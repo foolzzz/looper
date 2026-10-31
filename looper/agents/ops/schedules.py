@@ -281,7 +281,7 @@ async def _confirming(call: Call) -> str | None:
     _refuse_other_owner_template(call, row, data)
     # Refused as the update would refuse it, before anything is asked.
     fields, profiles, task_limits = await answered(schedules._fields(data, update=True))
-    gated = bool(fields.get("gate_command", row["gate_command"]))
+    gated = bool(fields.get("gate_command", row["gate_command"])) or row.get("kind", "agent") == "command"
     try:
         schedules.checked_rule(fields.get("cron", row["cron"]), fields.get("timezone", row["timezone"]),
                                now=datetime.now(timezone.utc), gated=gated)

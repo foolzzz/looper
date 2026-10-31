@@ -24,14 +24,20 @@ as a task's own choices (``projects.set_task_agents``).
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
+import asyncio
+import base64
+import os
+import re
+from pathlib import Path
+
 import asyncpg
 
+from ..paths import home_runtime_root
 from ..db import channel_configs as db_channel_configs, connection as db_connection, llm_records as db_llm_records
 from ..db import projects as db_projects, schedules as db_schedules
 from . import cron
@@ -72,6 +78,11 @@ class Overlap(str, Enum):
     SKIP = "skip"  # a firing while the previous run's task is in progress is skipped
     QUEUE = "queue"  # it waits for that task to end; at most one waits
     PARALLEL = "parallel"  # it starts beside the runs in progress, up to max_parallel_runs (reentrant)
+
+
+class Kind(str, Enum):
+    AGENT = "agent"
+    COMMAND = "command"
 
 
 class CatchUp(str, Enum):
@@ -146,11 +157,19 @@ def describe(rule_text: str, zone_name: str) -> str:
 # --- Views ---
 
 
-def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None, *,
+             runtime_root: Path | None = None) -> dict[str, Any]:
     """A run; a running one's cost is its task's so far (``cost``)."""
     cost_usd = row.get("cost_usd")
     if cost_usd is None and cost is not None:
         cost_usd = cost["cost_usd"]
+    start = row.get("started_at")
+    # Agent runs predate started_at; command runs must actually have launched a child.
+    if start is None and row.get("kind") != Kind.COMMAND.value:
+        start = row.get("fired_at")
+    if row["status"] in db_schedules.SKIPPED:
+        start = None
+    finish = row.get("finished_at")
     return {
         "run_id": row["id"], "schedule_id": row["schedule_id"], "scheduled_for": row["scheduled_for"],
         "manager_id": row.get("manager_id", "manager"),
@@ -159,6 +178,13 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> d
         "task_title": row.get("task_title"),
         "summary": row.get("summary"), "cost_usd": cost_usd, "error": row.get("error"),
         "finished_at": row.get("finished_at"), "gate_output": row.get("gate_output"),
+        "started_at": row.get("started_at"), "exit_code": row.get("exit_code"),
+        "exit_signal": row.get("exit_signal"),
+        "duration_seconds": (finish - start).total_seconds() if finish is not None and start is not None else None,
+        "log": {"path": str(((runtime_root or home_runtime_root()) / row["log_path"]).absolute()),
+                "bytes": row.get("log_bytes"),
+                "truncated": row.get("log_truncated", False)} if row.get("log_path") else None,
+        "log_tail": row.get("log_tail"),
         "execution_snapshot": row.get("execution_snapshot"),
         "carried_from": row.get("carried_from"),
         # A skip that repeated counts every firing it stands for, from scheduled_for to finished_at.
@@ -166,10 +192,10 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> d
     }
 
 
-async def _run_views(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def _run_views(rows: list[dict[str, Any]], *, runtime_root: Path | None = None) -> list[dict[str, Any]]:
     running = [row["task_id"] for row in rows if row.get("task_id") and row.get("cost_usd") is None]
     costs = await db_llm_records.task_costs(running) if running else {}
-    return [run_view(row, costs.get(row.get("task_id") or "")) for row in rows]
+    return [run_view(row, costs.get(row.get("task_id") or ""), runtime_root=runtime_root) for row in rows]
 
 
 def _timeout_view(row: Mapping[str, Any], default: int | None) -> tuple[Any, int | None]:
@@ -183,16 +209,46 @@ def _timeout_view(row: Mapping[str, Any], default: int | None) -> tuple[Any, int
     return row["run_timeout_seconds"], row["run_timeout_seconds"]
 
 
+def _stale_after_seconds_view(row: Mapping[str, Any], window: timedelta | None) -> int:
+    """Show the runtime's window even before the schedule has run or been enabled."""
+    from .schedule_notify import STALE_LIMIT, stale_deadline
+
+    if window is not None:
+        return int(window.total_seconds())
+    rule, tz = cron.parse(row["cron"]), cron.zone(row["timezone"])
+    enabled_at = row.get("enabled_at") or row["created_at"]
+    since = max(moment for moment in (row.get("last_ok_at"), enabled_at, row.get("rule_changed_at"))
+                if moment is not None)
+    start = cron.next_fire(rule, tz, since)
+    # A hypothetical first run exposes the window without changing runtime alert eligibility.
+    deadline = stale_deadline(rule, tz, last_ok=row.get("last_ok_at"), first_run=since,
+                              enabled_at=enabled_at, rule_changed_at=row.get("rule_changed_at"))
+    window = deadline - start if deadline is not None and start is not None else STALE_LIMIT
+    return int(window.total_seconds())
+
+
 def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None, *,
                   spent_today: float = 0.0, default_timeout: int | None = None) -> dict[str, Any]:
     """``default_timeout``: the system default run timeout, for a schedule that follows it."""
     target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row.get("notify_channel") else None
+    from .schedule_notify import alert_policy
+    policy = alert_policy(row)
     return {
         "schedule_id": row["id"], "project_id": row["project_id"], "project_name": row["project_name"],
         "manager_id": row.get("manager_id", "manager"), "manager_name": row.get("manager_name"),
         "template_key": row.get("template_key"), "template_inputs": row.get("template_inputs") or {},
         "template_name": row.get("template_name"),
         "name": row["name"], "cron": row["cron"],
+        "kind": row.get("kind", Kind.AGENT.value), "command": row.get("command"),
+        "env": dict(row.get("env") or {}), "env_file": row.get("env_file"),
+        "success_deadline": row.get("success_deadline"),
+        "alert_policy": {key: {"value": value, "default": row.get(column) is None,
+                              "source": "default" if row.get(column) is None else "schedule"}
+                         for key, column, value in (
+                             ("failures_after", "alert_failures_after", policy.failures_after),
+                             ("stale_after_seconds", "alert_stale_after_seconds",
+                              _stale_after_seconds_view(row, policy.stale_after)),
+                             ("overlap_after", "alert_overlap_after", policy.overlap_after))},
         "timezone": row["timezone"], "description": describe(row["cron"], row["timezone"]),
         "requirement": row["requirement"], "work_dir": row["work_dir"], "overlap": row["overlap"],
         "max_parallel_runs": row["max_parallel_runs"],
@@ -208,7 +264,8 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "daily_budget_usd": row.get("daily_budget_usd"), "notify": row.get("notify") or Notify.FAILURES.value,
         "user_gates": row.get("user_gates", UserGates.OFF.value),
         "notify_target": target, "spent_today_usd": round(spent_today, 6),
-        "alerts": {"failures_since": row.get("failures_alert_at"), "stale_since": row.get("stale_alert_at")},
+        "alerts": {"failures_since": row.get("failures_alert_at"), "stale_since": row.get("stale_alert_at"),
+                   "deadline_since": row.get("deadline_alert_at"), "overlap_since": row.get("overlap_alert_at")},
         "planner_session": {
             "active": bool(row.get("planner_session_id")),
             **{key: row.get(column) if row.get("planner_session_id") else None for key, column in (
@@ -227,10 +284,10 @@ def local_midnight(now: datetime | None = None) -> datetime:
     return datetime.combine(local.date(), datetime.min.time(), tzinfo=zone)
 
 
-async def _schedule_answer(schedule_id: str) -> dict[str, Any]:
+async def _schedule_answer(schedule_id: str, *, runtime_root: Path | None = None) -> dict[str, Any]:
     row = await _existing(schedule_id)
     latest = (await db_schedules.latest_runs([schedule_id])).get(schedule_id)
-    last_run = (await _run_views([latest]))[0] if latest else None
+    last_run = (await _run_views([latest], runtime_root=runtime_root))[0] if latest else None
     spent = await db_schedules.spent_since(db_connection.get_pool(), schedule_id, local_midnight())
     return {"schedule": schedule_view(row, last_run, spent_today=spent, default_timeout=await default_run_timeout())}
 
@@ -355,10 +412,54 @@ def _gate_timeout(raw: Any) -> int | None:
     return raw
 
 
+def _command(raw: Any) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("command is required: a nonempty shell command")
+    text = raw.strip()
+    if len(text) > GATE_COMMAND_MAX_CHARS or "\x00" in text:
+        raise ValueError(f"command must have at most {GATE_COMMAND_MAX_CHARS} characters and no NUL")
+    return text
+
+
+def _env(raw: Any) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or len(raw) > 64:
+        raise ValueError("env must be an object with at most 64 keys")
+    for key, value in raw.items():
+        if (not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+                or key.startswith("LOOPER_SCHEDULE_")):
+            raise ValueError(f"env key {key!r} must be a variable name outside LOOPER_SCHEDULE_")
+        if not isinstance(value, str) or len(value) > 4096 or "\x00" in value:
+            raise ValueError(f"env value for {key!r} must be a string of at most 4096 characters without NUL")
+    return dict(raw)
+
+
+def _env_file(raw: Any, *, must_exist: bool = True) -> str | None:
+    if raw is None or raw == "":
+        return None
+    if not isinstance(raw, str) or len(raw) > 1024 or "\x00" in raw:
+        raise ValueError("env_file must be a path of at most 1024 characters without NUL")
+    path = os.path.expanduser(raw)
+    if not os.path.isabs(path):
+        raise ValueError("env_file must be an absolute path")
+    if must_exist and (not os.path.isfile(path) or not os.access(path, os.R_OK)):
+        raise ValueError(f"env_file {raw} is not a readable file")
+    return raw
+
+
 def _success_deadline(raw: Any) -> str | None:
     if raw is not None and (not isinstance(raw, str) or not re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", raw)):
-        raise ValueError("success_deadline must be HH:MM (00:00 to 23:59), or null")
+        raise ValueError("success_deadline must be HH:MM (00:00 through 23:59), or null")
     return raw
+
+
+def _bounded(field: str, low: int, high: int) -> Any:
+    def parse(raw: Any) -> int | None:
+        if raw is not None and (isinstance(raw, bool) or not isinstance(raw, int) or not low <= raw <= high):
+            raise ValueError(f"{field} must be a whole number from {low} to {high}, or null")
+        return raw
+    return parse
 
 
 _PARSERS = {
@@ -369,7 +470,11 @@ _PARSERS = {
     "gate_command": _gate_command, "gate_timeout_seconds": _gate_timeout,
     "daily_budget_usd": _budget("daily_budget_usd"), "notify": lambda raw: _choice("notify", raw, Notify),
     "user_gates": lambda raw: _choice("user_gates", raw, UserGates),
-    "success_deadline": _success_deadline,
+    "kind": lambda raw: _choice("kind", raw, Kind), "command": _command, "env": _env,
+    "env_file": _env_file, "success_deadline": _success_deadline,
+    "alert_failures_after": _bounded("alert_failures_after", 1, 1000),
+    "alert_stale_after_seconds": _bounded("alert_stale_after_seconds", 300, 2592000),
+    "alert_overlap_after": _bounded("alert_overlap_after", 0, 10000),
 }
 _ACCEPTED = (*(name for name in db_schedules.FIELDS
                 if name not in ("notify_channel", "notify_chat", "run_timeout_mode")),
@@ -399,10 +504,11 @@ def _task_limits(raw: Any) -> dict[str, int]:
     return {role: limit for role, limit in limits.items() if limit is not None}
 
 
-async def _fields(data: Mapping[str, Any], *, update: bool,
+async def _fields(data: Mapping[str, Any], *, update: bool, resolve_profiles: bool = True,
                   ) -> tuple[dict[str, Any], dict[str, str] | None, dict[str, int] | None]:
     """The schedule fields in ``data``, validated, and the profile overrides and the task limits when given (each
-    replaces the schedule's); ``enabled`` is the caller's. A new schedule needs a name, a rule and a requirement."""
+    replaces the schedule's). Writes can defer resolving profiles until the kind is checked.
+    ``enabled`` is the caller's."""
     accepted = (*_ACCEPTED, "enabled") if update else (*_ACCEPTED, "manager_id")
     if update and "manager_id" in data:
         raise RequestError(HTTP_400, "a schedule's owner cannot change")
@@ -420,9 +526,16 @@ async def _fields(data: Mapping[str, Any], *, update: bool,
     try:
         for name, parse in _PARSERS.items():
             if name in data or (not update and name in ("name", "requirement")):
-                fields[name] = parse(data.get(name))
+                raw = data.get(name)
+                if name == "requirement" and ((update and isinstance(raw, str) and not raw.strip())
+                        or (not update and data.get("kind") == Kind.COMMAND.value
+                            and (raw is None or isinstance(raw, str) and not raw.strip()))):
+                    fields[name] = ""
+                else:
+                    fields[name] = parse(raw)
         if "run_timeout_seconds" in data or not update:
-            fields.update(_timeout(data.get("run_timeout_seconds", TIMEOUT_DEFAULT)))
+            default = None if data.get("kind") == Kind.COMMAND.value else TIMEOUT_DEFAULT
+            fields.update(_timeout(data.get("run_timeout_seconds", default)))
         if "cron" in data or not update:
             fields["cron"] = data.get("cron")
         if "timezone" in data or not update:
@@ -438,8 +551,32 @@ async def _fields(data: Mapping[str, Any], *, update: bool,
     if "notify_target" in data:
         fields.update(await _notify_target(data["notify_target"]))
     task_limits = _task_limits(data["task_limits"]) if "task_limits" in data else None
-    profiles = await _profile_overrides(data["profile_overrides"]) if "profile_overrides" in data else None
+    profiles = (await _profile_overrides(data["profile_overrides"]) if resolve_profiles
+                else data["profile_overrides"]) if "profile_overrides" in data else None
     return fields, profiles, task_limits
+
+
+def _check_kind_fields(kind: str, merged: Mapping[str, Any]) -> None:
+    if kind == Kind.COMMAND.value:
+        if not merged.get("command"):
+            raise RequestError(HTTP_400, "command is required: a nonempty shell command")
+        for field in ("requirement", "template_key", "template_inputs", "gate_command", "gate_timeout_seconds",
+                      "run_budget_usd", "daily_budget_usd", "profile_overrides", "task_limits"):
+            if merged.get(field):
+                raise RequestError(HTTP_400, f"{field} does not apply to a command schedule")
+        if merged.get("user_gates") == UserGates.ON.value:
+            raise RequestError(HTTP_400, "user_gates does not apply to a command schedule")
+        if merged.get("run_timeout_mode") == RunTimeoutMode.INHERIT.value:
+            raise RequestError(HTTP_400, "a command schedule's run_timeout_seconds is a number of seconds "
+                                        "or null for no limit")
+    else:
+        for field in ("command", "env", "env_file"):
+            if merged.get(field):
+                raise RequestError(HTTP_400, f"{field} applies to command schedules only")
+        try:
+            _requirement(merged.get("requirement"))
+        except ValueError as exc:
+            raise RequestError(HTTP_400, str(exc)) from None
 
 
 async def _existing_project(project_id: str) -> dict[str, Any]:
@@ -472,41 +609,47 @@ def _check_rule(rule_text: Any, zone_name: Any, now: datetime, *, gated: bool,
 # --- Requests ---
 
 
-async def _schedule_views(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def _schedule_views(rows: list[dict[str, Any]], *, runtime_root: Path | None = None) -> list[dict[str, Any]]:
     """``schedule_view`` of each row, with its newest run and what it spent today."""
     ids = [row["id"] for row in rows]
     latest = await db_schedules.latest_runs(ids)
-    views = dict(zip(latest, await _run_views(list(latest.values()))))
+    views = dict(zip(latest, await _run_views(list(latest.values()), runtime_root=runtime_root)))
     spent = await db_schedules.spent_since_each(db_connection.get_pool(), ids, local_midnight())
     default = await default_run_timeout()
     return [schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]], default_timeout=default)
             for row in rows]
 
 
-async def list_schedules(project_id: str) -> dict[str, Any]:
+async def list_schedules(project_id: str, *, runtime_root: Path | None = None) -> dict[str, Any]:
     """The project's schedules, and the limits a schedule is checked against."""
     await _existing_project(project_id)
-    return {"schedules": await _schedule_views(await db_schedules.list_schedules(project_id)),
+    return {"schedules": await _schedule_views(await db_schedules.list_schedules(project_id), runtime_root=runtime_root),
             "limits": await limits()}
 
 
-async def list_all_schedules() -> dict[str, Any]:
+async def list_all_schedules(*, runtime_root: Path | None = None) -> dict[str, Any]:
     """Every project's schedules, by project name and then name, the disabled ones too (the Schedules page)."""
-    return {"schedules": await _schedule_views(await db_schedules.list_schedules())}
+    return {"schedules": await _schedule_views(await db_schedules.list_schedules(), runtime_root=runtime_root)}
 
 
 async def create_schedule(project_id: str, data: dict[str, Any], *, created_via: str = "dashboard",
-                          now: datetime | None = None) -> dict[str, Any]:
+                          now: datetime | None = None, runtime_root: Path | None = None) -> dict[str, Any]:
     await _existing_project(project_id)
-    fields, profiles, task_limits = await _fields(data, update=False)
+    fields, profiles, task_limits = await _fields(data, update=False, resolve_profiles=False)
+    kind = fields.get("kind", Kind.AGENT.value)
+    _check_kind_fields(kind, {**fields, "profile_overrides": profiles,
+                             **{key: data[key] for key in ("template_inputs", "task_limits") if key in data}})
+    profiles = await _profile_overrides(profiles) if "profile_overrides" in data else None
     manager_id = fields.pop("manager_id")
-    _check_rule(fields["cron"], fields["timezone"], now or _utcnow(), gated=bool(fields.get("gate_command")))
+    _check_rule(fields["cron"], fields["timezone"], now or _utcnow(),
+                gated=bool(fields.get("gate_command")) or kind == Kind.COMMAND.value)
     fields["cron"] = cron.parse(fields["cron"]).text
     try:
         async with db_connection.transaction() as conn:
             from .schedule_templates import effective_schedule, merge_selection
             try:
-                fields.update(merge_selection({}, fields))
+                fields.update(merge_selection({}, {**({"template_key": None} if kind == Kind.COMMAND.value else {}),
+                                                  **fields}))
                 await effective_schedule(conn, {**fields, "manager_id": manager_id, "project_id": project_id,
                                                 "profile_overrides": profiles or {}}, enabled=False)
             except ValueError as exc:
@@ -521,37 +664,55 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
     except asyncpg.ForeignKeyViolationError:  # the project or a profile was removed meanwhile
         raise RequestError(HTTP_400, "the project or an Agent Profile the schedule chose was removed meanwhile") \
             from None
-    return await _schedule_answer(schedule_id)
+    return await _schedule_answer(schedule_id, runtime_root=runtime_root)
 
 
-async def get_schedule(schedule_id: str) -> dict[str, Any]:
-    return await _schedule_answer(schedule_id)
+async def get_schedule(schedule_id: str, *, runtime_root: Path | None = None) -> dict[str, Any]:
+    return await _schedule_answer(schedule_id, runtime_root=runtime_root)
 
 
-async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: datetime | None = None,
+                          runtime_root: Path | None = None) -> dict[str, Any]:
     """Change the fields given. Enabling sets the next fire time from now (nothing missed before runs), as does a
     new rule or zone on an enabled schedule; disabling clears it."""
     if not data:
         raise RequestError(HTTP_400, "give at least one field to change")
     now = now or _utcnow()
-    fields, profiles, task_limits = await _fields(data, update=True)
+    fields, profiles, task_limits = await _fields(data, update=True, resolve_profiles=False)
+    if "kind" in fields:
+        stored = await _existing(schedule_id)
+        if fields.pop("kind") != stored["kind"]:
+            raise RequestError(HTTP_400, "a schedule's kind cannot change; create a new schedule")
+        if data == {"kind": stored["kind"]}:
+            return await _schedule_answer(schedule_id, runtime_root=runtime_root)
     enabled = data.get("enabled")
     if "enabled" in data and not isinstance(enabled, bool):
         raise RequestError(HTTP_400, "enabled must be true or false")
+    if "profile_overrides" in data:
+        if profiles:
+            stored = await _existing(schedule_id)
+            _check_kind_fields(stored["kind"], {**stored, **fields, "profile_overrides": profiles})
+        # Profile lookup borrows its own connection; resolve before holding the schedule's row lock.
+        profiles = await _profile_overrides(profiles)
     try:
         async with db_connection.transaction() as conn:
             row = await db_schedules.lock_schedule(conn, schedule_id)
             if row is None:
                 raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
+            kind = row["kind"]
+            _check_kind_fields(kind, {**row, **fields,
+                "profile_overrides": profiles if "profile_overrides" in data else row["profile_overrides"],
+                **{key: data[key] for key in ("template_inputs", "task_limits") if key in data}})
             rule_text, zone_name = fields.get("cron", row["cron"]), fields.get("timezone", row["timezone"])
-            gated = bool(fields.get("gate_command", row["gate_command"]))
+            gated = bool(fields.get("gate_command", row["gate_command"])) or kind == Kind.COMMAND.value
             rule = _check_rule(rule_text, zone_name, now, gated=gated,
-                               removes_gate=bool(row["gate_command"]) and not gated)
+                               removes_gate=kind == Kind.AGENT.value and bool(row["gate_command"]) and not gated)
             if "cron" in fields:
                 fields["cron"] = rule.text
             from .schedule_templates import effective_schedule, merge_selection, MissingDirectory
             try:
-                fields.update(merge_selection(row, fields))
+                fields.update(merge_selection(row, {**({"template_key": None} if kind == Kind.COMMAND.value else {}),
+                                                    **fields}))
             except ValueError as exc:
                 raise RequestError(HTTP_400, str(exc)) from None
             will_run = row["enabled"] if enabled is None else enabled
@@ -579,7 +740,7 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "an Agent Profile the schedule chose was removed meanwhile; choose again") \
             from None
-    return await _schedule_answer(schedule_id)
+    return await _schedule_answer(schedule_id, runtime_root=runtime_root)
 
 
 async def delete_schedule(schedule_id: str) -> dict[str, Any]:
@@ -597,7 +758,7 @@ async def reset_planner_session(schedule_id: str) -> dict[str, Any]:
     return {"cleared": cleared}
 
 
-async def list_runs(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any]:
+async def list_runs(schedule_id: str, query: Mapping[str, str], *, runtime_root: Path | None = None) -> dict[str, Any]:
     """A page of the schedule's runs, newest first: ``limit`` of them, older than the run ``before`` when given,
     without the routine skips when ``skips`` is ``hide``. ``next_before`` continues the list (None at its end), and
     ``routine_skips`` counts those skips over the schedule's whole history, shown or not."""
@@ -608,6 +769,10 @@ async def list_runs(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any
         skips = _choice("skips", query.get("skips") or SkipRows.SHOW.value, SkipRows)
     except ValueError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
+    status = query.get("status")
+    statuses = (*db_schedules.OPEN_STATUSES, *db_schedules.SUCCESS, *db_schedules.UNFINISHED, *db_schedules.SKIPPED)
+    if status is not None and status not in statuses:
+        raise RequestError(HTTP_400, "status must be a schedule run status")
     await _existing(schedule_id)
     before = query.get("before") or None
     if before is not None:
@@ -616,11 +781,69 @@ async def list_runs(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any
             raise RequestError(HTTP_400, f"before must be a run of schedule {schedule_id}")
     limit = int(raw)
     rows = await db_schedules.list_runs(schedule_id, limit=limit + 1, before=before,
+                                        only=status,
                                         without=ROUTINE_SKIPS if skips == SkipRows.HIDE.value else ())
     page = rows[:limit]
-    return {"runs": await _run_views(page),
+    return {"runs": await _run_views(page, runtime_root=runtime_root),
             "next_before": page[-1]["id"] if len(rows) > limit else None,
-            "routine_skips": await db_schedules.run_counts(schedule_id, ROUTINE_SKIPS)}
+            "routine_skips": await db_schedules.run_counts(schedule_id, ROUTINE_SKIPS),
+            "stats": await db_schedules.run_stats(schedule_id, _utcnow())}
+
+
+async def run_log(run_id: str, args: Mapping[str, Any], runtime_root: Path) -> dict[str, Any]:
+    """Read a bounded byte page, confined to the schedule log directory; preserve arbitrary output bytes."""
+    row = await db_schedules.get_run(run_id)
+    if row is None:
+        raise RequestError(HTTP_404, f"run {run_id!r} not found")
+    if not row.get("log_path"):
+        raise RequestError(HTTP_404, "this run has no log")
+    path = (runtime_root / row["log_path"]).resolve()
+    logs = (runtime_root / "logs" / "schedules").resolve()
+    if not path.is_relative_to(logs) or path == logs:
+        raise RequestError(HTTP_400, "log_path must be inside logs/schedules")
+    if "offset" in args and "tail_lines" in args:
+        raise RequestError(HTTP_400, "offset and tail_lines are mutually exclusive")
+
+    def integer(field: str, default: int, low: int, high: int | None = None) -> int:
+        value = args.get(field, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < low or high is not None and value > high:
+            raise RequestError(HTTP_400, f"{field} must be an integer from {low}" +
+                               (f" to {high}" if high is not None else ""))
+        return value
+
+    offset = integer("offset", 0, 0)
+    limit = integer("limit_bytes", 1024 * 1024, 1, 4 * 1024 * 1024)
+    tail = integer("tail_lines", 1, 1, 5000) if "tail_lines" in args else None
+
+    def read() -> tuple[int, int, bytes]:
+        with path.open("rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            start = max(0, size - limit) if tail is not None else offset
+            if start > size:
+                raise RequestError(HTTP_400, "offset exceeds the log size")
+            stream.seek(start)
+            data = stream.read(min(limit, size - start))
+            if os.fstat(stream.fileno()).st_nlink == 0:
+                raise FileNotFoundError(path)
+            if tail is not None:
+                # A trailing newline belongs to the final line, rather than creating an empty extra line.
+                lines = data.split(b"\n")
+                wanted = tail + 1 if data.endswith(b"\n") else tail
+                last = b"\n".join(lines[-wanted:])
+                start += len(data) - len(last)
+                data = last
+            return size, start, data
+
+    complete = row["status"] not in db_schedules.OPEN_STATUSES
+    try:
+        size, offset, data = await asyncio.to_thread(read)
+    except FileNotFoundError:
+        raise RequestError(HTTP_404, "the log was removed by the retention policy" if complete
+                           else "the log has not been written yet") from None
+    return {"run_id": run_id, "schedule_id": row["schedule_id"], "size": size, "offset": offset,
+            "next_offset": offset + len(data) if offset + len(data) < size else None,
+            "data_base64": base64.b64encode(data).decode("ascii"), "complete": complete,
+            "truncated": row.get("log_truncated", False)}
 
 
 def preview(data: Mapping[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
@@ -649,14 +872,14 @@ def preview(data: Mapping[str, Any], *, now: datetime | None = None) -> dict[str
             "next": cron.next_fires(rule, tz, now, count), "error": None}
 
 
-async def run_now(schedule_id: str, scheduler: Any) -> dict[str, Any]:
+async def run_now(schedule_id: str, scheduler: Any, *, runtime_root: Path | None = None) -> dict[str, Any]:
     """Fire the schedule now (``trigger`` manual), through the same overlap check; its next fire time stays."""
     run_id = await scheduler.run_now(schedule_id)
     if run_id is None:
         await _existing(schedule_id)
         raise RequestError(HTTP_409, "the service is draining for an upgrade: run it after the restart")
     row = await db_schedules.get_run(run_id)
-    return {"run": (await _run_views([row]))[0]}
+    return {"run": (await _run_views([row], runtime_root=runtime_root))[0]}
 
 
 async def list_notifications(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any]:

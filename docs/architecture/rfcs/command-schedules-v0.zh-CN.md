@@ -346,7 +346,7 @@ serve 侧的 `Popen` 参数：`start_new_session=True`、`stdin=DEVNULL`、`stdo
 - 路径 `<runtime root>/logs/schedules/<schedule id>/<run id>.log`，目录 0700，文件 0600。
 - stdout 和 stderr 合并，原样字节。
 - 单次上限 50 MiB（`LOG_MAX_BYTES`），超过之后保留开头 50 MiB 和最后 1 MiB，中间注明省略了多少（第 5.2 节第 8 步）。
-- 运行记录里的 `log_path` 存相对路径，接口返回绝对路径和大小。
+- 运行记录里的 `log_path` 存相对路径，接口的 `log` 返回 `{path, bytes, truncated}`：`path` 是 runtime root 拼接该相对路径后的绝对路径。`loopercli schedule-admin runs` 的文本和 JSON 输出使用同一结构。
 
 ### 7.2 运行记录里的日志末尾
 
@@ -438,13 +438,13 @@ serve 侧的 `Popen` 参数：`start_new_session=True`、`stdin=DEVNULL`、`stdo
 
 ### 9.1 接口（v1）
 
-- **创建和修改**（`schedule_admin.create` / `update`，`looper/agents/v1_domains/schedule_writes.py:16-60`；校验在 `looper/agents/schedules.py:394-434`）：新字段 `kind`（只能在创建时给）、`command`、`env`、`env_file`、`success_deadline`、`alert_failures_after`、`alert_stale_after_seconds`、`alert_overlap_after`。规则：
-  - `kind` 不能改：修改时带了不同的 `kind` 返回 400「定时任务的类型不能改，请新建一个」；
-  - 命令型必须有 `command`；下面这些字段给了非空值就返回 400「<字段> 不适用于命令型定时任务」：`requirement`、`template_key`、`template_inputs`、`gate_command`、`gate_timeout_seconds`、`run_budget_usd`、`daily_budget_usd`、`profile_overrides`、`task_limits`、`user_gates='on'`、`run_timeout_seconds='default'`；
+- **创建和修改**（`schedule_admin.create` / `update`，`looper/agents/v1_domains/schedule_writes.py:16-60`；校验在 `looper/agents/schedules.py:394-434`）：新字段 `kind`（创建时选定，修改时同值为 no-op）、`command`、`env`、`env_file`、`success_deadline`、`alert_failures_after`、`alert_stale_after_seconds`、`alert_overlap_after`。规则：
+  - `kind` 不能改：修改时带了不同的 `kind` 返回 400 `"a schedule's kind cannot change; create a new schedule"`；同值不修改记录；
+  - 命令型必须有 `command`；下面这些字段给了非空值就返回 400「<字段> 不适用于命令型定时任务」：`requirement`、`template_key`、`template_inputs`、`gate_command`、`gate_timeout_seconds`、`run_budget_usd`、`daily_budget_usd`、`profile_overrides`、`task_limits`、`user_gates='on'`、`run_timeout_seconds='default'`；其中 `"default"` 的错误信息为 `"a command schedule's run_timeout_seconds is a number of seconds or null for no limit"`；
   - agent 定时任务给了 `command`、非空的 `env` 或 `env_file` 返回 400；
   - 命令型同样受归属管家的任务策略约束：`templates_only` 的管家不能有自由形式的定时任务（`looper/db/schedules.py:140-156`），命令型更是如此。
-- **读取**（`schedule_admin.get` / `list` / `project_list`）：视图（`looper/agents/schedules.py:185-219`）加 `kind`、`command`、`env`、`env_file`、`success_deadline`、`alert_policy`（三个生效值，以及各自是不是默认值）和 `alerts.deadline_since`、`alerts.overlap_since`。
-- **运行列表**（`schedule_admin.runs`，`looper/agents/schedules.py:591-614`）：运行视图加 `started_at`、`exit_code`、`exit_signal`、`duration_seconds`、`log`（`{path, bytes, truncated}` 或 null）、`log_tail`；新参数 `status`（只看一种状态）；结果加 `stats`：最近 24 小时和 7 天里跑了东西的运行数、成功数、失败数、成功率、平均和最长耗时。
+- **读取**（`schedule_admin.get` / `list` / `project_list`）：视图（`looper/agents/schedules.py:185-219`）加 `kind`、`command`、`env`、`env_file`、`success_deadline`、`alert_policy`（三个生效值，包括默认公式算出的 `stale_after_seconds.value`；各项均带 `source: "default" | "schedule"` 和兼容的 `default` 布尔值）和 `alerts.deadline_since`、`alerts.overlap_since`。
+- **运行列表**（`schedule_admin.runs`，`looper/agents/schedules.py:591-614`）：运行视图加 `started_at`、`exit_code`、`exit_signal`、`duration_seconds`（命令未启动及所有 `skipped_*` 为 null，不参与耗时统计；已启动命令从 `started_at` 计时）、`log`（`{path, bytes, truncated}` 或 null，`path` 为绝对路径）、`log_tail`；新参数 `status`（只看一种状态）；结果加 `stats`：最近 24 小时和 7 天里跑了东西的运行数、成功数、失败数、成功率、平均和最长耗时。
 - **日志**（新，`schedule_admin.run_log`，只读）：参数 `run_id`，以及 `offset`（字节，默认 0）和 `limit_bytes`（默认 1 MiB，最多 4 MiB），或者 `tail_lines`（1–5000，和 `offset` 二选一）；结果 `{run_id, schedule_id, size, offset, next_offset, data_base64, complete, truncated}`。`complete` 表示运行已经结束、文件不会再变；`next_offset` 为 null 表示读到了头。用 base64 是为了让分页拼起来逐字节等于原文件。只读操作不进审计记录（`looper/agents/http_server.py:563-568`）。
 - **健康**（新，`system.health`）：第 10.1 节。
 

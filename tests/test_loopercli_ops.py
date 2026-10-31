@@ -322,3 +322,31 @@ def test_generated_manager_installs_commands_use_transient_operator_credentials(
         assert token not in output.out + output.err
     finally:
         server.close()
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_schedule_runs_output_preserves_absolute_log_path(tmp_path, capsys, as_json):
+    log = {"path": str(tmp_path / "logs/schedules/sched-example/srun-example.log"),
+           "bytes": 17, "truncated": False}
+    result = {"runs": [{"run_id": "srun-example", "schedule_id": "sched-example", "status": "succeeded",
+                        "duration_seconds": 1.5, "log": log}]}
+
+    def respond(handler, request):
+        _send(handler, 200, api_v1.document() if request[1].endswith("openapi.json")
+              else {"status": "ok", "result": result})
+
+    server = Server(respond)
+    try:
+        client = tmp_path / "client.json"
+        write_client_file(client, server.url)
+        args = ["--client-file", str(client), *(["--json"] if as_json else []),
+                "schedule-admin", "runs", "--schedule-id", "sched-example"]
+        assert loopercli.main(args) == 0
+        output = capsys.readouterr().out
+        if as_json:
+            assert json.loads(output)["result"]["runs"][0]["log"] == log
+        else:
+            assert '"path": ' + json.dumps(log["path"]) in output
+            assert '"bytes": 17' in output and '"truncated": false' in output
+    finally:
+        server.close()
