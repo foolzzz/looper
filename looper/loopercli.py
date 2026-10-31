@@ -47,6 +47,7 @@ MAX_MESSAGE_CHARS = 32_000  # what chat.send accepts
 FOLLOW_SECONDS = 5  # between the polls of chat --follow
 WAIT_INTERVAL_SECONDS, WAIT_MIN_INTERVAL_SECONDS = 10, 2
 _MAX_CLIENT_FILE_BYTES = 64 * 1024
+_LOG_PAGE = 4194304
 # Non-blocking, so a FIFO in the file's place can't hang the read before fstat refuses it.
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 
@@ -938,21 +939,49 @@ def _schedule_log(args: argparse.Namespace, ctx: Context) -> int:
         raise UsageError("--tail must be between 1 and 5000")
     offset, total = 0, 0
     try:
-        while True:
-            body = {"run_id": args.run_id, **({"tail_lines": args.tail} if args.tail is not None else
-                                            {"offset": offset, "limit_bytes": 4194304})}
+        if args.tail is not None:
+            body = {"run_id": args.run_id, "tail_lines": args.tail, "limit_bytes": _LOG_PAGE}
             status, answer = ctx.api().call("POST", f"{API_PREFIX}/schedule_admin/run_log", body)
             if answer.get("status") != "ok":
                 return finish(status, answer, ctx.as_json, ctx.session)
-            result = answer["result"]
-            data = base64.b64decode(result["data_base64"])
-            total += len(data)
+            first = answer["result"]
+            data = base64.b64decode(first["data_base64"])
+            start = first["offset"]
+            wanted = args.tail + 1 if data.endswith(b"\n") else args.tail
+            # An offset past the byte window means the server already found N whole lines.
+            exact = start == 0 or start > max(0, first["size"] - _LOG_PAGE)
+            while not exact:
+                begin = max(0, start - _LOG_PAGE)
+                body = {"run_id": args.run_id, "offset": begin, "limit_bytes": start - begin}
+                status, answer = ctx.api().call("POST", f"{API_PREFIX}/schedule_admin/run_log", body)
+                if answer.get("status") != "ok":
+                    return finish(status, answer, ctx.as_json, ctx.session)
+                data = base64.b64decode(answer["result"]["data_base64"]) + data
+                start = begin
+                exact = start == 0 or data.count(b"\n") >= wanted
+            pieces = data.split(b"\n")
+            last = b"\n".join(pieces[-wanted:])
+            start += len(data) - len(last)
+            total = len(last)
+            result = {**first, "offset": start}
             if not ctx.as_json:
-                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.write(last)
                 sys.stdout.buffer.flush()
-            offset = result["next_offset"]
-            if args.tail is not None or offset is None:
-                break
+        else:
+            while True:
+                body = {"run_id": args.run_id, "offset": offset, "limit_bytes": 4194304}
+                status, answer = ctx.api().call("POST", f"{API_PREFIX}/schedule_admin/run_log", body)
+                if answer.get("status") != "ok":
+                    return finish(status, answer, ctx.as_json, ctx.session)
+                result = answer["result"]
+                data = base64.b64decode(result["data_base64"])
+                total += len(data)
+                if not ctx.as_json:
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
+                offset = result["next_offset"]
+                if offset is None:
+                    break
         if not result["complete"]:
             print(f"(run {args.run_id} is still going; the log may grow)", file=sys.stderr)
         if result["truncated"]:
