@@ -145,6 +145,155 @@ def test_what_ignores_sigterm_is_killed_after_the_grace_period(
     assert _ended_line(caplog).endswith(": 4 found, 3 exited on SIGTERM, 1 killed")
 
 
+@pytest.mark.parametrize("leftover", [False, True])
+def test_end_leaves_a_reaped_agents_reused_pid_and_new_tree_alone(monkeypatch, leftover):
+    class Agent:
+        pid = 101
+        returncode = 0
+
+        async def wait(self):
+            return self.returncode
+
+    table = {101: (1, 101), 102: (101, 102), 103: (1, 101), 104: (1, 101), 105: (1, 105)}
+    known = {101: 101, 104: 101, 105: 101} if leftover else {}
+    signals = []
+
+    def kill(pid, sig):
+        signals.append((pid, sig))
+        if sig == signal.SIGKILL:
+            table.pop(pid, None)
+
+    monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
+    monkeypatch.setattr(proc_tree, "_start_time", lambda pid: "replacement")
+    monkeypatch.setattr(proc_tree.os, "kill", kill)
+    monkeypatch.setattr(proc_tree.os, "killpg", lambda pgid, sig: signals.append(("group", pgid, sig)))
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
+    monkeypatch.setattr(proc_tree, "REAP_SEC", 0.01)
+
+    asyncio.run(proc_tree.end(Agent(), label="reaped agent", known=known))
+    assert signals == ([(104, signal.SIGTERM), (104, signal.SIGKILL)] if leftover else [])
+
+
+@pytest.mark.parametrize("moved", [False, True], ids=["leftover", "changed_group"])
+def test_end_confirms_a_reaped_agents_leftover_group_member_before_signalling(monkeypatch, moved):
+    class Agent:
+        pid = 101
+        returncode = 0
+
+        async def wait(self):
+            return self.returncode
+
+    snapshots = 0
+    table = {102: (1, 101)}
+    signals = []
+
+    def snapshot():
+        nonlocal snapshots
+        snapshots += 1
+        if moved and snapshots > 1:
+            table[102] = (1, 102)
+        return dict(table)
+
+    def kill(pid, sig):
+        signals.append((pid, sig))
+        table.pop(pid, None)
+
+    monkeypatch.setattr(proc_tree, "_snapshot", snapshot)
+    monkeypatch.setattr(proc_tree.os, "kill", kill)
+    monkeypatch.setattr(proc_tree.os, "killpg", lambda *args: pytest.fail("never signal a reaped agent's group"))
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
+    monkeypatch.setattr(proc_tree, "REAP_SEC", 0.01)
+
+    asyncio.run(proc_tree.end(Agent(), label="reaped agent"))
+    assert signals == ([] if moved else [(102, signal.SIGTERM)])
+
+
+@pytest.mark.parametrize("result", ["empty", "exit_error", "os_error", "timeout"])
+def test_snapshot_distinguishes_ps_failure_from_an_empty_listing(monkeypatch, result):
+    def run(*args, **kwargs):
+        if result == "os_error":
+            raise OSError("ps unavailable")
+        if result == "timeout":
+            raise subprocess.TimeoutExpired("ps", 5)
+        return subprocess.CompletedProcess(args, int(result == "exit_error"), stdout="")
+
+    monkeypatch.setattr(proc_tree.subprocess, "run", run)
+    assert proc_tree._snapshot() == ({} if result == "empty" else None)
+
+
+@pytest.mark.parametrize("failure_at", ["confirmation", "initial", "no_tree"])
+def test_reaped_tree_ps_failure_signals_known_members_before_unlinking_record(tmp_path, monkeypatch, failure_at):
+    class Agent:
+        pid = 101
+        returncode = 0
+
+        async def wait(self):
+            return self.returncode
+
+    path = proc_tree._write_record(tmp_path, 101, "agent", (100, "server"), tree={102: "child"})
+    original_record = path.read_bytes()
+    monkeypatch.setattr(proc_tree, "_recorded", {101: (path, "agent")})
+    monkeypatch.setattr(proc_tree, "_server", (100, "server"))
+    monkeypatch.setattr(proc_tree, "_ending", set())
+    monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: "child" for pid in pids})
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
+    monkeypatch.setattr(proc_tree, "REAP_SEC", 0)
+    calls, signals = 0, []
+
+    def snapshot():
+        nonlocal calls
+        calls += 1
+        return {102: (1, 101)} if failure_at == "confirmation" and calls == 1 else None
+
+    def kill(pid, sig):
+        assert path.exists(), "the durable record must survive until the signals are sent"
+        assert 101 in proc_tree._recorded
+        signals.append((pid, sig))
+
+    monkeypatch.setattr(proc_tree, "_snapshot", snapshot)
+    monkeypatch.setattr(proc_tree.os, "kill", kill)
+    monkeypatch.setattr(proc_tree.os, "killpg", lambda *_: pytest.fail("never signal the reaped leader's group"))
+    known = {101: 101, 102: 101} if failure_at == "initial" else {}
+    asyncio.run(proc_tree.end(Agent(), label="reaped agent", known=known))
+    if failure_at == "no_tree":
+        assert not signals
+        assert path.read_bytes() == original_record and 101 in proc_tree._recorded
+    else:
+        assert signals == [(102, signal.SIGTERM), (102, signal.SIGKILL)]
+        assert not path.exists() and 101 not in proc_tree._recorded
+
+
+def test_end_never_signals_the_agent_group_after_the_agent_is_reaped(monkeypatch):
+    class Agent:
+        pid = 101
+        returncode = None
+
+        async def wait(self):
+            return self.returncode
+
+    agent = Agent()
+    table = {101: (1, 101), 102: (101, 101)}
+    signals = []
+
+    def killpg(pgid, sig):
+        signals.append(("group", pgid, sig))
+        agent.returncode = 0
+        table.update({101: (1, 101), 102: (1, 101), 103: (1, 101), 104: (101, 104)})
+
+    def kill(pid, sig):
+        signals.append((pid, sig))
+        table.pop(pid, None)
+
+    monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
+    monkeypatch.setattr(proc_tree, "_start_time", lambda pid: "replacement")
+    monkeypatch.setattr(proc_tree.os, "kill", kill)
+    monkeypatch.setattr(proc_tree.os, "killpg", killpg)
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.01)
+
+    asyncio.run(proc_tree.end(agent, label="exiting agent"))
+    assert signals == [("group", 101, signal.SIGTERM), (102, signal.SIGKILL)]
+
+
 @pytest.mark.parametrize("cancelled", [False, True])
 def test_stop_keeps_server_responsive_while_process_listing_is_slow(monkeypatch, cancelled):
     class Agent:
@@ -1280,7 +1429,7 @@ def test_turn_tree_checks_identity_before_expanding_an_observed_tree(
 ) -> None:
     class Agent:
         pid = 101
-        returncode = 0
+        returncode = None if lookup == "stable" else 0
 
         async def wait(self) -> int:
             return 0
@@ -1335,7 +1484,7 @@ def test_turn_tree_follows_an_observed_member_after_its_group_leader_exits(
 ) -> None:
     class Agent:
         pid = 101
-        returncode = 0
+        returncode = None
 
         async def wait(self) -> int:
             return 0
@@ -1489,7 +1638,7 @@ def test_turn_tree_ticker_picks_up_a_child_started_between_events(tmp_path: Path
 def test_cancelling_a_refresh_does_not_lose_new_descendants(monkeypatch: pytest.MonkeyPatch) -> None:
     class Agent:
         pid = 101
-        returncode = 0
+        returncode = None
 
         async def wait(self) -> int:
             return 0
