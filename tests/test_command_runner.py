@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import runpy
 import shlex
 import signal
 import subprocess
@@ -315,6 +316,55 @@ def test_start_failure(run_command, tmp_path, failure):
         assert "is not a directory" in ended["error"]
     assert "hidden-value" not in ended["error"]
     assert "oops" not in ended["error"]
+
+
+def test_log_open_retries_when_directory_vanishes(run_command, monkeypatch):
+    _, spec = run_command.prepare()
+    runner = runpy.run_path(str(RUNNER))
+    log = runner["_Log"](spec)
+    original_open = os.open
+    attempts = 0
+
+    def open_log(path, flags, mode=0o777):
+        nonlocal attempts
+        if path == spec["log_path"]:
+            attempts += 1
+            if attempts == 1:
+                Path(path).parent.rmdir()
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", open_log)
+    try:
+        log.open()
+        log.consume(b"recovered")
+    finally:
+        log.close()
+    assert attempts == 2
+    assert Path(spec["log_path"]).read_bytes() == b"recovered"
+
+
+def test_log_open_reports_second_missing_directory(run_command, monkeypatch):
+    directory, spec = run_command.prepare()
+    runner = runpy.run_path(str(RUNNER))
+    original_open = os.open
+    attempts = 0
+
+    def open_log(path, flags, mode=0o777):
+        nonlocal attempts
+        if path == spec["log_path"]:
+            attempts += 1
+            Path(path).parent.rmdir()
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", open_log)
+    monkeypatch.setattr(signal, "signal", lambda *_: None)
+    assert runner["main"]([str(directory)]) == 0
+    ended = json.loads((directory / "exit.json").read_text())
+    assert attempts == 2
+    assert ended["end"] == "start_failed"
+    assert "cannot open log" in ended["error"]
+    assert ended["started_at"] is None
+    assert not (directory / "runner.json").exists()
 
 
 def test_runner_survives_parent_exit(run_command):

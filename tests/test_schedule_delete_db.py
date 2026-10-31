@@ -1,4 +1,4 @@
-"""Deleting a schedule while a run of it is in progress, on a real PostgreSQL: the delete succeeds, a task under way
+"""Deleting an agent schedule while a run of it is in progress, on a real PostgreSQL: the delete succeeds, a task under way
 keeps running and ends as any task does, and nothing errors, brings the schedule back or sends a message about it.
 
 Runs only when LOOPER_TEST_DATABASE_URL points at a disposable database; it uses the schedule tests' helpers.
@@ -153,7 +153,7 @@ def test_a_schedule_deleted_while_its_runs_end_is_recorded_is_deleted_and_the_en
         ending = asyncio.create_task(env.scheduler.task_ended(task_id, "completed"))
         await counting.wait()
         deleting = asyncio.create_task(env.call("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid}))
-        await _waits_for_a_lock(env.pool, "DELETE FROM schedules")
+        await _waits_for_a_lock(env.pool, "SELECT * FROM schedules WHERE id = $1 FOR UPDATE")
         go.set()
         status, payload = await deleting
         await ending

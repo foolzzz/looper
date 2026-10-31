@@ -167,17 +167,21 @@ def _prune_run_directories(commands: CommandRuns, runs: list[dict[str, Any]], no
 async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | None,
                    commands: CommandRuns | None) -> Report:
     report = Report()
-    with _step(report, "runs and notifications"):
+    before = None
+    with _step(report, "retention"):
         async with db_connection.transaction() as conn:
-            before = now - timedelta(days=await scheduler_settings.run_retention_days(conn))
+            days = await scheduler_settings.run_retention_days(conn)
+        before = now - timedelta(days=days)
+    if before is not None:
         # Release the transaction between batches so a large backlog does not hold locks for the whole pass.
         for prune, counter in ((db_schedules.prune_runs, "runs"), (db_schedules.prune_notifications, "notifications")):
-            while True:
-                async with db_connection.transaction() as conn:
-                    count = await prune(conn, before)
-                setattr(report, counter, getattr(report, counter) + count)
-                if count == 0:
-                    break
+            with _step(report, counter):
+                while True:
+                    async with db_connection.transaction() as conn:
+                        count = await prune(conn, before)
+                    setattr(report, counter, getattr(report, counter) + count)
+                    if count == 0:
+                        break
 
     with _step(report, "command logs"):
         # A run commits its open row before creating its log. Snapshot files first so runs starting
@@ -198,8 +202,8 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             report.run_dirs = await asyncio.to_thread(_prune_run_directories, commands, closed, now)
     with _step(report, "runner files"):
         report.runner_files = await asyncio.to_thread(prune_runner_files, runtime_root / RUNNER_DIR, current_runner, now)
-    with _step(report, "log rotation"):
-        for name in ROTATED:
+    for name in ROTATED:
+        with _step(report, f"log rotation {name}"):
             if await asyncio.to_thread(rotate, runtime_root / "logs" / name, at_bytes=ROTATE_AT_BYTES, keep=ROTATE_KEEP):
                 report.rotated.append(name)
     logger.info("housekeeping runs_deleted=%d notifications_deleted=%d logs_deleted=%d log_bytes=%d "

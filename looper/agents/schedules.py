@@ -747,9 +747,17 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
 
 
 async def delete_schedule(schedule_id: str) -> dict[str, Any]:
-    """Delete a schedule and its run history; the tasks it created stay."""
-    if not await db_schedules.delete_schedule(schedule_id):
-        raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
+    """Delete an idle command schedule or an agent schedule; its created tasks stay."""
+    async with db_connection.transaction() as conn:
+        row = await db_schedules.lock_schedule(conn, schedule_id)
+        if row is None:
+            raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
+        # Share the firing lock so a command cannot start between this check and deletion.
+        if row["kind"] == "command" and any(
+                run["status"] == db_schedules.RUNNING for run in await db_schedules.open_runs(conn, schedule_id)):
+            raise RequestError(HTTP_409, "cannot delete a command schedule while a run is running; "
+                               "disable the schedule and wait for the run to end")
+        await db_schedules.delete_schedule(schedule_id, pool=conn)
     return {"deleted": schedule_id}
 
 

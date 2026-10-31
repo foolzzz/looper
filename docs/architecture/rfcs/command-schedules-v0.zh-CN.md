@@ -275,7 +275,7 @@ serve 侧的 `Popen` 参数：`start_new_session=True`、`stdin=DEVNULL`、`stdo
 - `Scheduler.stop`（同文件:384-394）只取消后台协程。命令型运行没有任何协程持有它的进程。正在 `to_thread` 里启动的运行器被取消时，线程照样把 `Popen` 跑完；pid 没写回库也没关系，接管时从 `runner.json` 读。
 - 停机期限 15 秒（`looper/agents/serve.py:416`）里不为命令型运行做任何事。
 
-**删除和停用：** 删除定时任务会级联删掉运行记录（`looper/db/schema.sql:1087`），运行器照样跑到结束或超时，和 agent 定时任务「运行中的任务继续」一致（`looper/agents/ops/schedules.py:447-448`）。没人接管的运行目录由保留任务在运行器结束后清掉（第 7.3 节）。停用只是不再触发，正在跑的运行照常结束。
+**删除和停用：** 命令型定时任务有 `running` 运行时拒绝删除（409），提示先停用并等待运行结束，避免删除记录后留下无人接管的命令。检查与删除持有触发使用的同一把定时任务行锁；没有进行中的命令时，删除会级联删掉运行记录（`looper/db/schema.sql:1087`）。agent 定时任务仍可在运行中删除，它建出的任务继续运行。停用只是不再触发，正在跑的运行照常结束。
 
 ### 5.5 实测结论
 
@@ -358,7 +358,7 @@ serve 侧的 `Popen` 参数：`start_new_session=True`、`stdin=DEVNULL`、`stdo
 
 | 对象 | 规则 |
 |---|---|
-| `schedule_runs` | 删除 `finished_at` 早于保留期（默认 30 天）、而且不在本定时任务最新 100 条之内的运行；从不删除 `queued`、`gating`、`running`。分批，每批最多 5000 行 |
+| `schedule_runs` | 删除 `finished_at` 早于保留期（默认 30 天）、而且不在本定时任务最新 100 条之内的运行；从不删除 `queued`、`gating`、`running`，或尚未交接非空前置检查输出的未完成运行（删除定时任务时一起删除）。分批，每批最多 5000 行 |
 | `schedule_notifications` | 删除早于保留期的 |
 | 命令日志 | 删除早于保留期的；`logs/schedules/` 总大小超过 2 GiB 时，从最旧的开始删，直到降到上限以下；从不删除仍是 `running` 的运行的日志 |
 | 运行目录 `.local/command-runs/*` | 运行记录已经是终态或已不存在、而且运行器已不在的，删除 |

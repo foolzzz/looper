@@ -1,5 +1,6 @@
 """Retention on real PostgreSQL, including the scheduler's hourly background pass."""
 
+from contextlib import asynccontextmanager
 from datetime import timedelta
 import json
 import os
@@ -69,6 +70,22 @@ def test_configured_retention_and_open_log_protection(monkeypatch, tmp_path):
         report = await housekeeping.run_once(env.runtime_root, env.clock.now, current_runner=None, commands=None)
         assert report.runs == 1 and report.logs == 0 and log.read_bytes() == b"active"
         assert await schedules.open_log_paths(env.pool) == {str(log.relative_to(env.runtime_root))}
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_retention_keeps_unhanded_gate_output(monkeypatch, tmp_path):
+    async def test(env: ScheduleEnv) -> None:
+        sid = (await env.schedule())["schedule_id"]
+        await _runs(env, sid, 2, 45)
+        await env.pool.execute(
+            "UPDATE schedule_runs SET status = 'failed', gate_output = 'unfinished input', "
+            "carried_on = (id = 'old2') WHERE schedule_id = $1", sid)
+        await _runs(env, sid, 100, 0, prefix="today")
+        report = await housekeeping.run_once(env.runtime_root, env.clock.now, current_runner=None, commands=None)
+        assert report.runs == 1
+        assert await schedules.run_states(env.pool, ["old1", "old2"]) == {"old1": "failed"}
+        assert [run["id"] for run in await schedules.unhanded_runs(env.pool, sid)] == ["old1"]
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -187,11 +204,12 @@ def test_process_probe_failure_keeps_run_directories_and_continues_cleanup(monke
 
 
 @pytest.mark.parametrize(("step", "module", "function"), [
-    ("runs and notifications", schedules, "prune_runs"),
+    ("runs", schedules, "prune_runs"),
+    ("notifications", schedules, "prune_notifications"),
     ("command logs", schedules, "open_log_paths"),
     ("run directories", schedules, "run_states"),
     ("runner files", housekeeping, "prune_runner_files"),
-    ("log rotation", housekeeping, "rotate"),
+    ("log rotation serve.log", housekeeping, "rotate"),
 ])
 def test_each_failed_step_leaves_the_other_cleanup_steps_running(monkeypatch, tmp_path, caplog, step, module, function):
     async def test(env: ScheduleEnv) -> None:
@@ -204,7 +222,8 @@ def test_each_failed_step_leaves_the_other_cleanup_steps_running(monkeypatch, tm
         directory = env.runtime_root / housekeeping.RUNS_DIR / "orphan"
         runner = env.runtime_root / housekeeping.RUNNER_DIR / "runner-old.py"
         rotation = env.runtime_root / "logs" / "serve.log"
-        for path in (log, directory / "spec.json", runner, rotation):
+        probe_rotation = env.runtime_root / "logs" / "probe.log"
+        for path in (log, directory / "spec.json", runner, rotation, probe_rotation):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("expired")
             stamp = (env.clock.now - timedelta(days=40)).timestamp()
@@ -212,7 +231,11 @@ def test_each_failed_step_leaves_the_other_cleanup_steps_running(monkeypatch, tm
         os.utime(directory, (stamp, stamp))
         monkeypatch.setattr(housekeeping, "ROTATE_AT_BYTES", 4)
 
+        rotate = housekeeping.rotate
+
         def fail(*args, **kwargs):
+            if function == "rotate" and args[0].name != "serve.log":
+                return rotate(*args, **kwargs)
             raise OSError("cleanup unavailable")
 
         async def fail_async(*args, **kwargs):
@@ -222,19 +245,72 @@ def test_each_failed_step_leaves_the_other_cleanup_steps_running(monkeypatch, tm
         report = await housekeeping.run_once(env.runtime_root, env.clock.now,
                                             current_runner=None, commands=CommandRuns(env.runtime_root))
         assert report.failed_steps == {step: "OSError: cleanup unavailable"}
-        assert report.runs == report.notifications == (0 if step == "runs and notifications" else 1)
-        assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs") == (101 if step == "runs and notifications" else 100)
-        assert await env.pool.fetchval("SELECT count(*) FROM schedule_notifications") == (1 if step == "runs and notifications" else 0)
+        assert report.runs == (0 if step == "runs" else 1)
+        assert report.notifications == (0 if step == "notifications" else 1)
+        assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs") == (101 if step == "runs" else 100)
+        assert await env.pool.fetchval("SELECT count(*) FROM schedule_notifications") == (1 if step == "notifications" else 0)
         assert report.logs == (0 if step == "command logs" else 1)
         assert log.exists() == (step == "command logs")
         assert report.run_dirs == (0 if step == "run directories" else 1)
         assert directory.exists() == (step == "run directories")
         assert report.runner_files == (0 if step == "runner files" else 1)
         assert runner.exists() == (step == "runner files")
-        assert report.rotated == ([] if step == "log rotation" else ["serve.log"])
-        assert rotation.read_text() == ("expired" if step == "log rotation" else "")
+        assert report.rotated == (["probe.log"] if step == "log rotation serve.log" else ["serve.log", "probe.log"])
+        assert rotation.read_text() == ("expired" if step == "log rotation serve.log" else "")
+        assert probe_rotation.read_text() == "" and probe_rotation.with_suffix(".log.1").read_text() == "expired"
         warnings = [record for record in caplog.records if record.levelname == "WARNING"]
         assert len(warnings) == 1 and step in warnings[0].message and "cleanup unavailable" in warnings[0].message
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("failure", ["read", "commit"])
+def test_failed_retention_step_skips_both_prunes(monkeypatch, tmp_path, failure):
+    async def test(env: ScheduleEnv) -> None:
+        sid = (await env.schedule())["schedule_id"]
+        await _runs(env, sid, 101, 40)
+        await env.pool.execute(
+            "INSERT INTO schedule_notifications (id, schedule_id, kind, text, status, created_at) "
+            "VALUES ('old-note', $1, 'run', '', 'dashboard', $2)", sid, env.clock.now - timedelta(days=40))
+        read_retention = scheduler_settings.run_retention_days
+        reads = 0
+        prunes = []
+
+        async def fail_first_read(conn):
+            nonlocal reads
+            reads += 1
+            if reads == 1 and failure == "read":
+                raise OSError("retention unavailable")
+            return await read_retention(conn)
+
+        transaction = housekeeping.db_connection.transaction
+        transactions = 0
+
+        @asynccontextmanager
+        async def fail_first_commit():
+            nonlocal transactions
+            transactions += 1
+            first = transactions == 1
+            async with transaction() as conn:
+                yield conn
+            if first:
+                raise OSError("retention unavailable")
+
+        async def record_prune(*args):
+            prunes.append(args)
+            return 0
+
+        monkeypatch.setattr(scheduler_settings, "run_retention_days", fail_first_read)
+        if failure == "commit":
+            monkeypatch.setattr(housekeeping.db_connection, "transaction", fail_first_commit)
+        monkeypatch.setattr(schedules, "prune_runs", record_prune)
+        monkeypatch.setattr(schedules, "prune_notifications", record_prune)
+        report = await housekeeping.run_once(env.runtime_root, env.clock.now, current_runner=None, commands=None)
+        assert report.failed_steps == {"retention": "OSError: retention unavailable"}
+        assert reads == 2 and prunes == []
+        assert report.runs == report.notifications == 0
+        assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs") == 101
+        assert await env.pool.fetchval("SELECT count(*) FROM schedule_notifications") == 1
 
     run_scheduled(test, monkeypatch, tmp_path)
 

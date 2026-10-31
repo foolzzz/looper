@@ -507,15 +507,15 @@ class Scheduler:
         handled: list[str] = []
         while True:
             with ExitStack() as firing_guard:
-                if kinds is None and not firing_guard.enter_context(self._admit_start()):
-                    return
                 launched: _Launched | None = None
                 schedule: dict[str, Any] | None = None
                 try:
                     async with db_connection.transaction() as conn:
-                        schedule = await db_schedules.lock_next_due(conn, now, skip=handled, kinds=kinds)
-                        if schedule is None or (self._drain is not None and self._drain.draining
-                                                and schedule["kind"] != "command"):
+                        # Until the kind is known, count a lookup that may admit agent work. Still look up
+                        # commands when agent admission is closed; release this count before kind admission.
+                        with self._admit_start():
+                            schedule = await db_schedules.lock_next_due(conn, now, skip=handled, kinds=kinds)
+                        if schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"])):
                             return
                         handled.append(schedule["id"])
                         if not firing_guard.enter_context(_project_firing(schedule["project_id"])):
