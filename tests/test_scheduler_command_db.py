@@ -679,8 +679,89 @@ def test_command_due_lookup_can_finish_when_drain_begins_mid_tick(monkeypatch, t
             return row
 
         monkeypatch.setattr(db_schedules, "lock_next_due", lookup)
+        start = env.scheduler._start_runner
+
+        async def starting(*args):
+            assert env.scheduler.drain_waiting() == {"gates": 0, "starting": 0}
+            assert drain.snapshot()["phase"] == "drained"
+            await start(*args)
+
+        monkeypatch.setattr(env.scheduler, "_start_runner", starting)
         await env.scheduler.tick()
         [run] = await _ended(env, sid)
         assert run["status"] == "succeeded"
         assert drain.snapshot()["phase"] == "drained"
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_agent_due_lookup_is_refused_when_drain_begins_mid_tick(monkeypatch, tmp_path):
+    async def test(env: ScheduleEnv):
+        drain = _with_drain(env)
+        sid = (await env.enabled())["schedule_id"]
+        await env.due(sid)
+        next_fire = await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id=$1", sid)
+        lock = db_schedules.lock_next_due
+
+        async def lookup(*args, **kwargs):
+            row = await lock(*args, **kwargs)
+            drain.begin("runs")
+            return row
+
+        monkeypatch.setattr(db_schedules, "lock_next_due", lookup)
+        await env.scheduler.tick()
+        assert await _rows(env, sid) == []
+        assert await env.pool.fetchval("SELECT count(*) FROM tasks") == 0
+        assert await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id=$1", sid) == next_fire
+        assert env.scheduler.drain_waiting() == {"gates": 0, "starting": 0}
+        assert drain.snapshot()["phase"] == "drained"
+
+        monkeypatch.setattr(db_schedules, "lock_next_due", lock)
+        drain.cancel()
+        await env.scheduler.tick()
+        [run] = await _rows(env, sid)
+        assert run["task_id"] == env.bus.of("task_start")[0]
+        assert await env.pool.fetchval("SELECT next_fire_at FROM schedules WHERE id=$1", sid) > next_fire
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_delete_running_command_is_refused_until_the_run_ends(monkeypatch, tmp_path):
+    async def test(env: ScheduleEnv):
+        sid = await _command(env, "sleep 120")
+        run = await _fire(env, sid)
+        identity = await _runner(env, run["id"])
+        status, answer = await env.call("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid})
+        assert status == 409, answer
+        assert answer["error"]["code"] == "conflict"
+        assert "disable" in answer["error"]["message"] and "wait" in answer["error"]["message"]
+        assert await env.pool.fetchval("SELECT count(*) FROM schedules WHERE id=$1", sid) == 1
+        assert (await _rows(env, sid))[0]["status"] == "running"
+        assert _alive(identity["runner_pid"])
+        assert _alive(identity["child_pid"])
+        # Disable future fires, then end the runner so its interrupted run can settle before deletion.
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": False}})
+        os.kill(identity["runner_pid"], signal.SIGTERM)
+        process = env.scheduler._commands._owned[run["id"]]
+        await asyncio.to_thread(process.wait, timeout=5)
+        assert not _alive(identity["child_pid"])
+        env.scheduler._commands.reap()
+        [ended] = await _ended(env, sid)
+        assert ended["status"] == "interrupted" and ended["finished_at"] is not None
+        assert (await env.call("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid}))[0] == 200
+        assert await env.pool.fetchval("SELECT count(*) FROM schedules WHERE id=$1", sid) == 0
+        assert await _rows(env, sid) == []
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_command_schedule_without_running_run_can_be_deleted(monkeypatch, tmp_path, queued):
+    async def test(env: ScheduleEnv):
+        sid = await _command(env, "sleep 120")
+        if queued:
+            await db_schedules.insert_run(env.pool, schedule_id=sid, scheduled_for=env.clock.now,
+                                          trigger="manual", status="queued")
+        assert (await env.call("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid}))[0] == 200
+        await env.scheduler.tick()
+        assert await _rows(env, sid) == []
+        assert not env.scheduler._commands._owned
+        assert (await env.call("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid}))[0] == 404
     run_scheduled(test, monkeypatch, tmp_path)
