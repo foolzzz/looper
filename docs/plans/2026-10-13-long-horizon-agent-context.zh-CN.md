@@ -733,6 +733,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-29 | 定时任务按项开启用户关卡：新增 `schedules.user_gates`（默认 `off`），仅在项目和定时任务都开启时允许规划者开关卡；未开启时完整 Planner prompt 与原策略逐字节相同。API、管家列表/配置/差异/启用确认、v4 配置导入导出和项目定时表单/详情均携带该字段；v4 缺省导入为关闭。关卡优先发到定时任务通知对象，否则用系统 dashboard target，再否则仅任务页，复用渠道白名单与 `/gates` 路由。等待计入运行超时，重叠跳过、补跑和预算规则不变。一次性数据库的定向 pytest 以 `-n 2` 验证策略、升级、投递、API 回复恢复、超时和导入导出；隔离 serve 配 fake runtime 与本地 Lark 替身完整跑通。Web 36 项测试及构建通过，1280/390 浏览器验证开关、保存读回和超时提示；无真实渠道发送。 |
 
 | 2026-10-30 | DSH runner 瞬态重试（本分支）：在 `llm/stream` 内最多重试 3 次，逐次使用独立 request id、预算授权和计量；仅无模型输出时按 HTTP 状态及固定 SDK 的类型化错误码表重试，包含 DeepSeek overload。退避为 1/2/4 秒加至多 20% jitter，`Retry-After` 上限 30 秒，cancel、close 或 settle 立即中断等待；耗尽保留最后错误和尝试次数，逐次诊断不含 provider 消息或凭据。已检查 `0.2.1-rc.2` 源码并用安装版 SDK 与 loopback provider 验证：重复 `next()` 会创建新的 adapter stream、HTTP 请求和鉴权，不需重新调用一次性的 prepared-call 入口。新增 22 项覆盖重试、计费、拒绝、中断、输出边界与错误分类；原截断响应夹具按 `TRANSPORT` 重试更新。`-n 2` 定向回归共 201 项分批通过（重试 22 项、请求 26 项完成复测；中途超时批次不计通过），含独立数据库上的 DSH serve 预算/取消/崩溃验证。Dashboard、Telegram、Lark 和 CLI 共用 runner 行为，无需新增入口；未改 Pi、未调用真实 provider。 |
+| 2026-10-30 | TTADK Codex 启动已实现：运行时行增加类型化 launcher，注册与探测 `ttadk-codex`，仅配 codex-login；包含登录门禁、自检、失败 stderr 和启动记录。新增 56 项与原生 Codex 136 项定向测试通过；全新一次性数据库的隔离服务通过运行时列表 HTTP 读回，未调用真实 TTADK。Dashboard、Telegram、Lark 和 CLI 继续通过 runtime_id 选择，界面专属过滤与登录帮助另行交付。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -838,6 +839,9 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - ~~**dashboard 在非安全上下文里白屏**~~（✅ 已修复 looper #213）（looper #207 的真实浏览器检查发现，早于 #207）：`web/src/pages/chat.tsx` 用 `crypto.randomUUID()`，浏览器只在 https 或 localhost 下提供它；用 http 从别的机器（`--host 0.0.0.0` 加局域网地址）打开时，登录成功后页面在首次渲染就抛 `TypeError` 而白屏。现在非安全上下文里生成 id 已回退到 `crypto.getRandomValues`，从别的机器通过普通 http 打开 dashboard 也能正常渲染。
 
 ### 5.2 工程待办
+
+- **TTADK 启动看门狗**（[RFC §9](../architecture/rfcs/ttadk-launch-v0.zh-CN.md#9-风险)）：登录检查与实际启动之间仍可能过期，需在工具启动前识别设备授权等待并终止，避免无人值守挂起。
+- **TTADK-only 模式**（[RFC §11.2](../architecture/rfcs/ttadk-launch-v0.zh-CN.md#112-待决问题附推荐默认值)）：待维护者决定；需要单独的 provider 与模型目录，目前 Codex 经 TTADK 仅支持 mixed 模式。
 
 - **DSH SDK runner 的后续**（[RFC §10.6、§16](../architecture/rfcs/agent-sdk-runner-v0.zh-CN.md#106-实现进展与验证缺口)）：全角色与咨询的单 runner opt-in 已实现，installed 隔离 serve 验证及真实 DeepSeek smoke、CLI/runner 对照已准备，真实结果待 lead。尚余按 provider binding 分运行器、容量数字及完整 composition 长期内存/exit hook 验证、运行时卡；完成门禁后切换默认值并删除 DSH CLI 路径；补齐 state root 中保留的 run sessions 的保留期限与回收，以及 runner 的 web fetch 和 skills。
 

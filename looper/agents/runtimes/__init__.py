@@ -96,6 +96,13 @@ class AuthKind(str, Enum):
     API_KEY = "api_key"
 
 
+class Launcher(str, Enum):
+    """How a registered runtime starts its tool."""
+
+    NATIVE = "native"
+    TTADK = "ttadk"
+
+
 class VendorType(str, Enum):
     """An account's vendor, independent of its display name and endpoint URLs."""
 
@@ -329,6 +336,9 @@ class RuntimeAdapter(ABC):
     protocols: ClassVar[frozenset[ApiProtocol]]
     # The provider auth kinds it can be started with now; OAUTH is the type's own login.
     auth_kinds: ClassVar[frozenset[AuthKind]]
+    launchers: ClassVar[frozenset[Launcher]] = frozenset({Launcher.NATIVE})
+    ttadk_tool: ClassVar[str | None] = None
+    ttadk_runtime_name: ClassVar[str | None] = None
     # Exact model ids when this runtime restricts them; None leaves the provider's catalog authoritative.
     supported_models: ClassVar[frozenset[str] | None] = None
     # None uses the registry's shared effort levels; a tuple is this adapter's exact choices.
@@ -358,6 +368,14 @@ class RuntimeAdapter(ABC):
     @abstractmethod
     def probe(self, executable: str) -> Probe:
         """The version and capabilities of ``executable``; never a model call."""
+
+    def auth_kinds_for(self, launcher: Launcher) -> frozenset[AuthKind]:
+        return self.auth_kinds
+
+    def probe_for(self, executable: str, launcher: Launcher) -> Probe:
+        if launcher is Launcher.NATIVE:
+            return self.probe(executable)
+        return Probe(None, self.capabilities, f"{self.label} cannot be launched through {launcher.value}")
 
     def read_only_for(self, capabilities: frozenset[Capability]) -> ReadOnly:
         """How a read-only run is kept read-only with a runtime of these (probed) ``capabilities``."""

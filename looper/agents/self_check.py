@@ -247,8 +247,52 @@ async def grok_login_check() -> Check:
     return await asyncio.to_thread(check_grok_login, profiles, problem, grok_login.cached_probe)
 
 
+async def _ttadk_runtime_rows(*, pool: Any = None) -> list[dict[str, Any]]:
+    from ..db import profile_registry
+
+    if not await profile_registry.launcher_profile_count("ttadk", pool=pool):
+        return []
+    return [row for row in await profile_registry.list_runtimes(pool=pool)
+            if row["launcher"] == "ttadk" and row["profile_count"]]
+
+
+async def check_ttadk(runtimes: list[dict[str, Any]] | None) -> Check:
+    """Check the TTADK tools used by saved Agent Profiles, without launching a model."""
+    from .runtimes import adapter, ttadk
+
+    if runtimes is None:
+        return Check("ttadk", "TTADK", SKIP,
+                     "not checked: the Agent Profiles are stored in PostgreSQL, which is unreachable")
+    if not runtimes:
+        return Check("ttadk", "TTADK", OK, "no Agent Profile uses a TTADK runtime")
+    problems = []
+    status = OK
+    for runtime in runtimes:
+        tool = adapter(runtime["type"]).ttadk_tool
+        problem = await ttadk.sign_in_problem(runtime["executable"] or "ttadk", tool)
+        if problem is not None:
+            problems.append(problem.message(runtime["type"]))
+            if problem is not ttadk.TtadkProblem.CHECK_FAILED:
+                status = FAIL
+            elif status == OK:
+                status = WARN
+    if problems:
+        return Check("ttadk", "TTADK", status, "; ".join(problems))
+    return Check("ttadk", "TTADK", OK, "signed in for the TTADK runtimes used by Agent Profiles")
+
+
+async def ttadk_check() -> Check:
+    """Read TTADK usage with the server's pool, then check its cached sign-in."""
+    try:
+        runtimes = await _ttadk_runtime_rows()
+    except Exception:
+        logger.warning("cannot read whether an Agent Profile uses TTADK", exc_info=True)
+        runtimes = None
+    return await check_ttadk(runtimes)
+
+
 # The checks of the runtimes' own logins, by id: what reads each now (``/api/v1/system/status`` reads them on every poll).
-LOGIN_CHECKS = {"codex_login": codex_login_check, "grok_login": grok_login_check}
+LOGIN_CHECKS = {"codex_login": codex_login_check, "grok_login": grok_login_check, "ttadk": ttadk_check}
 
 
 def check_lark_cli(lark_enabled: bool | None) -> Check:
@@ -377,6 +421,7 @@ class _DatabaseFacts:
     codex_login_problem: dict[str, str] | None = None
     grok_login_profiles: int | None = None
     grok_login_problem: dict[str, str] | None = None
+    ttadk_runtimes: list[dict[str, Any]] | None = None
     worktree_projects: list[dict[str, Any]] | None = None
 
 
@@ -411,6 +456,11 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
         except asyncpg.UndefinedTableError:  # a genuinely empty database
             profiles, problem, grok_profiles, grok_problem = 0, None, 0, None
         try:
+            ttadk_runtimes = await _ttadk_runtime_rows(pool=conn)
+        except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):
+            # Empty databases and baselines awaiting the launcher upgrade have no TTADK rows.
+            ttadk_runtimes = []
+        try:
             worktrees: list[dict[str, Any]] | None = await worktree_projects(pool=conn)
         except asyncpg.UndefinedTableError:
             worktrees = []
@@ -422,6 +472,7 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
             codex_login_problem=problem,
             grok_login_profiles=grok_profiles,
             grok_login_problem=grok_problem,
+            ttadk_runtimes=ttadk_runtimes,
             worktree_projects=worktrees,
         )
     finally:
@@ -444,7 +495,8 @@ async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Chec
     grok = check_grok_login(facts.grok_login_profiles, facts.grok_login_problem, grok_login.probe_login)
     pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending, ops)
     git = await asyncio.to_thread(check_git)
-    return [database, *claude, codex, grok, check_lark_cli(facts.lark_enabled), pg_dump, git,
+    return [database, *claude, codex, grok, await check_ttadk(facts.ttadk_runtimes),
+            check_lark_cli(facts.lark_enabled), pg_dump, git,
             await check_step_worktrees(facts.worktree_projects)]
 
 
