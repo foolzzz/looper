@@ -4179,7 +4179,8 @@ another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
 in) and `verify_command` (an argv array that lists the dump read on stdin like
 `pg_restore --list`), `[operator_notes] root` (an absolute path), and
-`[runtimes] pi` and `dsh` (`"runner"` by default, or explicit `"cli"` opt-outs; file only). Nothing is expanded: no
+`[runtimes] pi` and `dsh` (`"runner"` by default, or explicit `"cli"` opt-outs; file only), and
+`[agent_host] keeper` (`"off"` by default, or `"on"`; file only). Nothing is expanded: no
 variable, no `~`, no include. An unknown key, a wrong type or a bad value
 stops the command; the message names the key and never shows the value. The
 file must be a regular file (not a symlink), owned by the user, mode 0600, in
@@ -4207,11 +4208,24 @@ NAME`).
 
 `looper config init-ops` writes the file once from the values in effect, mode
 0600, including `[runtimes]` with the commented Pi and DSH runner defaults (or explicit
-`"cli"` opt-outs), and refuses to overwrite a file that exists. With nothing configured it
+`"cli"` opt-outs), and `[agent_host] keeper = "on"` only when keeper is on. It refuses to overwrite a file that exists. With nothing configured it
 writes `postgresql://localhost:5432/loopx` and says so. Remove the old
 variables from the shell and `.env`, then run `looper service install` again
 if the service is used. Until then `looper serve` keeps working from the
 variables, with the warnings.
+
+**One control plane per database.** With `[agent_host] keeper = "on"`,
+`looper serve` holds a PostgreSQL session advisory lock on a dedicated connection
+before it initializes the database pool. A second server refuses to start and
+names the holder's pid, application name, client address and backend start time;
+unavailable fields are reported as unknown. Each successful start increments
+the `control_plane_epoch` key in `system_settings` after the schema check. If the connection
+closes or a health check finds the lock lost (within 10 seconds), the server
+fences its database pool, closes the HTTP listener, ends its own agents and exits
+with code 75, without updating run records or detaching runs. A lock lost during
+startup or shutdown follows the same exit path. The service manager restarts the
+failed process, which must acquire the lock again. With keeper off, the server
+takes no control-plane lock and writes no epoch.
 
 `looper service install` (`looper/agents/service.py`) writes a unit that runs
 `looper serve --config <absolute ops file> --runtime-root <absolute root>`,

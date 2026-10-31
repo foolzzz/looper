@@ -285,6 +285,29 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
             _recorded.pop(process.pid, None)
 
 
+async def end_owned(*, deadline: float) -> None:
+    """End this server's recorded agents concurrently, for at most ``deadline`` seconds.
+
+    Recheck each agent's identity before signalling, as the startup sweep does. Any record whose end
+    cannot finish stays for that sweep; the caller is about to exit and must not wait beyond its deadline.
+    """
+    async def end_agent(pid: int, started: str) -> None:
+        try:
+            await _end(_Orphan(pid, started), label=f"owned agent {pid}", known={})
+        except Exception:
+            logger.exception("cannot end owned agent %s; keeping its record for the next sweep", pid)
+
+    tasks = [asyncio.create_task(end_agent(pid, started)) for pid, (_, started) in list(_recorded.items())]
+    if not tasks:
+        return
+    try:
+        await asyncio.wait(tasks, timeout=max(0, deadline))
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()  # _end sends SIGKILL too, but its reap grace must not extend this deadline.
+
+
 # --- Recording agents for the next server's sweep ---
 
 

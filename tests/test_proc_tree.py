@@ -436,6 +436,75 @@ def _record(root: Path, pid: int, started: str, server: tuple[int, str]) -> Path
     return proc_tree._write_record(directory, pid, started, server)
 
 
+
+def test_end_owned_ends_every_recorded_agents_tree(
+    tmp_path: Path, runtime_root: Path, trees: list[dict[str, int]],
+) -> None:
+    async def _run() -> None:
+        await proc_tree.sweep(runtime_root)
+        processes = []
+        for number in range(2):
+            root = tmp_path / str(number)
+            root.mkdir()
+            script = root / "agent.py"
+            script.write_text(_SPAWN_TREE + "sys.stdin.read()\n", encoding="utf-8")
+            process = await proc_tree.spawn(sys.executable, str(script), cwd=root, stdin=asyncio.subprocess.PIPE)
+            processes.append(process)
+            await _started(root, trees)
+        await proc_tree.end_owned(deadline=5)
+        await asyncio.wait_for(asyncio.gather(*(process.wait() for process in processes)), 2)
+        assert _running([pid for tree in trees for pid in tree.values()]) == []
+
+    asyncio.run(_run())
+
+
+def test_end_owned_leaves_a_reused_pid_alone(runtime_root: Path) -> None:
+    process = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+    try:
+        async def _run() -> None:
+            await proc_tree.sweep(runtime_root)
+            started = "Thu Jan 1 00:00:00 1970"
+            record = _record(runtime_root, process.pid, started, proc_tree._server)
+            proc_tree._recorded[process.pid] = (record, started)
+            await proc_tree.end_owned(deadline=5)
+            assert _running([process.pid], settle=0) == [process.pid]
+
+        asyncio.run(_run())
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_end_owned_starts_all_agents_concurrently_and_keeps_unfinished_records(
+    runtime_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started: dict[int, str] = {}
+    cancelled: set[int] = set()
+
+    async def slow_end(process: proc_tree._Orphan, **kwargs: Any) -> None:
+        started[process.pid] = process.started
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.add(process.pid)
+
+    monkeypatch.setattr(proc_tree, "_end", slow_end)
+
+    async def _run() -> None:
+        for pid in (101, 102):
+            record = _record(runtime_root, pid, "original", (1, "server"))
+            proc_tree._recorded[pid] = (record, "original")
+        before = time.monotonic()
+        await proc_tree.end_owned(deadline=0.05)
+        assert time.monotonic() - before < 0.5
+        assert started == {101: "original", 102: "original"}
+        assert all(path.exists() for path, _ in proc_tree._recorded.values())
+        await asyncio.sleep(0)
+        assert cancelled == {101, 102}
+
+    asyncio.run(_run())
+
+
 def test_the_next_start_ends_the_tree_of_an_agent_whose_server_is_gone(
     tmp_path: Path, runtime_root: Path, trees: list[dict[str, int]], caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,

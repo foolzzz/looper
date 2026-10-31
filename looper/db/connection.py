@@ -14,6 +14,8 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 _pool: asyncpg.Pool | None = None
+_fenced = False
+_FENCED_MESSAGE = "the database pool is fenced: this control plane lost its lock"
 
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 SEEDS_PATH = Path(__file__).with_name("seeds.sql")
@@ -22,7 +24,14 @@ SEEDS_PATH = Path(__file__).with_name("seeds.sql")
 async def init_pool(dsn: str, *, min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
     """The pool for ``dsn``, the ops file's ``database.url`` (``looper.ops_config``)."""
     global _pool
-    _pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
+    if _fenced:
+        raise RuntimeError(_FENCED_MESSAGE)
+    pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
+    # Loss can happen while create_pool is connecting, before _pool exists.
+    if _fenced:
+        pool.terminate()
+        raise RuntimeError(_FENCED_MESSAGE)
+    _pool = pool
     logger.info("database pool created (%s connections)", max_size)
     return _pool
 
@@ -35,7 +44,17 @@ async def close_pool() -> None:
         logger.info("database pool closed")
 
 
+def fence() -> None:
+    """Permanently revoke every pooled connection in this process, without awaiting anything."""
+    global _fenced
+    _fenced = True
+    if _pool is not None:
+        _pool.terminate()
+
+
 def get_pool() -> asyncpg.Pool:
+    if _fenced:
+        raise RuntimeError(_FENCED_MESSAGE)
     if _pool is None:
         raise RuntimeError("database pool not initialised — call init_pool() first")
     return _pool
