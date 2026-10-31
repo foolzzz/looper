@@ -13,7 +13,7 @@ import time
 
 FORMAT = 1
 TAIL_CHARS = 4000
-TAIL_READ_BYTES = 16384
+TAIL_READ_BYTES = TAIL_CHARS * 4
 REDACT_MIN_CHARS = 4
 PIPE_DRAIN_SECONDS = 2.0
 SELECT_SECONDS = 1.0
@@ -175,17 +175,19 @@ class _Log:
             self.fd = None
 
     def tail(self, file_values):
+        # UTF-8 needs up to four bytes per character; include secrets crossing the tail cut.
+        read_bytes = TAIL_READ_BYTES + 4 * max((len(value) for value in file_values.values()), default=0)
         try:
             with open(self.path, "rb") as source:
-                source.seek(max(0, os.fstat(source.fileno()).st_size - TAIL_READ_BYTES))
-                tail = source.read(TAIL_READ_BYTES).decode("utf-8", "replace")[-TAIL_CHARS:]
+                source.seek(max(0, os.fstat(source.fileno()).st_size - read_bytes))
+                tail = source.read(read_bytes).decode("utf-8", "replace")
         except OSError as exc:
             self.error = self.error or f"{type(exc).__name__}: {exc}"[:300]
             return ""
         for value in sorted(set(file_values.values()), key=len, reverse=True):
             if len(value) >= REDACT_MIN_CHARS:
                 tail = tail.replace(value, "[redacted]")
-        return tail
+        return tail[-TAIL_CHARS:]
 
 
 def _run_child(child, pgid, spec, log, deadline):

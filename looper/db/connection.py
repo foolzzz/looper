@@ -69,6 +69,8 @@ REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
 _RUNTIME_LAUNCHER = "runtime_launcher"
 _COMMAND_SCHEDULES = "command_schedules"
+_TASK_REPLY_ROUTE = "task_reply_route"
+_SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 
 _COMMAND_SCHEDULES_DDL: tuple[str, ...] = (
     """ALTER TABLE schedules
@@ -144,6 +146,26 @@ async def _command_schedules_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('schedules') AND attname = 'kind' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _task_reply_route_pending(conn: asyncpg.Connection) -> bool:
+    """An unmarked task baseline lacks the original reply route; recorded upgrades never repair DDL."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _TASK_REPLY_ROUTE):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('tasks') AND attname = 'origin_reply_route' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _schedule_missed_since_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _SCHEDULE_MISSED_SINCE):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('schedule_runs') AND attname = 'missed_since' "
         "AND attnum > 0 AND NOT attisdropped)")
 
 
@@ -257,6 +279,13 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             for ddl in _COMMAND_SCHEDULES_DDL:
                 await conn.execute(ddl)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _COMMAND_SCHEDULES)
+        if await _task_reply_route_pending(conn):
+            await conn.execute("ALTER TABLE tasks ADD COLUMN origin_reply_route JSONB "
+                               "CHECK (jsonb_typeof(origin_reply_route) = 'object')")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _TASK_REPLY_ROUTE)
+        if await _schedule_missed_since_pending(conn):
+            await conn.execute("ALTER TABLE schedule_runs ADD COLUMN missed_since TIMESTAMPTZ")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_MISSED_SINCE)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -289,4 +318,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         state = await _classify_schema(conn, sql)
         return state == "bridge" or (state == "current" and (
             await _schedule_user_gates_pending(conn) or await _runtime_launcher_pending(conn)
-            or await _command_schedules_pending(conn)))
+            or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
+            or await _schedule_missed_since_pending(conn)))

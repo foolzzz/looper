@@ -3,6 +3,7 @@ records what it would send the TaskRouter, the API as the dashboard calls it, an
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import uuid
@@ -60,6 +61,7 @@ class ScheduleEnv(SimpleNamespace):
     scheduler: Any
     project_id: str
     work_dir: str
+    runtime_root: Path
 
     async def call(self, method: str, path: str, body: Any = None, query: dict[str, str] | None = None,
                    ) -> tuple[int, Any]:
@@ -147,17 +149,30 @@ class Sender:
 def run_scheduled(test: Callable[[ScheduleEnv], Awaitable[None]], monkeypatch: pytest.MonkeyPatch,
                   tmp_path: Path) -> None:
     """Run ``test(env)`` on a new, migrated schema that is also the server's, with a project in ``tmp_path``."""
-    from looper.agents import scheduler_settings
+    from looper.agents import scheduler as scheduler_module, scheduler_settings
+    from looper.agents.command_runs import CommandRuns
     from looper.agents.scheduler import Scheduler
     from looper.db import projects
 
     async def with_env(pool: Any) -> None:
         monkeypatch.setattr(scheduler_settings, "_min_interval", scheduler_settings.DEFAULT_MIN_INTERVAL_SECONDS)
+
+        class FastCommands(CommandRuns):
+            def __init__(self, runtime_root: Path) -> None:
+                super().__init__(runtime_root, kill_grace_seconds=1, leftover_grace_seconds=1)
+
+        monkeypatch.setattr(scheduler_module, "CommandRuns", FastCommands)
         project = await projects.create_project(name="alerts", work_dir=str(tmp_path), pool=pool)
         bus, clock = Bus(), Clock()
-        await test(ScheduleEnv(pool=pool, bus=bus, clock=clock,
-                               scheduler=Scheduler(bus=bus, clock=clock, day_zone="America/Los_Angeles"),
-                               project_id=project["id"], work_dir=str(tmp_path)))
+        runtime_root = tmp_path / "runtime"
+        scheduler = Scheduler(bus=bus, clock=clock, day_zone="America/Los_Angeles", runtime_root=runtime_root)
+        await asyncio.to_thread(scheduler._commands.prepare)
+        env = ScheduleEnv(pool=pool, bus=bus, clock=clock, scheduler=scheduler,
+                          project_id=project["id"], work_dir=str(tmp_path), runtime_root=runtime_root)
+        try:
+            await test(env)
+        finally:
+            await env.scheduler.stop()
 
     run_db(with_env, monkeypatch, max_size=4)
 
@@ -167,7 +182,8 @@ def with_sender(env: ScheduleEnv, *, day_zone: str = "America/Los_Angeles", dash
 
     sender = Sender()
     env.scheduler = Scheduler(bus=env.bus, clock=env.clock, sender=sender, day_zone=day_zone,
-                              dashboard_url=dashboard_url)
+                              dashboard_url=dashboard_url, runtime_root=env.runtime_root)
+    env.scheduler._commands.prepare()
     return sender
 
 

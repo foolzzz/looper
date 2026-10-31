@@ -21,6 +21,16 @@ launchd: a job is reloaded with ``launchctl bootout`` then ``bootstrap``, never
 started before. ``bootout`` returns before the job is gone, and a ``bootstrap``
 issued meanwhile fails, so ``stop`` waits until ``launchctl print`` no longer
 finds the job and ``bootstrap`` is retried a few times.
+
+systemd units use ``KillMode=process``: serve ends the agents it started on
+shutdown, and the next startup's ``sweep`` cleans up any left behind; command
+schedule runners live in their own sessions and survive restarts.
+
+When the ops file configures probe notifications, install also registers an
+independent one-shot health check every 60 seconds. It writes logs/probe.log
+and carries only PATH, locale, time zone and network settings, never runtime
+API keys. Reinstalls synchronize it before starting the server. Restart repairs
+missing units and stale targets; uninstall stops and removes them before the server.
 """
 
 from __future__ import annotations
@@ -59,6 +69,12 @@ DEFAULT_LABEL = "com.looper.serve"
 DEFAULT_PORT = 8767
 DEFAULT_TIMEOUT_SECONDS = 120.0
 LOG_RELATIVE_PATH = Path("logs") / "serve.log"
+PROBE_INTERVAL_SECONDS = 60
+PROBE_LOG_RELATIVE_PATH = Path("logs") / "probe.log"
+PROBE_ENV_NAMES = (
+    "PATH", "TZ", *(name for name in child_env.SYSTEM if name.startswith(("LANG", "LC_"))),
+    *child_env.NETWORK,
+)
 
 # Copied from the environment of `install` when set: what the server and the agents it starts read
 # (``child_env``) but launchd and systemd do not set, and the Telegram channel's token variable.
@@ -76,6 +92,8 @@ _STOP_WAIT_SECONDS = 30.0  # launchd sends SIGKILL 20 s after SIGTERM by default
 _POLL_SECONDS = 0.5
 _BOOTSTRAP_ATTEMPTS = 10
 _COMMAND_TIMEOUT_SECONDS = 30.0
+_KILL_MODE_WARNING = ("the unit predates KillMode=process: restarting it ends running command schedules; "
+                      "run `looper service install` again")
 
 
 class ServiceError(RuntimeError):
@@ -92,10 +110,11 @@ def _run(argv: Sequence[str], *, timeout: float = _COMMAND_TIMEOUT_SECONDS) -> s
         raise ServiceError(f"`{' '.join(argv)}` did not finish in {timeout:.0f} s") from exc
 
 
-def _get_status(port: int, token: str | None) -> dict | None:
-    """``POST /api/v1/system/status`` on 127.0.0.1, bypassing any proxy; None when nothing answers with JSON."""
+def _get_status(port: int, token: str | None, address: str = "127.0.0.1") -> dict | None:
+    """``POST /api/v1/system/status``, bypassing any proxy; None when nothing answers with JSON."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1/system/status",
+    authority = f"[{address}]" if ":" in address else address
+    request = urllib.request.Request(f"http://{authority}:{port}/api/v1/system/status",
                                     data=b"{}", headers={"Content-Type": "application/json",
                                                            **({"Authorization": f"Bearer {token}"} if token else {})})
     try:
@@ -126,10 +145,14 @@ def _get_components(port: int, token: str | None) -> dict | None:
     return payload["result"]
 
 
-def _port_in_use(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+def _port_in_use(port: int, address: str = "127.0.0.1") -> bool:
+    with socket.socket(socket.AF_INET6 if ":" in address else socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(1.0)
-        return sock.connect_ex(("127.0.0.1", port)) == 0
+        return sock.connect_ex((address, port)) == 0
+
+
+def _connect_address(host: str) -> str:
+    return "127.0.0.1" if host in ("", "localhost", "0.0.0.0") else "::1" if host == "::" else host
 
 
 def _system_operation(port: int, token: str, name: str, arguments: dict) -> dict:
@@ -187,8 +210,8 @@ class Host:
     run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
-    get_status: Callable[[int, str | None], dict | None] = _get_status
-    port_in_use: Callable[[int], bool] = _port_in_use
+    get_status: Callable[[int, str | None, str], dict | None] = _get_status
+    port_in_use: Callable[[int, str], bool] = _port_in_use
     get_components: Callable[[int, str | None], dict | None] = _get_components
     system_operation: Callable[[int, str, str, dict], dict] = _system_operation
     get_whoami: Callable[[int, str], dict] = _get_whoami
@@ -211,6 +234,56 @@ class ServiceSpec:
     working_dir: Path
     env: tuple[tuple[str, str], ...]
     log_path: Path
+
+
+@dataclass(frozen=True)
+class ProbeSpec:
+    label: str
+    argv: tuple[str, ...]
+    working_dir: Path
+    env: tuple[tuple[str, str], ...]
+    log_path: Path
+
+
+def build_probe_spec(host: Host, *, label: str, runtime_root: Path, config: Path, port: int | None) -> ProbeSpec:
+    check_label(label)
+    root = _absolute_root(host, runtime_root)
+    return ProbeSpec(label=label,
+                     argv=(*looper_command(host.executable), "service", "probe", "--config", str(config),
+                           "--runtime-root", str(root), *(("--port", str(port)) if port is not None else ())),
+                     working_dir=host.cwd,
+                     env=tuple((name, host.environ[name]) for name in PROBE_ENV_NAMES if name in host.environ),
+                     log_path=root / PROBE_LOG_RELATIVE_PATH)
+
+
+def render_probe_plist(spec: ProbeSpec) -> bytes:
+    return plistlib.dumps({
+        "Label": f"{spec.label}.probe",
+        "ProgramArguments": list(spec.argv),
+        "WorkingDirectory": str(spec.working_dir),
+        "EnvironmentVariables": dict(spec.env),
+        "StartInterval": PROBE_INTERVAL_SECONDS,
+        "RunAtLoad": True,
+        "StandardOutPath": str(spec.log_path),
+        "StandardErrorPath": str(spec.log_path),
+    })
+
+
+def render_probe_systemd(spec: ProbeSpec) -> tuple[str, str]:
+    exec_start = " ".join(_systemd_quote(word.replace("$", "$$")) for word in spec.argv)
+    log = str(spec.log_path).replace("%", "%%")
+    service = "\n".join([
+        "[Unit]", f"Description=Looper health probe ({spec.label})", "", "[Service]", "Type=oneshot",
+        f"ExecStart={exec_start}", f"WorkingDirectory={str(spec.working_dir).replace('%', '%%')}",
+        *(f"Environment={_systemd_quote(f'{name}={value}')}" for name, value in spec.env),
+        f"StandardOutput=append:{log}", f"StandardError=append:{log}", "",
+    ])
+    timer = "\n".join([
+        "[Unit]", f"Description=Looper health probe timer ({spec.label})", "", "[Timer]",
+        f"OnBootSec={PROBE_INTERVAL_SECONDS}", f"OnUnitActiveSec={PROBE_INTERVAL_SECONDS}",
+        f"Unit={spec.label}-probe.service", "", "[Install]", "WantedBy=timers.target", "",
+    ])
+    return service, timer
 
 
 def looper_command(executable: str) -> list[str]:
@@ -290,6 +363,7 @@ def render_systemd_unit(spec: ServiceSpec) -> str:
         *(f"Environment={_systemd_quote(f'{name}={value}')}" for name, value in spec.env),
         "Restart=on-failure",
         "RestartSec=5",
+        "KillMode=process",
         f"StandardOutput=append:{log}",
         f"StandardError=append:{log}",
         "",
@@ -368,6 +442,20 @@ class _Manager:
         """The unit's port, log path and root; ``explicit_port`` ignores a port read from its ops file."""
         raise NotImplementedError
 
+    def unit_argv(self) -> Sequence[str]:
+        raise NotImplementedError
+
+    def ops(self) -> OpsConfig | None:
+        argv = list(self.unit_argv())
+        if "--config" not in argv[:-1]:
+            return None
+        path = Path(argv[argv.index("--config") + 1])
+        root = _runtime_root_of(argv) or self.host.cwd
+        try:
+            return OpsConfig(runtime_root=root, path=path, **ops_config.read_file(path))
+        except ops_config.OpsConfigError as exc:
+            raise ServiceError(str(exc)) from exc
+
     def state(self) -> State:
         raise NotImplementedError
 
@@ -397,6 +485,9 @@ class Launchd(_Manager):
 
     def render(self, spec: ServiceSpec) -> bytes:
         return render_plist(spec)
+
+    def unit_argv(self) -> Sequence[str]:
+        return plistlib.loads(self.unit_path.read_bytes()).get("ProgramArguments") or []
 
     def unit_settings(self, *, explicit_port: bool = False) -> tuple[int | None, Path | None, Path | None]:
         try:
@@ -464,6 +555,17 @@ class Systemd(_Manager):
 
     def render(self, spec: ServiceSpec) -> bytes:
         return render_systemd_unit(spec).encode()
+
+    def unit_argv(self) -> Sequence[str]:
+        command = next((line.removeprefix("ExecStart=") for line in self.unit_path.read_text().splitlines()
+                        if line.startswith("ExecStart=")), "")
+        return _systemd_words(command)
+
+    def kill_mode_ok(self) -> bool:
+        try:
+            return "KillMode=process" in self.unit_path.read_text().splitlines()
+        except FileNotFoundError:
+            return True
 
     def unit_settings(self, *, explicit_port: bool = False) -> tuple[int | None, Path | None, Path | None]:
         try:
@@ -552,6 +654,100 @@ def manager(host: Host, label: str) -> _Manager:
                        f"not {host.system or 'this system'}")
 
 
+def install_probe_units(host: Host, label: str, service_text: str, timer_text: str) -> None:
+    mgr = Systemd(host, f"{label}-probe")
+    write_private(mgr.unit_path, service_text.encode())
+    write_private(mgr.unit_path.with_suffix(".timer"), timer_text.encode())
+    mgr._systemctl("daemon-reload")
+    mgr._systemctl("enable", "--now", f"{label}-probe.timer")
+
+
+def remove_probe_units(host: Host, label: str) -> None:
+    if host.system == "Darwin":
+        Launchd(host, f"{label}.probe").remove()
+    else:
+        mgr = Systemd(host, f"{label}-probe")
+        timer = mgr.unit_path.with_suffix(".timer")
+        if not timer.is_file() and not mgr.unit_path.is_file():
+            return
+        mgr._systemctl("disable", "--now", timer.name, check=False)
+        mgr._systemctl("stop", mgr.unit, check=False)
+        deadline = host.clock() + _STOP_WAIT_SECONDS
+        for unit in (timer.name, mgr.unit):
+            while True:
+                shown = mgr._systemctl("show", unit, "--property=LoadState,ActiveState,MainPID", check=False)
+                fields = dict(line.split("=", 1) for line in shown.stdout.splitlines() if "=" in line)
+                if ((shown.returncode == 0 or fields.get("LoadState") == "not-found")
+                    and fields.get("ActiveState") in ("inactive", "failed")
+                    and fields.get("MainPID", "0") == "0"
+                ):
+                    break
+                if host.clock() >= deadline:
+                    raise ServiceError(f"cannot confirm {unit} stopped within {_STOP_WAIT_SECONDS:.0f} s; "
+                                       "probe units were kept")
+                host.sleep(_POLL_SECONDS)
+        mgr.unit_path.unlink(missing_ok=True)
+        timer.unlink(missing_ok=True)
+        mgr._systemctl("daemon-reload")
+
+
+def _probe_unit_path(host: Host, label: str) -> Path:
+    return (Launchd(host, f"{label}.probe").unit_path if host.system == "Darwin"
+            else Systemd(host, f"{label}-probe").unit_path.with_suffix(".timer"))
+
+
+def _install_probe(host: Host, ops: OpsConfig, label: str, runtime_root: Path, port: int | None) -> str:
+    path = _probe_unit_path(host, label)
+    if not ops.probe_notify_chat:
+        remove_probe_units(host, label)
+        return (f"probe      not configured: add [probe] to {ops.path} "
+                "to be alerted when this service stops answering")
+    try:
+        spec = build_probe_spec(host, label=label, runtime_root=runtime_root, config=ops.path, port=port)
+        if host.system == "Darwin":
+            mgr = Launchd(host, f"{label}.probe")
+            mgr.stop()
+            write_private(mgr.unit_path, render_probe_plist(spec))
+            mgr.start()
+        else:
+            install_probe_units(host, label, *render_probe_systemd(spec))
+    except (OSError, ServiceError) as exc:
+        # A probe failure must not turn a successfully started server into a failed install.
+        reason = str(exc)
+        try:
+            remove_probe_units(host, label)
+        except (OSError, ServiceError) as cleanup:
+            reason += f"; cleanup failed: {cleanup}"
+        return f"probe      failed to load: {reason}"
+    return f"probe      {path} every {PROBE_INTERVAL_SECONDS} s → {ops.probe_notify_channel} {ops.probe_notify_chat[:6]}…"
+
+
+def _probe_matches(host: Host, label: str, ops: OpsConfig, port: int | None) -> bool:
+    """An installed probe must use serve's config, operator token root and port source."""
+    mgr = manager(host, f"{label}.probe" if host.system == "Darwin" else f"{label}-probe")
+    if not mgr.unit_path.is_file() or not _probe_unit_path(host, label).is_file():
+        return False
+    argv = list(mgr.unit_argv())
+    return ("--config" in argv[:-1] and Path(argv[argv.index("--config") + 1]) == ops.path
+            and _runtime_root_of(argv) == ops.runtime_root and _given_port(argv) == port)
+
+
+def _probe_status(host: Host, label: str, runtime_root: Path | None) -> list[str]:
+    from .probe import _read_state
+
+    installed = _probe_unit_path(host, label).is_file()
+    if host.system == "Linux":
+        installed = installed and _probe_unit_path(host, label).with_suffix(".service").is_file()
+    state = _read_state(runtime_root / ".local/probe/state.json") if runtime_root else None
+    last = (f"{state.last_sample_at.isoformat()} {state.last_verdict or 'unknown'}"
+            if state and state.last_sample_at else "no check yet")
+    if state and state.alert_started_at:
+        last += f"; alert since {state.alert_started_at.isoformat()}"
+    if state and state.last_send_error:
+        last += f"; {state.last_send_error}"
+    return [f"probe      {'installed' if installed else 'not installed'}", f"last check {last}"]
+
+
 # --- The commands ------------------------------------------------------------------
 
 
@@ -562,10 +758,10 @@ class Serving:
 
 
 def _start_and_wait(mgr: _Manager, port: int, log_path: Path | None, timeout: float,
-                    runtime_root: Path | None) -> Serving:
+                    runtime_root: Path | None, address: str = "127.0.0.1") -> Serving:
     """Start the stopped service on a free ``port`` and wait until it answers ``POST /api/v1/system/status``."""
     host = mgr.host
-    if host.port_in_use(port):
+    if host.port_in_use(port, address):
         raise ServiceError(f"port {port} is in use by another process, so the service is installed but not "
                            "started; stop that process (or install again with another --port), then run "
                            "`looper service restart`")
@@ -573,7 +769,7 @@ def _start_and_wait(mgr: _Manager, port: int, log_path: Path | None, timeout: fl
     deadline = host.clock() + timeout
     while True:
         token = operator_auth.read_token(runtime_root) if runtime_root is not None else None
-        status = host.get_status(port, token)
+        status = host.get_status(port, token, address)
         if status is not None:
             return Serving(pid=mgr.state().pid, status=status)
         if host.clock() >= deadline:
@@ -604,7 +800,7 @@ def _describe(state: State) -> str:
 def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int | None = None,
             extra_env: Sequence[str] = (), timeout: float = DEFAULT_TIMEOUT_SECONDS) -> str:
     """Write the unit for ``ops``, reload it and wait until it serves. Keep an installed unit's explicit port
-    unless a new flag or the ops file selects one; otherwise the service reads its port from the ops file.
+    unless a new flag selects one; otherwise the service reads its port from the ops file.
     """
     mgr = manager(host, label)
     if not os.path.lexists(ops.path):
@@ -614,7 +810,7 @@ def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int
                      if source.origin is ops_config.Origin.ENVIRONMENT]:
         raise ServiceError(f"{', '.join(transient)} still comes from the environment, which the unit does not carry; "
                            f"set these settings in {ops.path} before installing (the existing service is unchanged)")
-    if port is None and "port" not in ops.sources:
+    if port is None:
         port, _, _ = mgr.unit_settings(explicit_port=True)
     runtime_root = _absolute_root(host, ops.runtime_root)
     spec = build_spec(host, label=label, port=port, runtime_root=runtime_root, config=ops.path, extra_env=extra_env)
@@ -623,7 +819,11 @@ def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int
     write_private(mgr.unit_path, mgr.render(spec))
     mgr.stop()
     serving_port = port if port is not None else ops.port
-    serving = _start_and_wait(mgr, serving_port, spec.log_path, timeout, runtime_root)
+    address = _connect_address(ops.host)
+    # The new unit can start later even if this attempt fails. Synchronize its probe first.
+    # Persist only serve's explicit override; otherwise each probe reads the current ops port.
+    probe_report = _install_probe(host, ops, label, runtime_root, port)
+    serving = _start_and_wait(mgr, serving_port, spec.log_path, timeout, runtime_root, address)
     names = [name for name, _ in spec.env]
     dropped = sorted(name for name in host.environ if name.startswith(FORMER_PREFIXES) and name not in names
                      and name not in ops_config.VARIABLES and name not in ("LOOPER_RUNTIME_ROOT", "LOOPX_RUNTIME_ROOT"))
@@ -637,6 +837,7 @@ def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int
         f"  env        {', '.join(names) if names else '(none)'}",
         f"  log        {spec.log_path}",
         f"  serving    http://127.0.0.1:{serving_port} (pid {serving.pid or 'unknown'})",
+        f"  {probe_report}",
     ]
     lines += [f"  not copied {', '.join(dropped)}: install no longer copies every LOOPER_*, ANTHROPIC_* and LARK_* "
               "variable; add --env NAME for one the service needs"] if dropped else []
@@ -657,15 +858,22 @@ def restart(host: Host, *, label: str = DEFAULT_LABEL, timeout: float = DEFAULT_
     port, log_path, runtime_root = mgr.unit_settings()
     if port is None:
         raise ServiceError(f"{mgr.unit_path} names no --port; run `looper service install` again")
+    ops = mgr.ops()
+    address = _connect_address(ops.host if ops else "127.0.0.1")
     before = mgr.state().pid
     mgr.stop()
-    serving = _start_and_wait(mgr, port, log_path, timeout, runtime_root)
+    probe_report = ""
+    explicit_port = mgr.unit_settings(explicit_port=True)[0]
+    if ops and ops.probe_notify_chat and not _probe_matches(host, label, ops, explicit_port):
+        probe_report = "\n  " + _install_probe(host, ops, label, ops.runtime_root, explicit_port)
+    serving = _start_and_wait(mgr, port, log_path, timeout, runtime_root, address)
     return (f"restarted {label}: pid {before or 'none'} -> {serving.pid or 'unknown'}, "
-            f"serving http://127.0.0.1:{port}")
+            f"serving http://127.0.0.1:{port}{probe_report}")
 
 
 def uninstall(host: Host, *, label: str = DEFAULT_LABEL) -> str:
     mgr = manager(host, label)
+    remove_probe_units(host, label)
     state = mgr.state()
     if not state.installed and not state.loaded:
         return f"{label} is not installed"
@@ -679,15 +887,20 @@ def status(host: Host, *, label: str = DEFAULT_LABEL) -> tuple[int, str]:
     mgr = manager(host, label)
     state = mgr.state()
     if not state.installed and not state.loaded:
-        return 1, f"{label}: not installed (`looper service install` runs looper serve in the background)"
+        return 1, "\n".join([
+            f"{label}: not installed (`looper service install` runs looper serve in the background)",
+            *_probe_status(host, label, state.runtime_root),
+        ])
     lines = [
         f"service    {label} ({mgr.kind})",
         f"unit       {mgr.unit_path}" + ("" if state.installed else " (missing; the service is still loaded)"),
         f"state      {_describe(state)}",
         f"log        {state.log_path or 'unknown'}",
     ]
+    if isinstance(mgr, Systemd) and not mgr.kill_mode_ok():
+        lines.append(f"warning    {_KILL_MODE_WARNING}")
     token = operator_auth.read_token(state.runtime_root) if state.runtime_root is not None else None
-    answer = host.get_status(state.port, token) if state.port else None
+    answer = host.get_status(state.port, token, "127.0.0.1") if state.port else None
     if state.port is None:
         lines.append("api        unknown port")
     elif answer is None:
@@ -703,6 +916,7 @@ def status(host: Host, *, label: str = DEFAULT_LABEL) -> tuple[int, str]:
         lines.append(f"api        http://127.0.0.1:{state.port}/api/v1/system/status: {answer.get('status', '?')}, "
                      f"{tasks.get('total', '?')} task(s), {tasks.get('running', '?')} running"
                      + (f"; check problems: {', '.join(failing)}" if failing else ""))
+    lines.extend(_probe_status(host, label, state.runtime_root))
     return (0 if state.running and answer is not None else 1), "\n".join(lines)
 
 
@@ -710,11 +924,14 @@ def doctor_check(host: Host | None = None, label: str = DEFAULT_LABEL) -> Check:
     """The ``looper doctor`` line: is the background service installed and running? Never a failure."""
     host = host or Host.current()
     try:
-        state = manager(host, label).state()
+        mgr = manager(host, label)
+        state = mgr.state()
     except ServiceError as exc:
         return Check("service", "Service", SKIP, f"not checked: {exc}")
     if not state.installed and not state.loaded:
         return Check("service", "Service", SKIP, f"{label} not installed (optional: `looper service install`)")
+    if isinstance(mgr, Systemd) and not mgr.kill_mode_ok():
+        return Check("service", "Service", WARN, _KILL_MODE_WARNING, "looper service install")
     if state.running:
         return Check("service", "Service", OK, f"{label} running (pid {state.pid})")
     return Check("service", "Service", WARN, f"{label} installed but not running ({_describe(state)})",

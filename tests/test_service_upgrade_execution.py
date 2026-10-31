@@ -83,7 +83,7 @@ def deployment(tmp_path, monkeypatch):
         get_components=lambda port, token: (current if scenario.verify_error else scenario.current).to_dict(),
         system_operation=operation, get_status=lambda *args: {"status": "ok"},
         get_whoami=lambda *args: {"looper_version": scenario.current.version},
-        port_in_use=lambda port: False, pid_alive=lambda pid: scenario.process_lingers)
+        port_in_use=lambda port, address="127.0.0.1": False, pid_alive=lambda pid: scenario.process_lingers)
     manager = SimpleNamespace(host=host, state=lambda: state, unit_path=unit,
         unit_settings=lambda **kwargs: (18841, root / "logs/serve.log", root), start=start, stop=stop)
     monkeypatch.setattr(service, "manager", lambda *args: manager)

@@ -287,7 +287,8 @@ async def reset_planner_session(schedule_id: str) -> bool | None:
         return row["planner_session_id"] is not None
 
 
-async def lock_next_due(conn: asyncpg.Connection, now: datetime, *, skip: list[str]) -> dict[str, Any] | None:
+async def lock_next_due(conn: asyncpg.Connection, now: datetime, *, skip: list[str],
+                        kinds: Sequence[str] | None = None) -> dict[str, Any] | None:
     """An enabled schedule due at ``now`` (not one in ``skip``), its row locked; another transaction's locked rows
     are passed over, so a second scheduler never handles the same firing. The lock is the one an update takes
     (``FOR NO KEY UPDATE``): a row held only by a foreign key check, such as a message about its last run being
@@ -296,9 +297,10 @@ async def lock_next_due(conn: asyncpg.Connection, now: datetime, *, skip: list[s
         """
         SELECT * FROM schedules
         WHERE enabled AND next_fire_at <= $1 AND NOT (id = ANY($2::text[]))
+          AND ($3::text[] IS NULL OR kind = ANY($3::text[]))
         ORDER BY next_fire_at, id LIMIT 1 FOR NO KEY UPDATE SKIP LOCKED
         """,
-        now, skip,
+        now, skip, kinds,
     )
     return (await _with_overrides(conn, [row]))[0] if row else None
 
@@ -325,17 +327,19 @@ async def insert_run(conn: Db, *, schedule_id: str, scheduled_for: datetime, tri
                      error: str | None = None, finished_at: datetime | None = None,
                      created_at: datetime | None = None, carried_from: str | None = None,
                      run_timeout_seconds: int | None = None, run_id: str | None = None,
-                     started_at: datetime | None = None, log_path: str | None = None) -> str:
+                     started_at: datetime | None = None, log_path: str | None = None,
+                     missed_since: datetime | None = None) -> str:
     if run_id is None:
         run_id = new_run_id()
     await conn.execute(
         """
         INSERT INTO schedule_runs (id, schedule_id, scheduled_for, fired_at, trigger, missed, status, task_id,
-                                   error, finished_at, created_at, carried_from, run_timeout_seconds, started_at, log_path)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), $12, $13, $14, $15)
+                                   error, finished_at, created_at, carried_from, run_timeout_seconds, started_at, log_path,
+                                   missed_since)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), $12, $13, $14, $15, $16)
         """,
         run_id, schedule_id, scheduled_for, fired_at, trigger, missed, status, task_id, error, finished_at,
-        created_at, carried_from, run_timeout_seconds, started_at, log_path,
+        created_at, carried_from, run_timeout_seconds, started_at, log_path, missed_since,
     )
     return run_id
 
@@ -474,6 +478,27 @@ async def count_outcome(conn: Db, schedule_id: str, status: str, at: datetime) -
                            schedule_id)
 
 
+async def finish_command_run(conn: Db, run_id: str, *, status: str, at: datetime,
+                             error: str | None, **fields: Any) -> bool:
+    """Finish a command once, locking its schedule before its run as other writers do."""
+    allowed = {"started_at", "exit_code", "exit_signal", "log_bytes", "log_truncated", "log_tail"}
+    if unknown := sorted(set(fields) - allowed):
+        raise ValueError(f"not a command result column: {unknown[0]}")
+    if await conn.fetchval("SELECT s.id FROM schedules s JOIN schedule_runs r ON r.schedule_id = s.id WHERE r.id = $1 "
+                           "FOR NO KEY UPDATE OF s", run_id) is None:
+        return False
+    sets = ["status = $2", "error = $3", "finished_at = $4"]
+    sets.extend(f"{name} = ${i}" for i, name in enumerate(fields, start=5))
+    schedule_id = await conn.fetchval(
+        f"UPDATE schedule_runs SET {', '.join(sets)} WHERE id = $1 AND status = 'running' RETURNING schedule_id",
+        run_id, status, error, at, *fields.values(),
+    )
+    if schedule_id is None:
+        return False
+    await count_outcome(conn, schedule_id, status, at)
+    return True
+
+
 async def running_run_of_task(task_id: str, *, pool: Db | None = None) -> dict[str, Any] | None:
     """The running run whose task is ``task_id``."""
     db = pool or get_pool()
@@ -487,7 +512,7 @@ async def running_runs(*, pool: Db | None = None) -> list[dict[str, Any]]:
     db = pool or get_pool()
     rows = await db.fetch(
         """
-        SELECT r.*, t.status AS task_status, t.result_summary, t.error AS task_error, s.project_id
+        SELECT r.*, t.status AS task_status, t.result_summary, t.error AS task_error, s.project_id, s.kind, s.timezone
         FROM schedule_runs r JOIN schedules s ON s.id = r.schedule_id LEFT JOIN tasks t ON t.id = r.task_id
         WHERE r.status = 'running'
         """,
@@ -495,9 +520,12 @@ async def running_runs(*, pool: Db | None = None) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-async def schedules_with_queued_runs(*, pool: Db | None = None) -> list[str]:
+async def schedules_with_queued_runs(*, kinds: Sequence[str] | None = None, pool: Db | None = None) -> list[str]:
     db = pool or get_pool()
-    rows = await db.fetch("SELECT DISTINCT schedule_id FROM schedule_runs WHERE status = 'queued'")
+    rows = await db.fetch(
+        "SELECT DISTINCT r.schedule_id FROM schedule_runs r JOIN schedules s ON s.id = r.schedule_id "
+        "WHERE r.status = 'queued' AND ($1::text[] IS NULL OR s.kind = ANY($1::text[]))", kinds,
+    )
     return [row["schedule_id"] for row in rows]
 
 

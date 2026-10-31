@@ -4,7 +4,7 @@
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
-- **最近更新：** 2026-10-30
+- **最近更新：** 2026-10-31
 
 ## 1. 工作方式
 
@@ -60,7 +60,7 @@
 | LLM 模型层 | Provider → Endpoint → Model → Profile；配置为 `looper-config/v4` | 已随 2.13 发布；真实 CLI 凭据与两档 dialogs 仍未测，五任务一次重复不是完整基线（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 | M9g | Pi 运行时：API key 的两种协议，四类角色，自有 HTTP 工具桥 | 本分支已实现（假 provider 闭环）；真实 Responses/DeepSeek 与 Claude 对照未验证 | M9e |
-| 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中 | 现有定时任务；排空期间放行依赖热升级排空功能 |
+| 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发 | 现有定时任务；热升级排空功能 |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
 
@@ -554,6 +554,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-10-31 | TTADK Codex 后续修复（本分支，未合入）：运行记录保留原生与 TTADK 的 launcher，控制台选择与已保存 Profile 显示 TTADK 运行时名称及启动器；Worker、Reviewer、Planner 的无结果错误和活动保留末尾 1000 字符的脱敏 stderr，服务先启动 HTTP 工具再重放消息和恢复任务。验证：三个 CI 失败均已复现，修复后与指定 TTADK 回归共 65 项通过（`-n 2`，一次性 PostgreSQL）；此前的 Agent Profiles 组件 48 项、TypeScript 编译及隔离浏览器截图验证保留，未调用真实模型。Telegram、Lark 和 CLI 沿用共同后端结果，无新增配置字段。 |
 | 2026-10-13 | RFC v0 合入（looper #12），4 个待决问题已决定 |
 | 2026-10-13 | M0 交付（looper #13，`c600594ea`）：项目背景；Worker 和 Reviewer 的 prompt 分层，契约移出 stdin；四类 agent 记录 `metadata.system_prompt`。真实 Claude 下 Worker 和 Reviewer 的判定都通过 |
 | 2026-10-13 | M1 开工 |
@@ -735,6 +736,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 2026-10-30 | DSH runner 瞬态重试（本分支）：在 `llm/stream` 内最多重试 3 次，逐次使用独立 request id、预算授权和计量；仅无模型输出时按 HTTP 状态及固定 SDK 的类型化错误码表重试，包含 DeepSeek overload。退避为 1/2/4 秒加至多 20% jitter，`Retry-After` 上限 30 秒，cancel、close 或 settle 立即中断等待；耗尽保留最后错误和尝试次数，逐次诊断不含 provider 消息或凭据。已检查 `0.2.1-rc.2` 源码并用安装版 SDK 与 loopback provider 验证：重复 `next()` 会创建新的 adapter stream、HTTP 请求和鉴权，不需重新调用一次性的 prepared-call 入口。新增 22 项覆盖重试、计费、拒绝、中断、输出边界与错误分类；原截断响应夹具按 `TRANSPORT` 重试更新。`-n 2` 定向回归共 201 项分批通过（重试 22 项、请求 26 项完成复测；中途超时批次不计通过），含独立数据库上的 DSH serve 预算/取消/崩溃验证。Dashboard、Telegram、Lark 和 CLI 共用 runner 行为，无需新增入口；未改 Pi、未调用真实 provider。 |
 
+| 2026-10-31 | 排空期间放行命令型定时任务（本分支）：到期、排队和立即运行照常执行，命令启动不计入排空等待；agent 定时任务保留到期游标和排队运行，取消排空后按原补跑规则继续。已有 agent 定时任务的立即运行返回 409 和重启后再试的提示，修复 #948 的误报 404；未知定时任务仍返回 404，Dashboard、管家（含 Telegram/Lark）和 CLI 共用后端，无需入口改动。定向 pytest 两批 246 项、58 项均通过（含重复用例），隔离 serve 验证排空期间触发、409/404、运行器跨重启接管并成功结算。 |
+
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。
@@ -829,7 +832,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
       - ⑧ CPA 真实验证与全部对话评测（已完成，D11 已满足，依赖 ⑤⑥⑦）：`dialogs --manager-agent SPEC.json` 每个用例登记一次 Profile，仅选择 Manager 的角色层，其他角色保持 `--model` / `--agent`；api/Codex CPA 示例显式声明协议，参数互斥且拒绝 fake 模式。本地 CPA 代理提供 `gpt-6-astra`，两份 spec 均用它，其他角色 Claude Code sonnet，key 仅在运行时通过 `LOOPER_EVAL_API_KEY` 提供。api smoke（`status`、`confirm_create_start`、`cancel_confirmation`、`stop_then_continue`，`--reps 1`）4/4、$0.44；全部对话 `--reps 2 --jobs 2`，Codex 78/84 个已评分项通过，另有 4 个 harness error（`stop_then_continue`、`withdraw_then_continue` 两次重复均出错），记录 $13.68；api 82/88、$9.06。双方均评分对话的记录花费为 $6.82 / $4.53。每个对话 api 均持平或更好，符合对照减 1 的门槛；对照出错的两个对话 api 均 2/2，`cancel_confirmation`、`config_tools`、`provider_key`、全部 `schedule_*` 和 `client_relay_cancel` 均 2/2。共同失败非 api 回归：`model_missing_endpoint` 0/2（未通过工具读取内容）、`start_no_wait` 0/2（未说明任务的问题会交给用户）；`session_profile_switch` 首轮双方 0/2 是 eval 比较了带 effort 后缀的显示名，分支修正后定向复跑双方均 2/2，与首轮总数分开记录。逐请求 token 差值、会话条目与协议读回及 Opus 描述性比较不在本次测量结论内。完整结果见 RFC 第 8.4、9、15 节，运行说明保留在 evals README；#688 已通过的真实 Claude CLI 交接提示词专项对照保持独立且不变。
     - **阶段 2**（阶段 1 之后）：`anthropic` 编解码器，DeepSeek 真实验证；GLM、Kimi、OpenCode 有 key 时补跑。
 
-24. **热升级 v0**（[RFC](../architecture/rfcs/hot-upgrade-v0.zh-CN.md)）：S0 的组件指纹、排空、`looper service upgrade` / `restart --drain` 执行与部署报告、Telegram 持久化去重已实现；真实隔离服务覆盖文档与连续控制台升级，渠道替身覆盖重启投递；系统服务管理器的实机重启尚未验证。S1（每个运行一个看护进程，先托管 Claude Code）、S2、S3 待做；#909 的多实例问题按 RFC 第 9 节第 3 条以「拒绝第二个实例」处理（S1）。
+24. **热升级 v0**（[RFC](../architecture/rfcs/hot-upgrade-v0.zh-CN.md)）：S0（组件指纹与升级计划、排空、`looper service upgrade`、Telegram 不丢积压）进行中；S1（每个运行一个看护进程，先托管 Claude Code）、S2、S3 待做；#909 的多实例问题按 RFC 第 9 节第 3 条以「拒绝第二个实例」处理（S1）。
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 

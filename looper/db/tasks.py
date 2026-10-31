@@ -152,6 +152,8 @@ def _task(row: Mapping[str, Any]) -> dict[str, Any]:
         task["config"] = _read_config(task["config"])
     if isinstance(task.get("template"), str):
         task["template"] = json.loads(task["template"])
+    if isinstance(task.get("origin_reply_route"), str):
+        task["origin_reply_route"] = json.loads(task["origin_reply_route"])
     task["name"] = task_name(title=task.get("title"), goal_id=task.get("goal_id"),
                              requirement=task.get("requirement"), task_id=str(task.get("id") or ""))
     return task
@@ -181,6 +183,7 @@ async def create_task(
     manager_id: str = "manager",
     template: Mapping[str, Any] | None = None,
     origin_thread: str | None = None,
+    origin_reply_route: Mapping[str, str] | None = None,
     client_id: str | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
@@ -196,6 +199,7 @@ async def create_task(
     ``manager_id`` is the Manager the task belongs to, ``template`` what the task template it came from said then.
     ``origin_thread`` is the web chat thread it was asked in (None for a task from anywhere else), ``client_id``
     the API client it came through (None for none).
+    ``origin_reply_route`` keeps the original chat and Lark message for progress after a channel restart.
     """
     pool = pool or get_pool()
     now = datetime.now(timezone.utc)
@@ -206,9 +210,9 @@ async def create_task(
                            config, status, correlation_id, origin_channel_id, chat_id, original_user_text, title,
                            created_at, updated_at, schedule_id, budget_usd, chat_kind, chat_mention,
                            workspace_dir, workspace_mode, workspace_base, manager_id, template, origin_thread,
-                           client_id)
+                           client_id, origin_reply_route)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17, $18, $19, $20,
-                $21, $22::jsonb, $23, $24)
+                $21, $22::jsonb, $23, $24, $25::jsonb)
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
@@ -216,6 +220,7 @@ async def create_task(
         schedule_id, budget_usd, chat_kind, chat_mention, workspace_dir, workspace_mode, workspace_base,
         manager_id, json.dumps(dict(template)) if template is not None else None,
         origin_thread or None, client_id,
+        json.dumps(dict(origin_reply_route)) if origin_reply_route is not None else None,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 

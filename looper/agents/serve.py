@@ -621,7 +621,8 @@ async def _run_agent_system_owned(
     # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
     # task ends, to record a scheduled run's outcome.
     drain = DrainState()  # A new control plane always starts serving; drain is never stored.
-    scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url, drain=drain)
+    scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url,
+                          runtime_root=runtime_root, drain=drain)
     # It notes the user gates that have waited for the user for their project's reminder interval; the courier
     # posts what the gates' discussions say to the chats their tasks came from.
     gate_reminders = GateReminders()
@@ -643,8 +644,10 @@ async def _run_agent_system_owned(
     from .managers import ManagerFleet
     platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=None,
                         supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
+    tools_ready = asyncio.Event()
     fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
-                         url=_local_url(host, port), config=manager_config, broadcaster=broadcaster, drain=drain)
+                         url=_local_url(host, port), config=manager_config, broadcaster=broadcaster, drain=drain,
+                         tools_ready=tools_ready)
     if ownership is not None:
         ownership.push_async_callback(fleet.stop)
     task_router.manager_running = fleet.is_running
@@ -689,15 +692,6 @@ async def _run_agent_system_owned(
     room_ops = RoomOps(room, url=_local_url(host, port))
     worker_pool.room_ops = room_ops
 
-    # The consults the last server left queued or running run again.
-    await consults.resume_all()
-
-    # --- Start ---
-
-    await supervisor.start_all()
-    await fleet.sweep()
-    await carry_on_tasks(task_router, left_running)
-
     # --- HTTP Server ---
 
     http_server = AgentHTTPServer(
@@ -726,6 +720,19 @@ async def _run_agent_system_owned(
     )
     await http_server.start()
     manager_config.http_ready.set()
+    tools_ready.set()
+
+    # Replayed messages and resumed runs can probe or call platform tools immediately.
+    # Listen before starting any of their consumers.
+    try:
+        await consults.resume_all()
+        await supervisor.start_all()
+        await fleet.sweep()
+        await carry_on_tasks(task_router, left_running)
+    except BaseException:
+        await http_server.stop()
+        raise
+
     # Its first pass handles the fires missed while the server was down.
     await scheduler.start()
     await gate_reminders.start()

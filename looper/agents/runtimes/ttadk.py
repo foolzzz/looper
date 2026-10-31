@@ -15,6 +15,14 @@ from ... import child_env
 from . import RuntimeUnsupported
 
 
+def error_tail(stderr: str) -> str:
+    """Redact credentials before retaining the last 1000 characters for a run and its activity."""
+    from ..log_redaction import redact
+    from .omp import safe_error
+
+    return safe_error(redact(stderr), limit=None)[-1000:]
+
+
 class TtadkProblem(str, Enum):
     NOT_FOUND = "not_found"
     NOT_SIGNED_IN = "not_signed_in"

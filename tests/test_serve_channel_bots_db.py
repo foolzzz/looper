@@ -502,6 +502,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                    manager_id=manager_id)
         adapters: list[Any] = []
         registries: list[Any] = []
+        servers: list[Any] = []
         incoming: list[str] = []
         bot, transport = _Bot(), StubTransport()
         pending = ["sent while offline"]
@@ -583,8 +584,15 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                 registries.append(registry)
             await register(registry, adapter)
 
+        http_start = serve.AgentHTTPServer.start
+
+        async def start_http(server: Any) -> None:
+            servers.append(server)
+            await http_start(server)
+
         async def ready(supervisor: Any, agent_id: str) -> None:
             # The real start_all has replayed the journal; inspect before any agent consumes its queue.
+            assert len(servers) == 1 and servers[0]._server.is_serving()
             raise Started
 
         identity = SimpleNamespace(profile="", app_id="cli_x", bot_name="B", bot_open_id="ou_bot00000001")
@@ -593,6 +601,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
         monkeypatch.setattr(TelegramChannelAdapter if channel_type == "telegram" else LarkChannelAdapter, "start", start)
         monkeypatch.setattr(managers.ManagerFleet, "load", load_with_backlog)
         monkeypatch.setattr(serve.ChannelRegistry, "register", register_and_keep)
+        monkeypatch.setattr(serve.AgentHTTPServer, "start", start_http)
         monkeypatch.setattr(serve.AgentSupervisor, "_start_agent", ready)
         monkeypatch.setattr(managers_api, "_listener", None)
         monkeypatch.setattr(operator_notes, "_root", str(tmp_path))
@@ -607,7 +616,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
         monkeypatch.setattr(serve.self_check, "check_claude", lambda _: [sync_check()])
         monkeypatch.setattr(serve.self_check, "check_git", sync_check)
         monkeypatch.setattr(serve.self_check, "check_lark_cli", lambda _: check)
-        ops = ops_config.OpsConfig(runtime_root=tmp_path, path=tmp_path / "ops.toml", database_url=DSN, port=9876,
+        ops = ops_config.OpsConfig(runtime_root=tmp_path, path=tmp_path / "ops.toml", database_url=DSN, port=0,
                                    operator_notes_root=str(tmp_path))
         try:
             with pytest.raises(Started):
@@ -630,6 +639,8 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                 assert replies == [TURNED_OFF_REPLY] * len(incoming)
                 assert adapters[0]._bus.journal.undelivered() == []
         finally:
+            for server in servers:
+                await server.stop()
             for registry in registries:
                 await registry.stop_all()
 

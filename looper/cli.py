@@ -124,6 +124,7 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
         help="Check once whether the service answers and alert through Lark when it has not for a while "
              "(run by the probe unit every minute).",
     )
+    probe.add_argument("--port", type=int, help="Port to check (default: the ops file's server.port, else 8767).")
     _add_location_flags(probe)
     install.add_argument("--env", action="append", default=[], metavar="NAME",
                          help="Also copy this environment variable into the unit (repeatable).")
@@ -233,7 +234,7 @@ def _service(args: argparse.Namespace) -> int:
     if args.service_command == "probe":
         from .agents import probe
 
-        ops = _load_ops(args, require_database=False)
+        ops = _load_ops(args, port=args.port, require_database=False)
         if ops is None:
             return 1
         try:

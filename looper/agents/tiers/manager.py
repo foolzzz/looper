@@ -697,8 +697,10 @@ class ManagerAgent:
         definition: ManagerDefinition | None = None,
         clock: Callable[[], float] = time.monotonic,
         drain: DrainState | None = None,
+        tools_ready: asyncio.Event | None = None,
     ) -> None:
         self._drain = drain
+        self._tools_ready = tools_ready
         self._definition = definition or default_definition()
         self._log = self._definition.id
         # Set when the definition was turned off or deleted; the fleet (card 6) sets ``on_turned_off``.
@@ -1036,10 +1038,12 @@ class ManagerAgent:
     async def _message_loop(self) -> None:
         assert self._bus is not None
         try:
-            # Restart replay can arrive before HTTP starts. Its tool probe must
-            # wait, or a durable message becomes an acknowledged error reply.
+            # Startup replays before the HTTP tools endpoint listens. Keep messages queued and unacknowledged
+            # until a turn can probe its tools, instead of consuming it with a tools-unavailable reply.
             if self._config.http_ready is not None:
                 await self._config.http_ready.wait()
+            if self._tools_ready is not None:
+                await self._tools_ready.wait()
             async for envelope in self._bus.subscribe(self.agent_id):
                 if not self._running:
                     break
@@ -1612,14 +1616,22 @@ class ManagerAgent:
         elif origin:
             progress_text = envelope.payload.get("summary", "")
             if progress_text:
-                await self._bus.publish(MessageEnvelope.create(
-                    source=self.agent_address,
-                    target=AgentAddress(agent_type="channel", agent_id=origin),
-                    message_type=MessageType.STATUS_UPDATE,
-                    payload={"text": progress_text},
-                    correlation_id=envelope.correlation_id,
-                    metadata={"origin_channel_id": origin},
-                ))
+                await self._task_progress(envelope, progress_text)
+
+    async def _task_progress(self, envelope: MessageEnvelope, text: str) -> None:
+        origin = envelope.metadata["origin_channel_id"]
+        channel = parse_channel_id(origin)
+        await self._bus.publish(MessageEnvelope.create(
+            source=self.agent_address,
+            target=AgentAddress(agent_type="channel", agent_id=origin,
+                                channel=channel.channel_type if channel else None),
+            message_type=MessageType.STATUS_UPDATE,
+            payload={"text": text},
+            correlation_id=envelope.correlation_id,
+            metadata={"origin_channel_id": origin,
+                      **({"reply_route": envelope.metadata["reply_route"]}
+                         if "reply_route" in envelope.metadata else {})},
+        ))
 
     async def _web_thread_reply(self, envelope: MessageEnvelope, thread: str, text: str) -> None:
         await self._bus.publish(MessageEnvelope.create(
@@ -1640,14 +1652,7 @@ class ManagerAgent:
             await self._web_thread_reply(envelope, thread, f"任务「{title}」已分解为 {step_count} 个步骤，开始执行。")
         elif origin:
             step_count = envelope.payload.get("step_count", 0)
-            await self._bus.publish(MessageEnvelope.create(
-                source=self.agent_address,
-                target=AgentAddress(agent_type="channel", agent_id=origin),
-                message_type=MessageType.STATUS_UPDATE,
-                payload={"text": f"任务已分解为 {step_count} 个步骤，开始执行..."},
-                correlation_id=envelope.correlation_id,
-                metadata={"origin_channel_id": origin},
-            ))
+            await self._task_progress(envelope, f"任务已分解为 {step_count} 个步骤，开始执行...")
 
     async def _handle_task_result(self, envelope: MessageEnvelope) -> None:
         summary = envelope.payload.get("summary", "任务完成")
@@ -1934,6 +1939,13 @@ class ManagerAgent:
             token.settle(ReplyOutcome.STOPPED)
             await self._end_stopped(token, prepared, turn, text_parts)
 
+        stderr_note = ""
+        if turn.result_event is None and not launch.exit_code_reliable:
+            from ..runtimes.ttadk import error_tail
+
+            if stderr := error_tail(turn.stderr):
+                stderr_note = f": {stderr}"
+
         if resume_lost:
             # An overflow rejects the new message, not the saved history. Hand that history over before
             # dropping it; only a genuinely lost session can be retried without its summary.
@@ -1941,7 +1953,7 @@ class ManagerAgent:
                        else f"session {resuming} could not be resumed")
             logger.warning("%s: %s; starting a new session", self._log, failure)
             await recorder.finish(output_text=None, result_event=None, error=(
-                f"{failure}{exit_note(turn.exit_code)}; retried in a new session"))
+                f"{failure}{exit_note(turn.exit_code)}; retried in a new session{stderr_note}"))
             await self._link_turn_task(recorder, ops_turn)
             if token.cancel.requested:
                 raise TurnStopped()
@@ -1988,7 +2000,7 @@ class ManagerAgent:
             output_text=final_text or None,
             result_event=result_event,
             error=over_cap or failed or (None if replied else (
-                f"no reply (exit code {turn.exit_code})" if exited else "no reply"
+                f"no reply (exit code {turn.exit_code}){stderr_note}" if exited else "no reply"
             )),
             usage=turn.usage,
         )
@@ -2017,7 +2029,7 @@ class ManagerAgent:
             raise RuntimeError(failed)
         if not replied:
             raise RuntimeError(
-                f"{launch.runtime.label} 没有返回内容（退出码 {turn.exit_code}）" if exited
+                f"{launch.runtime.label} 没有返回内容（退出码 {turn.exit_code}）{stderr_note}" if exited
                 else f"{launch.runtime.label} 没有返回内容"
             )
         return final_text
