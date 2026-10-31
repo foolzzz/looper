@@ -185,6 +185,42 @@ def test_a_shutdown_ends_kept_runs():
         assert _records(url, task)[0]['status'] == 'interrupted'
 
 
+def test_stopping_a_task_releases_its_kept_run_directory():
+    with fixture() as (root, url, state, server):
+        with running_server(**server, log_path=root / 'serve.log') as api:
+            task = _task(api, _project(api, root, 'held'), 'held')
+            directory, status = next(iter(_running(server['runtime_root']).values()))
+            _until(lambda: _events(state, 'worker', 'held'), 'the Worker reading its prompt')
+            assert (directory / keeper.MANIFEST).is_file()
+            assert api.post('/api/v1/ops/task_control/stop', {'task_id': task})['result']['stopped']
+            _until(lambda: not _live(status['keeper_pid']) and not _live(status['child_pid']), 'the run ending')
+            _until(lambda: not directory.exists(), 'the cancelled run directory being released', seconds=5)
+            assert _records(url, task)[0]['status'] == 'interrupted'
+
+
+@pytest.mark.parametrize('scope', ['turns', 'runs'])
+def test_a_drain_waits_for_a_live_kept_run(scope):
+    with fixture() as (root, url, state, server):
+        with running_server(**server, log_path=root / 'serve.log') as api:
+            task = _task(api, _project(api, root, 'held'), 'held')
+            _running(server['runtime_root'])
+            _until(lambda: _events(state, 'worker', 'held'), 'the Worker reading its prompt')
+            waiting = _until(
+                lambda: (status := api.post('/api/v1/system/drain_status', {})['result'])
+                and not status['waiting']['planner_turns'] and status, 'the Planner finishing its turn')
+            assert waiting['waiting']['runs'][0]['keepable']
+            assert not any(value for key, value in waiting['waiting'].items() if key != 'runs')
+            draining = api.post('/api/v1/system/drain', {'scope': scope})['result']
+            assert draining['phase'] == 'draining'
+            assert draining['waiting']['runs'] == waiting['waiting']['runs']
+            assert api.post('/api/v1/system/drain_status', {})['result']['phase'] == 'draining'
+            (state / 'release-s1').touch()
+            _until(lambda: api.post('/api/v1/system/drain_status', {})['result']['phase'] == 'drained',
+                   'the drain finishing after the run')
+            _completed(api, task)
+            assert _records(url, task)[0]['status'] == 'completed'
+
+
 def test_keeper_off_starts_no_keeper():
     snapshots = []
     with fixture() as (root, url, state, server):

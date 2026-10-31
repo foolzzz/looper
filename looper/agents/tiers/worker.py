@@ -828,52 +828,55 @@ class WorkerPool:
                 pass
 
         try:
-            result = await self._execute(envelope, is_verify=is_verify, started_at=wp.since)
-            wp.status = "completed"
-            wp.result = result
-        except asyncio.CancelledError:
-            # A pool stop has no kill reply. Preserve dropped steers through the normal result path instead.
-            if self._running or wp.handle is None or not wp.handle.dropped_input():
-                raise
-            wp.status = "stopped"
-            wp.result = {"status": "stopped", "summary": "The worker pool stopped this run"}
-        except asyncio.TimeoutError as exc:
-            wp.status = "failed"
-            wp.result = {"status": "failed", "error": str(exc) or "worker timeout"}
-            logger.warning("worker %s timed out on task %s: %s", worker_id, task_id, exc)
-        except Exception as exc:
-            wp.status = "failed"
-            wp.result = {"status": "failed", "error": str(exc)}
-            logger.exception("worker %s failed on task %s", worker_id, task_id)
+            try:
+                result = await self._execute(envelope, is_verify=is_verify, started_at=wp.since)
+                wp.status = "completed"
+                wp.result = result
+            except asyncio.CancelledError:
+                # A pool stop has no kill reply. Preserve dropped steers through the normal result path instead.
+                if self._running or wp.handle is None or not wp.handle.dropped_input():
+                    raise
+                wp.status = "stopped"
+                wp.result = {"status": "stopped", "summary": "The worker pool stopped this run"}
+            except asyncio.TimeoutError as exc:
+                wp.status = "failed"
+                wp.result = {"status": "failed", "error": str(exc) or "worker timeout"}
+                logger.warning("worker %s timed out on task %s: %s", worker_id, task_id, exc)
+            except Exception as exc:
+                wp.status = "failed"
+                wp.result = {"status": "failed", "error": str(exc)}
+                logger.exception("worker %s failed on task %s", worker_id, task_id)
+            finally:
+                self._reminders.pop(worker_id, None)
+                if seat is not None:
+                    # Its token stops working, with the files that carry it, before anything else waits.
+                    self.room_ops.revoke_run(worker_id)
+                    try:
+                        await self.room_ops.room.presence_changed(parent_task_id, seat, online=False)
+                    except Exception:
+                        logger.exception("worker %s could not announce it left task %s's room", worker_id, parent_task_id)
+
+            if wp.handle is not None and (missed := wp.handle.dropped_input()):
+                wp.result = {**(wp.result or {}), "missed_input": missed}
+
+            result_type = MessageType.VERIFY_RESULT if is_verify else MessageType.WORK_RESULT
+            await self._bus.publish(MessageEnvelope.create(
+                source=worker_address(worker_id),
+                # Reply to the dispatching per-task Planner (planner-<task_id>).
+                target=envelope.source,
+                message_type=result_type,
+                payload={
+                    "task_id": task_id,
+                    "plan_id": plan_id,
+                    **(wp.result or {}),
+                },
+                correlation_id=envelope.correlation_id,
+                metadata=envelope.metadata,
+            ))
         finally:
-            self._reminders.pop(worker_id, None)
-            if seat is not None:
-                # Its token stops working, with the files that carry it, before anything else waits.
-                self.room_ops.revoke_run(worker_id)
-                try:
-                    await self.room_ops.room.presence_changed(parent_task_id, seat, online=False)
-                except Exception:
-                    logger.exception("worker %s could not announce it left task %s's room", worker_id, parent_task_id)
-
-        if wp.handle is not None and (missed := wp.handle.dropped_input()):
-            wp.result = {**(wp.result or {}), "missed_input": missed}
-
-        result_type = MessageType.VERIFY_RESULT if is_verify else MessageType.WORK_RESULT
-        await self._bus.publish(MessageEnvelope.create(
-            source=worker_address(worker_id),
-            # Reply to the dispatching per-task Planner (planner-<task_id>).
-            target=envelope.source,
-            message_type=result_type,
-            payload={
-                "task_id": task_id,
-                "plan_id": plan_id,
-                **(wp.result or {}),
-            },
-            correlation_id=envelope.correlation_id,
-            metadata=envelope.metadata,
-        ))
-        if isinstance(wp.handle, KeptRun):
-            wp.handle.release()
+            # _execute has waited for or ended the run before its logs can be released.
+            if isinstance(wp.handle, KeptRun):
+                wp.handle.release()
 
     async def _execute(
         self,

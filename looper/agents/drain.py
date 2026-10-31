@@ -9,9 +9,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, Final
 
 logger = logging.getLogger(__name__)
+
+# Flip this once planned restarts can detach keepable runs instead of cancelling them.
+DETACH_SUPPORTED: Final[bool] = False
 
 
 class DrainPhase(StrEnum):
@@ -112,8 +115,8 @@ class DrainState:
                 else:
                     waiting[key] += value
         if self.draining:
-            # A turns drain may leave keepable runs alive; a runs drain waits for every run.
-            blocking_runs = any(self._status.scope == DrainScope.RUNS or not run["keepable"]
+            # Until detach is supported, both scopes must wait for every run.
+            blocking_runs = any(not DETACH_SUPPORTED or self._status.scope == DrainScope.RUNS or not run["keepable"]
                                 for run in waiting["runs"])
             blocked = blocking_runs or any(value for key, value in waiting.items() if key != "runs")
             phase = DrainPhase.DRAINING if blocked else DrainPhase.DRAINED

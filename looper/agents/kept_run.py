@@ -383,8 +383,7 @@ class KeptRun:
     async def error_output(self) -> str:
         try:
             with (self.run_dir / keeper.STDERR).open("rb") as source:
-                source.seek(max(0, source.seek(0, os.SEEK_END) - 65536))
-                return source.read().decode("utf-8", errors="replace")
+                return source.read(65536).decode("utf-8", errors="replace")
         except FileNotFoundError:
             return ""
 

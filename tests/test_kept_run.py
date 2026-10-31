@@ -229,12 +229,12 @@ def test_a_fenced_run_sends_nothing(tmp_path: Path) -> None:
 
 
 def test_error_output_reads_the_stderr_log(tmp_path: Path) -> None:
-    body = "import os; os.write(2, b'a' * (65536 + 50) + b'\\xff'); raise SystemExit(7)"
+    body = "import sys; sys.stderr.buffer.write(b'first\\xff' + b'a' * (100 * 1024 - 10) + b'last'); raise SystemExit(7)"
 
     async def run() -> None:
         async with opened(tmp_path, body) as handle:
             assert await handle.wait() == 7
-            assert await handle.error_output() == ('a' * 65535 + '\ufffd')
+            assert await handle.error_output() == ('first\ufffd' + 'a' * (65536 - 6))
 
     exercise(run())
 

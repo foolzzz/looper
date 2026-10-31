@@ -15,10 +15,11 @@ from tests.test_api_v1_auth import clients as clients  # noqa: F401
 
 
 @pytest.mark.parametrize("scope,seconds", [(DrainScope.TURNS, 180), (DrainScope.RUNS, 1200)])
-def test_deadline_reports_without_aborting_and_restart_starts_serving(scope, seconds):
+@pytest.mark.parametrize("keepable", [False, True])
+def test_deadline_reports_without_aborting_and_restart_starts_serving(scope, seconds, keepable):
     now = datetime(2026, 10, 30, tzinfo=timezone.utc)
     drain = DrainState(clock=lambda: now)
-    runs = [{"worker_id": "w1", "task_id": "t1", "role": "worker", "since": now.isoformat(), "keepable": False}]
+    runs = [{"worker_id": "w1", "task_id": "t1", "role": "worker", "since": now.isoformat(), "keepable": keepable}]
     drain.add_source(lambda: {"runs": runs})
     initial = drain.begin(scope)
     assert initial["phase"] == DrainPhase.DRAINING
