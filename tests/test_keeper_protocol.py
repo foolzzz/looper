@@ -870,6 +870,80 @@ while not pathlib.Path('continue').exists():
     exercise(check())
 
 
+@pytest.mark.parametrize("callback_name", ["on_exited", "on_closed"])
+def test_a_callback_can_gather_connection_cleanup(launch, callback_name) -> None:
+    async def check():
+        run = launch("import sys; sys.stdin.buffer.read()")
+        client, events, _ = await connected(run)
+        original = getattr(client, callback_name)
+        cleaned_up = asyncio.Event()
+        cleanup = None
+
+        async def callback(*args):
+            nonlocal cleanup
+            original(*args)
+            cleanup = asyncio.gather(client.close())
+            # Shield permits bounded teardown even if close waits on this dispatcher.
+            await asyncio.shield(cleanup)
+            cleaned_up.set()
+
+        setattr(client, callback_name, callback)
+        reader, dispatcher, writer = client._reader_task, client._dispatcher_task, client._writer
+        try:
+            await client.stdin_close()
+            await asyncio.wait_for(cleaned_up.wait(), 3)
+            await asyncio.wait_for(asyncio.shield(dispatcher), 3)
+            assert events.exited == [(0, None)]
+            assert events.order == ["exited", "closed"]
+            assert reader.done() and writer.is_closing()
+            assert (await run.wait())["exit_code"] == 0
+        finally:
+            if not dispatcher.done():
+                dispatcher.cancel()
+            await asyncio.gather(dispatcher, return_exceptions=True)
+            if cleanup is not None:
+                await cleanup
+            await client.close()
+
+    exercise(check())
+
+
+def test_wait_closed_waits_for_callback_cleanup_after_disconnect(launch) -> None:
+    async def check():
+        run = launch("import sys; sys.stdin.buffer.read()")
+        client, events, _ = await connected(run)
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = client.on_closed
+
+        async def on_closed():
+            entered.set()
+            await release.wait()
+            original()
+
+        client.on_closed = on_closed
+        dispatcher = client._dispatcher_task
+        try:
+            await client.stdin_close()
+            await asyncio.wait_for(entered.wait(), 5)
+            async with asyncio.timeout(2):
+                await client.close()
+            waiter = asyncio.create_task(client.wait_closed())
+            await asyncio.sleep(0)
+            assert not waiter.done()
+            assert not events.closed.is_set()
+            release.set()
+            await asyncio.wait_for(waiter, 3)
+            assert events.order == ["exited", "closed"]
+            assert dispatcher.done()
+            assert (await run.wait())["exit_code"] == 0
+        finally:
+            release.set()
+            await client.close()
+            await client.wait_closed()
+
+    exercise(check())
+
+
 def test_a_data_callback_can_write_to_the_same_interactive_child(launch) -> None:
     async def check():
         run = launch("""\

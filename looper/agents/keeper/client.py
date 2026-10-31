@@ -50,6 +50,7 @@ class KeeperClient:
 
     async def connect(self, socket_path, *, run_dir=None, timeout=10):
         await self.close()
+        await self.wait_closed()
         reader, self._writer = await asyncio.wait_for(
             asyncio.open_unix_connection(socket_path, limit=MAX_FRAME_BYTES), timeout)
         self._offsets.clear()
@@ -251,18 +252,27 @@ class KeeperClient:
         available.set()
 
     async def close(self):
+        """Close the connection without waiting for notification callbacks.
+
+        Callbacks may gather close() in child tasks, so joining the dispatcher
+        here would form a wait cycle. Use wait_closed() outside callbacks to
+        wait for queued notifications and on_closed to finish.
+        """
         task, self._reader_task = self._reader_task, None
-        dispatcher, self._dispatcher_task = self._dispatcher_task, None
         writer = self._writer
         if writer is not None:
             writer.close()
         if task is not None and task is not asyncio.current_task():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        if dispatcher is not None and dispatcher is not asyncio.current_task():
-            await asyncio.gather(dispatcher, return_exceptions=True)
         if writer is not None:
             try:
                 await asyncio.wait_for(writer.wait_closed(), 1)
             except (TimeoutError, ConnectionError, OSError):
                 writer.transport.abort()
+
+    async def wait_closed(self):
+        """Wait for callback draining; call outside callbacks and their child tasks."""
+        dispatcher = self._dispatcher_task
+        if dispatcher is not None and dispatcher is not asyncio.current_task():
+            await asyncio.gather(dispatcher, return_exceptions=True)
