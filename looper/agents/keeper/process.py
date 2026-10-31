@@ -40,6 +40,7 @@ class Keeper:
             "keeper_pid": os.getpid(), "keeper_started": None, "child_pid": None, "child_started": None,
             "state": KeeperState.STARTING, "exit_code": None, "signal": None, "ended_at": None,
             "end_reason": None, "error": None, "controller_epoch": None, "socket": None,
+            "stderr_truncated": False,
         }
 
     def _write_state(self, **changes):
@@ -74,7 +75,7 @@ class Keeper:
         if self.end_reason is not None:
             return
         self.end_reason = reason
-        if self.child is not None:
+        if self.child is not None and self._end_task is None:
             self._end_task = asyncio.create_task(proc_tree.end(self.child, label=f"keeper {self.run_id}"))
 
     def append_stdin(self, data):
@@ -97,6 +98,8 @@ class Keeper:
                     self.conditions[name].notify_all()
             if name == STDOUT and len(data) > remaining:
                 self.request_end(EndReason.LOG_LIMIT)
+            elif name == STDERR and self.offsets[name] >= limit and not self.state["stderr_truncated"]:
+                self._write_state(stderr_truncated=True)
         await self._mark_eof(name)
 
     def _close_pipes(self):
@@ -114,14 +117,22 @@ class Keeper:
                 if task is not None and task.done():
                     task.result()
             await asyncio.sleep(0.05)
-        if self._end_task is not None:
-            await self._end_task
-        try:
-            await asyncio.wait_for(asyncio.gather(*pumps), proc_tree.REAP_SEC)
-        except asyncio.TimeoutError:
-            await proc_tree.end(self.child, label=f"keeper {self.run_id}")
-            self._close_pipes()
+        # A reaped child can leave group members behind even when both pipes have closed.
+        if self._end_task is None:
+            self._end_task = asyncio.create_task(proc_tree.end(self.child, label=f"keeper {self.run_id}"))
+        await self._end_task
+        await self._drain(pumps)
         await self.child.wait()
+
+    async def _drain(self, pumps):
+        try:
+            results = await asyncio.wait_for(asyncio.gather(*pumps, return_exceptions=True), proc_tree.REAP_SEC)
+        except asyncio.TimeoutError:
+            self._close_pipes()
+        else:
+            for result in results:
+                if isinstance(result, Exception):
+                    raise result
 
     def _exited(self, reason, error=None):
         code = self.child.returncode if self.child is not None else None
@@ -151,7 +162,7 @@ class Keeper:
             self._write_state(keeper_started=proc_tree._start_time(os.getpid()))
             try:
                 await self.server.start()
-                proc_tree.own_records(self.runtime_root)
+                proc_tree.own_records(self.runtime_root, run_dir=self.run_dir)
                 self.child = await proc_tree.spawn(*self.argv, cwd=self.cwd, env=dict(os.environ),
                                                   stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                                                   stderr=asyncio.subprocess.PIPE)
@@ -186,6 +197,10 @@ class Keeper:
                     await proc_tree.end(self.child, label=f"keeper {self.run_id}")
                 except Exception:
                     logger.error("cannot end keeper child run=%s", self.run_id)
+            try:
+                await self._drain(pumps)
+            except Exception:
+                logger.error("cannot drain keeper logs run=%s", self.run_id)
             self._close_pipes()
             for fd in self.fds.values():
                 try:

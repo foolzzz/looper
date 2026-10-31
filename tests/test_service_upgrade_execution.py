@@ -75,7 +75,7 @@ def deployment(tmp_path, monkeypatch):
 
     def run(argv):
         assert argv[:3] == ["git", "-C", str(tmp_path)]
-        return subprocess.CompletedProcess(argv, 0, "" if "status" in argv else "1" * 40, "")
+        return subprocess.CompletedProcess(argv, 0, "1" * 40 if "rev-parse" in argv else "", "")
 
     host = service.Host(system="Linux", home=tmp_path / "home", uid=1, environ={},
         executable="python", cwd=tmp_path, run=run, clock=lambda: elapsed[0],
@@ -358,8 +358,9 @@ def test_cli_repeated_wheel_upgrade_preserves_dashboard_without_dependency_reins
 
 
 @pytest.mark.parametrize("pip_available", [True, False], ids=["pip", "uv"])
-def test_noop_wheel_upgrade_installs_cli_code_and_metadata_without_restart(
-        deployment, tmp_path, monkeypatch, pip_available):
+@pytest.mark.parametrize("change", [None, "web"], ids=["noop", "web_only"])
+def test_wheel_upgrade_installs_cli_code_and_metadata_without_restart(
+        deployment, tmp_path, monkeypatch, pip_available, change):
     environment = tmp_path / "venv"
     venv.EnvBuilder(with_pip=True).create(environment)
     python = str(environment / "bin/python")
@@ -401,7 +402,7 @@ def test_noop_wheel_upgrade_installs_cli_code_and_metadata_without_restart(
     monkeypatch.setattr(service, "__file__", str(site / "looper/agents/service.py"))
     monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
     deployment.host.executable = python
-    deployment.scenario.target = manifest(version="1.0.1")
+    deployment.scenario.target = manifest(change, version="1.0.1")
     monkeypatch.setattr(components, "manifest_from_wheel", lambda path: deployment.scenario.target)
     installations = []
 
@@ -426,10 +427,15 @@ def test_noop_wheel_upgrade_installs_cli_code_and_metadata_without_restart(
     deployment.host.run = run
     before = execute([str(environment / "bin/looper")])
     assert before.stdout.strip() == "1.0.0 old old"
-    for _ in range(2):
+    deployment.host.get_index = lambda *args: (static / "index.html").read_bytes()
+    deployment.host.get_components = lambda *args: components.Manifest(
+        "1.0.0", "startup", (deployment.scenario.target if installations else deployment.scenario.current).components,
+        deployment.scenario.current.adoption, {"web": components.web_fingerprints(static)[1]}).to_dict()
+    for attempt in range(2):
         assert cli.main(["service", "upgrade", "--to", str(wheels[1])]) == 0
         data = report(deployment)
-        assert data["plan"] == "NOOP" and data["status"] == "ok"
+        assert data["plan"] == ("WEB_ONLY" if change and attempt == 0 else "NOOP")
+        assert data["status"] == "ok"
         assert data["installed_package_version"] == "1.0.1"
         assert data["running_version"] == "1.0.0"
         assert execute([str(environment / "bin/looper")]).stdout.strip() == "1.0.1 fixed fixed"
@@ -489,3 +495,136 @@ def test_failed_wheel_dashboard_publication_preserves_all_current_files(
     assert not (tmp_path / "escaped.js").exists()
     assert not list(tmp_path.glob(".dist-upgrade-*"))
     assert not list(tmp_path.glob(".wheel-upgrade-*"))
+
+
+@pytest.fixture
+def checkout_install(deployment, tmp_path):
+    web = tmp_path / "web"
+    (web / "src").mkdir(parents=True)
+    (web / "src/app.ts").write_text("dashboard source")
+    config = tmp_path / "looper/components.toml"
+    config.parent.mkdir()
+    config.write_bytes(components.CONFIG.read_bytes())
+    commands = []
+
+    def run(argv):
+        commands.append(list(argv))
+        if "--outDir" in argv:
+            staged = Path(argv[-1])
+            (staged / "assets").mkdir()
+            (staged / "index.html").write_text("new dashboard")
+            (staged / "assets/app.js").write_text("script")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    deployment.host.run = run
+    return SimpleNamespace(host=deployment.host, web=web, commands=commands)
+
+
+@pytest.mark.parametrize("build_web", [False, True], ids=["noop", "web_only"])
+def test_checkout_live_upgrade_does_not_sync_dependencies(checkout_install, build_web):
+    _REAL_INSTALLER(checkout_install.host, "candidate", wheel=False, build_web=build_web, dependencies=False)
+    assert checkout_install.commands[0][:4] == ["git", "-C", str(checkout_install.host.cwd), "merge"]
+    assert not any("sync" in argv for argv in checkout_install.commands)
+    assert (checkout_install.web / "dist/index.html").exists() == build_web
+
+
+def test_full_checkout_sync_retains_test_extra_and_other_installed_packages(checkout_install):
+    _REAL_INSTALLER(checkout_install.host, "candidate", wheel=False, build_web=False, dependencies=True)
+    sync = next(argv for argv in checkout_install.commands if argv[:2] == ["uv", "sync"])
+    assert sync[sync.index("--extra") + 1] == "test"
+    assert "--inexact" in sync
+
+
+def test_checkout_dashboard_build_uses_service_python(checkout_install):
+    checkout_install.host.executable = "/service venv/bin/python"
+    _REAL_INSTALLER(checkout_install.host, "candidate", wheel=False, build_web=True, dependencies=False)
+    build = next(argv for argv in checkout_install.commands if "--outDir" in argv)
+    assert build[:3] == ["env", "PYTHON=/service venv/bin/python", "npm"]
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_dashboard_publication_sets_readable_directory_and_file_modes(tmp_path, existing):
+    import stat
+    staged, destination = tmp_path / "staged", tmp_path / "dist"
+    staged.mkdir(mode=0o700)
+    (staged / "assets").mkdir(mode=0o700)
+    (staged / "assets/app.js").write_text("script")
+    (staged / "assets/app.js").chmod(0o600)
+    if existing:
+        destination.mkdir(mode=0o755)
+    service._swap_directory(staged, destination)
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o755
+    assert stat.S_IMODE((destination / "assets").stat().st_mode) == 0o755
+    assert stat.S_IMODE((destination / "assets/app.js").stat().st_mode) == 0o644
+
+
+@pytest.mark.parametrize("recovery_serves", [True, False])
+def test_failed_start_retries_new_install_and_reports_serving(deployment, recovery_serves):
+    deployment.host.get_status = lambda *args: (
+        {"status": "ok"} if recovery_serves and deployment.events.count("start") == 2 else None)
+    assert cli.main(["service", "upgrade", "--timeout", "1"]) == 1
+    assert deployment.events.count("start") == 2
+    assert deployment.events.count("install") == 1
+    assert deployment.scenario.current is deployment.scenario.target
+    data = report(deployment)
+    assert data["status"] == "failed"
+    assert data["serving"] is recovery_serves
+    assert ("recovery_error" in data) is not recovery_serves
+
+
+@pytest.mark.parametrize("kind", [UpgradeKind.CONTROL_PLANE, UpgradeKind.FULL])
+@pytest.mark.parametrize("turns_timeout", [None, "7"])
+def test_upgrade_uses_scope_specific_drain_deadline(deployment, monkeypatch, kind, turns_timeout):
+    import looper.upgrade
+    monkeypatch.setattr(looper.upgrade, "decide", lambda *args, **kwargs: UpgradePlan(kind, (), ("control_plane",)))
+    requests = []
+    operation = deployment.host.system_operation
+
+    def record_operation(port, token, name, args):
+        if name == "drain":
+            requests.append(args)
+        return operation(port, token, name, args)
+
+    deployment.host.system_operation = record_operation
+    flags = [] if turns_timeout is None else ["--turns-timeout", turns_timeout]
+    assert cli.main(["service", "upgrade", "--drain-timeout", "11", *flags]) == 0
+    assert requests == [{"scope": "turns" if kind == UpgradeKind.CONTROL_PLANE else "runs",
+                         "timeout_seconds": (float(turns_timeout or 180) if kind == UpgradeKind.CONTROL_PLANE else 11)}]
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_invalid_turns_deadline_refused_before_mutation(deployment, value):
+    assert cli.main(["service", "upgrade", "--turns-timeout", value]) == 1
+    assert deployment.events == []
+
+
+@pytest.mark.parametrize("path,blocked,symlink", [
+    ("looper/extra module.py", True, False), ("web/src/extra.ts", True, False), ("runners/extra.py", True, False),
+    ("web/dist/extra.js", True, False), ("docs/notes.md", False, False), ("looper/ignored.py", False, False),
+    ("uv.lock", False, False), ("looper/__pycache__/cache.pyc", False, False), ("looper/extra.pyc", False, False),
+    ("web/src/node_modules/extra.ts", False, False), ("web/src/extra.pyc", True, False),
+    ("looper/extra.pyc", True, True),
+])
+def test_checkout_untracked_fingerprinted_files_refused_before_drain(
+        deployment, tmp_path, path, blocked, symlink, capsys):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=10)
+    (tmp_path / ".gitignore").write_text("looper/ignored.py\n")
+    source = tmp_path / path
+    source.parent.mkdir(parents=True, exist_ok=True)
+    if symlink:
+        source.symlink_to("target.py")
+    else:
+        source.write_text("untracked source")
+
+    def run(argv):
+        if "rev-parse" in argv:
+            return subprocess.CompletedProcess(argv, 0, "1" * 40, "")
+        return subprocess.run(argv, capture_output=True, text=True, timeout=10)
+
+    deployment.host.run = run
+    assert cli.main(["service", "upgrade"]) == (1 if blocked else 0)
+    if blocked:
+        assert deployment.events == []
+        assert path in capsys.readouterr().err
+    else:
+        assert "install" in deployment.events

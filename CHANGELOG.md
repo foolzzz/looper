@@ -18,6 +18,33 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.51] - 2026-10-31
+
+### Added
+
+- **`looper service upgrade --turns-timeout`** (default 180 seconds). A control-plane upgrade drains turns with this timeout; a full upgrade still uses `--drain-timeout`. ([#977](https://github.com/foolzzz/looper/pull/977))
+
+### Changed
+
+- **Checkout upgrades no longer sync dependencies for a no-op or web-only plan.** A full or control-plane upgrade runs `uv sync --extra test --inexact`, which keeps the deploy's test extra and other installed packages. The dashboard build gets the service's Python as `PYTHON`, and the published `web/dist` is made 0755 (directories) and 0644 (files). ([#977](https://github.com/foolzzz/looper/pull/977))
+- **Untracked files that the component fingerprints hash now stop an upgrade of a checkout** before the drain, with the files listed. Git-ignored files are not counted. ([#977](https://github.com/foolzzz/looper/pull/977))
+- **A web-only wheel upgrade installs the rest of the package** (without dependencies), not only the dashboard. ([#977](https://github.com/foolzzz/looper/pull/977))
+
+### Fixed
+
+- **A start failure after the stop and install no longer leaves the unit down.** The upgrade stops any partial process, starts the current install once more, and still reports the failure. The report gains `serving`, which says whether the service answers. ([#977](https://github.com/foolzzz/looper/pull/977))
+
+## [2.14.50] - 2026-10-31
+
+### Added
+
+- **Startup scan of kept-run directories.** `looper serve` now scans `.local/runs/*` after the process sweep and before it interrupts unfinished records, even with keepers off. A live keeper is ended with its child, a dead keeper's child is ended if still running, and the directory is removed; a keeper with unreadable `keeper.json` is identified by a unique spawn record naming its run directory, and is otherwise left in place with an error logged. If keeper liveness cannot be read, startup stops without deleting any run directory. ([#1017](https://github.com/foolzzz/looper/pull/1017))
+
+### Changed
+
+- **`proc_tree` no longer reads a failed `ps` as an empty process list.** A failed listing keeps the tree observed before the stop, never signals a reaped leader's pid or group directly, and keeps the agent's record; new `end_orphan` checks the start time first. Spawn records of a keeper's children carry `run_dir`. ([#1017](https://github.com/foolzzz/looper/pull/1017))
+- **Keeper process.** The keeper ends group members left after its child exits, drains its log pumps with a timeout before waiting, starts only one end task, and sets `stderr_truncated` in its state file when stderr reaches its limit. ([#1017](https://github.com/foolzzz/looper/pull/1017))
+
 ## [2.14.49] - 2026-10-31
 
 ### Added
