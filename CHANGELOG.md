@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.49] - 2026-10-31
+
+### Added
+
+- **Keeper switch and single control-plane lock.** The ops file takes `[agent_host] keeper = "off" | "on"` (default `off`; file only). With `on`, `looper serve` takes a PostgreSQL session advisory lock on a dedicated connection before it opens the database pool, refuses to start while another process holds it (the error names the holder), and increments the `control_plane_epoch` key in `system_settings` once the schema is ready. A lost lock is terminal: the server fences its database pool and new agent spawns, closes its listener, ends its own agents and exits with code 75 without touching run records. With `off`, none of this happens. ([#1012](https://github.com/foolzzz/looper/pull/1012))
+
+### Changed
+
+- **Agent process bookkeeping in `proc_tree`, with keeper off too.** `spawn` now tracks in-flight spawns and every owned process, and ending an orphaned agent's tree kills only survivors whose identity and start time it confirmed, one by one, instead of signalling the whole group. ([#1012](https://github.com/foolzzz/looper/pull/1012))
+
 ## [2.14.48] - 2026-10-31
 
 ### Added
