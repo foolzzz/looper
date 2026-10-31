@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.30] - 2026-10-31
+
+### Added
+
+- **`looper service install` installs the health probe.** With a `[probe]` chat in the ops file, install registers a unit that runs `looper service probe` every 60 seconds (a LaunchAgent `<label>.probe` on macOS, `<label>-probe.service` and a timer on Linux), carrying only path, locale, time zone and network settings. Without it install removes any probe unit; uninstall removes it, restart re-aligns its port, and status shows it. `looper service probe` gains `--port`, checks the configured `server.host`, and picks the `lark_bot` channel by `probe.lark_profile`, using it only when exactly one matches. ([#952](https://github.com/foolzzz/looper/pull/952))
+
+No model-visible change: no prompt, tool or message text changes.
+
 ## [2.14.29] - 2026-10-31
 
 ### Fixed
