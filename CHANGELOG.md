@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.27] - 2026-10-30
+
+### Changed
+
+- **The hot upgrade v0 RFC is corrected after its review.** `docs/architecture/rfcs/hot-upgrade-v0.zh-CN.md` (Chinese) now separates the control plane's loaded fingerprint from the served web fingerprint, stops the old control plane before installing after a drain, defines what a control plane does when it loses the database lock, keeps a Manager's bus message unacknowledged while a drain holds its turn, keeps keepers out of the startup sweep, and uses the v1 API conventions (issue #929). Documentation only; no runtime or model-visible change. ([#931](https://github.com/foolzzz/looper/pull/931))
+
+## [2.14.26] - 2026-10-30
+
+### Added
+
+- **The hot upgrade v0 RFC.** `docs/architecture/rfcs/hot-upgrade-v0.zh-CN.md` (Chinese) designs planned restarts that do not interrupt runs and upgrade only the changed components, and the development plan's open todos record its stages (S0 in progress; S1, S2, S3 to do). Documentation only; no runtime or model-visible change. ([#928](https://github.com/foolzzz/looper/pull/928))
+
 ## [2.14.25] - 2026-10-30
 
 ### Fixed
