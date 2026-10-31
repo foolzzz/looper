@@ -183,8 +183,7 @@ def test_atomic_dashboard_publication_replaces_nonempty_directory(tmp_path):
 
 
 @pytest.mark.parametrize("pip_available", [True, False])
-@pytest.mark.parametrize("dependencies", [True, False])
-def test_wheel_installer_targets_current_interpreter(deployment, pip_available, dependencies):
+def test_wheel_installer_targets_current_interpreter(deployment, pip_available):
     commands = []
 
     def run(argv):
@@ -194,11 +193,9 @@ def test_wheel_installer_targets_current_interpreter(deployment, pip_available, 
     deployment.host.run = run
     # The production installer is replaced by the ordering fixture, so restore
     # the original from a saved reference below for this command-boundary test.
-    _REAL_INSTALLER(deployment.host, "/candidate.whl", wheel=True, build_web=False, dependencies=dependencies)
+    _REAL_INSTALLER(deployment.host, "/candidate.whl", wheel=True, build_web=False, dependencies=True)
     expected = (["python", "-m", "pip", "install", "--force-reinstall", "/candidate.whl"] if pip_available else
                 ["uv", "pip", "install", "--python", "python", "--reinstall", "/candidate.whl"])
-    if not dependencies:
-        expected.insert(-1, "--no-deps")
     assert commands == [["python", "-m", "pip", "--version"], expected]
 
 
@@ -260,7 +257,9 @@ def test_terminated_cli_cancels_drain_and_restores_signal_handlers(deployment, t
         process.close()
 
 
-def test_wheel_dashboard_is_staged_and_published_atomically_while_http_serves(deployment, tmp_path, monkeypatch):
+@pytest.mark.parametrize("build_web", [True, False], ids=["web_only", "noop"])
+def test_wheel_dashboard_is_staged_and_published_atomically_while_http_serves(
+        deployment, tmp_path, monkeypatch, build_web):
     from tests.test_api_v1_auth import TOKEN, _send_raw, _serving
 
     wheel = tmp_path / "dashboard-update.whl"
@@ -298,7 +297,7 @@ def test_wheel_dashboard_is_staged_and_published_atomically_while_http_serves(de
 
             monkeypatch.setattr(service, "_swap_directory", publish)
             expected = await asyncio.to_thread(_REAL_INSTALLER, deployment.host, str(wheel),
-                wheel=True, build_web=True, dependencies=False)
+                wheel=True, build_web=build_web, dependencies=False)
             assert expected == (b"new dashboard", components.web_fingerprints(static)[1])
 
     asyncio.run(asyncio.wait_for(run(), 10))
@@ -306,8 +305,36 @@ def test_wheel_dashboard_is_staged_and_published_atomically_while_http_serves(de
     assert not list(tmp_path.glob(".dist-upgrade-*"))
 
 
+def test_cli_repeated_wheel_upgrade_preserves_dashboard_without_reinstall(deployment, tmp_path, monkeypatch):
+    static = tmp_path / "dashboard"
+    static.mkdir()
+    files = {"index.html": b"dashboard", "assets/app.js": b"script"}
+    wheel = tmp_path / "same-version.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, data in files.items():
+            path = static / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            archive.writestr("looper/web/dashboard/" + name, data)
+    monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(static))
+    monkeypatch.setattr(components, "manifest_from_wheel", lambda path: deployment.scenario.current)
+    monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
+    deployment.host.run = lambda argv: pytest.fail("a NOOP wheel upgrade must not reinstall the package")
+
+    for _ in range(2):
+        assert cli.main(["service", "upgrade", "--to", str(wheel)]) == 0
+        assert report(deployment)["plan"] == "NOOP"
+        assert report(deployment)["status"] == "ok"
+        assert {p.relative_to(static).as_posix(): p.read_bytes()
+                for p in static.rglob("*") if p.is_file()} == files
+    assert deployment.events == []
+    assert not list(tmp_path.glob(".dist-upgrade-*"))
+
+
 @pytest.mark.parametrize("failure", ["missing_index", "unsafe_path", "swap"])
-def test_failed_wheel_dashboard_publication_preserves_all_current_files(deployment, tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize("build_web", [True, False], ids=["web_only", "noop"])
+def test_failed_wheel_dashboard_publication_preserves_all_current_files(
+        deployment, tmp_path, monkeypatch, failure, build_web):
     static = tmp_path / "dashboard"
     static.mkdir()
     original = {"index.html": b"old dashboard", "app.js": b"old script"}
@@ -327,7 +354,7 @@ def test_failed_wheel_dashboard_publication_preserves_all_current_files(deployme
         monkeypatch.setattr(service, "_swap_directory", fail)
     deployment.host.run = lambda argv: pytest.fail("a live dashboard upgrade must not reinstall the package")
     with pytest.raises(service.ServiceError):
-        _REAL_INSTALLER(deployment.host, str(wheel), wheel=True, build_web=True, dependencies=False)
+        _REAL_INSTALLER(deployment.host, str(wheel), wheel=True, build_web=build_web, dependencies=False)
     assert {p.name: p.read_bytes() for p in static.iterdir()} == original
     assert not (tmp_path / "escaped.js").exists()
     assert not list(tmp_path.glob(".dist-upgrade-*"))

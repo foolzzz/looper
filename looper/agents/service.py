@@ -753,10 +753,10 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
     from ..components import record_web_source, web_fingerprints
 
     if wheel:
-        if build_web and not dependencies:
+        if not dependencies:
             from .http_server import default_static_dir
 
-            # WEB_ONLY retains the live interpreter and its complete dashboard.
+            # NOOP and WEB_ONLY retain the live interpreter and its complete dashboard.
             # pip's uninstall/install would expose missing or partly written assets.
             destination = default_static_dir()
             staged = Path(tempfile.mkdtemp(prefix=".dist-upgrade-", dir=destination.parent))
@@ -783,10 +783,6 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
         has_pip = host.run([host.executable, "-m", "pip", "--version"]).returncode == 0
         command = ([host.executable, "-m", "pip", "install", "--force-reinstall", source] if has_pip else
                    ["uv", "pip", "install", "--python", host.executable, "--reinstall", source])
-        # NOOP/WEB_ONLY retain the interpreter. Keep its unchanged dependencies
-        # in place so delayed imports use the same resolution.
-        if not dependencies:
-            command.insert(-1, "--no-deps")
         _checked(host, command, installing=True)
         return None
     _checked(host, ["git", "-C", str(host.cwd), "merge", "--ff-only", source], installing=True)

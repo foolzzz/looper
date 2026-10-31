@@ -182,7 +182,7 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
                 previous_web, previous_assets = current["components"]["web"], current["verification"]["web"]
                 assert "plan       NOOP" in service.upgrade(host, to=target, dry_run=True)
 
-            # Exercise the wheel WEB_ONLY path against the same real HTTP process.
+            # Exercise WEB_ONLY, then repeat the same wheel as NOOP on the live process.
             # Package the unchanged backend and runner aliases with a new dashboard.
             wheel = tmp_path / "dashboard-update.whl"
             aliases = tomllib.loads((source / "looper/components.toml").read_text())["aliases"]
@@ -200,19 +200,22 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
                 archive.writestr("looper/web/dashboard/assets/app.js", "wheel dashboard script")
                 archive.writestr("looper/web/dashboard/" + components.WEB_SOURCE_RECORD, "e" * 64)
             monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(source / "web/dist"))
-            assert "plan       WEB_ONLY" in service.upgrade(host, to=str(wheel), dry_run=True)
-            result = service.upgrade(host, to=str(wheel))
-            assert json.loads(result.splitlines()[-1])["installed_package_version"] == initial["version"]
-            current = api.post("/api/v1/system/components", {})["result"]
-            assert current["loaded_at"] == initial["loaded_at"]
-            assert current["components"] == components.manifest_from_wheel(wheel).components
-            assert current["verification"] == components.manifest_from_wheel(wheel).verification
-            assert int(pid_file.read_text()) == pid
-            for path, content in (("/", b"wheel dashboard update"), ("/assets/app.js", b"wheel dashboard script")):
-                with urlopen(Request(api.base_url + path, headers={"Cookie": f"looper_operator_{port}={api.token}"}),
-                             timeout=5) as response:
-                    assert response.status == 200 and response.read() == content
-            assert _git(source, "rev-parse", "HEAD") == target
+            for expected_plan in ("WEB_ONLY", "NOOP"):
+                assert f"plan       {expected_plan}" in service.upgrade(host, to=str(wheel), dry_run=True)
+                result = service.upgrade(host, to=str(wheel))
+                deployment = json.loads(result.splitlines()[-1])
+                assert deployment["plan"] == expected_plan
+                assert deployment["installed_package_version"] == initial["version"]
+                current = api.post("/api/v1/system/components", {})["result"]
+                assert current["loaded_at"] == initial["loaded_at"]
+                assert current["components"] == components.manifest_from_wheel(wheel).components
+                assert current["verification"] == components.manifest_from_wheel(wheel).verification
+                assert int(pid_file.read_text()) == pid
+                for path, content in (("/", b"wheel dashboard update"), ("/assets/app.js", b"wheel dashboard script")):
+                    with urlopen(Request(api.base_url + path, headers={"Cookie": f"looper_operator_{port}={api.token}"}),
+                                 timeout=5) as response:
+                        assert response.status == 200 and response.read() == content
+                assert _git(source, "rev-parse", "HEAD") == target
 
     assert sum(Path(argv[0]).name == "uv" for argv in installed_commands) == 3
     assert sum(argv[:3] == ["npm", "run", "build"] for argv in installed_commands) == 2
