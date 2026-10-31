@@ -617,7 +617,7 @@ async def _run_agent_system_owned(
 
     # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
     # task ends, to record a scheduled run's outcome.
-    scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url)
+    scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url, runtime_root=runtime_root)
     # It notes the user gates that have waited for the user for their project's reminder interval; the courier
     # posts what the gates' discussions say to the chats their tasks came from.
     gate_reminders = GateReminders()

@@ -2459,8 +2459,8 @@ the design is the [task workspaces RFC](rfcs/task-workspaces-v0.zh-CN.md)):
 
 ### Schedules: tasks on a time rule
 
-A project's schedules fire a full task of the project on a time rule
-([scheduled-tasks RFC](rfcs/scheduled-tasks-v0.zh-CN.md), S1 and S2; the
+A project's agent schedules fire a full task of the project on a time rule
+([scheduled-tasks RFC](rfcs/scheduled-tasks-v0.zh-CN.md); the
 Manager lists, reads, creates, changes, enables, disables, runs and deletes
 them with `looper_schedules`, which also resets their stored Planner
 sessions; they move with their projects in the configuration file, [Moving the configuration](#moving-the-configuration-export-and-import)). A schedule has a `name` (unique in the project ignoring case),
@@ -2480,6 +2480,26 @@ run's task's Workers and Reviewers run at once, `schedule_task_limits`); and, fr
 `gate_command` with `gate_timeout_seconds` (1–600, default 60), an optional `daily_budget_usd`, `notify` (`failures`,
 `alerts`, `always`, `never`) and a `notify_target` (a channel and chat; none: the
 dashboard only). A new schedule is disabled.
+
+**Command schedules** (`kind=command`, [command schedules RFC](rfcs/command-schedules-v0.zh-CN.md))
+run `/bin/sh -c` directly in the schedule's effective work directory, without
+creating a task or spending model budget. Each run starts a standalone Python
+supervisor in its own session, from a copy named by its source hash under the
+runtime root. Neither scheduler shutdown nor the agent-process sweep ends it.
+The supervisor records its identity, command start, exit code or signal and
+bounded output; logs remain under `logs/schedules/<schedule id>/<run id>.log`.
+On each pass, including after restart, the scheduler reads exit records or
+checks process identity and rejects zombies. Exit code zero is `succeeded`;
+a missing supervisor without an exit record is `interrupted` and counts as a
+failure. A timeout backstop kills a stuck supervisor and its command group
+after checking their identities. Final results and failure counters are
+written once, even when two schedulers observe the same exit. Overlap and
+catch-up policies also apply to commands; every skipped firing has its own
+record. Commands and preflight gates receive `LOOPER_SCHEDULE_TRIGGER`,
+`LOOPER_SCHEDULE_MISSED` and `LOOPER_SCHEDULE_MISSED_SINCE` alongside the
+schedule id, run id, scheduled time and timeout. Configuration and log-view
+entry points are described in the RFC; this execution path shares the
+existing scheduler and notification channels.
 
 A schedule has an immutable `manager_id`, chosen when created and defaulting
 to `manager` when omitted. The dashboard/operator API can choose its owner;
