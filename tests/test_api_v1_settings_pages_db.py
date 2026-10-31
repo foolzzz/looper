@@ -21,6 +21,15 @@ _STORED_KEYS = {"scheduler_settings": [scheduler.MIN_INTERVAL_KEY, scheduler.RUN
                 "wait_settings": [waits.MAX_WAIT_KEY, waits.MIN_CHECK_KEY], "knowledge_vault": [vault.SETTING_KEY]}
 
 
+@pytest.fixture(autouse=True)
+def _isolate_settings_cache(monkeypatch):
+    # Database cleanup does not restore the process-wide caches changed by these requests.
+    monkeypatch.setattr(waits, "_limits", waits.WaitLimits())
+    monkeypatch.setattr(waits, "_sources", {})
+    monkeypatch.setattr(scheduler, "_min_interval", scheduler.DEFAULT_MIN_INTERVAL_SECONDS)
+    monkeypatch.setattr(scheduler, "_min_source", None)
+
+
 @asynccontextmanager
 async def _api(tmp_path, pool):
     _, token = await api_clients.create("Settings client", pool=pool)
