@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.46] - 2026-10-31
+
+### Changed
+
+- **Command schedule confirmations and client-token API text.** The Manager's enable and run-now confirmations for a command schedule show the command in a verbatim code fence, the directory, the run timeout, the environment keys only, the env file when set, and (for enable) the success deadline and alert thresholds, and say the run uses no agent or model spend. Every command schedule update reply says so too, and the command appears in a code fence in the configuration block and in before → after diffs. The `looper_schedules` tool description no longer says an enabled schedule's runs "start tasks". The client-token API's enable and run confirmations name the shell command and say no task or model spend follows, and the confirmed update or run is bound to the configuration version that was shown. Listed runs and the run-now result carry the schedule `kind`. Agent schedule text is unchanged. ([#1005](https://github.com/foolzzz/looper/pull/1005))
+
 ## [2.14.45] - 2026-10-31
 
 ### Added
