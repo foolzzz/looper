@@ -1,4 +1,4 @@
-"""One-shot service checks use loopback HTTP and bot-only notification transports."""
+"""One-shot service checks use the listening address and bot-only notification transports."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
 import pytest
+from fake_claude import fake_claude
 
 from looper import cli
 from looper.agents import probe
@@ -24,7 +25,7 @@ HEALTH = {"status": "ok", "scheduler": {"running": True, "last_ok_tick_age_secon
 
 
 @contextmanager
-def serving(body=HEALTH, code=200):
+def serving(body=HEALTH, code=200, host="127.0.0.1"):
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             assert self.path == "/api/v1/system/health"
@@ -37,7 +38,10 @@ def serving(body=HEALTH, code=200):
         def log_message(self, *args):
             pass
 
-    with HTTPServer(("127.0.0.1", 0), Handler) as server:
+    class Server(HTTPServer):
+        address_family = socket.AF_INET6 if ":" in host else socket.AF_INET
+
+    with Server((host, 0), Handler) as server:
         thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.05))
         thread.start()
         try:
@@ -116,6 +120,28 @@ def test_sample_connection_refused():
     assert "refused" in reason.lower()
 
 
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+def test_probe_run_samples_the_configured_listening_address(tmp_path, host):
+    with serving(host=host) as server:
+        assert probe.run(ops(tmp_path, host=host, port=server.server_port), tmp_path) == 0
+    state = json.loads((tmp_path / ".local/probe/state.json").read_text())
+    assert state["last_verdict"] == "ok"
+
+
+@pytest.mark.parametrize(("host", "address"), [("", "127.0.0.1"), ("localhost", "127.0.0.1"),
+                                             ("0.0.0.0", "127.0.0.1"), ("::", "127.0.0.1"),
+                                             ("::1", "[::1]"), ("192.0.2.7", "192.0.2.7"),
+                                             ("2001:db8::7", "[2001:db8::7]")])
+def test_probe_addresses_wildcards_and_specific_hosts(monkeypatch, host, address):
+    import io
+    class Opener:
+        def open(self, request, timeout):
+            assert request.full_url == f"http://{address}:12345/api/v1/system/health"
+            return io.BytesIO(json.dumps(HEALTH).encode())
+    monkeypatch.setattr(probe, "build_opener", lambda *args: Opener())
+    assert probe.sample(12345, None, host) == (probe.Verdict.OK, "ok")
+
+
 def test_sample_timeout(monkeypatch):
     class Opener:
         def open(self, request, timeout):
@@ -148,6 +174,20 @@ def test_lark_missing_cli_and_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(probe.subprocess, "run", lambda *args, **kwargs:
                         CompletedProcess(args, 1, b"", b"first line\nlast line\n"))
     assert probe.send(ops(tmp_path), tmp_path, "test", "key") == "last line"
+
+
+def test_lark_send_keeps_profile_environment_in_the_child(tmp_path, monkeypatch):
+    log = tmp_path / "child.json"
+    fake_claude(tmp_path / "lark-cli", f"import os, json, sys\n"
+                f"open({str(log)!r}, 'w').write(json.dumps({{'env': dict(os.environ), 'argv': sys.argv[1:]}}))\n")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("LARK_PROFILE", "alert-bot")
+    monkeypatch.setenv("LOOPER_DATABASE_URL", "must-not-leak")
+    assert probe.send(ops(tmp_path), tmp_path, "test", "key") is None
+    child = json.loads(log.read_text())
+    assert child["env"]["LARK_PROFILE"] == "alert-bot"
+    assert "LOOPER_DATABASE_URL" not in child["env"]
+    assert child["argv"][child["argv"].index("--as") + 1] == "bot"
 
 
 @pytest.mark.parametrize("cached", [True, False])
@@ -208,11 +248,12 @@ def test_bot_credentials_cache_is_private_and_survives_connection_close_failure(
         cache.chmod(0o600)
     terminated = []
     class Connection:
-        async def fetchrow(self, query):
+        async def fetch(self, query):
             if close_fails:
                 raise ConnectionError("database lost")
-            assert "channel-lark_bot" in query
-            return {"config": json.dumps({"app_id": "test-app", "domain": "lark"}), "bot_token": "test-secret"}
+            assert "lark_bot" in query
+            return [{"channel_id": "channel-lark_bot-2", "config": json.dumps({"app_id": "test-app", "domain": "lark"}),
+                     "bot_token": "test-secret"}]
 
         async def close(self, timeout):
             if close_fails:
@@ -231,6 +272,93 @@ def test_bot_credentials_cache_is_private_and_survives_connection_close_failure(
     assert stat.S_IMODE(cache.stat().st_mode) == 0o600
     assert stat.S_IMODE(cache.parent.stat().st_mode) == 0o700
     assert bool(terminated) == close_fails
+
+
+@pytest.mark.parametrize(("profile", "rows", "selected"), [
+    ("", [("channel-lark_bot-2", "")], "channel-lark_bot-2"),
+    ("ops", [("channel-lark_bot", "other"), ("channel-lark_bot-2", "ops")], "channel-lark_bot-2"),
+    ("channel-lark_bot-2", [("channel-lark_bot", ""), ("channel-lark_bot-2", "")], "channel-lark_bot-2"),
+    ("", [("channel-lark_bot", ""), ("channel-lark_bot-2", "")], None),
+    ("missing", [("channel-lark_bot-2", "ops")], None),
+])
+def test_bot_credentials_select_the_configured_channel(tmp_path, monkeypatch, profile, rows, selected):
+    import asyncio
+    import asyncpg
+    class Connection:
+        async def fetch(self, query):
+            assert "lark_bot" in query
+            return [{"channel_id": name, "config": json.dumps({"profile": value, "app_id": name}),
+                     "bot_token": "secret"} for name, value in rows]
+        async def close(self, timeout):
+            pass
+    async def connect(*args, **kwargs):
+        return Connection()
+    monkeypatch.setattr(asyncpg, "connect", connect)
+    credentials = asyncio.run(probe._bot_credentials(ops(tmp_path, probe_lark_profile=profile), tmp_path))
+    assert (credentials["app_id"] if credentials else None) == selected
+
+
+def test_bot_cache_is_not_reused_for_another_profile(tmp_path, monkeypatch):
+    import asyncio
+    import asyncpg
+    path = tmp_path / ".local/probe/lark_bot.json"
+    probe._write_json(path, {"app_id": "old-app", "app_secret": "old-secret", "domain": "feishu", "profile": "old"})
+    async def offline(*args, **kwargs):
+        raise ConnectionError("database stopped")
+    monkeypatch.setattr(asyncpg, "connect", offline)
+    assert asyncio.run(probe._bot_credentials(ops(tmp_path, probe_lark_profile="new"), tmp_path)) is None
+    assert asyncio.run(probe._bot_credentials(ops(tmp_path, probe_lark_profile="old"), tmp_path))["app_id"] == "old-app"
+
+
+def test_healthy_sample_primes_and_refreshes_bot_cache_before_database_outage(tmp_path, monkeypatch):
+    import asyncpg
+    from looper.agents.channels import lark_api
+    calls, sends = [], []
+    online = True
+    secret = "first-secret"
+    class Connection:
+        async def fetch(self, query):
+            return [{"channel_id": "channel-lark_bot-7", "config": {"app_id": "test-app"}, "bot_token": secret}]
+        async def close(self, timeout):
+            pass
+    async def connect(*args, **kwargs):
+        calls.append(online)
+        if not online:
+            raise ConnectionError("database stopped")
+        return Connection()
+    class Api:
+        def __init__(self, app_id, app_secret, **kwargs):
+            assert app_id == "test-app" and app_secret == "rotated-secret"
+        async def send(self, **kwargs):
+            sends.append(kwargs)
+        async def aclose(self):
+            pass
+    class Clock(datetime):
+        current = NOW
+        @classmethod
+        def now(cls, tz):
+            return cls.current
+    monkeypatch.setattr(asyncpg, "connect", connect)
+    monkeypatch.setattr(lark_api, "LarkApi", Api)
+    monkeypatch.setattr(probe, "datetime", Clock)
+    with serving() as server:
+        config = replace(ops(tmp_path, port=server.server_port, probe_after_minutes=1), probe_notify_channel="lark_bot")
+        assert probe.run(config, tmp_path) == 0
+        cache = tmp_path / ".local/probe/lark_bot.json"
+        assert json.loads(cache.read_text())["app_secret"] == "first-secret"
+        assert stat.S_IMODE(cache.stat().st_mode) == 0o600
+        secret = "rotated-secret"
+        Clock.current += MINUTE
+        assert probe.run(config, tmp_path) == 0
+        assert json.loads(cache.read_text())["app_secret"] == secret
+    assert calls == [True, True] and not sends
+    online = False
+    for _ in range(2):
+        Clock.current += MINUTE
+        assert probe.run(config, tmp_path) == 0
+    assert len(sends) == 1 and "告警：" in sends[0]["text"]
+    state = json.loads((tmp_path / ".local/probe/state.json").read_text())
+    assert state["alert_started_at"] and state["last_send_error"] is None
 
 
 def test_run_alerts_once_then_recovers(tmp_path, lark_cli_stand_in, monkeypatch, capsys):

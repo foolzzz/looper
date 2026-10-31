@@ -9,6 +9,7 @@ runs the real ``launchctl`` or ``systemctl``.
 from __future__ import annotations
 
 import io
+import json
 import plistlib
 import stat
 import subprocess
@@ -64,6 +65,7 @@ class FakeLaunchd:
         self.pid = 4000 if loaded else 0
         self.calls: list[list[str]] = []
         self.early_bootstraps = 0
+        self.probe = None
 
     @property
     def serving(self) -> bool:
@@ -73,6 +75,10 @@ class FakeLaunchd:
         argv = list(argv)
         self.calls.append(argv)
         assert argv[0] == "launchctl", argv
+        if argv[-1].endswith((f"/{self.label}.probe", f"/{self.label}.probe.plist")):
+            if self.probe is None:
+                self.probe = FakeLaunchd(label=f"{self.label}.probe")
+            return self.probe(argv)
         command = argv[1]
         if command == "print":
             assert argv[2] == f"gui/{UID}/{self.label}"
@@ -114,6 +120,7 @@ class FakeSystemd:
         self.active = False
         self.pid = 7000
         self.calls: list[list[str]] = []
+        self.probe_active = False
 
     @property
     def serving(self) -> bool:
@@ -124,6 +131,10 @@ class FakeSystemd:
         self.calls.append(argv)
         assert argv[:2] == ["systemctl", "--user"], argv
         args = argv[2:]
+        if args[-1] == f"{LABEL}-probe.timer":
+            assert args[:2] in (["enable", "--now"], ["disable", "--now"])
+            self.probe_active = args[0] == "enable"
+            return subprocess.CompletedProcess(argv, 0, "", "")
         if args[0] == "show":
             out = (f"LoadState=loaded\nActiveState={'active' if self.active else 'inactive'}\nSubState=running\n"
                    f"MainPID={self.pid if self.active else 0}\nExecMainCode=0\nExecMainStatus=0\n")
@@ -201,6 +212,223 @@ def _install(monkeypatch, host: service.Host, root: Path, *more: str, port: str 
 
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
+
+
+def _probe_paths(host):
+    if host.system == "Darwin":
+        return (service.Launchd(host, f"{LABEL}.probe").unit_path,)
+    directory = service.Systemd(host, LABEL).unit_path.parent
+    return tuple(directory / f"{LABEL}-probe.{suffix}" for suffix in ("service", "timer"))
+
+
+def _configure_probe(root):
+    path = _write_ops(root)
+    with path.open("a") as stream:
+        stream.write('[probe]\nnotify_channel = "lark"\nnotify_chat = "oc_probechat123"\n')
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_probe_units_run_once_per_minute_without_service_secrets(tmp_path, checkout, system):
+    host = _host(tmp_path, checkout, FakeLaunchd(), system=system)
+    host.environ["PATH"] = '/tools/100%/$bin:"quoted"\\path\nnext'
+    root = tmp_path / "runtime 100%"
+    config = root / ops_config.FILE
+    spec = service.build_probe_spec(host, label=LABEL, runtime_root=root, config=config)
+    expected = [str(checkout / ".venv/bin/looper"), "service", "probe", "--config", str(config),
+                "--runtime-root", str(root)]
+    assert list(spec.argv) == expected
+    environment = {name: host.environ[name] for name in ("PATH", "TZ", "LANG", "HTTPS_PROXY")}
+    assert dict(spec.env) == environment
+    assert not set(dict(spec.env)) & {"ANTHROPIC_API_KEY", "LOOPER_TELEGRAM_BOT_TOKEN"}
+    if system == "Darwin":
+        unit = plistlib.loads(service.render_probe_plist(spec))
+        assert unit == {"Label": f"{LABEL}.probe", "ProgramArguments": expected,
+                        "WorkingDirectory": str(checkout), "EnvironmentVariables": environment,
+                        "StartInterval": 60, "RunAtLoad": True,
+                        "StandardOutPath": str(root / "logs/probe.log"),
+                        "StandardErrorPath": str(root / "logs/probe.log")}
+    else:
+        unit, timer = service.render_probe_systemd(spec)
+        values = dict(line.split("=", 1) for line in unit.splitlines()
+                      if "=" in line and not line.startswith("Environment="))
+        assert values["Type"] == "oneshot"
+        assert service._systemd_words(values["ExecStart"]) == expected
+        assert values["WorkingDirectory"] == str(checkout)
+        assert values["StandardOutput"] == values["StandardError"] == f"append:{root}/logs/probe.log".replace("%", "%%")
+        assignments = [service._systemd_words(line.removeprefix("Environment="))[0]
+                       for line in unit.splitlines() if line.startswith("Environment=")]
+        assert dict(item.split("=", 1) for item in assignments) == environment
+        assert "Restart=" not in unit
+        assert "[Timer]\nOnBootSec=60\nOnUnitActiveSec=60\n" in timer
+        assert f"Unit={LABEL}-probe.service" in timer and "WantedBy=timers.target" in timer
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_install_reloads_probe_and_removes_it_when_unconfigured(tmp_path, checkout, monkeypatch, capsys, system):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    for _ in range(2):
+        assert _install(monkeypatch, host, root, "--env", "MY_BOT_TOKEN") == 0
+        assert all(path.is_file() and _mode(path) == 0o600 for path in _probe_paths(host))
+        assert all(b"sk-test" not in path.read_bytes() and b"MY_BOT_TOKEN" not in path.read_bytes()
+                   for path in _probe_paths(host))
+        out = capsys.readouterr().out
+        assert f"probe      {_probe_paths(host)[-1]} every 60 s → lark oc_pro…" in out
+        assert "oc_probechat123" not in out
+        if system == "Darwin":
+            assert fake.probe.loaded and fake.probe.early_bootstraps == 0
+            assert fake.commands().index("bootstrap") < next(
+                i for i, argv in enumerate(fake.calls) if argv[-1].endswith(f"{LABEL}.probe.plist"))
+        else:
+            assert fake.probe_active
+            assert fake.commands()[-2:] == ["daemon-reload", f"enable --now {LABEL}-probe.timer"]
+    _write_ops(root)
+    assert _install(monkeypatch, host, root) == 0
+    assert not any(path.exists() for path in _probe_paths(host))
+    assert "probe      not configured: add [probe] to" in capsys.readouterr().out
+    assert fake.serving
+    if system == "Darwin":
+        assert not fake.probe.loaded
+    else:
+        assert not fake.probe_active
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_probe_load_failure_keeps_service_successful_and_cleans_units(tmp_path, checkout, monkeypatch, capsys, system):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    def run(argv):
+        if (argv[1] == "bootstrap" and argv[-1].endswith(".probe.plist")
+                or list(argv[2:4]) == ["enable", "--now"] and argv[-1].endswith("-probe.timer")):
+            return subprocess.CompletedProcess(argv, 1, "", "probe rejected")
+        return fake(argv)
+    host.run = run
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    assert _install(monkeypatch, host, root) == 0
+    out = capsys.readouterr().out
+    assert "probe      failed to load:" in out and "probe rejected" in out
+    assert fake.serving and not any(path.exists() for path in _probe_paths(host))
+    assert _looper(monkeypatch, host, "status", "--label", LABEL) == 0
+    assert "probe      not installed" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+@pytest.mark.parametrize("service_missing", [False, True])
+def test_uninstall_removes_probe_before_the_service_even_if_service_is_missing(
+    tmp_path, checkout, monkeypatch, system, service_missing,
+):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    assert _install(monkeypatch, host, root) == 0
+    unit = service.manager(host, LABEL).unit_path
+    if service_missing:
+        unit.unlink()
+        if system == "Darwin":
+            fake.loaded = False
+        else:
+            fake.active = False
+    fake.calls.clear()
+    assert _looper(monkeypatch, host, "uninstall", "--label", LABEL) == 0
+    assert not unit.exists() and not any(path.exists() for path in _probe_paths(host))
+    assert not fake.serving
+    if system == "Darwin":
+        assert not fake.probe.loaded
+        stops = [argv[-1] for argv in fake.calls if argv[1] == "bootout"]
+        assert stops == [f"gui/{UID}/{LABEL}.probe", *([] if service_missing else [f"gui/{UID}/{LABEL}"])]
+    else:
+        assert not fake.probe_active
+        stops = [argv[-1] for argv in fake.calls if argv[2:4] == ["disable", "--now"]]
+        assert stops == [f"{LABEL}-probe.timer", *([] if service_missing else [f"{LABEL}.service"])]
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_restart_leaves_probe_running(tmp_path, checkout, monkeypatch, system):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    assert _install(monkeypatch, host, root) == 0
+    units = {path: path.read_bytes() for path in _probe_paths(host)}
+    fake.calls.clear()
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
+    assert all(path.read_bytes() == data for path, data in units.items())
+    assert not any(argv[-1].endswith((f"/{LABEL}.probe", f"/{LABEL}.probe.plist", f"{LABEL}-probe.timer"))
+                   for argv in fake.calls)
+    assert fake.probe.loaded if system == "Darwin" else fake.probe_active
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+@pytest.mark.parametrize("state", [None, {"last_sample_at": "2026-10-30T12:00:00+00:00", "last_verdict": "no_answer",
+                                        "alert_started_at": "2026-10-30T11:59:00+00:00"},
+                                   {"last_sample_at": "2026-10-30T12:00:00+00:00", "last_verdict": "tick_stale",
+                                    "last_send_error": "lark-cli missing"}, "corrupt"])
+def test_status_reports_probe_check_alert_and_send_error(tmp_path, checkout, monkeypatch, capsys, system, state):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    assert _install(monkeypatch, host, root) == 0
+    capsys.readouterr()
+    if state is not None:
+        path = root / ".local/probe/state.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{broken" if state == "corrupt" else json.dumps(state))
+    assert _looper(monkeypatch, host, "status", "--label", LABEL) == 0
+    out = capsys.readouterr().out
+    assert "probe      installed" in out
+    if state in (None, "corrupt"):
+        assert "last check no check yet" in out
+    else:
+        assert f"last check {state['last_sample_at']} {state['last_verdict']}" in out
+        if state.get("alert_started_at"):
+            assert f"alert since {state['alert_started_at']}" in out
+        if state.get("last_send_error"):
+            assert state["last_send_error"] in out
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_probe_follows_a_custom_service_label(tmp_path, checkout, system):
+    label = "looper.other"
+    fake = FakeLaunchd(label=label) if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    if system == "Linux":
+        def run(argv):
+            if argv[-1] == f"{label}-probe.timer":
+                fake.calls.append(list(argv))
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return fake(argv)
+        host.run = run
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    ops = ops_config.load(ops_config.Flags(runtime_root=root), environ={})
+    service.install(host, ops, label=label)
+    path = (service.Launchd(host, f"{label}.probe").unit_path if system == "Darwin"
+            else service.Systemd(host, f"{label}-probe").unit_path)
+    assert path.is_file()
+    assert not any(path.exists() for path in _probe_paths(host))
+    service.uninstall(host, label=label)
+    assert not path.exists()
+
+
+def test_systemd_probe_cleanup_ignores_disable_failure(tmp_path, checkout):
+    fake = FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system="Linux")
+    for path in _probe_paths(host):
+        service.write_private(path, b"stale")
+    def run(argv):
+        if list(argv[2:4]) == ["disable", "--now"]:
+            fake.calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 1, "", "timer already unloaded")
+        return fake(argv)
+    host.run = run
+    service.remove_probe_units(host, LABEL)
+    assert not any(path.exists() for path in _probe_paths(host))
+    assert fake.commands() == [f"disable --now {LABEL}-probe.timer", "daemon-reload"]
 
 
 @pytest.mark.parametrize("token", [None, "test-operator-token"])
