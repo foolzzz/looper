@@ -41,6 +41,8 @@ class DrainState:
         self._serving.set()
         self._wakers: list[Callable[[], None]] = []
         self._sources: list[Callable[[], Mapping[str, Any]]] = []
+        self._poll_timeout: float | None = None
+        self._poll_timer: asyncio.TimerHandle | None = None
 
     @property
     def draining(self) -> bool:
@@ -56,7 +58,8 @@ class DrainState:
         while self.draining:
             await self._serving.wait()
 
-    def begin(self, scope: DrainScope, timeout_seconds: float | None = None) -> dict[str, Any]:
+    def begin(self, scope: DrainScope, timeout_seconds: float | None = None, *,
+              poll_timeout_seconds: float | None = None) -> dict[str, Any]:
         scope = DrainScope(scope)
         timeout = (180 if scope == DrainScope.TURNS else 1200) if timeout_seconds is None else timeout_seconds
         if isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
@@ -66,12 +69,32 @@ class DrainState:
             deadline = now + timedelta(seconds=timeout)
         except OverflowError:
             raise ValueError("timeout_seconds exceeds the supported deadline range") from None
+        self._clear_poll_timer()
+        self._poll_timeout = poll_timeout_seconds
         self._serving.clear()
         self._status = DrainStatus(DrainPhase.DRAINING, scope, now, deadline)
         logger.info("drain phase=draining scope=%s deadline=%s", scope.value, deadline.isoformat())
+        return self.poll()
+
+    def _clear_poll_timer(self) -> None:
+        if self._poll_timer is not None:
+            self._poll_timer.cancel()
+            self._poll_timer = None
+
+    def poll(self) -> dict[str, Any]:
+        """Renew the controller lease, independently of its deadline to stop the process."""
+        self._clear_poll_timer()
+        if self.draining and self._poll_timeout is not None:
+            self._poll_timer = asyncio.get_running_loop().call_later(self._poll_timeout, self._poll_lost)
         return self.snapshot()
 
+    def _poll_lost(self) -> None:
+        logger.warning("drain controller polls stopped; resuming admission")
+        self.cancel()
+
     def cancel(self) -> dict[str, Any]:
+        self._clear_poll_timer()
+        self._poll_timeout = None
         self._status = DrainStatus()
         self._serving.set()
         for wake in self._wakers:

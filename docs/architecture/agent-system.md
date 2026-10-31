@@ -4294,8 +4294,10 @@ a wheel, without installing files or restarting.
 It prints `NOOP`, `WEB_ONLY`, `CONTROL_PLANE` or `FULL`, the changed components
 and the reason. Keeper mode is off in S0, so every control-plane change plans
 `FULL`. Without `--dry-run`, `NOOP` installs without restarting; `WEB_ONLY`
-installs and builds to a temporary directory, atomically swaps `web/dist`, then
-checks the served index and asset hash. A full upgrade starts a `runs` drain,
+stages the dashboard in a temporary directory, atomically swaps the served
+directory, then checks the served index and asset hash. A wheel's `WEB_ONLY`
+publishes only dashboard assets, retaining the installed Python package version.
+A full upgrade starts a `runs` drain,
 waits for DRAINED or `--drain-timeout` (default 1200 seconds), stops the service
 and confirms its old PID exited before installing, then starts it and verifies
 `system.components`. `CONTROL_PLANE` retains the same path with a `turns` drain.
@@ -4304,9 +4306,12 @@ their tool probes cannot turn startup backlog into failed replies.
 `--no-force` cancels an expired drain and resumes serving. A failure before
 restart also attempts to cancel the drain, restoring the stopped service when
 necessary. `looper service restart --drain` follows the full path without an install.
+`SIGHUP` and `SIGTERM` use the same recovery path. The service also resumes
+admission when `drain_status` polls stop for 30 seconds, independently of the
+stop deadline; ordinary status/dashboard reads do not renew this lease.
 
 Checkout installation fast-forwards to the planned commit and runs `uv sync`;
-wheel installation uses pip. The deploy report is printed and appended as one
+wheel installation outside `WEB_ONLY` uses pip. The deploy report is printed and appended as one
 JSON line to the service log: plan, reasons, drain duration, HTTP gap, deadline
 interruptions, running fingerprint and installed version. The running version
 is read from `GET /api/v1/whoami`, which can differ from the installed version

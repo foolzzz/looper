@@ -33,6 +33,7 @@ import platform
 import plistlib
 import re
 import shlex
+import signal
 import socket
 import shutil
 import subprocess
@@ -43,6 +44,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -751,6 +753,32 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
     from ..components import record_web_source, web_fingerprints
 
     if wheel:
+        if build_web and not dependencies:
+            from .http_server import default_static_dir
+
+            # WEB_ONLY retains the live interpreter and its complete dashboard.
+            # pip's uninstall/install would expose missing or partly written assets.
+            destination = default_static_dir()
+            staged = Path(tempfile.mkdtemp(prefix=".dist-upgrade-", dir=destination.parent))
+            try:
+                prefix = "looper/web/dashboard/"
+                with zipfile.ZipFile(source) as archive:
+                    for entry in archive.infolist():
+                        if not entry.filename.startswith(prefix) or entry.is_dir():
+                            continue
+                        relative = Path(entry.filename[len(prefix):])
+                        if relative.is_absolute() or ".." in relative.parts:
+                            raise ServiceError("wheel contains an unsafe dashboard path")
+                        path = staged / relative
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(archive.read(entry))
+                if not (staged / "index.html").is_file():
+                    raise ServiceError("the wheel dashboard did not contain index.html")
+                expected = ((staged / "index.html").read_bytes(), web_fingerprints(staged)[1])
+                _swap_directory(staged, destination)
+                return expected
+            finally:
+                shutil.rmtree(staged, ignore_errors=True)
         # uv tool environments omit pip; target that same interpreter with uv's pip interface.
         has_pip = host.run([host.executable, "-m", "pip", "--version"]).returncode == 0
         command = ([host.executable, "-m", "pip", "install", "--force-reinstall", source] if has_pip else
@@ -798,9 +826,31 @@ def _stop_for_install(mgr: _Manager, before: int | None) -> None:
         mgr.host.sleep(_POLL_SECONDS)
 
 
+@contextmanager
+def _deployment_signals():
+    """Unwind through deployment recovery when the foreground CLI loses its terminal."""
+    previous = {}
+    interrupted = False
+
+    def terminate(signum, frame):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True  # A second hangup must not interrupt recovery.
+            raise SystemExit(128 + signum)
+
+    try:
+        for sig in (signal.SIGHUP, signal.SIGTERM):
+            previous[sig] = signal.signal(sig, terminate)
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+@_deployment_signals()
 def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path: Path | None,
                   plan, running, target, installer, timeout: float, drain_timeout: float,
-                  no_force: bool) -> str:
+                  no_force: bool, installed_version: str | None = None) -> str:
     from ..components import Manifest
     from ..upgrade import UpgradeKind
 
@@ -855,7 +905,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             report["gap_seconds"] = round(host.clock() - gap_started, 3)
         elif installer:
             expected = installer()
-            report["installed_package_version"] = target.version
+            report["installed_package_version"] = installed_version or target.version
 
         actual = Manifest.from_dict(host.get_components(port, token))
         if target is not None:
@@ -919,6 +969,7 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
             timeout: float = DEFAULT_TIMEOUT_SECONDS, drain_timeout: float = 1200, no_force: bool = False) -> str:
     """Compute a plan before mutating files; stop the old interpreter before a full install."""
     from .. import components
+    from .. import __version__
     from ..upgrade import UpgradeKind, decide, scan_keepers
 
     try:
@@ -949,6 +1000,7 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
             running=running, target=target,
             installer=lambda: _install_target(host, source, wheel=wheel, build_web="web" in plan.changed_components,
                 dependencies=plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE)),
+            installed_version=__version__ if wheel and plan.kind == UpgradeKind.WEB_ONLY else None,
             timeout=timeout, drain_timeout=drain_timeout, no_force=no_force)
     except (ValueError, KeyError, zipfile.BadZipFile) as exc:
         raise ServiceError(str(exc)) from exc

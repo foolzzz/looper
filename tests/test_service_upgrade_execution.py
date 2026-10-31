@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import json
+import asyncio
+import multiprocessing
+import os
+import signal
 import subprocess
+import zipfile
 from types import SimpleNamespace
 
 import pytest
@@ -223,3 +228,106 @@ def test_full_refuses_an_http_service_not_owned_by_the_service_manager(deploymen
     deployment.state.pid = None
     assert cli.main(["service", "upgrade"]) == 1
     assert deployment.events == []
+
+
+@pytest.mark.parametrize("command", [["upgrade"], ["restart", "--drain"]])
+@pytest.mark.parametrize("sig", [signal.SIGHUP, signal.SIGTERM])
+def test_terminated_cli_cancels_drain_and_restores_signal_handlers(deployment, tmp_path, command, sig):
+    outcome = tmp_path / "termination.json"
+
+    def run():
+        previous = {s: signal.getsignal(s) for s in (signal.SIGHUP, signal.SIGTERM)}
+        deployment.host.sleep = lambda seconds: os.kill(os.getpid(), sig)
+        try:
+            cli.main(["service", *command])
+        finally:
+            outcome.write_text(json.dumps({"events": deployment.events,
+                "restored": all(signal.getsignal(s) == handler for s, handler in previous.items())}))
+
+    process = multiprocessing.get_context("fork").Process(target=run)
+    process.start()
+    try:
+        process.join(5)
+        assert not process.is_alive()
+        assert process.exitcode == 128 + sig
+        data = json.loads(outcome.read_text())
+        assert data == {"events": ["drain", "drain_cancel"], "restored": True}
+        assert report(deployment)["status"] == "failed"
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join(5)
+        process.close()
+
+
+def test_wheel_dashboard_is_staged_and_published_atomically_while_http_serves(deployment, tmp_path, monkeypatch):
+    from tests.test_api_v1_auth import TOKEN, _send_raw, _serving
+
+    wheel = tmp_path / "dashboard-update.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("looper/web/dashboard/index.html", "new dashboard")
+        archive.writestr("looper/web/dashboard/assets/app.js", "new script")
+        archive.writestr("looper/__init__.py", "do not install backend code")
+    static = tmp_path / "dashboard"
+    static.mkdir()
+    (static / "assets").mkdir()
+    (static / "assets/app.js").write_text("old script")
+    monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(static))
+    deployment.host.run = lambda argv: pytest.fail("a live dashboard upgrade must not reinstall the package")
+    swap = service._swap_directory
+    publications = []
+
+    async def run():
+        async with _serving(static, listen=True) as server:
+            loop = asyncio.get_running_loop()
+
+            def read(path):
+                return asyncio.run_coroutine_threadsafe(_send_raw(server, "GET " + path,
+                    {"Cookie": f"looper_operator_{server._port}={TOKEN}"}), loop).result(2)
+
+            def publish(staged, destination):
+                assert destination == static
+                assert read("/")[2] == "<html>dashboard</html>"
+                assert read("/assets/app.js")[2] == "old script"
+                assert (staged / "index.html").read_text() == "new dashboard"
+                assert (staged / "assets/app.js").read_text() == "new script"
+                swap(staged, destination)
+                assert read("/")[2] == "new dashboard"
+                assert read("/assets/app.js")[2] == "new script"
+                publications.append(destination)
+
+            monkeypatch.setattr(service, "_swap_directory", publish)
+            expected = await asyncio.to_thread(_REAL_INSTALLER, deployment.host, str(wheel),
+                wheel=True, build_web=True, dependencies=False)
+            assert expected == (b"new dashboard", components.web_fingerprints(static)[1])
+
+    asyncio.run(asyncio.wait_for(run(), 10))
+    assert publications == [static]
+    assert not list(tmp_path.glob(".dist-upgrade-*"))
+
+
+@pytest.mark.parametrize("failure", ["missing_index", "unsafe_path", "swap"])
+def test_failed_wheel_dashboard_publication_preserves_all_current_files(deployment, tmp_path, monkeypatch, failure):
+    static = tmp_path / "dashboard"
+    static.mkdir()
+    original = {"index.html": b"old dashboard", "app.js": b"old script"}
+    for name, data in original.items():
+        (static / name).write_bytes(data)
+    monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(static))
+    wheel = tmp_path / "dashboard-update.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("looper/web/dashboard/app.js", "new script")
+        if failure != "missing_index":
+            archive.writestr("looper/web/dashboard/index.html", "new dashboard")
+        if failure == "unsafe_path":
+            archive.writestr("looper/web/dashboard/../escaped.js", "unsafe")
+    if failure == "swap":
+        def fail(*args):
+            raise service.ServiceError("atomic exchange refused")
+        monkeypatch.setattr(service, "_swap_directory", fail)
+    deployment.host.run = lambda argv: pytest.fail("a live dashboard upgrade must not reinstall the package")
+    with pytest.raises(service.ServiceError):
+        _REAL_INSTALLER(deployment.host, str(wheel), wheel=True, build_web=True, dependencies=False)
+    assert {p.name: p.read_bytes() for p in static.iterdir()} == original
+    assert not (tmp_path / "escaped.js").exists()
+    assert not list(tmp_path.glob(".dist-upgrade-*"))

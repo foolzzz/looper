@@ -78,6 +78,54 @@ def test_cancel_wakes_the_held_worker_slot(tmp_path, monkeypatch):
 
 
 @pytest.mark.usefixtures("clients")
+@pytest.mark.parametrize("blocked", [False, True])
+def test_lost_drain_polls_resume_held_turns_and_runs_without_releasing_at_deadline(tmp_path, monkeypatch, blocked):
+    from looper.agents.tiers import worker
+    from looper.agents.v1_domains import drain as domain
+
+    monkeypatch.setattr(worker, "load_task_limit", AsyncMock(return_value=2))
+    monkeypatch.setattr(domain, "DRAIN_POLL_TIMEOUT_SECONDS", 0.2, raising=False)
+
+    async def run():
+        async with _serving(tmp_path, listen=True) as server:
+            drain = server._drain
+            pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path, drain=drain)
+            drain.add_source(lambda: {"gates": int(blocked)})
+            code, _, initial = await _send(server, "POST /api/v1/system/drain", _bearer(TOKEN),
+                '{"scope":"runs","timeout_seconds":0.05}')
+            assert code == 200
+            phase = "draining" if blocked else "drained"
+            assert initial["result"]["phase"] == phase
+            turn = asyncio.create_task(drain.wait_serving())
+
+            async def held_run():
+                async with pool.slot_for(WorkerProcess("held", "step", "project")):
+                    return "admitted"
+
+            pending = asyncio.create_task(held_run())
+            try:
+                await asyncio.sleep(0.12)
+                code, _, status = await _send(server, "POST /api/v1/system/drain_status", _bearer(TOKEN), "{}")
+                assert code == 200 and status["result"]["deadline_passed"]
+                assert status["result"]["phase"] == phase
+                # Polling renews the lease beyond its original expiry, even after the stop deadline.
+                await asyncio.sleep(0.12)
+                assert drain.snapshot()["phase"] == phase
+                assert not turn.done() and not pending.done()
+                # No more polls: the timer must wake both wait paths without another HTTP request.
+                await asyncio.wait_for(asyncio.gather(turn, pending), 1)
+                assert pending.result() == "admitted"
+                assert drain.snapshot()["phase"] == "serving"
+                assert drain.snapshot()["deadline"] is None
+            finally:
+                turn.cancel()
+                pending.cancel()
+                await asyncio.gather(turn, pending, return_exceptions=True)
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.usefixtures("clients")
 def test_operator_drain_api_and_generated_cli_contract(tmp_path):
     async def run():
         async with _serving(tmp_path, listen=True) as server:

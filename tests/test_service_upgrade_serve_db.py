@@ -13,6 +13,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tomllib
+import zipfile
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -115,6 +117,7 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
     def run(argv):
         argv = list(argv)
         installed_commands.append(argv)
+        assert Path(argv[0]).name in ("git", "npm", "uv"), "wheel web updates must not invoke pip"
         if Path(argv[0]).name == "uv":
             assert argv[1:] == ["sync", "--project", str(source)]
             return subprocess.CompletedProcess(argv, 0, "", "")
@@ -178,6 +181,38 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
                     assert current["verification"]["web"] == previous_assets
                 previous_web, previous_assets = current["components"]["web"], current["verification"]["web"]
                 assert "plan       NOOP" in service.upgrade(host, to=target, dry_run=True)
+
+            # Exercise the wheel WEB_ONLY path against the same real HTTP process.
+            # Package the unchanged backend and runner aliases with a new dashboard.
+            wheel = tmp_path / "dashboard-update.whl"
+            aliases = tomllib.loads((source / "looper/components.toml").read_text())["aliases"]
+            with zipfile.ZipFile(wheel, "w") as archive:
+                for path in (source / "looper").rglob("*"):
+                    relative = path.relative_to(source).as_posix()
+                    if path.is_file() and "__pycache__" not in path.parts and not relative.startswith("looper/web/dashboard/"):
+                        archive.write(path, relative)
+                for alias, prefix in aliases.items():
+                    for path in (source / prefix).rglob("*"):
+                        if path.is_file() and "__pycache__" not in path.parts:
+                            archive.write(path, alias + path.relative_to(source / prefix).as_posix())
+                archive.writestr(components.RUNTIME_RECORD, components.runtime_fingerprint(source))
+                archive.writestr("looper/web/dashboard/index.html", "wheel dashboard update")
+                archive.writestr("looper/web/dashboard/assets/app.js", "wheel dashboard script")
+                archive.writestr("looper/web/dashboard/" + components.WEB_SOURCE_RECORD, "e" * 64)
+            monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(source / "web/dist"))
+            assert "plan       WEB_ONLY" in service.upgrade(host, to=str(wheel), dry_run=True)
+            result = service.upgrade(host, to=str(wheel))
+            assert json.loads(result.splitlines()[-1])["installed_package_version"] == initial["version"]
+            current = api.post("/api/v1/system/components", {})["result"]
+            assert current["loaded_at"] == initial["loaded_at"]
+            assert current["components"] == components.manifest_from_wheel(wheel).components
+            assert current["verification"] == components.manifest_from_wheel(wheel).verification
+            assert int(pid_file.read_text()) == pid
+            for path, content in (("/", b"wheel dashboard update"), ("/assets/app.js", b"wheel dashboard script")):
+                with urlopen(Request(api.base_url + path, headers={"Cookie": f"looper_operator_{port}={api.token}"}),
+                             timeout=5) as response:
+                    assert response.status == 200 and response.read() == content
+            assert _git(source, "rev-parse", "HEAD") == target
 
     assert sum(Path(argv[0]).name == "uv" for argv in installed_commands) == 3
     assert sum(argv[:3] == ["npm", "run", "build"] for argv in installed_commands) == 2
