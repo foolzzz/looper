@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.39] - 2026-10-31
+
+### Fixed
+
+- **`loopercli schedule-log --tail N` prints exactly the last N lines.** The client asks the server for the tail with the largest page (4 MiB); when that page may begin mid-line it reads earlier byte ranges with `offset` and `limit_bytes` until it holds N whole lines or reaches the start of the file. The server API (`schedule_admin.run_log`) is unchanged. ([#991](https://github.com/foolzzz/looper/pull/991))
+
+No model-visible change.
+
 ## [2.14.38] - 2026-10-31
 
 ### Fixed
