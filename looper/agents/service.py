@@ -106,7 +106,7 @@ def _get_components(port: int, token: str | None) -> dict | None:
     """Read the startup snapshot through the operator-authenticated v1 API."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     request = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1/system/components",
-                                    headers={"Authorization": f"Bearer {token}"} if token else {})
+                                    headers={"Authorization": f"Bearer {token}"} if token else {}, method="POST")
     try:
         with opener.open(request, timeout=3) as response:
             payload = json.loads(response.read())

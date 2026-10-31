@@ -24,7 +24,7 @@ def test_components_require_operator_and_preserve_loaded_snapshot(tmp_path, monk
             expected = components.manifest_from_directory(
                 Path(components.__file__).resolve().parent.parent)
             for token, status in ((None, 401), (CLIENT_TOKEN, 403), (TOKEN, 200)):
-                actual, _, answer = await _send(server, "GET /api/v1/system/components",
+                actual, _, answer = await _send(server, "POST /api/v1/system/components",
                                                 _bearer(token) if token else {})
                 assert actual == status
             result = answer["result"]
@@ -38,7 +38,7 @@ def test_components_require_operator_and_preserve_loaded_snapshot(tmp_path, monk
                 raise AssertionError("an endpoint must not recompute the loaded snapshot")
 
             monkeypatch.setattr(components, "manifest_from_directory", refuse_recompute)
-            status, headers, repeat = await _send(server, "GET /api/v1/system/components", _bearer(TOKEN))
+            status, headers, repeat = await _send(server, "POST /api/v1/system/components", _bearer(TOKEN))
             assert status == 200 and headers["cache-control"] == "no-store"
             assert repeat["result"] == result
 
@@ -46,6 +46,19 @@ def test_components_require_operator_and_preserve_loaded_snapshot(tmp_path, monk
 
 
 def test_components_are_registered_for_generated_cli():
-    operation = api_v1.document()["paths"]["/system/components"]["get"]
+    operation = api_v1.document()["paths"]["/system/components"]["post"]
     assert operation["operationId"] == "system.components"
     assert operation["x-looper-operator-only"] is True
+    assert operation["x-looper-risk"] == "read"
+    assert "200" in operation["responses"]
+
+
+def test_components_get_is_refused_like_other_v1_operations(tmp_path):
+    async def run():
+        async with _serving(tmp_path, listen=True) as server:
+            for path in ("/api/v1/system/status", "/api/v1/system/components"):
+                status, _, answer = await _send(server, f"GET {path}", _bearer(TOKEN))
+                assert status == 405
+                assert answer["error"] == {"code": "invalid", "message": "use POST"}
+
+    asyncio.run(run())

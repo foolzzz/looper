@@ -186,12 +186,12 @@ def test_upgrade_fails_closed_when_the_running_manifest_is_unavailable(upgrade_h
 
 
 @pytest.mark.parametrize("code", [200, 401, 503])
-def test_components_request_uses_operator_auth_and_get(monkeypatch, code):
+def test_components_request_uses_operator_auth_and_post(monkeypatch, code):
     manifest = _manifest().to_dict()
 
     def open_request(request, *, timeout):
         assert request.full_url == "http://127.0.0.1:18834/api/v1/system/components"
-        assert request.get_method() == "GET"
+        assert request.get_method() == "POST"
         assert request.get_header("Authorization") == "Bearer preview-token"
         assert timeout == 3
         if code != 200:

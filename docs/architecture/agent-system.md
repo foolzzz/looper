@@ -4304,7 +4304,7 @@ under canonical `web/dist` paths (also used for the packaged dashboard).
 The adoption fingerprint separately covers report contracts, both seat-tool
 listings (including optional vault tools), manifest version and keeper protocols.
 
-`GET /api/v1/system/components` requires operator authentication and returns the
+`POST /api/v1/system/components` requires operator authentication and returns the
 standard v1 result envelope containing `version`, `loaded_at`, `components`,
 `adoption` and `verification`. The snapshot is captured from the loaded package's
 directory once per process at HTTP-server startup and remains fixed if files later change.
