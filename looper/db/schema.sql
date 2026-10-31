@@ -245,6 +245,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     REFERENCES managers(id) ON DELETE RESTRICT,
     template JSONB,
     origin_thread TEXT,
+    origin_reply_route JSONB CHECK (jsonb_typeof(origin_reply_route) = 'object'),
     schedule_id TEXT,
     budget_usd DOUBLE PRECISION CHECK (budget_usd > 0),
     planner_session_label TEXT,

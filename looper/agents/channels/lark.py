@@ -157,6 +157,18 @@ class LarkChannelAdapter(ChannelAdapter):
             # Restore both destinations: a group's answer/status must reply to its original message.
             route = envelope.metadata.get("reply_route")
             if isinstance(route, dict) and isinstance(route.get("chat_id"), str) and route["chat_id"]:
+                if (envelope.message_type is MessageType.STATUS_UPDATE
+                        and status_kind(envelope.payload) is StatusKind.PROGRESS
+                        and isinstance(route.get("reply_to"), str) and route["reply_to"]):
+                    # A recovered task report answers its original message without changing live routing.
+                    try:
+                        await self._transport.reply(route["reply_to"], markdown=str(envelope.payload["text"]))
+                    except LarkCliError as exc:
+                        logger.warning("%s: a recovered task progress reply failed: %s", self.channel_id, exc)
+                        if exc.code in MESSAGE_GONE_CODES:
+                            return await self._send_message(route["chat_id"], str(envelope.payload["text"]))
+                        return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
+                    return DeliveryReceipt(channel=self.channel_type, success=True)
                 chat_id = route["chat_id"]
                 self._correlation_chat[corr_id] = chat_id
                 if isinstance(route.get("reply_to"), str) and route["reply_to"]:

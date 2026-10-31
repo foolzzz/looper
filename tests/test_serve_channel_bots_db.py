@@ -502,7 +502,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                    manager_id=manager_id)
         adapters: list[Any] = []
         registries: list[Any] = []
-        http_servers: list[Any] = []
+        servers: list[Any] = []
         incoming: list[str] = []
         bot, transport = _Bot(), StubTransport()
         pending = ["sent while offline"]
@@ -586,14 +586,13 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
 
         http_start = serve.AgentHTTPServer.start
 
-        async def start_http_and_keep(server: Any) -> None:
-            http_servers.append(server)
+        async def start_http(server: Any) -> None:
+            servers.append(server)
             await http_start(server)
 
         async def ready(supervisor: Any, agent_id: str) -> None:
             # The real start_all has replayed the journal; inspect before any agent consumes its queue.
-            assert len(http_servers) == 1
-            assert http_servers[0]._server.is_serving()
+            assert len(servers) == 1 and servers[0]._server.is_serving()
             raise Started
 
         identity = SimpleNamespace(profile="", app_id="cli_x", bot_name="B", bot_open_id="ou_bot00000001")
@@ -602,7 +601,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
         monkeypatch.setattr(TelegramChannelAdapter if channel_type == "telegram" else LarkChannelAdapter, "start", start)
         monkeypatch.setattr(managers.ManagerFleet, "load", load_with_backlog)
         monkeypatch.setattr(serve.ChannelRegistry, "register", register_and_keep)
-        monkeypatch.setattr(serve.AgentHTTPServer, "start", start_http_and_keep)
+        monkeypatch.setattr(serve.AgentHTTPServer, "start", start_http)
         monkeypatch.setattr(serve.AgentSupervisor, "_start_agent", ready)
         monkeypatch.setattr(managers_api, "_listener", None)
         monkeypatch.setattr(operator_notes, "_root", str(tmp_path))
@@ -640,7 +639,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
                 assert replies == [TURNED_OFF_REPLY] * len(incoming)
                 assert adapters[0]._bus.journal.undelivered() == []
         finally:
-            for server in http_servers:
+            for server in servers:
                 await server.stop()
             for registry in registries:
                 await registry.stop_all()

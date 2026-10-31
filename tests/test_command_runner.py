@@ -254,6 +254,24 @@ def test_env_file_secret_is_only_in_raw_log(run_command, tmp_path):
     assert "s3cr3t-value" not in (directory / "runner.log").read_text()
 
 
+@pytest.mark.parametrize("secret", ["abcd", "secret-" * 3000, "🔑" * 5000])
+def test_env_file_secret_straddling_tail_cut_is_redacted(run_command, tmp_path, secret):
+    env_file = tmp_path / "secret.env"
+    env_file.write_text(f"SECRET={secret}\n", encoding="utf-8")
+    suffix = "." * 3998
+    result, ended, directory, spec = run_command(python_command(
+        "import os, sys; "
+        f"sys.stdout.buffer.write(('prefix' + os.environ['SECRET'] + {suffix!r}).encode('utf-8'))"
+    ), env_file=str(env_file))
+    assert result.returncode == 0
+    assert ended["exit_code"] == 0
+    assert Path(spec["log_path"]).read_text(encoding="utf-8") == "prefix" + secret + suffix
+    assert ended["tail"] == ("prefix[redacted]" + suffix)[-4000:]
+    assert secret[-2:] not in ended["tail"]
+    assert secret[-2:] not in (directory / "exit.json").read_text(encoding="utf-8")
+    assert_group_ended(directory)
+
+
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
 def test_runner_forwards_termination(run_command, sig):
     directory, _ = run_command.prepare("sleep 30")

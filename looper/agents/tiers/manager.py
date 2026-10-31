@@ -696,8 +696,10 @@ class ManagerAgent:
         definition: ManagerDefinition | None = None,
         clock: Callable[[], float] = time.monotonic,
         drain: DrainState | None = None,
+        tools_ready: asyncio.Event | None = None,
     ) -> None:
         self._drain = drain
+        self._tools_ready = tools_ready
         self._definition = definition or default_definition()
         self._log = self._definition.id
         # Set when the definition was turned off or deleted; the fleet (card 6) sets ``on_turned_off``.
@@ -1035,6 +1037,10 @@ class ManagerAgent:
     async def _message_loop(self) -> None:
         assert self._bus is not None
         try:
+            # Startup replays before the HTTP tools endpoint listens. Keep messages queued and unacknowledged
+            # until a turn can probe its tools, instead of consuming it with a tools-unavailable reply.
+            if self._tools_ready is not None:
+                await self._tools_ready.wait()
             async for envelope in self._bus.subscribe(self.agent_id):
                 if not self._running:
                     break
@@ -1607,14 +1613,22 @@ class ManagerAgent:
         elif origin:
             progress_text = envelope.payload.get("summary", "")
             if progress_text:
-                await self._bus.publish(MessageEnvelope.create(
-                    source=self.agent_address,
-                    target=AgentAddress(agent_type="channel", agent_id=origin),
-                    message_type=MessageType.STATUS_UPDATE,
-                    payload={"text": progress_text},
-                    correlation_id=envelope.correlation_id,
-                    metadata={"origin_channel_id": origin},
-                ))
+                await self._task_progress(envelope, progress_text)
+
+    async def _task_progress(self, envelope: MessageEnvelope, text: str) -> None:
+        origin = envelope.metadata["origin_channel_id"]
+        channel = parse_channel_id(origin)
+        await self._bus.publish(MessageEnvelope.create(
+            source=self.agent_address,
+            target=AgentAddress(agent_type="channel", agent_id=origin,
+                                channel=channel.channel_type if channel else None),
+            message_type=MessageType.STATUS_UPDATE,
+            payload={"text": text},
+            correlation_id=envelope.correlation_id,
+            metadata={"origin_channel_id": origin,
+                      **({"reply_route": envelope.metadata["reply_route"]}
+                         if "reply_route" in envelope.metadata else {})},
+        ))
 
     async def _web_thread_reply(self, envelope: MessageEnvelope, thread: str, text: str) -> None:
         await self._bus.publish(MessageEnvelope.create(
@@ -1635,14 +1649,7 @@ class ManagerAgent:
             await self._web_thread_reply(envelope, thread, f"任务「{title}」已分解为 {step_count} 个步骤，开始执行。")
         elif origin:
             step_count = envelope.payload.get("step_count", 0)
-            await self._bus.publish(MessageEnvelope.create(
-                source=self.agent_address,
-                target=AgentAddress(agent_type="channel", agent_id=origin),
-                message_type=MessageType.STATUS_UPDATE,
-                payload={"text": f"任务已分解为 {step_count} 个步骤，开始执行..."},
-                correlation_id=envelope.correlation_id,
-                metadata={"origin_channel_id": origin},
-            ))
+            await self._task_progress(envelope, f"任务已分解为 {step_count} 个步骤，开始执行...")
 
     async def _handle_task_result(self, envelope: MessageEnvelope) -> None:
         summary = envelope.payload.get("summary", "任务完成")

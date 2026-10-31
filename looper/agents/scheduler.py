@@ -57,6 +57,7 @@ from contextlib import ExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Protocol
 
 import asyncpg
@@ -64,6 +65,7 @@ import asyncpg
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import schedules as db_schedules, tasks as db_tasks
 from . import cron
+from .command_runs import BACKSTOP_SLACK, CommandRuns, CommandSpec, Finished, Lost, Observation, Running, Starting
 from .drain import DrainState
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
 from .schedule_gate import GateResult, run_gate
@@ -204,12 +206,12 @@ def _local(moment: datetime, tz: Any) -> str:
 
 
 def gate_env(schedule: Mapping[str, Any], run_id: str, firing: Firing, timeout: int | None) -> dict[str, str]:
-    """What a gate is told about its run, so it can claim the items it hands to this run (a ``parallel`` schedule's
-    runs overlap): the schedule, the run, its fire time (ISO 8601) and the run's timeout in seconds ("" for none),
-    after which a claim may be taken back."""
+    """The schedule, firing, missed fires and timeout passed to gates and scheduled commands."""
     return {"LOOPER_SCHEDULE_ID": str(schedule["id"]), "LOOPER_SCHEDULE_RUN_ID": run_id,
             "LOOPER_SCHEDULE_SCHEDULED_FOR": firing.scheduled_for.isoformat(),
-            "LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS": "" if timeout is None else str(timeout)}
+            "LOOPER_SCHEDULE_RUN_TIMEOUT_SECONDS": "" if timeout is None else str(timeout),
+            "LOOPER_SCHEDULE_TRIGGER": firing.trigger.value, "LOOPER_SCHEDULE_MISSED": str(firing.missed),
+            "LOOPER_SCHEDULE_MISSED_SINCE": firing.missed_since.isoformat() if firing.missed_since else ""}
 
 
 def run_title(schedule: Mapping[str, Any], firing: Firing) -> str | None:
@@ -346,8 +348,7 @@ def _utcnow() -> datetime:
 
 @dataclass
 class _Launched:
-    """What a firing did, for the caller to finish after the transaction: the task to start, the gate to run, or the
-    run that reached its final status (for the notifier)."""
+    """After commit: start a task, gate or command, or notify that the run ended."""
 
     run_id: str
     task_id: str | None = None
@@ -355,6 +356,7 @@ class _Launched:
     ended: bool = False
     fingerprint: str | None = None
     gate_enabled: bool | None = None
+    command: CommandSpec | None = None
 
 
 class Scheduler:
@@ -364,7 +366,7 @@ class Scheduler:
 
     def __init__(self, *, bus: _Bus, clock: Callable[[], datetime] = _utcnow, tick_seconds: float = TICK_SECONDS,
                  sender: Sender | None = None, day_zone: str | None = None, dashboard_url: str = "",
-                 drain: DrainState | None = None) -> None:
+                 runtime_root: Path | None = None, drain: DrainState | None = None) -> None:
         self._bus = bus
         self._clock = clock
         self._tick_seconds = tick_seconds
@@ -373,6 +375,8 @@ class Scheduler:
         self._last_ok_tick_at: datetime | None = None
         self._notifier = Notifier(sender=sender, clock=clock, dashboard_url=dashboard_url)
         self._day_zone = cron.zone(day_zone or cron.local_zone_name())
+        self._commands = CommandRuns(runtime_root) if runtime_root is not None else None
+        self._adopted: set[str] = set()
         # Gates and messages under way; stopping cancels them.
         self._background: set[asyncio.Task[Any]] = set()
         self._drain = drain
@@ -395,6 +399,8 @@ class Scheduler:
             self._starting -= 1
 
     async def start(self) -> None:
+        if self._commands is not None:
+            await asyncio.to_thread(self._commands.prepare)
         # A gate cannot outlive the server that ran it.
         async with db_connection.transaction() as conn:
             if count := await db_schedules.fail_gating_runs(conn, self._clock()):
@@ -525,6 +531,7 @@ class Scheduler:
                 conn, "skipped_missed", now,
                 {"schedule_id": schedule["id"], "scheduled_for": firing.scheduled_for,
                  "trigger": firing.trigger.value, "missed": firing.missed, "created_at": now},
+                kind=schedule["kind"],
                 error=f"{firing.missed} fires were missed since {_local(firing.missed_since or now, tz)}; the latest, "
                       f"at {_local(firing.scheduled_for, tz)}, was more than {int(GRACE.total_seconds() // 60)} "
                       "minutes ago (catch-up: skip)",
@@ -552,6 +559,8 @@ class Scheduler:
         """After the firing's transaction: start its task, run its gate, report its end."""
         if launched.task_id:
             await self._start_task(launched.task_id, schedule["project_id"])
+        if launched.command is not None:
+            await self._start_runner(schedule, launched.command)
         if launched.gate is not None:
             self._spawn(self._gate(schedule["id"], launched.run_id, launched.gate, launched.fingerprint,
                                    launched.gate_enabled), gate=True)
@@ -571,7 +580,8 @@ class Scheduler:
         launched (``_launch``)."""
         common = {"schedule_id": schedule["id"], "scheduled_for": firing.scheduled_for,
                   "trigger": firing.trigger.value, "missed": firing.missed, "created_at": now}
-        if await db_schedules.owner_error(conn, schedule["manager_id"], template_key=schedule.get("template_key")):
+        command = schedule["kind"] == "command"
+        if not command and await db_schedules.owner_error(conn, schedule["manager_id"], template_key=schedule.get("template_key")):
             return await self._create_run(conn, schedule, firing, now, common=common)
         open_runs = await db_schedules.open_runs(conn, schedule["id"])
         queued = next((run for run in open_runs if run["status"] == db_schedules.QUEUED), None)
@@ -583,23 +593,27 @@ class Scheduler:
                 return await self._launch(conn, schedule, firing, now, common=common)
             reason = ("the previous run is still checking its gate" if gating
                       else f"{running} runs are in progress, the most this schedule runs at once (max_parallel_runs)")
-            return _Launched(await self._skip(conn, "skipped_overlap", now, common, fired_at=now, error=reason))
-        busy = await self._busy_task(conn, schedule["id"])
+            return _Launched(await self._skip(conn, "skipped_overlap", now, common, kind=schedule["kind"],
+                                              fired_at=now, error=reason))
+        busy = (next((run["id"] for run in open_runs if run["status"] == db_schedules.RUNNING), None)
+                if command else await self._busy_task(conn, schedule["id"]))
         if busy or queued or gating:
             if schedule["overlap"] == "queue" and queued is None:
                 return _Launched(await db_schedules.insert_run(conn, status=db_schedules.QUEUED, **common))
-            reason = ("a run is already waiting for the previous run's task" if queued
+            reason = ("a run is already waiting for the previous command run" if queued and command
+                      else "a run is already waiting for the previous run's task" if queued
                       else "the previous run is still checking its gate" if gating
+                      else f"the previous command run ({busy}) is still in progress" if command
                       else f"the previous run's task ({busy}) is still in progress")
-            return _Launched(await self._skip(conn, "skipped_overlap", now, common, fired_at=now, error=reason))
+            return _Launched(await self._skip(conn, "skipped_overlap", now, common, kind=schedule["kind"],
+                                              fired_at=now, error=reason))
         return await self._launch(conn, schedule, firing, now, common=common)
 
     async def _skip(self, conn: asyncpg.Connection, status: str, now: datetime, common: Mapping[str, Any],
-                    **fields: Any) -> str:
-        """Record a skipped firing: on the schedule's latest run when that is the same skip today
-        (``count_skip``), else as a run of its own."""
-        merged = await db_schedules.count_skip(conn, common["schedule_id"], status=status, at=now,
-                                               since=self.day_start(now))
+                    *, kind: str = "agent", **fields: Any) -> str:
+        """Record every command skip; merge repeated agent skips on today's latest run."""
+        merged = (await db_schedules.count_skip(conn, common["schedule_id"], status=status, at=now,
+                                                since=self.day_start(now)) if kind == "agent" else None)
         return merged or await db_schedules.insert_run(conn, status=status, finished_at=now, **common, **fields)
 
     async def _put(self, conn: asyncpg.Connection, run_id: str | None, common: Mapping[str, Any] | None,
@@ -619,6 +633,8 @@ class Scheduler:
     async def _launch(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing, now: datetime, *,
                       common: Mapping[str, Any] | None = None, run_id: str | None = None) -> _Launched:
         """A firing past the overlap check: skipped at the daily budget, gating, or its task created."""
+        if schedule["kind"] == "command":
+            return await self._start_command(conn, schedule, firing, now, common=common, run_id=run_id)
         if await db_schedules.owner_error(conn, schedule["manager_id"], template_key=schedule.get("template_key")):
             return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id)
         budget = schedule["daily_budget_usd"]
@@ -646,6 +662,51 @@ class Scheduler:
             await db_schedules.update_run(conn, run_id, execution_snapshot=json.loads(expected))
             return _Launched(run_id, gate=firing, fingerprint=expected, gate_enabled=schedule["enabled"])
         return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id, started=timeout)
+
+    async def _start_command(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], firing: Firing,
+                             now: datetime, *, common: Mapping[str, Any] | None = None,
+                             run_id: str | None = None) -> _Launched:
+        from .schedule_templates import effective_schedule
+
+        try:
+            if self._commands is None:
+                raise ValueError("this server cannot run commands (no runtime root)")
+            effective = await effective_schedule(conn, schedule)
+        except ValueError as exc:
+            run_id = await self._put(conn, run_id, common, status="failed", fired_at=now,
+                                     finished_at=now, error=str(exc))
+            await db_schedules.count_outcome(conn, schedule["id"], "failed", now)
+            return _Launched(run_id, ended=True)
+        timeout = schedule["run_timeout_seconds"] if schedule["run_timeout_mode"] == "seconds" else None
+        run_id = run_id or db_schedules.new_run_id()
+        log = CommandRuns.log_path(schedule["id"], run_id)
+        if common is not None:
+            await db_schedules.insert_run(conn, run_id=run_id, status=db_schedules.RUNNING, fired_at=now,
+                                          run_timeout_seconds=timeout, log_path=log, **common)
+        else:
+            await db_schedules.update_run(conn, run_id, status=db_schedules.RUNNING, fired_at=now,
+                                          run_timeout_seconds=timeout, log_path=log)
+        return _Launched(run_id, command=CommandSpec(
+            run_id, schedule["id"], schedule["command"], effective.work_dir, schedule["env"] or {},
+            schedule["env_file"], timeout, gate_env(schedule, run_id, firing, timeout),
+        ))
+
+    async def _start_runner(self, schedule: Mapping[str, Any], spec: CommandSpec) -> None:
+        assert self._commands is not None
+        try:
+            pid, started = await asyncio.to_thread(self._commands.spawn, spec)
+        except (OSError, RuntimeError) as exc:
+            async with db_connection.transaction() as conn:
+                finished = await db_schedules.finish_command_run(
+                    conn, spec.run_id, status="failed", at=self._clock(),
+                    error=f"the runner could not start: {exc}",
+                )
+            if finished:
+                self._spawn(self._notifier.run_ended(spec.run_id))
+            logger.exception("command runner could not start schedule=%s run=%s", schedule["id"], spec.run_id)
+            return
+        await db_schedules.update_run(db_connection.get_pool(), spec.run_id, runner_pid=pid, runner_started=started)
+        logger.info("command run started schedule=%s run=%s pid=%s", schedule["id"], spec.run_id, pid)
 
     async def _create_run(self, conn: asyncpg.Connection, schedule: dict[str, Any], firing: Firing, now: datetime, *,
                           common: Mapping[str, Any] | None = None, run_id: str | None = None,
@@ -870,8 +931,11 @@ class Scheduler:
                     return
                 runs = await db_schedules.open_runs(conn, schedule_id)
                 queued = [run for run in runs if run["status"] == db_schedules.QUEUED]
-                if not queued or any(run["status"] == db_schedules.GATING for run in runs) \
-                        or await self._busy_task(conn, schedule_id):
+                if not queued or any(run["status"] == db_schedules.GATING for run in runs):
+                    return
+                busy = (any(run["status"] == db_schedules.RUNNING for run in runs)
+                        if schedule["kind"] == "command" else await self._busy_task(conn, schedule_id))
+                if busy:
                     return
                 run = queued[0]
                 firing = Firing(Trigger(run["trigger"]), run["scheduled_for"], missed=run["missed"])
@@ -910,13 +974,76 @@ class Scheduler:
             self._spawn(self._notifier.run_ended(run["id"]))
 
     async def _settle_running(self, now: datetime) -> None:
-        """Finish the running runs whose task ended or went away, stop those past their timeout, and start the
-        tasks a server stop left created but never started."""
-        for run in await db_schedules.running_runs():
+        """Observe commands, finish ended tasks, enforce timeouts and recover task starts."""
+        if self._commands is not None:
+            self._commands.reap()
+        rows = await db_schedules.running_runs()
+        commands = [run for run in rows if run["kind"] == "command"]
+        observations = (await asyncio.to_thread(self._commands.inspect, commands, now)
+                        if self._commands is not None else
+                        {run["id"]: Lost("this server cannot run commands") for run in commands})
+        for run in rows:
             try:
-                await self._settle(run, now)
+                if run["kind"] == "command":
+                    await self._settle_command(run, observations[run["id"]], now)
+                else:
+                    await self._settle(run, now)
             except Exception:
                 logger.exception("could not check schedule run %s", run["id"])
+
+    async def _settle_command(self, run: Mapping[str, Any], obs: Observation, now: datetime) -> None:
+        run_id = run["id"]
+        fields: dict[str, Any] = {}
+        if isinstance(obs, Starting):
+            return
+        if isinstance(obs, Running):
+            assert self._commands is not None
+            if run_id not in self._commands._owned and run_id not in self._adopted:
+                logger.info("command run adopted run=%s pid=%s", run_id, obs.runner_pid)
+                self._adopted.add(run_id)
+            # Recover the identity even when shutdown cancelled the original spawn's database write.
+            if obs.runner_pid and (not run["runner_pid"] or not run["runner_started"] or not run["started_at"]):
+                await db_schedules.update_run(db_connection.get_pool(), run_id,
+                                              runner_pid=obs.runner_pid, runner_started=obs.runner_started,
+                                              started_at=obs.started_at)
+            timeout = run["run_timeout_seconds"]
+            if timeout is None or obs.started_at is None \
+                    or now <= obs.started_at + timedelta(seconds=timeout) + BACKSTOP_SLACK:
+                return
+            await asyncio.to_thread(self._commands.end_group, obs.child)
+            if obs.runner_pid:
+                await asyncio.to_thread(self._commands.kill_runner, obs.runner_pid, obs.runner_started)
+            status, at = "timed_out", now
+            error = "the runner did not end the run at its timeout; Looper killed its process group"
+            fields["started_at"] = obs.started_at
+        elif isinstance(obs, Finished):
+            status, at, error = obs.status, obs.ended_at, obs.error
+            # PostgreSQL TEXT rejects NUL; keep raw output in the log file and exit record.
+            fields = {"started_at": obs.started_at, "exit_code": obs.exit_code, "exit_signal": obs.signal,
+                      "log_bytes": obs.log_bytes, "log_truncated": obs.log_truncated,
+                      "log_tail": obs.tail.replace("\0", "")}
+        else:
+            assert isinstance(obs, Lost)
+            if self._commands is not None:
+                await asyncio.to_thread(self._commands.end_group, obs.child)
+            status, at, error = "interrupted", now, obs.reason
+        async with db_connection.transaction() as conn:
+            finished = await db_schedules.finish_command_run(conn, run_id, status=status, at=at, error=error, **fields)
+        if not finished:
+            return
+        if isinstance(obs, Finished):
+            seconds = (obs.ended_at - obs.started_at).total_seconds() if obs.started_at else 0.0
+            logger.info("command run finished run=%s status=%s exit=%s seconds=%.1f log_bytes=%d truncated=%s",
+                        run_id, status, obs.exit_code, seconds, obs.log_bytes, obs.log_truncated)
+        elif isinstance(obs, Running):
+            logger.warning("command run killed by backstop run=%s", run_id)
+        else:
+            logger.warning("command run interrupted run=%s reason=%s", run_id, error)
+        if self._commands is not None:
+            await asyncio.to_thread(self._commands.release, run_id)
+        self._adopted.discard(run_id)
+        self._spawn(self._notifier.run_ended(run_id))
+        await self._start_queued(run["schedule_id"])
 
     async def _settle(self, run: dict[str, Any], now: datetime) -> None:
         task_status = run["task_status"]

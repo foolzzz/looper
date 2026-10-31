@@ -361,6 +361,12 @@ async def _create(call: Call) -> dict[str, Any]:
         "original_user_text": (str(envelope.payload.get("text") or "") or None) if envelope is not None else None,
         "manager_id": call.manager_id, "client_id": turn.client_id,
     }
+    if envelope is not None and turn.chat and (turn.channel == "telegram" or is_lark(turn.channel)):
+        route = {"chat_id": turn.chat}
+        context = envelope.payload.get("channel_context") or {}
+        if is_lark(turn.channel) and isinstance(context.get("message_id"), str) and context["message_id"]:
+            route["reply_to"] = context["message_id"]
+        row["origin_reply_route"] = route
     if origin == "channel-web" and envelope is not None and (call.manager_id != DEFAULT_MANAGER_ID or turn.client_id):
         thread = (envelope.payload.get("channel_context") or {}).get("session_id")
         row["origin_thread"] = thread if isinstance(thread, str) and thread else None

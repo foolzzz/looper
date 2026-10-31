@@ -1277,3 +1277,16 @@ def test_turn_tree_end_ends_a_seen_child_that_left_the_group(tmp_path: Path) -> 
                 os.kill(pid, signal.SIGKILL)
 
     assert asyncio.run(_run()) == []
+
+
+def test_sweep_leaves_unrecorded_process_in_its_own_session(tmp_path: Path) -> None:
+    process = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        assert process.pid == os.getpgid(process.pid)
+        assert proc_tree._start_time(process.pid) is not None
+        asyncio.run(proc_tree.sweep(tmp_path))
+        assert process.poll() is None
+        assert not list((tmp_path / proc_tree.RECORDS_DIR).glob("*.json"))
+    finally:
+        process.kill()
+        process.wait(timeout=2)

@@ -49,11 +49,14 @@ class State:
     last_send_error: str | None = None
 
 
-def sample(port: int, token: str | None) -> tuple[Verdict, str]:
+def sample(port: int, token: str | None, host: str = "127.0.0.1") -> tuple[Verdict, str]:
     headers = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = Request(f"http://127.0.0.1:{port}/api/v1/system/health", data=b"{}", headers=headers, method="POST")
+    address = "127.0.0.1" if host in ("", "localhost", "0.0.0.0") else "::1" if host == "::" else host
+    if ":" in address:
+        address = f"[{address}]"
+    request = Request(f"http://{address}:{port}/api/v1/system/health", data=b"{}", headers=headers, method="POST")
     try:
         with build_opener(ProxyHandler({})).open(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             answer = json.load(response)
@@ -138,15 +141,24 @@ async def _bot_credentials(ops: ops_config.OpsConfig, runtime_root: Path) -> dic
     path = runtime_root / ".local/probe/lark_bot.json"
     connection = None
     credentials = None
+    read_ok = False
     try:
         connection = await asyncpg.connect(ops.database_url, timeout=5, command_timeout=5)
-        row = await connection.fetchrow(
-            "SELECT c.config, s.bot_token FROM channel_configs c JOIN channel_secrets s USING (channel_id) "
-            "WHERE c.channel_id = 'channel-lark_bot'")
-        if row:
+        rows = await connection.fetch(
+            "SELECT c.channel_id, c.config, s.bot_token FROM channel_configs c JOIN channel_secrets s USING (channel_id) "
+            "WHERE c.channel_type = 'lark_bot'")
+        candidates = []
+        for row in rows:
             config = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
-            credentials = _credentials({"app_id": config.get("app_id"), "domain": config.get("domain", "feishu"),
-                                        "app_secret": row["bot_token"]})
+            if (not ops.probe_lark_profile or ops.probe_lark_profile == row["channel_id"]
+                    or ops.probe_lark_profile == config.get("profile")):
+                candidate = _credentials({"app_id": config.get("app_id"), "domain": config.get("domain", "feishu"),
+                                          "app_secret": row["bot_token"]})
+                if candidate:
+                    candidates.append(candidate)
+        if len(candidates) == 1:
+            credentials = candidates[0]
+        read_ok = True
     except Exception:
         # A failed database is precisely when the independent probe must still send.
         pass
@@ -157,12 +169,19 @@ async def _bot_credentials(ops: ops_config.OpsConfig, runtime_root: Path) -> dic
             except Exception:
                 connection.terminate()
     if credentials:
-        _write_json(path, credentials)
+        _write_json(path, {**credentials, **({"profile": ops.probe_lark_profile} if ops.probe_lark_profile else {})})
         return credentials
+    if read_ok:
+        # A reachable database with no unique match must not reuse another bot's credentials.
+        path.unlink(missing_ok=True)
+        return None
     try:
-        return _credentials(json.loads(path.read_text(encoding="utf-8")))
+        cached = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(cached, dict) and cached.get("profile", "") == ops.probe_lark_profile:
+            return _credentials(cached)
     except (OSError, ValueError):
         return None
+    return None
 
 
 async def _bot_send(ops: ops_config.OpsConfig, runtime_root: Path, text: str, key: str, target: dict) -> str | None:
@@ -186,11 +205,9 @@ def send(ops: ops_config.OpsConfig, runtime_root: Path, text: str, key: str) -> 
             return asyncio.run(_bot_send(ops, runtime_root, text, key, target))
         if ops.probe_notify_channel != "lark":
             return "unsupported probe.notify_channel"
-        from looper import child_env
-
         argv = lark_cli.send_command(**target, text=text, profile=ops.probe_lark_profile or None, idempotency_key=key)
         assert "--as" in argv and argv[argv.index("--as") + 1] == "bot"
-        result = subprocess.run(argv, env=child_env.inherited(), timeout=20, capture_output=True)
+        result = subprocess.run(argv, env=lark_cli.environment(), timeout=20, capture_output=True)
         if result.returncode:
             lines = result.stderr.decode("utf-8", errors="replace").strip().splitlines()
             return lines[-1] if lines else f"lark-cli exited {result.returncode}"
@@ -206,11 +223,17 @@ def run(ops: ops_config.OpsConfig, runtime_root: Path) -> int:
     if not ops.probe_notify_channel or not ops.probe_notify_chat:
         print("probe is not configured: set probe.notify_channel and probe.notify_chat in the ops file")
         return 0
-    verdict, reason = sample(ops.port, operator_auth.read_token(runtime_root))
+    verdict, reason = sample(ops.port, operator_auth.read_token(runtime_root), ops.host)
     path = runtime_root / ".local/probe/state.json"
     previous = _read_state(path)
     now = datetime.now(timezone.utc)
     state, action = step(previous, verdict, now, timedelta(minutes=ops.probe_after_minutes))
+    if verdict == Verdict.OK and ops.probe_notify_channel == "lark_bot" and action == Action.NONE:
+        # Prime and refresh before the first outage, while the database still answers.
+        try:
+            asyncio.run(_bot_credentials(ops, runtime_root))
+        except OSError as exc:
+            state.last_send_error = f"could not cache lark_bot credentials: {type(exc).__name__}"
     if action == Action.ALERT:
         minutes = max(0, int((now - state.first_bad_at).total_seconds() // 60))
         text = (f"告警：Looper 服务（{socket.gethostname()}，端口 {ops.port}）已经 {minutes} 分钟没有正常响应："
