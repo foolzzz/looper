@@ -72,7 +72,7 @@ def test_a_bad_schedule_is_refused_with_the_reason(monkeypatch: pytest.MonkeyPat
         ("daily_budget_usd", 1), ("profile_overrides", {"worker": "missing-profile"}),
         ("task_limits", {"worker": 1}), ("user_gates", "on"),
     )],
-    ({"command": "true", "run_timeout_seconds": "default"}, "run_timeout_mode"),
+    ({"command": "true", "run_timeout_seconds": "default"}, "run_timeout_seconds"),
     *[({"command": "true", "env": value}, "env") for value in (
         [], {"1A": "x"}, {"LOOPER_SCHEDULE_X": "x"}, {"A": "x" * 4097},
         {"A": "x\x00y"}, {"A": 1}, {f"A{i}": "x" for i in range(65)},
@@ -132,12 +132,6 @@ def test_env_file_preserves_spelling_and_import_can_defer_existence(tmp_path, mo
     assert schedules._env_file(None) is None
 
 
-def test_kind_is_immutable_at_the_service_boundary():
-    with pytest.raises(RequestError, match="a schedule's kind cannot change") as refused:
-        asyncio.run(schedules._fields({"kind": "command"}, update=True))
-    assert refused.value.status == HTTP_400
-
-
 @pytest.mark.parametrize("kind", ["agent", "command"])
 def test_one_minute_rules_are_only_allowed_for_commands_or_gates(monkeypatch, kind):
     from datetime import datetime, timezone
@@ -151,13 +145,13 @@ def test_one_minute_rules_are_only_allowed_for_commands_or_gates(monkeypatch, ki
 
 
 @pytest.mark.parametrize(("kind", "overrides", "expected"), [
-    ("command", {}, (3, None, 10)), ("agent", {}, (3, None, 0)),
+    ("command", {}, (3, 900, 10)), ("agent", {}, (3, 900, 0)),
     ("command", {"alert_failures_after": 1, "alert_stale_after_seconds": 300,
                  "alert_overlap_after": 0}, (1, 300, 0)),
 ])
 def test_alert_policy_resolves_defaults_and_explicit_zero(kind, overrides, expected):
     from looper.agents.schedule_notify import alert_policy
-    policy = alert_policy({"kind": kind, **overrides})
+    policy = alert_policy({"kind": kind, "cron": "* * * * *", "timezone": "UTC", **overrides})
     assert (policy.failures_after, policy.stale_after.total_seconds() if policy.stale_after else None,
             policy.overlap_after) == expected
 

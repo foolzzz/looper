@@ -37,6 +37,7 @@ from pathlib import Path
 
 import asyncpg
 
+from ..paths import home_runtime_root
 from ..db import channel_configs as db_channel_configs, connection as db_connection, llm_records as db_llm_records
 from ..db import projects as db_projects, schedules as db_schedules
 from . import cron
@@ -156,12 +157,19 @@ def describe(rule_text: str, zone_name: str) -> str:
 # --- Views ---
 
 
-def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None, *,
+             runtime_root: Path | None = None) -> dict[str, Any]:
     """A run; a running one's cost is its task's so far (``cost``)."""
     cost_usd = row.get("cost_usd")
     if cost_usd is None and cost is not None:
         cost_usd = cost["cost_usd"]
-    start, finish = row.get("started_at") or row.get("fired_at"), row.get("finished_at")
+    start = row.get("started_at")
+    # Agent runs predate started_at; command runs must actually have launched a child.
+    if start is None and row.get("kind") != Kind.COMMAND.value:
+        start = row.get("fired_at")
+    if row["status"] in db_schedules.SKIPPED:
+        start = None
+    finish = row.get("finished_at")
     return {
         "run_id": row["id"], "schedule_id": row["schedule_id"], "scheduled_for": row["scheduled_for"],
         "manager_id": row.get("manager_id", "manager"),
@@ -173,7 +181,8 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> d
         "started_at": row.get("started_at"), "exit_code": row.get("exit_code"),
         "exit_signal": row.get("exit_signal"),
         "duration_seconds": (finish - start).total_seconds() if finish is not None and start is not None else None,
-        "log": {"file": row["log_path"], "bytes": row.get("log_bytes"),
+        "log": {"path": str(((runtime_root or home_runtime_root()) / row["log_path"]).absolute()),
+                "bytes": row.get("log_bytes"),
                 "truncated": row.get("log_truncated", False)} if row.get("log_path") else None,
         "log_tail": row.get("log_tail"),
         "execution_snapshot": row.get("execution_snapshot"),
@@ -183,10 +192,10 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> d
     }
 
 
-async def _run_views(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def _run_views(rows: list[dict[str, Any]], *, runtime_root: Path | None = None) -> list[dict[str, Any]]:
     running = [row["task_id"] for row in rows if row.get("task_id") and row.get("cost_usd") is None]
     costs = await db_llm_records.task_costs(running) if running else {}
-    return [run_view(row, costs.get(row.get("task_id") or "")) for row in rows]
+    return [run_view(row, costs.get(row.get("task_id") or ""), runtime_root=runtime_root) for row in rows]
 
 
 def _timeout_view(row: Mapping[str, Any], default: int | None) -> tuple[Any, int | None]:
@@ -215,11 +224,12 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "kind": row.get("kind", Kind.AGENT.value), "command": row.get("command"),
         "env": dict(row.get("env") or {}), "env_file": row.get("env_file"),
         "success_deadline": row.get("success_deadline"),
-        "alert_policy": {key: {"value": value, "default": row.get(column) is None}
+        "alert_policy": {key: {"value": value, "default": row.get(column) is None,
+                              "source": "default" if row.get(column) is None else "schedule"}
                          for key, column, value in (
                              ("failures_after", "alert_failures_after", policy.failures_after),
                              ("stale_after_seconds", "alert_stale_after_seconds",
-                              int(policy.stale_after.total_seconds()) if policy.stale_after is not None else None),
+                              int(policy.stale_after.total_seconds())),
                              ("overlap_after", "alert_overlap_after", policy.overlap_after))},
         "timezone": row["timezone"], "description": describe(row["cron"], row["timezone"]),
         "requirement": row["requirement"], "work_dir": row["work_dir"], "overlap": row["overlap"],
@@ -256,10 +266,10 @@ def local_midnight(now: datetime | None = None) -> datetime:
     return datetime.combine(local.date(), datetime.min.time(), tzinfo=zone)
 
 
-async def _schedule_answer(schedule_id: str) -> dict[str, Any]:
+async def _schedule_answer(schedule_id: str, *, runtime_root: Path | None = None) -> dict[str, Any]:
     row = await _existing(schedule_id)
     latest = (await db_schedules.latest_runs([schedule_id])).get(schedule_id)
-    last_run = (await _run_views([latest]))[0] if latest else None
+    last_run = (await _run_views([latest], runtime_root=runtime_root))[0] if latest else None
     spent = await db_schedules.spent_since(db_connection.get_pool(), schedule_id, local_midnight())
     return {"schedule": schedule_view(row, last_run, spent_today=spent, default_timeout=await default_run_timeout())}
 
@@ -484,8 +494,6 @@ async def _fields(data: Mapping[str, Any], *, update: bool, resolve_profiles: bo
     accepted = (*_ACCEPTED, "enabled") if update else (*_ACCEPTED, "manager_id")
     if update and "manager_id" in data:
         raise RequestError(HTTP_400, "a schedule's owner cannot change")
-    if update and "kind" in data:
-        raise RequestError(HTTP_400, "a schedule's kind cannot change; create a new schedule")
     if "enabled" in data and not update:
         raise RequestError(HTTP_400, "a new schedule is created disabled; enable it with PUT /api/schedules/<id> "
                                      '{"enabled": true}')
@@ -538,9 +546,11 @@ def _check_kind_fields(kind: str, merged: Mapping[str, Any]) -> None:
                       "run_budget_usd", "daily_budget_usd", "profile_overrides", "task_limits"):
             if merged.get(field):
                 raise RequestError(HTTP_400, f"{field} does not apply to a command schedule")
-        for field, value in (("user_gates", UserGates.ON.value), ("run_timeout_mode", RunTimeoutMode.INHERIT.value)):
-            if merged.get(field) == value:
-                raise RequestError(HTTP_400, f"{field} does not apply to a command schedule")
+        if merged.get("user_gates") == UserGates.ON.value:
+            raise RequestError(HTTP_400, "user_gates does not apply to a command schedule")
+        if merged.get("run_timeout_mode") == RunTimeoutMode.INHERIT.value:
+            raise RequestError(HTTP_400, "a command schedule's run_timeout_seconds is a number of seconds "
+                                        "or null for no limit")
     else:
         for field in ("command", "env", "env_file"):
             if merged.get(field):
@@ -581,31 +591,31 @@ def _check_rule(rule_text: Any, zone_name: Any, now: datetime, *, gated: bool,
 # --- Requests ---
 
 
-async def _schedule_views(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+async def _schedule_views(rows: list[dict[str, Any]], *, runtime_root: Path | None = None) -> list[dict[str, Any]]:
     """``schedule_view`` of each row, with its newest run and what it spent today."""
     ids = [row["id"] for row in rows]
     latest = await db_schedules.latest_runs(ids)
-    views = dict(zip(latest, await _run_views(list(latest.values()))))
+    views = dict(zip(latest, await _run_views(list(latest.values()), runtime_root=runtime_root)))
     spent = await db_schedules.spent_since_each(db_connection.get_pool(), ids, local_midnight())
     default = await default_run_timeout()
     return [schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]], default_timeout=default)
             for row in rows]
 
 
-async def list_schedules(project_id: str) -> dict[str, Any]:
+async def list_schedules(project_id: str, *, runtime_root: Path | None = None) -> dict[str, Any]:
     """The project's schedules, and the limits a schedule is checked against."""
     await _existing_project(project_id)
-    return {"schedules": await _schedule_views(await db_schedules.list_schedules(project_id)),
+    return {"schedules": await _schedule_views(await db_schedules.list_schedules(project_id), runtime_root=runtime_root),
             "limits": await limits()}
 
 
-async def list_all_schedules() -> dict[str, Any]:
+async def list_all_schedules(*, runtime_root: Path | None = None) -> dict[str, Any]:
     """Every project's schedules, by project name and then name, the disabled ones too (the Schedules page)."""
-    return {"schedules": await _schedule_views(await db_schedules.list_schedules())}
+    return {"schedules": await _schedule_views(await db_schedules.list_schedules(), runtime_root=runtime_root)}
 
 
 async def create_schedule(project_id: str, data: dict[str, Any], *, created_via: str = "dashboard",
-                          now: datetime | None = None) -> dict[str, Any]:
+                          now: datetime | None = None, runtime_root: Path | None = None) -> dict[str, Any]:
     await _existing_project(project_id)
     fields, profiles, task_limits = await _fields(data, update=False, resolve_profiles=False)
     kind = fields.get("kind", Kind.AGENT.value)
@@ -636,20 +646,27 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
     except asyncpg.ForeignKeyViolationError:  # the project or a profile was removed meanwhile
         raise RequestError(HTTP_400, "the project or an Agent Profile the schedule chose was removed meanwhile") \
             from None
-    return await _schedule_answer(schedule_id)
+    return await _schedule_answer(schedule_id, runtime_root=runtime_root)
 
 
-async def get_schedule(schedule_id: str) -> dict[str, Any]:
-    return await _schedule_answer(schedule_id)
+async def get_schedule(schedule_id: str, *, runtime_root: Path | None = None) -> dict[str, Any]:
+    return await _schedule_answer(schedule_id, runtime_root=runtime_root)
 
 
-async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: datetime | None = None,
+                          runtime_root: Path | None = None) -> dict[str, Any]:
     """Change the fields given. Enabling sets the next fire time from now (nothing missed before runs), as does a
     new rule or zone on an enabled schedule; disabling clears it."""
     if not data:
         raise RequestError(HTTP_400, "give at least one field to change")
     now = now or _utcnow()
     fields, profiles, task_limits = await _fields(data, update=True, resolve_profiles=False)
+    if "kind" in fields:
+        stored = await _existing(schedule_id)
+        if fields.pop("kind") != stored["kind"]:
+            raise RequestError(HTTP_400, "a schedule's kind cannot change; create a new schedule")
+        if data == {"kind": stored["kind"]}:
+            return await _schedule_answer(schedule_id, runtime_root=runtime_root)
     enabled = data.get("enabled")
     if "enabled" in data and not isinstance(enabled, bool):
         raise RequestError(HTTP_400, "enabled must be true or false")
@@ -704,7 +721,7 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "an Agent Profile the schedule chose was removed meanwhile; choose again") \
             from None
-    return await _schedule_answer(schedule_id)
+    return await _schedule_answer(schedule_id, runtime_root=runtime_root)
 
 
 async def delete_schedule(schedule_id: str) -> dict[str, Any]:
@@ -722,7 +739,7 @@ async def reset_planner_session(schedule_id: str) -> dict[str, Any]:
     return {"cleared": cleared}
 
 
-async def list_runs(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any]:
+async def list_runs(schedule_id: str, query: Mapping[str, str], *, runtime_root: Path | None = None) -> dict[str, Any]:
     """A page of the schedule's runs, newest first: ``limit`` of them, older than the run ``before`` when given,
     without the routine skips when ``skips`` is ``hide``. ``next_before`` continues the list (None at its end), and
     ``routine_skips`` counts those skips over the schedule's whole history, shown or not."""
@@ -748,7 +765,7 @@ async def list_runs(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any
                                         only=status,
                                         without=ROUTINE_SKIPS if skips == SkipRows.HIDE.value else ())
     page = rows[:limit]
-    return {"runs": await _run_views(page),
+    return {"runs": await _run_views(page, runtime_root=runtime_root),
             "next_before": page[-1]["id"] if len(rows) > limit else None,
             "routine_skips": await db_schedules.run_counts(schedule_id, ROUTINE_SKIPS),
             "stats": await db_schedules.run_stats(schedule_id, _utcnow())}
@@ -836,13 +853,13 @@ def preview(data: Mapping[str, Any], *, now: datetime | None = None) -> dict[str
             "next": cron.next_fires(rule, tz, now, count), "error": None}
 
 
-async def run_now(schedule_id: str, scheduler: Any) -> dict[str, Any]:
+async def run_now(schedule_id: str, scheduler: Any, *, runtime_root: Path | None = None) -> dict[str, Any]:
     """Fire the schedule now (``trigger`` manual), through the same overlap check; its next fire time stays."""
     run_id = await scheduler.run_now(schedule_id)
     if run_id is None:
         raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
     row = await db_schedules.get_run(run_id)
-    return {"run": (await _run_views([row]))[0]}
+    return {"run": (await _run_views([row], runtime_root=runtime_root))[0]}
 
 
 async def list_notifications(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any]:

@@ -14,6 +14,7 @@ ORDER = 12
 
 _BUDGET = _nullable({"type": "number", "exclusiveMinimum": 0, "maximum": BUDGET_MAX_USD})
 _FIELDS = {
+    "kind": _enum("agent", "command"),
     "name": {"type": "string", "maxLength": schedules.NAME_MAX_CHARS}, "cron": _STR,
     "requirement": _STR, "timezone": _STR, "work_dir": _STR,
     "command": _nullable({"type": "string", "maxLength": schedules.GATE_COMMAND_MAX_CHARS}),
@@ -42,7 +43,7 @@ _FIELDS = {
     "task_limits": _nullable(_object(dict.fromkeys(("worker", "reviewer"), _nullable({
         "type": "integer", "minimum": 1, "maximum": CONCURRENCY_MAX})), [], closed=True)),
 }
-SCHEDULE_CREATE = _object({**_FIELDS, "kind": _enum("agent", "command"),
+SCHEDULE_CREATE = _object({**_FIELDS,
                            "manager_id": {"type": "string", "minLength": 1}}, ["name", "cron"], closed=True)
 SCHEDULE_PATCH = {**_object({**_FIELDS, "enabled": _BOOL}, [], closed=True),
                   "anyOf": [{"required": [key]} for key in (*_FIELDS, "enabled")]}
@@ -94,6 +95,8 @@ async def impact(server, operation, arguments, principal, headers):
     data = arguments["fields"]
     if not data:
         raise OpError(ErrorCode.INVALID, "give at least one field to change")
+    if "kind" in data and data["kind"] != row.get("kind", "agent"):
+        raise OpError(ErrorCode.INVALID, "a schedule's kind cannot change; create a new schedule")
     # Normalize with the same validators as execution before deciding whether a cap rises.
     command = row.get("kind", "agent") == "command"
     fields, profiles, _ = await answered(schedules._fields(data, update=True, resolve_profiles=not command))
@@ -121,13 +124,16 @@ async def impact(server, operation, arguments, principal, headers):
 async def run(server, operation, arguments, principal, headers):
     action = operation.operation_id.removeprefix("schedule_admin.")
     if action == "create":
-        result = await answered(schedules.create_schedule(arguments["project_id"], arguments["fields"]))
+        result = await answered(schedules.create_schedule(arguments["project_id"], arguments["fields"],
+                                                          runtime_root=server._runtime_root))
     elif action == "update":
-        result = await answered(schedules.update_schedule(arguments["schedule_id"], arguments["fields"]))
+        result = await answered(schedules.update_schedule(arguments["schedule_id"], arguments["fields"],
+                                                          runtime_root=server._runtime_root))
     elif action == "run":
         if server._scheduler is None:
             raise OpError(ErrorCode.CONFLICT, "the scheduler is not running in this server")
-        result = await answered(schedules.run_now(arguments["schedule_id"], server._scheduler))
+        result = await answered(schedules.run_now(arguments["schedule_id"], server._scheduler,
+                                                  runtime_root=server._runtime_root))
     else:
         service = schedules.delete_schedule if action == "delete" else schedules.reset_planner_session
         result = await answered(service(arguments["schedule_id"]))

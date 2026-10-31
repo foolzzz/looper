@@ -49,7 +49,7 @@ SKIPPED = ("skipped_gate", *NOTHING_RAN)
 UNFINISHED = ("failed", "timed_out", "gate_failed", "stopped", "cancelled", "interrupted")
 
 _RUN = """
-    SELECT r.*, s.manager_id, t.status AS task_status, t.title AS task_title FROM schedule_runs r
+    SELECT r.*, s.manager_id, s.kind, t.status AS task_status, t.title AS task_title FROM schedule_runs r
     JOIN schedules s ON s.id = r.schedule_id LEFT JOIN tasks t ON t.id = r.task_id
 """
 
@@ -417,9 +417,11 @@ async def run_stats(schedule_id: str, now: datetime, *, pool: Db | None = None) 
     row = await db.fetchrow(
         """
         WITH executions AS (
-            SELECT status, finished_at, EXTRACT(EPOCH FROM finished_at - COALESCE(started_at, fired_at)) AS seconds
-            FROM schedule_runs
-            WHERE schedule_id = $1 AND status = ANY($3::text[])
+            SELECT r.status, r.finished_at,
+                   EXTRACT(EPOCH FROM r.finished_at - CASE WHEN s.kind = 'command' THEN r.started_at
+                       ELSE COALESCE(r.started_at, r.fired_at) END) AS seconds
+            FROM schedule_runs r JOIN schedules s ON s.id = r.schedule_id
+            WHERE r.schedule_id = $1 AND r.status = ANY($3::text[])
               AND finished_at > $2::timestamptz - interval '7 days' AND finished_at <= $2
         )
         SELECT count(*) FILTER (WHERE finished_at > $2 - interval '1 day') AS day_runs,
@@ -465,7 +467,7 @@ async def latest_runs(schedule_ids: list[str], *, pool: Db | None = None) -> dic
     db = pool or get_pool()
     rows = await db.fetch(
         """
-        SELECT DISTINCT ON (r.schedule_id) r.*, s.manager_id, t.status AS task_status
+        SELECT DISTINCT ON (r.schedule_id) r.*, s.manager_id, s.kind, t.status AS task_status
         FROM schedule_runs r JOIN schedules s ON s.id = r.schedule_id LEFT JOIN tasks t ON t.id = r.task_id
         WHERE r.schedule_id = ANY($1::text[]) ORDER BY r.schedule_id, r.created_at DESC, r.id DESC
         """,

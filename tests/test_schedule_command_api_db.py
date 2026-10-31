@@ -78,9 +78,9 @@ def test_command_create_defaults_and_update_readback_across_full_views(tmp_path,
             assert view["kind"] == "command" and view["requirement"] == ""
             assert view["run_timeout_seconds"] is None and view["env"] == {}
             assert view["alert_policy"] == {
-                "failures_after": {"value": 3, "default": True},
-                "stale_after_seconds": {"value": None, "default": True},
-                "overlap_after": {"value": 10, "default": True}}
+                "failures_after": {"value": 3, "default": True, "source": "default"},
+                "stale_after_seconds": {"value": 900, "default": True, "source": "default"},
+                "overlap_after": {"value": 10, "default": True, "source": "default"}}
             assert view["alerts"]["deadline_since"] is None
             assert view["alerts"]["overlap_since"] is None
             env_file = tmp_path / "command.env"
@@ -105,21 +105,28 @@ def test_command_create_defaults_and_update_readback_across_full_views(tmp_path,
                     assert saved[key] == fields[key]
                 assert saved["name"] == "Renamed"
                 assert saved["alert_policy"] == {
-                    "failures_after": {"value": 4, "default": False},
-                    "stale_after_seconds": {"value": 600, "default": False},
-                    "overlap_after": {"value": 2, "default": False}}
+                    "failures_after": {"value": 4, "default": False, "source": "schedule"},
+                    "stale_after_seconds": {"value": 600, "default": False, "source": "schedule"},
+                    "overlap_after": {"value": 2, "default": False, "source": "schedule"}}
             status, result = await call("update", {"schedule_id": sid, "fields": {"env": None}}, client=False)
             assert status == 200 and result["schedule"]["env"] == {}, result
-            for fields in ({"kind": "command"}, {"kind": "agent"}, {"requirement": "Run a task"},
+            for fields in ({"kind": "agent"}, {"requirement": "Run a task"},
                            {"gate_command": "true"}, {"run_timeout_seconds": "default"},
                            {"template_key": None, "template_inputs": {"REPORT": "daily"}},
                            {"profile_overrides": {"planner": "profile-not-present"}}):
                 status, result = await call("update", {"schedule_id": sid, "fields": fields}, client=False)
                 assert status == 400 and result["error"]["code"] == "invalid", result
+                if "kind" in fields:
+                    assert result["error"]["message"] == "a schedule's kind cannot change; create a new schedule"
+                if "run_timeout_seconds" in fields:
+                    assert result["error"]["message"] == (
+                        "a command schedule's run_timeout_seconds is a number of seconds or null for no limit")
                 if "profile_overrides" in fields:
                     assert "profile_overrides does not apply" in result["error"]["message"]
                 if "template_inputs" in fields:
                     assert "template_inputs does not apply" in result["error"]["message"]
+            status, result = await call("update", {"schedule_id": sid, "fields": {"kind": "command"}}, client=False)
+            assert status == 200 and result["schedule"]["kind"] == "command", result
             assert (await db_schedules.get_schedule(sid))["command"] == "printf changed"
     run_db(run, monkeypatch, timeout=30)
 
@@ -153,26 +160,42 @@ def test_runs_status_filter_stats_and_execution_details(tmp_path, monkeypatch):
             for status, age, duration in (("completed", 3, 90), ("failed", 4, 100), ("succeeded", 8, 110)):
                 await _run(pool, sid, status=status, finished_at=now - timedelta(days=age), seconds=duration)
             for status in (*db_schedules.SKIPPED, *db_schedules.OPEN_STATUSES):
-                await _run(pool, sid, status=status, finished_at=now - timedelta(hours=1), seconds=500)
+                await _run(pool, sid, status=status, finished_at=now - timedelta(hours=1), seconds=500, started=False)
             await db_schedules.update_run(pool, ids["failed"], exit_code=7, exit_signal=9,
                 log_path="logs/schedules/example/run.log", log_bytes=123, log_truncated=True, log_tail="last line")
             status, page = await call("runs", {"schedule_id": sid, "status": "failed"})
             assert status == 200 and len(page["runs"]) == 2
             assert {row["status"] for row in page["runs"]} == {"failed"}
             assert page["stats"]["day"] == {"runs": 8, "succeeded": 2, "failed": 4,
-                "success_rate": 0.25, "avg_seconds": 45, "max_seconds": 80}
+                "success_rate": 0.25, "avg_seconds": 40, "max_seconds": 70}
             assert page["stats"]["week"] == {"runs": 10, "succeeded": 3, "failed": 5,
-                "success_rate": 0.3, "avg_seconds": 55, "max_seconds": 100}
+                "success_rate": 0.3, "avg_seconds": 470 / 9, "max_seconds": 100}
             details = next(row for row in page["runs"] if row["run_id"] == ids["failed"])
             assert details["started_at"] and details["duration_seconds"] == 30
             assert (details["exit_code"], details["exit_signal"], details["log_tail"]) == (7, 9, "last line")
-            assert details["log"] == {"file": "logs/schedules/example/run.log", "bytes": 123, "truncated": True}
+            assert details["log"] == {"path": str(tmp_path / "logs/schedules/example/run.log"), "bytes": 123, "truncated": True}
             _, all_runs = await call("runs", {"schedule_id": sid})
             assert all_runs["stats"] == page["stats"]
             running = next(row for row in all_runs["runs"] if row["status"] == "running")
             assert running["duration_seconds"] is None and running["log"] is None
             cancelled = next(row for row in all_runs["runs"] if row["status"] == "cancelled")
-            assert cancelled["started_at"] is None and cancelled["duration_seconds"] == 80
+            assert cancelled["started_at"] is None and cancelled["duration_seconds"] is None
+            assert all(row["duration_seconds"] is None for row in all_runs["runs"]
+                       if row["status"] in db_schedules.SKIPPED)
+            # A failed launch remains a failure, but contributes no duration.
+            rid = await _run(pool, sid, status="failed", seconds=1000, started=False)
+            _, after = await call("runs", {"schedule_id": sid})
+            assert next(row for row in after["runs"] if row["run_id"] == rid)["duration_seconds"] is None
+            for action, body in (("get", {"schedule_id": sid}), ("list", {}),
+                                 ("project_list", {"project_id": project["id"]})):
+                _, result = await call(action, body)
+                view = result["schedule"] if action == "get" else result["schedules"][0]
+                assert view["last_run"]["run_id"] == rid
+                assert view["last_run"]["duration_seconds"] is None
+            assert after["stats"]["day"]["runs"] == 9 and after["stats"]["day"]["failed"] == 5
+            for window in ("day", "week"):
+                for metric in ("avg_seconds", "max_seconds"):
+                    assert after["stats"][window][metric] == page["stats"][window][metric]
             status, answer = await call("runs", {"schedule_id": sid, "status": "unknown"})
             assert status == 400 and answer["error"]["code"] == "invalid"
     run_db(run, monkeypatch, timeout=30)
@@ -225,6 +248,12 @@ def test_run_log_tail_returns_last_lines_and_their_byte_offset(tmp_path, monkeyp
             rid = await _run(pool, sid, status="running", log_path=str(path.relative_to(tmp_path)))
             _, schedule = await call("get", {"schedule_id": sid})
             assert schedule["schedule"]["last_run"]["log"]["bytes"] is None
+            for action, body in (("get", {"schedule_id": sid}), ("list", {}),
+                                 ("project_list", {"project_id": project["id"]})):
+                _, result = await call(action, body)
+                view = result["schedule"] if action == "get" else result["schedules"][0]
+                assert view["last_run"]["log"]["path"] == str(path)
+            assert (await db_schedules.get_run(rid))["log_path"] == str(path.relative_to(tmp_path))
             status, result = await call("run_log", {"run_id": rid, "tail_lines": 3})
             assert status == 200 and base64.b64decode(result["data_base64"]) == tail
             assert result["offset"] == len(prefix) and result["next_offset"] is None
@@ -260,7 +289,7 @@ def test_run_log_rejects_escaping_paths_and_reports_missing_files(tmp_path, monk
             assert status == 200, result
             agent = result["schedule"]
             assert agent["kind"] == "agent" and agent["run_timeout_seconds"] == "default"
-            assert agent["alert_policy"]["overlap_after"] == {"value": 0, "default": True}
+            assert agent["alert_policy"]["overlap_after"] == {"value": 0, "default": True, "source": "default"}
             status, result = await call("update", {"schedule_id": agent["schedule_id"],
                 "fields": {"command": "true"}}, client=False)
             assert status == 400 and "command applies to command schedules only" in result["error"]["message"]
@@ -285,4 +314,49 @@ def test_run_log_rejects_invalid_paging_parameters(tmp_path, monkeypatch):
                            {"limit_bytes": True}, {"tail_lines": 0}, {"tail_lines": 5001}, {"tail_lines": True}):
                 status, result = await call("run_log", {"run_id": rid, **fields})
                 assert status == 400 and result["error"]["code"] == "invalid", (fields, result)
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("kind,other", [("agent", "command"), ("command", "agent")])
+def test_kind_update_is_idempotent_and_changes_are_refused(tmp_path, monkeypatch, kind, other):
+    async def run(pool):
+        project = await projects.create_project(name="Example", work_dir=str(tmp_path))
+        async with _api(tmp_path, pool) as call:
+            status, created = await call("create", {"project_id": project["id"], "fields": {
+                "name": "Example", "kind": kind, "cron": "0 * * * *", "timezone": "UTC",
+                **({"command": "true"} if kind == "command" else {"requirement": "Read"})}}, client=False)
+            assert status == 200, created
+            original = created["schedule"]
+            sid = original["schedule_id"]
+            for client in (True, False):
+                status, result = await call("update", {"schedule_id": sid, "fields": {"kind": kind}}, client=client)
+                assert status == 200 and result["schedule"] == original, result
+                status, result = await call("update", {"schedule_id": sid,
+                    "fields": {"kind": other, "name": "Rejected"}}, client=client)
+                assert status == 400, result
+                assert result["error"]["message"] == "a schedule's kind cannot change; create a new schedule"
+            status, result = await call("update", {"schedule_id": sid,
+                "fields": {"kind": kind, "name": "Renamed"}}, client=False)
+            assert status == 200 and result["schedule"]["name"] == "Renamed", result
+            assert result["schedule"]["kind"] == kind
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("cron,seconds", [("* * * * *", 900), ("0 * * * *", 10800), ("0 0 * * *", 86400)])
+def test_alert_policy_reports_effective_defaults_after_overrides_are_cleared(tmp_path, monkeypatch, cron, seconds):
+    async def run(pool):
+        project = await projects.create_project(name="Example", work_dir=str(tmp_path))
+        async with _api(tmp_path, pool) as call:
+            view = await _create(call, project["id"], cron=cron, alert_failures_after=1,
+                                 alert_stale_after_seconds=300, alert_overlap_after=0)
+            assert view["alert_policy"] == {
+                key: {"value": value, "default": False, "source": "schedule"}
+                for key, value in (("failures_after", 1), ("stale_after_seconds", 300), ("overlap_after", 0))}
+            status, result = await call("update", {"schedule_id": view["schedule_id"], "fields": {
+                "alert_failures_after": None, "alert_stale_after_seconds": None, "alert_overlap_after": None}},
+                client=False)
+            assert status == 200, result
+            assert result["schedule"]["alert_policy"] == {
+                key: {"value": value, "default": True, "source": "default"}
+                for key, value in (("failures_after", 3), ("stale_after_seconds", seconds), ("overlap_after", 10))}
     run_db(run, monkeypatch, timeout=30)

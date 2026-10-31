@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
@@ -58,7 +58,7 @@ SNIPPET_CHARS = 300
 @dataclass(frozen=True)
 class AlertPolicy:
     failures_after: int
-    stale_after: timedelta | None
+    stale_after: timedelta
     overlap_after: int
 
 
@@ -69,7 +69,10 @@ def alert_policy(schedule: Mapping[str, Any]) -> AlertPolicy:
     overlap = schedule.get("alert_overlap_after")
     return AlertPolicy(
         failures_after=FAILURES_ALERT_AT if failures is None else failures,
-        stale_after=None if stale is None else timedelta(seconds=stale),
+        stale_after=(_default_stale_after(cron.parse(schedule["cron"]), cron.zone(schedule["timezone"]),
+            max((schedule[key] for key in ("last_ok_at", "enabled_at", "rule_changed_at", "created_at")
+                 if schedule.get(key) is not None), default=datetime.now(timezone.utc)))
+            if stale is None else timedelta(seconds=stale)),
         overlap_after=(10 if schedule.get("kind") == "command" else 0) if overlap is None else overlap,
     )
 
@@ -109,9 +112,14 @@ def stale_deadline(rule: cron.CronRule, tz: Any, *, last_ok: datetime | None, fi
     start = cron.next_fire(rule, tz, since)
     if start is None:
         return None
-    following = cron.next_fire(rule, tz, start)
-    period = (following - start) if following is not None else STALE_LIMIT
-    return start + min(max(STALE_PERIODS * period, STALE_FLOOR), STALE_LIMIT)
+    return start + _default_stale_after(rule, tz, since)
+
+
+def _default_stale_after(rule: cron.CronRule, tz: Any, since: datetime) -> timedelta:
+    start = cron.next_fire(rule, tz, since)
+    following = cron.next_fire(rule, tz, start) if start is not None else None
+    period = following - start if following is not None else STALE_LIMIT
+    return min(max(STALE_PERIODS * period, STALE_FLOOR), STALE_LIMIT)
 
 
 def snippet(text: str | None) -> str:

@@ -38,7 +38,7 @@ def test_generated_cli_posts_declared_schedule_write(action, options, body):
       for owner in ("", None, 1)],
     ("update", {"schedule_id": "sched-a", "fields": {}}),
     ("update", {"schedule_id": "sched-a", "fields": {"manager_id": "manager-reports"}}),
-    ("update", {"schedule_id": "sched-a", "fields": {"kind": "command"}}),
+    ("update", {"schedule_id": "sched-a", "fields": {"kind": "shell"}}),
     ("update", {"schedule_id": "sched-a", "fields": {"max_parallel_runs": True}}),
     ("update", {"schedule_id": "sched-a", "fields": {"profile_overrides": {"manager": "profile-a"}}}),
     ("update", {"schedule_id": "sched-a", "fields": {"task_limits": {"planner": 1}}}),

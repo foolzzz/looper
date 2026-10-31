@@ -28,7 +28,7 @@ RUN = _object({
                      "gate_output", "carried_from", "started_at", "log_tail"), _NULL_STR),
     "cost_usd": _NULL_NUMBER, "exit_code": _NULL_INT, "exit_signal": _NULL_INT,
     "duration_seconds": _NULL_NUMBER,
-    "log": _nullable(_object({"file": _STR, "bytes": _NULL_INT, "truncated": _BOOL}))})
+    "log": _nullable(_object({"path": _STR, "bytes": _NULL_INT, "truncated": _BOOL}))})
 _SCHEDULE_FIELDS = {
     **dict.fromkeys(("schedule_id", "project_id", "project_name", "manager_id", "name", "cron", "timezone", "description",
                      "requirement", "work_dir", "created_via", "created_at", "updated_at"), _STR),
@@ -37,9 +37,9 @@ _SCHEDULE_FIELDS = {
     "env": {"type": "object", "additionalProperties": _STR},
     "env_file": _NULL_STR, "success_deadline": _NULL_STR,
     "alert_policy": _object({
-        "failures_after": _object({"value": _INT, "default": _BOOL}),
-        "stale_after_seconds": _object({"value": _NULL_INT, "default": _BOOL}),
-        "overlap_after": _object({"value": _INT, "default": _BOOL})}),
+        "failures_after": _object({"value": _INT, "default": _BOOL, "source": _enum("default", "schedule")}),
+        "stale_after_seconds": _object({"value": _INT, "default": _BOOL, "source": _enum("default", "schedule")}),
+        "overlap_after": _object({"value": _INT, "default": _BOOL, "source": _enum("default", "schedule")})}),
     "template_inputs": {"type": "object", "additionalProperties": _STR},
     "enabled": _BOOL, "overlap": _enum("skip", "queue", "parallel"), "catch_up": _enum("once", "skip"),
     "notify": _enum("failures", "alerts", "always", "never"),
@@ -123,16 +123,17 @@ async def run(server, operation, arguments, principal, headers):
     if action == "preview":
         return _plain(schedules.preview(arguments))
     if action == "list":
-        result = await answered(schedules.list_all_schedules())
+        result = await answered(schedules.list_all_schedules(runtime_root=server._runtime_root))
     elif action == "project_list":
-        result = await answered(schedules.list_schedules(arguments["project_id"]))
+        result = await answered(schedules.list_schedules(arguments["project_id"], runtime_root=server._runtime_root))
     elif action == "get":
-        result = await answered(schedules.get_schedule(arguments["schedule_id"]))
+        result = await answered(schedules.get_schedule(arguments["schedule_id"], runtime_root=server._runtime_root))
     elif action == "run_log":
         result = await answered(schedules.run_log(arguments["run_id"], arguments, server._runtime_root))
     else:
         # The shared service accepts query-string values; v1 validates JSON types before adapting them.
         query = {key: str(value) for key, value in arguments.items() if key != "schedule_id" and value is not None}
         reader = schedules.list_runs if action == "runs" else schedules.list_notifications
-        result = await answered(reader(arguments["schedule_id"], query))
+        result = await answered(reader(arguments["schedule_id"], query,
+                                       **({"runtime_root": server._runtime_root} if action == "runs" else {})))
     return _plain(result)
