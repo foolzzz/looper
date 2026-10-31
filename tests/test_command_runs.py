@@ -1,9 +1,11 @@
 """Command supervisors survive the event loop and are observed by files and pid identity."""
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -156,6 +158,47 @@ def spec(root):
 def test_spawn_requires_prepare(tmp_path):
     with pytest.raises(RuntimeError, match="prepare"):
         CommandRuns(tmp_path).spawn(spec(tmp_path))
+
+
+def test_spawn_keeps_serve_environment_out_of_command(tmp_path, monkeypatch):
+    serve_env = {
+        "LOOPER_DATABASE_URL": "postgresql://serve-only.invalid/database",
+        "PGPASSWORD": "serve-only-password", "PGHOST": "serve-only-host",
+        "LOOPER_TELEGRAM_BOT_TOKEN": "serve-only-token", "SOME_SECRET": "serve-only-secret",
+    }
+    for name, value in serve_env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("LANG", "C")
+    env_file = tmp_path / "command.env"
+    env_file.write_text("FROM_FILE=file\nOVERRIDE=file\n")
+    command_spec = replace(spec(tmp_path), command="env", env_file=str(env_file),
+                           env={"OVERRIDE": "schedule", "LOOPER_SCHEDULE_ID": "fake"},
+                           schedule_env={"LOOPER_SCHEDULE_ID": "sched-test"})
+    runs = CommandRuns(tmp_path)
+    runs.prepare()
+    runs.spawn(command_spec)
+    process = runs._owned[command_spec.run_id]
+    try:
+        assert process.wait(timeout=5) == 0
+        observed = runs.inspect([row()], datetime.now(timezone.utc))[command_spec.run_id]
+        assert isinstance(observed, Finished)
+        assert observed.status == "succeeded"
+        log = (tmp_path / runs.log_path(command_spec.schedule_id, command_spec.run_id)).read_text()
+        actual = dict(line.split("=", 1) for line in log.splitlines())
+        assert not serve_env.keys() & actual.keys()
+        assert all(value not in log for value in serve_env.values())
+        assert actual["PATH"] == os.environ["PATH"]
+        assert actual["HOME"] == os.environ["HOME"]
+        assert actual["LANG"] == "C"
+        assert actual["FROM_FILE"] == "file"
+        assert actual["OVERRIDE"] == "schedule"
+        assert actual["LOOPER_SCHEDULE_ID"] == "sched-test"
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=5)
+        runs.reap()
+    assert not runs._owned
 
 
 def test_spawn_survives_event_loop_close_and_rejects_duplicate(tmp_path):
