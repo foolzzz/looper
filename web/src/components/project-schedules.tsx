@@ -13,6 +13,8 @@ import {
   fetchSchedule,
   fetchManagers,
   fetchScheduleRuns,
+  fetchRunLog,
+  downloadRunLog,
   fetchSchedules,
   previewSchedule,
   resetSchedulePlannerSession,
@@ -34,6 +36,7 @@ import {
   type ScheduleRunInfo,
   type ScheduleRunsPage,
   type ScheduleRunStatus,
+  type RunStats,
   type ScheduleUpdate,
   type TaskLimitRole,
   type TaskRole,
@@ -1489,12 +1492,130 @@ const RUNS_MAX = 200;
 /** How long a finished run took: "45 s", "3 min 05 s", "1 h 20 min". */
 function durationText(run: ScheduleRunInfo): string | null {
   // A run that counts repeated skips spans its firings ("×N, until"); it took no time of its own.
-  if (!run.fired_at || !run.finished_at || run.firings > 1) return null;
-  const seconds = Math.max(0, Math.round((Date.parse(run.finished_at) - Date.parse(run.fired_at)) / 1000));
+  if (run.firings > 1) return null;
+  const value = run.duration_seconds ?? (run.fired_at && run.finished_at
+    ? (Date.parse(run.finished_at) - Date.parse(run.fired_at)) / 1000 : null);
+  if (value == null) return null;
+  return secondsText(value);
+}
+
+function secondsText(value: number): string | null {
+  const seconds = Math.max(0, Math.round(value));
   if (!Number.isFinite(seconds)) return null;
   if (seconds < 60) return `${seconds} s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)} min ${String(seconds % 60).padStart(2, "0")} s`;
   return `${Math.floor(seconds / 3600)} h ${Math.floor((seconds % 3600) / 60)} min`;
+}
+
+function runStatsText(stats: RunStats, label: string) {
+  if (!stats.runs) return `No runs in the ${label === "Last 24 h" ? "last 24 h" : "last 7 days"}`;
+  return `${label}: ${stats.succeeded}/${stats.runs} succeeded · avg ${stats.avg_seconds == null ? "—" : secondsText(stats.avg_seconds)} · max ${stats.max_seconds == null ? "—" : secondsText(stats.max_seconds)}`;
+}
+
+/** Text decoding belongs only to the preview; downloads retain the original bytes. */
+function CommandRunLog({ run }: { run: ScheduleRunInfo }) {
+  const [tail, setTail] = useState<string | null>(null);
+  const [complete, setComplete] = useState(!isActiveRun(run));
+  const [truncated, setTruncated] = useState(run.log?.truncated ?? false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [downloadError, setDownloadError] = useState("");
+  const [progress, setProgress] = useState<{ downloaded: number; total: number } | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const log = await fetchRunLog(run.run_id, { tail_lines: 200 });
+      setTail(new TextDecoder().decode(Uint8Array.from(atob(log.data_base64), (c) => c.charCodeAt(0))));
+      setComplete(log.complete);
+      setTruncated(log.truncated);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [run.run_id]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const download = async () => {
+    setProgress({ downloaded: 0, total: run.log?.bytes ?? 0 });
+    setDownloadError("");
+    try {
+      const blob = await downloadRunLog(run.run_id, (downloaded, total) => setProgress({ downloaded, total }));
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${run.run_id}.log`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      // Let the browser start reading the Blob before releasing its URL.
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (err) {
+      setDownloadError(errorText(err));
+    } finally {
+      setProgress(null);
+    }
+  };
+
+  return (
+    <div className="min-w-0 space-y-2 pb-3 text-xs">
+      {(run.error ?? run.summary) && <p className="break-words text-muted-foreground">{run.error ?? run.summary}</p>}
+      <pre aria-label="Run log" className="max-h-64 overflow-auto whitespace-pre rounded-md border border-border bg-muted/20 px-3 py-2 font-mono text-[11px]">
+        {tail ?? run.log_tail ?? (loading ? "Loading log…" : "")}
+      </pre>
+      {error && <p role="alert" className="text-destructive">{error}</p>}
+      {(truncated || run.log?.truncated) && <p className="text-warning">The log was truncated at 50 MiB; the middle is left out.</p>}
+      {(!complete || isActiveRun(run)) && <p className="text-muted-foreground">Still running: the log grows</p>}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" size="sm" variant="outline" onClick={refresh} disabled={loading} className="h-11 sm:h-8">
+          {loading && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
+          Refresh log
+        </Button>
+        <Button type="button" size="sm" variant="outline" onClick={download} disabled={progress !== null}
+          className="min-h-11 max-w-full whitespace-normal break-words sm:min-h-8">
+          {progress ? `Downloading ${progress.downloaded.toLocaleString()} / ${progress.total.toLocaleString()} bytes` : "Download log"}
+        </Button>
+      </div>
+      {downloadError && <p role="alert" className="text-destructive">{downloadError}</p>}
+    </div>
+  );
+}
+
+function CommandRun({ run, timeZone, linked }: { run: ScheduleRunInfo; timeZone: string; linked: boolean }) {
+  const [expanded, setExpanded] = useState(linked);
+  const row = useRef<HTMLLIElement>(null);
+  const id = useId();
+  useEffect(() => {
+    if (!linked) return;
+    setExpanded(true);
+    row.current?.scrollIntoView({ block: "center" });
+  }, [linked]);
+  const failed = run.status === "failed" || run.status === "timed_out" || run.status === "interrupted";
+  const fields = [
+    ["Status", <span className="flex flex-wrap items-center gap-1"><RunStatusBadge status={run.status} />
+      {failed && (run.exit_signal != null || run.exit_code != null) && <span>
+        {run.exit_signal != null ? `signal ${run.exit_signal}` : `exit ${run.exit_code}`}
+      </span>}</span>],
+    ["Scheduled", formatInZone(run.scheduled_for, timeZone)],
+    ["Started", formatInZone(run.started_at, timeZone)],
+    ["Finished", formatInZone(run.finished_at, timeZone)],
+    ["Duration", durationText(run) ?? "—"],
+    ["Trigger", triggerText(run)],
+  ] as const;
+  return (
+    <li ref={row} data-run-id={run.run_id} className="min-w-0">
+      <button type="button" aria-expanded={expanded} aria-controls={`${id}-log`} onClick={() => setExpanded((value) => !value)}
+        className="grid w-full grid-cols-2 gap-3 rounded-sm py-3 text-left text-xs hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring sm:grid-cols-3 xl:grid-cols-6">
+        {fields.map(([label, value]) => <span key={label} className="min-w-0 break-words">
+          <span className="mb-1 block text-muted-foreground">{label}</span>{value}
+        </span>)}
+      </button>
+      {expanded && <div id={`${id}-log`}><CommandRunLog run={run} /></div>}
+    </li>
+  );
 }
 
 /**
@@ -1503,34 +1624,67 @@ function durationText(run: ScheduleRunInfo): string | null {
  * it took, its cost, its error or summary, and the gate's output. Loaded when shown first, after "Run now"
  * (`version`) and when the newest run changes, and every 10 s while `open` with a run going.
  */
-export function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo; open: boolean; version: number }) {
+export function RunHistory({ schedule, open, version, runId = "" }: {
+  schedule: ScheduleInfo; open: boolean; version: number; runId?: string;
+}) {
   const id = useId();
   const [page, setPage] = useState<ScheduleRunsPage | null>(null);
   const [error, setError] = useState("");
-  const [hideSkips, setHideSkips] = useState(true);
+  const [hideSkips, setHideSkips] = useState(!runId);
+  const [status, setStatus] = useState<ScheduleRunStatus | "">("");
+  const [missingRun, setMissingRun] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const latest = useRef(0);
   /** How many runs are shown, so a refresh keeps the pages already loaded. */
   const shown = useRef(RUNS_PAGE);
   const scheduleId = schedule.schedule_id;
+  const isCommand = schedule.kind === "command";
   // A run that counts repeated skips changes by its count.
   const newest = schedule.last_run
     ? `${schedule.last_run.run_id}:${schedule.last_run.status}:${schedule.last_run.firings}`
     : "";
-  const skips = hideSkips ? "hide" : "show";
+  const skips = status ? "show" : hideSkips ? "hide" : "show";
+
+  useEffect(() => {
+    if (runId) {
+      shown.current = RUNS_PAGE;
+      setHideSkips(false);
+      setStatus("");
+    }
+  }, [runId]);
 
   const load = useCallback(() => {
     const mine = ++latest.current;
-    fetchScheduleRuns(scheduleId, { limit: Math.min(shown.current, RUNS_MAX), skips })
-      .then((next) => {
+    setMissingRun(false);
+    const fetchPage = async () => {
+      const options = { skips, ...(status ? { status } : {}) } as const;
+      let next = await fetchScheduleRuns(scheduleId, { limit: Math.min(shown.current, RUNS_MAX), ...options });
+      const cursors = new Set<string>();
+      while (runId && !status && !next.runs.some((run) => run.run_id === runId)
+        && next.next_before && next.runs.length < RUNS_MAX) {
+        if (mine !== latest.current) return;
+        if (cursors.has(next.next_before)) throw new Error("The run history did not advance");
+        cursors.add(next.next_before);
+        const older = await fetchScheduleRuns(scheduleId, {
+          limit: Math.min(RUNS_PAGE, RUNS_MAX - next.runs.length), before: next.next_before, ...options,
+        });
+        next = { ...older, runs: [...next.runs, ...older.runs] };
+      }
+      if (mine !== latest.current) return;
+      shown.current = Math.max(RUNS_PAGE, next.runs.length);
+      setMissingRun(Boolean(runId && !status && !next.runs.some((run) => run.run_id === runId)));
+      return next;
+    };
+    fetchPage().then((next) => {
+        if (!next) return;
         if (mine !== latest.current) return;
         setPage(next);
         setError("");
       })
       .catch((err) => mine === latest.current && setError(errorText(err)));
-  }, [scheduleId, skips]);
+  }, [scheduleId, skips, status, runId]);
 
-  useEffect(() => load(), [load, version, newest]);
+  useEffect(() => { load(); return () => { latest.current++; }; }, [load, version, newest]);
   const active = !!page?.runs.some(isActiveRun);
   useEffect(() => {
     if (!open || !active) return;
@@ -1542,7 +1696,8 @@ export function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo
     if (!page?.next_before) return;
     const mine = ++latest.current;
     setLoadingMore(true);
-    fetchScheduleRuns(scheduleId, { limit: RUNS_PAGE, before: page.next_before, skips })
+    fetchScheduleRuns(scheduleId, { limit: RUNS_PAGE, before: page.next_before, skips,
+      ...(status ? { status } : {}) })
       .then((next) => {
         if (mine !== latest.current) return;
         setPage((current) => current && { ...next, runs: [...current.runs, ...next.runs] });
@@ -1558,7 +1713,16 @@ export function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo
     <section aria-labelledby={`${id}-history`} className="space-y-2 border-t border-border pt-4">
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
         <h3 id={`${id}-history`} className="text-xs font-semibold">Run history</h3>
-        <label className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-muted-foreground sm:min-h-0">
+        {isCommand && <select aria-label="Run status" className={cn(SELECT, "w-auto")} value={status}
+          onChange={(e) => { shown.current = RUNS_PAGE; setStatus(e.target.value as ScheduleRunStatus | ""); }}>
+          <option value="">All</option>
+          <option value="succeeded">Succeeded</option>
+          <option value="failed">Failed</option>
+          <option value="timed_out">Timed out</option>
+          <option value="interrupted">Interrupted</option>
+          <option value="skipped_overlap">Skipped (overlap)</option>
+        </select>}
+        {!status && <label className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-muted-foreground sm:min-h-0">
           <input
             type="checkbox"
             checked={hideSkips}
@@ -1570,8 +1734,12 @@ export function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo
           />
           Hide routine skips (nothing new, busy)
           {skipCount > 0 && <span className="tabular-nums">· {skipCount.toLocaleString()} in all</span>}
-        </label>
+        </label>}
       </div>
+      {isCommand && page?.stats && <p className="text-xs text-muted-foreground">
+        {runStatsText(page.stats.day, "Last 24 h")} · {runStatsText(page.stats.week, "Last 7 days")}
+      </p>}
+      {missingRun && <p role="status" className="text-xs text-muted-foreground">This run is no longer kept</p>}
       {error && <p role="alert" className="text-xs text-destructive">Could not load the runs: {error}</p>}
       {!page ? (
         !error && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" aria-label="Loading" />
@@ -1582,6 +1750,7 @@ export function RunHistory({ schedule, open, version }: { schedule: ScheduleInfo
       ) : (
         <ul className="divide-y divide-border">
           {page.runs.map((run) => {
+            if (isCommand) return <CommandRun key={run.run_id} run={run} timeZone={schedule.timezone} linked={run.run_id === runId} />;
             const text = run.error ?? run.summary;
             const took = durationText(run);
             return (
@@ -1719,6 +1888,12 @@ export function LastRun({ schedule }: { schedule: ScheduleInfo }) {
           No success lately
         </Badge>
       )}
+      {schedule.alerts.deadline_since && <span className="basis-full break-words text-xs text-destructive">
+        Missed its success deadline since {at(schedule.alerts.deadline_since)}
+      </span>}
+      {schedule.alerts.overlap_since && <span className="basis-full break-words text-xs text-warning">
+        Skipping: the previous run is still going since {at(schedule.alerts.overlap_since)}
+      </span>}
     </>
   );
 }
@@ -1726,7 +1901,8 @@ export function LastRun({ schedule }: { schedule: ScheduleInfo }) {
 /**
  * A project's Schedules tab: one row per schedule (its rule, next run, last result, an on/off switch and "Run now"),
  * opening to every field and its run history, and a form for a new one. `linked`
- * (#projects/<id>/schedules/<schedule id>) opens one row and scrolls it into view; `onLink` changes that address.
+ * (#projects/<id>/schedules/<schedule id>[/runs/<run id>]) opens a schedule and optionally one run;
+ * `onLink` changes that address.
  */
 export function ProjectSchedulesSection({
   project,
@@ -1749,7 +1925,11 @@ export function ProjectSchedulesSection({
   /** Bumped to reload a schedule's run history. */
   const [runsVersion, setRunsVersion] = useState<Record<string, number>>({});
   const { notices, notify } = useNotices();
-  const row = useCollapsibleRows(linked, data !== null);
+  // Only the schedule id is a collapsible row; a run suffix focuses its history below.
+  const [scheduleLink, runLink] = linked.split("/runs/");
+  const linkedSchedule = decodeURIComponent(scheduleLink);
+  const linkedRun = runLink ? decodeURIComponent(runLink) : "";
+  const row = useCollapsibleRows(linkedSchedule, data !== null);
   const latest = useRef(0);
 
   const load = useCallback(() => {
@@ -1949,10 +2129,11 @@ export function ProjectSchedulesSection({
                       onDeleted={() => {
                         latest.current++;
                         setData((d) => d && { ...d, schedules: d.schedules.filter((s) => s.schedule_id !== sid) });
-                        if (linked === sid) onLink("");
+                        if (linkedSchedule === sid) onLink("");
                       }}
                     />
-                    <RunHistory schedule={schedule} open={state.state === "open"} version={runsVersion[sid] ?? 0} />
+                    <RunHistory schedule={schedule} open={state.state === "open"} version={runsVersion[sid] ?? 0}
+                      runId={linkedSchedule === sid ? linkedRun : ""} />
                   </>
                 )}
               </CollapsibleRow>

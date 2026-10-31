@@ -2,8 +2,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PlannerSessionStatus, ProjectSchedulesSection, ResetPlannerSession, RunStatusBadge } from "@/components/project-schedules";
-import type { Project, ScheduleInfo } from "@/lib/api";
+import { PlannerSessionStatus, ProjectSchedulesSection, ResetPlannerSession, RunStatusBadge, RunHistory, LastRun } from "@/components/project-schedules";
+import type { Project, ScheduleInfo, ScheduleRunInfo } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -338,5 +338,189 @@ describe("schedule form types", () => {
     await act(async () => button("Save").click());
     expect(writes).toEqual([{ success_deadline: "09:30", alert_failures_after: null,
       alert_stale_after_seconds: 330, alert_overlap_after: 0 }]);
+  });
+});
+
+
+describe("command run history", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  const run = (changes: Partial<ScheduleRunInfo> = {}): ScheduleRunInfo => ({
+    run_id: "srun-failed", schedule_id: "sched/a", status: "failed", trigger: "catch_up", missed: 3,
+    scheduled_for: "2026-10-30T09:00:00Z", fired_at: "2026-10-30T09:00:00Z",
+    started_at: "2026-10-30T09:01:00Z", finished_at: "2026-10-30T09:01:07Z",
+    exit_code: 9, exit_signal: null, duration_seconds: 7, firings: 1,
+    log: { file: "run.log", bytes: 12, truncated: false }, log_tail: "stored tail",
+    task_id: null, task_title: null, task_status: null, summary: null, error: null,
+    cost_usd: null, gate_output: null, carried_from: null, ...changes,
+  } as ScheduleRunInfo);
+  const stats = { runs: 48, succeeded: 47, failed: 1, success_rate: 47 / 48, avg_seconds: 7, max_seconds: 20 };
+  const requests: { path: string; body: Record<string, unknown> }[] = [];
+  const respond = (runs = [run()], next: string | null = null) => ({ runs, next_before: next,
+    routine_skips: { skipped_gate: 0, skipped_overlap: 2 }, stats: { day: stats, week: stats } });
+  const stub = (handler?: (path: string, body: Record<string, unknown>) => unknown) => {
+    vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(url).split("/api/v1/")[1];
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      requests.push({ path, body });
+      const result = handler?.(path, body) ?? (path === "schedule_admin/run_log"
+        ? { size: 12, offset: 0, next_offset: null, data_base64: btoa("fresh tail"), complete: true, truncated: false }
+        : respond());
+      return result instanceof Response ? result : Response.json({ status: "ok", result });
+    }));
+  };
+  const button = (name: string) => [...container.querySelectorAll("button")].find((item) => item.textContent?.includes(name))!;
+  beforeEach(() => {
+    container = document.createElement("div"); document.body.append(container); root = createRoot(container);
+    requests.length = 0;
+    Element.prototype.scrollIntoView = vi.fn();
+  });
+  afterEach(() => { act(() => root.unmount()); container.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  it("shows command exit, actual duration, catch-up and both time-window statistics", async () => {
+    stub();
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} />));
+    expect(container.textContent).toContain("exit 9");
+    expect(container.textContent).toContain("7 s");
+    expect(container.textContent).not.toContain("1 min 07 s");
+    expect(container.textContent).toContain("Catch-up (3 missed)");
+    expect(container.textContent).toContain("Last 24 h: 47/48 succeeded · avg 7 s · max 20 s");
+    expect(container.textContent).toContain("Last 7 days:");
+    expect(container.textContent).toContain("Started");
+  });
+
+  it("passes the status filter and shows overlap skips even when routine skips were hidden", async () => {
+    stub();
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} />));
+    const select = container.querySelector<HTMLSelectElement>('select[aria-label="Run status"]')!;
+    await act(async () => { select.value = "skipped_overlap"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(requests.at(-1)?.body).toMatchObject({ status: "skipped_overlap", skips: "show" });
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+  });
+
+  it("shows the stored tail immediately, loads the last 200 lines, and refreshes a growing log only on demand", async () => {
+    vi.useFakeTimers();
+    let finish: (value: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => String(url).endsWith("/runs")
+      ? Response.json({ status: "ok", result: respond([run({ status: "running", finished_at: null })]) })
+      : new Promise<Response>((resolve) => { finish = resolve; })));
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} />));
+    await act(async () => button("Running").click());
+    expect(container.textContent).toContain("stored tail");
+    expect(container.textContent).toContain("Still running: the log grows");
+    await act(async () => finish!(Response.json({ status: "ok", result: {
+      size: 12, offset: 0, next_offset: null, data_base64: btoa("fresh tail"), complete: false, truncated: true,
+    } })));
+    expect(container.querySelector('[aria-label="Run log"]')?.textContent).toBe("fresh tail");
+    expect(container.textContent).toContain("The log was truncated at 50 MiB; the middle is left out.");
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    const logCalls = () => vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/run_log"));
+    expect(logCalls()).toHaveLength(1);
+    expect(JSON.parse(String(logCalls()[0][1]?.body))).toEqual({ run_id: "srun-failed", tail_lines: 200 });
+    await act(async () => button("Refresh log").click());
+    expect(logCalls()).toHaveLength(2);
+  });
+
+  it("finds and expands a linked run on an older page including hidden skips", async () => {
+    stub((path, body) => path === "schedule_admin/runs"
+      ? body.before ? respond([run({ run_id: "srun-target", exit_code: null, exit_signal: 15 })]) : respond([run()], "srun-failed")
+      : undefined);
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-target" />));
+    expect(requests.filter((r) => r.path.endsWith("/runs")).map((r) => r.body.skips)).toEqual(["show", "show"]);
+    expect(container.querySelector('[data-run-id="srun-target"] button')?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector('[data-run-id="srun-target"]')?.textContent).toContain("signal 15");
+    expect(container.textContent).toContain("fresh tail");
+  });
+
+  it("opens the schedule and target run from its nested project link", async () => {
+    stub((path) => {
+      if (path === "schedule_admin/project_list") return { schedules: [storedSchedule("command")], limits: {
+        default_timezone: "UTC", roles: [], notify_targets: [], name_max_chars: 80, requirement_max_chars: 10000,
+      } };
+      if (path === "managers/list") return { managers: [] };
+      if (path === "registry/view") return { profiles: [] };
+    });
+    await act(async () => root.render(<ProjectSchedulesSection project={{ project_id: "project" } as Project}
+      linked="sched%2Fa/runs/srun-failed" onLink={() => {}} />));
+    expect(container.querySelector('[aria-controls="schedule-sched/a-panel"]')?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector('[data-run-id="srun-failed"] button')?.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("reports a retained-history miss and an empty statistics window", async () => {
+    stub(() => ({ ...respond([]), stats: { day: { ...stats, runs: 0 }, week: { ...stats, runs: 0 } } }));
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-gone" />));
+    expect(container.textContent).toContain("This run is no longer kept");
+    expect(container.textContent).toContain("No runs in the last 24 h");
+  });
+
+  it("stops looking for a linked run after 200 records", async () => {
+    let count = 0;
+    stub(() => {
+      const rows = Array.from({ length: 20 }, () => run({ run_id: `srun-${++count}` }));
+      return respond(rows, rows.at(-1)!.run_id);
+    });
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-gone" />));
+    expect(count).toBe(200);
+    expect(requests).toHaveLength(10);
+    expect(container.textContent).toContain("This run is no longer kept");
+  });
+
+  it("shows the API reason when a log has been removed", async () => {
+    stub((path) => path === "schedule_admin/run_log" ? Response.json({ status: "error",
+      error: { code: "not_found", message: "the log was removed by the retention policy" } }, { status: 404 }) : undefined);
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} />));
+    await act(async () => button("Failed").click());
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("the log was removed by the retention policy");
+    expect(container.querySelector('[aria-label="Run log"]')?.textContent).toBe("stored tail");
+  });
+
+  it("shows byte progress while a running log download is pending, then downloads its snapshot", async () => {
+    let finish: (value: Response) => void;
+    stub((path, body) => path === "schedule_admin/runs"
+      ? respond([run({ status: "running", finished_at: null })])
+      : body.offset === 0
+        ? { size: 6, offset: 0, next_offset: 3, data_base64: btoa("abc"), complete: false, truncated: false }
+        : undefined);
+    const fetcher = vi.mocked(fetch);
+    const base = fetcher.getMockImplementation()!;
+    fetcher.mockImplementation(async (url, init) => {
+      if (String(url).endsWith("/run_log") && JSON.parse(String(init?.body)).offset === 3)
+        return new Promise<Response>((resolve) => { finish = resolve; });
+      return base(url, init);
+    });
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const create = vi.fn((_blob: Blob | MediaSource) => "blob:run-log");
+    vi.spyOn(URL, "createObjectURL").mockImplementation(create);
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} />));
+    await act(async () => button("Running").click());
+    await act(async () => button("Download log").click());
+    expect(button("Downloading 3 / 6 bytes").disabled).toBe(true);
+    await act(async () => finish!(Response.json({ status: "ok", result: {
+      size: 6, offset: 3, next_offset: null, data_base64: btoa("def"), complete: false, truncated: false,
+    } })));
+    expect(button("Download log").disabled).toBe(false);
+    expect(clicked).toHaveBeenCalledOnce();
+    expect(await (create.mock.calls[0][0] as Blob).text()).toBe("abcdef");
+  });
+
+  it("keeps agent task, cost, gate output and summary rendering without command controls", async () => {
+    stub(() => respond([run({ status: "completed", task_id: "task-a", task_title: "Review report", task_status: "completed",
+      summary: "Report ready", gate_output: "New input", cost_usd: 0.5, duration_seconds: 67 })]));
+    await act(async () => root.render(<RunHistory schedule={storedSchedule()} open version={0} />));
+    expect(container.querySelector('a[href="#tasks/task-a"]')?.textContent).toContain("Review report");
+    expect(container.textContent).toContain("Report ready"); expect(container.textContent).toContain("New input");
+    expect(container.textContent).toContain("1 min 07 s"); expect(container.textContent).toContain("$0.50");
+    expect(container.querySelector("select")).toBeNull(); expect(container.querySelector('[data-run-id]')).toBeNull();
+    expect(container.textContent).not.toContain("Last 24 h");
+  });
+
+  it("shows deadline and overlap warnings for agent schedules too", async () => {
+    const schedule = storedSchedule();
+    schedule.alerts.deadline_since = "2026-10-30T08:00:00Z";
+    schedule.alerts.overlap_since = "2026-10-30T07:00:00Z";
+    await act(async () => root.render(<LastRun schedule={schedule} />));
+    expect(container.textContent).toContain("Missed its success deadline since");
+    expect(container.textContent).toContain("Skipping: the previous run is still going since");
   });
 });

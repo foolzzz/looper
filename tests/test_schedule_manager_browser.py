@@ -1,5 +1,6 @@
 """Schedule ownership through the built dashboard and synthetic v1 responses."""
 
+import base64
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,8 @@ def dashboard(dashboard_url):  # noqa: F811
         page.set_default_timeout(5000)
         project = {"project_id": "proj-example", "name": "Example", "work_dir": "/srv/example",
                    "description": "", "background": "", "task_count": 0, "active_count": 0, "schedule_count": 0}
-        state = {"calls": [], "schedules": [], "scenarios": True, "refuse": False, "owner_error": False}
+        state = {"calls": [], "schedules": [], "scenarios": True, "refuse": False, "owner_error": False,
+                 "runs": [], "logs": {}, "overview": {}}
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         limits = {"name_max_chars": 80, "requirement_max_chars": 10000, "default_timezone": "UTC",
@@ -66,16 +68,38 @@ def dashboard(dashboard_url):  # noqa: F811
                 assert "manager_id" not in body["fields"]
                 state["schedules"][0].update(body["fields"])
                 result = {"schedule": state["schedules"][0]}
+            elif path == "schedule_admin/runs":
+                rows = state["runs"]
+                if body.get("status"):
+                    rows = [run for run in rows if run["status"] == body["status"]]
+                elif body.get("skips") == "hide":
+                    rows = [run for run in rows if run["status"] not in {"skipped_gate", "skipped_overlap"}]
+                cursor = body.get("before")
+                if cursor:
+                    rows = rows[next(i + 1 for i, run in enumerate(rows) if run["run_id"] == cursor):]
+                limit = min(body.get("limit", 20), state.get("run_page_size", 20))
+                zero = {"runs": 0, "succeeded": 0, "failed": 0, "success_rate": None,
+                        "avg_seconds": None, "max_seconds": None}
+                result = {"runs": rows[:limit], "next_before": rows[limit - 1]["run_id"] if len(rows) > limit else None,
+                          "routine_skips": {status: sum(run["status"] == status for run in state["runs"])
+                                            for status in ("skipped_gate", "skipped_overlap")},
+                          "stats": state.get("stats", {"day": zero, "week": zero})}
+            elif path == "schedule_admin/run_log":
+                data = state["logs"][body["run_id"]]
+                offset = body.get("offset", 0)
+                end = min(len(data), offset + body.get("limit_bytes", len(data)))
+                result = {"size": len(data), "offset": offset,
+                          "next_offset": end if end < len(data) else None,
+                          "data_base64": base64.b64encode(data[offset:end]).decode("ascii"),
+                          "complete": True, "truncated": False}
             else:
                 result = {"project_admin/list": {"projects": [project]}, "system/status": {},
-                    "system/overview": {}, "ops/gates/list": {"gates": [], "total": 0},
+                    "system/overview": state["overview"], "ops/gates/list": {"gates": [], "total": 0},
                     "chat_settings/get": {"stop_enabled": False},
                     "registry/view": {"profiles": [], "models": [], "runtimes": [], "providers": []},
                     "schedule_admin/project_list": {"schedules": state["schedules"], "limits": limits},
                     "schedule_admin/list": {"schedules": state["schedules"]},
                     "schedule_admin/get": {"schedule": state["schedules"][0] if state["schedules"] else None},
-                    "schedule_admin/runs": {"runs": [], "next_before": None,
-                                            "routine_skips": {"skipped_gate": 0, "skipped_overlap": 0}},
                     "schedule_admin/notifications": {"notifications": []},
                     "schedule_admin/preview": {"valid": True, "description": "Every hour (UTC)", "next": []},
                 }.get(path)
@@ -228,6 +252,119 @@ def test_command_environment_multiline_round_trip(dashboard, tmp_path, width):
 
 
 @pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
+def test_command_run_history_deep_link_and_alerts(dashboard, width):
+    """Read command outcomes and logs through the built dashboard at both supported widths."""
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    page.set_viewport_size({"width": width, "height": 1100})
+    stamp = "2026-10-30T08:00:00Z"
+    sid = "sched-command"
+    target = "run-failed"
+    log = b"Preparing synthetic report\nReport failed: synthetic input unavailable\n"
+    schedule = {"kind": "command", "command": "printf report", "env": {}, "env_file": None,
+                "schedule_id": sid, "project_id": "proj-example", "project_name": "Example",
+                "name": "Synthetic report", "manager_id": "manager", "manager_name": "Default",
+                "cron": "0 * * * *", "timezone": "UTC", "description": "Every hour (UTC)",
+                "requirement": "", "work_dir": "", "enabled": True, "next_fire_at": stamp,
+                "last_fired_at": stamp, "last_success_at": stamp, "consecutive_failures": 1,
+                "overlap": "skip", "catch_up": "once", "max_parallel_runs": 1,
+                "run_timeout_seconds": 60, "run_timeout_effective_seconds": 60,
+                "run_budget_usd": None, "daily_budget_usd": None, "spent_today_usd": 0,
+                "profile_overrides": {}, "task_limits": {"worker": None, "reviewer": None},
+                "gate_command": None, "gate_timeout_seconds": None,
+                "notify": "alerts", "user_gates": "off", "notify_target": None,
+                "template_key": None, "template_inputs": {}, "template_name": None,
+                "planner_session": {"active": False}, "success_deadline": "08:00",
+                "alert_policy": {"failures_after": {"value": 3, "default": True},
+                                 "stale_after_seconds": {"value": 86400, "default": True},
+                                 "overlap_after": {"value": 10, "default": True}},
+                "alerts": {"failures_since": None, "stale_since": None,
+                           "deadline_since": stamp, "overlap_since": stamp},
+                "created_via": "dashboard", "created_at": stamp, "updated_at": stamp}
+    statuses = [("run-success", "succeeded"), ("run-timeout", "timed_out"),
+                ("run-interrupted", "interrupted"), ("run-overlap", "skipped_overlap"), (target, "failed")]
+    for rid, status in statuses:
+        state["runs"].append({"run_id": rid, "schedule_id": sid, "manager_id": "manager",
+            "scheduled_for": stamp, "fired_at": stamp, "started_at": stamp,
+            "finished_at": "2026-10-30T08:00:20Z", "trigger": "cron", "missed": 0,
+            "status": status, "task_id": None, "task_status": None, "task_title": None,
+            "summary": None, "cost_usd": None, "error": None, "gate_output": None,
+            "carried_from": None, "firings": 1, "exit_code": 7 if status == "failed" else None,
+            "exit_signal": None, "duration_seconds": 7 if status == "failed" else 20,
+            "log": {"file": f"{rid}.log", "bytes": len(log), "truncated": False},
+            "log_tail": "Report failed: synthetic input unavailable" if status == "failed" else ""})
+        state["logs"][rid] = log
+    schedule["last_run"] = state["runs"][0]
+    state["schedules"] = [schedule]
+    state["run_page_size"] = 3
+    stats = {"runs": 4, "succeeded": 1, "failed": 3, "success_rate": 0.25,
+             "avg_seconds": 7, "max_seconds": 20}
+    state["stats"] = {"day": stats, "week": stats}
+    page.goto(f"{base}/#projects/proj-example/schedules/{sid}/runs/{target}")
+    history = page.get_by_role("region", name="Run history", exact=True)
+    expect(history.get_by_text("exit 7", exact=True)).to_be_visible()
+    expect(history.locator(f'li[data-run-id="{target}"]').get_by_role("button", expanded=True)).to_contain_text("7 s")
+    expect(history.get_by_text("Report failed: synthetic input unavailable", exact=False)).to_be_visible()
+    expect(history.get_by_role("button", name="Download log", exact=True)).to_be_visible()
+    assert any(path == "schedule_admin/runs" and body.get("before") for path, body in state["calls"])
+    expect(history.get_by_text("Last 24 h:", exact=False)).to_contain_text("1/4 succeeded")
+    # The linked run reveals its tail without a separate expansion gesture.
+    expect(history.locator("pre")).to_contain_text("Report failed: synthetic input unavailable")
+    assert any(path == "schedule_admin/run_log" and body == {"run_id": target, "tail_lines": 200}
+               for path, body in state["calls"])
+    hide = history.get_by_role("checkbox", name="Hide routine skips", exact=False)
+    if hide.is_checked():
+        hide.uncheck()
+    # Loading all outcomes leaves the linked failure visible beside the other statuses.
+    older = history.get_by_role("button", name="Show older runs", exact=True)
+    if older.count():
+        older.click()
+    runs = history.locator("li[data-run-id]")
+    expect(runs.get_by_text("Succeeded", exact=True)).to_be_visible()
+    expect(runs.get_by_text("Timed out", exact=True)).to_be_visible()
+    expect(runs.get_by_text("Interrupted", exact=True)).to_be_visible()
+    expect(runs.get_by_text("Skipped: busy", exact=True)).to_be_visible()
+    expect(page.get_by_text("Missed its success deadline since", exact=False)).to_be_visible()
+    expect(page.get_by_text("Skipping: the previous run is still going since", exact=False)).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    artifacts = Path(__file__).resolve().parents[1] / ".local" / "command-run-history"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    page.set_viewport_size({"width": width, "height": max(1100, history.evaluate("element => element.scrollHeight") + 200)})
+    history.scroll_into_view_if_needed()
+    page.screenshot(path=str(artifacts / f"runs-{width}.png"), full_page=True)
+    page.set_viewport_size({"width": width, "height": 1100})
+    with page.expect_download() as downloaded:
+        history.get_by_role("button", name="Download log", exact=True).click()
+    assert downloaded.value.suggested_filename == f"{target}.log"
+    assert Path(downloaded.value.path()).read_bytes() == log
+    history.get_by_role("combobox", name="Run status", exact=True).select_option("failed")
+    expect(history.get_by_role("checkbox", name="Hide routine skips", exact=False)).to_have_count(0)
+    expect(runs.get_by_text("Succeeded", exact=True)).to_have_count(0)
+    assert any(path == "schedule_admin/runs" and body.get("status") == "failed"
+               for path, body in state["calls"])
+
+    state["overview"] = {"health": {"unhealthy": []},
+        "tasks": {"total": 0, "in_progress": 0, "ready": 0, "attention": 0, "completed": 0,
+                  "needs_you": 0, "cancelled": 0, "other": 0, "other_statuses": {}},
+        "agents": {"manager": None, "planners": [], "workers": [], "reviewers": []},
+        "projects": [], "idle_projects": 1,
+        "spend_today": {"since": stamp, "provider_priced_usd": 0, "equivalent_usd": 0,
+                        "runs": 0, "running": 0, "unpriced_runs": 0},
+        "schedules": {"total": 1, "enabled": 1, "next": [],
+            "failing": [{**schedule, "last_status": "failed", "failures_since": None,
+                         "stale_since": None, "deadline_since": stamp, "overlap_since": stamp}],
+            "skipped_today": {"skipped_gate": 0, "skipped_overlap": 1, "skipped_missed": 0, "skipped_budget": 0}}}
+    page.goto(f"{base}/#dashboard")
+    expect(page.get_by_role("heading", name="Dashboard", exact=True)).to_be_visible()
+    expect(page.get_by_text("Missed its success deadline since", exact=False)).to_be_visible()
+    expect(page.get_by_text("Skipping: the previous run is still going since", exact=False)).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.get_by_role("region", name="Schedules", exact=True).scroll_into_view_if_needed()
+    page.screenshot(path=str(artifacts / f"deadline-{width}.png"), full_page=True)
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
 def test_command_form_create_edit_and_agent_regression(tmp_path, staged_dashboard_dir, width):
     """Exercise form serialization against a fresh database and a real serve process."""
     import os
@@ -315,6 +452,21 @@ def test_command_form_create_edit_and_agent_regression(tmp_path, staged_dashboar
                 page.get_by_role("button", name="Save", exact=True).click()
             assert response.value.status == 200
             assert response.value.request.post_data_json["fields"] == {"command": "printf updated"}
+            if width == 1280:
+                server.api.post("/api/v1/schedule_admin/update", {
+                    "schedule_id": sid, "fields": {"work_dir": str(tmp_path / "work")}})
+                run = server.api.post("/api/v1/schedule_admin/run", {"schedule_id": sid})["result"]["run"]
+                rid = run["run_id"]
+                page.goto(f"{base}/#projects/{pid}/schedules/{sid}/runs/{rid}", wait_until="domcontentloaded")
+                row = page.locator("li[data-run-id]").filter(has=page.get_by_role("button", expanded=True))
+                expect(row.get_by_text("Succeeded", exact=True)).to_be_visible(timeout=35000)
+                row.get_by_role("button", name="Refresh log", exact=True).click()
+                expect(row.get_by_label("Run log", exact=True)).to_have_text("updated")
+                with page.expect_download() as downloaded:
+                    row.get_by_role("button", name="Download log", exact=True).click()
+                assert downloaded.value.suggested_filename == f"{rid}.log"
+                assert Path(downloaded.value.path()).read_bytes() == b"updated"
+                assert server.api.post("/api/v1/schedule_admin/run_log", {"run_id": rid})["result"]["complete"]
             page.goto(f"{base}/#schedules/{sid}", wait_until="domcontentloaded")
             expect(page.get_by_text("printf updated", exact=True)).to_be_visible()
             expect(page.get_by_text("REPORT=daily=summary", exact=True)).to_be_visible()
