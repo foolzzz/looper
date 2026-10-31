@@ -16,6 +16,14 @@ _BUDGET = _nullable({"type": "number", "exclusiveMinimum": 0, "maximum": BUDGET_
 _FIELDS = {
     "name": {"type": "string", "maxLength": schedules.NAME_MAX_CHARS}, "cron": _STR,
     "requirement": _STR, "timezone": _STR, "work_dir": _STR,
+    "command": _nullable({"type": "string", "maxLength": schedules.GATE_COMMAND_MAX_CHARS}),
+    "env": _nullable({"type": "object", "additionalProperties": {"type": "string", "maxLength": 4096},
+                      "maxProperties": 64}),
+    "env_file": _nullable({"type": "string", "maxLength": 1024}),
+    "success_deadline": _nullable({"type": "string", "pattern": r"^([01][0-9]|2[0-3]):[0-5][0-9]$"}),
+    "alert_failures_after": _nullable({"type": "integer", "minimum": 1, "maximum": 1000}),
+    "alert_stale_after_seconds": _nullable({"type": "integer", "minimum": 300, "maximum": 2592000}),
+    "alert_overlap_after": _nullable({"type": "integer", "minimum": 0, "maximum": 10000}),
     "template_key": _nullable({"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,31}$"}),
     "template_inputs": {"type": "object", "additionalProperties": {"type": "string", "maxLength": 2000}},
     "overlap": _enum("skip", "queue", "parallel"), "catch_up": _enum("once", "skip"),
@@ -34,8 +42,8 @@ _FIELDS = {
     "task_limits": _nullable(_object(dict.fromkeys(("worker", "reviewer"), _nullable({
         "type": "integer", "minimum": 1, "maximum": CONCURRENCY_MAX})), [], closed=True)),
 }
-SCHEDULE_CREATE = _object({**_FIELDS, "manager_id": {"type": "string", "minLength": 1}},
-                          ["name", "cron", "requirement"], closed=True)
+SCHEDULE_CREATE = _object({**_FIELDS, "kind": _enum("agent", "command"),
+                           "manager_id": {"type": "string", "minLength": 1}}, ["name", "cron"], closed=True)
 SCHEDULE_PATCH = {**_object({**_FIELDS, "enabled": _BOOL}, [], closed=True),
                   "anyOf": [{"required": [key]} for key in (*_FIELDS, "enabled")]}
 SCHEMAS = {"ScheduleCreate": SCHEDULE_CREATE, "SchedulePatch": SCHEDULE_PATCH}
@@ -87,12 +95,17 @@ async def impact(server, operation, arguments, principal, headers):
     if not data:
         raise OpError(ErrorCode.INVALID, "give at least one field to change")
     # Normalize with the same validators as execution before deciding whether a cap rises.
-    fields, _, _ = await answered(schedules._fields(data, update=True))
-    gated = bool(fields.get("gate_command", row["gate_command"]))
+    command = row.get("kind", "agent") == "command"
+    fields, profiles, _ = await answered(schedules._fields(data, update=True, resolve_profiles=not command))
+    gated = bool(fields.get("gate_command", row["gate_command"])) or command
     try:
+        if command:
+            schedules._check_kind_fields("command", {**row, **fields,
+                "profile_overrides": profiles if "profile_overrides" in data else row.get("profile_overrides"),
+                **{key: data[key] for key in ("template_inputs", "task_limits") if key in data}})
         schedules._check_rule(fields.get("cron", row["cron"]), fields.get("timezone", row["timezone"]),
                               schedules._utcnow(), gated=gated,
-                              removes_gate=bool(row["gate_command"]) and not gated)
+                              removes_gate=not command and bool(row["gate_command"]) and not gated)
     except schedules.RequestError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     project = await db_projects.get_project(row["project_id"])

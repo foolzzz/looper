@@ -18,13 +18,75 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from tests.db_support import DSN
+from tests.db_support import DSN, run_db
 from tests.schedule_support import NOON, UTC, ScheduleEnv, run_scheduled
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
 # --- The API ---
+
+
+def test_run_filter_keeps_pagination_and_schedule_scope() -> None:
+    from looper.db import projects, schedules
+
+    async def test(pool: Any) -> None:
+        project = await projects.create_project(name="filters", pool=pool)
+        fields = {"name": "filtered", "cron": "0 * * * *", "timezone": "UTC", "requirement": "Check"}
+        sid = await schedules.create_schedule(pool, project_id=project["id"], fields=fields, profiles={})
+        other = await schedules.create_schedule(pool, project_id=project["id"], fields={**fields, "name": "other"},
+                                                profiles={})
+        ids = []
+        for index, status in enumerate(("failed", "succeeded", "failed", "failed")):
+            ids.append(await schedules.insert_run(pool, schedule_id=sid, scheduled_for=NOON,
+                                                  trigger="scheduled", status=status,
+                                                  created_at=NOON + timedelta(seconds=index)))
+        await schedules.insert_run(pool, schedule_id=other, scheduled_for=NOON, trigger="scheduled", status="failed")
+        page = await schedules.list_runs(sid, limit=2, only="failed", pool=pool)
+        assert [row["id"] for row in page] == [ids[3], ids[2]]
+        assert [row["id"] for row in await schedules.list_runs(
+            sid, limit=2, only="failed", before=page[-1]["id"], pool=pool)] == [ids[0]]
+        assert await schedules.list_runs(sid, limit=2, only="failed", without=("failed",), pool=pool) == []
+
+    run_db(test, timeout=30)
+
+
+def test_run_statistics_use_finished_windows_outcomes_and_execution_duration() -> None:
+    from looper.db import projects, schedules
+
+    async def test(pool: Any) -> None:
+        project = await projects.create_project(name="statistics", pool=pool)
+        sid = await schedules.create_schedule(pool, project_id=project["id"], profiles={}, fields={
+            "name": "statistics", "cron": "0 * * * *", "timezone": "UTC", "requirement": "Check"})
+        empty = {"runs": 0, "succeeded": 0, "failed": 0, "success_rate": None,
+                 "avg_seconds": None, "max_seconds": None}
+        assert await schedules.run_stats(sid, NOON, pool=pool) == {"day": empty, "week": empty}
+
+        async def add(status: str, ended: datetime, duration: int = 10, *, started: bool = True) -> None:
+            begin = ended - timedelta(seconds=duration)
+            await schedules.insert_run(pool, schedule_id=sid, scheduled_for=begin, trigger="scheduled", status=status,
+                                       fired_at=begin - timedelta(seconds=100) if started else begin,
+                                       started_at=begin if started else None, finished_at=ended,
+                                       created_at=NOON - timedelta(days=20))
+
+        for index, status in enumerate((*schedules.SUCCESS, *schedules.FAILURES, "stopped", "cancelled"), start=1):
+            await add(status, NOON - timedelta(hours=1), index * 10, started=index != 1)
+        await add("succeeded", NOON - timedelta(days=2), 100)
+        await add("failed", NOON - timedelta(days=6), 200)
+        # Neither scheduling/creation time nor non-executing/future/unfinished outcomes enter the windows.
+        for status in (*schedules.OPEN_STATUSES, *schedules.SKIPPED):
+            await add(status, NOON - timedelta(minutes=1), 10000)
+        await add("succeeded", NOON + timedelta(seconds=1), 10000)
+        await add("failed", NOON - timedelta(days=8), 10000)
+        await schedules.insert_run(pool, schedule_id=sid, scheduled_for=NOON, trigger="scheduled", status="failed")
+
+        stats = await schedules.run_stats(sid, NOON, pool=pool)
+        assert stats["day"] == {"runs": 8, "succeeded": 2, "failed": 4, "success_rate": 0.25,
+                                "avg_seconds": 45.0, "max_seconds": 80.0}
+        assert stats["week"] == {"runs": 10, "succeeded": 3, "failed": 5, "success_rate": 0.3,
+                                 "avg_seconds": 66.0, "max_seconds": 200.0}
+
+    run_db(test, timeout=30)
 
 
 def test_a_refused_schedule_writes_nothing_and_a_profile_the_registry_lacks_is_refused(
@@ -125,7 +187,8 @@ def test_every_projects_schedules_are_listed_together_the_disabled_ones_too(monk
         assert listed[2]["description"] == "Daily at 06:00 (Europe/Berlin)" and listed[2]["next_fire_at"] is None
         assert (listed[0]["last_run"]["task_id"], listed[0]["last_run"]["status"]) == (run["task_id"], "completed")
         assert listed[0]["spent_today_usd"] == pytest.approx(0.25) and listed[1]["spent_today_usd"] == 0
-        assert listed[0]["alerts"] == {"failures_since": None, "stale_since": None}
+        assert listed[0]["alerts"] == {"failures_since": None, "stale_since": None,
+                                        "deadline_since": None, "overlap_since": None}
         # The same rows a project's list and a schedule's own answer give.
         assert (await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id}))["schedules"] == listed[:2]
         assert (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": hourly['schedule_id']}))["schedule"] == listed[0]

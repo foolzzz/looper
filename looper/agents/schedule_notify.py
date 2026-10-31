@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
@@ -52,6 +53,25 @@ STALE_PERIODS = 3
 # minutes, not a schedule gone quiet.
 STALE_FLOOR = STALE_PERIODS * timedelta(minutes=5)
 SNIPPET_CHARS = 300
+
+
+@dataclass(frozen=True)
+class AlertPolicy:
+    failures_after: int
+    stale_after: timedelta | None
+    overlap_after: int
+
+
+def alert_policy(schedule: Mapping[str, Any]) -> AlertPolicy:
+    """Resolve per-schedule alert thresholds, preserving explicit zero for disabled overlap alerts."""
+    failures = schedule.get("alert_failures_after")
+    stale = schedule.get("alert_stale_after_seconds")
+    overlap = schedule.get("alert_overlap_after")
+    return AlertPolicy(
+        failures_after=FAILURES_ALERT_AT if failures is None else failures,
+        stale_after=None if stale is None else timedelta(seconds=stale),
+        overlap_after=(10 if schedule.get("kind") == "command" else 0) if overlap is None else overlap,
+    )
 
 # The final statuses of a run that ran something (a task, or a gate that failed).
 RAN = ("completed", "failed", "stopped", "cancelled", "timed_out", "gate_failed")

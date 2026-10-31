@@ -29,6 +29,12 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+import asyncio
+import base64
+import os
+import re
+from pathlib import Path
+
 import asyncpg
 
 from ..db import channel_configs as db_channel_configs, connection as db_connection, llm_records as db_llm_records
@@ -71,6 +77,11 @@ class Overlap(str, Enum):
     SKIP = "skip"  # a firing while the previous run's task is in progress is skipped
     QUEUE = "queue"  # it waits for that task to end; at most one waits
     PARALLEL = "parallel"  # it starts beside the runs in progress, up to max_parallel_runs (reentrant)
+
+
+class Kind(str, Enum):
+    AGENT = "agent"
+    COMMAND = "command"
 
 
 class CatchUp(str, Enum):
@@ -150,6 +161,7 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> d
     cost_usd = row.get("cost_usd")
     if cost_usd is None and cost is not None:
         cost_usd = cost["cost_usd"]
+    start, finish = row.get("started_at") or row.get("fired_at"), row.get("finished_at")
     return {
         "run_id": row["id"], "schedule_id": row["schedule_id"], "scheduled_for": row["scheduled_for"],
         "manager_id": row.get("manager_id", "manager"),
@@ -158,6 +170,12 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None) -> d
         "task_title": row.get("task_title"),
         "summary": row.get("summary"), "cost_usd": cost_usd, "error": row.get("error"),
         "finished_at": row.get("finished_at"), "gate_output": row.get("gate_output"),
+        "started_at": row.get("started_at"), "exit_code": row.get("exit_code"),
+        "exit_signal": row.get("exit_signal"),
+        "duration_seconds": (finish - start).total_seconds() if finish is not None and start is not None else None,
+        "log": {"file": row["log_path"], "bytes": row.get("log_bytes"),
+                "truncated": row.get("log_truncated", False)} if row.get("log_path") else None,
+        "log_tail": row.get("log_tail"),
         "execution_snapshot": row.get("execution_snapshot"),
         "carried_from": row.get("carried_from"),
         # A skip that repeated counts every firing it stands for, from scheduled_for to finished_at.
@@ -186,12 +204,23 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
                   spent_today: float = 0.0, default_timeout: int | None = None) -> dict[str, Any]:
     """``default_timeout``: the system default run timeout, for a schedule that follows it."""
     target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row.get("notify_channel") else None
+    from .schedule_notify import alert_policy
+    policy = alert_policy(row)
     return {
         "schedule_id": row["id"], "project_id": row["project_id"], "project_name": row["project_name"],
         "manager_id": row.get("manager_id", "manager"), "manager_name": row.get("manager_name"),
         "template_key": row.get("template_key"), "template_inputs": row.get("template_inputs") or {},
         "template_name": row.get("template_name"),
         "name": row["name"], "cron": row["cron"],
+        "kind": row.get("kind", Kind.AGENT.value), "command": row.get("command"),
+        "env": dict(row.get("env") or {}), "env_file": row.get("env_file"),
+        "success_deadline": row.get("success_deadline"),
+        "alert_policy": {key: {"value": value, "default": row.get(column) is None}
+                         for key, column, value in (
+                             ("failures_after", "alert_failures_after", policy.failures_after),
+                             ("stale_after_seconds", "alert_stale_after_seconds",
+                              int(policy.stale_after.total_seconds()) if policy.stale_after is not None else None),
+                             ("overlap_after", "alert_overlap_after", policy.overlap_after))},
         "timezone": row["timezone"], "description": describe(row["cron"], row["timezone"]),
         "requirement": row["requirement"], "work_dir": row["work_dir"], "overlap": row["overlap"],
         "max_parallel_runs": row["max_parallel_runs"],
@@ -207,7 +236,8 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "daily_budget_usd": row.get("daily_budget_usd"), "notify": row.get("notify") or Notify.FAILURES.value,
         "user_gates": row.get("user_gates", UserGates.OFF.value),
         "notify_target": target, "spent_today_usd": round(spent_today, 6),
-        "alerts": {"failures_since": row.get("failures_alert_at"), "stale_since": row.get("stale_alert_at")},
+        "alerts": {"failures_since": row.get("failures_alert_at"), "stale_since": row.get("stale_alert_at"),
+                   "deadline_since": row.get("deadline_alert_at"), "overlap_since": row.get("overlap_alert_at")},
         "planner_session": {
             "active": bool(row.get("planner_session_id")),
             **{key: row.get(column) if row.get("planner_session_id") else None for key, column in (
@@ -354,6 +384,56 @@ def _gate_timeout(raw: Any) -> int | None:
     return raw
 
 
+def _command(raw: Any) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("command is required: a nonempty shell command")
+    text = raw.strip()
+    if len(text) > GATE_COMMAND_MAX_CHARS or "\x00" in text:
+        raise ValueError(f"command must have at most {GATE_COMMAND_MAX_CHARS} characters and no NUL")
+    return text
+
+
+def _env(raw: Any) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or len(raw) > 64:
+        raise ValueError("env must be an object with at most 64 keys")
+    for key, value in raw.items():
+        if (not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+                or key.startswith("LOOPER_SCHEDULE_")):
+            raise ValueError(f"env key {key!r} must be a variable name outside LOOPER_SCHEDULE_")
+        if not isinstance(value, str) or len(value) > 4096 or "\x00" in value:
+            raise ValueError(f"env value for {key!r} must be a string of at most 4096 characters without NUL")
+    return dict(raw)
+
+
+def _env_file(raw: Any, *, must_exist: bool = True) -> str | None:
+    if raw is None or raw == "":
+        return None
+    if not isinstance(raw, str) or len(raw) > 1024 or "\x00" in raw:
+        raise ValueError("env_file must be a path of at most 1024 characters without NUL")
+    path = os.path.expanduser(raw)
+    if not os.path.isabs(path):
+        raise ValueError("env_file must be an absolute path")
+    if must_exist and (not os.path.isfile(path) or not os.access(path, os.R_OK)):
+        raise ValueError(f"env_file {raw} is not a readable file")
+    return raw
+
+
+def _success_deadline(raw: Any) -> str | None:
+    if raw is not None and (not isinstance(raw, str) or not re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", raw)):
+        raise ValueError("success_deadline must be HH:MM (00:00 through 23:59), or null")
+    return raw
+
+
+def _bounded(field: str, low: int, high: int) -> Any:
+    def parse(raw: Any) -> int | None:
+        if raw is not None and (isinstance(raw, bool) or not isinstance(raw, int) or not low <= raw <= high):
+            raise ValueError(f"{field} must be a whole number from {low} to {high}, or null")
+        return raw
+    return parse
+
+
 _PARSERS = {
     "name": _name, "requirement": _requirement, "work_dir": _work_dir,
     "overlap": lambda raw: _choice("overlap", raw, Overlap), "max_parallel_runs": _max_parallel_runs,
@@ -362,6 +442,11 @@ _PARSERS = {
     "gate_command": _gate_command, "gate_timeout_seconds": _gate_timeout,
     "daily_budget_usd": _budget("daily_budget_usd"), "notify": lambda raw: _choice("notify", raw, Notify),
     "user_gates": lambda raw: _choice("user_gates", raw, UserGates),
+    "kind": lambda raw: _choice("kind", raw, Kind), "command": _command, "env": _env,
+    "env_file": _env_file, "success_deadline": _success_deadline,
+    "alert_failures_after": _bounded("alert_failures_after", 1, 1000),
+    "alert_stale_after_seconds": _bounded("alert_stale_after_seconds", 300, 2592000),
+    "alert_overlap_after": _bounded("alert_overlap_after", 0, 10000),
 }
 _ACCEPTED = (*(name for name in db_schedules.FIELDS
                 if name not in ("notify_channel", "notify_chat", "run_timeout_mode")),
@@ -391,13 +476,16 @@ def _task_limits(raw: Any) -> dict[str, int]:
     return {role: limit for role, limit in limits.items() if limit is not None}
 
 
-async def _fields(data: Mapping[str, Any], *, update: bool,
+async def _fields(data: Mapping[str, Any], *, update: bool, resolve_profiles: bool = True,
                   ) -> tuple[dict[str, Any], dict[str, str] | None, dict[str, int] | None]:
     """The schedule fields in ``data``, validated, and the profile overrides and the task limits when given (each
-    replaces the schedule's); ``enabled`` is the caller's. A new schedule needs a name, a rule and a requirement."""
+    replaces the schedule's). Writes can defer resolving profiles until the kind is checked.
+    ``enabled`` is the caller's."""
     accepted = (*_ACCEPTED, "enabled") if update else (*_ACCEPTED, "manager_id")
     if update and "manager_id" in data:
         raise RequestError(HTTP_400, "a schedule's owner cannot change")
+    if update and "kind" in data:
+        raise RequestError(HTTP_400, "a schedule's kind cannot change; create a new schedule")
     if "enabled" in data and not update:
         raise RequestError(HTTP_400, "a new schedule is created disabled; enable it with PUT /api/schedules/<id> "
                                      '{"enabled": true}')
@@ -412,9 +500,16 @@ async def _fields(data: Mapping[str, Any], *, update: bool,
     try:
         for name, parse in _PARSERS.items():
             if name in data or (not update and name in ("name", "requirement")):
-                fields[name] = parse(data.get(name))
+                raw = data.get(name)
+                if name == "requirement" and ((update and isinstance(raw, str) and not raw.strip())
+                        or (not update and data.get("kind") == Kind.COMMAND.value
+                            and (raw is None or isinstance(raw, str) and not raw.strip()))):
+                    fields[name] = ""
+                else:
+                    fields[name] = parse(raw)
         if "run_timeout_seconds" in data or not update:
-            fields.update(_timeout(data.get("run_timeout_seconds", TIMEOUT_DEFAULT)))
+            default = None if data.get("kind") == Kind.COMMAND.value else TIMEOUT_DEFAULT
+            fields.update(_timeout(data.get("run_timeout_seconds", default)))
         if "cron" in data or not update:
             fields["cron"] = data.get("cron")
         if "timezone" in data or not update:
@@ -430,8 +525,30 @@ async def _fields(data: Mapping[str, Any], *, update: bool,
     if "notify_target" in data:
         fields.update(await _notify_target(data["notify_target"]))
     task_limits = _task_limits(data["task_limits"]) if "task_limits" in data else None
-    profiles = await _profile_overrides(data["profile_overrides"]) if "profile_overrides" in data else None
+    profiles = (await _profile_overrides(data["profile_overrides"]) if resolve_profiles
+                else data["profile_overrides"]) if "profile_overrides" in data else None
     return fields, profiles, task_limits
+
+
+def _check_kind_fields(kind: str, merged: Mapping[str, Any]) -> None:
+    if kind == Kind.COMMAND.value:
+        if not merged.get("command"):
+            raise RequestError(HTTP_400, "command is required: a nonempty shell command")
+        for field in ("requirement", "template_key", "template_inputs", "gate_command", "gate_timeout_seconds",
+                      "run_budget_usd", "daily_budget_usd", "profile_overrides", "task_limits"):
+            if merged.get(field):
+                raise RequestError(HTTP_400, f"{field} does not apply to a command schedule")
+        for field, value in (("user_gates", UserGates.ON.value), ("run_timeout_mode", RunTimeoutMode.INHERIT.value)):
+            if merged.get(field) == value:
+                raise RequestError(HTTP_400, f"{field} does not apply to a command schedule")
+    else:
+        for field in ("command", "env", "env_file"):
+            if merged.get(field):
+                raise RequestError(HTTP_400, f"{field} applies to command schedules only")
+        try:
+            _requirement(merged.get("requirement"))
+        except ValueError as exc:
+            raise RequestError(HTTP_400, str(exc)) from None
 
 
 async def _existing_project(project_id: str) -> dict[str, Any]:
@@ -490,15 +607,21 @@ async def list_all_schedules() -> dict[str, Any]:
 async def create_schedule(project_id: str, data: dict[str, Any], *, created_via: str = "dashboard",
                           now: datetime | None = None) -> dict[str, Any]:
     await _existing_project(project_id)
-    fields, profiles, task_limits = await _fields(data, update=False)
+    fields, profiles, task_limits = await _fields(data, update=False, resolve_profiles=False)
+    kind = fields.get("kind", Kind.AGENT.value)
+    _check_kind_fields(kind, {**fields, "profile_overrides": profiles,
+                             **{key: data[key] for key in ("template_inputs", "task_limits") if key in data}})
+    profiles = await _profile_overrides(profiles) if "profile_overrides" in data else None
     manager_id = fields.pop("manager_id")
-    _check_rule(fields["cron"], fields["timezone"], now or _utcnow(), gated=bool(fields.get("gate_command")))
+    _check_rule(fields["cron"], fields["timezone"], now or _utcnow(),
+                gated=bool(fields.get("gate_command")) or kind == Kind.COMMAND.value)
     fields["cron"] = cron.parse(fields["cron"]).text
     try:
         async with db_connection.transaction() as conn:
             from .schedule_templates import effective_schedule, merge_selection
             try:
-                fields.update(merge_selection({}, fields))
+                fields.update(merge_selection({}, {**({"template_key": None} if kind == Kind.COMMAND.value else {}),
+                                                  **fields}))
                 await effective_schedule(conn, {**fields, "manager_id": manager_id, "project_id": project_id,
                                                 "profile_overrides": profiles or {}}, enabled=False)
             except ValueError as exc:
@@ -526,24 +649,35 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
     if not data:
         raise RequestError(HTTP_400, "give at least one field to change")
     now = now or _utcnow()
-    fields, profiles, task_limits = await _fields(data, update=True)
+    fields, profiles, task_limits = await _fields(data, update=True, resolve_profiles=False)
     enabled = data.get("enabled")
     if "enabled" in data and not isinstance(enabled, bool):
         raise RequestError(HTTP_400, "enabled must be true or false")
+    if "profile_overrides" in data:
+        if profiles:
+            stored = await _existing(schedule_id)
+            _check_kind_fields(stored["kind"], {**stored, **fields, "profile_overrides": profiles})
+        # Profile lookup borrows its own connection; resolve before holding the schedule's row lock.
+        profiles = await _profile_overrides(profiles)
     try:
         async with db_connection.transaction() as conn:
             row = await db_schedules.lock_schedule(conn, schedule_id)
             if row is None:
                 raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
+            kind = row["kind"]
+            _check_kind_fields(kind, {**row, **fields,
+                "profile_overrides": profiles if "profile_overrides" in data else row["profile_overrides"],
+                **{key: data[key] for key in ("template_inputs", "task_limits") if key in data}})
             rule_text, zone_name = fields.get("cron", row["cron"]), fields.get("timezone", row["timezone"])
-            gated = bool(fields.get("gate_command", row["gate_command"]))
+            gated = bool(fields.get("gate_command", row["gate_command"])) or kind == Kind.COMMAND.value
             rule = _check_rule(rule_text, zone_name, now, gated=gated,
-                               removes_gate=bool(row["gate_command"]) and not gated)
+                               removes_gate=kind == Kind.AGENT.value and bool(row["gate_command"]) and not gated)
             if "cron" in fields:
                 fields["cron"] = rule.text
             from .schedule_templates import effective_schedule, merge_selection, MissingDirectory
             try:
-                fields.update(merge_selection(row, fields))
+                fields.update(merge_selection(row, {**({"template_key": None} if kind == Kind.COMMAND.value else {}),
+                                                    **fields}))
             except ValueError as exc:
                 raise RequestError(HTTP_400, str(exc)) from None
             will_run = row["enabled"] if enabled is None else enabled
@@ -599,6 +733,10 @@ async def list_runs(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any
         skips = _choice("skips", query.get("skips") or SkipRows.SHOW.value, SkipRows)
     except ValueError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
+    status = query.get("status")
+    statuses = (*db_schedules.OPEN_STATUSES, *db_schedules.SUCCESS, *db_schedules.UNFINISHED, *db_schedules.SKIPPED)
+    if status is not None and status not in statuses:
+        raise RequestError(HTTP_400, "status must be a schedule run status")
     await _existing(schedule_id)
     before = query.get("before") or None
     if before is not None:
@@ -607,11 +745,69 @@ async def list_runs(schedule_id: str, query: Mapping[str, str]) -> dict[str, Any
             raise RequestError(HTTP_400, f"before must be a run of schedule {schedule_id}")
     limit = int(raw)
     rows = await db_schedules.list_runs(schedule_id, limit=limit + 1, before=before,
+                                        only=status,
                                         without=ROUTINE_SKIPS if skips == SkipRows.HIDE.value else ())
     page = rows[:limit]
     return {"runs": await _run_views(page),
             "next_before": page[-1]["id"] if len(rows) > limit else None,
-            "routine_skips": await db_schedules.run_counts(schedule_id, ROUTINE_SKIPS)}
+            "routine_skips": await db_schedules.run_counts(schedule_id, ROUTINE_SKIPS),
+            "stats": await db_schedules.run_stats(schedule_id, _utcnow())}
+
+
+async def run_log(run_id: str, args: Mapping[str, Any], runtime_root: Path) -> dict[str, Any]:
+    """Read a bounded byte page, confined to the schedule log directory; preserve arbitrary output bytes."""
+    row = await db_schedules.get_run(run_id)
+    if row is None:
+        raise RequestError(HTTP_404, f"run {run_id!r} not found")
+    if not row.get("log_path"):
+        raise RequestError(HTTP_404, "this run has no log")
+    path = (runtime_root / row["log_path"]).resolve()
+    logs = (runtime_root / "logs" / "schedules").resolve()
+    if not path.is_relative_to(logs) or path == logs:
+        raise RequestError(HTTP_400, "log_path must be inside logs/schedules")
+    if "offset" in args and "tail_lines" in args:
+        raise RequestError(HTTP_400, "offset and tail_lines are mutually exclusive")
+
+    def integer(field: str, default: int, low: int, high: int | None = None) -> int:
+        value = args.get(field, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < low or high is not None and value > high:
+            raise RequestError(HTTP_400, f"{field} must be an integer from {low}" +
+                               (f" to {high}" if high is not None else ""))
+        return value
+
+    offset = integer("offset", 0, 0)
+    limit = integer("limit_bytes", 1024 * 1024, 1, 4 * 1024 * 1024)
+    tail = integer("tail_lines", 1, 1, 5000) if "tail_lines" in args else None
+
+    def read() -> tuple[int, int, bytes]:
+        with path.open("rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            start = max(0, size - limit) if tail is not None else offset
+            if start > size:
+                raise RequestError(HTTP_400, "offset exceeds the log size")
+            stream.seek(start)
+            data = stream.read(min(limit, size - start))
+            if os.fstat(stream.fileno()).st_nlink == 0:
+                raise FileNotFoundError(path)
+            if tail is not None:
+                # A trailing newline belongs to the final line, rather than creating an empty extra line.
+                lines = data.split(b"\n")
+                wanted = tail + 1 if data.endswith(b"\n") else tail
+                last = b"\n".join(lines[-wanted:])
+                start += len(data) - len(last)
+                data = last
+            return size, start, data
+
+    complete = row["status"] not in db_schedules.OPEN_STATUSES
+    try:
+        size, offset, data = await asyncio.to_thread(read)
+    except FileNotFoundError:
+        raise RequestError(HTTP_404, "the log was removed by the retention policy" if complete
+                           else "the log has not been written yet") from None
+    return {"run_id": run_id, "schedule_id": row["schedule_id"], "size": size, "offset": offset,
+            "next_offset": offset + len(data) if offset + len(data) < size else None,
+            "data_base64": base64.b64encode(data).decode("ascii"), "complete": complete,
+            "truncated": row.get("log_truncated", False)}
 
 
 def preview(data: Mapping[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
