@@ -121,6 +121,7 @@ class FakeSystemd:
         self.pid = 7000
         self.calls: list[list[str]] = []
         self.probe_active = False
+        self.probe_service_active = False
 
     @property
     def serving(self) -> bool:
@@ -131,9 +132,15 @@ class FakeSystemd:
         self.calls.append(argv)
         assert argv[:2] == ["systemctl", "--user"], argv
         args = argv[2:]
-        if args[-1] == f"{LABEL}-probe.timer":
-            assert args[:2] in (["enable", "--now"], ["disable", "--now"])
-            self.probe_active = args[0] == "enable"
+        unit = args[1] if args[0] == "show" else args[-1]
+        if unit in (f"{LABEL}-probe.timer", f"{LABEL}-probe.service"):
+            attr = "probe_active" if unit.endswith(".timer") else "probe_service_active"
+            if args[0] == "show":
+                active = getattr(self, attr)
+                return subprocess.CompletedProcess(argv, 0,
+                    f"LoadState=loaded\nActiveState={'active' if active else 'inactive'}\nMainPID={42 if active else 0}\n", "")
+            assert args[0] in ("enable", "disable", "stop")
+            setattr(self, attr, args[0] == "enable")
             return subprocess.CompletedProcess(argv, 0, "", "")
         if args[0] == "show":
             out = (f"LoadState=loaded\nActiveState={'active' if self.active else 'inactive'}\nSubState=running\n"
@@ -178,8 +185,8 @@ def _host(tmp_path: Path, checkout: Path, fake, *, system: str, port_busy: bool 
         system=system, home=tmp_path / "home", uid=UID, environ=dict(SHELL_ENV),
         executable=str(checkout / ".venv" / "bin" / "python3"), cwd=checkout, run=fake,
         sleep=clock.sleep, clock=lambda: clock.now,
-        get_status=lambda port, token: answer if fake.serving else None,
-        port_in_use=lambda port: port_busy and not fake.serving,
+        get_status=lambda port, token, address="127.0.0.1": answer if fake.serving else None,
+        port_in_use=lambda port, address="127.0.0.1": port_busy and not fake.serving,
     )
 
 
@@ -304,7 +311,9 @@ def test_install_reloads_probe_and_removes_it_when_unconfigured(tmp_path, checko
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
-def test_failed_reinstall_removes_old_probe_before_stopping_service(tmp_path, checkout, monkeypatch, capsys, system):
+@pytest.mark.parametrize("failure", ["busy", "timeout"])
+@pytest.mark.parametrize("configured", [False, True])
+def test_failed_reinstall_keeps_old_probe(tmp_path, checkout, monkeypatch, capsys, system, failure, configured):
     fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
     host = _host(tmp_path, checkout, fake, system=system)
     _configure_probe(tmp_path / "old-runtime")
@@ -312,20 +321,16 @@ def test_failed_reinstall_removes_old_probe_before_stopping_service(tmp_path, ch
     assert all(path.is_file() for path in _probe_paths(host))
     assert fake.probe.loaded if system == "Darwin" else fake.probe_active
 
-    def run(argv):
-        if (system == "Darwin" and list(argv[1:]) == ["bootout", f"gui/{UID}/{LABEL}"]
-                or system == "Linux" and list(argv[2:]) == ["stop", f"{LABEL}.service"]):
-            assert not any(path.exists() for path in _probe_paths(host))
-            assert not (fake.probe.loaded if system == "Darwin" else fake.probe_active)
-        return fake(argv)
-
-    host.run = run
-    host.port_in_use = lambda port: True
-    assert _install(monkeypatch, host, tmp_path / "new-runtime") == 1
-    assert "port 9876 is in use" in capsys.readouterr().err
-    assert not fake.serving
-    assert not any(path.exists() for path in _probe_paths(host))
-    assert not (fake.probe.loaded if system == "Darwin" else fake.probe_active)
+    units = {path: path.read_bytes() for path in _probe_paths(host)}
+    root = tmp_path / "new-runtime"
+    if configured:
+        _configure_probe(root)
+    host.port_in_use = lambda port, address="127.0.0.1": failure == "busy"
+    host.get_status = lambda port, token, address="127.0.0.1": None
+    assert _install(monkeypatch, host, root, "--timeout", "2") == 1
+    assert ("port 9876 is in use" if failure == "busy" else "within 2 s") in capsys.readouterr().err
+    assert all(path.read_bytes() == data for path, data in units.items())
+    assert fake.probe.loaded if system == "Darwin" else fake.probe_active
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
@@ -341,7 +346,7 @@ def test_installed_probe_uses_the_serving_port(tmp_path, checkout, monkeypatch, 
     if selection == "retained":
         assert _install(monkeypatch, host, root, port="9888") == 0
     received = []
-    host.get_status = lambda port, token: received.append(port) or {"status": "running"}
+    host.get_status = lambda port, token, address="127.0.0.1": received.append(port) or {"status": "running"}
     assert _install(monkeypatch, host, root, port="9888" if selection == "flag" else None) == 0
     assert received == [9888]
     argv = _probe_argv(host)
@@ -349,6 +354,160 @@ def test_installed_probe_uses_the_serving_port(tmp_path, checkout, monkeypatch, 
         assert "--port" not in argv
     else:
         assert argv[argv.index("--port") + 1] == "9888"
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+@pytest.mark.parametrize("retained", [False, True])
+def test_probe_port_override_wins_over_ops_file(tmp_path, checkout, monkeypatch, system, retained):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    config = root / ops_config.FILE
+    config.write_text(config.read_text().replace('[server]\n', '[server]\nport = 8767\n'))
+    assert _install(monkeypatch, host, root, port="9000") == 0
+    if retained:
+        assert _install(monkeypatch, host, root, port=None) == 0
+    argv = _probe_argv(host)
+    assert argv[argv.index("--port") + 1] == "9000"
+    assert service.manager(host, LABEL).unit_settings()[0] == 9000
+
+
+@pytest.mark.parametrize(("system", "missing"), [("Darwin", "all"), ("Linux", "all"),
+                                               ("Linux", "service"), ("Linux", "timer")])
+def test_restart_recreates_missing_probe_units(tmp_path, checkout, monkeypatch, system, missing):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    config = root / ops_config.FILE
+    custom = root / "ops" / "custom.toml"
+    config.rename(custom)
+    assert _install(monkeypatch, host, root, "--config", str(custom), port="9000") == 0
+    for path in _probe_paths(host):
+        if missing == "all" or path.suffix == f".{missing}":
+            path.unlink()
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
+    assert all(path.is_file() for path in _probe_paths(host))
+    argv = _probe_argv(host)
+    assert argv[argv.index("--config") + 1] == str(custom)
+    assert argv[argv.index("--port") + 1] == "9000"
+    assert fake.probe.loaded if system == "Darwin" else fake.probe_active
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_uninstall_waits_for_running_probe_before_removing_units(tmp_path, checkout, monkeypatch, system):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    assert _install(monkeypatch, host, root) == 0
+    if system == "Linux":
+        fake.probe_service_active = True
+    observed = []
+
+    def run(argv):
+        if (system == "Darwin" and argv[1] == "print" and argv[-1].endswith(f"/{LABEL}.probe")
+                or system == "Linux" and argv[2] in ("show", "stop") and "-probe." in argv[3]):
+            assert all(path.is_file() for path in _probe_paths(host))
+            observed.append(list(argv))
+        return fake(argv)
+
+    host.run = run
+    assert _looper(monkeypatch, host, "uninstall", "--label", LABEL) == 0
+    assert observed
+    assert not any(path.exists() for path in _probe_paths(host))
+    if system == "Linux":
+        assert not fake.probe_active and not fake.probe_service_active
+        assert {argv[3] for argv in observed if argv[2] == "show"} == {
+            f"{LABEL}-probe.timer", f"{LABEL}-probe.service"}
+    else:
+        assert not fake.probe.loaded and fake.probe.unloading == 0
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_uninstall_keeps_units_if_probe_does_not_stop(tmp_path, checkout, monkeypatch, capsys, system):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    assert _install(monkeypatch, host, root) == 0
+    if system == "Linux":
+        fake.probe_service_active = True
+
+    def run(argv):
+        if (system == "Darwin" and argv[1] == "bootout" and argv[-1].endswith(f"/{LABEL}.probe")
+                or system == "Linux" and argv[2:] == ["stop", f"{LABEL}-probe.service"]):
+            return subprocess.CompletedProcess(argv, 1, "", "cannot stop")
+        return fake(argv)
+
+    host.run = run
+    assert _looper(monkeypatch, host, "uninstall", "--label", LABEL) == 1
+    assert capsys.readouterr().err
+    assert all(path.is_file() for path in _probe_paths(host))
+    assert service.manager(host, LABEL).unit_path.is_file() and fake.serving
+
+
+def test_missing_probe_units_do_not_reload_systemd(tmp_path, checkout):
+    fake = FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system="Linux")
+
+    def run(argv):
+        pytest.fail(f"no probe is installed: unexpected command {argv}")
+
+    host.run = run
+    assert "not installed" in service.uninstall(host, label=LABEL)
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_install_and_restart_check_ipv6_loopback_for_wildcard_host(tmp_path, checkout, monkeypatch, system):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    config = _write_ops(root)
+    config.write_text(config.read_text().replace('[server]\n', '[server]\nhost = "::"\n'))
+    addresses = []
+
+    def port_in_use(port, address="127.0.0.1"):
+        addresses.append(("connect", address))
+        return address != "::1"
+
+    def get_status(port, token, address="127.0.0.1"):
+        addresses.append(("status", address))
+        return {"status": "running"} if address == "::1" else None
+
+    host.port_in_use, host.get_status = port_in_use, get_status
+    assert _install(monkeypatch, host, root, "--timeout", "2") == 0
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL, "--timeout", "2") == 0
+    assert addresses == [("connect", "::1"), ("status", "::1")] * 2
+
+
+def test_start_checks_dial_ipv6_loopback(monkeypatch):
+    def open_request(request, *, timeout):
+        assert request.full_url == "http://[::1]:18834/api/v1/system/status"
+        return io.BytesIO(b'{"status": "ok", "result": {"status": "running"}}')
+
+    class Socket:
+        def __init__(self, family, kind):
+            assert family == service.socket.AF_INET6 and kind == service.socket.SOCK_STREAM
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def settimeout(self, timeout):
+            assert timeout == 1
+
+        def connect_ex(self, address):
+            assert address == ("::1", 18834)
+            return 0
+
+    monkeypatch.setattr(service.urllib.request, "build_opener", lambda *args: SimpleNamespace(open=open_request))
+    monkeypatch.setattr(service.socket, "socket", Socket)
+    assert service._get_status(18834, None, "::1") == {"status": "running"}
+    assert service._port_in_use(18834, "::1")
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
@@ -375,7 +534,7 @@ def test_probe_follows_ops_port_changes_after_restart(tmp_path, checkout, monkey
     config.write_text(text.replace(f"port = {initial_port}", "port = 9889") if initial_port is not None
                       else text.replace('[server]\n', '[server]\nport = 9889\n'))
     serving_ports = []
-    host.get_status = lambda port, token: serving_ports.append(port) or {"status": "running"}
+    host.get_status = lambda port, token, address="127.0.0.1": serving_ports.append(port) or {"status": "running"}
     assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
     assert serving_ports == [9889]
     # Invoke the installed command again, as the timer would after a crash restart too.
@@ -400,7 +559,7 @@ def test_restart_refreshes_a_stale_pinned_probe(tmp_path, checkout, monkeypatch,
     config = root / ops_config.FILE
     config.write_text(config.read_text().replace('[server]\n', '[server]\nport = 9889\n'))
     received = []
-    host.get_status = lambda port, token: received.append(port) or {"status": "running"}
+    host.get_status = lambda port, token, address="127.0.0.1": received.append(port) or {"status": "running"}
     assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
     assert received == [int(explicit_port) if explicit_port else 9889]
     argv = _probe_argv(host)
@@ -544,7 +703,8 @@ def test_systemd_probe_cleanup_ignores_disable_failure(tmp_path, checkout):
     host.run = run
     service.remove_probe_units(host, LABEL)
     assert not any(path.exists() for path in _probe_paths(host))
-    assert fake.commands() == [f"disable --now {LABEL}-probe.timer", "daemon-reload"]
+    assert f"stop {LABEL}-probe.service" in fake.commands()
+    assert fake.commands()[-1] == "daemon-reload"
 
 
 @pytest.mark.parametrize("token", [None, "test-operator-token"])
@@ -575,7 +735,7 @@ def test_start_wait_reads_the_token_again_when_the_new_server_creates_it(
     root = tmp_path / "runtime"
     received = []
 
-    def get_status(port: int, token: str | None) -> dict | None:
+    def get_status(port: int, token: str | None, address: str = "127.0.0.1") -> dict | None:
         received.append((port, token))
         if token is None:
             operator_auth.token_path(root).write_text("test-operator-token\n")
@@ -732,7 +892,7 @@ def test_waiting_gives_up_with_the_log_tail(
 ) -> None:
     fake = FakeLaunchd()
     host = _host(tmp_path, checkout, fake, system="Darwin")
-    host.get_status = lambda port, token: None
+    host.get_status = lambda port, token, address="127.0.0.1": None
     (tmp_path / "runtime" / "logs").mkdir(parents=True)
     (tmp_path / "runtime" / "logs" / "serve.log").write_text("starting\nOSError: address already in use\n")
 
@@ -807,7 +967,7 @@ def test_status_reads_the_operator_token_from_the_units_runtime_root(
     assert _install(monkeypatch, host, root) == 0
     operator_auth.token_path(root).write_text("test-operator-token\n")
     received = []
-    host.get_status = lambda port, token: received.append((port, token)) or {"status": "running"}
+    host.get_status = lambda port, token, address="127.0.0.1": received.append((port, token)) or {"status": "running"}
 
     assert _looper(monkeypatch, host, "status", "--label", LABEL) == 0
     assert received == [(9876, "test-operator-token")]
@@ -948,7 +1108,7 @@ def test_install_without_a_port_uses_the_ops_file_for_status_and_restart(
     root = tmp_path / "runtime"
     _write_ops(root, port=9002)
     received = []
-    host.get_status = lambda port, token: received.append(port) or {"status": "running"}
+    host.get_status = lambda port, token, address="127.0.0.1": received.append(port) or {"status": "running"}
 
     assert _install(monkeypatch, host, root, port=None) == 0
     mgr = service.manager(host, LABEL)
@@ -1053,7 +1213,7 @@ def test_install_requires_an_ops_file(
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
 @pytest.mark.parametrize("override", ["none", "flag", "file"])
 @pytest.mark.parametrize("old_config", [False, True], ids=["legacy-unit", "ops-unit"])
-def test_reinstall_preserves_installed_port_unless_explicitly_overridden(
+def test_reinstall_preserves_installed_port_unless_flag_overrides_it(
     tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     system: str, override: str, old_config: bool,
 ) -> None:
@@ -1074,17 +1234,17 @@ def test_reinstall_preserves_installed_port_unless_explicitly_overridden(
     service.write_private(mgr.unit_path, mgr.render(old))
     assert b"LOOPER_DATABASE_URL" in mgr.unit_path.read_bytes()
 
-    expected = {"none": 9001, "flag": 9003, "file": 8767}[override]
+    expected = 9003 if override == "flag" else 9001
     if override != "none":
         _write_ops(root, port=8767)
-    host.port_in_use = lambda port: port == 8767 and override != "file"
+    host.port_in_use = lambda port, address="127.0.0.1": port == 8767
     received = []
-    host.get_status = lambda port, token: received.append(port) or {"status": "running"}
+    host.get_status = lambda port, token, address="127.0.0.1": received.append(port) or {"status": "running"}
     assert _install(monkeypatch, host, root, port="9003" if override == "flag" else None) == 0
 
     data = mgr.unit_path.read_bytes()
     assert b"DATABASE_URL" not in data and b"postgresql://" not in data and b"s3cret" not in data
-    assert (b"--port" in data) is (override != "file")
+    assert b"--port" in data
     assert mgr.unit_settings() == (expected, root / "logs" / "serve.log", root)
     assert received == [expected] and fake.serving
     assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
