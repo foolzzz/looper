@@ -335,6 +335,9 @@ def _ok_blocks(answer: Mapping[str, Any]) -> list[str]:
                 isinstance(item, dict) for item in value) else []
             if table:
                 lines += [f"{key}:", *table]
+                if key == "runs":
+                    lines += [f"  {item['run_id']} log: " + json.dumps(item["log"], ensure_ascii=False)
+                              for item in value if item.get("run_id") and isinstance(item.get("log"), dict)]
             else:
                 lines.append(f"{key}: " + _clip(json.dumps(value, ensure_ascii=False), LINE_CHARS))
         if lines:

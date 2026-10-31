@@ -49,7 +49,7 @@ SKIPPED = ("skipped_gate", *NOTHING_RAN)
 UNFINISHED = ("failed", "timed_out", "gate_failed", "stopped", "cancelled", "interrupted")
 
 _RUN = """
-    SELECT r.*, s.manager_id, t.status AS task_status, t.title AS task_title FROM schedule_runs r
+    SELECT r.*, s.manager_id, s.kind, t.status AS task_status, t.title AS task_title FROM schedule_runs r
     JOIN schedules s ON s.id = r.schedule_id LEFT JOIN tasks t ON t.id = r.task_id
 """
 
@@ -397,21 +397,60 @@ async def get_run(run_id: str, *, pool: Db | None = None) -> dict[str, Any] | No
 
 
 async def list_runs(schedule_id: str, *, limit: int, before: str | None = None, without: Sequence[str] = (),
-                    pool: Db | None = None) -> list[dict[str, Any]]:
+                    only: str | None = None, pool: Db | None = None) -> list[dict[str, Any]]:
     """The schedule's runs, newest first, each with its task's status and title: those older than the run
-    ``before`` when given, and none whose status is in ``without``."""
+    ``before`` when given, none whose status is in ``without``, and only ``only`` when given."""
     db = pool or get_pool()
     rows = await db.fetch(
         f"""
         {_RUN}
         WHERE r.schedule_id = $1 AND NOT (r.status = ANY($3::text[]))
+          AND ($5::text IS NULL OR r.status = $5)
           AND ($4::text IS NULL OR (r.created_at, r.id) < (SELECT b.created_at, b.id FROM schedule_runs b
                                                           WHERE b.id = $4 AND b.schedule_id = $1))
         ORDER BY r.created_at DESC, r.id DESC LIMIT $2
         """,
-        schedule_id, limit, list(without), before,
+        schedule_id, limit, list(without), before, only,
     )
     return [_run_row(row) for row in rows]
+
+
+async def run_stats(schedule_id: str, now: datetime, *, pool: Db | None = None) -> dict[str, dict[str, Any]]:
+    """Execution outcomes and durations finished in the last day and week, independent of list filters."""
+    db = pool or get_pool()
+    row = await db.fetchrow(
+        """
+        WITH executions AS (
+            SELECT r.status, r.finished_at,
+                   EXTRACT(EPOCH FROM r.finished_at - CASE WHEN s.kind = 'command' THEN r.started_at
+                       ELSE COALESCE(r.started_at, r.fired_at) END) AS seconds
+            FROM schedule_runs r JOIN schedules s ON s.id = r.schedule_id
+            WHERE r.schedule_id = $1 AND r.status = ANY($3::text[])
+              AND finished_at > $2::timestamptz - interval '7 days' AND finished_at <= $2
+        )
+        SELECT count(*) FILTER (WHERE finished_at > $2 - interval '1 day') AS day_runs,
+               count(*) FILTER (WHERE finished_at > $2 - interval '1 day' AND status = ANY($4::text[])) AS day_succeeded,
+               count(*) FILTER (WHERE finished_at > $2 - interval '1 day' AND status = ANY($5::text[])) AS day_failed,
+               avg(seconds) FILTER (WHERE finished_at > $2 - interval '1 day') AS day_avg_seconds,
+               max(seconds) FILTER (WHERE finished_at > $2 - interval '1 day') AS day_max_seconds,
+               count(*) AS week_runs,
+               count(*) FILTER (WHERE status = ANY($4::text[])) AS week_succeeded,
+               count(*) FILTER (WHERE status = ANY($5::text[])) AS week_failed,
+               avg(seconds) AS week_avg_seconds, max(seconds) AS week_max_seconds
+        FROM executions
+        """,
+        schedule_id, now, [*SUCCESS, *FAILURES, "stopped", "cancelled"], list(SUCCESS), list(FAILURES),
+    )
+    stats = {}
+    for window in ("day", "week"):
+        runs, succeeded = row[f"{window}_runs"], row[f"{window}_succeeded"]
+        stats[window] = {
+            "runs": runs, "succeeded": succeeded, "failed": row[f"{window}_failed"],
+            "success_rate": succeeded / runs if runs else None,
+            **{metric: float(row[f"{window}_{metric}"]) if row[f"{window}_{metric}"] is not None else None
+               for metric in ("avg_seconds", "max_seconds")},
+        }
+    return stats
 
 
 async def run_counts(schedule_id: str, statuses: Sequence[str], *, pool: Db | None = None) -> dict[str, int]:
@@ -432,7 +471,7 @@ async def latest_runs(schedule_ids: list[str], *, pool: Db | None = None) -> dic
     db = pool or get_pool()
     rows = await db.fetch(
         """
-        SELECT DISTINCT ON (r.schedule_id) r.*, s.manager_id, t.status AS task_status
+        SELECT DISTINCT ON (r.schedule_id) r.*, s.manager_id, s.kind, t.status AS task_status
         FROM schedule_runs r JOIN schedules s ON s.id = r.schedule_id LEFT JOIN tasks t ON t.id = r.task_id
         WHERE r.schedule_id = ANY($1::text[]) ORDER BY r.schedule_id, r.created_at DESC, r.id DESC
         """,

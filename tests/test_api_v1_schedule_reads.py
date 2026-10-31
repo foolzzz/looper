@@ -7,6 +7,7 @@ import pytest
 
 from looper import loopercli
 from looper.agents import api_v1
+from looper.agents.ops import OpError
 from looper.agents.v1_domains import schedule_reads
 from tests.test_api_v1_auth import _bearer, _send, _serving
 from tests.test_loopercli import Server, _send as cli_send, write_client_file
@@ -47,6 +48,12 @@ def test_malformed_preview_is_a_typed_invalid_request(tmp_path, body):
     ("preview", ["--cron", "0 * * * *", "--count", "20", "--gated"], {"cron": "0 * * * *", "count": 20, "gated": True}),
     ("runs", ["--schedule-id", "sched-example", "--limit", "200", "--skips", "hide"],
      {"schedule_id": "sched-example", "limit": 200, "skips": "hide"}),
+    ("runs", ["--schedule-id", "sched-example", "--status", "failed"],
+     {"schedule_id": "sched-example", "status": "failed"}),
+    ("run_log", ["--run-id", "srun-example", "--offset", "0", "--limit-bytes", "1048576"],
+     {"run_id": "srun-example", "offset": 0, "limit_bytes": 1048576}),
+    ("run_log", ["--run-id", "srun-example", "--tail-lines", "3"],
+     {"run_id": "srun-example", "tail_lines": 3}),
     ("notifications", ["--schedule-id", "sched-example", "--limit", "1"], {"schedule_id": "sched-example", "limit": 1})])
 def test_generated_schedule_commands_send_the_declared_request(tmp_path, capsys, action, args, body):
     def respond(handler, request):
@@ -64,3 +71,45 @@ def test_generated_schedule_commands_send_the_declared_request(tmp_path, capsys,
         assert "202" not in api_v1.document()["paths"][path.removeprefix("/api/v1")]["post"]["responses"]
     finally:
         server.close()
+
+
+@pytest.mark.parametrize("action,body", [
+    ("runs", {"schedule_id": "sched-example", "status": "unknown"}),
+    ("runs", {"schedule_id": "sched-example", "status": None}),
+    ("run_log", {}), ("run_log", {"run_id": 1}),
+    *[("run_log", {"run_id": "srun-example", key: value}) for key, value in (
+        ("offset", -1), ("offset", True), ("limit_bytes", 0), ("limit_bytes", 4 * 1024 * 1024 + 1),
+        ("tail_lines", 0), ("tail_lines", 5001), ("tail_lines", True))],
+])
+def test_run_read_requests_validate_status_and_log_bounds(action, body):
+    operation = api_v1.find("POST", f"/api/v1/schedule_admin/{action}")
+    assert operation is not None
+    with pytest.raises(OpError):
+        api_v1.validate_arguments(operation.request, body)
+
+
+@pytest.mark.parametrize("status", [
+    "queued", "gating", "running", "completed", "failed", "stopped", "cancelled", "timed_out",
+    "gate_failed", "skipped_overlap", "skipped_missed", "skipped_gate", "skipped_budget", "succeeded", "interrupted",
+])
+def test_run_status_filter_accepts_every_persisted_status(status):
+    operation = api_v1.find("POST", "/api/v1/schedule_admin/runs")
+    api_v1.validate_arguments(operation.request, {"schedule_id": "sched-example", "status": status})
+
+
+def test_run_log_uses_server_runtime_root(tmp_path, monkeypatch):
+    async def read_log(run_id, arguments, runtime_root):
+        assert run_id == "srun-example"
+        assert arguments == {"run_id": "srun-example", "tail_lines": 3}
+        assert runtime_root == tmp_path
+        return {"run_id": run_id, "schedule_id": "sched-example", "size": 5, "offset": 0,
+                "next_offset": None, "data_base64": "Ynl0ZXM=", "complete": True, "truncated": False}
+
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(schedule_reads.schedules, "run_log", read_log, raising=False)
+    operation = api_v1.find("POST", "/api/v1/schedule_admin/run_log")
+    assert operation is not None
+    result = asyncio.run(schedule_reads.run(SimpleNamespace(_runtime_root=tmp_path), operation,
+                                            {"run_id": "srun-example", "tail_lines": 3}, None, {}))
+    api_v1.validate_arguments(schedule_reads.RUN_LOG, result)
