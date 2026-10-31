@@ -10,7 +10,7 @@ pytestmark = pytest.mark.installed
 
 
 @pytest.fixture
-def dashboard(dashboard_url):
+def dashboard(dashboard_url):  # noqa: F811
     playwright = pytest.importorskip("playwright.sync_api", reason="UNTESTED: Playwright missing")
 
     with playwright.sync_playwright() as driver:
@@ -174,3 +174,173 @@ def test_owner_load_failure_is_visible_and_can_retry_without_losing_draft(dashbo
     page.get_by_role("button", name="Retry owners", exact=True).click()
     expect(page.get_by_label("Owner", exact=True)).to_be_visible()
     expect(page.get_by_label("Name *", exact=True)).to_have_value("Hourly review")
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
+def test_command_environment_multiline_round_trip(dashboard, tmp_path, width):
+    import json
+
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    page.set_viewport_size({"width": width, "height": 900})
+    new_schedule(page, base)
+    page.get_by_role("radio", name="Command", exact=False).check()
+    page.get_by_label("Command *", exact=True).fill("printf ready")
+    page.get_by_role("button", name="Create", exact=True).click()
+    expect(page.get_by_text("Type: Command", exact=True)).to_be_visible()
+    # Simulate a schedule supplied by the API/CLI, including values that look like new entries.
+    original = {"SETTINGS": "REGION=us\nTIER=gold", "EMPTY": "",
+                "LITERAL": '  C:\\reports\\n="quoted"  '}
+    state["schedules"][0]["env"] = original.copy()
+    page.reload()
+    page.get_by_label("Name *", exact=True).fill("Renamed command")
+    with page.expect_response(lambda r: r.url.endswith("/schedule_admin/update")) as response:
+        page.get_by_role("button", name="Save", exact=True).click()
+    assert response.value.request.post_data_json["fields"] == {"name": "Renamed command"}
+    assert state["schedules"][0]["env"] == original
+
+    env = page.get_by_label("Environment", exact=True)
+    assert json.loads(env.input_value()) == original
+    updated = {**original, "SETTINGS": "REGION=eu\nTIER=silver\n", "CRLF": "a\r\nb\r", "ADDED": " x=y "}
+    env.fill(json.dumps(updated))
+    with page.expect_response(lambda r: r.url.endswith("/schedule_admin/update")) as response:
+        page.get_by_role("button", name="Save", exact=True).click()
+    assert response.value.request.post_data_json["fields"] == {"env": updated}
+    page.reload()
+    expect(page.get_by_role("button", name="Save", exact=True)).to_be_disabled()
+    assert json.loads(env.input_value()) == updated
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    env.scroll_into_view_if_needed()
+    page.screenshot(path=str(tmp_path / f"command-environment-{width}.png"), full_page=True)
+
+    for invalid in ('{"SETTINGS":', '{"SETTINGS": 1}', '{"SETTINGS": null}', '{"BAD-KEY": "value"}'):
+        env.fill(invalid)
+        expect(env).to_have_attribute("aria-invalid", "true")
+        expect(page.locator("form").get_by_role("alert")).to_be_visible()
+        expect(page.get_by_role("button", name="Save", exact=True)).to_be_disabled()
+    env.fill("{}")
+    with page.expect_response(lambda r: r.url.endswith("/schedule_admin/update")) as response:
+        page.get_by_role("button", name="Save", exact=True).click()
+    assert response.value.request.post_data_json["fields"] == {"env": {}}
+    page.reload()
+    expect(env).to_have_value("")
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
+def test_command_form_create_edit_and_agent_regression(tmp_path, staged_dashboard_dir, width):
+    """Exercise form serialization against a fresh database and a real serve process."""
+    import os
+
+    playwright = pytest.importorskip("playwright.sync_api", reason="UNTESTED: Playwright missing")
+    expect, sync_playwright = playwright.expect, playwright.sync_playwright
+
+    from tests.test_llm_models_dashboard import _running_dashboard
+
+    admin_url = os.environ.get("LOOPER_TEST_DATABASE_URL")
+    if not admin_url:
+        pytest.skip("UNTESTED: disposable PostgreSQL is not configured")
+    with _running_dashboard(tmp_path, admin_url) as server, sync_playwright() as driver:
+        if not Path(driver.chromium.executable_path).is_file():
+            pytest.skip("UNTESTED: Chromium missing")
+        browser = driver.chromium.launch(headless=True, timeout=15000)
+        context = browser.new_context(viewport={"width": width, "height": 900})
+        try:
+            page = context.new_page()
+            page.set_default_timeout(10000)
+
+            def snapshot(name):
+                form = page.locator("form").filter(has=page.get_by_label("Name *", exact=True))
+                expect(form).not_to_contain_text("Checking the rule…")
+                height = form.evaluate("element => element.scrollHeight") + 800
+                page.set_viewport_size({"width": width, "height": height})
+                form.evaluate("""element => {
+                    for (let node = element; node; node = node.parentElement) node.scrollTop = 0;
+                }""")
+                page.locator("textarea").evaluate_all("elements => elements.forEach(element => element.scrollTop = 0)")
+                page.screenshot(path=str(tmp_path / f"{name}-{width}.png"), full_page=True)
+                page.set_viewport_size({"width": width, "height": 900})
+
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            project = server.api.post("/api/v1/project_admin/list", {})["result"]["projects"][0]
+            pid = project["project_id"]
+            server.api.post("/api/v1/project_admin/update", {"project_id": pid, "fields": {
+                "name": "Example", "work_dir": "/srv/example"}})
+            base = server.api.base_url
+            page.goto(f"{base}/#projects/{pid}/schedules", wait_until="domcontentloaded")
+            page.get_by_role("button", name="New schedule", exact=True).click()
+            expect(page.get_by_label("Requirement *", exact=True)).to_be_visible()
+            page.get_by_role("radio", name="Command", exact=False).check()
+            expect(page.get_by_label("Requirement *", exact=True)).to_have_count(0)
+            expect(page.get_by_role("radio", name="Use the default", exact=False)).to_have_count(0)
+            page.get_by_label("Time zone", exact=True).fill("UTC")
+            page.get_by_label("Name *", exact=True).fill("Daily report")
+            page.get_by_label("Rule (cron) *", exact=True).fill("* * * * *")
+            command = "printf '%s\\n' " + "x" * 400
+            page.get_by_label("Command *", exact=True).fill(command)
+            env = page.get_by_label("Environment", exact=True)
+            env.fill("# synthetic configuration\nBROKEN")
+            expect(page.locator("form").get_by_role("alert")).to_contain_text("Line 2 is not KEY=VALUE")
+            expect(page.get_by_role("button", name="Create", exact=True)).to_be_disabled()
+            env.fill("REPORT=old\nREPORT=daily=summary\nZONE=west")
+            expect(page.get_by_text("the last value is used.", exact=False)).to_be_visible()
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            snapshot("command-create")
+            page.get_by_text("Alerts", exact=True).click()
+            page.get_by_label("Success deadline", exact=True).fill("08:00")
+            page.get_by_label("Alert after N failures in a row", exact=True).fill("5")
+            page.get_by_label("Alert after no success for (minutes)", exact=True).fill("5.5")
+            page.get_by_label("Alert after N skipped firings in a row", exact=True).fill("0")
+            with page.expect_response(lambda r: r.url.endswith("/schedule_admin/create")) as response:
+                page.get_by_role("button", name="Create", exact=True).click()
+            assert response.value.status == 200, response.value.text()
+            fields = response.value.request.post_data_json["fields"]
+            assert fields["kind"] == "command" and fields["run_timeout_seconds"] is None
+            assert "requirement" not in fields and "profile_overrides" not in fields
+            saved = response.value.json()["result"]["schedule"]
+            assert saved["env"] == {"REPORT": "daily=summary", "ZONE": "west"}
+            assert saved["alert_policy"]["stale_after_seconds"] == {
+                "value": 330, "default": False, "source": "schedule"}
+            sid = saved["schedule_id"]
+            expect(page.get_by_text("Type: Command", exact=True)).to_be_visible()
+            expect(page.get_by_role("radio", name="Agent task", exact=False)).to_have_count(0)
+            page.reload(wait_until="domcontentloaded")
+            expect(page.get_by_label("Command *", exact=True)).to_have_value(command)
+            expect(page.get_by_role("button", name="Save", exact=True)).to_be_disabled()
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            snapshot("command-edit")
+            page.get_by_label("Command *", exact=True).fill("printf updated")
+            with page.expect_response(lambda r: r.url.endswith("/schedule_admin/update")) as response:
+                page.get_by_role("button", name="Save", exact=True).click()
+            assert response.value.status == 200
+            assert response.value.request.post_data_json["fields"] == {"command": "printf updated"}
+            page.goto(f"{base}/#schedules/{sid}", wait_until="domcontentloaded")
+            expect(page.get_by_text("printf updated", exact=True)).to_be_visible()
+            expect(page.get_by_text("REPORT=daily=summary", exact=True)).to_be_visible()
+            expect(page.get_by_text("Requirement", exact=True)).to_have_count(0)
+            page.goto(f"{base}/#schedules", wait_until="domcontentloaded")
+            expect(page.get_by_text("Command", exact=True)).to_be_visible()
+            page.goto(f"{base}/#projects/{pid}/schedules", wait_until="domcontentloaded")
+            page.get_by_role("button", name="New schedule", exact=True).click()
+            page.get_by_label("Time zone", exact=True).fill("UTC")
+            page.get_by_label("Name *", exact=True).fill("Agent report")
+            page.get_by_label("Rule (cron) *", exact=True).fill("0 9 * * *")
+            page.get_by_label("Requirement *", exact=True).fill("Review the daily reports.")
+            expect(page.get_by_label("Command *", exact=True)).to_have_count(0)
+            expect(page.get_by_label("Spend cap per run (USD)", exact=True)).to_be_visible()
+            expect(page.get_by_role("radio", name="Use the default", exact=False)).to_be_checked()
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            snapshot("agent-create")
+            with page.expect_response(lambda r: r.url.endswith("/schedule_admin/create")) as response:
+                page.get_by_role("button", name="Create", exact=True).click()
+            assert response.value.status == 200, response.value.text()
+            fields = response.value.request.post_data_json["fields"]
+            assert fields == {"kind": "agent", "name": "Agent report", "cron": "0 9 * * *",
+                              "timezone": "UTC", "requirement": "Review the daily reports.",
+                              "overlap": "skip", "catch_up": "once", "run_timeout_seconds": "default",
+                              "notify": "failures", "user_gates": "off"}
+            assert not errors
+        finally:
+            context.close()
+            browser.close()

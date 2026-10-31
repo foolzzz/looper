@@ -155,6 +155,11 @@ def _connect_address(host: str) -> str:
     return "127.0.0.1" if host in ("", "localhost", "0.0.0.0") else "::1" if host == "::" else host
 
 
+def _base_url(address: str, port: int) -> str:
+    authority = f"[{address}]" if ":" in address else address
+    return f"http://{authority}:{port}"
+
+
 def _system_operation(port: int, token: str, name: str, arguments: dict) -> dict:
     return _request_json(port, token, f"/api/v1/system/{name}", arguments)
 
@@ -656,10 +661,32 @@ def manager(host: Host, label: str) -> _Manager:
 
 def install_probe_units(host: Host, label: str, service_text: str, timer_text: str) -> None:
     mgr = Systemd(host, f"{label}-probe")
+    timer = mgr.unit_path.with_suffix(".timer")
+    if mgr.unit_path.is_file() or timer.is_file():
+        _stop_probe_units(host, mgr, timer)
     write_private(mgr.unit_path, service_text.encode())
-    write_private(mgr.unit_path.with_suffix(".timer"), timer_text.encode())
+    write_private(timer, timer_text.encode())
     mgr._systemctl("daemon-reload")
     mgr._systemctl("enable", "--now", f"{label}-probe.timer")
+
+
+def _stop_probe_units(host: Host, mgr: Systemd, timer: Path) -> None:
+    mgr._systemctl("disable", "--now", timer.name, check=False)
+    mgr._systemctl("stop", mgr.unit, check=False)
+    deadline = host.clock() + _STOP_WAIT_SECONDS
+    for unit in (timer.name, mgr.unit):
+        while True:
+            shown = mgr._systemctl("show", unit, "--property=LoadState,ActiveState,MainPID", check=False)
+            fields = dict(line.split("=", 1) for line in shown.stdout.splitlines() if "=" in line)
+            if ((shown.returncode == 0 or fields.get("LoadState") == "not-found")
+                and fields.get("ActiveState") in ("inactive", "failed")
+                and fields.get("MainPID", "0") == "0"
+            ):
+                break
+            if host.clock() >= deadline:
+                raise ServiceError(f"cannot confirm {unit} stopped within {_STOP_WAIT_SECONDS:.0f} s; "
+                                   "probe units were kept")
+            host.sleep(_POLL_SECONDS)
 
 
 def remove_probe_units(host: Host, label: str) -> None:
@@ -669,23 +696,10 @@ def remove_probe_units(host: Host, label: str) -> None:
         mgr = Systemd(host, f"{label}-probe")
         timer = mgr.unit_path.with_suffix(".timer")
         if not timer.is_file() and not mgr.unit_path.is_file():
+            mgr._systemctl("disable", "--now", timer.name, check=False)
+            mgr._systemctl("stop", mgr.unit, check=False)
             return
-        mgr._systemctl("disable", "--now", timer.name, check=False)
-        mgr._systemctl("stop", mgr.unit, check=False)
-        deadline = host.clock() + _STOP_WAIT_SECONDS
-        for unit in (timer.name, mgr.unit):
-            while True:
-                shown = mgr._systemctl("show", unit, "--property=LoadState,ActiveState,MainPID", check=False)
-                fields = dict(line.split("=", 1) for line in shown.stdout.splitlines() if "=" in line)
-                if ((shown.returncode == 0 or fields.get("LoadState") == "not-found")
-                    and fields.get("ActiveState") in ("inactive", "failed")
-                    and fields.get("MainPID", "0") == "0"
-                ):
-                    break
-                if host.clock() >= deadline:
-                    raise ServiceError(f"cannot confirm {unit} stopped within {_STOP_WAIT_SECONDS:.0f} s; "
-                                       "probe units were kept")
-                host.sleep(_POLL_SECONDS)
+        _stop_probe_units(host, mgr, timer)
         mgr.unit_path.unlink(missing_ok=True)
         timer.unlink(missing_ok=True)
         mgr._systemctl("daemon-reload")
@@ -698,6 +712,12 @@ def _probe_unit_path(host: Host, label: str) -> Path:
 
 def _install_probe(host: Host, ops: OpsConfig, label: str, runtime_root: Path, port: int | None) -> str:
     path = _probe_unit_path(host, label)
+    paths = (path,) if host.system == "Darwin" else (path.with_suffix(".service"), path)
+    try:
+        previous = {p: p.read_bytes() for p in paths if p.is_file()}
+    except OSError as exc:
+        # No changes are safe without a complete snapshot.
+        return f"probe      failed to update: {exc}; kept the previous probe"
     if not ops.probe_notify_chat:
         remove_probe_units(host, label)
         return (f"probe      not configured: add [probe] to {ops.path} "
@@ -714,6 +734,24 @@ def _install_probe(host: Host, ops: OpsConfig, label: str, runtime_root: Path, p
     except (OSError, ServiceError) as exc:
         # A probe failure must not turn a successfully started server into a failed install.
         reason = str(exc)
+        if previous:
+            try:
+                for new_path in paths:
+                    if new_path not in previous:
+                        new_path.unlink(missing_ok=True)
+                for old_path, data in previous.items():
+                    write_private(old_path, data)
+                if host.system == "Darwin":
+                    Launchd(host, f"{label}.probe").start()
+                else:
+                    mgr = Systemd(host, f"{label}-probe")
+                    results = [mgr._systemctl("daemon-reload", check=False),
+                               mgr._systemctl("enable", "--now", path.name, check=False)]
+                    if errors := [(r.stderr or r.stdout).strip() for r in results if r.returncode]:
+                        raise ServiceError("; ".join(errors))
+            except (OSError, ServiceError) as restore:
+                return f"probe      failed to update: {reason}; restoring it failed: {restore}"
+            return f"probe      failed to update: {reason}; kept the previous probe"
         try:
             remove_probe_units(host, label)
         except (OSError, ServiceError) as cleanup:
@@ -836,7 +874,7 @@ def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int
         f"  ops file   {ops.path} (the database URL and the other settings; no database URL is in the unit)",
         f"  env        {', '.join(names) if names else '(none)'}",
         f"  log        {spec.log_path}",
-        f"  serving    http://127.0.0.1:{serving_port} (pid {serving.pid or 'unknown'})",
+        f"  serving    {_base_url(address, serving_port)} (pid {serving.pid or 'unknown'})",
         f"  {probe_report}",
     ]
     lines += [f"  not copied {', '.join(dropped)}: install no longer copies every LOOPER_*, ANTHROPIC_* and LARK_* "
@@ -868,16 +906,22 @@ def restart(host: Host, *, label: str = DEFAULT_LABEL, timeout: float = DEFAULT_
         probe_report = "\n  " + _install_probe(host, ops, label, ops.runtime_root, explicit_port)
     serving = _start_and_wait(mgr, port, log_path, timeout, runtime_root, address)
     return (f"restarted {label}: pid {before or 'none'} -> {serving.pid or 'unknown'}, "
-            f"serving http://127.0.0.1:{port}{probe_report}")
+            f"serving {_base_url(address, port)}{probe_report}")
 
 
 def uninstall(host: Host, *, label: str = DEFAULT_LABEL) -> str:
     mgr = manager(host, label)
-    remove_probe_units(host, label)
+    probe_error = None
+    try:
+        remove_probe_units(host, label)
+    except ServiceError as exc:
+        probe_error = exc
     state = mgr.state()
-    if not state.installed and not state.loaded:
+    if not state.installed and not state.loaded and probe_error is None:
         return f"{label} is not installed"
     mgr.remove()
+    if probe_error is not None:
+        raise ServiceError(f"uninstalled {label}; probe cleanup failed: {probe_error}; run uninstall again")
     kept = f"; the log stays at {state.log_path}" if state.log_path else ""
     return f"uninstalled {label}: stopped it and removed {mgr.unit_path}{kept}"
 
@@ -899,21 +943,26 @@ def status(host: Host, *, label: str = DEFAULT_LABEL) -> tuple[int, str]:
     ]
     if isinstance(mgr, Systemd) and not mgr.kill_mode_ok():
         lines.append(f"warning    {_KILL_MODE_WARNING}")
+    try:
+        ops = mgr.ops()
+    except (ServiceError, OSError):
+        ops = None
+    address = _connect_address(ops.host if ops else "127.0.0.1")
     token = operator_auth.read_token(state.runtime_root) if state.runtime_root is not None else None
-    answer = host.get_status(state.port, token, "127.0.0.1") if state.port else None
+    answer = host.get_status(state.port, token, address) if state.port else None
     if state.port is None:
         lines.append("api        unknown port")
     elif answer is None:
-        lines.append(f"api        http://127.0.0.1:{state.port}/api/v1/system/status: no answer")
+        lines.append(f"api        {_base_url(address, state.port)}/api/v1/system/status: no answer")
     elif answer.get("status") == "unauthorized":
         path = operator_auth.token_path(state.runtime_root) if state.runtime_root is not None else "unknown"
-        lines.append(f"api        http://127.0.0.1:{state.port}/api/v1/system/status: unauthorized "
+        lines.append(f"api        {_base_url(address, state.port)}/api/v1/system/status: unauthorized "
                      f"(the operator token in {path} was refused)")
     else:
         tasks = answer.get("tasks") or {}
         failing = [check.get("label", "?") for check in answer.get("checks") or []
                    if isinstance(check, dict) and check.get("status") in ("fail", "warn")]
-        lines.append(f"api        http://127.0.0.1:{state.port}/api/v1/system/status: {answer.get('status', '?')}, "
+        lines.append(f"api        {_base_url(address, state.port)}/api/v1/system/status: {answer.get('status', '?')}, "
                      f"{tasks.get('total', '?')} task(s), {tasks.get('running', '?')} running"
                      + (f"; check problems: {', '.join(failing)}" if failing else ""))
     lines.extend(_probe_status(host, label, state.runtime_root))

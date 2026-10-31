@@ -395,7 +395,8 @@ class AgentProfile:
     def record(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "model_id": self.model_id, "custom_prompt": self.custom_prompt,
                 "runtime": {"id": self.runtime.id, "name": self.runtime.name, "type": self.runtime.type,
-                            "launcher": self.runtime.launcher.value}}
+                            **({"launcher": self.runtime.launcher.value}
+                               if self.runtime.launcher is Launcher.TTADK else {})}}
 
 
 @dataclass(frozen=True, kw_only=True)

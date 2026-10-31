@@ -139,6 +139,9 @@ describe("Settings → Scheduler", () => {
 
   it.each([true, false])("shows a schedule's registered model summary or project inheritance (override: %s)", async (override) => {
     const schedule: ScheduleInfo = {
+      kind: "agent", command: null, env: {}, env_file: null, success_deadline: null,
+      alert_policy: { failures_after: { value: 3, default: true }, stale_after_seconds: { value: 900, default: true },
+        overlap_after: { value: 0, default: true } },
       manager_id: "manager", manager_name: "Manager", template_key: null, template_inputs: {}, template_name: null,
       schedule_id: "schedule", project_id: "project", project_name: "Project", name: "Scheduled task",
       cron: "0 9 * * *", timezone: "UTC", description: "Every morning", requirement: "Check changes", work_dir: "",
@@ -147,7 +150,7 @@ describe("Settings → Scheduler", () => {
       task_limits: { worker: null, reviewer: null }, enabled: false, next_fire_at: null, last_fired_at: null,
       last_success_at: null, consecutive_failures: 0, created_via: "dashboard", created_at: "", updated_at: "",
       last_run: null, gate_command: null, gate_timeout_seconds: null, daily_budget_usd: null, notify: "never", user_gates: override ? "on" : "off",
-      notify_target: null, spent_today_usd: 0, alerts: { failures_since: null, stale_since: null },
+      notify_target: null, spent_today_usd: 0, alerts: { failures_since: null, stale_since: null, deadline_since: null, overlap_since: null },
       planner_session: { active: false, runtime: null, profile: null, last_task_id: null, last_task_title: null, updated_at: null },
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
