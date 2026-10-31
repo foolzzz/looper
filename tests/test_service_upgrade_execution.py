@@ -75,6 +75,8 @@ def deployment(tmp_path, monkeypatch):
         scenario.current = scenario.target
 
     def run(argv):
+        if argv[:3] == [host.executable, "-I", "-c"]:
+            return subprocess.CompletedProcess(argv, 0, str(tmp_path / ".venv"), "")
         assert argv[:3] == ["git", "-C", str(tmp_path)]
         return subprocess.CompletedProcess(argv, 0, "1" * 40 if "rev-parse" in argv else "", "")
 
@@ -120,6 +122,83 @@ def test_upgrade_refuses_unreadable_unit(deployment, dry_run, capsys):
     assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 1
     assert deployment.events == []
     assert "cannot read the service unit" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_checkout_upgrade_refuses_foreign_sync_environment_before_drain(
+        deployment, tmp_path, monkeypatch, dry_run, capsys):
+    environment = tmp_path / ".venv"
+    venv.EnvBuilder().create(environment)
+    deployment.host.executable = str(environment / "bin/python")
+    foreign = tmp_path / "other-venv"
+    deployment.host.environ = {**os.environ, "UV_PROJECT_ENVIRONMENT": str(foreign)}
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(foreign))
+    run = deployment.host.run
+
+    def execute(argv):
+        if argv[0] == deployment.host.executable:
+            return subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        return run(argv)
+
+    deployment.host.run = execute
+    assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 1
+    assert deployment.events == []
+    assert deployment.state.running
+    assert not foreign.exists()
+    error = capsys.readouterr().err
+    assert "UV_PROJECT_ENVIRONMENT" in error and str(environment) in error
+
+
+def test_checkout_upgrade_pins_real_sync_to_preflight_interpreter(deployment, tmp_path, monkeypatch):
+    environment, foreign = tmp_path / "service venv", tmp_path / "other-venv"
+    for path in (environment, foreign):
+        venv.EnvBuilder().create(path)
+    python = str(environment / "bin/python")
+    wheel = tmp_path / "sync_probe-1.0.0-py3-none-any.whl"
+    metadata = "sync_probe-1.0.0.dist-info"
+    files = {
+        "sync_probe.py": "VALUE = 'installed'\n",
+        f"{metadata}/METADATA": "Metadata-Version: 2.1\nName: sync-probe\nVersion: 1.0.0\n",
+        f"{metadata}/WHEEL": "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    files[f"{metadata}/RECORD"] = "".join(f"{name},,\n" for name in (*files, f"{metadata}/RECORD"))
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "sync-fixture"\nversion = "1.0.0"\nrequires-python = ">=3.11"\n'
+        f'[project.optional-dependencies]\ntest = ["sync-probe @ {wheel.as_uri()}"]\n')
+    deployment.host.executable = python
+    deployment.host.environ = {**os.environ, "HOME": str(deployment.host.home),
+        "UV_PROJECT_ENVIRONMENT": environment.name, "UV_OFFLINE": "1", "UV_NO_CONFIG": "1",
+        "UV_CACHE_DIR": str(tmp_path / "uv-cache"), "UV_PYTHON_DOWNLOADS": "never"}
+    monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
+    operation, git = deployment.host.system_operation, deployment.host.run
+
+    def drain(port, token, name, args):
+        if name == "drain":
+            monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(foreign))
+            deployment.host.environ["UV_PROJECT_ENVIRONMENT"] = str(foreign)
+        return operation(port, token, name, args)
+
+    def run(argv, *, env=None):
+        if argv[0] == "git":
+            return git(argv)
+        result = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+        if argv[:2] == ["uv", "sync"]:
+            assert not deployment.state.running
+            assert result.returncode == 0, result.stderr
+            deployment.scenario.current = deployment.scenario.target
+        return result
+
+    deployment.host.system_operation, deployment.host.run = drain, run
+    assert cli.main(["service", "upgrade"]) == 0
+    assert report(deployment)["status"] == "ok"
+    probe = ["-I", "-c", "import sync_probe; print(sync_probe.VALUE)"]
+    installed = subprocess.run([python, *probe], capture_output=True, text=True, timeout=10)
+    assert installed.returncode == 0 and installed.stdout.strip() == "installed"
+    untouched = subprocess.run([str(foreign / "bin/python"), *probe], capture_output=True, text=True, timeout=10)
+    assert untouched.returncode != 0 and "ModuleNotFoundError" in untouched.stderr
 
 
 @pytest.mark.parametrize("wheel", [False, True])
@@ -625,8 +704,10 @@ def checkout_install(deployment, tmp_path):
     config.write_bytes(components.CONFIG.read_bytes())
     commands = []
 
-    def run(argv):
+    def run(argv, **kwargs):
         commands.append(list(argv))
+        if argv[:3] == [deployment.host.executable, "-I", "-c"]:
+            return subprocess.CompletedProcess(argv, 0, str(tmp_path / ".venv"), "")
         if "--outDir" in argv:
             staged = Path(argv[-1])
             (staged / "assets").mkdir()
@@ -764,7 +845,11 @@ def test_checkout_untracked_fingerprinted_files_refused_before_drain(
     else:
         source.write_text("untracked source")
 
+    probe = deployment.host.run
+
     def run(argv):
+        if argv[0] == deployment.host.executable:
+            return probe(argv)
         if "rev-parse" in argv:
             return subprocess.CompletedProcess(argv, 0, "1" * 40, "")
         return subprocess.run(argv, capture_output=True, text=True, timeout=10)

@@ -991,8 +991,10 @@ def doctor_check(host: Host | None = None, label: str = DEFAULT_LABEL) -> Check:
                  f"run `looper service restart`; the log is {state.log_path or 'under the runtime root'}")
 
 
-def _checked(host: Host, argv: Sequence[str], *, installing: bool = False) -> str:
-    result = (_run(argv, timeout=600) if installing and host.run is _run else host.run(argv))
+def _checked(host: Host, argv: Sequence[str], *, installing: bool = False,
+             env: Mapping[str, str] | None = None) -> str:
+    kwargs = {"env": env} if env is not None else {}
+    result = (_run(argv, timeout=600, **kwargs) if installing and host.run is _run else host.run(argv, **kwargs))
     if result.returncode:
         raise ServiceError(f"`{shlex.join(argv)}` failed: {(result.stderr or result.stdout).strip()}")
     return result.stdout.strip()
@@ -1083,7 +1085,7 @@ def _install_wheel(host: Host, source: str, *, dependencies: bool) -> None:
 
 
 def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
-                    dependencies: bool = True) -> tuple[bytes, str] | None:
+                    dependencies: bool = True, sync_environment: Path | None = None) -> tuple[bytes, str] | None:
     from ..components import record_web_source, web_fingerprints
 
     if wheel:
@@ -1117,10 +1119,15 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
                 shutil.rmtree(staged, ignore_errors=True)
         _install_wheel(host, source, dependencies=dependencies)
         return None
+    if dependencies and sync_environment is None:
+        sync_environment = _checkout_sync_environment(host)
     _checked(host, ["git", "-C", str(host.cwd), "merge", "--ff-only", source], installing=True)
     if dependencies:
         # Keep deploy's test extra and any other packages already in the venv.
-        _checked(host, ["uv", "sync", "--project", str(host.cwd), "--extra", "test", "--inexact"], installing=True)
+        # Pin the preflight result even if the caller's environment changes while draining.
+        _checked(host, ["uv", "sync", "--project", str(host.cwd), "--python", host.executable,
+                        "--extra", "test", "--inexact"], installing=True,
+                 env={**host.environ, "UV_PROJECT_ENVIRONMENT": str(sync_environment)})
     if not build_web:
         return None
     web = host.cwd / "web"
@@ -1385,6 +1392,20 @@ def _unit_package_root(host: Host, mgr: _Manager) -> Path:
     return path.resolve()
 
 
+def _checkout_sync_environment(host: Host) -> Path:
+    prefix = _checked(host, [host.executable, "-I", "-c",
+        "import sys; print(sys.prefix if sys.prefix != sys.base_prefix else '')"])
+    if not prefix or not Path(prefix).is_absolute():
+        raise ServiceError("checkout upgrades require the service interpreter to use a virtual environment")
+    environment = Path(prefix).resolve()
+    configured = Path(host.environ.get("UV_PROJECT_ENVIRONMENT") or ".venv")
+    destination = (host.cwd / configured).resolve()
+    if destination != environment:
+        raise ServiceError(f"UV_PROJECT_ENVIRONMENT selects {destination}, not the service's environment {environment}; "
+                           f"set UV_PROJECT_ENVIRONMENT={shlex.quote(str(environment))} before upgrading")
+    return environment
+
+
 def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dry_run: bool = False,
             timeout: float = DEFAULT_TIMEOUT_SECONDS, drain_timeout: float = 1200, turns_timeout: float = 180,
             no_force: bool = False) -> str:
@@ -1435,6 +1456,8 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
             raise ServiceError("the service operator token is missing")
         running = components.Manifest.from_dict(host.get_components(port, token))
         plan = decide(target, running, scan_keepers(root), keeper_mode=False)
+        dependencies = plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE)
+        sync_environment = _checkout_sync_environment(host) if not wheel and dependencies else None
         if wheel and plan.kind in (UpgradeKind.WEB_ONLY, UpgradeKind.NOOP):
             from .http_server import default_static_dir
 
@@ -1449,7 +1472,7 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         return _execute_plan(host, mgr, port=port, root=root, log_path=log_path, plan=plan,
             running=running, target=target,
             installer=lambda: _install_target(host, source, wheel=wheel, build_web="web" in plan.changed_components,
-                dependencies=plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE)),
+                dependencies=dependencies, sync_environment=sync_environment),
             timeout=timeout, drain_timeout=drain_timeout, turns_timeout=turns_timeout, no_force=no_force)
     except (ValueError, KeyError, zipfile.BadZipFile) as exc:
         raise ServiceError(str(exc)) from exc

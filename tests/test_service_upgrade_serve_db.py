@@ -273,10 +273,14 @@ def test_ignored_web_files_allow_dashboard_and_full_upgrade_on_real_serve(tmp_pa
            "PYTEST_LOOPER_STATIC_DIR": str(source / "web/dist"), "UPGRADE_FIXTURE_PID": str(pid_file)}
     installed_commands = []
 
-    def run(argv):
+    def run(argv, **kwargs):
         argv = list(argv)
         installed_commands.append(argv)
+        if argv[:3] == [sys.executable, "-I", "-c"]:
+            return subprocess.run(argv, text=True, capture_output=True, timeout=10)
         if argv[:2] == ["uv", "sync"]:
+            assert kwargs["env"]["UV_PROJECT_ENVIRONMENT"] == str(Path(sys.prefix).resolve())
+            assert argv[argv.index("--python") + 1] == sys.executable
             return subprocess.CompletedProcess(argv, 0, "", "")
         assert Path(argv[0]).name in ("git", "npm", "env")
         return subprocess.run(argv, cwd=source, text=True, capture_output=True, timeout=30,
@@ -311,7 +315,8 @@ def test_ignored_web_files_allow_dashboard_and_full_upgrade_on_real_serve(tmp_pa
                                   unit_settings=lambda **kwargs: (port, state.log_path, runtime),
                                   unit_argv=lambda: service.looper_command(sys.executable) + ["serve"],
                                   start=start, stop=stop)
-        host = service.Host(system="Linux", home=home, uid=os.getuid(), environ={},
+        host = service.Host(system="Linux", home=home, uid=os.getuid(),
+                            environ={"UV_PROJECT_ENVIRONMENT": sys.prefix},
                             executable=sys.executable, cwd=source, package_root=source, run=run)
         manager.host = host
         monkeypatch.setattr(service, "manager", lambda host, label: manager)

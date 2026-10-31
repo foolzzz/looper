@@ -49,8 +49,10 @@ def upgrade_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         assert (port, credential) == (18834, token)
         return _manifest().to_dict()
 
-    def run(argv, *, env):
+    def run(argv, *, env=None):
         assert argv[:3] == [host.executable, "-I", "-c"], "ownership must be checked before git"
+        if "sys.prefix" in argv[-1]:
+            return subprocess.CompletedProcess(argv, 0, str(checkout / ".venv"), "")
         assert env["UNIT_MARKER"] == "service"
         assert "PYTHONPATH" not in env
         return subprocess.CompletedProcess(argv, 0, str(checkout), "")
