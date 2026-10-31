@@ -479,9 +479,7 @@ class TaskRouter:
     def _report_metadata(envelope: MessageEnvelope, task: Task | None) -> dict[str, Any]:
         if task is None:
             return envelope.metadata
-        return {**envelope.metadata,
-                "origin_channel_id": task.origin_channel_id or envelope.metadata.get("origin_channel_id"),
-                "origin_thread": task.origin_thread, "task_title": task.title,
+        return {**envelope.metadata, "origin_thread": task.origin_thread, "task_title": task.title,
                 **({"reply_route": task.origin_reply_route} if task.origin_reply_route else {})}
 
     async def _handle_task_accepted(self, envelope: MessageEnvelope) -> None:

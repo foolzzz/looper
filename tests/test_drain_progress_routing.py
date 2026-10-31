@@ -3,6 +3,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from telegram import Bot
@@ -16,6 +17,7 @@ from looper.agents.drain import DrainScope, DrainState
 from looper.agents.message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from looper.agents.tiers.task import Task, TaskRouter
+from looper.db import tasks as db_tasks
 from tests.db_support import until
 from tests.test_lark_transport import StubTransport
 
@@ -115,7 +117,7 @@ def test_task_progress_reaches_original_chat_once(agent_db, tmp_path, monkeypatc
         report = MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=kind,
             payload={"task_id": "t1", "status": "executing", "step_count": 3, "summary": text},
-            correlation_id="c1")
+            correlation_id="c1", metadata={"origin_channel_id": channel_id})
         await manager.start(bus)
         try:
             if kind is MessageType.TASK_ACCEPTED:
@@ -172,3 +174,42 @@ def test_task_progress_reaches_original_chat_once(agent_db, tmp_path, monkeypatc
             await run()
 
     asyncio.run(asyncio.wait_for(main(), 10))
+
+
+def test_start_over_keeps_chat_progress_silent_while_serving(agent_db, planner_claude, tmp_path, monkeypatch):
+    from tests.test_planner_agent import plan, step
+
+    channel_id = "channel-lark"
+    route = {"chat_id": "oc_original", "reply_to": "om_original"}
+    agent_db.store.tasks["t1"] = {
+        "requirement": "finish", "project_id": "p1", "work_dir": str(tmp_path), "status": "stopped",
+        "correlation_id": "c1", "origin_channel_id": channel_id, "origin_reply_route": route,
+    }
+    monkeypatch.setattr(db_tasks, "reset_task_for_restart", AsyncMock(return_value=True))
+    claude = planner_claude(plan(step("s1")))
+
+    async def run():
+        bus = MessageBus(runtime_root=tmp_path)
+        await bus.start()
+        router = TaskRouter(runtime_root=tmp_path, claude_bin=claude.bin)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path, drain=DrainState())
+        manager._bus = bus
+        await router.start(bus)
+        try:
+            await bus.publish(MessageEnvelope.create(
+                source=MANAGER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_RESTART,
+                payload={"task_id": "t1", "mode": "start_over"}))
+            queue = bus.get_queue("manager")
+            reports = [await asyncio.wait_for(queue.get(), 5) for _ in range(2)]
+            assert [report.message_type for report in reports] == [MessageType.TASK_ACCEPTED, MessageType.GOAL_STATUS]
+            await manager._handle_task_accepted(reports[0])
+            await manager._handle_goal_status(reports[1])
+            assert bus.pending_count(channel_id) == 0
+            # The persisted route supplements each report without opting it into chat progress.
+            assert [report.metadata.get("origin_channel_id") for report in reports] == [None, ""]
+            assert all(report.metadata["reply_route"] == route for report in reports)
+        finally:
+            await router.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 15))
