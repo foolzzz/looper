@@ -718,12 +718,14 @@ async def prune_runs(conn: Db, before: datetime) -> int:
     """Delete one batch of expired terminal runs, keeping each schedule's newest runs."""
     from ..agents.housekeeping import KEEP_LATEST_RUNS, PRUNE_BATCH
 
+    # Unfinished inputs are kept until handed on; deleting the schedule removes them.
     result = await conn.execute(
         "DELETE FROM schedule_runs WHERE id IN (SELECT id FROM ("
-        "SELECT id, finished_at, status, row_number() OVER ("
+        "SELECT id, finished_at, status, carried_on, gate_output, row_number() OVER ("
         "PARTITION BY schedule_id ORDER BY created_at DESC, id DESC) AS rn FROM schedule_runs) r "
-        "WHERE rn > $2 AND finished_at < $1 AND NOT (status = ANY($3::text[])) LIMIT $4)",
-        before, KEEP_LATEST_RUNS, list(OPEN_STATUSES), PRUNE_BATCH)
+        "WHERE rn > $2 AND finished_at < $1 AND NOT (status = ANY($3::text[])) "
+        "AND NOT (NOT carried_on AND status = ANY($5::text[]) AND btrim(COALESCE(gate_output, '')) <> '') LIMIT $4)",
+        before, KEEP_LATEST_RUNS, list(OPEN_STATUSES), PRUNE_BATCH, list(UNFINISHED))
     return int(result.split()[-1])
 
 
