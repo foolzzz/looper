@@ -10,6 +10,7 @@ private file on every call, goes only to a loopback address and never follows a 
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import errno
 import getpass
@@ -924,6 +925,48 @@ def _wait(args: argparse.Namespace, ctx: Context) -> int:
         time.sleep(min(interval, max(remaining, 0)))
 
 
+# --- schedule logs ---
+
+
+def _schedule_log_arguments(parser: Parser) -> None:
+    parser.add_argument("run_id", metavar="RUN")
+    parser.add_argument("--tail", type=int, metavar="N", help="print only the last N lines (1–5000)")
+
+
+def _schedule_log(args: argparse.Namespace, ctx: Context) -> int:
+    if args.tail is not None and not 1 <= args.tail <= 5000:
+        raise UsageError("--tail must be between 1 and 5000")
+    offset, total = 0, 0
+    try:
+        while True:
+            body = {"run_id": args.run_id, **({"tail_lines": args.tail} if args.tail is not None else
+                                            {"offset": offset, "limit_bytes": 4194304})}
+            status, answer = ctx.api().call("POST", f"{API_PREFIX}/schedule_admin/run_log", body)
+            if answer.get("status") != "ok":
+                return finish(status, answer, ctx.as_json, ctx.session)
+            result = answer["result"]
+            data = base64.b64decode(result["data_base64"])
+            total += len(data)
+            if not ctx.as_json:
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+            offset = result["next_offset"]
+            if args.tail is not None or offset is None:
+                break
+        if not result["complete"]:
+            print(f"(run {args.run_id} is still going; the log may grow)", file=sys.stderr)
+        if result["truncated"]:
+            print("(the log was truncated at 50 MiB on the server)", file=sys.stderr)
+        if ctx.as_json:
+            print(json.dumps({**{key: value for key, value in result.items() if key != "data_base64"},
+                              "bytes": total}, ensure_ascii=False, indent=2), flush=True)
+    except BrokenPipeError:
+        # Prevent Python's exit-time flush from retrying buffered bytes on a closed pipe.
+        with open(os.devnull, "wb") as sink:
+            os.dup2(sink.fileno(), sys.stdout.fileno())
+    return EXIT_OK
+
+
 # --- skill ---
 
 
@@ -961,6 +1004,8 @@ HAND_COMMANDS: dict[str, HandCommand] = {command.name: command for command in (
     HandCommand("chat", "Talk to the Manager, read a conversation, or list your conversations", _chat_arguments,
                 _chat),
     HandCommand("wait", "Wait until a task needs you, ends, or the timeout passes (exit 6)", _wait_arguments, _wait),
+    HandCommand("schedule-log", "Print a command schedule run's log as it was written (--tail N: its last N lines)",
+                _schedule_log_arguments, _schedule_log),
     HandCommand("skill", "Print the directory (path) or the text (show) of the skill packaged with Looper",
                 _skill_arguments, _skill),
 )}
