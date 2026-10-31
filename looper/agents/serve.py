@@ -224,6 +224,21 @@ async def _register_bots(registry: ChannelRegistry, rows: list[dict[str, Any]], 
             started.append({**row, "app_id": found[0] if found else row.get("app_id")})
 
 
+async def _reload_bots(registry: ChannelRegistry, runtime_root: Path,
+                       manager_running: Callable[[str], bool], *, stop_chat: ChatStop) -> None:
+    """Apply restart-time channel settings without stopping the execution owner.
+
+    Stop the old ingress before reading storage: a failed refresh must never
+    leave a revoked sender authorized by an adapter's immutable allowlist.
+    """
+    for channel in registry.list_channels():
+        if channel["channel_type"] in BOT_TYPES:
+            await registry.unregister(channel["channel_id"])
+    rows = await _enabled_bot_rows()
+    await _register_bots(registry, rows, runtime_root, manager_running, ("telegram",), stop_chat=stop_chat)
+    await _register_bots(registry, rows, runtime_root, manager_running, ("lark", "lark_bot"), stop_chat=stop_chat)
+
+
 async def seed_channel_configs(pool: Any = None) -> None:
     """Give Telegram and Lark their config rows, disabled and with empty sender allowlists; existing rows are kept."""
     from ..db.channel_configs import seed_defaults
@@ -634,7 +649,8 @@ async def _run_agent_system_owned(
     web_adapter = WebChannelAdapter(host=host, port=port)
     await registry.register(web_adapter)
 
-    # Every enabled bot runs as its own adapter (RFC §9.1), read once at startup.
+    # Every enabled bot runs as its own adapter (RFC §9.1); a replacement
+    # listener refreshes these rows in the retained host before it is admitted.
     bot_rows = await _enabled_bot_rows()
     lark_enabled = any(r["channel_type"] == "lark" for r in bot_rows)
 

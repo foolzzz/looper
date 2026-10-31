@@ -214,6 +214,7 @@ class AgentHTTPServer:
         self._listen_socket = listen_socket
         self._proxy_secret = proxy_secret
         self._proxy_watchers: set[asyncio.StreamWriter] = set()
+        self._proxy_attach_lock = asyncio.Lock()
 
     async def start(self) -> None:
         if self._config_imports:
@@ -251,11 +252,19 @@ class AgentHTTPServer:
                 fields = request_line.decode("ascii").strip().split(" ")
                 if len(fields) != 3 or not secrets.compare_digest(fields[1], self._proxy_secret):
                     return
-                if fields[2] != "watch":
+                if fields[2] not in {"watch", "attach"}:
                     peer_host = str(ipaddress.ip_address(fields[2]))
+                elif fields[2] == "attach" and self._channels is not None:
+                    from .serve import _reload_bots
+
+                    # A retained host must apply channel revocations before
+                    # acknowledging a replacement listener. Serialize retries.
+                    async with self._proxy_attach_lock:
+                        await _reload_bots(self._channels, self._runtime_root,
+                            self._managers.is_running, stop_chat=self._managers.stop_chat)
                 writer.write(b"LOOPER/1 ready\n")
                 await writer.drain()
-                if fields[2] == "watch":
+                if fields[2] in {"watch", "attach"}:
                     self._proxy_watchers.add(writer)
                     try:
                         await reader.read(1)

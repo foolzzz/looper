@@ -71,7 +71,8 @@ def read_host(root: Path) -> HostState | None:
 
 
 async def _connect(state: HostState, peer: str = "watch"):
-    async with asyncio.timeout(5):
+    # Listener admission may rebuild external channels, including their login checks.
+    async with asyncio.timeout(START_TIMEOUT if peer == "attach" else 5):
         reader, writer = await asyncio.open_connection("127.0.0.1", state["port"])
         try:
             writer.write(f"LOOPER/1 {state['secret']} {peer}\n".encode("ascii"))
@@ -87,7 +88,9 @@ async def _connect(state: HostState, peer: str = "watch"):
 
 def _host_command(ops: OpsConfig, work_dir: Path, claude_bin: str, skip_backup: bool) -> list[str]:
     return [sys.executable, "-m", __name__, "--runtime-root", str(ops.runtime_root),
-            "--config", str(ops.path), "--host", ops.host, "--port", str(ops.port),
+            # The default file is optional in the parent and must stay optional here.
+            *(("--config", str(ops.path)) if ops.path != ops.runtime_root / ops_config.FILE else ()),
+            "--host", ops.host, "--port", str(ops.port),
             "--log-level", ops.log_level,
             "--work-dir", str(work_dir.absolute()), "--claude-bin", claude_bin,
             *(("--skip-backup",) if skip_backup else ())]
@@ -165,7 +168,9 @@ async def serve_frontend(*, ops: OpsConfig, work_dir: Path, claude_bin: str, ski
                     raise StartupCheckFailed("a live execution host owns this runtime root with different settings; "
                         "finish its active work and stop that host before changing execution settings")
                 try:
-                    watch_reader, watch_writer = await _connect(state)
+                    # A fresh host already loaded its channels. Only adoption
+                    # reloads them, avoiding a second poller startup/drop of backlog.
+                    watch_reader, watch_writer = await _connect(state, "attach" if child is None else "watch")
                     break
                 except (OSError, TimeoutError):
                     pass
@@ -246,7 +251,8 @@ def main() -> None:
     from .serve import StartupCheckFailed, _configure_logging
 
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("runtime-root", "config", "host", "port", "log-level", "work-dir", "claude-bin"):
+    parser.add_argument("--config")
+    for name in ("runtime-root", "host", "port", "log-level", "work-dir", "claude-bin"):
         parser.add_argument(f"--{name}", required=True)
     parser.add_argument("--skip-backup", action="store_true")
     args = parser.parse_args()
