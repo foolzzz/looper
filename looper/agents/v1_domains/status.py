@@ -1,5 +1,9 @@
 """The dashboard status projection, without adding a model-facing Tool."""
 
+import os
+from datetime import datetime, timezone
+
+from ... import __version__
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 
 ORDER = 1
@@ -25,12 +29,38 @@ _STATUS = _object({
                                 ["id", "name", "running", "busy", "healthy", "sync", "turn_binding"]))},
     ["status", "agents", "tasks", "channels", "checks", "can_sign_out"])
 
+_HEALTH = _object({
+    "status": {"const": "ok"}, "version": _STR, "pid": _INT, "started_at": _STR, "now": _STR,
+    "scheduler": _object({
+        "running": _BOOL, "tick_seconds": {"type": ["number", "null"]},
+        "last_tick_at": _NULL_STR, "last_ok_tick_at": _NULL_STR,
+        "last_ok_tick_age_seconds": {"type": ["number", "null"]},
+        "command_runs": _object({"running": _INT}),
+    }),
+})
+
 RESULTS = {}
-OPERATIONS = (Operation("system.status", "POST", "/api/v1/system/status", "Read dashboard status.",
-                        "Read dashboard status.", _object({}, closed=True), _STATUS, risk="read"),)
+OPERATIONS = (
+    Operation("system.status", "POST", "/api/v1/system/status", "Read dashboard status.",
+              "Read dashboard status.", _object({}, closed=True), _STATUS, risk="read"),
+    Operation("system.health", "POST", "/api/v1/system/health",
+              "Read the server's liveness: its scheduler's latest tick.",
+              "Read the server's liveness: its scheduler's latest tick.",
+              _object({}, closed=True), _HEALTH, risk="read"),
+)
 
 
 async def run(server, operation, arguments, principal, headers):
+    if operation.operation_id == "system.health":
+        return {
+            "status": "ok", "version": __version__, "pid": os.getpid(),
+            "started_at": server._started_at.isoformat(), "now": datetime.now(timezone.utc).isoformat(),
+            "scheduler": server._scheduler.health() if server._scheduler else {
+                "running": False, "tick_seconds": None, "last_tick_at": None,
+                "last_ok_tick_at": None, "last_ok_tick_age_seconds": None,
+                "command_runs": {"running": 0},
+            },
+        }
     result = await server._status_result(headers)
     if principal.kind != "operator":
         result["can_sign_out"] = False

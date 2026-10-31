@@ -20,6 +20,7 @@ import time
 import uuid
 import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -169,6 +170,7 @@ class AgentHTTPServer:
         ops_config: OpsConfig | None = None,
         channels: ChannelRegistry | None = None,
     ) -> None:
+        self._started_at = datetime.now(timezone.utc)
         self._host = host
         self._port = port
         self._web_adapter = web_adapter

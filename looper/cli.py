@@ -119,6 +119,12 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     install.add_argument("--port", type=int,
                          help="Port for `looper serve`, written into the unit (default: the ops file's, else 8767).")
     _add_location_flags(install)
+    probe = service_commands.add_parser(
+        "probe", allow_abbrev=False,
+        help="Check once whether the service answers and alert through Lark when it has not for a while "
+             "(run by the probe unit every minute).",
+    )
+    _add_location_flags(probe)
     install.add_argument("--env", action="append", default=[], metavar="NAME",
                          help="Also copy this environment variable into the unit (repeatable).")
     restart = service_commands.add_parser(
@@ -186,13 +192,14 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _load_ops(args: argparse.Namespace, port: int | None = None) -> OpsConfig | None:
+def _load_ops(args: argparse.Namespace, port: int | None = None, *, require_database: bool = True) -> OpsConfig | None:
     """The ops settings for this command's --runtime-root, --config (and ``port``), with their warnings printed; None
     (the error printed) when they cannot be used."""
     from . import ops_config
 
     try:
-        ops = ops_config.load(ops_config.Flags(runtime_root=args.runtime_root, config=args.config, port=port))
+        ops = ops_config.load(ops_config.Flags(runtime_root=args.runtime_root, config=args.config, port=port),
+                              require_database=require_database)
     except ops_config.OpsConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
@@ -216,6 +223,17 @@ def _init_ops(args: argparse.Namespace) -> int:
 
 
 def _service(args: argparse.Namespace) -> int:
+    if args.service_command == "probe":
+        from .agents import probe
+
+        ops = _load_ops(args, require_database=False)
+        if ops is None:
+            return 1
+        try:
+            return probe.run(ops, ops.runtime_root)
+        except OSError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     from .agents import service
 
     host = service.Host.current()
