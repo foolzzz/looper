@@ -11,12 +11,13 @@ import tomllib
 from pathlib import Path
 
 from looper.agents import api_v1
+from looper.loopercli import HAND_COMMANDS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CANONICAL = REPO_ROOT / "looper" / "skill" / "looper-skill" / "SKILL.md"
 PLUGIN = REPO_ROOT / "plugins" / "looper"
 PLUGIN_COPY = PLUGIN / "skills" / "looper-skill" / "SKILL.md"
-HAND_WRITTEN = {"login", "chat", "wait", "confirm", "skill", "create", "list", "status", "start", "stop", "pipeline"}
+HAND_WRITTEN = set(HAND_COMMANDS) | {"create", "list", "status", "start", "stop", "pipeline"}
 DESCRIPTION_LIMIT = 1_024
 
 

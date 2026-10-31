@@ -33,6 +33,7 @@ Always relay to the user first, word for word, and confirm only after they agree
 - `loopercli wait <task>` – blocks until a gate opens for the user, the task ends, or the timeout passes (run it in the background if you can); exit 6 means it timed out. This is how you follow gates and progress: they do not come into your conversation.
 - `loopercli chat --conversation <id> --read` – the Manager's messages in your conversation, including the task's acceptance and its end (not its gates or progress).
 - `loopercli list` – recent tasks.
+- `loopercli schedule-log <run>` – print a command schedule run's raw log; `--tail N` prints its last N lines (1–5000), and `--json` prints metadata and the byte count.
 
 ## Answer a gate
 
