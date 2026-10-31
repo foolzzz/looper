@@ -233,6 +233,9 @@ def test_drain_restart_replays_held_runs_and_manager_once_and_keeps_planners_mov
             _until(lambda: any(m["message_id"] == "held-during-drain:reply" for m in _messages(api)),
                    "the replayed Manager reply")
             assert sum(m["message_id"] == "held-during-drain:reply" for m in _messages(api)) == 1
+            reply = next(m for m in _messages(api) if m["message_id"] == "held-during-drain:reply")
+            assert reply["content"].startswith("Drain fixture answer: ")
+            assert "held-during-drain" in reply["content"]
             assert [row["step"] for row in _events(state, "worker", "restart")] == ["s1", "s2"]
             assert len(_events(state, "worker", "fresh")) == 1
             assert sum("held-during-drain" in row["text"] for row in _events(state, "manager")) == 1
