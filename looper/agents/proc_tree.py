@@ -227,6 +227,7 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
 
     seen = dict(known)
     alive = dict(seen)
+    orphan_starts: dict[int, str] = {}
     try:
         # Bulk stops must not serialize blocking ps calls on the server's event loop.
         seen = members(await asyncio.to_thread(_snapshot), known)
@@ -240,6 +241,7 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
                     logger.warning("%s: pid %s was reused; leaving it alone", label, process.pid)
                     alive = {}
                     return
+                orphan_starts.update(await asyncio.to_thread(_start_times, alive) or {})
             _signal(process, alive, signal.SIGTERM)
         deadline = time.monotonic() + TERM_GRACE_SEC
         while alive and time.monotonic() < deadline:
@@ -247,6 +249,8 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
             alive = members(await asyncio.to_thread(_snapshot), seen)
             if fresh := {pid: pgid for pid, pgid in alive.items() if pid not in seen}:
                 seen.update(fresh)
+                if isinstance(process, _Orphan) and process.started is not None:
+                    orphan_starts.update(await asyncio.to_thread(_start_times, fresh) or {})
                 if recorded is not None:
                     await _record_tree(process.pid, seen)
                 _signal(process, fresh, signal.SIGTERM)
@@ -255,24 +259,35 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
         raise
     finally:
         if alive:
-            if (isinstance(process, _Orphan) and process.started is not None
-                    and await asyncio.to_thread(_start_time, process.pid) != process.started):
-                logger.warning("%s: pid %s was reused; leaving it alone", label, process.pid)
+            if isinstance(process, _Orphan) and process.started is not None:
+                started_now = await asyncio.to_thread(_start_time, process.pid)
+                if started_now is not None and started_now != process.started:
+                    logger.warning("%s: pid %s was reused; leaving it alone", label, process.pid)
+                table = await asyncio.to_thread(_snapshot)
+                current = await asyncio.to_thread(_start_times, alive) or {}
+                alive = {pid: pgid for pid, pgid in alive.items()
+                         if pid in table and table[pid][1] == pgid == seen.get(pid) and pid in orphan_starts
+                         and current.get(pid) == orphan_starts[pid]
+                         and (pid != process.pid or started_now == process.started)}
+                # The agent may be gone or reused. Kill confirmed survivors individually: a group
+                # signal could also hit an unrelated replacement or a member we never observed.
+                for pid in alive:
+                    _send(os.kill, pid, signal.SIGKILL)
             else:
                 _signal(process, alive, signal.SIGKILL)
-                # SIGKILL being sent (or the agent being reaped) does not mean its descendants have exited.
-                # Wait for the processes we signalled, without expanding the tree or signalling it again.
-                pending = dict(alive)
-                deadline = time.monotonic() + REAP_SEC
-                while pending and time.monotonic() < deadline:
-                    table = await asyncio.to_thread(_snapshot)
-                    pending = {pid: pgid for pid, pgid in pending.items()
-                               if pid in table and table[pid][1] == pgid}
-                    if pending:
-                        await asyncio.sleep(min(_POLL_SEC, max(0, deadline - time.monotonic())))
+            # SIGKILL being sent (or the agent being reaped) does not mean its descendants have exited.
+            # Wait for the processes we signalled, without expanding the tree or signalling it again.
+            pending = dict(alive)
+            deadline = time.monotonic() + REAP_SEC
+            while pending and time.monotonic() < deadline:
+                table = await asyncio.to_thread(_snapshot)
+                pending = {pid: pgid for pid, pgid in pending.items()
+                           if pid in table and table[pid][1] == pgid}
                 if pending:
-                    logger.warning("%s: processes still running %.1f s after SIGKILL: %s",
-                                   label, REAP_SEC, sorted(pending))
+                    await asyncio.sleep(min(_POLL_SEC, max(0, deadline - time.monotonic())))
+            if pending:
+                logger.warning("%s: processes still running %.1f s after SIGKILL: %s",
+                               label, REAP_SEC, sorted(pending))
         logger.info("%s: ended the process tree of pid %s: %d found, %d exited on SIGTERM, %d killed",
                     label, process.pid, len(seen), len(seen) - len(alive), len(alive))
         _ending.discard(process.pid)

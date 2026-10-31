@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import signal
 import sys
 from collections.abc import AsyncIterator
@@ -176,12 +177,23 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
         WHERE datname=current_database() AND pid<>pg_backend_pid()""")}
     assert len(driver_pids) == 1, "only fresh_schema's administrator is exempt from the restart"
     probe = await asyncpg.connect(DSN)
-    child = None
+    agent = None
+    child_pid = None
     try:
         async with _running(pool, monkeypatch, root, keeper=KeeperMode.ON) as system:
             assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1", control_plane.EPOCH_KEY) == "1"
-            child = await proc_tree.spawn(sys.executable, "-c", "import time; time.sleep(60)")
-            assert child.pid in proc_tree._recorded
+            child_code = ("import os, signal, sys, time\n"
+                          "def stop(*_):\n    time.sleep(5)\n    sys.exit(0)\n"
+                          "signal.signal(signal.SIGTERM, stop)\n"
+                          "open('child.pid', 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
+            agent = await proc_tree.spawn(
+                sys.executable, "-c", f"import subprocess, sys, time\n"
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\ntime.sleep(60)\n", cwd=root)
+            await until(lambda: (root / "child.pid").exists() and (root / "child.pid").read_text(),
+                        "the slow child's SIGTERM handler")
+            child_pid = int((root / "child.pid").read_text())
+            assert child_pid in proc_tree._snapshot()
+            assert agent.pid in proc_tree._recorded
             pid = await probe.fetchval("""SELECT pid FROM pg_stat_activity
                 WHERE datname=current_database() AND application_name LIKE 'looper serve %'""")
             assert pid is not None
@@ -191,10 +203,11 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
                                   list(driver_pids))
             else:
                 assert await probe.fetchval("SELECT pg_terminate_backend($1)", pid)
-            await until(lambda: bool(system.exits), "the lost-lock exit", timeout=2)
+            await until(lambda: bool(system.exits), "the lost-lock exit", timeout=8)
             assert system.exits == [control_plane.EXIT_LOCK_LOST]
-            await asyncio.wait_for(child.wait(), 1)
-            assert child.returncode is not None
+            await asyncio.wait_for(agent.wait(), 1)
+            assert agent.returncode == -signal.SIGTERM
+            assert child_pid not in proc_tree._snapshot()
             assert not system.server._server.is_serving()
             with pytest.raises(RuntimeError, match="fenced"):
                 connection.get_pool()
@@ -207,9 +220,16 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
             with pytest.raises(RuntimeError, match="fenced"):
                 connection.get_pool()
     finally:
-        if child is not None and child.returncode is None:
-            child.kill()
-            await child.wait()
+        if agent is not None:
+            if agent.returncode is None:
+                agent.kill()
+            await agent.wait()
+        if child_pid is None and (root / "child.pid").exists():
+            child_pid = int((root / "child.pid").read_text())
+        if child_pid is not None and child_pid in proc_tree._snapshot():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+            await until(lambda: child_pid not in proc_tree._snapshot(), "the test child's cleanup")
         await probe.close()
 
 

@@ -475,6 +475,87 @@ def test_end_owned_leaves_a_reused_pid_alone(runtime_root: Path) -> None:
         process.wait()
 
 
+@pytest.mark.parametrize("entry", ["owned", "sweep"])
+def test_orphan_end_kills_a_slow_child_after_its_parent_exits_on_sigterm(
+    tmp_path: Path, runtime_root: Path, trees: list[dict[str, int]], monkeypatch: pytest.MonkeyPatch, entry: str,
+) -> None:
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 3)
+    child = ("import os, signal, sys, time\n"
+             "def stop(*_):\n    time.sleep(5)\n    sys.exit(0)\n"
+             "signal.signal(signal.SIGTERM, stop)\n"
+             "open('child.ready', 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
+    script = tmp_path / "agent.py"
+    script.write_text(
+        "import json, os, subprocess, sys, time\n"
+        f"child = subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+        "while not os.path.exists('child.ready'):\n    time.sleep(0.01)\n"
+        "json.dump({'agent': os.getpid(), 'child': child.pid}, open('tree.json', 'w'))\n"
+        "time.sleep(60)\n", encoding="utf-8")
+
+    async def _run() -> None:
+        await proc_tree.sweep(runtime_root)
+        process = await proc_tree.spawn(sys.executable, str(script), cwd=tmp_path)
+        try:
+            tree = await _started(tmp_path, trees)
+            if entry == "owned":
+                await proc_tree.end_owned(deadline=8)
+            else:
+                path, started = proc_tree._recorded[process.pid]
+                _record(runtime_root, process.pid, started, _exited())
+                monkeypatch.setattr(proc_tree, "_recorded", {})
+                await proc_tree.sweep(runtime_root)
+                assert not path.exists()
+            await asyncio.wait_for(process.wait(), 1)
+            assert process.returncode == -signal.SIGTERM
+            assert _running([tree["child"]], settle=0) == []
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    asyncio.run(asyncio.wait_for(_run(), 12))
+
+
+@pytest.mark.parametrize("root_identity", [None, "replacement", "agent"], ids=["gone", "reused", "same"])
+def test_orphan_end_rechecks_each_survivor_before_sigkill(
+    monkeypatch: pytest.MonkeyPatch, root_identity: str | None,
+) -> None:
+    table = {101: (1, 101), 102: (101, 101), 103: (101, 103), 104: (101, 104)}
+    starts = {101: "agent", 102: "child", 103: "reused child", 104: "moved child"}
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
+    monkeypatch.setattr(proc_tree, "_start_time", lambda pid: starts.get(pid))
+    monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids if pid in starts})
+    monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
+
+    original_signal = proc_tree._signal
+
+    def signal_tree(process: Any, tree: proc_tree.Tree, sig: int) -> None:
+        if sig == signal.SIGTERM:
+            # Only the snapshotted child still has its original identity and group.
+            if root_identity is None:
+                table.pop(101)
+                starts.pop(101)
+            else:
+                starts[101] = root_identity
+            starts[103] = "replacement child"
+            table[104] = (1, 105)
+            table[106] = (1, 101)  # an unrelated newcomer in the old agent's group
+            starts[106] = "newcomer"
+        else:
+            original_signal(process, tree, sig)
+
+    def kill(pid: int, sig: int) -> None:
+        signalled.append((pid, sig))
+        table.pop(pid, None)
+
+    monkeypatch.setattr(proc_tree, "_signal", signal_tree)
+    monkeypatch.setattr(proc_tree.os, "kill", kill)
+    monkeypatch.setattr(proc_tree.os, "killpg", lambda *_: pytest.fail("SIGKILL must recheck individual identities"))
+    asyncio.run(asyncio.wait_for(proc_tree._end(proc_tree._Orphan(101, "agent"), label="agent", known={}), 3))
+    assert set(signalled) == {(pid, signal.SIGKILL) for pid in ([101, 102] if root_identity == "agent" else [102])}
+
+
 def test_end_owned_starts_all_agents_concurrently_and_keeps_unfinished_records(
     runtime_root: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
