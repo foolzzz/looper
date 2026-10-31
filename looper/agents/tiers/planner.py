@@ -2265,11 +2265,12 @@ class PlannerAgent:
         step.result = {**(step.result or {}), "role_reviews": [
             *_role_reviews(step.result or {}),
             {"role": item.role, "version": item.version, "required": item.required, **verdict}]}
+        summary = str(verdict.get("summary") or "")
         await self._activity(
             "text" if passed else "error",
             f"Review by role {item.role}" + (f" v{item.version}" if item.version else "")
             + f"{'' if item.required else ' (advisory)'} {'passed' if passed else 'failed'}: "
-            f"{str(verdict.get('summary') or '')[:150]}", worker=step.reviewer_id,
+            f"{summary[:150] if passed else _clip_ends(summary, 200)}", worker=step.reviewer_id,
         )
         position = step.review_position or 0
         if (passed or not item.required) and position + 1 < len(step.review_roles):
