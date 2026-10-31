@@ -307,6 +307,46 @@ def test_platform_reply_errors_report_whether_the_parent_is_gone(
     asyncio.run(main())
 
 
+@pytest.mark.parametrize(("code", "send_error", "success"), [
+    (230011, None, True), (999, None, False), (None, None, False), (230011, "send refused", False),
+])
+def test_recovered_progress_falls_back_only_when_the_original_message_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int | None, send_error: str | None, success: bool,
+) -> None:
+    async def main() -> None:
+        transport = StubTransport()
+        call = transport._call
+
+        async def failing_call(method: str, **kwargs: Any) -> str | None:
+            result = await call(method, **kwargs)
+            if method == "reply":
+                raise LarkCliError("reply refused", code=code)
+            if send_error:
+                raise LarkCliError(send_error)
+            return result
+
+        monkeypatch.setattr(transport, "_call", failing_call)
+        adapter = _adapter(tmp_path, transport)
+        envelope = MessageEnvelope.create(
+            source=MANAGER_ADDRESS, target=channel_address("lark_bot"), message_type=MessageType.STATUS_UPDATE,
+            correlation_id="recovered", payload={"kind": "progress", "text": "task progress"},
+            metadata={"reply_route": {"chat_id": "oc_original", "reply_to": "om_recalled"}},
+        )
+        try:
+            receipt = await adapter.deliver(envelope)
+            assert receipt.success is success
+            assert receipt.error == (None if success else send_error or "reply refused")
+            expected = [("reply", {"message_id": "om_recalled", "markdown": "task progress"})]
+            if code == 230011:
+                expected.append(("send", {"chat_id": "oc_original", "markdown": "task progress"}))
+            assert transport.calls == expected
+            assert not adapter._correlation_chat and not adapter._group_message
+        finally:
+            await adapter.stop()
+
+    asyncio.run(main())
+
+
 def test_a_post_without_a_message_id_is_not_successful(tmp_path: Path) -> None:
     async def main() -> None:
         transport = StubTransport()

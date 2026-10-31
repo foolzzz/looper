@@ -641,8 +641,10 @@ async def _run_agent_system_owned(
     from .managers import ManagerFleet
     platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=None,
                         supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
+    tools_ready = asyncio.Event()
     fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
-                         url=_local_url(host, port), config=manager_config, broadcaster=broadcaster, drain=drain)
+                         url=_local_url(host, port), config=manager_config, broadcaster=broadcaster, drain=drain,
+                         tools_ready=tools_ready)
     if ownership is not None:
         ownership.push_async_callback(fleet.stop)
     task_router.manager_running = fleet.is_running
@@ -714,6 +716,7 @@ async def _run_agent_system_owned(
         channels=registry,
     )
     await http_server.start()
+    tools_ready.set()
 
     # Replayed messages and resumed runs can probe or call platform tools immediately.
     # Listen before starting any of their consumers.
