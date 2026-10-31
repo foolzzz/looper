@@ -20,7 +20,8 @@ def test_the_keeper_loads_only_allowed_looper_modules() -> None:
     )
     modules = set(json.loads(result.stdout))
     assert {"looper.agents.keeper", "looper.agents.keeper.__main__",
-            "looper.agents.keeper.process"} <= modules
+            "looper.agents.keeper.process", "looper.agents.keeper.server",
+            "looper.agents.keeper.protocol", "looper.agents.keeper.client"} <= modules
     allowed = {"looper", "looper.agents", "looper.agents.keeper",
                "looper.agents.proc_tree", "looper.child_env"}
     assert {name for name in modules if not name.startswith("looper.agents.keeper.")} <= allowed
