@@ -81,6 +81,9 @@ def trees() -> Iterator[list[dict[str, int]]]:
 def _short_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0.5)
     monkeypatch.setattr(claude_cli, "STOP_GRACE_SEC", 0.5)
+    monkeypatch.setattr(proc_tree, "_spawns_fenced", False)
+    monkeypatch.setattr(proc_tree, "_spawning", set())
+    monkeypatch.setattr(proc_tree, "_owned", set())
 
 
 async def _started(root: Path, trees: list[dict[str, int]]) -> dict[str, int]:
@@ -456,6 +459,181 @@ def test_end_owned_ends_every_recorded_agents_tree(
         assert _running([pid for tree in trees for pid in tree.values()]) == []
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize("attempt", range(20))
+def test_fenced_end_waits_for_inflight_spawns(
+    runtime_root: Path, monkeypatch: pytest.MonkeyPatch, attempt: int,
+) -> None:
+    async def run() -> None:
+        await proc_tree.sweep(runtime_root)
+        created, release = asyncio.Event(), asyncio.Event()
+        processes = []
+        real_create = asyncio.create_subprocess_exec
+
+        async def create(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+            process = await real_create(*args, **kwargs)
+            processes.append(process)
+            if len(processes) == 4:
+                created.set()
+            await release.wait()  # A real process exists, but spawn has not recorded it yet.
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+        spawns = [asyncio.create_task(proc_tree.spawn("/bin/sleep", "60")) for _ in range(4)]
+        ending = None
+        try:
+            await asyncio.wait_for(created.wait(), 5)
+            assert _running([p.pid for p in processes], settle=0) == [p.pid for p in processes]
+            assert not proc_tree._recorded
+            proc_tree.fence_spawns()
+            ending = asyncio.create_task(proc_tree.end_owned(deadline=5))
+            await asyncio.sleep(0)
+            assert not ending.done(), "cleanup must wait for the unrecorded spawns"
+            release.set()
+            assert set(await asyncio.gather(*spawns)) == set(processes)
+            await ending
+            await asyncio.wait_for(asyncio.gather(*(p.wait() for p in processes)), 2)
+            assert _running([p.pid for p in processes], settle=0) == []
+            await asyncio.gather(*proc_tree._forgetting)
+            assert not proc_tree._owned
+            assert not proc_tree._spawning
+        finally:
+            release.set()
+            await asyncio.gather(*spawns, return_exceptions=True)
+            if ending is not None:
+                await ending
+            for process in processes:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
+
+    asyncio.run(asyncio.wait_for(run(), 12))
+
+
+def test_fenced_spawn_starts_no_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def create(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("fenced spawn reached process creation")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+
+    async def run() -> None:
+        proc_tree.fence_spawns()
+        with pytest.raises(RuntimeError, match="^the control plane lost its lock; no new agents$"):
+            await proc_tree.spawn("/bin/sleep", "60")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", ["start_time", "record_write", "no_sweep"])
+def test_fenced_end_reaches_agents_without_records(
+    runtime_root: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    async def run() -> None:
+        if failure != "no_sweep":
+            await proc_tree.sweep(runtime_root)
+        if failure == "start_time":
+            monkeypatch.setattr(proc_tree, "_start_time", lambda _: None)
+        elif failure == "record_write":
+            def write(*args: Any, **kwargs: Any) -> Path:
+                raise OSError("record storage is unavailable")
+            monkeypatch.setattr(proc_tree, "_write_record", write)
+        process = await proc_tree.spawn("/bin/sleep", "60")
+        try:
+            assert process.pid not in proc_tree._recorded
+            assert _running([process.pid], settle=0) == [process.pid]
+            proc_tree.fence_spawns()
+            await proc_tree.end_owned(deadline=5)
+            assert process.returncode == -signal.SIGTERM
+            assert _running([process.pid], settle=0) == []
+            await asyncio.gather(*proc_tree._forgetting)
+            assert not proc_tree._owned
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+    asyncio.run(asyncio.wait_for(run(), 10))
+
+
+def test_failed_spawn_does_not_hold_up_fenced_end(runtime_root: Path) -> None:
+    async def run() -> None:
+        with pytest.raises(FileNotFoundError):
+            await proc_tree.spawn(str(runtime_root / "missing-agent"))
+        proc_tree.fence_spawns()
+        await proc_tree.end_owned(deadline=1)
+        assert not proc_tree._spawning
+
+    asyncio.run(asyncio.wait_for(run(), 2))
+
+
+def test_cancelled_spawn_does_not_hold_up_fenced_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> None:
+        creating = asyncio.Event()
+
+        async def create(*args: Any, **kwargs: Any) -> None:
+            creating.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+        spawning = asyncio.create_task(proc_tree.spawn("/bin/sleep", "60"))
+        await creating.wait()
+        proc_tree.fence_spawns()
+        ending = asyncio.create_task(proc_tree.end_owned(deadline=1))
+        spawning.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await spawning
+        await ending
+        assert not proc_tree._spawning
+
+    asyncio.run(asyncio.wait_for(run(), 2))
+
+
+def test_end_owned_shares_its_deadline_between_spawning_and_ending(
+    runtime_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        await proc_tree.sweep(runtime_root)
+        created, release = asyncio.Event(), asyncio.Event()
+        processes = []
+        real_create = asyncio.create_subprocess_exec
+
+        async def create(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+            process = await real_create(*args, **kwargs)
+            processes.append(process)
+            assert await process.stdout.readline() == b"ready\n"
+            created.set()
+            await release.wait()
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+        spawning = asyncio.create_task(proc_tree.spawn(
+            sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); time.sleep(60)", stdout=asyncio.subprocess.PIPE))
+        timer = None
+        try:
+            await asyncio.wait_for(created.wait(), 5)
+            proc_tree.fence_spawns()
+            timer = asyncio.get_running_loop().call_later(0.25, release.set)
+            began = time.monotonic()
+            await proc_tree.end_owned(deadline=0.4)
+            elapsed = time.monotonic() - began
+            assert 0.25 <= elapsed < 0.55  # Giving the end a fresh 0.4 s would take at least 0.65 s.
+            process = await spawning
+            await asyncio.wait_for(process.wait(), 2)
+            assert process.returncode == -signal.SIGKILL
+            assert _running([process.pid], settle=0) == []
+        finally:
+            if timer is not None:
+                timer.cancel()
+            release.set()
+            await asyncio.gather(spawning, return_exceptions=True)
+            for process in processes:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
+
+    asyncio.run(asyncio.wait_for(run(), 10))
 
 
 def test_end_owned_leaves_a_reused_pid_alone(runtime_root: Path) -> None:

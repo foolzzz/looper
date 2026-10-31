@@ -58,6 +58,9 @@ _server: tuple[int, str] | None = None
 _recorded: dict[int, tuple[Path, str]] = {}
 _ending: set[int] = set()
 _forgetting: set[asyncio.Task[None]] = set()
+_spawns_fenced = False
+_spawning: set[asyncio.Future[None]] = set()
+_owned: set[asyncio.subprocess.Process] = set()  # also retains agents whose durable record could not be written
 
 # pid -> (ppid, pgid) of every live process; a zombie has exited already and is left out.
 Table = dict[int, tuple[int, int]]
@@ -300,23 +303,42 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
             _recorded.pop(process.pid, None)
 
 
+def fence_spawns() -> None:
+    """Refuse new agents immediately after the control plane loses its lock."""
+    global _spawns_fenced
+    _spawns_fenced = True
+
+
 async def end_owned(*, deadline: float) -> None:
-    """End this server's recorded agents concurrently, for at most ``deadline`` seconds.
+    """Wait for in-flight spawns, then end this server's agents within the same ``deadline`` seconds.
 
     Recheck each agent's identity before signalling, as the startup sweep does. Any record whose end
     cannot finish stays for that sweep; the caller is about to exit and must not wait beyond its deadline.
     """
-    async def end_agent(pid: int, started: str) -> None:
-        try:
-            await _end(_Orphan(pid, started), label=f"owned agent {pid}", known={})
-        except Exception:
-            logger.exception("cannot end owned agent %s; keeping its record for the next sweep", pid)
+    loop = asyncio.get_running_loop()
+    expires = loop.time() + max(0, deadline)
+    if _spawning:
+        _, pending = await asyncio.wait(list(_spawning), timeout=max(0, expires - loop.time()))
+        if pending:
+            logger.warning("control-plane exit deadline reached with %d spawns still in flight", len(pending))
 
-    tasks = [asyncio.create_task(end_agent(pid, started)) for pid, (_, started) in list(_recorded.items())]
+    async def end_agent(process: _Orphan | asyncio.subprocess.Process) -> None:
+        try:
+            if isinstance(process, _Orphan):
+                await _end(process, label=f"owned agent {process.pid}", known={})
+            else:
+                await end(process, label=f"owned agent {process.pid}")
+        except Exception:
+            logger.exception("cannot end owned agent %s; keeping any record for the next sweep", process.pid)
+
+    recorded = dict(_recorded)
+    tasks = [asyncio.create_task(end_agent(_Orphan(pid, started))) for pid, (_, started) in recorded.items()]
+    tasks.extend(asyncio.create_task(end_agent(process))
+                 for process in list(_owned) if process.pid not in recorded)
     if not tasks:
         return
     try:
-        await asyncio.wait(tasks, timeout=max(0, deadline))
+        await asyncio.wait(tasks, timeout=max(0, expires - loop.time()))
     finally:
         for task in tasks:
             if not task.done():
@@ -373,27 +395,43 @@ def _write_record(
 async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any) -> asyncio.subprocess.Process:
     """Start an agent process in a session of its own, so its children share its process group, and record it
     until it is reaped (once ``sweep`` has run). Without ``env``, start with ``child_env.inherited()``."""
-    process = await asyncio.create_subprocess_exec(
-        *argv, env=child_env.inherited() if env is None else env, start_new_session=True, **kwargs)
-    if _records is not None and _server is not None:
-        if (started := _start_time(process.pid)) is None:
-            logger.warning("cannot read the start time of agent pid %s; it is not recorded for the next sweep",
-                           process.pid)
-            return process
+    if _spawns_fenced:
+        raise RuntimeError("the control plane lost its lock; no new agents")
+    loop = asyncio.get_running_loop()
+    spawning = loop.create_future()
+    _spawning.add(spawning)  # No await between the fence check and registering this spawn.
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *argv, env=child_env.inherited() if env is None else env, start_new_session=True, **kwargs)
+        _owned.add(process)
+        path, started = None, None
         try:
-            path = _write_record(_records, process.pid, started, _server)
-        except OSError as exc:
-            logger.warning("cannot record agent pid %s for the next sweep: %s", process.pid, exc)
-            return process
-        _recorded[process.pid] = (path, started)
-        forget = asyncio.get_running_loop().create_task(_forget(process, path, started))
-        _forgetting.add(forget)
-        forget.add_done_callback(_forgetting.discard)
-    return process
+            if _records is not None and _server is not None:
+                if (started := _start_time(process.pid)) is None:
+                    logger.warning("cannot read the start time of agent pid %s; it is not recorded for the next sweep",
+                                   process.pid)
+                else:
+                    try:
+                        path = _write_record(_records, process.pid, started, _server)
+                    except OSError as exc:
+                        logger.warning("cannot record agent pid %s for the next sweep: %s", process.pid, exc)
+                    else:
+                        _recorded[process.pid] = (path, started)
+        finally:
+            forget = loop.create_task(_forget(process, path, started))
+            _forgetting.add(forget)
+            forget.add_done_callback(_forgetting.discard)
+        return process  # A fence set during creation must not prevent recording this process.
+    finally:
+        _spawning.discard(spawning)
+        spawning.set_result(None)
 
 
-async def _forget(process: asyncio.subprocess.Process, path: Path, started: str) -> None:
+async def _forget(process: asyncio.subprocess.Process, path: Path | None, started: str | None) -> None:
     await process.wait()
+    _owned.discard(process)
+    if path is None:
+        return
     if process.pid in _ending:
         return
     try:

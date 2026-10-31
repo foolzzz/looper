@@ -52,7 +52,7 @@ async def _running(pool: Any, monkeypatch: pytest.MonkeyPatch, root: Path, *, ke
     monkeypatch.setattr(operator_notes, "_root", str(root))
     monkeypatch.setattr(managers_api, "_listener", None)
     for name, value in (("_records", None), ("_server", None), ("_recorded", {}), ("_ending", set()),
-                        ("_forgetting", set())):
+                        ("_forgetting", set()), ("_spawns_fenced", False), ("_spawning", set()), ("_owned", set())):
         monkeypatch.setattr(proc_tree, name, value)
     monkeypatch.setattr(profile_registry, "register_found_runtimes", AsyncMock(return_value=[]))
     for module in (codex_login, grok_login):
@@ -245,6 +245,9 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
     probe = await asyncpg.connect(DSN)
     agent = None
     child_pid = None
+    spawning = None
+    inflight = []
+    created, release = asyncio.Event(), asyncio.Event()
     try:
         async with _running(pool, monkeypatch, root, keeper=KeeperMode.ON) as system:
             assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1", control_plane.EPOCH_KEY) == "1"
@@ -260,6 +263,21 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
             child_pid = int((root / "child.pid").read_text())
             assert child_pid in proc_tree._snapshot()
             assert agent.pid in proc_tree._recorded
+            real_create = asyncio.create_subprocess_exec
+
+            async def create(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+                process = await real_create(*args, **kwargs)
+                if args == ("/bin/sleep", "60"):
+                    inflight.append(process)
+                    created.set()
+                    await release.wait()  # Alive when the lease is lost, not yet returned to spawn.
+                return process
+
+            monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+            spawning = asyncio.create_task(proc_tree.spawn("/bin/sleep", "60"))
+            await asyncio.wait_for(created.wait(), 5)
+            assert inflight[0].pid in proc_tree._snapshot()
+            assert inflight[0].pid not in proc_tree._recorded
             pid = await probe.fetchval("""SELECT pid FROM pg_stat_activity
                 WHERE datname=current_database() AND application_name LIKE 'looper serve %'""")
             assert pid is not None
@@ -269,10 +287,20 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
                                   list(driver_pids))
             else:
                 assert await probe.fetchval("SELECT pg_terminate_backend($1)", pid)
+            await until(lambda: proc_tree._spawns_fenced, "the lost-lock spawn fence", timeout=5)
+            assert not spawning.done()
+            assert not system.exits
+            release.set()
+            assert await spawning is inflight[0]
             await until(lambda: bool(system.exits), "the lost-lock exit", timeout=8)
             assert system.exits == [control_plane.EXIT_LOCK_LOST]
             await asyncio.wait_for(agent.wait(), 1)
             assert agent.returncode == -signal.SIGTERM
+            await asyncio.wait_for(inflight[0].wait(), 1)
+            assert inflight[0].returncode == -signal.SIGTERM
+            assert inflight[0].pid not in proc_tree._snapshot()
+            with pytest.raises(RuntimeError, match="the control plane lost its lock; no new agents"):
+                await proc_tree.spawn("/bin/sleep", "60")
             assert child_pid not in proc_tree._snapshot()
             assert not system.server._server.is_serving()
             with pytest.raises(RuntimeError, match="fenced"):
@@ -286,6 +314,13 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
             with pytest.raises(RuntimeError, match="fenced"):
                 connection.get_pool()
     finally:
+        release.set()
+        if spawning is not None:
+            await asyncio.gather(spawning, return_exceptions=True)
+        for process in inflight:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
         if agent is not None:
             if agent.returncode is None:
                 agent.kill()

@@ -434,6 +434,9 @@ class Fence:
         if self._lost:
             return
         self._lost = True
+        from . import proc_tree
+
+        proc_tree.fence_spawns()
         loop = asyncio.get_running_loop()
         self._backstop = loop.call_later(SHUTDOWN_DEADLINE_SEC, self.exit_now, EXIT_LOCK_LOST)
         connection.fence()
@@ -441,8 +444,6 @@ class Fence:
             self.http_server.close_listener()
 
         async def end_owned() -> None:
-            from . import proc_tree
-
             try:
                 await proc_tree.end_owned(deadline=10)
             finally:

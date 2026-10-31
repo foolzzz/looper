@@ -79,6 +79,7 @@ def test_lost_lock_fences_before_ending_owned_agents(monkeypatch):
 
     async def run():
         events = []
+        monkeypatch.setattr(proc_tree, "fence_spawns", lambda: events.append("spawns fenced"))
         monkeypatch.setattr(connection, "fence", lambda: events.append("fenced"))
         async def end_owned(*, deadline):
             assert deadline == 10
@@ -87,13 +88,13 @@ def test_lost_lock_fences_before_ending_owned_agents(monkeypatch):
         fence = serve.Fence(exit_now=lambda code: events.append(code))
         fence.http_server = SimpleNamespace(close_listener=lambda: events.append("listener closed"))
         fence.lost("connection lost during shutdown")
-        assert events == ["fenced", "listener closed"]
+        assert events == ["spawns fenced", "fenced", "listener closed"]
         assert fence._backstop is not None
         fence.exit(1)  # A normal shutdown deadline that fires after loss still exits 75.
         fence.lost("second notification")
         await fence._ending
         fence._backstop.cancel()
-        assert events == ["fenced", "listener closed", 75, "agents ended", 75]
+        assert events == ["spawns fenced", "fenced", "listener closed", 75, "agents ended", 75]
     asyncio.run(run())
 
 
@@ -103,6 +104,7 @@ def test_lost_lock_before_http_still_exits_if_agent_cleanup_fails(monkeypatch):
 
     async def run():
         exits = []
+        monkeypatch.setattr(proc_tree, "_spawns_fenced", False)
         monkeypatch.setattr(connection, "fence", lambda: None)
         async def end_owned(*, deadline):
             raise OSError("cannot read processes")
