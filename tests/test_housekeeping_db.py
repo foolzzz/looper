@@ -144,20 +144,97 @@ def test_new_logs_after_the_candidate_snapshot_are_not_pruned(monkeypatch, tmp_p
     run_scheduled(test, monkeypatch, tmp_path)
 
 
-def test_process_probe_failure_preserves_orphan_runner_directory(monkeypatch, tmp_path, caplog):
+def test_process_probe_failure_keeps_run_directories_and_continues_cleanup(monkeypatch, tmp_path, caplog):
     async def test(env: ScheduleEnv) -> None:
         directory = env.runtime_root / ".local" / "command-runs" / "orphan"
         directory.mkdir(parents=True)
         (directory / "spec.json").write_text("{}")
         (directory / "runner.json").write_text(json.dumps({
             "runner_pid": os.getpid(), "runner_started": proc_tree._start_time(os.getpid())}))
+        runner = env.runtime_root / housekeeping.RUNNER_DIR / "runner-old.py"
+        runner.parent.mkdir(parents=True, exist_ok=True)
+        runner.write_text("old runner")
+        stamp = (env.clock.now - timedelta(days=40)).timestamp()
+        os.utime(runner, (stamp, stamp))
+        for name in housekeeping.ROTATED:
+            log = env.runtime_root / "logs" / name
+            log.parent.mkdir(parents=True, exist_ok=True)
+            with log.open("wb") as output:
+                output.truncate(housekeeping.ROTATE_AT_BYTES + 1)
 
         def fail_probe(*args, **kwargs):
-            raise subprocess.TimeoutExpired("ps", 5)
+            return subprocess.CompletedProcess(args[0], 1, stdout="", stderr="ps unavailable")
 
         monkeypatch.setattr(subprocess, "run", fail_probe)
-        await env.scheduler._housekeep(env.clock.now)
-        assert directory.is_dir() and "housekeeping failed" in caplog.text
+        with caplog.at_level("INFO", logger=housekeeping.__name__):
+            report = await housekeeping.run_once(env.runtime_root, env.clock.now,
+                                                current_runner=None, commands=CommandRuns(env.runtime_root))
+        assert directory.is_dir() and report.run_dirs == 0
+        assert report.runner_files == 1 and not runner.exists()
+        assert report.rotated == list(housekeeping.ROTATED)
+        for name in housekeeping.ROTATED:
+            log = env.runtime_root / "logs" / name
+            assert log.stat().st_size == 0
+            assert log.with_suffix(".log.1").stat().st_size == housekeeping.ROTATE_AT_BYTES + 1
+        assert set(report.failed_steps) == {"run directories"}
+        assert "ps exited with status 1" in report.failed_steps["run directories"]
+        warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "run directories" in warnings[0].message and "ps exited with status 1" in warnings[0].message
+        assert "failed_steps=" in caplog.records[-1].message and "run directories" in caplog.records[-1].message
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize(("step", "module", "function"), [
+    ("runs and notifications", schedules, "prune_runs"),
+    ("command logs", schedules, "open_log_paths"),
+    ("run directories", schedules, "run_states"),
+    ("runner files", housekeeping, "prune_runner_files"),
+    ("log rotation", housekeeping, "rotate"),
+])
+def test_each_failed_step_leaves_the_other_cleanup_steps_running(monkeypatch, tmp_path, caplog, step, module, function):
+    async def test(env: ScheduleEnv) -> None:
+        sid = (await env.schedule())["schedule_id"]
+        await _runs(env, sid, 101, 40)
+        await env.pool.execute(
+            "INSERT INTO schedule_notifications (id, schedule_id, kind, text, status, created_at) "
+            "VALUES ('old-note', $1, 'run', '', 'dashboard', $2)", sid, env.clock.now - timedelta(days=40))
+        log = env.runtime_root / housekeeping.LOGS_DIR / sid / "old.log"
+        directory = env.runtime_root / housekeeping.RUNS_DIR / "orphan"
+        runner = env.runtime_root / housekeeping.RUNNER_DIR / "runner-old.py"
+        rotation = env.runtime_root / "logs" / "serve.log"
+        for path in (log, directory / "spec.json", runner, rotation):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("expired")
+            stamp = (env.clock.now - timedelta(days=40)).timestamp()
+            os.utime(path, (stamp, stamp))
+        os.utime(directory, (stamp, stamp))
+        monkeypatch.setattr(housekeeping, "ROTATE_AT_BYTES", 4)
+
+        def fail(*args, **kwargs):
+            raise OSError("cleanup unavailable")
+
+        async def fail_async(*args, **kwargs):
+            fail()
+
+        monkeypatch.setattr(module, function, fail_async if module is schedules else fail)
+        report = await housekeeping.run_once(env.runtime_root, env.clock.now,
+                                            current_runner=None, commands=CommandRuns(env.runtime_root))
+        assert report.failed_steps == {step: "OSError: cleanup unavailable"}
+        assert report.runs == report.notifications == (0 if step == "runs and notifications" else 1)
+        assert await env.pool.fetchval("SELECT count(*) FROM schedule_runs") == (101 if step == "runs and notifications" else 100)
+        assert await env.pool.fetchval("SELECT count(*) FROM schedule_notifications") == (1 if step == "runs and notifications" else 0)
+        assert report.logs == (0 if step == "command logs" else 1)
+        assert log.exists() == (step == "command logs")
+        assert report.run_dirs == (0 if step == "run directories" else 1)
+        assert directory.exists() == (step == "run directories")
+        assert report.runner_files == (0 if step == "runner files" else 1)
+        assert runner.exists() == (step == "runner files")
+        assert report.rotated == ([] if step == "log rotation" else ["serve.log"])
+        assert rotation.read_text() == ("expired" if step == "log rotation" else "")
+        warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+        assert len(warnings) == 1 and step in warnings[0].message and "cleanup unavailable" in warnings[0].message
 
     run_scheduled(test, monkeypatch, tmp_path)
 

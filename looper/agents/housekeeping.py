@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import errno
@@ -37,6 +39,17 @@ class Report:
     run_dirs: int = 0
     runner_files: int = 0
     rotated: list[str] = field(default_factory=list)
+    failed_steps: dict[str, str] = field(default_factory=dict)
+
+
+@contextmanager
+def _step(report: Report, name: str) -> Iterator[None]:
+    try:
+        yield
+    except Exception as exc:
+        cause = f"{type(exc).__name__}: {exc}"
+        report.failed_steps[name] = cause
+        logger.warning("housekeeping step %s failed: %s", name, cause)
 
 
 def _log_files(logs_root: Path) -> list[tuple[float, Path, int]]:
@@ -154,35 +167,42 @@ def _prune_run_directories(commands: CommandRuns, runs: list[dict[str, Any]], no
 async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | None,
                    commands: CommandRuns | None) -> Report:
     report = Report()
-    async with db_connection.transaction() as conn:
-        before = now - timedelta(days=await scheduler_settings.run_retention_days(conn))
-    # Release the transaction between batches so a large backlog does not hold locks for the whole pass.
-    for prune, counter in ((db_schedules.prune_runs, "runs"), (db_schedules.prune_notifications, "notifications")):
-        while True:
-            async with db_connection.transaction() as conn:
-                count = await prune(conn, before)
-            setattr(report, counter, getattr(report, counter) + count)
-            if count == 0:
-                break
+    with _step(report, "runs and notifications"):
+        async with db_connection.transaction() as conn:
+            before = now - timedelta(days=await scheduler_settings.run_retention_days(conn))
+        # Release the transaction between batches so a large backlog does not hold locks for the whole pass.
+        for prune, counter in ((db_schedules.prune_runs, "runs"), (db_schedules.prune_notifications, "notifications")):
+            while True:
+                async with db_connection.transaction() as conn:
+                    count = await prune(conn, before)
+                setattr(report, counter, getattr(report, counter) + count)
+                if count == 0:
+                    break
 
-    runs = await asyncio.to_thread(_run_directories, runtime_root, now) if commands is not None else []
-    # A run commits its open row before creating its log. Snapshot files first so runs starting
-    # after the open-row query cannot lose a new log to the size cap.
-    logs = await asyncio.to_thread(_log_files, runtime_root / LOGS_DIR)
-    async with db_connection.transaction() as conn:
-        states = await db_schedules.run_states(conn, [run["id"] for run in runs])
-        paths = await db_schedules.open_log_paths(conn)
-    keep = {runtime_root / path for path in paths}
-    report.logs, report.log_bytes = await asyncio.to_thread(
-        _prune_logs, runtime_root / LOGS_DIR, logs, before, LOG_TOTAL_MAX_BYTES, keep)
-    if commands is not None:
-        closed = [run for run in runs if states.get(run["id"]) not in db_schedules.OPEN_STATUSES]
-        report.run_dirs = await asyncio.to_thread(_prune_run_directories, commands, closed, now)
-    report.runner_files = await asyncio.to_thread(prune_runner_files, runtime_root / RUNNER_DIR, current_runner, now)
-    for name in ROTATED:
-        if await asyncio.to_thread(rotate, runtime_root / "logs" / name, at_bytes=ROTATE_AT_BYTES, keep=ROTATE_KEEP):
-            report.rotated.append(name)
+    with _step(report, "command logs"):
+        # A run commits its open row before creating its log. Snapshot files first so runs starting
+        # after the open-row query cannot lose a new log to the size cap.
+        logs = await asyncio.to_thread(_log_files, runtime_root / LOGS_DIR)
+        async with db_connection.transaction() as conn:
+            before = now - timedelta(days=await scheduler_settings.run_retention_days(conn))
+            paths = await db_schedules.open_log_paths(conn)
+        keep = {runtime_root / path for path in paths}
+        report.logs, report.log_bytes = await asyncio.to_thread(
+            _prune_logs, runtime_root / LOGS_DIR, logs, before, LOG_TOTAL_MAX_BYTES, keep)
+    with _step(report, "run directories"):
+        if commands is not None:
+            runs = await asyncio.to_thread(_run_directories, runtime_root, now)
+            async with db_connection.transaction() as conn:
+                states = await db_schedules.run_states(conn, [run["id"] for run in runs])
+            closed = [run for run in runs if states.get(run["id"]) not in db_schedules.OPEN_STATUSES]
+            report.run_dirs = await asyncio.to_thread(_prune_run_directories, commands, closed, now)
+    with _step(report, "runner files"):
+        report.runner_files = await asyncio.to_thread(prune_runner_files, runtime_root / RUNNER_DIR, current_runner, now)
+    with _step(report, "log rotation"):
+        for name in ROTATED:
+            if await asyncio.to_thread(rotate, runtime_root / "logs" / name, at_bytes=ROTATE_AT_BYTES, keep=ROTATE_KEEP):
+                report.rotated.append(name)
     logger.info("housekeeping runs_deleted=%d notifications_deleted=%d logs_deleted=%d log_bytes=%d "
-                "run_dirs=%d runner_files=%d rotated=%s", report.runs, report.notifications, report.logs,
-                report.log_bytes, report.run_dirs, report.runner_files, ",".join(report.rotated))
+                "run_dirs=%d runner_files=%d rotated=%s failed_steps=%s", report.runs, report.notifications, report.logs,
+                report.log_bytes, report.run_dirs, report.runner_files, ",".join(report.rotated), report.failed_steps)
     return report

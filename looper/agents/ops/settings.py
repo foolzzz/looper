@@ -167,8 +167,9 @@ _SOURCE_WORDS = {"setting": "设置", "env": "旧环境变量", "built-in": "内
 def _scheduler_values(arguments: Mapping[str, Any]) -> dict[str, Any]:
     values = arguments.get("scheduler")
     if not isinstance(values, Mapping) or not values:
-        raise OpError(ErrorCode.INVALID, "scheduler: give min_interval_seconds and/or run_timeout_seconds (null: "
-                                         "the built-in)")
+        raise OpError(ErrorCode.INVALID, "scheduler: give min_interval_seconds, run_timeout_seconds and/or "
+                                         "run_retention_days (days a finished schedule run is kept; each schedule "
+                                         "keeps its newest 100) (null: the built-in)")
     return dict(values)
 
 
@@ -508,7 +509,9 @@ TOOLS: tuple[Tool, ...] = (
                     },
                 },
                 "scheduler": {"type": "object", "description": "scheduler: min_interval_seconds (schedules' least "
-                                                              "gap), run_timeout_seconds (default); null: built-in."},
+                                                              "gap), run_timeout_seconds (default), run_retention_days "
+                                                              "(days a finished schedule run is kept; each schedule "
+                                                              "keeps its newest 100); null: built-in."},
                 "add": {"type": "array", "description": "allowed_profiles: profile ids or names."},
                 "remove": {"type": "array", "description": "allowed_profiles: as add."},
             },
