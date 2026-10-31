@@ -577,8 +577,15 @@ def _chat_record(envelope: MessageEnvelope, message_id: str) -> dict[str, Any]:
 
 
 def _reply_route(envelope: MessageEnvelope) -> dict[str, Any]:
-    """Keep native reply routing in the journaled answer, independent of the channel's in-memory correlation map."""
+    """Keep reply routing in the journaled answer, independent of the channel's in-memory correlation map."""
     origin = _message_origin(envelope)
+    if origin["channel"] == "web":
+        context = envelope.payload.get("channel_context")
+        if isinstance(context, dict):
+            session, client_id = context.get("session_id"), context.get("client_message_id")
+            if isinstance(session, str) and session and isinstance(client_id, str) and client_id:
+                return {"reply_route": {"session_id": session, "message_id": f"{client_id}:reply"}}
+        return {}
     if not origin["chat"] or not (origin["channel"] == "telegram" or is_lark(origin["channel"])):
         return {}
     route = {"chat_id": origin["chat"]}
@@ -665,12 +672,6 @@ def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *
     outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
     if record is None:
         record = _chat_record(original, f"{original.message_id}:reply")
-    context = original.payload.get("channel_context")
-    if original.source.channel == "web" and isinstance(context, dict):
-        session, client_id = context.get("session_id"), context.get("client_message_id")
-        if isinstance(session, str) and session and isinstance(client_id, str) and client_id:
-            # Web recovery needs its identity even when external chat persistence is disabled.
-            record = {**record, CHAT_RECORD: chat_record(session, f"{client_id}:reply")}
     return MessageEnvelope.create(
         source=source,
         target=original.source,
