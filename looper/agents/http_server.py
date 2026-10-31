@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import html
+import ipaddress
 import json
 import logging
 import mimetypes
 import os
 import re
 import secrets
+import socket
 import time
 import uuid
 import urllib.parse
@@ -165,6 +167,8 @@ class AgentHTTPServer:
         client_ops: ClientOps | None = None,
         ops_config: OpsConfig | None = None,
         channels: ChannelRegistry | None = None,
+        listen_socket: socket.socket | None = None,
+        proxy_secret: str | None = None,
     ) -> None:
         self._host = host
         self._port = port
@@ -207,18 +211,23 @@ class AgentHTTPServer:
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
+        self._listen_socket = listen_socket
+        self._proxy_secret = proxy_secret
+        self._proxy_watchers: set[asyncio.StreamWriter] = set()
 
     async def start(self) -> None:
         if self._config_imports:
             self._config_imports.clear()  # what a previous server left pending
-        self._server = await asyncio.start_server(
-            self._handle_connection, self._host, self._port
-        )
+        self._server = (await asyncio.start_server(self._handle_connection, sock=self._listen_socket)
+                        if self._listen_socket is not None else
+                        await asyncio.start_server(self._handle_connection, self._host, self._port))
         if self._port == 0:
             self._port = self._server.sockets[0].getsockname()[1]
         logger.info("HTTP server listening on %s:%d", self._host, self._port)
 
     async def stop(self) -> None:
+        for writer in self._proxy_watchers:
+            writer.close()
         if self._server:
             self._server.close()
             await self._server.wait_closed()
@@ -236,6 +245,24 @@ class AgentHTTPServer:
         sign_in_headers = None
         try:
             request_line = await asyncio.wait_for(reader.readline(), timeout=30.0)
+            if self._proxy_secret and request_line.startswith(b"LOOPER/1 "):
+                # Only the private execution-host credential may supply a peer.
+                # Regular internal tool HTTP requests use the loopback peer above.
+                fields = request_line.decode("ascii").strip().split(" ")
+                if len(fields) != 3 or not secrets.compare_digest(fields[1], self._proxy_secret):
+                    return
+                if fields[2] != "watch":
+                    peer_host = str(ipaddress.ip_address(fields[2]))
+                writer.write(b"LOOPER/1 ready\n")
+                await writer.drain()
+                if fields[2] == "watch":
+                    self._proxy_watchers.add(writer)
+                    try:
+                        await reader.read(1)
+                    finally:
+                        self._proxy_watchers.discard(writer)
+                    return
+                request_line = await asyncio.wait_for(reader.readline(), timeout=30.0)
             if not request_line:
                 writer.close()
                 return
