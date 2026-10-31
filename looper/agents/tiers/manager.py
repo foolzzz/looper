@@ -576,6 +576,19 @@ def _chat_record(envelope: MessageEnvelope, message_id: str) -> dict[str, Any]:
     return {CHAT_RECORD: chat_record(key, message_id)}
 
 
+def _reply_route(envelope: MessageEnvelope) -> dict[str, Any]:
+    """Keep native reply routing in the journaled answer, independent of the channel's in-memory correlation map."""
+    origin = _message_origin(envelope)
+    if not origin["chat"] or not (origin["channel"] == "telegram" or is_lark(origin["channel"])):
+        return {}
+    route = {"chat_id": origin["chat"]}
+    if is_lark(origin["channel"]) and origin["group"]:
+        message_id = envelope.payload["channel_context"].get("message_id")
+        if isinstance(message_id, str) and message_id:
+            route["reply_to"] = message_id
+    return {"reply_route": route}
+
+
 def _with_blocks(text: str, blocks: list[str]) -> str:
     """A reply: Claude's words, then what Looper itself writes to the user (``Turn.blocks``)."""
     return "\n\n".join(part for part in (text.strip(), *blocks) if part)
@@ -665,7 +678,7 @@ def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *
         payload={"text": text, "outcome": outcome.value, **({"error": error} if error else {})},
         correlation_id=original.correlation_id,
         reply_to=original.message_id,
-        metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record,
+        metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **_reply_route(original), **record,
                   **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {})},
     )
 
@@ -2443,6 +2456,7 @@ class ManagerAgent:
             payload=payload,
             correlation_id=last.correlation_id,
             metadata={"origin_channel_id": last.metadata.get("origin_channel_id"),
+                      **_reply_route(last),
                       **_chat_record(last, f"auto-{uuid.uuid4().hex[:12]}")},
         ))
 
@@ -2667,5 +2681,5 @@ class ManagerAgent:
             payload={"text": text, "delta": delta, "phase": phase, **extra},
             correlation_id=original.correlation_id,
             reply_to=original.message_id,
-            metadata={"origin_channel_id": original.metadata.get("origin_channel_id")},
+            metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **_reply_route(original)},
         ))

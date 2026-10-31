@@ -152,3 +152,124 @@ def test_immediate_redrain_keeps_previously_woken_turns_held():
             await asyncio.gather(waiter, return_exceptions=True)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("channel,group", [("telegram", False), ("lark", False),
+                                          ("lark", True), ("lark_bot", True)])
+@pytest.mark.parametrize("restart_before_delivery", [False, True])
+def test_held_chat_reply_survives_restart(agent_db, tmp_path, monkeypatch, channel, group,
+                                         restart_before_delivery):
+    from types import SimpleNamespace
+
+    from looper.agents.bus import MessageBus
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.lark import LarkChannelAdapter
+    from looper.agents.channels.telegram import TelegramChannelAdapter
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.db import chat
+    from tests.db_support import until
+    from tests.test_manager_stop import _Session
+
+    saved = AsyncMock()
+    monkeypatch.setattr(chat, "save_channel_message", saved)
+    channel_id = f"channel-{channel}"
+    chat_id = 99 if channel == "telegram" else "oc_chat"
+    sent, replied = AsyncMock(return_value=SimpleNamespace(message_id=42)), AsyncMock(return_value="om_answer")
+    transport = SimpleNamespace(send=sent, reply=replied, edit=AsyncMock(), react=AsyncMock(),
+                                names=AsyncMock(return_value={}), aclose=AsyncMock())
+
+    def adapter(bus):
+        allowlist = SenderAllowlist(channel_id, frozenset({"7", "ou_sender"}))
+        if channel == "telegram":
+            result = TelegramChannelAdapter(allowlist=allowlist)
+            result._app = SimpleNamespace(bot=SimpleNamespace(send_message=sent, edit_message_text=AsyncMock()))
+        else:
+            result = LarkChannelAdapter(allowlist=allowlist, channel_type=channel, transport=transport,
+                                        bot_open_id="ou_bot", runtime_root=tmp_path)
+        result._bus, result._running = bus, True
+        return result
+
+    async def run():
+        bus = MessageBus(runtime_root=tmp_path)
+        await bus.start()
+        drain = DrainState()
+        drain.begin(DrainScope.TURNS)
+        held = asyncio.Event()
+        wait = drain.wait_serving
+
+        async def waiting():
+            held.set()
+            await wait()
+
+        monkeypatch.setattr(drain, "wait_serving", waiting)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path, drain=drain)
+        inbound = adapter(bus)
+        await manager.start(bus)
+        try:
+            if channel == "telegram":
+                update = SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id),
+                                         effective_user=SimpleNamespace(id=7, username="sender"),
+                                         message=SimpleNamespace(text="hello", message_id=41, reply_to_message=None))
+                await inbound._on_message(update, None)
+            else:
+                await inbound._handle_lark_event({"type": "im.message.receive_v1", "chat_id": chat_id,
+                    "chat_type": "group" if group else "p2p", "sender_id": "ou_sender", "sender_type": "user",
+                    "message_type": "text", "message_id": "om_question", "content": "hello",
+                    "mentions": [{"id": "ou_bot", "key": "@bot", "name": "Bot"}] if group else []})
+            await asyncio.wait_for(held.wait(), 2)
+            assert saved.await_count == 0  # held before the Manager starts the turn
+            (question,) = bus.journal.undelivered()
+        finally:
+            await manager.stop()
+            await inbound._reactions.stop()
+            await bus.shutdown()
+
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._claude = _Session(hold=False)
+        await bus.start()
+        await manager.start(bus)
+        try:
+            await until(lambda: question.message_id not in {e.message_id for e in bus.journal.undelivered()},
+                        timeout=5)
+            assert len(manager._claude.turns) == 1
+        finally:
+            await manager.stop()
+        if restart_before_delivery:
+            await bus.shutdown()
+            bus = MessageBus(runtime_root=tmp_path)
+            await bus.start()  # only the pending answer remains, not the user's message
+
+        outbound = adapter(bus)  # no routing state from the previous channel instance
+        assert not outbound._correlation_chat
+        outbound._outbound_task = asyncio.create_task(outbound._outbound_loop())
+        try:
+            await until(lambda: not bus.journal.undelivered(), timeout=5)
+            answers = [call.kwargs for call in saved.await_args_list if call.kwargs["role"] == "assistant"]
+            assert len(answers) == 1 and answers[0]["delivery_failure"] is None
+            deliveries = replied.await_args_list if group else sent.await_args_list
+            final = [call for call in deliveries if call.kwargs.get("markdown", call.kwargs.get("text")) == "好的"]
+            assert len(final) == 1
+            if not restart_before_delivery:
+                assert len(deliveries) > 1  # the resumed turn's status also reached the chat
+            if group:
+                assert all(call.args == ("om_question",) for call in deliveries)
+                sent.assert_not_awaited()  # never broadcast the group reply
+            else:
+                assert final[0].kwargs["chat_id"] == chat_id
+            # An autonomous answer must carry the same route even after the cache is lost again.
+            outbound._correlation_chat.clear()
+            if group:
+                outbound._group_message.clear()
+            manager._bus = bus
+            await manager._send_own_reply(question, "background result")
+            await until(lambda: not bus.journal.undelivered(), timeout=5)
+            own = replied.await_args_list if group else sent.await_args_list
+            assert len([call for call in own if call.kwargs.get("markdown", call.kwargs.get("text"))
+                        == "background result"]) == 1
+        finally:
+            outbound._outbound_task.cancel()
+            await asyncio.gather(outbound._outbound_task, return_exceptions=True)
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 15))
