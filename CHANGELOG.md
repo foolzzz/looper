@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.35] - 2026-10-31
+
+### Added
+
+- **Per-schedule alert thresholds, two new alerts and command run messages.** `Notifier` now reads each schedule's `alert_policy`: `alert_failures_after`, `alert_stale_after_seconds` and `alert_overlap_after` (a null keeps the old default: 3 failures, the period-based stale window, and 10 skips for a command schedule, none for an agent schedule). A schedule's `success_deadline` (`HH:MM` in its time zone) alerts once when a deadline passes with a fire in the window and no successful run, and recovers with the next OK run; consecutive overlap skips alert once at the threshold and recover when a new run starts. A command run's message carries its exit code or signal, duration, log tail and a link to the run. The overview's "Failing now" lists the two new alerts (`deadline_since`, `overlap_since`). No migration: the columns were added earlier. ([#963](https://github.com/foolzzz/looper/pull/963))
+
+Model-visible change: none for prompts or tools; the new alert and command run messages go to the schedule's notification channel, not to a model.
+
 ## [2.14.34] - 2026-10-31
 
 ### Fixed

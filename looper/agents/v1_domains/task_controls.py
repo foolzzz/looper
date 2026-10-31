@@ -39,10 +39,11 @@ _OVERVIEW = _object({
     "schedules": _object({"total": _INT, "enabled": _INT,
         "next": _array(_object({**_SCHEDULE, "next_fire_at": _STR, "timezone": _STR})),
         "failing": _array(_object({**_SCHEDULE, "timezone": _STR, "consecutive_failures": _INT,
-            "failures_since": _NULL_STR, "stale_since": _NULL_STR, "last_success_at": _NULL_STR,
+            "failures_since": _NULL_STR, "stale_since": _NULL_STR, "deadline_since": _NULL_STR,
+            "overlap_since": _NULL_STR, "last_success_at": _NULL_STR,
             "last_status": {"type": ["string", "null"], "enum": [None, "queued", "gating", "running", "completed",
-                "failed", "stopped", "cancelled", "timed_out", "skipped_overlap", "skipped_missed", "skipped_gate",
-                "gate_failed", "skipped_budget"]}})),
+                "succeeded", "failed", "stopped", "cancelled", "timed_out", "interrupted", "skipped_overlap",
+                "skipped_missed", "skipped_gate", "gate_failed", "skipped_budget"]}})),
         "skipped_today": _object({reason: _INT for reason in (
             "skipped_gate", "skipped_overlap", "skipped_missed", "skipped_budget")})})})
 
