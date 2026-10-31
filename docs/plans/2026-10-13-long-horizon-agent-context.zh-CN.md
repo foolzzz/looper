@@ -4,7 +4,7 @@
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
-- **最近更新：** 2026-10-29
+- **最近更新：** 2026-10-30
 
 ## 1. 工作方式
 
@@ -60,6 +60,7 @@
 | LLM 模型层 | Provider → Endpoint → Model → Profile；配置为 `looper-config/v4` | 已随 2.13 发布；真实 CLI 凭据与两档 dialogs 仍未测，五任务一次重复不是完整基线（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 | M9g | Pi 运行时：API key 的两种协议，四类角色，自有 HTTP 工具桥 | 本分支已实现（假 provider 闭环）；真实 Responses/DeepSeek 与 Claude 对照未验证 | M9e |
+| 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中 | 现有定时任务；排空期间放行依赖热升级排空功能 |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
 
@@ -734,8 +735,6 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 2026-10-30 | DSH runner 瞬态重试（本分支）：在 `llm/stream` 内最多重试 3 次，逐次使用独立 request id、预算授权和计量；仅无模型输出时按 HTTP 状态及固定 SDK 的类型化错误码表重试，包含 DeepSeek overload。退避为 1/2/4 秒加至多 20% jitter，`Retry-After` 上限 30 秒，cancel、close 或 settle 立即中断等待；耗尽保留最后错误和尝试次数，逐次诊断不含 provider 消息或凭据。已检查 `0.2.1-rc.2` 源码并用安装版 SDK 与 loopback provider 验证：重复 `next()` 会创建新的 adapter stream、HTTP 请求和鉴权，不需重新调用一次性的 prepared-call 入口。新增 22 项覆盖重试、计费、拒绝、中断、输出边界与错误分类；原截断响应夹具按 `TRANSPORT` 重试更新。`-n 2` 定向回归共 201 项分批通过（重试 22 项、请求 26 项完成复测；中途超时批次不计通过），含独立数据库上的 DSH serve 预算/取消/崩溃验证。Dashboard、Telegram、Lark 和 CLI 共用 runner 行为，无需新增入口；未改 Pi、未调用真实 provider。 |
 
-| 2026-10-30 | 计划内重启排空（本分支）：新增进程内排空状态、运行与 Manager 回合停靠、调度与咨询暂停，以及 DRAINED 和截止时间阻塞项报告；Planner 和 TASK_START 继续落库。system 域提供开始、读取、取消接口，控制台显示升级横幅；Web 回复携带可重放的聊天标识。验收使用一次性数据库与替身运行时，覆盖排空后重启、超时报告、取消恢复及定时补跑；部署命令与跨重启保留运行留待后续阶段。 |
-
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。
@@ -881,6 +880,11 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.3 非核心待办（M6 之后统一做）
 
+- **停止单次命令型运行的按钮**：在控制台停止一条正在运行的命令型定时任务运行。
+- **管家读取运行日志**：让管家能读取命令型定时任务的运行日志。
+- **探活的维护窗口**：`looper service upgrade` 期间暂停告警。
+- **Telegram 探活**：外部探活支持通过 Telegram 发送告警和恢复通知。
+- **命令型定时任务的保留设置**：把日志总量上限（2 GiB）和每个定时任务至少保留的条数（100）做成设置。
 - **任务页「What each step ran on」改读精简的运行记录**：这张表现在用 `GET /api/llm-records?task_id=&role=worker|reviewer&limit=500` 读两个角色的完整记录（`list_records` 是 `SELECT *`，替身 Claude 下每条 12–13 KB，真实 prompt 更大），每当步骤变化就重读一次，长任务一次刷新可能有几 MB。改成只取表格要用的字段：`id`、`agent_id`、`status`、`created_at`、`metadata.step_id`、Profile 及其来源（含 effort）、`prompt_layers.task_role`（新参数或新接口均可，带测试），表格和测试相应改用它。
 - **定时任务的每日花费额度按各自时区清零**：每日额度（`daily_budget_usd`）现在在服务器时区的午夜清零，不看定时任务自己的 `timezone`；要按各定时任务的时区清零另做（2026-10-17 维护者决定暂不改）。
 - **dashboard 收到 401 时转到登录页**（looper #207）：会话过期或密码改过后，已打开的页面各处显示「status 401」，应提示重新加载（本机会自动登录，其他浏览器重新加载后看到 `/login`）。

@@ -298,6 +298,71 @@ def test_existing_database_url_is_preserved(tmp_path, dotenv):
     assert ops.read_file(path)["database_url"] == DATABASE_URL
 
 
+@pytest.mark.parametrize(("channel", "chat", "profile"), [
+    ("lark", "ou_abcd", ""),
+    ("lark_bot", "oc_aB9_-", "ops.bot@example-1"),
+    ("lark", "ou_" + "a" * 128, ""),
+])
+def test_probe_file_settings_are_valid_and_preserved(tmp_path, dotenv, channel, chat, profile):
+    values = {"notify_channel": channel, "notify_chat": chat, "after_minutes": 7, "lark_profile": profile}
+    _file(tmp_path, f'[database]\nurl = "{DATABASE_URL}"\n[probe]\n' +
+          "\n".join(f"{key} = {json.dumps(value)}" for key, value in values.items()))
+    config = _load(tmp_path, dotenv)
+    for key, value in values.items():
+        name = "probe_" + key
+        assert getattr(config, name) == value
+        assert config.sources[name].origin is Origin.FILE
+        setting = next(setting for setting in ops.SETTINGS if setting.name == name)
+        assert setting.variables == () and setting.flag is None
+    assert tomllib.loads(ops.render(config))["probe"] == values
+    ops.write_private(config.path, ops.render(config))
+    assert _load(tmp_path, dotenv) == config
+
+
+def test_probe_defaults_are_file_only_and_init_template_is_commented(tmp_path, dotenv, monkeypatch):
+    for key, value in {"NOTIFY_CHANNEL": "lark", "NOTIFY_CHAT": "ou_abcd", "AFTER_MINUTES": "9",
+                       "LARK_PROFILE": "ops"}.items():
+        monkeypatch.setenv("LOOPER_PROBE_" + key, value)
+    config = _load(tmp_path, dotenv)
+    assert (config.probe_notify_channel, config.probe_notify_chat, config.probe_after_minutes,
+            config.probe_lark_profile) == ("", "", 5, "")
+    written, _ = ops.init_file(Flags(runtime_root=tmp_path))
+    text = written.path.read_text()
+    assert "# [probe]" in text
+    assert '# notify_channel = "lark"' in text
+    assert '# notify_chat = "ou_..."' in text
+    assert "# after_minutes = 5" in text
+    assert '# lark_profile = ""' in text
+    assert "probe" not in tomllib.loads(text)
+
+
+@pytest.mark.parametrize("text, key", [
+    ('notify_channel = "lark"', "probe.notify_chat"),
+    ('notify_chat = "ou_Sekr1t-pw"', "probe.notify_channel"),
+    ('unknown = "Sekr1t-pw"', "probe.unknown"),
+    ('notify_channel = "Sekr1t-pw"', "probe.notify_channel"),
+    *[(f'notify_channel = "lark"\nnotify_chat = {json.dumps(value)}', "probe.notify_chat")
+      for value in ("Sekr1t-pw", "ou_abc", "oc_" + "a" * 129, "ou_bad id", 123)],
+    *[(f"after_minutes = {value}", "probe.after_minutes") for value in ('0', '121', 'true', '"5"', '1.5')],
+    *[(f"lark_profile = {value}", "probe.lark_profile")
+      for value in ('"Sekr1t-pw/invalid"', '"contains space"', 'false', '"' + "a" * 65 + '"')],
+])
+def test_probe_invalid_settings_name_keys_without_values(tmp_path, dotenv, text, key):
+    _file(tmp_path, "[probe]\n" + text)
+    with pytest.raises(OpsConfigError) as error:
+        _load(tmp_path, dotenv)
+    assert key in str(error.value)
+    assert SECRET not in str(error.value)
+
+
+@pytest.mark.parametrize("minutes", [1, 120])
+def test_probe_after_minutes_accepts_bounds(tmp_path, dotenv, minutes):
+    _file(tmp_path, f"[probe]\nafter_minutes = {minutes}\n")
+    config = _load(tmp_path, dotenv)
+    assert config.probe_after_minutes == minutes
+    assert tomllib.loads(ops.render(config))["probe"]["after_minutes"] == minutes
+
+
 @pytest.mark.parametrize("fails", [False, True], ids=["replace", "failed-replace"])
 def test_write_private_replaces_and_cleans_temporary_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fails: bool,
