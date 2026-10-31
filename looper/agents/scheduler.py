@@ -69,7 +69,7 @@ from .command_runs import BACKSTOP_SLACK, CommandRuns, CommandSpec, Finished, Lo
 from .drain import DrainState
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
 from .schedule_gate import GateResult, run_gate
-from .schedule_notify import Notifier, Sender
+from .schedule_notify import Notifier, Sender, alert_policy
 from .scheduler_settings import effective_run_timeout
 from .system_prompt import TASK_REQUIREMENT_LIMIT
 
@@ -357,6 +357,10 @@ class _Launched:
     fingerprint: str | None = None
     gate_enabled: bool | None = None
     command: CommandSpec | None = None
+    overlap_alert: bool = False
+    overlap_recovered: bool = False
+    overlap_count: int = 0
+    overlap_run: Mapping[str, Any] | None = None
 
 
 class Scheduler:
@@ -479,6 +483,7 @@ class Scheduler:
             await self._start_queued(schedule_id)
         await self._fire_due(now, kinds=kinds)
         await self._notifier.check_stale(now)
+        await self._notifier.check_deadlines(now)
 
     # --- Firing ---
 
@@ -568,6 +573,11 @@ class Scheduler:
                                    launched.gate_enabled), gate=True)
         if launched.ended:
             self._spawn(self._notifier.run_ended(launched.run_id))
+        if launched.overlap_alert:
+            self._spawn(self._notifier.overlap_alert(schedule["id"], launched.run_id,
+                                                    count=launched.overlap_count, running=launched.overlap_run))
+        if launched.overlap_recovered:
+            self._spawn(self._notifier.overlap_recovered(schedule["id"], launched.run_id))
 
     async def _busy_task(self, conn: asyncpg.Connection, schedule_id: str) -> str | None:
         """A task of the schedule still in progress (queued, running, or created and about to start), if any."""
@@ -596,8 +606,7 @@ class Scheduler:
                 return await self._launch(conn, schedule, firing, now, common=common)
             reason = ("the previous run is still checking its gate" if gating
                       else f"{running} runs are in progress, the most this schedule runs at once (max_parallel_runs)")
-            return _Launched(await self._skip(conn, "skipped_overlap", now, common, kind=schedule["kind"],
-                                              fired_at=now, error=reason))
+            return await self._skip_overlap(conn, schedule, now, common, reason, open_runs)
         busy = (next((run["id"] for run in open_runs if run["status"] == db_schedules.RUNNING), None)
                 if command else await self._busy_task(conn, schedule["id"]))
         if busy or queued or gating:
@@ -608,9 +617,20 @@ class Scheduler:
                       else "the previous run is still checking its gate" if gating
                       else f"the previous command run ({busy}) is still in progress" if command
                       else f"the previous run's task ({busy}) is still in progress")
-            return _Launched(await self._skip(conn, "skipped_overlap", now, common, kind=schedule["kind"],
-                                              fired_at=now, error=reason))
+            return await self._skip_overlap(conn, schedule, now, common, reason, open_runs)
         return await self._launch(conn, schedule, firing, now, common=common)
+
+    async def _skip_overlap(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], now: datetime,
+                            common: Mapping[str, Any], reason: str, open_runs: Sequence[Mapping[str, Any]]) -> _Launched:
+        run_id = await self._skip(conn, "skipped_overlap", now, common, kind=schedule["kind"],
+                                  fired_at=now, error=reason)
+        count = await db_schedules.add_overlap(conn, schedule["id"])
+        threshold = alert_policy(schedule).overlap_after
+        alert = (threshold > 0 and count >= threshold
+                 and await db_schedules.set_alert(conn, schedule["id"], "overlap_alert_at", now))
+        # Keep the alert's evidence even if the next run resets the streak before delivery.
+        running = next((run for run in open_runs if run["status"] != db_schedules.QUEUED), None)
+        return _Launched(run_id, overlap_alert=alert, overlap_count=count, overlap_run=running)
 
     async def _skip(self, conn: asyncpg.Connection, status: str, now: datetime, common: Mapping[str, Any],
                     *, kind: str = "agent", **fields: Any) -> str:
@@ -663,7 +683,9 @@ class Scheduler:
             expected = fingerprint(schedule, effective)
             run_id = await self._put(conn, run_id, common, status=db_schedules.GATING, fired_at=now, **timeout)
             await db_schedules.update_run(conn, run_id, execution_snapshot=json.loads(expected))
-            return _Launched(run_id, gate=firing, fingerprint=expected, gate_enabled=schedule["enabled"])
+            recovered = await db_schedules.reset_overlaps(conn, schedule["id"])
+            return _Launched(run_id, gate=firing, fingerprint=expected, gate_enabled=schedule["enabled"],
+                             overlap_recovered=recovered)
         return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id, started=timeout)
 
     async def _start_command(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], firing: Firing,
@@ -689,7 +711,8 @@ class Scheduler:
         else:
             await db_schedules.update_run(conn, run_id, status=db_schedules.RUNNING, fired_at=now,
                                           run_timeout_seconds=timeout, log_path=log)
-        return _Launched(run_id, command=CommandSpec(
+        recovered = await db_schedules.reset_overlaps(conn, schedule["id"])
+        return _Launched(run_id, overlap_recovered=recovered, command=CommandSpec(
             run_id, schedule["id"], schedule["command"], effective.work_dir, schedule["env"] or {},
             schedule["env_file"], timeout, gate_env(schedule, run_id, firing, timeout),
         ))
@@ -744,7 +767,8 @@ class Scheduler:
                                  carried_from=carried[-1].run_id if carried else None, **fired, **(started or {}))
         await db_schedules.hand_on(conn, [one.run_id for one in carried])
         logger.info("schedule %s fired (%s): task %s", schedule["id"], firing.trigger.value, task_id)
-        return _Launched(run_id, task_id=task_id)
+        recovered = await db_schedules.reset_overlaps(conn, schedule["id"])
+        return _Launched(run_id, task_id=task_id, overlap_recovered=recovered)
 
     async def _work_dir(self, conn: asyncpg.Connection | None, schedule: Mapping[str, Any]) -> str:
         from .schedule_templates import effective_schedule

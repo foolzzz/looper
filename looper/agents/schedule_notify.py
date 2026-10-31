@@ -1,32 +1,22 @@
-"""Telling people about a schedule's runs (scheduled-tasks RFC §8, S2).
+"""Schedule run messages and alerts, sent through the configured channels.
 
-A schedule's ``notify`` decides which runs get a message: ``failures`` (the
-default) the failed ones (``failed``, ``timed_out``, ``gate_failed``),
-``always`` every run that ran something (a task's outcome, or a failed gate),
-``alerts`` and ``never`` none. Runs that were skipped never do. Two alerts go
-out once per streak, each with one recovery message:
+``failures`` sends failed runs, ``always`` sends every run that ran something,
+and ``alerts`` sends alerts and recoveries only. ``never`` records them only
+on the dashboard. Skipped runs never get a run message.
 
-- **failures**: ``consecutive_failures`` reaches ``FAILURES_ALERT_AT`` (3);
-  it recovers with the next ok run (``db.schedules.OK``): a completed run,
-  or a gate that found nothing to do;
-- **stale**: no run completed, and no gate found nothing to do, for 3
-  periods of the rule, at least 15 minutes and at most 24 hours, counted
-  from the first fire after the latest of that run, the schedule's last
-  enabling and its rule's last change (``stale_deadline``); checked on every
-  scheduler pass while the schedule is enabled and no run of it is in
-  progress, it recovers the same way.
-
-Alerts and recoveries are sent under every ``notify`` but ``never``, which
-sends none; ``alerts`` sends nothing else. Every message is recorded in ``schedule_notifications`` (the outbox):
-``sent``, ``failed`` with the reason, or ``dashboard`` when the schedule names
-no chat or ``notify`` is ``never``. The text is code-written: the schedule,
-the run's status, a summary snippet, its cost and the link to the task (``links``).
+Each alert starts once per streak: consecutive failures, no success within
+the stale window, no success by the daily deadline, and consecutive overlap
+skips. ``alert_policy`` resolves their configurable thresholds with the
+existing agent defaults. An OK run recovers the success alerts; starting a
+new run recovers the overlap alert. Every message goes through the outbox,
+recorded as ``sent``, ``failed`` or ``dashboard``.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
@@ -35,7 +25,7 @@ import asyncpg
 
 from ..db import connection as db_connection, projects as db_projects, schedules as db_schedules
 from . import cron
-from .links import schedule_link, task_link
+from .links import run_link, schedule_link, task_link
 from .message import builtin_channel_id
 from .project_execution import format_usd
 
@@ -54,10 +44,10 @@ STALE_FLOOR = STALE_PERIODS * timedelta(minutes=5)
 SNIPPET_CHARS = 300
 
 # The final statuses of a run that ran something (a task, or a gate that failed).
-RAN = ("completed", "failed", "stopped", "cancelled", "timed_out", "gate_failed")
+RAN = ("completed", "failed", "stopped", "cancelled", "timed_out", "gate_failed", "succeeded", "interrupted")
 STATUS_WORDS = {
     "completed": "完成", "failed": "失败", "stopped": "已停止", "cancelled": "已取消", "timed_out": "超时被停止",
-    "gate_failed": "前置检查失败",
+    "gate_failed": "前置检查失败", "succeeded": "成功", "interrupted": "中断",
 }
 
 
@@ -67,6 +57,29 @@ class Kind(str, Enum):
     FAILURES_RECOVERED = "failures_recovered"
     STALE_ALERT = "stale_alert"
     STALE_RECOVERED = "stale_recovered"
+    DEADLINE_ALERT = "deadline_alert"
+    DEADLINE_RECOVERED = "deadline_recovered"
+    OVERLAP_ALERT = "overlap_alert"
+    OVERLAP_RECOVERED = "overlap_recovered"
+
+
+@dataclass(frozen=True)
+class AlertPolicy:
+    failures_after: int
+    stale_after: timedelta | None
+    overlap_after: int
+
+
+def alert_policy(schedule: Mapping[str, Any]) -> AlertPolicy:
+    """Resolve NULL defaults once, preserving the existing agent alert behavior."""
+    failures = schedule.get("alert_failures_after")
+    stale = schedule.get("alert_stale_after_seconds")
+    overlap = schedule.get("alert_overlap_after")
+    return AlertPolicy(
+        FAILURES_ALERT_AT if failures is None else failures,
+        None if stale is None else timedelta(seconds=stale),
+        (10 if schedule.get("kind") == "command" else 0) if overlap is None else overlap,
+    )
 
 
 def wants_run_message(notify: str, status: str) -> bool:
@@ -78,17 +91,20 @@ def wants_run_message(notify: str, status: str) -> bool:
 
 
 def stale_deadline(rule: cron.CronRule, tz: Any, *, last_ok: datetime | None, first_run: datetime | None,
-                   enabled_at: datetime, rule_changed_at: datetime | None = None) -> datetime | None:
+                   enabled_at: datetime, rule_changed_at: datetime | None = None,
+                   window: timedelta | None = None) -> datetime | None:
     """When the stale alert is due: ``STALE_PERIODS`` periods of the rule, at least ``STALE_FLOOR`` and at most
     ``STALE_LIMIT``, after the first fire that could have been a success: the first fire after the latest of
     ``last_ok``, ``enabled_at`` (the schedule's creation or its last enabling) and ``rule_changed_at`` (its rule's
-    or zone's last change). None before any run."""
+    or zone's last change). An explicit ``window`` replaces the period formula. None before any run."""
     if last_ok is None and first_run is None:
         return None
     since = max(moment for moment in (last_ok, enabled_at, rule_changed_at) if moment is not None)
     start = cron.next_fire(rule, tz, since)
     if start is None:
         return None
+    if window is not None:
+        return start + window
     following = cron.next_fire(rule, tz, start)
     period = (following - start) if following is not None else STALE_LIMIT
     return start + min(max(STALE_PERIODS * period, STALE_FLOOR), STALE_LIMIT)
@@ -104,6 +120,8 @@ def _local(moment: datetime, zone_name: str) -> str:
 
 
 def run_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any], *, base: str = "") -> str:
+    if schedule.get("kind") == "command":
+        return command_run_text(schedule, project_name, run, base=base)
     when = _local(run.get("fired_at") or run["scheduled_for"], schedule["timezone"])
     lines = [f"定时任务「{schedule['name']}」（项目 {project_name}）{when} 的运行："
              f"{STATUS_WORDS.get(run['status'], run['status'])}"]
@@ -112,6 +130,41 @@ def run_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, A
     cost = f"花费 ${format_usd(float(run['cost_usd']))}" if run.get("cost_usd") is not None else "无花费"
     link = task_link(base, run["task_id"]) if run.get("task_id") else schedule_link(base, schedule)
     lines.append(f"{cost} · {link}")
+    return "\n".join(lines)
+
+
+def command_run_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any], *,
+                     base: str = "") -> str:
+    from .scheduler import _fenced
+
+    when = _local(run["scheduled_for"], schedule["timezone"])
+    status = STATUS_WORDS.get(run["status"], run["status"])
+    if run["status"] in db_schedules.FAILURES:
+        if run.get("exit_code") is not None:
+            status += f"（退出码 {run['exit_code']}）"
+        elif run.get("exit_signal") is not None:
+            status += f"（信号 {run['exit_signal']}）"
+    lines = [f"定时任务「{schedule['name']}」（项目 {project_name}）{when} 的运行：{status}"]
+    start = run.get("started_at") or run.get("fired_at") or run["scheduled_for"]
+    end = run.get("finished_at") or start
+    seconds = max(0, int((end - start).total_seconds()))
+    if seconds < 60:
+        elapsed = f"{seconds} 秒"
+    elif seconds < 3600:
+        elapsed = f"{seconds // 60} 分 {seconds % 60} 秒"
+    else:
+        elapsed = f"{seconds // 3600} 小时 {seconds % 3600 // 60} 分"
+    timing = f"耗时 {elapsed}"
+    if run["trigger"] == "catch_up":
+        timing += f" · 补跑，代替错过的 {run['missed']} 次"
+    elif run["trigger"] == "manual":
+        timing += " · 手动运行"
+    lines.append(timing)
+    if run.get("error"):
+        lines.append(run["error"][:SNIPPET_CHARS])
+    if run.get("log_tail"):
+        lines.append(f"日志末尾：\n{_fenced(run['log_tail'][-1500:], 1500)}")
+    lines.append(run_link(base, schedule, run["id"]))
     return "\n".join(lines)
 
 
@@ -166,7 +219,7 @@ class Notifier:
             await self._deliver(schedule, Kind.RUN, run_text(schedule, project_name, run, base=self._base),
                                 run_id=run_id)
         now = self._clock()
-        if status in db_schedules.FAILURES and schedule["consecutive_failures"] >= FAILURES_ALERT_AT:
+        if status in db_schedules.FAILURES and schedule["consecutive_failures"] >= alert_policy(schedule).failures_after:
             if await self._switch(schedule["id"], "failures_alert_at", now):
                 await self._deliver(schedule, Kind.FAILURES_ALERT,
                                     failures_alert_text(schedule, project_name, run, base=self._base), run_id=run_id)
@@ -177,6 +230,10 @@ class Notifier:
         if status in db_schedules.OK and await self._switch(schedule["id"], "stale_alert_at", None):
             await self._deliver(schedule, Kind.STALE_RECOVERED,
                                 recovered_text(schedule, project_name, run, Kind.STALE_RECOVERED, base=self._base),
+                                run_id=run_id)
+        if status in db_schedules.OK and await self._switch(schedule["id"], "deadline_alert_at", None):
+            await self._deliver(schedule, Kind.DEADLINE_RECOVERED,
+                                recovered_text(schedule, project_name, run, Kind.DEADLINE_RECOVERED, base=self._base),
                                 run_id=run_id)
 
     async def check_stale(self, now: datetime) -> None:
@@ -195,7 +252,8 @@ class Notifier:
                 first_run = await db_schedules.first_run_at(pool, schedule["id"])
                 deadline = stale_deadline(rule, tz, last_ok=schedule["last_ok_at"], first_run=first_run,
                                           enabled_at=schedule["enabled_at"],
-                                          rule_changed_at=schedule.get("rule_changed_at"))
+                                          rule_changed_at=schedule.get("rule_changed_at"),
+                                          window=alert_policy(schedule).stale_after)
                 if deadline is None or now < deadline or not await db_schedules.start_stale_alert(
                         pool, schedule["id"], now, last_ok_at=schedule["last_ok_at"]):
                     continue
@@ -205,6 +263,76 @@ class Notifier:
                                                      base=self._base))
             except Exception:
                 logger.exception("could not check whether schedule %s has gone without a success", schedule["id"])
+
+    async def check_deadlines(self, now: datetime) -> None:
+        """Alert once when a deadline window contained a fire but no successful run."""
+        pool = db_connection.get_pool()
+        for schedule in await db_schedules.deadline_candidates():
+            try:
+                hh, mm = schedule["success_deadline"].split(":")
+                rule, tz = cron.parse(f"{int(mm)} {int(hh)} * * *"), cron.zone(schedule["timezone"])
+                deadline = cron.last_fire(rule, tz, now)
+                if deadline is None:
+                    continue
+                previous = cron.last_fire(rule, tz, deadline - timedelta(microseconds=1))
+                if previous is None:
+                    continue
+                since = max(previous, schedule["enabled_at"], schedule.get("rule_changed_at") or previous)
+                if since >= deadline or not cron.fires_between(cron.parse(schedule["cron"]), tz, since, deadline,
+                                                               limit=1):
+                    continue
+                if schedule["last_ok_at"] is not None and schedule["last_ok_at"] > previous:
+                    continue
+                opened = await db_schedules.open_runs(pool, schedule["id"])
+                recent = [] if opened else await db_schedules.recent_runs(pool, schedule["id"], limit=1)
+                if not await db_schedules.start_deadline_alert(pool, schedule["id"], now,
+                                                              last_ok_at=schedule["last_ok_at"]):
+                    continue
+                last_ok = (f"上次成功：{_local(schedule['last_ok_at'], schedule['timezone'])}"
+                           if schedule["last_ok_at"] is not None else "还没有成功过")
+                lines = [f"告警：定时任务「{schedule['name']}」（项目 {schedule['project_name']}）到 "
+                         f"{_local(deadline, schedule['timezone'])}（{schedule['timezone']}）仍没有成功运行（{last_ok}）。"]
+                if opened:
+                    run = opened[0]
+                    lines.append(f"仍在运行中，自 {_local(run.get('fired_at') or run['scheduled_for'], schedule['timezone'])} 起。")
+                elif recent:
+                    run = recent[0]
+                    last = f"最近一次：{STATUS_WORDS.get(run['status'], run['status'])}"
+                    if error := snippet(run.get("error")):
+                        last += f" · {error}"
+                    lines.append(last)
+                lines.append(schedule_link(self._base, schedule))
+                await self._deliver(schedule, Kind.DEADLINE_ALERT, "\n".join(lines))
+            except Exception:
+                logger.exception("could not check success deadline for schedule %s", schedule["id"])
+
+    async def overlap_alert(self, schedule_id: str, run_id: str, *, count: int | None = None,
+                            running: Mapping[str, Any] | None = None) -> None:
+        schedule = await db_schedules.get_schedule(schedule_id)
+        if schedule is None:
+            return
+        project = await db_projects.get_project(schedule["project_id"])
+        if count is None:
+            count = schedule["consecutive_overlaps"]
+            opened = await db_schedules.open_runs(db_connection.get_pool(), schedule_id)
+            running = next((run for run in opened if run["status"] != db_schedules.QUEUED), None)
+        text = (f"告警：定时任务「{schedule['name']}」（项目 {(project or {}).get('name') or schedule['project_id']}）"
+                f"已连续 {count} 次因为上一次运行还没结束而跳过")
+        if running is not None:
+            text += (f"；正在跑的那次自 {_local(running.get('fired_at') or running['scheduled_for'], schedule['timezone'])} "
+                     f"开始，可能卡住了。\n{run_link(self._base, schedule, running['id'])}")
+        else:
+            text += f"。\n{schedule_link(self._base, schedule)}"
+        await self._deliver(schedule, Kind.OVERLAP_ALERT, text, run_id=run_id)
+
+    async def overlap_recovered(self, schedule_id: str, run_id: str) -> None:
+        schedule = await db_schedules.get_schedule(schedule_id)
+        if schedule is None:
+            return
+        project = await db_projects.get_project(schedule["project_id"])
+        text = (f"恢复：定时任务「{schedule['name']}」（项目 {(project or {}).get('name') or schedule['project_id']}）"
+                f"又开始了新的运行。\n{schedule_link(self._base, schedule)}")
+        await self._deliver(schedule, Kind.OVERLAP_RECOVERED, text, run_id=run_id)
 
     @staticmethod
     async def _switch(schedule_id: str, column: str, at: datetime | None) -> bool:

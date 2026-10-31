@@ -24,6 +24,7 @@ as a task's own choices (``projects.set_task_agents``).
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import Enum
@@ -354,6 +355,12 @@ def _gate_timeout(raw: Any) -> int | None:
     return raw
 
 
+def _success_deadline(raw: Any) -> str | None:
+    if raw is not None and (not isinstance(raw, str) or not re.fullmatch(r"([01][0-9]|2[0-3]):[0-5][0-9]", raw)):
+        raise ValueError("success_deadline must be HH:MM (00:00 to 23:59), or null")
+    return raw
+
+
 _PARSERS = {
     "name": _name, "requirement": _requirement, "work_dir": _work_dir,
     "overlap": lambda raw: _choice("overlap", raw, Overlap), "max_parallel_runs": _max_parallel_runs,
@@ -362,6 +369,7 @@ _PARSERS = {
     "gate_command": _gate_command, "gate_timeout_seconds": _gate_timeout,
     "daily_budget_usd": _budget("daily_budget_usd"), "notify": lambda raw: _choice("notify", raw, Notify),
     "user_gates": lambda raw: _choice("user_gates", raw, UserGates),
+    "success_deadline": _success_deadline,
 }
 _ACCEPTED = (*(name for name in db_schedules.FIELDS
                 if name not in ("notify_channel", "notify_chat", "run_timeout_mode")),
@@ -562,8 +570,9 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
                 fields["enabled"] = enabled
             if enabled and not row["enabled"]:
                 fields["enabled_at"] = now  # the no-success alert counts from here (``stale_deadline``)
-            if rule.text != row["cron"] or zone_name != row["timezone"]:
-                fields["rule_changed_at"] = now  # so does it from a new rule or zone
+            if (rule.text != row["cron"] or zone_name != row["timezone"]
+                    or fields.get("success_deadline", row["success_deadline"]) != row["success_deadline"]):
+                fields["rule_changed_at"] = now  # so does it from a new rule, zone or deadline
             await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles, task_limits=task_limits)
     except asyncpg.UniqueViolationError:
         raise _name_taken(fields["name"]) from None
@@ -683,6 +692,7 @@ async def schedule_overview(since: datetime) -> dict[str, Any]:
                      "project_name": row["project_name"], "timezone": row["timezone"],
                      "consecutive_failures": row["consecutive_failures"],
                      "failures_since": row["failures_alert_at"], "stale_since": row["stale_alert_at"],
+                     "deadline_since": row["deadline_alert_at"], "overlap_since": row["overlap_alert_at"],
                      "last_success_at": row["last_success_at"], "last_status": row["last_status"]}
                     for row in summary["failing"]],
         "skipped_today": {status: summary["skipped"].get(status, 0)

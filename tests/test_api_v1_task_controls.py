@@ -33,6 +33,7 @@ def test_overview_keeps_running_waiting_spend_health_and_fleet(tmp_path, monkeyp
                 "failing": [{"schedule_id": "schedule-a", "name": "Daily", "project_id": "project-a",
                              "project_name": "Demo", "timezone": "UTC", "consecutive_failures": 1,
                              "failures_since": now, "stale_since": None, "last_success_at": None,
+                             "deadline_since": now, "overlap_since": None,
                              "last_status": "failed"}]}
 
     async def concurrency(*args):
@@ -83,6 +84,8 @@ def test_overview_keeps_running_waiting_spend_health_and_fleet(tmp_path, monkeyp
             assert result["projects"][0]["reviewers"]["waiting"] == 1
             assert result["schedules"]["next"][0]["next_fire_at"] == now.isoformat()
             assert result["schedules"]["failing"][0]["failures_since"] == now.isoformat()
+            assert result["schedules"]["failing"][0]["deadline_since"] == now.isoformat()
+            assert result["schedules"]["failing"][0]["overlap_since"] is None
             status, _, compact = await _send(server, "POST /api/v1/ops/overview", _bearer(token), "{}")
             assert status == 200 and compact["result"]["waiting_gates"] == 1
             assert compact["result"]["running_tasks"][0]["concurrency"] == {"worker": 2}
