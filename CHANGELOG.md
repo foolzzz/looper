@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.38] - 2026-10-31
+
+### Fixed
+
+- **Telegram messages sent during a long upgrade gap are delivered.** The service saves when Telegram polling stopped (on SIGINT or SIGTERM, through a new `prepare_stop` channel hook), and a message sent from then until polling resumed is no longer ignored as older than `backlog_max_age_seconds`; older messages are still ignored and `update_id` deduplication is unchanged. Polling responses are saved before they are acknowledged, and the stop time is retired after a response with fewer than 100 updates. The inbox database gains a `polling` table. ([#975](https://github.com/foolzzz/looper/pull/975))
+
+No model-visible change.
+
 ## [2.14.37] - 2026-10-31
 
 ### Changed
