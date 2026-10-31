@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.29] - 2026-10-31
+
+### Fixed
+
+- **Task progress updates stay routable after a drain restart.** A Telegram or Lark task now stores its original chat (and for Lark the original message id) as `tasks.origin_reply_route`, added by the one-time migration `task_reply_route`; task reports and the Manager's progress messages carry it, so a replay after a restart reaches the same chat, and the Lark channel replies to the original message. Manager message handling waits until the HTTP tools endpoint listens, so messages replayed at startup stay queued. Tasks created before the upgrade keep the old behavior. ([#950](https://github.com/foolzzz/looper/pull/950))
+
+No model-visible change: no prompt, tool or message text changes.
+
 ## [2.14.28] - 2026-10-31
 
 ### Added
