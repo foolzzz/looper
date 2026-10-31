@@ -554,6 +554,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-10-31 | TTADK Codex 后续修复（本分支，未合入）：原生运行记录省略 launcher，控制台选择与已保存 Profile 显示 TTADK 运行时名称及启动器；Worker、Reviewer、Planner 的无结果错误和活动保留末尾 1000 字符的脱敏 stderr。验证：指定 pytest 范围以 `-n 2` 在一次性 PostgreSQL 上 189 通过，Agent Profiles 组件 48 通过，应用 TypeScript 编译及隔离无头浏览器截图通过；原生 provider 环境保存与 TTADK 网关键拒绝的校验已在基线修复，本次补充保存及读回覆盖，未调用真实模型。Telegram、Lark 和 CLI 沿用共同后端结果，无新增配置字段。 |
 | 2026-10-13 | RFC v0 合入（looper #12），4 个待决问题已决定 |
 | 2026-10-13 | M0 交付（looper #13，`c600594ea`）：项目背景；Worker 和 Reviewer 的 prompt 分层，契约移出 stdin；四类 agent 记录 `metadata.system_prompt`。真实 Claude 下 Worker 和 Reviewer 的判定都通过 |
 | 2026-10-13 | M1 开工 |

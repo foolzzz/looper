@@ -2683,6 +2683,7 @@ export interface RuntimeType {
  * before runtimes were built in (`builtin` false), kept read-only while an Agent Profile uses it. */
 export interface Runtime {
   runtime_id: string;
+  launcher?: "native" | "ttadk";
   in_process: boolean;
   name: string;
   type: string;

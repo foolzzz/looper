@@ -59,6 +59,7 @@ function defaultTeams(registry: Registry, runtime: Runtime | undefined): boolean
 }
 
 function runtimeTitle(runtime: Runtime): string {
+  if (runtime.launcher === "ttadk") return `${runtime.name} (launcher: ${runtime.launcher})`;
   if (!runtime.builtin) return `${runtime.name} (custom, legacy)`;
   return RUNTIME_TYPES[runtime.type]?.title ?? runtime.type_label;
 }

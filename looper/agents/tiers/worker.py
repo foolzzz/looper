@@ -1280,9 +1280,18 @@ class WorkerPool:
                 stderr = await handle.error_output()
                 error = (f"{runtime.label} exited with code {return_code}" if launch.exit_code_reliable
                          else f"{runtime.label} through TTADK ended without a result")
+                if not launch.exit_code_reliable:
+                    from ..runtimes.ttadk import error_tail
+
+                    stderr = error_tail(stderr)
+                    if stderr:
+                        error += f": {stderr}"
+                    if parent_task_id:
+                        await self._activity(parent_task_id, worker_id, "error", error)
                 await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value)
-                return {"status": "failed", "error": error, "stderr": stderr[:500]}
+                return {"status": "failed", "error": error,
+                        "stderr": stderr[:500] if launch.exit_code_reliable else stderr}
             if return_code != 0 and result_ok:
                 logger.warning(
                     "worker %s: Claude exited %d but produced a successful result; judging the result",

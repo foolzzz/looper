@@ -107,6 +107,18 @@ describe("Agent Profiles", () => {
 
   const CODEX: AgentProfile = { ...PROFILE, model_id: "model-responses", model: { ...PROFILE.model, model_id: "model-responses", protocol: "openai-responses" }, runtime_id: "rt-codex", runtime_type: "codex", agent_teams: false };
 
+  it("distinguishes TTADK from native Codex in the runtime dropdown and saved profile", async () => {
+    const native = registry.runtimes.find((runtime) => runtime.runtime_id === "rt-codex")!;
+    registry.runtimes.push({ ...native, runtime_id: "rt-ttadk-codex", name: "ttadk-codex", launcher: "ttadk" });
+    registry.profiles = [{ ...CODEX, runtime_id: "rt-ttadk-codex", runtime_name: "ttadk-codex" }];
+    await show(registry.profiles[0]);
+    const runtimes = select("Runtime");
+    expect(runtimes.querySelector('option[value="rt-codex"]')!.textContent).toBe("Codex CLI");
+    expect(runtimes.selectedOptions[0].textContent).toBe("ttadk-codex (launcher: ttadk)");
+    await act(async () => root.render(<AgentProfilesSection />));
+    expect(container.textContent).toContain("ttadk-codex (launcher: ttadk) · Provider · model");
+  });
+
   it.each([
     [null, "Profile"], ["high", "Profile · high"], ["xhigh", "Profile · xhigh"],
   ])("labels profiles with their derived provider, exact model and protocol (%s)", (effort, name) => {

@@ -3517,8 +3517,19 @@ class PlannerAgent:
                 if self._ops is not None and self._token is not None:
                     self._ops.end_turn(self._token)
 
+            ttadk_error: str | None = None
+            if turn.result_event is None and not process.launch.exit_code_reliable:
+                from ..runtimes.ttadk import error_tail
+
+                ttadk_error = f"{process.launch.runtime.label} through TTADK ended without a result"
+                if stderr := error_tail(turn.stderr):
+                    ttadk_error += f": {stderr}"
+                await self._activity("error", ttadk_error)
+
             if resuming and not turn.session_started:
                 error = f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"
+                if ttadk_error:
+                    error += f": {ttadk_error}"
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise _SessionNotResumed(error)
 
@@ -3542,7 +3553,7 @@ class PlannerAgent:
             over_cap = process.launch.runtime.budget_error(result_event)
             label = process.launch.runtime.label  # the runtime that ran the turn, not always Claude Code
             if result_event is None:
-                error = f"{label} exited before finishing the turn (exit code {turn.exit_code})"
+                error = ttadk_error or f"{label} exited before finishing the turn (exit code {turn.exit_code})"
             elif over_cap:
                 error = over_cap
             elif result_event.get("is_error") or result_event.get("subtype") != "success":

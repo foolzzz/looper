@@ -28,6 +28,32 @@ from test_agent_planner_worker import _step_envelope, _worker_row
 CODEX: CodexRuntime = adapter("codex")  # type: ignore[assignment]
 
 
+def test_native_codex_run_record_preserves_exact_serialized_snapshot(monkeypatch) -> None:
+    from looper.agents.runtimes import pricing
+
+    # The pre-launcher snapshot, with an empty price table to avoid unrelated catalog changes.
+    monkeypatch.setattr(pricing, "BUILTIN_PRICES", {})
+    price = {"input_usd_per_mtok": None, "output_usd_per_mtok": None,
+             "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None}
+    expected = {
+        "system_prompt_mode": "append",
+        "profile": {"id": "agent-login", "name": "codex/login", "model_id": "model-login",
+            "custom_prompt": "", "runtime": {"id": "rt-codex", "name": "codex", "type": "codex"},
+            "model": "gpt-6.1-sol", "provider": {"id": "prov-codex-login", "name": "codex-login",
+            "auth": "oauth"}, "source": "builtin"},
+        "model_choice": {"model": "gpt-6.1-sol", "source": "builtin", "effort": None},
+        "settings_sources": {"harness": "builtin", "profile": "builtin", "effort": "builtin",
+            "env": {}, "run_budget_usd": "builtin"},
+        "llm_model": {"model_id": "model-login", "provider_id": "prov-codex-login",
+            "name": "gpt-6.1-sol", "protocol": "openai-responses"},
+        "pricing": {"cost_source": "provider_price", "rule": "exact_normalized_builtin_v1",
+            "builtin_prices_as_of": "2026-10-14", "exact": {"gpt-6.1-sol": price},
+            "normalized": {"gpt-6.1-sol": price}, "builtin": {}, "aliases": {}},
+    }
+    assert json.dumps(_launch(Launcher.NATIVE).record(), separators=(",", ":")).encode() == \
+        json.dumps(expected, separators=(",", ":")).encode()
+
+
 def _launch(launcher: Launcher = Launcher.TTADK, executable: str = "ttadk") -> Launch:
     provider = ProviderSpec("prov-codex-login", "codex-login", VendorType.CODEX_LOGIN, AuthKind.OAUTH, "codex")
     model = ModelSpec("model-login", provider.id, "gpt-6.1-sol", ApiProtocol.OPENAI_RESPONSES)
@@ -189,7 +215,7 @@ def test_worker_reads_codex_stream_after_wrapper_banners_and_handles_false_succe
         assert result["status"] == "completed" and result["summary"] == "done"
     else:
         assert result["status"] == "failed"
-        assert result["error"] == "Codex through TTADK ended without a result"
+        assert result["error"] == "Codex through TTADK ended without a result: boom"
         assert "boom" in result["stderr"]
     assert launch.exit_code_reliable is False
     assert _launch(Launcher.NATIVE).exit_code_reliable is True
