@@ -103,6 +103,33 @@ def test_existing_baseline_upgrades_once_preserves_data_and_matches_fresh():
     asyncio.run(asyncio.wait_for(test(), 30))
 
 
+def test_missed_since_upgrade_preserves_runs_and_matches_fresh():
+    async def test():
+        async with fresh_connection() as old, fresh_connection() as fresh:
+            await connection.ensure_schema(old)
+            await old.execute("ALTER TABLE schedule_runs DROP COLUMN IF EXISTS missed_since")
+            await old.execute("DELETE FROM schema_migrations WHERE name='schedule_missed_since'")
+            await old.execute("INSERT INTO projects (id,name) VALUES ('p','Example')")
+            await old.execute("INSERT INTO schedules (id,project_id,name,cron,timezone,requirement) "
+                              "VALUES ('s','p','Reports','0 * * * *','UTC','Report')")
+            await old.execute("INSERT INTO schedule_runs (id,schedule_id,scheduled_for,trigger,status,missed) "
+                              "VALUES ('r','s',now(),'catch_up','queued',3)")
+            before, shape = await witness(old), await structure(old)
+            assert await connection.schema_change_pending(old)
+            assert await witness(old) == before and await structure(old) == shape
+            await connection.ensure_schema(old)
+            assert dict(await old.fetchrow("SELECT * FROM schedule_runs")) == {
+                **before["schedule_runs"][0], "missed_since": None}
+            await connection.ensure_schema(fresh)
+            assert await structure(old) == await structure(fresh)
+            after, shape = await witness(old), await structure(old)
+            assert not await connection.schema_change_pending(old)
+            await connection.ensure_schema(old)
+            assert await witness(old) == after and await structure(old) == shape
+            assert await old.fetchval("SELECT count(*) FROM schema_migrations WHERE name='schedule_missed_since'") == 1
+    asyncio.run(asyncio.wait_for(test(), 30))
+
+
 @pytest.mark.parametrize("upgraded", [False, True], ids=["fresh", "upgraded"])
 @pytest.mark.parametrize("table,assignment,valid", [
     ("schedules", "kind='command'", False),

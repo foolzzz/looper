@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -28,6 +29,8 @@ KILL_GRACE_SECONDS = 30
 LEFTOVER_GRACE_SECONDS = 5
 START_GRACE = timedelta(seconds=60)
 BACKSTOP_SLACK = timedelta(seconds=90)
+
+logger = logging.getLogger(__name__)
 
 
 class End(StrEnum):
@@ -77,12 +80,17 @@ class Starting:
 
 
 @dataclass(frozen=True)
+class Unknown:
+    reason: str
+
+
+@dataclass(frozen=True)
 class Lost:
     reason: str
     child: tuple[int, str] | None = None
 
 
-Observation = Finished | Running | Starting | Lost
+Observation = Finished | Running | Starting | Unknown | Lost
 
 
 def run_status(end: End, exit_code: int | None, signal: int | None) -> tuple[str, str | None]:
@@ -234,13 +242,20 @@ class CommandRuns:
 
         pids = {pid for _, _, _, pid, _ in pending if isinstance(pid, int) and pid > 0}
         live: dict[int, str] = {}
+        unknown: Unknown | None = None
         if pids:
             try:
+                # A live control PID makes an empty result an observation failure, even if all runners ended.
+                query_pids = pids | {os.getpid()}
                 listed = subprocess.run(
-                    ["ps", "-o", "pid=,stat=,lstart=", "-p", ",".join(map(str, sorted(pids)))],
+                    ["ps", "-o", "pid=,stat=,lstart=", "-p", ",".join(map(str, sorted(query_pids)))],
                     capture_output=True, text=True, timeout=5, check=False,
                     env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"},
                 )
+                if listed.returncode != 0:
+                    unknown = Unknown(f"ps exited with status {listed.returncode}")
+                elif not listed.stdout.strip():
+                    unknown = Unknown("ps returned no process information")
                 for line in listed.stdout.splitlines():
                     fields = line.split(maxsplit=2)
                     if len(fields) == 3 and not fields[1].startswith("Z"):
@@ -248,14 +263,16 @@ class CommandRuns:
                             live[int(fields[0])] = " ".join(fields[2].split())
                         except ValueError:
                             continue
-            except (OSError, subprocess.SubprocessError):
-                pass
+            except (OSError, subprocess.SubprocessError) as exc:
+                unknown = Unknown(f"{type(exc).__name__}: {exc}")
+            if unknown is not None:
+                logger.warning("could not observe command runners; retrying next tick: %s", unknown.reason)
         for run, directory, runner, pid, started in pending:
             identity = runner or {}
             child_pid, child_started = identity.get("child_pid"), identity.get("child_started")
             child = ((child_pid, child_started)
                      if isinstance(child_pid, int) and child_pid > 0 and isinstance(child_started, str) else None)
-            if started is not None and live.get(pid) == started:
+            if unknown is None and started is not None and live.get(pid) == started:
                 try:
                     started_at = _datetime(run.get("started_at") or identity.get("started_at"))
                 except (ValueError, TypeError):
@@ -263,6 +280,10 @@ class CommandRuns:
                 results[run["id"]] = Running(started_at, child, pid, started)
             elif (finished := self._finished(directory, now)) is not None:
                 results[run["id"]] = finished
+            elif unknown is not None and pid in pids:
+                results[run["id"]] = unknown
+            elif pid in pids and (pid not in live or (started is not None and live[pid] != started)):
+                results[run["id"]] = Lost(f"its runner (pid {pid}) ended without recording an exit code", child)
             elif runner is None and now - run["created_at"] < START_GRACE:
                 results[run["id"]] = Starting()
             elif not directory.is_dir() or not (directory / "spec.json").is_file():
