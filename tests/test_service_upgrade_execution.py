@@ -38,7 +38,7 @@ def deployment(tmp_path, monkeypatch):
     events = []
     current = manifest()
     target = manifest("control_plane", "1.0.1")
-    state = SimpleNamespace(running=True, pid=123456789)
+    state = service.State(installed=True, loaded=True, running=True, pid=123456789)
     elapsed = [0.0]
     statuses = [{"phase": "draining", "waiting": {"runs": []}}, {"phase": "drained"}]
     scenario = SimpleNamespace(target=target, current=current, install_error=False, stop_error=False, stop_then_error=False,
@@ -78,13 +78,14 @@ def deployment(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(argv, 0, "1" * 40 if "rev-parse" in argv else "", "")
 
     host = service.Host(system="Linux", home=tmp_path / "home", uid=1, environ={},
-        executable="python", cwd=tmp_path, run=run, clock=lambda: elapsed[0],
+        executable="python", cwd=tmp_path, package_root=tmp_path, run=run, clock=lambda: elapsed[0],
         sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
         get_components=lambda port, token: (current if scenario.verify_error else scenario.current).to_dict(),
         system_operation=operation, get_status=lambda *args: {"status": "ok"},
         get_whoami=lambda *args: {"looper_version": scenario.current.version},
         port_in_use=lambda port, address="127.0.0.1": False, pid_alive=lambda pid: scenario.process_lingers)
     manager = SimpleNamespace(host=host, state=lambda: state, unit_path=unit,
+        unit_argv=lambda: service.looper_command(host.executable) + ["serve"],
         unit_settings=lambda **kwargs: (18841, root / "logs/serve.log", root), start=start, stop=stop)
     monkeypatch.setattr(service, "manager", lambda *args: manager)
     monkeypatch.setattr(service.Host, "current", classmethod(lambda cls: host))
@@ -97,6 +98,121 @@ def deployment(tmp_path, monkeypatch):
 
 def report(deployment):
     return json.loads((deployment.root / "logs/serve.log").read_text().splitlines()[-1])
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("argv", [["/other/bin/looper", "serve"], []])
+def test_upgrade_refuses_another_interpreter_before_contacting_service(deployment, dry_run, argv, capsys):
+    service.manager(deployment.host, "test").unit_argv = lambda: argv
+    deployment.host.get_components = lambda *args: pytest.fail("must refuse before contacting the service")
+    assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 1
+    assert deployment.events == []
+    assert "run looper service upgrade with that looper" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_upgrade_refuses_unreadable_unit(deployment, dry_run, capsys):
+    def unreadable():
+        raise OSError("cannot read unit")
+    service.manager(deployment.host, "test").unit_argv = unreadable
+    assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 1
+    assert deployment.events == []
+    assert "cannot read the service unit" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("wheel", [False, True])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_checkout_must_be_its_package_root_but_wheel_allows_any_cwd(
+        deployment, monkeypatch, wheel, dry_run, capsys):
+    deployment.host.package_root = deployment.host.cwd / "other-checkout"
+    monkeypatch.setattr(components, "manifest_from_wheel", lambda *args: deployment.scenario.target)
+    flags = (["--to", "target.whl"] if wheel else []) + (["--dry-run"] if dry_run else [])
+    assert cli.main(["service", "upgrade", *flags]) == (0 if wheel else 1)
+    if not wheel:
+        assert deployment.events == []
+        assert str(deployment.host.package_root) in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("late_exit", [True, False])
+@pytest.mark.parametrize("manager_readable", [True, False])
+def test_stop_timeout_recovers_a_late_exit_and_cancels_drain(
+        deployment, late_exit, manager_readable, capsys):
+    mgr = service.manager(deployment.host, "test")
+    stop_deadline = []
+
+    def stop():
+        deployment.events.append("stop")
+        deployment.elapsed[0] += service._STOP_WAIT_SECONDS
+        stop_deadline.append(deployment.elapsed[0])
+        raise service.ServiceError("stop deadline passed")
+
+    def state():
+        if not manager_readable and "stop" in deployment.events and "start" not in deployment.events:
+            raise service.ServiceError("manager unavailable")
+        return deployment.state
+
+    def alive(pid):
+        living = not late_exit or deployment.elapsed[0] <= stop_deadline[0]
+        if not living:
+            deployment.state.running = False
+            deployment.state.pid = None
+        return living
+
+    mgr.stop, mgr.state = stop, state
+    deployment.host.pid_alive = alive
+    assert cli.main(["service", "upgrade"]) == 1
+    assert deployment.events.count("start") == int(late_exit)
+    assert "install" not in deployment.events
+    assert deployment.events[-1] == "drain_cancel"
+    data = report(deployment)
+    assert data["status"] == "failed"
+    assert ("recovery_error" in data) is not late_exit
+    if not late_exit:
+        assert "old service process is still running" in data["recovery_error"]
+    assert "serving: yes" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("renew_error", [None, service.ServiceError, OSError])
+def test_stop_wait_renews_drain_best_effort(deployment, renew_error):
+    deployment.statuses[:] = [{"phase": "drained"}]
+    deployment.host.pid_alive = lambda pid: deployment.elapsed[0] < 2 * service._POLL_SECONDS
+    operation = deployment.host.system_operation
+
+    def renew(port, token, name, args):
+        result = operation(port, token, name, args)
+        if name == "drain_status" and renew_error is not None:
+            raise renew_error("old service no longer answers")
+        return result
+
+    deployment.host.system_operation = renew
+    assert cli.main(["service", "upgrade"]) == 0
+    assert deployment.events.count("drain_status") == 2
+
+
+@pytest.mark.parametrize("live_pid", [False, True])
+def test_failed_start_only_stops_a_live_process_before_retry(deployment, live_pid):
+    mgr = service.manager(deployment.host, "test")
+    start, stop = mgr.start, mgr.stop
+
+    def fail_once():
+        if deployment.events.count("start") == 0:
+            deployment.events.append("start")
+            deployment.state.running = live_pid
+            deployment.state.pid = 123456790 if live_pid else None
+            raise service.ServiceError("first start failed")
+        start()
+
+    def stop_once():
+        if deployment.events.count("stop") and not live_pid:
+            pytest.fail("must start immediately when no process is alive")
+        stop()
+
+    mgr.start, mgr.stop = fail_once, stop_once
+    deployment.host.pid_alive = lambda pid: deployment.state.pid == pid
+    assert cli.main(["service", "upgrade"]) == 1
+    assert deployment.events.count("start") == 2
+    assert deployment.events.count("stop") == (2 if live_pid else 1)
+    assert report(deployment)["serving"] is True
 
 
 @pytest.mark.parametrize("deadline", [False, True])
@@ -559,7 +675,10 @@ def test_dashboard_publication_sets_readable_directory_and_file_modes(tmp_path, 
 
 
 @pytest.mark.parametrize("recovery_serves", [True, False])
-def test_failed_start_retries_new_install_and_reports_serving(deployment, recovery_serves):
+def test_failed_start_retries_new_install_and_reports_serving(deployment, recovery_serves, capsys):
+    log = deployment.root / "logs/serve.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("startup output\n")
     deployment.host.get_status = lambda *args: (
         {"status": "ok"} if recovery_serves and deployment.events.count("start") == 2 else None)
     assert cli.main(["service", "upgrade", "--timeout", "1"]) == 1
@@ -570,6 +689,33 @@ def test_failed_start_retries_new_install_and_reports_serving(deployment, recove
     assert data["status"] == "failed"
     assert data["serving"] is recovery_serves
     assert ("recovery_error" in data) is not recovery_serves
+    error_line = capsys.readouterr().err.splitlines()[0]
+    assert f"serving: {'yes' if recovery_serves else 'no'}" in error_line
+    if recovery_serves:
+        assert data["running_code_fingerprint"] == deployment.scenario.target.components["control_plane"]
+    else:
+        assert data["running_code_fingerprint"] is None
+        assert data["running_code_fingerprint_error"]
+        assert data["restart_hint"] == "looper service restart"
+        assert data["restart_hint"] in error_line
+
+
+def test_serving_failure_reports_unknown_fingerprint_when_readback_fails(deployment):
+    reads = []
+
+    def components_readback(*args):
+        reads.append(True)
+        if len(reads) == 1:
+            return deployment.scenario.current.to_dict()
+        raise service.ServiceError("components unavailable")
+
+    deployment.scenario.install_error = True
+    deployment.host.get_components = components_readback
+    assert cli.main(["service", "upgrade"]) == 1
+    data = report(deployment)
+    assert data["serving"] is True
+    assert data["running_code_fingerprint"] is None
+    assert data["running_code_fingerprint_error"] == "components unavailable"
 
 
 @pytest.mark.parametrize("kind", [UpgradeKind.CONTROL_PLANE, UpgradeKind.FULL])

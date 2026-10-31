@@ -48,12 +48,13 @@ def upgrade_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     host = service.Host(
         system="Linux", home=tmp_path / "home", uid=501, environ={},
-        executable=str(tmp_path / ".venv/bin/python"), cwd=checkout, run=forbidden,
+        executable=str(tmp_path / ".venv/bin/python"), cwd=checkout, package_root=checkout, run=forbidden,
         sleep=forbidden, get_status=forbidden, port_in_use=forbidden, get_components=get_components,
     )
     state = service.State(installed=True, loaded=True, running=True, pid=1234, port=18834,
                           log_path=root / "logs/serve.log", runtime_root=root)
     manager = SimpleNamespace(
+        unit_argv=lambda: service.looper_command(host.executable) + ["serve"],
         unit_path=unit, state=lambda: state, unit_settings=lambda **kwargs: (18834, state.log_path, root),
         start=forbidden, stop=forbidden, remove=forbidden,
     )

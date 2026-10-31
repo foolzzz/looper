@@ -214,6 +214,7 @@ class Host:
     executable: str  # the interpreter running looper
     cwd: Path
     run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+    package_root: Path = Path(__file__).resolve().parents[2]
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
     get_status: Callable[[int, str | None, str], dict | None] = _get_status
@@ -1145,10 +1146,12 @@ def _deploy_report(report: dict, log_path: Path | None) -> str:
     return line
 
 
-def _stop_for_install(mgr: _Manager, before: int | None) -> None:
+def _stop_for_install(mgr: _Manager, before: int | None, renew: Callable[[], None] | None = None) -> None:
     mgr.stop()
     deadline = mgr.host.clock() + _STOP_WAIT_SECONDS
     while mgr.state().running or (before is not None and mgr.host.pid_alive(before)):
+        if renew is not None:
+            renew()
         if mgr.host.clock() >= deadline:
             raise ServiceError("old service process is still running; refusing to install")
         mgr.host.sleep(_POLL_SECONDS)
@@ -1189,6 +1192,13 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
     token = operator_auth.read_token(root)
     if not token:
         raise ServiceError("the service operator token is missing")
+
+    def renew() -> None:
+        try:
+            host.system_operation(port, token, "drain_status", {})
+        except (ServiceError, OSError):
+            pass  # The old process may already have closed its listener.
+
     report = {"plan": plan.kind.value, "reasons": list(plan.reasons), "drain_seconds": 0.0,
               "gap_seconds": 0.0, "interrupted": [], "kept_before": 0, "adopted": 0,
               "running_code_fingerprint": running.components["control_plane"],
@@ -1225,7 +1235,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 status = host.system_operation(port, token, "drain_status", {})
             gap_started = host.clock()
             stop_attempted = True
-            _stop_for_install(mgr, before)
+            _stop_for_install(mgr, before, renew)
             stopped = True
             if installer:
                 expected = installer()
@@ -1257,29 +1267,56 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             try:
                 # bootout/stop can take effect and then report an error. Check
                 # exit evidence before deciding that only drain_cancel is needed.
-                if stop_attempted and not stopped and before is not None and not host.pid_alive(before):
-                    try:
-                        stopped = not mgr.state().running
-                    except ServiceError:
-                        stopped = not host.port_in_use(port)
+                if stop_attempted and not stopped and before is not None:
+                    deadline = host.clock() + _STOP_WAIT_SECONDS
+                    while host.pid_alive(before):
+                        renew()
+                        if host.clock() >= deadline:
+                            report["recovery_error"] = ("the old service process is still running; "
+                                                        "start it by hand once it exits")
+                            break
+                        host.sleep(_POLL_SECONDS)
+                    else:
+                        try:
+                            stopped = not mgr.state().running
+                        except (ServiceError, OSError):
+                            stopped = not host.port_in_use(port)
                 # A timed-out start can leave a loaded unit or a partial process.
                 # Retry the current install from a stopped unit before cancelling.
                 if stopped:
                     if start_attempted:
-                        _stop_for_install(mgr, mgr.state().pid)
+                        pid = mgr.state().pid
+                        if pid is not None and host.pid_alive(pid):
+                            _stop_for_install(mgr, pid, renew)
                     _start_and_wait(mgr, port, log_path, timeout, root)
-                host.system_operation(port, token, "drain_cancel", {})
             except Exception as cancel_error:
                 report["recovery_error"] = str(cancel_error)
+            try:
+                host.system_operation(port, token, "drain_cancel", {})
+            except (ServiceError, OSError) as cancel_error:
+                report["recovery_error"] = "; ".join(filter(None, (report.get("recovery_error"), str(cancel_error))))
         try:
             answer = host.get_status(port, token, "127.0.0.1")
             report["serving"] = answer is not None and answer.get("status") != "unauthorized"
         except Exception:
             report["serving"] = False
+        report["running_code_fingerprint"] = None
+        if report["serving"]:
+            try:
+                actual = Manifest.from_dict(host.get_components(port, token))
+                report["running_code_fingerprint"] = actual.components["control_plane"]
+            except Exception as fingerprint_error:
+                report["running_code_fingerprint_error"] = str(fingerprint_error)
+        else:
+            report["running_code_fingerprint_error"] = "the service is not serving"
+            report["restart_hint"] = "looper service restart"
         line = _deploy_report(report, log_path)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
-        raise ServiceError(f"{exc}\n{line}") from exc
+        serving = "yes" if report["serving"] else "no"
+        hint = f"; run `{report['restart_hint']}`" if not report["serving"] else ""
+        error, separator, detail = str(exc).partition("\n")
+        raise ServiceError(f"{error}; serving: {serving}{hint}{separator}{detail}\n{line}") from exc
     return (f"plan       {plan.kind.value}\n"
             + "\n".join("reason     " + reason for reason in plan.reasons)
             + f"\nrunning code fingerprint {report['running_code_fingerprint']}, "
@@ -1338,6 +1375,16 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         port, log_path, root = mgr.unit_settings()
         if port is None or root is None:
             raise ServiceError("cannot locate the service port and runtime root; install the service first")
+        expected = looper_command(host.executable)
+        try:
+            argv = list(mgr.unit_argv())
+        except OSError as exc:
+            raise ServiceError("cannot read the service unit") from exc
+        if argv[:len(expected)] != expected:
+            raise ServiceError(f"the service runs {shlex.join(argv[:len(expected) or 1])}; "
+                               "run looper service upgrade with that looper")
+        if not wheel and host.cwd.resolve() != host.package_root.resolve():
+            raise ServiceError(f"run the upgrade from the service's checkout {host.package_root}")
         token = operator_auth.read_token(root)
         if not token:
             raise ServiceError("the service operator token is missing")
