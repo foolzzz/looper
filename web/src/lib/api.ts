@@ -976,13 +976,16 @@ export async function deleteProject(projectId: string): Promise<void> {
 export type ScheduleOverlap = "skip" | "queue" | "parallel";
 /** After downtime: "once" runs once for all missed fires; "skip" skips them unless the latest was within 2 minutes. */
 export type ScheduleCatchUp = "once" | "skip";
+export type ScheduleKind = "agent" | "command";
 export type ScheduleRunTrigger = "scheduled" | "catch_up" | "manual";
-/** Final: all but "queued", "gating" and "running". Failures: "failed", "timed_out" and "gate_failed". */
+/** Final: all but "queued", "gating" and "running". Failures: "failed", "timed_out", "gate_failed" and "interrupted". */
 export type ScheduleRunStatus =
   | "queued"
   | "gating"
   | "running"
   | "completed"
+  | "succeeded"
+  | "interrupted"
   | "failed"
   | "stopped"
   | "cancelled"
@@ -1043,6 +1046,16 @@ export interface ScheduleRunInfo {
 }
 
 export interface ScheduleInfo {
+  kind: ScheduleKind;
+  command: string | null;
+  env: Record<string, string>;
+  env_file: string | null;
+  success_deadline: string | null;
+  alert_policy: {
+    failures_after: { value: number; default: boolean };
+    stale_after_seconds: { value: number | null; default: boolean };
+    overlap_after: { value: number; default: boolean };
+  };
   planner_session: {
     active: boolean;
     runtime: string | null;
@@ -1109,7 +1122,7 @@ export interface ScheduleInfo {
   /** This schedule's runs since the server's local midnight (running ones at their cost so far). */
   spent_today_usd: number;
   /** When each alert became active; null while it is not. */
-  alerts: { failures_since: string | null; stale_since: string | null };
+  alerts: { failures_since: string | null; stale_since: string | null; deadline_since: string | null; overlap_since: string | null };
 }
 
 /** How many Workers and Reviewers run at once in each task a schedule creates; null = the default (Settings → Roles). */
@@ -1151,11 +1164,18 @@ export interface SchedulePreview {
 
 /** A new schedule's fields; one is always created disabled. */
 export interface ScheduleFields {
+  command?: string | null;
+  env?: Record<string, string> | null;
+  env_file?: string | null;
+  success_deadline?: string | null;
+  alert_failures_after?: number | null;
+  alert_stale_after_seconds?: number | null;
+  alert_overlap_after?: number | null;
   template_key?: string | null;
   template_inputs?: Record<string, string>;
   name: string;
   cron: string;
-  requirement: string;
+  requirement?: string;
   timezone?: string;
   work_dir?: string;
   overlap?: ScheduleOverlap;
@@ -1177,7 +1197,7 @@ export interface ScheduleFields {
 }
 
 /** Ownership is chosen only when a schedule is created. */
-export type ScheduleCreate = ScheduleFields & { manager_id?: string };
+export type ScheduleCreate = ScheduleFields & { kind?: ScheduleKind; manager_id?: string };
 /** Any mutable schedule field, plus turning it on or off. */
 export type ScheduleUpdate = Partial<ScheduleFields> & { enabled?: boolean };
 

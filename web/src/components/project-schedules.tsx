@@ -24,6 +24,7 @@ import {
   type ScheduleCatchUp,
   type ScheduleFields,
   type ScheduleInfo,
+  type ScheduleKind,
   type ScheduleLimits,
   type ScheduleNotify,
   type ScheduleUserGates,
@@ -227,6 +228,14 @@ function interval(seconds: number) {
 
 /** A schedule as its form holds it: text as typed. */
 interface Draft {
+  kind: ScheduleKind;
+  command: string;
+  envText: string;
+  envFile: string;
+  deadline: string;
+  failuresAfter: string;
+  staleAfterMinutes: string;
+  overlapAfter: string;
   managerId: string;
   templateKey: string;
   templateInputs: Record<string, string>;
@@ -271,6 +280,8 @@ function targetOf(key: string): ScheduleNotifyTarget | null {
 function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
   if (!schedule)
     return {
+      kind: "agent", command: "", envText: "", envFile: "", deadline: "",
+      failuresAfter: "", staleAfterMinutes: "", overlapAfter: "",
       managerId: "manager",
       templateKey: "",
       templateInputs: {},
@@ -295,6 +306,14 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
       notifyTarget: "",
     };
   return {
+    kind: schedule.kind ?? "agent",
+    command: schedule.command ?? "",
+    envText: Object.entries(schedule.env ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join("\n"),
+    envFile: schedule.env_file ?? "",
+    deadline: schedule.success_deadline ?? "",
+    failuresAfter: thresholdText(schedule, "failures_after"),
+    staleAfterMinutes: thresholdText(schedule, "stale_after_seconds", 60),
+    overlapAfter: thresholdText(schedule, "overlap_after"),
     managerId: schedule.manager_id,
     templateKey: schedule.template_key ?? "",
     templateInputs: { ...schedule.template_inputs },
@@ -327,31 +346,72 @@ function numberOf(text: string): number | null {
   return value === "" ? null : Number(value);
 }
 
-/** The draft as the API takes it; an empty zone is the default one. */
-function fieldsOf(draft: Draft, limits: ScheduleLimits): Required<ScheduleFields> {
+function thresholdValue(schedule: ScheduleInfo, key: keyof ScheduleInfo["alert_policy"]): number | null {
+  const policy = schedule.alert_policy?.[key];
+  return !policy || policy.default ? null : policy.value;
+}
+
+function thresholdText(schedule: ScheduleInfo, key: keyof ScheduleInfo["alert_policy"], divisor = 1): string {
+  const value = thresholdValue(schedule, key);
+  return value == null ? "" : String(value / divisor);
+}
+
+function environmentOf(text: string) {
+  const entries: [string, string][] = [];
+  const keys = new Set<string>();
+  const duplicates = new Set<string>();
+  let error = "";
+  text.split("\n").forEach((line, index) => {
+    if (!line.trim() || line.trimStart().startsWith("#")) return;
+    const at = line.indexOf("=");
+    const key = line.slice(0, at).trim();
+    if (at < 1 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      error ||= `Line ${index + 1} is not KEY=VALUE`;
+      return;
+    }
+    if (keys.has(key)) duplicates.add(key);
+    keys.add(key);
+    entries.push([key, line.slice(at + 1)]);
+  });
+  return { env: Object.fromEntries(entries), error, duplicates: [...duplicates] };
+}
+
+type FormFields = ScheduleFields & Required<Pick<ScheduleFields,
+  "name" | "cron" | "timezone" | "work_dir" | "overlap" | "max_parallel_runs" | "catch_up" |
+  "run_timeout_seconds" | "notify" | "notify_target" | "success_deadline" |
+  "alert_failures_after" | "alert_stale_after_seconds" | "alert_overlap_after">>;
+
+/** Command fields are kept separate from task settings before serialization. */
+function fieldsOf(draft: Draft, limits: ScheduleLimits): FormFields {
   const minutes = numberOf(draft.timeout);
+  const common = {
+    name: draft.name.trim(), cron: draft.cron.trim(),
+    timezone: draft.timezone.trim() || limits.default_timezone,
+    work_dir: draft.workDir.trim(), overlap: draft.overlap,
+    max_parallel_runs: Number(draft.maxParallel.trim() || NaN), catch_up: draft.catchUp,
+    run_timeout_seconds: draft.timeoutMode === "limit" ? Math.round((minutes ?? NaN) * 60)
+      : draft.timeoutMode === "none" || draft.kind === "command" ? null : "default" as const,
+    notify: draft.notify, notify_target: targetOf(draft.notifyTarget),
+    success_deadline: draft.deadline.trim() || null,
+    alert_failures_after: numberOf(draft.failuresAfter),
+    alert_stale_after_seconds: draft.staleAfterMinutes.trim() ? Math.round(Number(draft.staleAfterMinutes) * 60) : null,
+    alert_overlap_after: numberOf(draft.overlapAfter),
+  };
+  if (draft.kind === "command") return {
+    ...common, command: draft.command.trim(), env: environmentOf(draft.envText).env,
+    env_file: draft.envFile.trim() || null,
+  };
   return {
+    ...common,
     template_key: draft.templateKey || null,
     template_inputs: draft.templateKey ? draft.templateInputs : {},
-    name: draft.name.trim(),
-    cron: draft.cron.trim(),
     requirement: draft.requirement.trim(),
-    timezone: draft.timezone.trim() || limits.default_timezone,
-    work_dir: draft.workDir.trim(),
-    overlap: draft.overlap,
-    max_parallel_runs: Number(draft.maxParallel.trim() || NaN),
-    catch_up: draft.catchUp,
-    run_timeout_seconds:
-      draft.timeoutMode === "default" ? "default" : draft.timeoutMode === "none" ? null : Math.round((minutes ?? NaN) * 60),
     run_budget_usd: numberOf(draft.budget),
     profile_overrides: Object.fromEntries(Object.entries(draft.profiles).filter(([, profile]) => profile)),
     task_limits: taskLimitsOf(draft.taskLimits),
     gate_command: draft.gateCommand.trim() || null,
     gate_timeout_seconds: numberOf(draft.gateTimeout),
-    daily_budget_usd: numberOf(draft.dailyBudget),
-    notify: draft.notify,
-    user_gates: draft.userGates,
-    notify_target: targetOf(draft.notifyTarget),
+    daily_budget_usd: numberOf(draft.dailyBudget), user_gates: draft.userGates,
   };
 }
 
@@ -360,34 +420,40 @@ const sameProfiles = (a: Partial<Record<TaskRole, string>>, b: Partial<Record<Ta
 
 /** What the fields change, as a PUT takes it; `profile_overrides` and `task_limits` are sent whole, and a cleared
  * field as null. */
-function changesOf(fields: Required<ScheduleFields>, schedule: ScheduleInfo): ScheduleUpdate {
+function changesOf(fields: FormFields, schedule: ScheduleInfo): ScheduleUpdate {
   const changes: ScheduleUpdate = {};
-  for (const key of ["name", "cron", "requirement", "timezone", "work_dir", "overlap", "catch_up", "notify", "user_gates"] as const) {
-    if (fields[key] !== schedule[key]) (changes as Record<string, unknown>)[key] = fields[key];
+  const policyKeys = {
+    alert_failures_after: "failures_after", alert_stale_after_seconds: "stale_after_seconds", alert_overlap_after: "overlap_after",
+  } as const;
+  for (const [key, value] of Object.entries(fields)) {
+    if (key === "max_parallel_runs" && fields.overlap !== "parallel") continue;
+    if (key === "profile_overrides") {
+      if (!sameProfiles(fields.profile_overrides ?? {}, schedule.profile_overrides)) changes.profile_overrides = fields.profile_overrides;
+      continue;
+    }
+    if (key === "task_limits") {
+      Object.assign(changes, changedTaskLimits(fields.task_limits ?? null, schedule.task_limits));
+      continue;
+    }
+    const stored = key in policyKeys
+      ? thresholdValue(schedule, policyKeys[key as keyof typeof policyKeys])
+      : schedule[key as keyof ScheduleInfo] ?? null;
+    // Object order does not change saved environment or template inputs.
+    const canonical = (item: unknown) => item && typeof item === "object"
+      ? JSON.stringify(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item;
+    if (canonical(value) !== canonical(stored)) (changes as Record<string, unknown>)[key] = value;
   }
-  if (fields.template_key !== (schedule.template_key ?? null)) changes.template_key = fields.template_key;
-  const storedInputs = schedule.template_inputs ?? {};
-  const inputKeys = new Set([...Object.keys(fields.template_inputs), ...Object.keys(storedInputs)]);
-  if ([...inputKeys].some((key) => fields.template_inputs[key] !== storedInputs[key]))
-    changes.template_inputs = fields.template_inputs;
-  // The cap counts only for a parallel schedule; it is left alone otherwise.
-  if (fields.overlap === "parallel" && fields.max_parallel_runs !== schedule.max_parallel_runs)
-    changes.max_parallel_runs = fields.max_parallel_runs;
-  if (fields.run_timeout_seconds !== schedule.run_timeout_seconds) changes.run_timeout_seconds = fields.run_timeout_seconds;
-  if (fields.run_budget_usd !== schedule.run_budget_usd) changes.run_budget_usd = fields.run_budget_usd;
-  if (!sameProfiles(fields.profile_overrides, schedule.profile_overrides))
-    changes.profile_overrides = fields.profile_overrides;
-  Object.assign(changes, changedTaskLimits(fields.task_limits, schedule.task_limits));
-  if ((fields.gate_command ?? "") !== (schedule.gate_command ?? "")) changes.gate_command = fields.gate_command;
-  if (fields.gate_timeout_seconds !== schedule.gate_timeout_seconds)
-    changes.gate_timeout_seconds = fields.gate_timeout_seconds;
-  if (fields.daily_budget_usd !== schedule.daily_budget_usd) changes.daily_budget_usd = fields.daily_budget_usd;
-  if (targetKey(fields.notify_target) !== targetKey(schedule.notify_target)) changes.notify_target = fields.notify_target;
   return changes;
 }
 
 /** A new schedule's fields: the optional ones that are empty are left out, so the server's defaults apply. */
-function createFields(fields: Required<ScheduleFields>, managerId: string): ScheduleCreate {
+function createFields(fields: FormFields, managerId: string, kind: ScheduleKind): ScheduleCreate {
+  if (kind === "command") {
+    const { work_dir, max_parallel_runs, notify_target, ...rest } = fields;
+    return { ...rest, kind, ...(work_dir ? { work_dir } : {}),
+      ...(fields.overlap === "parallel" ? { max_parallel_runs } : {}),
+      ...(notify_target ? { notify_target } : {}) };
+  }
   const {
     template_key,
     template_inputs,
@@ -400,17 +466,22 @@ function createFields(fields: Required<ScheduleFields>, managerId: string): Sche
     gate_timeout_seconds,
     daily_budget_usd,
     notify_target,
+    success_deadline, alert_failures_after, alert_stale_after_seconds, alert_overlap_after,
     ...rest
   } = fields;
   return {
-    ...rest,
+    ...rest, kind,
+    ...(success_deadline ? { success_deadline } : {}),
+    ...(alert_failures_after != null ? { alert_failures_after } : {}),
+    ...(alert_stale_after_seconds != null ? { alert_stale_after_seconds } : {}),
+    ...(alert_overlap_after != null ? { alert_overlap_after } : {}),
     ...(template_key ? { template_key, template_inputs } : {}),
     ...(managerId !== "manager" ? { manager_id: managerId } : {}),
     ...(work_dir ? { work_dir } : {}),
     ...(rest.overlap === "parallel" ? { max_parallel_runs } : {}),
     ...(run_budget_usd != null ? { run_budget_usd } : {}),
-    ...(Object.keys(profile_overrides).length ? { profile_overrides } : {}),
-    ...createTaskLimits(task_limits),
+    ...(Object.keys(profile_overrides ?? {}).length ? { profile_overrides } : {}),
+    ...createTaskLimits(task_limits ?? null),
     ...(gate_command ? { gate_command } : {}),
     ...(gate_timeout_seconds != null ? { gate_timeout_seconds } : {}),
     ...(daily_budget_usd != null ? { daily_budget_usd } : {}),
@@ -568,7 +639,9 @@ function GateBudgetNotify({
 
   return (
     <section aria-labelledby={id("around")} className="space-y-3 border-t border-border pt-4">
-      <h3 id={id("around")} className="text-xs font-semibold">Before each run and after</h3>
+      <h3 id={id("around")} className="text-xs font-semibold">{draft.kind === "command" ? "Notifications" : "Before each run and after"}</h3>
+
+      {draft.kind === "agent" && <>
 
       <div className="space-y-1">
         <div className="flex items-baseline justify-between gap-2">
@@ -662,6 +735,7 @@ function GateBudgetNotify({
         </div>
       </div>
 
+      </>}
       <div className="grid gap-3 sm:grid-cols-2">
         <Choices
           name={id("notify")}
@@ -770,7 +844,7 @@ function ScheduleForm({
   };
   const owner = managers?.find((manager) => manager.id === draft.managerId);
   const templates = owner?.templates ?? [];
-  const template = templates.find((item) => item.key === draft.templateKey);
+  const template = draft.kind === "agent" ? templates.find((item) => item.key === draft.templateKey) : undefined;
   const showTemplates = Boolean(schedule?.template_key) || managers?.some((manager) => manager.id !== "manager");
   const selectOwner = (managerId: string) => {
     setDraft((d) => ({ ...d, managerId, templateKey: "", templateInputs: {} }));
@@ -780,23 +854,27 @@ function ScheduleForm({
     setDraft((d) => ({ ...d, templateKey, templateInputs: {} }));
     setSaved(false);
   };
+  const isCommand = draft.kind === "command";
+  const env = environmentOf(draft.envText);
   const fields = fieldsOf(draft, limits);
   const changes = schedule ? changesOf(fields, schedule) : {};
   const dirty = Object.keys(changes).length > 0;
   useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange]);
 
-  const check = useRulePreview(fields.cron, fields.timezone, Boolean(fields.gate_command));
+  const check = useRulePreview(fields.cron, fields.timezone, Boolean(fields.gate_command) || draft.kind === "command");
   const ruleInvalid = check?.preview?.valid === false;
   const missing = [
     !fields.name && "a name",
     !fields.cron && "a rule",
-    !fields.requirement && "a requirement",
+    !isCommand && !fields.requirement && "a requirement",
+    isCommand && !fields.command && "a command",
     !fields.work_dir && !template?.work_dir && !project.work_dir && "a work directory",
-    owner?.task_policy === "templates_only" && !template && "a task template",
-    ...((template?.inputs ?? []).filter((input) => input.required && !draft.templateInputs[input.key]?.trim())
+    !isCommand && owner?.task_policy === "templates_only" && !template && "a task template",
+    ...((!isCommand && template?.inputs || []).filter((input) => input.required && !draft.templateInputs[input.key]?.trim())
       .map((input) => input.label || input.key)),
   ].filter(Boolean);
-  const tooLong = fields.requirement.length > limits.requirement_max_chars;
+  const tooLong = (fields.requirement ?? "").length > limits.requirement_max_chars;
+  const commandTooLong = draft.command.trim().length > 2000;
   const badTimeout = draft.timeoutMode === "limit" && !(Number(fields.run_timeout_seconds) >= 1);
   const badBudget = Number.isNaN(fields.run_budget_usd);
   const gateLength = (fields.gate_command ?? "").length;
@@ -812,18 +890,21 @@ function ScheduleForm({
     !(Number.isInteger(maxParallel) && maxParallel >= 1 && maxParallel <= limits.max_parallel_runs_limit);
   const badLimit = (role: TaskLimitRole) => badTaskLimit(fields.task_limits?.[role] ?? null, limits.concurrency_max);
   const badLimits = TASK_LIMIT_ROLES.some(badLimit);
+  const alertError = [
+    fields.success_deadline != null && !/^([01]\d|2[0-3]):[0-5]\d$/.test(fields.success_deadline)
+      && "Success deadline must be HH:MM (00:00 through 23:59).",
+    fields.alert_failures_after != null && !(Number.isInteger(fields.alert_failures_after) && fields.alert_failures_after >= 1 && fields.alert_failures_after <= 1000)
+      && "Enter a whole number of failures from 1 to 1000, or leave it empty.",
+    fields.alert_stale_after_seconds != null && !(Number.isInteger(fields.alert_stale_after_seconds) && fields.alert_stale_after_seconds >= 300 && fields.alert_stale_after_seconds <= 2592000)
+      && "Enter a no-success window from 5 to 43200 minutes, or leave it empty.",
+    fields.alert_overlap_after != null && !(Number.isInteger(fields.alert_overlap_after) && fields.alert_overlap_after >= 0 && fields.alert_overlap_after <= 10000)
+      && "Enter a whole number of skipped firings from 0 to 10000, or leave it empty.",
+  ].find(Boolean);
   const invalid =
-    missing.length > 0 ||
-    badMaxParallel ||
-    badLimits ||
-    tooLong ||
-    ruleInvalid ||
-    badTimeout ||
-    badBudget ||
-    gateTooLong ||
-    badGateTimeout ||
-    badDailyBudget ||
-    Boolean(draft.templateKey && !template && managers && !managerError);
+    missing.length > 0 || badMaxParallel || badLimits || tooLong || ruleInvalid || badTimeout || badBudget ||
+    gateTooLong || badGateTimeout || badDailyBudget || Boolean(alertError) ||
+    (!isCommand && Boolean(draft.templateKey && !template && managers && !managerError)) ||
+    (isCommand && (Boolean(env.error) || commandTooLong));
   const id = (field: string) => `${idPrefix}-${field}`;
 
   const submit = async (e: React.FormEvent) => {
@@ -834,7 +915,7 @@ function ScheduleForm({
     try {
       const next = schedule
         ? await updateSchedule(schedule.schedule_id, changes)
-        : await createSchedule(project.project_id, createFields(fields, draft.managerId));
+        : await createSchedule(project.project_id, createFields(fields, draft.managerId, draft.kind));
       if (schedule) {
         setDraft(draftOf(next, limits));
         setSaved(true);
@@ -848,12 +929,22 @@ function ScheduleForm({
   };
 
   return (
-    <form onSubmit={submit} className="space-y-4">
+    <form onSubmit={submit} className="min-w-0 space-y-4">
+      {schedule ? <p className="text-sm text-muted-foreground">Type: {isCommand ? "Command" : "Agent task"}</p> : (
+        <Choices name={id("kind")} legend="Type" value={draft.kind}
+          onChange={(kind) => {
+            setDraft((d) => ({ ...d, kind, timeoutMode: kind === "command" ? "none" : "default" }));
+            setSaved(false);
+          }} options={[
+            { value: "agent", label: "Agent task", hint: "Each firing starts a task: a Planner and Workers, with model spend." },
+            { value: "command", label: "Command", hint: "Each firing runs a shell command directly: no agent, no model spend." },
+          ]} />
+      )}
       {schedule ? (
         <p className="text-sm text-muted-foreground">
           Owner: {schedule.manager_name || schedule.manager_id}. Ownership cannot be changed.
         </p>
-      ) : managers?.some((manager) => manager.id !== "manager") ? (
+      ) : !isCommand && managers?.some((manager) => manager.id !== "manager") ? (
         <div className="space-y-1">
           <label htmlFor={id("manager")} className={LABEL}>Owner</label>
           <select id={id("manager")} className={SELECT} value={draft.managerId}
@@ -873,7 +964,7 @@ function ScheduleForm({
           <Button type="button" variant="outline" size="sm" onClick={() => setManagerReload((value) => value + 1)}>Retry owners</Button>
         </div>
       )}
-      {showTemplates && (
+      {!isCommand && showTemplates && (
         <section aria-label="Template configuration" className="space-y-3">
           <div className="space-y-1">
             <label htmlFor={id("template")} className={LABEL}>Task template{owner?.task_policy === "templates_only" ? " *" : ""}</label>
@@ -945,8 +1036,7 @@ function ScheduleForm({
             className="font-mono aria-invalid:border-destructive"
           />
           <p id={id("cron-hint")} className="text-xs text-muted-foreground">
-            Minute, hour, day of month, month, day of week. Fires at least {interval(limits.min_interval_seconds)} apart,
-            or {interval(limits.min_interval_gated_seconds)} with a gate command.
+            Minute, hour, day of month, month, day of week. Fires at least {interval(isCommand ? limits.min_interval_gated_seconds : limits.min_interval_seconds)} apart{isCommand ? "." : `, or ${interval(limits.min_interval_gated_seconds)} with a gate command.`}
           </p>
         </div>
         <div className="space-y-1">
@@ -970,7 +1060,35 @@ function ScheduleForm({
         </div>
       </div>
 
-      <div className="space-y-1">
+      {isCommand ? (
+        <div className="min-w-0 space-y-3">
+          <div className="min-w-0 space-y-1">
+            <div className="flex items-baseline justify-between gap-2">
+              <label htmlFor={id("command")} className={LABEL}>Command *</label>
+              <span className={cn("text-xs tabular-nums", commandTooLong ? "text-destructive" : "text-muted-foreground")}>
+                {draft.command.length} / 2000
+              </span>
+            </div>
+            <textarea id={id("command")} value={draft.command} onChange={(e) => set("command", e.target.value)}
+              rows={4} spellCheck={false} aria-invalid={commandTooLong} className={cn(TEXTAREA, "min-w-0 font-mono whitespace-pre-wrap break-all")} />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={id("env")} className={LABEL}>Environment</label>
+            <textarea id={id("env")} value={draft.envText} onChange={(e) => set("envText", e.target.value)}
+              rows={4} spellCheck={false} aria-invalid={Boolean(env.error)} aria-describedby={id("env-hint")}
+              className={cn(TEXTAREA, "font-mono whitespace-pre-wrap break-all")} />
+            <p id={id("env-hint")} className="text-xs text-muted-foreground">One KEY=VALUE per line. Shown as written: put secrets in the env file.</p>
+            {env.error && <p role="alert" className="text-xs text-destructive">{env.error}</p>}
+            {env.duplicates.length > 0 && <p role="status" className="text-xs text-warning">Duplicate keys: {env.duplicates.join(", ")}; the last value is used.</p>}
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={id("env-file")} className={LABEL}>Env file</label>
+            <Input id={id("env-file")} value={draft.envFile} onChange={(e) => set("envFile", e.target.value)}
+              spellCheck={false} aria-describedby={id("env-file-hint")} className="font-mono" />
+            <p id={id("env-file-hint")} className="text-xs text-muted-foreground">A file of KEY=VALUE lines, read at each run; only its path is stored.</p>
+          </div>
+        </div>
+      ) : <div className="space-y-1">
         <div className="flex items-baseline justify-between gap-2">
           <label htmlFor={id("requirement")} className={LABEL}>Requirement *</label>
           <span
@@ -981,7 +1099,7 @@ function ScheduleForm({
             )}
           >
             {tooLong && <AlertCircle className="h-3 w-3" aria-label="Too long" />}
-            {fields.requirement.length} / {limits.requirement_max_chars}
+            {(fields.requirement ?? "").length} / {limits.requirement_max_chars}
           </span>
         </div>
         <textarea
@@ -997,7 +1115,7 @@ function ScheduleForm({
         <p id={id("requirement-hint")} className="text-xs text-muted-foreground">
           Each firing starts a new task of this project with this requirement.
         </p>
-      </div>
+      </div>}
 
       <div className="grid gap-3 sm:grid-cols-2">
         <Choices
@@ -1011,7 +1129,7 @@ function ScheduleForm({
             {
               value: "parallel",
               label: "Parallel (reentrant)",
-              hint: "Start it beside the runs in progress, up to the most below. Pre-run checks never run at once.",
+              hint: isCommand ? "Start it beside the runs in progress, up to the most below." : "Start it beside the runs in progress, up to the most below. Pre-run checks never run at once.",
             },
           ]}
         />
@@ -1061,13 +1179,13 @@ function ScheduleForm({
             value={draft.timeoutMode}
             onChange={(value) => set("timeoutMode", value)}
             options={[
-              {
-                value: "default",
+              ...(!isCommand ? [{
+                value: "default" as const,
                 label: `Use the default (${limits.run_timeout_default_seconds == null ? "no limit" : `${limits.run_timeout_default_seconds} s`})`,
                 hint: "Follows Settings → Scheduler. A run keeps the timeout it started with.",
-              },
+              }] : []),
               { value: "limit", label: "Set a limit", hint: "A run still going after the minutes below is stopped and counts as a failure." },
-              { value: "none", label: "No limit", hint: "A run lasts until its task ends." },
+              { value: "none", label: "No limit", hint: isCommand ? "A run lasts until its command ends." : "A run lasts until its task ends." },
             ]}
           />
           {draft.timeoutMode === "limit" && (
@@ -1088,7 +1206,7 @@ function ScheduleForm({
             </div>
           )}
         </div>
-        <div className="space-y-1">
+        {!isCommand && <div className="space-y-1">
           <label htmlFor={id("budget")} className={LABEL}>Spend cap per run (USD)</label>
           <Input
             id={id("budget")}
@@ -1105,9 +1223,10 @@ function ScheduleForm({
               ? "Enter dollars as a number, or leave it empty."
               : "Empty: the project's spend cap per task applies (its Settings tab)."}
           </p>
-        </div>
+        </div>}
       </div>
 
+      {!isCommand && <>
       <div className="space-y-1">
         <label className="flex min-h-11 cursor-pointer items-center gap-2 text-xs">
           <Switch
@@ -1180,6 +1299,8 @@ function ScheduleForm({
         </p>
       </div>
 
+      </>}
+
       <GateBudgetNotify
         id={id}
         schedule={schedule}
@@ -1191,6 +1312,35 @@ function ScheduleForm({
         badGateTimeout={badGateTimeout}
         badDailyBudget={badDailyBudget}
       />
+
+      <details className="space-y-3 border-t border-border pt-4 text-sm">
+        <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">Alerts</summary>
+        {alertError && <p role="alert" className="text-xs text-destructive">{alertError}</p>}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1">
+            <label htmlFor={id("deadline")} className={LABEL}>Success deadline</label>
+            <Input id={id("deadline")} value={draft.deadline} onChange={(e) => set("deadline", e.target.value)}
+              placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" aria-describedby={id("deadline-hint")} />
+            <p id={id("deadline-hint")} className="text-xs text-muted-foreground">Alert once if no run has succeeded since the previous deadline.</p>
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={id("failures-after")} className={LABEL}>Alert after N failures in a row</label>
+            <Input id={id("failures-after")} inputMode="numeric" value={draft.failuresAfter}
+              onChange={(e) => set("failuresAfter", e.target.value)} placeholder="3" />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={id("stale-after")} className={LABEL}>Alert after no success for (minutes)</label>
+            <Input id={id("stale-after")} inputMode="decimal" value={draft.staleAfterMinutes}
+              onChange={(e) => set("staleAfterMinutes", e.target.value)} placeholder="3 periods, 15 min – 24 h" />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor={id("overlap-after")} className={LABEL}>Alert after N skipped firings in a row</label>
+            <Input id={id("overlap-after")} inputMode="numeric" value={draft.overlapAfter}
+              onChange={(e) => set("overlapAfter", e.target.value)} placeholder={isCommand ? "10" : "off"} aria-describedby={id("overlap-after-hint")} />
+            <p id={id("overlap-after-hint")} className="text-xs text-muted-foreground">0 turns this alert off.</p>
+          </div>
+        </div>
+      </details>
 
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
       <div className="flex flex-wrap items-center justify-end gap-2">
@@ -1643,7 +1793,7 @@ export function ProjectSchedulesSection({
     <div className="space-y-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <p className="min-w-0 flex-1 basis-64 text-sm text-muted-foreground">
-          A schedule runs a full task of this project on a time rule. A new one starts disabled; turn it on when it is
+          A schedule runs an agent task or shell command of this project on a time rule. A new one starts disabled; turn it on when it is
           ready.
         </p>
         <Button type="button" size="sm" onClick={() => setAdding(true)} disabled={!data || adding}>
@@ -1722,6 +1872,7 @@ export function ProjectSchedulesSection({
                 id={`schedule-${sid}`}
                 {...state}
                 name={schedule.name}
+                marks={schedule.kind === "command" && <Badge variant="outline">Command</Badge>}
                 detail={schedule.description}
                 summary={next}
                 actions={
@@ -1758,9 +1909,9 @@ export function ProjectSchedulesSection({
                         )}
                         Run now
                       </Button>
-                      <ResetPlannerSession schedule={schedule} onReset={put} />
+                      {schedule.kind !== "command" && <ResetPlannerSession schedule={schedule} onReset={put} />}
                     </div>
-                    <PlannerSessionStatus schedule={schedule} />
+                    {schedule.kind !== "command" && <PlannerSessionStatus schedule={schedule} />}
                     {notices[sid] && <NoticeText notice={notices[sid]} />}
                   </>
                 }

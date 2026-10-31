@@ -141,6 +141,7 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
         <div className="min-w-0 flex-1 basis-72 space-y-1">
           <h1 className="flex min-w-0 flex-wrap items-center gap-2 text-2xl font-bold">
             <span className="min-w-0 break-words">{schedule.name}</span>
+            {schedule.kind === "command" && <Badge variant="outline">Command</Badge>}
             {!schedule.enabled && <Badge variant="outline">Off</Badge>}
           </h1>
           <p className="text-sm text-muted-foreground">
@@ -227,7 +228,7 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
           <Field label="Work directory">
             {schedule.work_dir ? <code className={CODE}>{schedule.work_dir}</code> : schedule.template_key ? "As the template and project set it" : "The project's default"}
           </Field>
-          <Field label="Gate">
+          {schedule.kind !== "command" && <Field label="Gate">
             {schedule.gate_command ? (
               <>
                 <code className={CODE}>{schedule.gate_command}</code>
@@ -238,7 +239,7 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
             ) : (
               "None: every run starts a task"
             )}
-          </Field>
+          </Field>}
           <Field label="Notify">
             {notifyOption?.label ?? schedule.notify}
             {schedule.notify !== "never" &&
@@ -247,6 +248,7 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
                 : " → the dashboard only")}
             {notifyOption && <p className="text-xs text-muted-foreground">{notifyOption.hint}</p>}
           </Field>
+          {schedule.kind !== "command" && <>
           <Field label="User gates">
             {schedule.user_gates === "on" ? "On" : "Off"}
             <p className="text-xs text-muted-foreground">
@@ -264,6 +266,7 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
               Per day: {schedule.daily_budget_usd != null ? formatUsd(schedule.daily_budget_usd) : "no cap"}
             </span>
           </Field>
+          </>}
           <Field label="Run timeout">
             {runTimeoutText(schedule)}
           </Field>
@@ -276,6 +279,7 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
             {" · after downtime: "}
             {schedule.catch_up === "once" ? "run once" : "skip what was missed"}
           </Field>
+          {schedule.kind !== "command" && <>
           <Field label="Agent Profiles">
             {profiles.length === 0
               ? schedule.template_key ? "As the template and project set them" : "As the project sets them"
@@ -294,15 +298,26 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
               ))}
             </Field>
           )}
+          </>}
         </dl>
-        <details className="mt-4 text-sm">
+        {schedule.kind === "command" ? (
+          <dl className="mt-4 min-w-0 space-y-3">
+            <Field label="Command"><pre className="whitespace-pre-wrap break-all font-mono text-sm">{schedule.command}</pre></Field>
+            <Field label="Environment">
+              {Object.keys(schedule.env).length ? Object.entries(schedule.env).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => (
+                <code key={key} className="block whitespace-pre-wrap break-all font-mono text-xs">{key}={value}</code>
+              )) : "None"}
+            </Field>
+            <Field label="Env file">{schedule.env_file ? <code className={CODE}>{schedule.env_file}</code> : "None"}</Field>
+          </dl>
+        ) : <details className="mt-4 text-sm">
           <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
             Requirement
           </summary>
           <p className="mt-2 whitespace-pre-wrap break-words rounded-md border border-border bg-muted/20 px-3 py-2 text-sm text-foreground/90">
             {schedule.requirement}
           </p>
-        </details>
+        </details>}
       </section>
 
       <RunHistory schedule={schedule} open version={runsVersion} />
