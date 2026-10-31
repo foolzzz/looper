@@ -1055,9 +1055,24 @@ CREATE TABLE IF NOT EXISTS schedules (
     planner_session_profile TEXT,
     planner_session_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     planner_session_since TIMESTAMPTZ,
+    kind TEXT NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent', 'command')),
+    command TEXT,
+    env JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(env) = 'object'),
+    env_file TEXT,
+    success_deadline TEXT CHECK (success_deadline ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'),
+    alert_failures_after INTEGER CHECK (alert_failures_after BETWEEN 1 AND 1000),
+    alert_stale_after_seconds INTEGER CHECK (alert_stale_after_seconds BETWEEN 300 AND 2592000),
+    alert_overlap_after INTEGER CHECK (alert_overlap_after BETWEEN 0 AND 10000),
+    consecutive_overlaps INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_overlaps >= 0),
+    deadline_alert_at TIMESTAMPTZ,
+    overlap_alert_at TIMESTAMPTZ,
     CONSTRAINT schedules_template_fkey FOREIGN KEY (manager_id, template_key)
         REFERENCES manager_task_templates(manager_id, key) ON DELETE RESTRICT,
-    CONSTRAINT schedules_notify_target_check CHECK ((notify_channel IS NULL) = (notify_chat IS NULL))
+    CONSTRAINT schedules_notify_target_check CHECK ((notify_channel IS NULL) = (notify_chat IS NULL)),
+    CONSTRAINT schedules_kind_fields_check CHECK (
+        (kind = 'command') = (command IS NOT NULL)
+        AND (kind = 'command' OR (env = '{}'::jsonb AND env_file IS NULL))
+        AND (kind = 'agent' OR (gate_command IS NULL AND template_key IS NULL)))
 );
 CREATE INDEX IF NOT EXISTS idx_schedules_manager ON schedules (manager_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_schedules_project_name ON schedules (project_id, lower(name));
@@ -1091,7 +1106,8 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
     missed        INTEGER NOT NULL DEFAULT 0 CHECK (missed >= 0),
     status        TEXT NOT NULL CHECK (status IN (
                       'queued', 'gating', 'running', 'completed', 'failed', 'stopped', 'cancelled', 'timed_out',
-                      'gate_failed', 'skipped_overlap', 'skipped_missed', 'skipped_gate', 'skipped_budget')),
+                      'gate_failed', 'skipped_overlap', 'skipped_missed', 'skipped_gate', 'skipped_budget',
+                      'succeeded', 'interrupted')),
     task_id       TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     summary       TEXT,
     cost_usd      DOUBLE PRECISION,
@@ -1103,10 +1119,20 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
     carried_from TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL,
     firings INTEGER NOT NULL DEFAULT 1 CHECK (firings >= 1),
     run_timeout_seconds INTEGER CHECK (run_timeout_seconds > 0),
-    carried_on BOOLEAN NOT NULL DEFAULT false
+    carried_on BOOLEAN NOT NULL DEFAULT false,
+    started_at TIMESTAMPTZ,
+    exit_code INTEGER,
+    exit_signal INTEGER,
+    log_path TEXT,
+    log_bytes BIGINT,
+    log_truncated BOOLEAN NOT NULL DEFAULT false,
+    log_tail TEXT,
+    runner_pid INTEGER,
+    runner_started TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule ON schedule_runs (schedule_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_schedule_runs_open ON schedule_runs (schedule_id) WHERE status IN ('queued', 'running');
+CREATE INDEX IF NOT EXISTS idx_schedule_runs_finished ON schedule_runs (finished_at) WHERE finished_at IS NOT NULL;
 -- Every message about a schedule, sent or not: a run's outcome, an alert or its recovery. 'dashboard' when the
 -- schedule names no chat (or notify is 'never' for an alert), 'failed' with the reason when sending failed.
 CREATE TABLE IF NOT EXISTS schedule_notifications (
@@ -1114,7 +1140,8 @@ CREATE TABLE IF NOT EXISTS schedule_notifications (
     schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
     run_id      TEXT REFERENCES schedule_runs(id) ON DELETE SET NULL,
     kind        TEXT NOT NULL CHECK (kind IN ('run', 'failures_alert', 'failures_recovered', 'stale_alert',
-                                              'stale_recovered')),
+                                              'stale_recovered',
+                                              'deadline_alert', 'deadline_recovered', 'overlap_alert', 'overlap_recovered')),
     channel     TEXT,
     chat        TEXT,
     text        TEXT NOT NULL,
