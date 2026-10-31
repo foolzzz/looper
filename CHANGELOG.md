@@ -18,6 +18,19 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.40] - 2026-10-31
+
+### Added
+
+- **The dashboard can create and edit command schedules.** The form on a project's Schedules tab has a "Type" selector (Agent task or Command) that is chosen only when creating and is read-only afterwards. A command schedule shows the command (up to 2000 characters), the work directory, `env` (KEY=VALUE lines or a JSON object), `env_file`, the timeout, overlap, catch-up, notifications, the success deadline and the three alert thresholds, and hides the agent-only fields (requirement, template, gate, budgets, profiles, task limits). The schedule list and detail view show a "Command" badge. ([#979](https://github.com/foolzzz/looper/pull/979))
+
+### Fixed
+
+- **Config import skips a command schedule that carries a requirement.** An entry of kind `command` whose `requirement` is non-empty is skipped with the reason "requirement does not apply to a command schedule"; `""` is stored only when the field is absent, null or blank. ([#995](https://github.com/foolzzz/looper/pull/995))
+- **A run's recorded profile omits `runtime.launcher` unless it is `ttadk`.** The run record (`profile.runtime`) no longer lists `"launcher": "native"`. ([#995](https://github.com/foolzzz/looper/pull/995))
+
+No model-visible change.
+
 ## [2.14.39] - 2026-10-31
 
 ### Fixed
