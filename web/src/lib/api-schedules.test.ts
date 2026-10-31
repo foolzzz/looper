@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, expect, it, vi } from "vitest";
 import { fetchAllSchedules, fetchSchedules, fetchSchedule, fetchScheduleRuns, fetchScheduleNotifications,
-  previewSchedule, fetchRunLog, downloadRunLog } from "@/lib/api";
+  previewSchedule, fetchRunLog, fetchRunLogTail, downloadRunLog } from "@/lib/api";
 import { installSessionGuard, resetSessionGuard, SessionEndedError } from "@/lib/session";
 
 afterEach(() => { resetSessionGuard(); vi.unstubAllGlobals(); });
@@ -98,4 +98,16 @@ it("downloads an empty log once and stops at its end", async () => {
   vi.stubGlobal("fetch", fetcher);
   expect((await downloadRunLog("srun-empty")).size).toBe(0);
   expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+it.each(["a line with no newline", "partial\nlast line"]) ("bounds the tail walk and discards an incomplete leading line: %s", async (tail) => {
+  const window = 4 * 1024 * 1024;
+  const fetcher = vi.fn(async (_url, init) => {
+    const body = JSON.parse(init.body);
+    return Response.json({ status: "ok", result: { size: 5 * window, offset: body.offset ?? 4 * window,
+      next_offset: null, data_base64: btoa(body.offset == null ? tail : "prefix"), complete: true, truncated: false } });
+  });
+  vi.stubGlobal("fetch", fetcher);
+  expect((await fetchRunLogTail("run")).text).toBe(tail.includes("\n") ? "last line" : "");
+  expect(fetcher).toHaveBeenCalledTimes(4);
 });
