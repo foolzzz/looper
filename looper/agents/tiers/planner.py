@@ -858,6 +858,7 @@ class PlannerAgent:
         self._running = False
         self._claude = CLAUDE_CODE.resident_session(self.agent_id)
         self._claude_runtime = CLAUDE_CODE  # the runtime type whose session self._claude is
+        self._handling_message = False
         self._turn_lock = asyncio.Lock()
         self._supervise_task: asyncio.Task[Any] | None = None
         # When the last turn ended, so a periodic SUPERVISE is skipped right
@@ -1012,10 +1013,13 @@ class PlannerAgent:
             async for envelope in self._bus.subscribe(self.agent_id):
                 if not self._running:
                     break
+                self._handling_message = True
                 try:
                     await self._handle(envelope)
                 except Exception:
                     logger.exception("planner %s error handling %s", self.agent_id, envelope.message_id)
+                finally:
+                    self._handling_message = False
         except asyncio.CancelledError:
             pass
 

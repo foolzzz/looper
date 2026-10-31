@@ -6,6 +6,7 @@ import App from "./App";
 
 vi.mock("@/components/sidebar", () => ({ Sidebar: () => null, SIDEBAR_ID: "sidebar" }));
 vi.mock("@/components/claude-check-banner", () => ({ ClaudeCheckBanner: () => null }));
+vi.mock("@/components/drain-banner", () => ({ DrainBanner: () => null }));
 vi.mock("@/lib/session", () => ({ useSessionEnded: () => false }));
 vi.mock("@/pages/chat", () => ({ ChatPage: () => null }));
 vi.mock("@/pages/dashboard", () => ({ DashboardPage: () => <div>Dashboard view</div> }));

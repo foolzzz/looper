@@ -59,6 +59,7 @@ from .. import child_env
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
 from ..db import tasks as db_tasks
 from .agent_settings import AgentType, Launch, load_agent_settings
+from .drain import DrainState
 from .runtimes import ReadOnly
 from .runtimes.channel import Fork, RunHandle, RunStartError
 from .room import FallbackReason, Member, MemberKind, RoomService, _line, run_session_dir
@@ -143,7 +144,8 @@ def _unsuccessful(result: Mapping[str, Any]) -> str | None:
 class ConsultService:
     """The consults of every task's room: ``ask`` is the room's, the WorkerPool runs them."""
 
-    def __init__(self, *, room: RoomService, worker_pool: Any, runtime_root: Path, claude_bin: str = "claude") -> None:
+    def __init__(self, *, room: RoomService, worker_pool: Any, runtime_root: Path, claude_bin: str = "claude",
+                 drain: DrainState | None = None) -> None:
         self.room = room
         self.worker_pool = worker_pool
         self.runtime_root = runtime_root
@@ -151,6 +153,12 @@ class ConsultService:
         self._running: set[asyncio.Task[Any]] = set()
         self._stopping = False
         self._recovered = False
+        self._drain = drain
+        self._active_consults = 0
+
+    def drain_waiting(self) -> int:
+        """Queued consults, including those waiting for a Worker slot, do not delay drain."""
+        return self._active_consults
 
     # --- Asking ---
 
@@ -234,6 +242,8 @@ class ConsultService:
     # --- Running ---
 
     async def _run(self, consult_id: int) -> None:
+        if self._drain is not None:
+            await self._drain.wait_serving()
         row = await db_room.get_consult(consult_id)
         if row is None or row["state"] != "queued":
             return
@@ -272,12 +282,22 @@ class ConsultService:
 
         wp = WorkerProcess(worker_id=run_id, task_id=str((step or {}).get("id") or ""), plan_id="",
                            role=agent, parent_task_id=task_id, step=step_key, instruction="consult")
+        admitted = False
         try:
-            async with self.worker_pool.slot_for(wp):
-                _, started = await db_room.start_consult(consult_id, consult_run=run_id)
-                if started is not db_room.ConsultStart.STARTED:
+            while True:
+                if self._drain is not None:
+                    await self._drain.wait_serving()
+                async with self.worker_pool.slot_for(wp):
+                    if self._drain is not None and self._drain.draining:
+                        continue
+                    # Admission and counting are synchronous; a drain during start_consult waits for it.
+                    self._active_consults += 1
+                    admitted = True
+                    _, started = await db_room.start_consult(consult_id, consult_run=run_id)
+                    if started is not db_room.ConsultStart.STARTED:
+                        return
+                    await self._consult(consult_id, task_id, seat_name, kind, agent, step, run_id)
                     return
-                await self._consult(consult_id, task_id, seat_name, kind, agent, step, run_id)
         except asyncio.CancelledError:
             if not self._stopping:
                 await asyncio.shield(self._give_up(consult_id, task_id, seat_name, FallbackReason.STOPPED,
@@ -289,6 +309,9 @@ class ConsultService:
             logger.exception("task %s: the consult of %s failed", task_id, seat_name)
             await self._give_up(consult_id, task_id, seat_name, FallbackReason.CONTRACT,
                                 f"{type(exc).__name__}: {exc}")
+        finally:
+            if admitted:
+                self._active_consults -= 1
 
     async def _consult(self, consult_id: int, task_id: str, seat_name: str, kind: MemberKind, agent: AgentType,
                        step: Mapping[str, Any] | None, run_id: str) -> None:

@@ -34,6 +34,7 @@ from .. import child_env
 from ..db import activity as db_activity, projects as db_projects, tasks as db_tasks, waits as db_waits
 from . import proc_tree, waits
 from .bus import MessageBus
+from .drain import DrainState
 from .links import task_link
 from .message import AgentAddress, MessageEnvelope, MessageType, channel_address, planner_address
 from .project_execution import ProjectExecution
@@ -400,7 +401,7 @@ class WaitService:
     tell the user of timeouts, then wake a Planner that is running."""
 
     def __init__(self, *, bus: MessageBus, has_planner: Callable[[str], bool], dashboard_url: str = "",
-                 interval: float = waits.WAIT_TICK_SEC, gh: str = "gh") -> None:
+                 interval: float = waits.WAIT_TICK_SEC, gh: str = "gh", drain: DrainState | None = None) -> None:
         self._bus = bus
         self._has_planner = has_planner
         self._dashboard_url = dashboard_url
@@ -408,6 +409,11 @@ class WaitService:
         self._gh = gh
         self._semaphore = asyncio.Semaphore(waits.MAX_CONCURRENT_CHECKS)
         self._task: asyncio.Task[Any] | None = None
+        self._drain = drain
+        self._active_checks = 0
+
+    def drain_waiting(self) -> int:
+        return self._active_checks
 
     async def start(self) -> None:
         if self._task is None:
@@ -431,12 +437,17 @@ class WaitService:
 
     async def run_once(self, *, clock: Callable[[], datetime] | None = None) -> int:
         """Check due waits; how many rows moved. ``clock`` supplies UTC now when given."""
+        if self._drain is not None and self._drain.draining:
+            return 0
         clock = clock or (lambda: datetime.now(timezone.utc))
         rows = await db_waits.due(clock(), db_tasks.ACTIVE_STATUSES)
         return sum(await asyncio.gather(*(self._run_row(row, clock) for row in rows)))
 
     async def _run_row(self, row: Mapping[str, Any], clock: Callable[[], datetime]) -> int:
         async with self._semaphore:
+            if self._drain is not None and self._drain.draining:
+                return 0
+            self._active_checks += 1
             try:
                 # The queue may outlive a user action, a Planner transition or the task itself.
                 current = await db_waits.get(row["task_id"], row["step_key"])
@@ -450,6 +461,8 @@ class WaitService:
                 # Exceptions may contain command output or notice text. Only the row's id belongs in the log.
                 logger.warning("wait step %s failed; trying again later", row["step_id"])
                 return 0
+            finally:
+                self._active_checks -= 1
 
     async def _run_wait(self, row: Mapping[str, Any], clock: Callable[[], datetime]) -> int:
         now = clock()
