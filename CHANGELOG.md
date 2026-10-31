@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.54] - 2026-10-31
+
+### Changed
+
+- **With keeper on, Claude Code Worker and Reviewer runs go through a keeper.** A run qualifies when its runtime is keepable (only Claude Code), it is not hosted or steered, its launcher reports reliable exit codes and it belongs to a task. The keeper holds the child and its stdout, stderr and stdin in the run directory; a lost keeper fails only its own run, a lost control-plane lock fences kept runs without sending a request, and a drain of either scope waits for every run until detach is supported. With keeper off (the default) nothing changes. ([#1023](https://github.com/foolzzz/looper/pull/1023))
+
 ## [2.14.53] - 2026-10-31
 
 ### Fixed
