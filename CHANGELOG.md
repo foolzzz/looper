@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.31] - 2026-10-31
+
+### Added
+
+- **The scheduler runs command schedules and adopts their runs after a restart.** A schedule of kind `command` starts a standalone runner (`looper/agents/command_runs.py`), skips or queues overlapping firings without merging skips, settles runs as `succeeded`, `failed`, `timed_out` or `interrupted`, adopts a live runner after a server restart, kills a run that passes its timeout by 90 seconds, and gets `LOOPER_SCHEDULE_TRIGGER`, `LOOPER_SCHEDULE_MISSED` and `LOOPER_SCHEDULE_MISSED_SINCE` (gates get them too). The runner's output tail also redacts secrets that cross its cut, and a failed serve start now stops the HTTP server. Nothing creates a command schedule yet. ([#944](https://github.com/foolzzz/looper/pull/944))
+
+No model-visible change: no prompt, tool or message text changes.
+
 ## [2.14.30] - 2026-10-31
 
 ### Added
