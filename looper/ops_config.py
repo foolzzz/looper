@@ -17,6 +17,9 @@
     # pi = "runner"
     # dsh = "runner"
 
+    [agent_host]
+    keeper = "off"                             # "on" requires one control plane per database
+
     [backup]                                    # how the database is backed up before a schema change
     pg_dump = "/usr/lib/postgresql/17/bin/pg_dump"
     command = ["docker", "exec", "pg", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
@@ -39,7 +42,7 @@ stops the command with a message that names the key and never shows the value. N
 no ``~``, no include.
 
 Environment and ``.env`` settings remain readable until the ops file names them. Only deployment settings are
-read from ``.env``; its contents are never added to the process environment. ``runtimes.pi`` and ``runtimes.dsh`` are file-only and default to ``runner`` (``cli`` is the opt-out). The ``probe`` settings are file-only too.
+read from ``.env``; its contents are never added to the process environment. ``runtimes.pi`` and ``runtimes.dsh`` are file-only and default to ``runner`` (``cli`` is the opt-out). ``agent_host.keeper`` is file-only and defaults to ``off``. The ``probe`` settings are file-only too.
 """
 
 from __future__ import annotations
@@ -82,6 +85,11 @@ class Origin(StrEnum):
     DOTENV = ".env"
 
 
+class KeeperMode(StrEnum):
+    OFF = "off"
+    ON = "on"
+
+
 @dataclass(frozen=True)
 class Source:
     origin: Origin
@@ -119,6 +127,7 @@ class OpsConfig:
     operator_notes_root: str = ""
     pi_runtime: str = "runner"
     dsh_runtime: str = "runner"
+    keeper_mode: KeeperMode = KeeperMode.OFF
     probe_notify_channel: str = ""
     probe_notify_chat: str = ""
     probe_after_minutes: int = 5
@@ -177,6 +186,12 @@ def _runtime_choice(value: Any, where: str) -> str:
     if value not in ("cli", "runner"):
         raise OpsConfigError(f"{where} must be cli or runner")
     return value
+
+
+def _keeper_mode(value: Any, where: str) -> KeeperMode:
+    if not isinstance(value, str) or value not in ("off", "on"):
+        raise OpsConfigError(f"{where} must be off or on")
+    return KeeperMode(value)
 
 
 def _probe_channel(value: Any, where: str) -> str:
@@ -251,6 +266,7 @@ class _Setting:
 SETTINGS = (
     _Setting("pi_runtime", "runtimes", "pi", _runtime_choice),
     _Setting("dsh_runtime", "runtimes", "dsh", _runtime_choice),
+    _Setting("keeper_mode", "agent_host", "keeper", _keeper_mode),
     _Setting("probe_notify_channel", "probe", "notify_channel", _probe_channel),
     _Setting("probe_notify_chat", "probe", "notify_chat", _probe_chat),
     _Setting("probe_after_minutes", "probe", "after_minutes", _probe_after_minutes),
@@ -488,6 +504,7 @@ def render(config: OpsConfig) -> str:
         "[runtimes]",
         'pi = "cli"' if config.pi_runtime == "cli" else '# pi = "runner"',
         'dsh = "cli"' if config.dsh_runtime == "cli" else '# dsh = "runner"',
+        *(["", "[agent_host]", 'keeper = "on"'] if config.keeper_mode is KeeperMode.ON else []),
         "",
         "[backup]",
         f"pg_dump = {_toml_string(config.pg_dump)}" if config.pg_dump else '# pg_dump = "/path/to/pg_dump"',
