@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.42] - 2026-10-31
+
+### Added
+
+- **The Manager's `looper_schedules` tool creates, modifies and views command schedules.** It gains `kind`, `command`, `env`, `env_file`, `success_deadline` and three alert thresholds. For a command schedule the configuration, diff and the enable and run-now confirmations show the command verbatim and say it uses no model quota; the list and run summaries include `kind` and `exit_code`. A confirmed enable, disable or run-now is bound to the schedule id and configuration version it showed, and is refused with a 409 if the settings changed. ([#981](https://github.com/foolzzz/looper/pull/981))
+
 ## [2.14.41] - 2026-10-31
 
 ### Fixed
