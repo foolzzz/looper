@@ -442,6 +442,21 @@ async def _forget(process: asyncio.subprocess.Process, path: Path | None, starte
     _recorded.pop(process.pid, None)
 
 
+def own_records(runtime_root: Path) -> None:
+    """Record agents for a process that owns agents but is not a server, without sweeping.
+
+    ``spawn`` records this process as owner. A server's ``sweep`` leaves its
+    agents alone while it lives, and ends them once their owner is gone.
+    """
+    global _records, _server
+    directory = runtime_root / RECORDS_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    started = _start_time(os.getpid())
+    if started is None:
+        raise RuntimeError("cannot read this owner's start time")
+    _records, _server = directory, (os.getpid(), started)
+
+
 async def sweep(runtime_root: Path) -> None:
     """End what agents of a previous server on ``runtime_root`` left running, then record this server's agents.
 
