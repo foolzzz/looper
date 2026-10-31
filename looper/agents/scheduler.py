@@ -511,7 +511,10 @@ class Scheduler:
                 schedule: dict[str, Any] | None = None
                 try:
                     async with db_connection.transaction() as conn:
-                        schedule = await db_schedules.lock_next_due(conn, now, skip=handled, kinds=kinds)
+                        # Until the kind is known, count a lookup that may admit agent work. Still look up
+                        # commands when agent admission is closed; release this count before kind admission.
+                        with self._admit_start():
+                            schedule = await db_schedules.lock_next_due(conn, now, skip=handled, kinds=kinds)
                         if schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"])):
                             return
                         handled.append(schedule["id"])
