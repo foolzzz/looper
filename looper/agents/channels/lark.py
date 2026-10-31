@@ -165,6 +165,8 @@ class LarkChannelAdapter(ChannelAdapter):
                         await self._transport.reply(route["reply_to"], markdown=str(envelope.payload["text"]))
                     except LarkCliError as exc:
                         logger.warning("%s: a recovered task progress reply failed: %s", self.channel_id, exc)
+                        if exc.code in MESSAGE_GONE_CODES:
+                            return await self._send_message(route["chat_id"], str(envelope.payload["text"]))
                         return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))
                     return DeliveryReceipt(channel=self.channel_type, success=True)
                 chat_id = route["chat_id"]
