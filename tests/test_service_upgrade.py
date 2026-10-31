@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
+import sys
+import threading
 import urllib.error
 import zipfile
 from pathlib import Path
@@ -33,7 +36,7 @@ def upgrade_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root = tmp_path / "runtime"
     token = operator_auth.ensure_token(root)
     unit = tmp_path / "looper.service"
-    unit.write_text("test service unit\n")
+    unit.write_text('Environment="UNIT_MARKER=service"\n')
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     requests = []
@@ -46,21 +49,249 @@ def upgrade_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         assert (port, credential) == (18834, token)
         return _manifest().to_dict()
 
+    def run(argv, *, env=None):
+        assert argv[:3] == [host.executable, "-I", "-c"], "ownership must be checked before git"
+        if "sysconfig" in argv[-1]:
+            return subprocess.CompletedProcess(argv, 0,
+                json.dumps([str(checkout / ".venv"), str(checkout), str(checkout)]), "")
+        if "sys.prefix" in argv[-1]:
+            return subprocess.CompletedProcess(argv, 0, str(checkout / ".venv"), "")
+        assert env["UNIT_MARKER"] == "service"
+        assert "PYTHONPATH" not in env
+        return subprocess.CompletedProcess(argv, 0, str(checkout), "")
+
     host = service.Host(
         system="Linux", home=tmp_path / "home", uid=501, environ={},
-        executable=str(tmp_path / ".venv/bin/python"), cwd=checkout, run=forbidden,
+        executable=str(tmp_path / ".venv/bin/python"), cwd=checkout, package_root=checkout, run=run,
         sleep=forbidden, get_status=forbidden, port_in_use=forbidden, get_components=get_components,
+        get_whoami=forbidden,
     )
     state = service.State(installed=True, loaded=True, running=True, pid=1234, port=18834,
                           log_path=root / "logs/serve.log", runtime_root=root)
     manager = SimpleNamespace(
+        host=host,
+        unit_argv=lambda: service.looper_command(host.executable) + ["serve"],
         unit_path=unit, state=lambda: state, unit_settings=lambda **kwargs: (18834, state.log_path, root),
         start=forbidden, stop=forbidden, remove=forbidden,
     )
     monkeypatch.setattr(service, "manager", lambda host, label: manager)
     monkeypatch.setattr(service.Host, "current", classmethod(lambda cls: host))
+    from looper.agents import http_server
+    monkeypatch.setattr(http_server, "default_static_dir", lambda: checkout / "looper/web/dashboard")
     monkeypatch.setenv("HOME", str(host.home))
     return host, requests
+
+
+@pytest.fixture
+def stopping_upgrade(upgrade_host):
+    host, _ = upgrade_host
+    mgr = service.manager(host, "test")
+    events, elapsed = [], [0.0]
+    state = mgr.state()
+
+    def stop():
+        events.append("stop")
+        state.running, state.pid, state.loaded = False, None, False
+
+    def start():
+        events.append("start")
+        state.running, state.pid, state.loaded = True, 5678, True
+
+    host.clock = lambda: elapsed[0]
+    host.sleep = lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+    host.pid_alive = lambda pid: state.pid == pid
+    host.port_in_use = lambda *args: state.running
+    host.get_status = lambda *args: {"status": "ok", "pid": state.pid} if state.running else None
+    host.get_whoami = lambda *args: {"looper_version": "1.0.0"}
+    host.system_operation = lambda port, token, name, args: events.append(name) or {"phase": "drained"}
+    mgr.stop, mgr.start = stop, start
+
+    def execute():
+        from looper.upgrade import UpgradeKind, UpgradePlan
+
+        return service._execute_plan(host, mgr, port=18834, root=state.runtime_root,
+            log_path=state.log_path, plan=UpgradePlan(UpgradeKind.FULL, (), ()),
+            running=_manifest(), target=_manifest(), installer=lambda: events.append("install"),
+            timeout=1, drain_timeout=1, no_force=False)
+
+    return SimpleNamespace(host=host, mgr=mgr, state=state, events=events, elapsed=elapsed, execute=execute)
+
+
+def test_upgrade_renews_drain_during_a_blocking_stop(stopping_upgrade, monkeypatch):
+    from concurrent.futures import wait
+
+    case = stopping_upgrade
+    entered, release = threading.Event(), threading.Event()
+    renewals = []
+    stop, operation = case.mgr.stop, case.host.system_operation
+
+    def blocking_stop():
+        entered.set()
+        assert release.wait(1), "blocking stop was not accompanied by lease renewal"
+        stop()
+
+    def fake_wait(futures, *, timeout):
+        assert entered.wait(1)
+        assert timeout <= 5
+        case.elapsed[0] += timeout
+        if case.elapsed[0] >= 35:
+            release.set()
+            return wait(futures, timeout=1)
+        return wait(futures, timeout=0)
+
+    def operation_with_lease(port, token, name, args):
+        if name == "drain_status":
+            renewals.append(case.elapsed[0])
+        return operation(port, token, name, args)
+
+    case.mgr.stop = blocking_stop
+    case.host.system_operation = operation_with_lease
+    monkeypatch.setattr(service, "wait", fake_wait, raising=False)
+    result = json.loads(case.execute().splitlines()[-1])
+    assert result["status"] == "ok"
+    assert renewals and max(b - a for a, b in zip([0, *renewals], [*renewals, 35])) <= 5
+    assert case.events[-3:] == ["stop", "install", "start"]
+
+
+@pytest.mark.parametrize("other_pid", [None, 9876])
+def test_upgrade_recovery_unloads_an_exited_launchd_label_before_starting(stopping_upgrade, other_pid):
+    case = stopping_upgrade
+    case.host.system = "Darwin"
+    launchd = service.Launchd(case.host, "com.looper.upgrade.test")
+    launchd.unit_path.parent.mkdir(parents=True)
+    launchd.unit_path.write_bytes(launchd.render(service.ServiceSpec(
+        launchd.label, ("python", "-m", "looper.cli", "serve", "--port", "18834",
+                        "--runtime-root", str(case.state.runtime_root)),
+        case.host.cwd, (), case.state.log_path)))
+    loaded, bootouts, unloading = [True], [0], [0]
+
+    def run(argv):
+        command = argv[1]
+        case.events.append(command)
+        if command == "print":
+            if not loaded[0]:
+                return subprocess.CompletedProcess(argv, 113, "", "")
+            if unloading[0]:
+                unloading[0] -= 1
+                if not unloading[0]:
+                    loaded[0] = False
+            pid = (f"\tstate = running\n\tpid = {case.state.pid}\n" if case.state.pid
+                   else "\tstate = exited\n\tlast exit code = 0\n")
+            return subprocess.CompletedProcess(argv, 0, pid, "")
+        if command == "bootout":
+            bootouts[0] += 1
+            case.state.running, case.state.pid = False, None
+            if bootouts[0] == 1:
+                case.elapsed[0] += service._STOP_WAIT_SECONDS
+                raise service.ServiceError("stop timed out after the old process exited")
+            unloading[0] = 2
+        elif command == "bootstrap":
+            assert not loaded[0], "bootstrap must follow a completed bootout"
+            loaded[0], case.state.running, case.state.pid = True, True, 5678
+        else:
+            pytest.fail(f"unexpected command: {argv}")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    case.host.run = run
+    case.mgr.stop, case.mgr.start, case.mgr.state = launchd.stop, launchd.start, launchd.state
+    case.host.port_in_use = lambda *args: other_pid is not None or case.state.running
+    case.host.get_status = lambda *args: ({"status": "ok"}
+                                         if other_pid or case.state.running else None)
+    operation = case.host.system_operation
+    case.host.system_operation = lambda port, token, name, args: (
+        {"pid": other_pid} if name == "health" else operation(port, token, name, args))
+    with pytest.raises(service.ServiceError) as caught:
+        case.execute()
+    result = json.loads(str(caught.value).splitlines()[-1])
+    assert case.events.count("bootstrap") == (0 if other_pid else 1)
+    assert result["serving"] is True
+    if other_pid:
+        assert str(other_pid) in result["recovery_error"] and "18834" in result["recovery_error"]
+    else:
+        assert bootouts[0] == 2
+        assert "recovery_error" not in result
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+def test_upgrade_rejects_foreign_pythonpath_checkout_before_git(upgrade_host, tmp_path, monkeypatch, dirty):
+    host, _ = upgrade_host
+    own_root = host.cwd
+    foreign = tmp_path / "foreign-checkout"
+    foreign.mkdir()
+    host.cwd = host.package_root = foreign
+    host.environ = {"PYTHONPATH": str(foreign)}
+    monkeypatch.setenv("PYTHONPATH", str(foreign))
+    probe, git_calls = host.run, []
+
+    def run(argv, **kwargs):
+        if argv[0] == "git":
+            git_calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, " M looper/cli.py" if dirty else "", "")
+        return probe(argv, **kwargs)
+
+    host.run = run
+    monkeypatch.setattr(components, "manifest_from_git", lambda *args: _manifest())
+    with pytest.raises(service.ServiceError) as caught:
+        service.upgrade(host)
+    assert "not the service's checkout" in str(caught.value)
+    assert str(own_root) in str(caught.value) and str(foreign) in str(caught.value)
+    assert "tracked changes" not in str(caught.value)
+    assert git_calls == []
+
+
+@pytest.mark.parametrize("system", ["Linux", "Darwin"])
+def test_upgrade_queries_the_unit_interpreter_in_an_isolated_environment(
+        upgrade_host, tmp_path, monkeypatch, system):
+    host, _ = upgrade_host
+    own_root = Path(service.__file__).resolve().parents[2]
+    foreign = tmp_path / "foreign"
+    (foreign / "looper").mkdir(parents=True)
+    (foreign / "looper/__init__.py").write_text("raise AssertionError('foreign package imported')\n")
+    host.cwd = host.package_root = foreign
+    host.executable, host.system = sys.executable, system
+    host.environ = {"PYTHONPATH": str(foreign), "SHELL_ONLY": "shell"}
+    monkeypatch.setenv("PYTHONPATH", str(foreign))
+    monkeypatch.setenv("SHELL_ONLY", "shell")
+    mgr = (service.Launchd if system == "Darwin" else service.Systemd)(host, "com.looper.upgrade.test")
+    mgr.unit_path.parent.mkdir(parents=True)
+    mgr.unit_path.write_bytes(mgr.render(service.ServiceSpec(mgr.label,
+        (*service.looper_command(sys.executable), "serve"), own_root,
+        (("UNIT_MARKER", "service $$ value"),), tmp_path / "serve.log")))
+    # Keep settings/status fake; read the real unit's argv and environment and run its Python.
+    fake = service.manager(host, "test")
+    fake.unit_path, fake.unit_argv = mgr.unit_path, mgr.unit_argv
+    probes = []
+
+    def run(argv, *, env):
+        assert argv[:3] == [sys.executable, "-I", "-c"], "no git command may precede the ownership check"
+        assert env["UNIT_MARKER"] == "service $$ value"
+        assert "PYTHONPATH" not in env and "SHELL_ONLY" not in env
+        assert "UNIT_MARKER=service $$ value" not in argv
+        result = service._run(argv, env=env)
+        assert result.returncode == 0, result.stderr
+        probes.append(Path(result.stdout.strip()))
+        return result
+
+    host.run = run
+    with pytest.raises(service.ServiceError, match="not the service's checkout") as caught:
+        service.upgrade(host)
+    assert probes == [own_root]
+    assert str(own_root) in str(caught.value) and str(foreign) in str(caught.value)
+
+
+@pytest.mark.parametrize("change", ["web", None], ids=["web_only", "noop"])
+def test_wheel_upgrade_refuses_a_foreign_dashboard_before_installing(upgrade_host, tmp_path, monkeypatch, change):
+    from looper.agents import http_server
+
+    host, _ = upgrade_host
+    own_root = host.cwd
+    foreign = tmp_path / "foreign/looper/web/dashboard"
+    monkeypatch.setattr(http_server, "default_static_dir", lambda: foreign)
+    monkeypatch.setattr(components, "manifest_from_wheel", lambda *args: _manifest(change))
+    monkeypatch.setattr(service, "_install_target", lambda *args, **kwargs: pytest.fail("must refuse before install"))
+    with pytest.raises(service.ServiceError, match="not the service's dashboard") as caught:
+        service.upgrade(host, to="candidate.whl")
+    assert str(foreign) in str(caught.value) and str(own_root) in str(caught.value)
 
 
 @pytest.mark.parametrize("change, changed_component, expected", [

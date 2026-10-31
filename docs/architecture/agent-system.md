@@ -4373,8 +4373,7 @@ running service's startup manifest with a Git tree (default `origin/main` of
 the current checkout) or a wheel, without installing files or restarting.
 It prints `NOOP`, `WEB_ONLY`, `CONTROL_PLANE` or `FULL`, the changed components
 and the reason. Keeper mode is off in S0, so every control-plane change plans
-`FULL`. Running without `--dry-run` refuses until drain and deployment are
-available.
+`FULL`. The upgrade refuses unless it runs with the service's own `looper` and checkout.
 
 `looper/components.toml` declares component globs, runner packaging aliases
 and explicit ignores. A normal-suite test rejects unclassified tracked files.

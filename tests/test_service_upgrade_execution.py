@@ -5,6 +5,7 @@ import json
 import asyncio
 import multiprocessing
 import os
+import plistlib
 import signal
 import subprocess
 import venv
@@ -19,6 +20,11 @@ from looper.agents import operator_auth, service
 from looper.upgrade import UpgradeKind, UpgradePlan
 
 _REAL_INSTALLER = service._install_target
+_REAL_UNIT_PACKAGE_ROOT = service._unit_package_root
+
+
+def wheel_paths(host):
+    return json.dumps([str(host.cwd / ".venv"), str(host.package_root), str(host.package_root)])
 
 
 def manifest(change=None, version="1.0.0"):
@@ -38,7 +44,7 @@ def deployment(tmp_path, monkeypatch):
     events = []
     current = manifest()
     target = manifest("control_plane", "1.0.1")
-    state = SimpleNamespace(running=True, pid=123456789)
+    state = service.State(installed=True, loaded=True, running=True, pid=123456789)
     elapsed = [0.0]
     statuses = [{"phase": "draining", "waiting": {"runs": []}}, {"phase": "drained"}]
     scenario = SimpleNamespace(target=target, current=current, install_error=False, stop_error=False, stop_then_error=False,
@@ -57,6 +63,7 @@ def deployment(tmp_path, monkeypatch):
         state.running = False
         state.pid = None
         if scenario.stop_then_error:
+            scenario.stop_then_error = False
             raise service.ServiceError("manager stopped the service but lost its response")
 
     def start():
@@ -73,23 +80,28 @@ def deployment(tmp_path, monkeypatch):
             raise service.ServiceError("install failed")
         scenario.current = scenario.target
 
-    def run(argv):
+    def run(argv, **kwargs):
+        if argv[:3] == [host.executable, "-I", "-c"]:
+            output = wheel_paths(host) if "sysconfig" in argv[-1] else str(tmp_path / ".venv")
+            return subprocess.CompletedProcess(argv, 0, output, "")
         assert argv[:3] == ["git", "-C", str(tmp_path)]
         return subprocess.CompletedProcess(argv, 0, "1" * 40 if "rev-parse" in argv else "", "")
 
     host = service.Host(system="Linux", home=tmp_path / "home", uid=1, environ={},
-        executable="python", cwd=tmp_path, run=run, clock=lambda: elapsed[0],
+        executable="python", cwd=tmp_path, package_root=tmp_path, run=run, clock=lambda: elapsed[0],
         sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
         get_components=lambda port, token: (current if scenario.verify_error else scenario.current).to_dict(),
         system_operation=operation, get_status=lambda *args: {"status": "ok"},
         get_whoami=lambda *args: {"looper_version": scenario.current.version},
         port_in_use=lambda port, address="127.0.0.1": False, pid_alive=lambda pid: scenario.process_lingers)
     manager = SimpleNamespace(host=host, state=lambda: state, unit_path=unit,
+        unit_argv=lambda: service.looper_command(host.executable) + ["serve"],
         unit_settings=lambda **kwargs: (18841, root / "logs/serve.log", root), start=start, stop=stop)
     monkeypatch.setattr(service, "manager", lambda *args: manager)
     monkeypatch.setattr(service.Host, "current", classmethod(lambda cls: host))
     monkeypatch.setattr(components, "manifest_from_git", lambda *args: scenario.target)
     monkeypatch.setattr(service, "_install_target", install)
+    monkeypatch.setattr(service, "_unit_package_root", lambda host, mgr: host.package_root.resolve())
     monkeypatch.setattr(service, "__file__", str(tmp_path / "looper/agents/service.py"))
     return SimpleNamespace(host=host, events=events, statuses=statuses, state=state, scenario=scenario,
                            root=root, elapsed=elapsed)
@@ -97,6 +109,256 @@ def deployment(tmp_path, monkeypatch):
 
 def report(deployment):
     return json.loads((deployment.root / "logs/serve.log").read_text().splitlines()[-1])
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("argv", [["/other/bin/looper", "serve"], []])
+def test_upgrade_refuses_another_interpreter_before_contacting_service(deployment, dry_run, argv, capsys):
+    service.manager(deployment.host, "test").unit_argv = lambda: argv
+    deployment.host.get_components = lambda *args: pytest.fail("must refuse before contacting the service")
+    assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 1
+    assert deployment.events == []
+    assert "run looper service upgrade with that looper" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_upgrade_refuses_unreadable_unit(deployment, dry_run, capsys):
+    def unreadable():
+        raise OSError("cannot read unit")
+    service.manager(deployment.host, "test").unit_argv = unreadable
+    assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 1
+    assert deployment.events == []
+    assert "cannot read the service unit" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("system", ["Linux", "Darwin"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_checkout_upgrade_refuses_unit_pythonpath_before_drain(
+        deployment, tmp_path, monkeypatch, system, dry_run, capsys):
+    environment = tmp_path / ".venv"
+    venv.EnvBuilder().create(environment)
+    python = str(environment / "bin/python")
+    foreign = tmp_path / "foreign"
+    for checkout in (tmp_path, foreign):
+        (checkout / "looper").mkdir(parents=True, exist_ok=True)
+        (checkout / "looper/__init__.py").write_text("")
+
+    def execute(argv, *, env=None):
+        return subprocess.run(argv, cwd=environment / "bin", env=env,
+                              capture_output=True, text=True, timeout=10)
+
+    site = Path(execute([python, "-I", "-c",
+        "import sysconfig; print(sysconfig.get_path('purelib'))"]).stdout.strip())
+    (site / "checkout.pth").write_text(str(tmp_path) + "\n")
+    entry = environment / "bin/looper"
+    entry.write_text(f"#!{python}\nimport looper; print(looper.__file__)\n")
+    entry.chmod(0o755)
+    unit_env = {"PYTHONPATH": str(foreign)}
+    # The unit's own executable really imports the foreign checkout, while -I sees this one.
+    loaded = execute([str(entry)], env=unit_env)
+    assert loaded.returncode == 0, loaded.stderr
+    assert Path(loaded.stdout.strip()) == foreign / "looper/__init__.py"
+    isolated = execute([python, "-I", "-c", "import looper; print(looper.__file__)"])
+    assert Path(isolated.stdout.strip()) == tmp_path / "looper/__init__.py"
+    deployment.host.system, deployment.host.executable = system, python
+    mgr = service.manager(deployment.host, "test")
+    if system == "Darwin":
+        mgr.unit_path.write_bytes(plistlib.dumps({"EnvironmentVariables": unit_env}))
+    else:
+        mgr.unit_path.write_text(f'Environment="PYTHONPATH={foreign}"\n')
+    monkeypatch.setattr(service, "_unit_package_root", _REAL_UNIT_PACKAGE_ROOT)
+    run = deployment.host.run
+    deployment.host.run = lambda argv, **kwargs: execute(argv, **kwargs) if argv[0] == python else run(argv)
+    assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 1
+    assert deployment.events == []
+    assert deployment.state.running
+    assert "PYTHONPATH" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_wheel_upgrade_refuses_package_outside_install_scheme_before_drain(
+        deployment, tmp_path, monkeypatch, dry_run, capsys):
+    environment = tmp_path / ".venv"
+    venv.EnvBuilder().create(environment)
+    deployment.host.executable = str(environment / "bin/python")
+    deployment.host.run = lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=10)
+    monkeypatch.setattr(components, "manifest_from_wheel", lambda *args: deployment.scenario.target)
+    assert cli.main(["service", "upgrade", "--to", str(tmp_path / "update.whl"),
+                     *(["--dry-run"] if dry_run else [])]) == 1
+    assert deployment.events == []
+    assert deployment.state.running
+    assert "outside the interpreter's installation paths" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_checkout_upgrade_refuses_foreign_sync_environment_before_drain(
+        deployment, tmp_path, monkeypatch, dry_run, capsys):
+    environment = tmp_path / ".venv"
+    venv.EnvBuilder().create(environment)
+    deployment.host.executable = str(environment / "bin/python")
+    foreign = tmp_path / "other-venv"
+    deployment.host.environ = {**os.environ, "UV_PROJECT_ENVIRONMENT": str(foreign)}
+    monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(foreign))
+    run = deployment.host.run
+
+    def execute(argv):
+        if argv[0] == deployment.host.executable:
+            return subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        return run(argv)
+
+    deployment.host.run = execute
+    assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 1
+    assert deployment.events == []
+    assert deployment.state.running
+    assert not foreign.exists()
+    error = capsys.readouterr().err
+    assert "UV_PROJECT_ENVIRONMENT" in error and str(environment) in error
+
+
+def test_checkout_upgrade_pins_real_sync_to_preflight_interpreter(deployment, tmp_path, monkeypatch):
+    environment, foreign = tmp_path / "service venv", tmp_path / "other-venv"
+    for path in (environment, foreign):
+        venv.EnvBuilder().create(path)
+    python = str(environment / "bin/python")
+    wheel = tmp_path / "sync_probe-1.0.0-py3-none-any.whl"
+    metadata = "sync_probe-1.0.0.dist-info"
+    files = {
+        "sync_probe.py": "VALUE = 'installed'\n",
+        f"{metadata}/METADATA": "Metadata-Version: 2.1\nName: sync-probe\nVersion: 1.0.0\n",
+        f"{metadata}/WHEEL": "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    files[f"{metadata}/RECORD"] = "".join(f"{name},,\n" for name in (*files, f"{metadata}/RECORD"))
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "sync-fixture"\nversion = "1.0.0"\nrequires-python = ">=3.11"\n'
+        f'[project.optional-dependencies]\ntest = ["sync-probe @ {wheel.as_uri()}"]\n')
+    deployment.host.executable = python
+    deployment.host.environ = {**os.environ, "HOME": str(deployment.host.home),
+        "UV_PROJECT_ENVIRONMENT": environment.name, "UV_OFFLINE": "1", "UV_NO_CONFIG": "1",
+        "UV_CACHE_DIR": str(tmp_path / "uv-cache"), "UV_PYTHON_DOWNLOADS": "never"}
+    monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
+    operation, git = deployment.host.system_operation, deployment.host.run
+
+    def drain(port, token, name, args):
+        if name == "drain":
+            monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(foreign))
+            deployment.host.environ["UV_PROJECT_ENVIRONMENT"] = str(foreign)
+        return operation(port, token, name, args)
+
+    def run(argv, *, env=None):
+        if argv[0] == "git":
+            return git(argv)
+        result = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+        if argv[:2] == ["uv", "sync"]:
+            assert not deployment.state.running
+            assert result.returncode == 0, result.stderr
+            deployment.scenario.current = deployment.scenario.target
+        return result
+
+    deployment.host.system_operation, deployment.host.run = drain, run
+    assert cli.main(["service", "upgrade"]) == 0
+    assert report(deployment)["status"] == "ok"
+    probe = ["-I", "-c", "import sync_probe; print(sync_probe.VALUE)"]
+    installed = subprocess.run([python, *probe], capture_output=True, text=True, timeout=10)
+    assert installed.returncode == 0 and installed.stdout.strip() == "installed"
+    untouched = subprocess.run([str(foreign / "bin/python"), *probe], capture_output=True, text=True, timeout=10)
+    assert untouched.returncode != 0 and "ModuleNotFoundError" in untouched.stderr
+
+
+@pytest.mark.parametrize("wheel", [False, True])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_checkout_must_be_its_package_root_but_wheel_allows_any_cwd(
+        deployment, monkeypatch, wheel, dry_run, capsys):
+    deployment.host.package_root = deployment.host.cwd / "other-checkout"
+    monkeypatch.setattr(components, "manifest_from_wheel", lambda *args: deployment.scenario.target)
+    flags = (["--to", "target.whl"] if wheel else []) + (["--dry-run"] if dry_run else [])
+    assert cli.main(["service", "upgrade", *flags]) == (0 if wheel else 1)
+    if not wheel:
+        assert deployment.events == []
+        assert str(deployment.host.package_root) in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("late_exit", [True, False])
+@pytest.mark.parametrize("manager_readable", [True, False])
+def test_stop_timeout_recovers_a_late_exit_and_cancels_drain(
+        deployment, late_exit, manager_readable, capsys):
+    mgr = service.manager(deployment.host, "test")
+    stop_deadline = []
+    original_stop = mgr.stop
+
+    def stop():
+        if stop_deadline:
+            original_stop()
+            return
+        deployment.events.append("stop")
+        deployment.elapsed[0] += service._STOP_WAIT_SECONDS
+        stop_deadline.append(deployment.elapsed[0])
+        raise service.ServiceError("stop deadline passed")
+
+    def state():
+        if not manager_readable and "stop" in deployment.events and "start" not in deployment.events:
+            raise service.ServiceError("manager unavailable")
+        return deployment.state
+
+    def alive(pid):
+        living = not late_exit or deployment.elapsed[0] <= stop_deadline[0]
+        if not living:
+            deployment.state.running = False
+            deployment.state.pid = None
+        return living
+
+    mgr.stop, mgr.state = stop, state
+    deployment.host.pid_alive = alive
+    assert cli.main(["service", "upgrade"]) == 1
+    assert deployment.events.count("start") == int(late_exit)
+    assert "install" not in deployment.events
+    assert deployment.events[-1] == "drain_cancel"
+    data = report(deployment)
+    assert data["status"] == "failed"
+    assert ("recovery_error" in data) is not late_exit
+    if not late_exit:
+        assert "old service process is still running" in data["recovery_error"]
+    assert "serving: yes" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("renew_error", [None, service.ServiceError, OSError])
+def test_stop_wait_renews_drain_best_effort(deployment, renew_error):
+    deployment.statuses[:] = [{"phase": "drained"}]
+    deployment.host.pid_alive = lambda pid: deployment.elapsed[0] < 2 * service._POLL_SECONDS
+    operation = deployment.host.system_operation
+
+    def renew(port, token, name, args):
+        result = operation(port, token, name, args)
+        if name == "drain_status" and renew_error is not None:
+            raise renew_error("old service no longer answers")
+        return result
+
+    deployment.host.system_operation = renew
+    assert cli.main(["service", "upgrade"]) == 0
+    assert deployment.events.count("drain_status") == 2
+
+
+@pytest.mark.parametrize("live_pid", [False, True])
+def test_failed_start_stops_the_unit_before_retry_even_without_a_live_pid(deployment, live_pid):
+    mgr = service.manager(deployment.host, "test")
+    start = mgr.start
+
+    def fail_once():
+        if deployment.events.count("start") == 0:
+            deployment.events.append("start")
+            deployment.state.running = live_pid
+            deployment.state.pid = 123456790 if live_pid else None
+            raise service.ServiceError("first start failed")
+        start()
+
+    mgr.start = fail_once
+    deployment.host.pid_alive = lambda pid: deployment.state.pid == pid
+    assert cli.main(["service", "upgrade"]) == 1
+    assert deployment.events.count("start") == 2
+    assert deployment.events.count("stop") == 2
+    assert report(deployment)["serving"] is True
 
 
 @pytest.mark.parametrize("deadline", [False, True])
@@ -189,7 +451,9 @@ def test_atomic_dashboard_publication_replaces_nonempty_directory(tmp_path):
 def test_wheel_installer_targets_current_interpreter(deployment, pip_available):
     commands = []
 
-    def run(argv):
+    def run(argv, **kwargs):
+        if "-c" in argv:
+            return subprocess.CompletedProcess(argv, 0, wheel_paths(deployment.host), "")
         commands.append(list(argv))
         return subprocess.CompletedProcess(argv, 0 if pip_available or argv[-1] != "--version" else 1, "", "")
 
@@ -197,9 +461,11 @@ def test_wheel_installer_targets_current_interpreter(deployment, pip_available):
     # The production installer is replaced by the ordering fixture, so restore
     # the original from a saved reference below for this command-boundary test.
     _REAL_INSTALLER(deployment.host, "/candidate.whl", wheel=True, build_web=False, dependencies=True)
-    expected = (["python", "-m", "pip", "install", "--force-reinstall", "/candidate.whl"] if pip_available else
-                ["uv", "pip", "install", "--python", "python", "--reinstall", "/candidate.whl"])
-    assert commands == [["python", "-m", "pip", "--version"], expected]
+    prefix = str(deployment.host.cwd / ".venv")
+    expected = (["python", "-I", "-m", "pip", "install", "--force-reinstall"] if pip_available else
+                ["uv", "pip", "install", "--python", "python", "--reinstall"])
+    assert commands == [["python", "-I", "-m", "pip", "--version"],
+                        [*expected, "--prefix", prefix, "/candidate.whl"]]
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
@@ -277,7 +543,9 @@ def test_wheel_dashboard_is_staged_and_published_atomically_while_http_serves(
     monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(static))
     installs = []
 
-    def install(argv):
+    def install(argv, **kwargs):
+        if "-c" in argv:
+            return subprocess.CompletedProcess(argv, 0, wheel_paths(deployment.host), "")
         if "install" in argv:
             assert "--no-deps" in argv
             with zipfile.ZipFile(argv[-1]) as archive:
@@ -321,8 +589,8 @@ def test_wheel_dashboard_is_staged_and_published_atomically_while_http_serves(
 
 
 def test_cli_repeated_wheel_upgrade_preserves_dashboard_without_dependency_reinstall(deployment, tmp_path, monkeypatch):
-    static = tmp_path / "dashboard"
-    static.mkdir()
+    static = tmp_path / "looper/web/dashboard"
+    static.mkdir(parents=True)
     files = {"index.html": b"dashboard", "assets/app.js": b"script"}
     wheel = tmp_path / "same-version.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
@@ -336,7 +604,9 @@ def test_cli_repeated_wheel_upgrade_preserves_dashboard_without_dependency_reins
     monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
     installs = []
 
-    def install(argv):
+    def install(argv, **kwargs):
+        if "-c" in argv:
+            return subprocess.CompletedProcess(argv, 0, wheel_paths(deployment.host), "")
         if "install" in argv:
             assert "--no-deps" in argv
             with zipfile.ZipFile(argv[-1]) as archive:
@@ -358,8 +628,8 @@ def test_cli_repeated_wheel_upgrade_preserves_dashboard_without_dependency_reins
 
 
 @pytest.mark.parametrize("pip_available", [True, False], ids=["pip", "uv"])
-@pytest.mark.parametrize("change", [None, "web"], ids=["noop", "web_only"])
-def test_wheel_upgrade_installs_cli_code_and_metadata_without_restart(
+@pytest.mark.parametrize("change", [None, "web", "control_plane"], ids=["noop", "web_only", "full"])
+def test_wheel_upgrade_installs_cli_code_and_metadata_in_service_environment(
         deployment, tmp_path, monkeypatch, pip_available, change):
     environment = tmp_path / "venv"
     venv.EnvBuilder(with_pip=True).create(environment)
@@ -368,9 +638,10 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_without_restart(
     monkeypatch.setenv("PIP_CONFIG_FILE", os.devnull)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
 
-    def execute(argv):
+    def execute(argv, *, env=None):
         return subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, timeout=30,
-                              env={k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
+                              env=env if env is not None else
+                              {k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
 
     wheels = []
     for version, marker in (("1.0.0", "old"), ("1.0.1", "fixed")):
@@ -402,11 +673,13 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_without_restart(
     monkeypatch.setattr(service, "__file__", str(site / "looper/agents/service.py"))
     monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
     deployment.host.executable = python
+    deployment.host.package_root = site
     deployment.scenario.target = manifest(change, version="1.0.1")
     monkeypatch.setattr(components, "manifest_from_wheel", lambda path: deployment.scenario.target)
     installations = []
+    restarts = change == "control_plane"
 
-    def run(argv):
+    def run(argv, *, env=None):
         assert {p.relative_to(static).as_posix(): p.read_bytes()
                 for p in static.rglob("*") if p.is_file()} == original
         if argv[-1] == "--version" and not pip_available:
@@ -415,11 +688,15 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_without_restart(
             with zipfile.ZipFile(argv[-1]) as archive:
                 assert "looper/cli.py" in archive.namelist()
                 assert "looper/agents/service.py" in archive.namelist()
-                assert not any(name.startswith("looper/web/dashboard/") for name in archive.namelist())
-            assert all("looper/web/dashboard/" not in p.read_text()
-                       for p in site.glob("looper-*.dist-info/RECORD"))
+                if "--no-deps" in argv:
+                    assert not any(name.startswith("looper/web/dashboard/") for name in archive.namelist())
+            if "--no-deps" in argv:
+                assert all("looper/web/dashboard/" not in p.read_text()
+                           for p in site.glob("looper-*.dist-info/RECORD"))
+            else:
+                assert not deployment.state.running
             installations.append(list(argv))
-        result = execute(argv)
+        result = execute(argv, env=env)
         assert {p.relative_to(static).as_posix(): p.read_bytes()
                 for p in static.rglob("*") if p.is_file()} == original
         return result
@@ -427,17 +704,40 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_without_restart(
     deployment.host.run = run
     before = execute([str(environment / "bin/looper")])
     assert before.stdout.strip() == "1.0.0 old old"
+    redirected = tmp_path / "redirected"
+    pip_config = tmp_path / "pip.conf"
+    pip_config.write_text(f"[install]\ntarget = {redirected / 'config'}\n")
+    if change is None:
+        monkeypatch.setenv("PIP_TARGET", str(redirected / "pip-target"))
+    monkeypatch.setenv("PIP_CONFIG_FILE", str(pip_config))
+    # A venv-local config must also be ignored, independently of PIP_CONFIG_FILE.
+    (environment / "pip.conf").write_text(f"[install]\ntarget = {redirected / 'site-config'}\n")
+    deployment.host.environ = dict(os.environ)
+    operation = deployment.host.system_operation
+
+    def drain(port, token, name, args):
+        if name == "drain":
+            # The installation must use the environment validated before draining.
+            deployment.host.environ.update(PIP_TARGET=str(redirected / "after-drain"),
+                                           PIP_PREFIX=str(redirected / "after-drain-prefix"))
+            monkeypatch.setenv("PIP_TARGET", str(redirected / "after-drain"))
+        return operation(port, token, name, args)
+
+    deployment.host.system_operation = drain
     deployment.host.get_index = lambda *args: (static / "index.html").read_bytes()
+    deployment.host.get_whoami = lambda *args: {
+        "looper_version": "1.0.1" if restarts and installations else "1.0.0"}
     deployment.host.get_components = lambda *args: components.Manifest(
-        "1.0.0", "startup", (deployment.scenario.target if installations else deployment.scenario.current).components,
+        "1.0.1" if restarts and installations else "1.0.0", "startup",
+        (deployment.scenario.target if installations else deployment.scenario.current).components,
         deployment.scenario.current.adoption, {"web": components.web_fingerprints(static)[1]}).to_dict()
     for attempt in range(2):
         assert cli.main(["service", "upgrade", "--to", str(wheels[1])]) == 0
         data = report(deployment)
-        assert data["plan"] == ("WEB_ONLY" if change and attempt == 0 else "NOOP")
+        assert data["plan"] == (("FULL" if restarts else "WEB_ONLY") if change and attempt == 0 else "NOOP")
         assert data["status"] == "ok"
         assert data["installed_package_version"] == "1.0.1"
-        assert data["running_version"] == "1.0.0"
+        assert data["running_version"] == ("1.0.1" if restarts else "1.0.0")
         assert execute([str(environment / "bin/looper")]).stdout.strip() == "1.0.1 fixed fixed"
         metadata = execute([python, "-c", "from importlib.metadata import version; print(version('looper'))"])
         assert metadata.stdout.strip() == "1.0.1"
@@ -445,8 +745,9 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_without_restart(
         record = (site / "looper-1.0.1.dist-info/RECORD").read_text()
         assert all("looper/web/dashboard/" + name + "," in record for name in original)
     assert len(installations) == 2
-    assert all("--no-deps" in argv for argv in installations)
-    assert deployment.events == []
+    assert ["--no-deps" in argv for argv in installations] == [not restarts, True]
+    assert deployment.events == (["drain", "drain_status", "stop", "start"] if restarts else [])
+    assert not redirected.exists()
     assert not list(static.parent.glob(".*-upgrade-*"))
 
 
@@ -476,7 +777,9 @@ def test_failed_wheel_dashboard_publication_preserves_all_current_files(
         def fail(*args):
             raise service.ServiceError("atomic exchange refused")
         monkeypatch.setattr(service, "_swap_directory", fail)
-    def install(argv):
+    def install(argv, **kwargs):
+        if "-c" in argv:
+            return subprocess.CompletedProcess(argv, 0, wheel_paths(deployment.host), "")
         assert failure in ("install", "swap"), "invalid dashboard must fail before package installation"
         assert {p.name: p.read_bytes() for p in static.iterdir()} == original
         if "install" in argv:
@@ -507,8 +810,10 @@ def checkout_install(deployment, tmp_path):
     config.write_bytes(components.CONFIG.read_bytes())
     commands = []
 
-    def run(argv):
+    def run(argv, **kwargs):
         commands.append(list(argv))
+        if argv[:3] == [deployment.host.executable, "-I", "-c"]:
+            return subprocess.CompletedProcess(argv, 0, str(tmp_path / ".venv"), "")
         if "--outDir" in argv:
             staged = Path(argv[-1])
             (staged / "assets").mkdir()
@@ -559,7 +864,10 @@ def test_dashboard_publication_sets_readable_directory_and_file_modes(tmp_path, 
 
 
 @pytest.mark.parametrize("recovery_serves", [True, False])
-def test_failed_start_retries_new_install_and_reports_serving(deployment, recovery_serves):
+def test_failed_start_retries_new_install_and_reports_serving(deployment, recovery_serves, capsys):
+    log = deployment.root / "logs/serve.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("startup output\n")
     deployment.host.get_status = lambda *args: (
         {"status": "ok"} if recovery_serves and deployment.events.count("start") == 2 else None)
     assert cli.main(["service", "upgrade", "--timeout", "1"]) == 1
@@ -570,6 +878,33 @@ def test_failed_start_retries_new_install_and_reports_serving(deployment, recove
     assert data["status"] == "failed"
     assert data["serving"] is recovery_serves
     assert ("recovery_error" in data) is not recovery_serves
+    error_line = capsys.readouterr().err.splitlines()[0]
+    assert f"serving: {'yes' if recovery_serves else 'no'}" in error_line
+    if recovery_serves:
+        assert data["running_code_fingerprint"] == deployment.scenario.target.components["control_plane"]
+    else:
+        assert data["running_code_fingerprint"] is None
+        assert data["running_code_fingerprint_error"]
+        assert data["restart_hint"] == "looper service restart"
+        assert data["restart_hint"] in error_line
+
+
+def test_serving_failure_reports_unknown_fingerprint_when_readback_fails(deployment):
+    reads = []
+
+    def components_readback(*args):
+        reads.append(True)
+        if len(reads) == 1:
+            return deployment.scenario.current.to_dict()
+        raise service.ServiceError("components unavailable")
+
+    deployment.scenario.install_error = True
+    deployment.host.get_components = components_readback
+    assert cli.main(["service", "upgrade"]) == 1
+    data = report(deployment)
+    assert data["serving"] is True
+    assert data["running_code_fingerprint"] is None
+    assert data["running_code_fingerprint_error"] == "components unavailable"
 
 
 @pytest.mark.parametrize("kind", [UpgradeKind.CONTROL_PLANE, UpgradeKind.FULL])
@@ -616,7 +951,11 @@ def test_checkout_untracked_fingerprinted_files_refused_before_drain(
     else:
         source.write_text("untracked source")
 
+    probe = deployment.host.run
+
     def run(argv):
+        if argv[0] == deployment.host.executable:
+            return probe(argv)
         if "rev-parse" in argv:
             return subprocess.CompletedProcess(argv, 0, "1" * 40, "")
         return subprocess.run(argv, capture_output=True, text=True, timeout=10)

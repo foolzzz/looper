@@ -57,6 +57,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,10 +102,11 @@ class ServiceError(RuntimeError):
     """A service command could not do its job; the message says why and what to do."""
 
 
-def _run(argv: Sequence[str], *, timeout: float = _COMMAND_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+def _run(argv: Sequence[str], *, timeout: float = _COMMAND_TIMEOUT_SECONDS,
+         env: Mapping[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(list(argv), capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                              timeout=timeout)
+                              timeout=timeout, env=env)
     except FileNotFoundError as exc:
         raise ServiceError(f"`{argv[0]}` is not on PATH") from exc
     except subprocess.TimeoutExpired as exc:
@@ -213,7 +215,8 @@ class Host:
     environ: Mapping[str, str]
     executable: str  # the interpreter running looper
     cwd: Path
-    run: Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+    run: Callable[..., subprocess.CompletedProcess[str]]
+    package_root: Path = Path(__file__).resolve().parents[2]
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
     get_status: Callable[[int, str | None, str], dict | None] = _get_status
@@ -988,8 +991,10 @@ def doctor_check(host: Host | None = None, label: str = DEFAULT_LABEL) -> Check:
                  f"run `looper service restart`; the log is {state.log_path or 'under the runtime root'}")
 
 
-def _checked(host: Host, argv: Sequence[str], *, installing: bool = False) -> str:
-    result = (_run(argv, timeout=600) if installing and host.run is _run else host.run(argv))
+def _checked(host: Host, argv: Sequence[str], *, installing: bool = False,
+             env: Mapping[str, str] | None = None) -> str:
+    kwargs = {"env": env} if env is not None else {}
+    result = (_run(argv, timeout=600, **kwargs) if installing and host.run is _run else host.run(argv, **kwargs))
     if result.returncode:
         raise ServiceError(f"`{shlex.join(argv)}` failed: {(result.stderr or result.stdout).strip()}")
     return result.stdout.strip()
@@ -1071,19 +1076,45 @@ def _dashboard_safe_wheel(source: str, directory: Path):
                     csv.writer(output).writerows(dashboard_rows)
 
 
-def _install_wheel(host: Host, source: str, *, dependencies: bool) -> None:
+def _wheel_install_environment(host: Host, package_root: Path) -> dict[str, str]:
+    # Inspect the interpreter's prefix scheme, then use that same prefix for both
+    # installers. An editable checkout or a user/target install is not this scheme.
+    output = _checked(host, [host.executable, "-I", "-c",
+        "import json, sys, sysconfig; "
+        "paths = sysconfig.get_paths(scheme=sysconfig.get_preferred_scheme('prefix')); "
+        "print(json.dumps([sys.prefix, paths['purelib'], paths['platlib']]))"])
+    prefix, purelib, platlib = map(Path, json.loads(output))
+    if not all(path.is_absolute() for path in (prefix, purelib, platlib)):
+        raise ServiceError("cannot resolve the service interpreter's installation paths")
+    if package_root.resolve() not in (purelib.resolve(), platlib.resolve()):
+        raise ServiceError(f"the service package in {package_root} is outside the interpreter's installation "
+                           f"paths {purelib} and {platlib}; refusing to install a wheel")
+    redirects = {"PIP_TARGET", "PIP_PREFIX", "PIP_ROOT", "PIP_USER", "PIP_PYTHON",
+                 "UV_TARGET", "UV_PREFIX", "UV_PYTHON", "UV_PROJECT_ENVIRONMENT", "UV_SYSTEM_PYTHON",
+                 "UV_CONFIG_FILE", "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"}
+    # PIP_CONFIG_FILE=/dev/null disables global, user and venv-local pip config;
+    # uv's no-config mode likewise prevents project/user config from retargeting.
+    return {**{name: value for name, value in host.environ.items() if name not in redirects},
+            "PIP_CONFIG_FILE": os.devnull, "PIP_PREFIX": str(prefix), "UV_NO_CONFIG": "true"}
+
+
+def _install_wheel(host: Host, source: str, *, dependencies: bool, environment: Mapping[str, str]) -> None:
     # uv tool environments omit pip; target that same interpreter with uv's pip interface.
-    has_pip = host.run([host.executable, "-m", "pip", "--version"]).returncode == 0
-    command = ([host.executable, "-m", "pip", "install", "--force-reinstall"] if has_pip else
+    has_pip = host.run([host.executable, "-I", "-m", "pip", "--version"], env=environment).returncode == 0
+    command = ([host.executable, "-I", "-m", "pip", "install", "--force-reinstall"] if has_pip else
                ["uv", "pip", "install", "--python", host.executable, "--reinstall"])
-    _checked(host, [*command, *([] if dependencies else ["--no-deps"]), source], installing=True)
+    _checked(host, [*command, "--prefix", environment["PIP_PREFIX"],
+                   *([] if dependencies else ["--no-deps"]), source], installing=True, env=environment)
 
 
 def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
-                    dependencies: bool = True) -> tuple[bytes, str] | None:
+                    dependencies: bool = True, sync_environment: Path | None = None,
+                    wheel_environment: Mapping[str, str] | None = None) -> tuple[bytes, str] | None:
     from ..components import record_web_source, web_fingerprints
 
     if wheel:
+        if wheel_environment is None:
+            wheel_environment = _wheel_install_environment(host, host.package_root)
         if not dependencies:
             from .http_server import default_static_dir
 
@@ -1107,17 +1138,22 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
                     raise ServiceError("the wheel dashboard did not contain index.html")
                 expected = ((staged / "index.html").read_bytes(), web_fingerprints(staged)[1])
                 with _dashboard_safe_wheel(source, destination.parent) as filtered:
-                    _install_wheel(host, filtered, dependencies=False)
+                    _install_wheel(host, filtered, dependencies=False, environment=wheel_environment)
                 _swap_directory(staged, destination)
                 return expected
             finally:
                 shutil.rmtree(staged, ignore_errors=True)
-        _install_wheel(host, source, dependencies=dependencies)
+        _install_wheel(host, source, dependencies=dependencies, environment=wheel_environment)
         return None
+    if dependencies and sync_environment is None:
+        sync_environment = _checkout_sync_environment(host)
     _checked(host, ["git", "-C", str(host.cwd), "merge", "--ff-only", source], installing=True)
     if dependencies:
         # Keep deploy's test extra and any other packages already in the venv.
-        _checked(host, ["uv", "sync", "--project", str(host.cwd), "--extra", "test", "--inexact"], installing=True)
+        # Pin the preflight result even if the caller's environment changes while draining.
+        _checked(host, ["uv", "sync", "--project", str(host.cwd), "--python", host.executable,
+                        "--extra", "test", "--inexact"], installing=True,
+                 env={**host.environ, "UV_PROJECT_ENVIRONMENT": str(sync_environment)})
     if not build_web:
         return None
     web = host.cwd / "web"
@@ -1145,10 +1181,22 @@ def _deploy_report(report: dict, log_path: Path | None) -> str:
     return line
 
 
-def _stop_for_install(mgr: _Manager, before: int | None) -> None:
-    mgr.stop()
+def _stop_with_renewal(mgr: _Manager, renew: Callable[[], None] | None) -> None:
+    # Both systemctl stop and launchd's unload wait can outlast the drain lease.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        stopping = executor.submit(mgr.stop)
+        while not wait([stopping], timeout=5).done:
+            if renew is not None:
+                renew()
+        stopping.result()
+
+
+def _stop_for_install(mgr: _Manager, before: int | None, renew: Callable[[], None] | None = None) -> None:
+    _stop_with_renewal(mgr, renew)
     deadline = mgr.host.clock() + _STOP_WAIT_SECONDS
     while mgr.state().running or (before is not None and mgr.host.pid_alive(before)):
+        if renew is not None:
+            renew()
         if mgr.host.clock() >= deadline:
             raise ServiceError("old service process is still running; refusing to install")
         mgr.host.sleep(_POLL_SECONDS)
@@ -1189,6 +1237,13 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
     token = operator_auth.read_token(root)
     if not token:
         raise ServiceError("the service operator token is missing")
+
+    def renew() -> None:
+        try:
+            host.system_operation(port, token, "drain_status", {})
+        except (ServiceError, OSError):
+            pass  # The old process may already have closed its listener.
+
     report = {"plan": plan.kind.value, "reasons": list(plan.reasons), "drain_seconds": 0.0,
               "gap_seconds": 0.0, "interrupted": [], "kept_before": 0, "adopted": 0,
               "running_code_fingerprint": running.components["control_plane"],
@@ -1225,7 +1280,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 status = host.system_operation(port, token, "drain_status", {})
             gap_started = host.clock()
             stop_attempted = True
-            _stop_for_install(mgr, before)
+            _stop_for_install(mgr, before, renew)
             stopped = True
             if installer:
                 expected = installer()
@@ -1257,29 +1312,67 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             try:
                 # bootout/stop can take effect and then report an error. Check
                 # exit evidence before deciding that only drain_cancel is needed.
-                if stop_attempted and not stopped and before is not None and not host.pid_alive(before):
-                    try:
-                        stopped = not mgr.state().running
-                    except ServiceError:
-                        stopped = not host.port_in_use(port)
+                if stop_attempted and not stopped and before is not None:
+                    deadline = host.clock() + _STOP_WAIT_SECONDS
+                    while host.pid_alive(before):
+                        renew()
+                        if host.clock() >= deadline:
+                            report["recovery_error"] = ("the old service process is still running; "
+                                                        "run `looper service restart` once it exits")
+                            break
+                        host.sleep(_POLL_SECONDS)
+                    else:
+                        stopped = True
                 # A timed-out start can leave a loaded unit or a partial process.
                 # Retry the current install from a stopped unit before cancelling.
                 if stopped:
+                    pid = None
                     if start_attempted:
-                        _stop_for_install(mgr, mgr.state().pid)
+                        pid = mgr.state().pid
+                    if pid is not None and host.pid_alive(pid):
+                        _stop_for_install(mgr, pid, renew)
+                    else:
+                        # An exited launchd job can remain loaded forever;
+                        # bootstrap needs a completed bootout even without a PID.
+                        _stop_with_renewal(mgr, renew)
+                    if host.port_in_use(port):
+                        answer = host.get_status(port, token, "127.0.0.1") or {}
+                        if "pid" not in answer:
+                            try:
+                                answer = host.system_operation(port, token, "health", {})
+                            except (ServiceError, OSError):
+                                pass
+                        raise ServiceError(f"port {port} is served by pid {answer.get('pid', 'unknown')}; "
+                                           "refusing to start another service")
                     _start_and_wait(mgr, port, log_path, timeout, root)
-                host.system_operation(port, token, "drain_cancel", {})
             except Exception as cancel_error:
                 report["recovery_error"] = str(cancel_error)
+            try:
+                host.system_operation(port, token, "drain_cancel", {})
+            except (ServiceError, OSError) as cancel_error:
+                report["recovery_error"] = "; ".join(filter(None, (report.get("recovery_error"), str(cancel_error))))
         try:
             answer = host.get_status(port, token, "127.0.0.1")
             report["serving"] = answer is not None and answer.get("status") != "unauthorized"
         except Exception:
             report["serving"] = False
+        report["running_code_fingerprint"] = None
+        if report["serving"]:
+            try:
+                actual = Manifest.from_dict(host.get_components(port, token))
+                report["running_code_fingerprint"] = actual.components["control_plane"]
+            except Exception as fingerprint_error:
+                report["running_code_fingerprint_error"] = str(fingerprint_error)
+        else:
+            report["running_code_fingerprint_error"] = "the service is not serving"
+            report["restart_hint"] = "looper service restart"
         line = _deploy_report(report, log_path)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
-        raise ServiceError(f"{exc}\n{line}") from exc
+        serving = "yes" if report["serving"] else "no"
+        hint = f"; run `{report['restart_hint']}`" if not report["serving"] else ""
+        error, separator, detail = str(exc).partition("\n")
+        raise ServiceError(f"{error}; serving: {serving}{hint}{separator}{detail}\n{line}") from exc
     return (f"plan       {plan.kind.value}\n"
             + "\n".join("reason     " + reason for reason in plan.reasons)
             + f"\nrunning code fingerprint {report['running_code_fingerprint']}, "
@@ -1304,6 +1397,44 @@ def _planned_restart(host: Host, *, label: str, timeout: float, drain_timeout: f
         running=running, target=None, installer=None, timeout=timeout, drain_timeout=drain_timeout, no_force=no_force)
 
 
+def _unit_package_root(host: Host, mgr: _Manager) -> Path:
+    try:
+        if host.system == "Darwin":
+            environment = dict(plistlib.loads(mgr.unit_path.read_bytes()).get("EnvironmentVariables", {}))
+        else:
+            # Environment values keep literal dollars; ExecStart's parser expands $$.
+            environment = dict(word.split("=", 1)
+                for line in mgr.unit_path.read_text().splitlines() if line.startswith("Environment=")
+                for word in _systemd_words(line.removeprefix("Environment=").replace("$$", "$$$$")) if "=" in word)
+        overrides = [name for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE") if environment.get(name)]
+        if overrides:
+            raise ServiceError("the service unit overrides Python imports with " + ", ".join(overrides)
+                               + "; reinstall the unit without these overrides before upgrading")
+        environment.setdefault("HOME", str(host.home))
+        result = host.run([host.executable, "-I", "-c",
+            "import looper, pathlib; print(pathlib.Path(looper.__file__).resolve().parent.parent)"], env=environment)
+    except (OSError, ValueError):
+        raise ServiceError(f"cannot resolve the service's package root with {host.executable}") from None
+    path = Path(result.stdout.strip())
+    if result.returncode or not path.is_absolute():
+        raise ServiceError(f"cannot resolve the service's package root with {host.executable}")
+    return path.resolve()
+
+
+def _checkout_sync_environment(host: Host) -> Path:
+    prefix = _checked(host, [host.executable, "-I", "-c",
+        "import sys; print(sys.prefix if sys.prefix != sys.base_prefix else '')"])
+    if not prefix or not Path(prefix).is_absolute():
+        raise ServiceError("checkout upgrades require the service interpreter to use a virtual environment")
+    environment = Path(prefix).resolve()
+    configured = Path(host.environ.get("UV_PROJECT_ENVIRONMENT") or ".venv")
+    destination = (host.cwd / configured).resolve()
+    if destination != environment:
+        raise ServiceError(f"UV_PROJECT_ENVIRONMENT selects {destination}, not the service's environment {environment}; "
+                           f"set UV_PROJECT_ENVIRONMENT={shlex.quote(str(environment))} before upgrading")
+    return environment
+
+
 def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dry_run: bool = False,
             timeout: float = DEFAULT_TIMEOUT_SECONDS, drain_timeout: float = 1200, turns_timeout: float = 180,
             no_force: bool = False) -> str:
@@ -1314,6 +1445,21 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
     try:
         wheel = bool(to and to.endswith(".whl"))
         source = str(Path(to).resolve()) if wheel else to or "origin/main"
+        mgr = manager(host, label)
+        port, log_path, root = mgr.unit_settings()
+        if port is None or root is None:
+            raise ServiceError("cannot locate the service port and runtime root; install the service first")
+        expected = looper_command(host.executable)
+        try:
+            argv = list(mgr.unit_argv())
+        except OSError as exc:
+            raise ServiceError("cannot read the service unit") from exc
+        if argv[:len(expected)] != expected:
+            raise ServiceError(f"the service runs {shlex.join(argv[:len(expected) or 1])}; "
+                               "run looper service upgrade with that looper")
+        package_root = _unit_package_root(host, mgr)
+        if not wheel and host.cwd.resolve() != package_root:
+            raise ServiceError(f"{host.cwd.resolve()} is not the service's checkout {package_root}")
         if not dry_run and not wheel:
             if _checked(host, ["git", "-C", str(host.cwd), "status", "--porcelain", "--untracked-files=no"]):
                 raise ServiceError("the installed checkout has tracked changes; refusing to upgrade")
@@ -1334,15 +1480,20 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
                                      "--end-of-options", source + "^{commit}"])
         target = (components.manifest_from_wheel(Path(source)) if wheel
                   else components.manifest_from_git(host.cwd, source))
-        mgr = manager(host, label)
-        port, log_path, root = mgr.unit_settings()
-        if port is None or root is None:
-            raise ServiceError("cannot locate the service port and runtime root; install the service first")
         token = operator_auth.read_token(root)
         if not token:
             raise ServiceError("the service operator token is missing")
         running = components.Manifest.from_dict(host.get_components(port, token))
         plan = decide(target, running, scan_keepers(root), keeper_mode=False)
+        dependencies = plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE)
+        sync_environment = _checkout_sync_environment(host) if not wheel and dependencies else None
+        if wheel and plan.kind in (UpgradeKind.WEB_ONLY, UpgradeKind.NOOP):
+            from .http_server import default_static_dir
+
+            destination = default_static_dir().resolve()
+            if destination not in (package_root / "web/dist", package_root / "looper/web/dashboard"):
+                raise ServiceError(f"{destination} is not the service's dashboard in {package_root}")
+        wheel_environment = _wheel_install_environment(host, package_root) if wheel else None
         if dry_run:
             return "\n".join((f"plan       {plan.kind.value}", f"target     {target.version}",
                 f"running    {running.version} (loaded {running.loaded_at})",
@@ -1351,7 +1502,7 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         return _execute_plan(host, mgr, port=port, root=root, log_path=log_path, plan=plan,
             running=running, target=target,
             installer=lambda: _install_target(host, source, wheel=wheel, build_web="web" in plan.changed_components,
-                dependencies=plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE)),
+                dependencies=dependencies, sync_environment=sync_environment, wheel_environment=wheel_environment),
             timeout=timeout, drain_timeout=drain_timeout, turns_timeout=turns_timeout, no_force=no_force)
     except (ValueError, KeyError, zipfile.BadZipFile) as exc:
         raise ServiceError(str(exc)) from exc

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import csv
 import hashlib
 import json
 import os
@@ -128,11 +129,27 @@ def _paths(directory: Path) -> Iterable[Path]:
             yield Path(current) / name
 
 
+def _source_paths(root: Path) -> Iterable[Path]:
+    if (root / ".git").exists():
+        names = _git(root, "ls-files", "-z", "--", "looper", "web", "runners", "pyproject.toml", "uv.lock")
+        return (root / name.decode() for name in names.split(b"\0") if name)
+    records = list(root.glob("looper-*.dist-info/RECORD"))
+    if records:
+        names = set()
+        for record in records:
+            with record.open(newline="") as source:
+                names.update(row[0] for row in csv.reader(source)
+                             if row and row[0].startswith("looper/") and ".." not in Path(row[0]).parts)
+        return (root / name for name in sorted(names))
+    # Unpacked source trees have neither Git metadata nor installed wheel records.
+    return (path for prefix in ("looper", "web", "runners") for path in _paths(root / prefix))
+
+
 def record_web_source(root: Path, dist: Path) -> str:
     """Record the source inputs actually used by a dashboard build."""
     patterns = tomllib.loads((root / "looper/components.toml").read_text())["components"]["web"]["include"]
     files = {path.relative_to(root).as_posix(): path.read_bytes()
-             for path in _paths(root / "web")
+             for path in _source_paths(root)
              if path.is_file() and _matches(path.relative_to(root).as_posix(), patterns)}
     fingerprint = _fingerprint(files)
     (dist / WEB_SOURCE_RECORD).write_text(fingerprint + "\n")
@@ -254,15 +271,19 @@ def manifest_from_wheel(path: Path) -> Manifest:
 def manifest_from_directory(root: Path) -> Manifest:
     """root is the directory containing looper, never the working directory."""
     files = {}
-    for prefix in ("looper", "web", "runners"):
-        for path in _paths(root / prefix):
-            relative = path.relative_to(root).as_posix()
-            if path.is_symlink():
-                files[relative] = os.readlink(path).encode()
-            elif (path.is_file() and "__pycache__" not in path.parts
-                    and "node_modules" not in path.parts and path.suffix != ".pyc"):
-                files[relative] = path.read_bytes()
-    files.update(_runtime_files(root))
+    for path in _source_paths(root):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            files[relative] = os.readlink(path).encode()
+        elif (path.is_file() and "__pycache__" not in path.parts
+              and "node_modules" not in path.parts and path.suffix != ".pyc"):
+            files[relative] = path.read_bytes()
+    # Dashboard assets are generated rather than tracked source inputs.
+    for path in _paths(root / "web/dist"):
+        if path.is_file():
+            files[path.relative_to(root).as_posix()] = path.read_bytes()
+    if not (root / ".git").exists() and not any(root.glob("looper-*.dist-info/RECORD")):
+        files.update(_runtime_files(root))
     manifest = _manifest(files, packaged=not (root / "web").is_dir())
     record = root / "web/dist" / WEB_SOURCE_RECORD
     if record.is_file():
