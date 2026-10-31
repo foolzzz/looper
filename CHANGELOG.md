@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.50] - 2026-10-31
+
+### Added
+
+- **Startup scan of kept-run directories.** `looper serve` now scans `.local/runs/*` after the process sweep and before it interrupts unfinished records, even with keepers off. A live keeper is ended with its child, a dead keeper's child is ended if still running, and the directory is removed; a keeper with unreadable `keeper.json` is identified by a unique spawn record naming its run directory, and is otherwise left in place with an error logged. If keeper liveness cannot be read, startup stops without deleting any run directory. ([#1017](https://github.com/foolzzz/looper/pull/1017))
+
+### Changed
+
+- **`proc_tree` no longer reads a failed `ps` as an empty process list.** A failed listing keeps the tree observed before the stop, never signals a reaped leader's pid or group directly, and keeps the agent's record; new `end_orphan` checks the start time first. Spawn records of a keeper's children carry `run_dir`. ([#1017](https://github.com/foolzzz/looper/pull/1017))
+- **Keeper process.** The keeper ends group members left after its child exits, drains its log pumps with a timeout before waiting, starts only one end task, and sets `stderr_truncated` in its state file when stderr reaches its limit. ([#1017](https://github.com/foolzzz/looper/pull/1017))
+
 ## [2.14.49] - 2026-10-31
 
 ### Added
