@@ -5,6 +5,8 @@ import os
 from enum import StrEnum
 from pathlib import Path
 
+from .protocol import PROTOCOL_VERSIONS as PROTOCOL_VERSIONS
+
 RUNS_DIR = Path(".local") / "runs"
 MANIFEST = "manifest.json"
 STATE = "keeper.json"
@@ -16,7 +18,6 @@ GRANT = "grant.json"
 SOCKET = "keeper.sock"
 LOG = "keeper.log"
 STATE_FORMAT = 1
-PROTOCOL_VERSIONS: tuple[str, ...] = ()
 DEFAULT_ORPHAN_TIMEOUT_S = 1800
 DEFAULT_STDOUT_LIMIT_BYTES = 512 * 1024 ** 2
 STDERR_LIMIT_BYTES = 64 * 1024 ** 2

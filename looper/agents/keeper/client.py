@@ -1,0 +1,278 @@
+"""Async keeper control client; connection loss never retries a write."""
+
+import asyncio
+import base64
+import inspect
+import logging
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .protocol import (MAX_FRAME_BYTES, MAX_STREAM_BYTES, PROTOCOL_VERSIONS, KeeperError,
+                       Stream, decode_data, encode, read_frame)
+
+logger = logging.getLogger(__name__)
+
+
+class KeeperGone(ConnectionError):
+    """The peer disappeared, or its stream could no longer be consumed safely."""
+
+
+@dataclass
+class _Unread:
+    callback: Callable
+    ranges: dict[Stream, tuple[int, int]] = field(default_factory=dict)
+
+
+class KeeperClient:
+    """Dispatch ordered notifications without letting callbacks block RPC replies.
+
+    The data queue holds at most 64 notifications (4 MiB of data). A bounded
+    overflow stores control events and confirmed byte ranges, replayed from
+    run_dir's logs. Data is
+    contiguous and ordered per stream; stdout/stderr interleaving within a
+    spilled range is not preserved. Control notifications retain their order.
+    run_dir defaults to the socket's parent directory.
+    """
+
+    def __init__(self):
+        self.on_data = lambda stream, offset, data: None
+        self.on_eof = lambda stream, offset: None
+        self.on_exited = lambda exit_code, signal: None
+        self.on_replaced = lambda epoch: None
+        self.on_closing = lambda stdout_offset, stderr_offset: None
+        self.on_closed = lambda: None
+        self._writer = self._reader_task = self._dispatcher_task = None
+        self._pending, self._offsets = {}, {}
+        self._next_id = 0
+        self._queued_bytes = 0
+
+    async def connect(self, socket_path, *, run_dir=None, timeout=10):
+        await self.close()
+        await self.wait_closed()
+        reader, self._writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(socket_path, limit=MAX_FRAME_BYTES), timeout)
+        self._offsets.clear()
+        self._run_dir = Path(run_dir) if run_dir is not None else Path(socket_path).parent
+        self._queued_bytes = 0
+        # At most 64 queued frames, each carrying at most MAX_STREAM_BYTES of data.
+        notifications = asyncio.Queue(maxsize=64)
+        overflow = deque()
+        available, finished = asyncio.Event(), asyncio.Event()
+        self._dispatcher_task = asyncio.create_task(self._dispatch(notifications, overflow, available, finished))
+        self._reader_task = asyncio.create_task(self._read(reader, notifications, overflow, available))
+        writer = self._writer
+        # A task cancelled before it starts never executes its coroutine's finally.
+        self._reader_task.add_done_callback(lambda _: self._disconnected(writer, available, finished))
+
+    async def initialize(self, *, epoch, looper_version, timeout=10) -> dict:
+        return await self._request("initialize", {"protocol_versions": PROTOCOL_VERSIONS,
+                                   "controller": {"epoch": epoch, "looper_version": looper_version}}, timeout)
+
+    async def subscribe(self, stream, from_offset, *, timeout=10):
+        stream = Stream(stream)
+        new = stream not in self._offsets
+        if new:
+            self._offsets[stream] = from_offset
+        try:
+            await self._request("stream/subscribe", {"stream": stream, "from_offset": from_offset}, timeout)
+        except BaseException:
+            if new:
+                self._offsets.pop(stream, None)
+            raise
+
+    async def stdin_write(self, data, expect_offset, *, timeout=10) -> int:
+        result = await self._request("stdin/write", {"data": base64.b64encode(data).decode("ascii"),
+                                                   "expect_offset": expect_offset}, timeout)
+        return result["offset"]
+
+    async def stdin_close(self, *, timeout=10):
+        await self._request("stdin/close", {}, timeout)
+
+    async def signal(self, sig, *, timeout=10):
+        await self._request("child/signal", {"signal": sig}, timeout)
+
+    async def end(self, *, timeout=15) -> tuple[int | None, int | None]:
+        # child/end deliberately uses proc_tree's fixed grace, with no grace_seconds parameter.
+        result = await self._request("child/end", {}, timeout)
+        return result["exit_code"], result["signal"]
+
+    async def _request(self, method, params, timeout):
+        writer = self._writer
+        if writer is None or writer.is_closing():
+            raise KeeperGone("keeper connection is closed")
+        self._next_id += 1
+        request_id = self._next_id
+        frame = encode({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        future = asyncio.get_running_loop().create_future()
+        self._pending[request_id] = future
+        try:
+            async with asyncio.timeout(timeout):
+                writer.write(frame)
+                await writer.drain()
+                return await future
+        except (ConnectionError, OSError) as exc:
+            # A dispatcher callback may be awaiting this RPC in a child task.
+            # Disconnect without joining the dispatcher, which would deadlock.
+            self._disconnect(writer)
+            # Disconnect has failed every future; retrieve this one's exception too.
+            if future.done() and not future.cancelled():
+                future.exception()
+            raise KeeperGone("keeper connection dropped") from exc
+        finally:
+            self._pending.pop(request_id, None)
+            if not future.done():
+                future.cancel()
+
+    async def _callback(self, callback, *args):
+        result = callback(*args)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _deliver(self, callback, args):
+        try:
+            await self._callback(callback, *args)
+        except (Exception, asyncio.CancelledError):
+            logger.exception("keeper notification callback failed")
+            await self.close()
+            if asyncio.current_task().cancelling():
+                raise
+
+    async def _replay(self, unread):
+        for stream, (offset, end) in unread.ranges.items():
+            with (self._run_dir / f"{stream}.log").open("rb", buffering=0) as source:
+                source.seek(offset)
+                # Never read beyond the bytes confirmed by stream/data notifications.
+                while offset < end:
+                    data = source.read(min(MAX_STREAM_BYTES, end - offset))
+                    if not data:
+                        raise KeeperGone("keeper log ends before its confirmed offset")
+                    await self._deliver(unread.callback, (stream, offset, data))
+                    offset += len(data)
+                    await asyncio.sleep(0)
+
+    async def _dispatch(self, notifications, overflow, available, finished):
+        try:
+            while True:
+                await available.wait()
+                available.clear()
+                while not notifications.empty() or overflow:
+                    item = notifications.get_nowait() if not notifications.empty() else overflow.popleft()
+                    if isinstance(item, _Unread):
+                        try:
+                            await self._replay(item)
+                        except (OSError, KeeperGone):
+                            logger.exception("cannot replay keeper log range")
+                            await self.close()
+                            return
+                    else:
+                        callback, args, data_size = item
+                        self._queued_bytes -= data_size
+                        await self._deliver(callback, args)
+                if finished.is_set():
+                    break
+        finally:
+            await self._callback(self.on_closed)
+
+    async def _read(self, reader, notifications, overflow, available):
+        try:
+            while True:
+                message = await read_frame(reader)
+                if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+                    raise ValueError("invalid keeper message")
+                if "id" in message:
+                    future = self._pending.get(message["id"])
+                    if future is not None and not future.done():
+                        if "error" in message:
+                            error = message["error"]
+                            future.set_exception(KeeperError(error["code"], error["message"], error.get("data")))
+                        else:
+                            future.set_result(message["result"])
+                    continue
+                method, params = message["method"], message["params"]
+                data_size = 0
+                if method in ("stream/data", "stream/eof"):
+                    stream, offset = Stream(params["stream"]), params["offset"]
+                    if type(offset) is not int or self._offsets.get(stream) != offset:
+                        raise ValueError("noncontiguous keeper stream")
+                    if method == "stream/data":
+                        data = decode_data(params["data"], MAX_STREAM_BYTES)
+                        data_size = len(data)
+                        self._offsets[stream] += len(data)
+                        callback, args = self.on_data, (stream, offset, data)
+                    else:
+                        callback, args = self.on_eof, (stream, offset)
+                elif method == "child/exited":
+                    callback, args = self.on_exited, (params["exit_code"], params["signal"])
+                elif method == "controller/replaced":
+                    callback, args = self.on_replaced, (params["epoch"],)
+                elif method == "keeper/closing":
+                    args = (params["stdout_offset"], params["stderr_offset"])
+                    if any(type(offset) is not int or offset < 0 for offset in args):
+                        raise ValueError("invalid final keeper offsets")
+                    callback = self.on_closing
+                else:
+                    continue
+                if overflow or notifications.full():
+                    # Coalesce consecutive spilled data, but seal ranges at control
+                    # events so replay cannot move later bytes ahead of those events.
+                    if method == "stream/data":
+                        if not overflow or not isinstance(overflow[-1], _Unread):
+                            if len(overflow) >= notifications.maxsize:
+                                raise ValueError("too many pending keeper notifications")
+                            overflow.append(_Unread(callback))
+                        ranges = overflow[-1].ranges
+                        start = ranges.get(stream, (offset, offset))[0]
+                        ranges[stream] = (start, self._offsets[stream])
+                        del data, args
+                    else:
+                        if len(overflow) >= notifications.maxsize:
+                            raise ValueError("too many pending keeper notifications")
+                        overflow.append((callback, args, 0))
+                else:
+                    notifications.put_nowait((callback, args, data_size))
+                    self._queued_bytes += data_size
+                available.set()
+        except (EOFError, KeeperError, ValueError, KeyError, TypeError, ConnectionError, OSError):
+            pass
+
+    def _disconnect(self, writer):
+        writer.close()
+        if self._writer is writer:
+            self._writer = None
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(KeeperGone("keeper connection dropped"))
+
+    def _disconnected(self, writer, available, finished):
+        self._disconnect(writer)
+        # Wake the dispatcher without needing space for a sentinel in a full queue.
+        finished.set()
+        available.set()
+
+    async def close(self):
+        """Close the connection without waiting for notification callbacks.
+
+        Callbacks may gather close() in child tasks, so joining the dispatcher
+        here would form a wait cycle. Use wait_closed() outside callbacks to
+        wait for queued notifications and on_closed to finish.
+        """
+        task, self._reader_task = self._reader_task, None
+        writer = self._writer
+        if writer is not None:
+            writer.close()
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if writer is not None:
+            try:
+                await asyncio.wait_for(writer.wait_closed(), 1)
+            except (TimeoutError, ConnectionError, OSError):
+                writer.transport.abort()
+
+    async def wait_closed(self):
+        """Wait for callback draining; call outside callbacks and their child tasks."""
+        dispatcher = self._dispatcher_task
+        if dispatcher is not None and dispatcher is not asyncio.current_task():
+            await asyncio.gather(dispatcher, return_exceptions=True)

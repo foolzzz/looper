@@ -15,6 +15,8 @@ from . import (CHUNK, DEFAULT_ORPHAN_TIMEOUT_S, DEFAULT_STDOUT_LIMIT_BYTES, MANI
                PROTOCOL_VERSIONS, STATE, STATE_FORMAT, STDERR, STDERR_LIMIT_BYTES,
                STDIN, STDOUT, EndReason, KeeperState, _write_all, read_json, write_json)
 
+from .server import KeeperServer
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,6 +25,10 @@ class Keeper:
         self.run_dir, self.runtime_root, self.cwd, self.argv = run_dir, runtime_root, cwd, argv
         self.run_id = run_dir.name
         self.child: asyncio.subprocess.Process | None = None
+        self.ready, self.finished = asyncio.Event(), asyncio.Event()
+        self.stdin_closed = False
+        self.eof = set()
+        self.server = KeeperServer(self)
         self.end_reason: EndReason | None = None
         self._end_task: asyncio.Task | None = None
         self._orphan_task: asyncio.Task | None = None
@@ -72,6 +78,15 @@ class Keeper:
         if self.child is not None and self._end_task is None:
             self._end_task = asyncio.create_task(proc_tree.end(self.child, label=f"keeper {self.run_id}"))
 
+    def append_stdin(self, data):
+        _write_all(self.fds[STDIN], data)
+        self.offsets[STDIN] += len(data)
+
+    async def _mark_eof(self, name):
+        async with self.conditions[name]:
+            self.eof.add(name)
+            self.conditions[name].notify_all()
+
     async def _pump(self, stream: asyncio.StreamReader, name: str, limit: int):
         while data := await stream.read(CHUNK):
             remaining = max(0, limit - self.offsets[name])
@@ -85,6 +100,7 @@ class Keeper:
                 self.request_end(EndReason.LOG_LIMIT)
             elif name == STDERR and self.offsets[name] >= limit and not self.state["stderr_truncated"]:
                 self._write_state(stderr_truncated=True)
+        await self._mark_eof(name)
 
     def _close_pipes(self):
         if self.child is not None:
@@ -145,6 +161,7 @@ class Keeper:
                 self.offsets[name] = os.fstat(self.fds[name]).st_size
             self._write_state(keeper_started=proc_tree._start_time(os.getpid()))
             try:
+                await self.server.start()
                 proc_tree.own_records(self.runtime_root, run_dir=self.run_dir)
                 self.child = await proc_tree.spawn(*self.argv, cwd=self.cwd, env=dict(os.environ),
                                                   stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -158,13 +175,20 @@ class Keeper:
                               child_started=proc_tree._start_time(self.child.pid))
             pumps = [asyncio.create_task(self._pump(self.child.stdout, STDOUT, self.stdout_limit_bytes)),
                      asyncio.create_task(self._pump(self.child.stderr, STDERR, STDERR_LIMIT_BYTES))]
-            self.controller_detached()
+            self.ready.set()
+            if self.server.controller is None:
+                self.controller_detached()
             if self.end_reason is not None:  # SIGTERM may have arrived while spawn was awaiting.
                 self._end_task = asyncio.create_task(proc_tree.end(self.child, label=f"keeper {self.run_id}"))
             await self._finish(pumps)
             for fd in self.fds.values():
                 os.fsync(fd)
+            for name in (STDOUT, STDERR):
+                await self._mark_eof(name)
+            self.stdin_closed = True
             self._exited(self.end_reason or EndReason.EXITED)
+            self.finished.set()
+            await self.server.finish()
             return 0
         except Exception as exc:
             logger.error("keeper failed run=%s: %s", self.run_id, type(exc).__name__)
@@ -189,6 +213,9 @@ class Keeper:
                 logger.error("cannot write keeper error state run=%s", self.run_id)
             return 1
         finally:
+            self.ready.set()
+            self.finished.set()
+            await self.server.close()
             self.controller_attached()
             for task in [*pumps, self._end_task]:
                 if task is not None and not task.done():

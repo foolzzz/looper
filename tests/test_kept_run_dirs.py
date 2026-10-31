@@ -3,7 +3,9 @@
 import asyncio
 import json
 import signal
+import stat
 import sys
+import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +18,13 @@ from looper.agents import housekeeping, keeper, kept_dirs, proc_tree
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def tmp_path():
+    # Pytest's per-test paths exceed the Unix socket path limit, even on Linux.
+    with tempfile.TemporaryDirectory(prefix="looper-kept-", dir="/tmp") as directory:
+        yield Path(directory)
 
 
 @asynccontextmanager
@@ -32,7 +41,7 @@ async def running_keeper(runtime_root):
     try:
         async with asyncio.timeout(10):
             while (state := keeper.read_json(directory / keeper.STATE) or {}).get("state") != "running":
-                assert process.returncode is None
+                assert process.returncode is None, state
                 await asyncio.sleep(0.03)
         yield directory, process, state
     finally:
@@ -60,8 +69,8 @@ def test_a_live_leftover_keeper_is_ended_before_the_scan_returns(tmp_path, monke
                 ended_states.append(keeper.read_json(path / keeper.STATE))
                 rmtree(path)
 
-            monkeypatch.setattr(kept_dirs.shutil, "rmtree", remove)
-            with caplog.at_level("INFO", logger=kept_dirs.__name__):
+            with monkeypatch.context() as patch, caplog.at_level("INFO", logger=kept_dirs.__name__):
+                patch.setattr(kept_dirs.shutil, "rmtree", remove)
                 scan = await kept_dirs.scan_at_start(tmp_path)
             assert scan.ended == {kept_dirs.Reason.NOT_ADOPTABLE: 1}
             assert scan.released == 0
@@ -323,15 +332,21 @@ def test_non_directory_entries_are_ignored(tmp_path):
 
 
 def test_housekeeping_leaves_kept_runs_alone(tmp_path):
+    def snapshot(directory):
+        # Preserve the entry set and file bytes; sockets have metadata, not readable contents.
+        return {path.name: path.read_bytes() if path.is_file() else path.lstat()
+                for path in directory.iterdir()}
+
     async def run():
         async with running_keeper(tmp_path) as (directory, process, state):
-            before = {path.name: path.read_bytes() for path in directory.iterdir()}
+            assert stat.S_ISSOCK((directory / keeper.SOCKET).lstat().st_mode)
+            before = snapshot(directory)
             report = await housekeeping.run_once(tmp_path, datetime.now(timezone.utc),
                                                  current_runner=None, commands=None)
             assert "retention" in report.failed_steps  # No database pool in this suite.
             assert process.returncode is None
             assert state["child_pid"] in proc_tree._snapshot()
-            assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+            assert snapshot(directory) == before
 
     asyncio.run(run())
 

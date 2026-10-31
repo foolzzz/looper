@@ -7,6 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
+from . import client as client  # Load the client before an in-place upgrade can replace its code.
 from .process import Keeper
 
 
