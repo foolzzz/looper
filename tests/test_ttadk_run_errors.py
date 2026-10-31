@@ -11,8 +11,11 @@ import pytest
 
 from fake_claude import fake_claude
 from looper.agents import log_redaction
+from looper.agents.bus import MessageBus
+from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+from looper.agents.runtimes import Launcher
 from looper.agents.system_prompt import SystemPrompt
-from looper.agents.tiers import planner, worker
+from looper.agents.tiers import manager, planner, worker
 from test_agent_planner_worker import _step_envelope, _worker_row
 from test_ttadk_runtime import CODEX, _launch
 
@@ -91,3 +94,57 @@ def test_ttadk_planner_without_result_records_sign_in_stderr(
 
     error = asyncio.run(asyncio.wait_for(run(), 8))
     _assert_diagnostic(error, agent_db)
+
+
+@pytest.mark.parametrize("launcher", [Launcher.TTADK, Launcher.NATIVE])
+@pytest.mark.parametrize("resuming", [False, True], ids=["new-session", "resume"])
+def test_manager_without_result_reports_stderr_only_for_unreliable_exit_codes(
+    launcher: Launcher, resuming: bool, failed_ttadk: str, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    launch = _launch(launcher, executable=failed_ttadk)
+    monkeypatch.setattr(manager, "load_agent_settings", AsyncMock(return_value=launch.settings))
+    if resuming:
+        agent_db.store.sessions["manager"] = {
+            "session_id": "expired-thread", "session_totals": {}, "runtime_type": "codex",
+            "profile_id": launch.profile.id, "provider_id": launch.profile.provider.id,
+        }
+
+    async def run() -> dict[str, Any]:
+        root = tmp_path / "runtime"
+        bus = MessageBus(runtime_root=root)
+        agent = manager.ManagerAgent(config=manager.ManagerConfig(work_dir=tmp_path), runtime_root=root)
+        agent._bus = bus
+        source = channel_address("web")
+        queue = bus.get_queue(source.agent_id)
+        try:
+            await agent._handle(MessageEnvelope.create(
+                source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                payload={"text": "hello"}, correlation_id="failed-sign-in",
+            ))
+            replies = []
+            while not queue.empty():
+                envelope = queue.get_nowait()
+                if envelope.message_type == MessageType.AGENT_REPLY:
+                    assert envelope.correlation_id == "failed-sign-in"
+                    replies.append(envelope.payload)
+            assert len(replies) == 1
+            return replies[0]
+        finally:
+            await agent.stop()
+            await bus.shutdown()
+
+    reply = asyncio.run(asyncio.wait_for(run(), 8))
+    runs = [call.kwargs for call in agent_db.finish_record.await_args_list]
+    assert len(runs) == (2 if resuming else 1)
+    assert all(run["status"] == "failed" for run in runs)
+    commands = [call.kwargs["metadata"]["command"] for call in agent_db.start_record.await_args_list]
+    assert ["resume" in command for command in commands] == ([True, False] if resuming else [False])
+    if resuming:
+        assert "expired-thread" in runs[0]["error"]
+        assert "retried in a new session" in runs[0]["error"]
+    for error in [reply["text"], reply["error"], *(run["error"] for run in runs)]:
+        assert (SIGN_IN_ERROR in error) is (launcher is Launcher.TTADK)
+        assert SECRET not in error and "synthetic-api-token" not in error
+        assert "discarded-prefix" not in error
+        assert len(error) <= 1200
