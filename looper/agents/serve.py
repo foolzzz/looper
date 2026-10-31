@@ -26,8 +26,6 @@ import dataclasses
 import logging
 import os
 import signal
-import socket
-import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -222,21 +220,6 @@ async def _register_bots(registry: ChannelRegistry, rows: list[dict[str, Any]], 
             adapter = await _lark_bot_adapter(row["config"], row["secret"], runtime_root, **kwargs)
         if adapter is not None and await _register_optional_channel(registry, adapter):
             started.append({**row, "app_id": found[0] if found else row.get("app_id")})
-
-
-async def _reload_bots(registry: ChannelRegistry, runtime_root: Path,
-                       manager_running: Callable[[str], bool], *, stop_chat: ChatStop) -> None:
-    """Apply restart-time channel settings without stopping the execution owner.
-
-    Stop the old ingress before reading storage: a failed refresh must never
-    leave a revoked sender authorized by an adapter's immutable allowlist.
-    """
-    for channel in registry.list_channels():
-        if channel["channel_type"] in BOT_TYPES:
-            await registry.unregister(channel["channel_id"])
-    rows = await _enabled_bot_rows()
-    await _register_bots(registry, rows, runtime_root, manager_running, ("telegram",), stop_chat=stop_chat)
-    await _register_bots(registry, rows, runtime_root, manager_running, ("lark", "lark_bot"), stop_chat=stop_chat)
 
 
 async def seed_channel_configs(pool: Any = None) -> None:
@@ -468,14 +451,6 @@ def _local_url(host: str, port: int) -> str:
     return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
 
 
-def _persistent_runners(ops: OpsConfig) -> bool:
-    if sys.platform != "linux":
-        return False
-    from .execution_host import read_host
-    # An edited ops file must not start recovery beside a live execution owner.
-    return ops.pi_runtime == "runner" or ops.dsh_runtime == "runner" or read_host(ops.runtime_root) is not None
-
-
 async def _run_agent_system(
     *,
     ops: OpsConfig,
@@ -486,24 +461,8 @@ async def _run_agent_system(
     runner_supervisor: RunnerSupervisor | None = None,
 ) -> None:
     """Own an opted-in or supplied runner, including when startup only partly completes."""
-    if runner_supervisor is None and _persistent_runners(ops):
-        from .execution_host import serve_frontend
-        await serve_frontend(ops=ops, work_dir=work_dir, claude_bin=claude_bin, skip_backup=skip_backup)
-        return
-    await _run_agent_system_local(ops=ops, runtime_root=runtime_root, work_dir=work_dir,
-        claude_bin=claude_bin, skip_backup=skip_backup, runner_supervisor=runner_supervisor)
-
-
-async def _run_agent_system_local(
-    *, ops: OpsConfig, runtime_root: Path, work_dir: Path, claude_bin: str = "claude",
-    skip_backup: bool = False, runner_supervisor: RunnerSupervisor | None = None,
-    http_socket: socket.socket | None = None, proxy_secret: str | None = None,
-) -> None:
-    """The execution owner. Only its termination closes runner sessions and sweeps on recovery."""
     kwargs = dict(ops=ops, runtime_root=runtime_root, work_dir=work_dir,
                   claude_bin=claude_bin, skip_backup=skip_backup)
-    if http_socket is not None:
-        kwargs.update(http_socket=http_socket, proxy_secret=proxy_secret)
     supervisors = [runner_supervisor] if runner_supervisor is not None else []
     if runner_supervisor is None:
         from .runtimes import pi_runner, dsh_runner
@@ -535,8 +494,6 @@ async def _run_agent_system_owned(
     skip_backup: bool = False,
     runner_supervisors: tuple[RunnerSupervisor, ...] = (),
     ownership: contextlib.AsyncExitStack | None = None,
-    http_socket: socket.socket | None = None,
-    proxy_secret: str | None = None,
 ) -> None:
     """Start the full agent system with the ops settings ``ops`` and run until interrupted."""
 
@@ -545,8 +502,6 @@ async def _run_agent_system_owned(
 
     from . import chat_settings, links, operator_notes, scheduler_settings, waits
     host, port = ops.host, ops.port
-    local_url = (_local_url("127.0.0.1", http_socket.getsockname()[1]) if http_socket is not None
-                 else _local_url(host, port))
     dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
     operator_notes.configure_root(ops.operator_notes_root)
 
@@ -649,8 +604,7 @@ async def _run_agent_system_owned(
     web_adapter = WebChannelAdapter(host=host, port=port)
     await registry.register(web_adapter)
 
-    # Every enabled bot runs as its own adapter (RFC §9.1); a replacement
-    # listener refreshes these rows in the retained host before it is admitted.
+    # Every enabled bot runs as its own adapter (RFC §9.1), read once at startup.
     bot_rows = await _enabled_bot_rows()
     lark_enabled = any(r["channel_type"] == "lark" for r in bot_rows)
 
@@ -686,7 +640,7 @@ async def _run_agent_system_owned(
     platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=None,
                         supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
     fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
-                         url=local_url, config=manager_config, broadcaster=broadcaster)
+                         url=_local_url(host, port), config=manager_config, broadcaster=broadcaster)
     if ownership is not None:
         ownership.push_async_callback(fleet.stop)
     task_router.manager_running = fleet.is_running
@@ -713,7 +667,7 @@ async def _run_agent_system_owned(
     platform = dataclasses.replace(platform, manager=manager, managers=fleet)
     from .ops.clients import ClientOps
     client_ops = ClientOps(platform)
-    planner_ops = PlannerOps(platform, url=local_url, dashboard_url=dashboard_url)
+    planner_ops = PlannerOps(platform, url=_local_url(host, port), dashboard_url=dashboard_url)
     task_router.planner_ops = planner_ops
     # Each task's agent room: its Planner's tools (with its token) and its runs' (each with a token of its own).
     from .ops.room import RoomOps
@@ -723,7 +677,7 @@ async def _run_agent_system_owned(
     consults = ConsultService(room=room, worker_pool=worker_pool, runtime_root=runtime_root, claude_bin=claude_bin)
     room.consults = consults
     planner_ops.room = room
-    room_ops = RoomOps(room, url=local_url)
+    room_ops = RoomOps(room, url=_local_url(host, port))
     worker_pool.room_ops = room_ops
 
     # The consults the last server left queued or running run again.
@@ -759,7 +713,6 @@ async def _run_agent_system_owned(
         client_ops=client_ops,
         ops_config=ops,
         channels=registry,
-        **({"listen_socket": http_socket, "proxy_secret": proxy_secret} if http_socket is not None else {}),
     )
     await http_server.start()
     # Its first pass handles the fires missed while the server was down.

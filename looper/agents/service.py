@@ -22,11 +22,9 @@ started before. ``bootout`` returns before the job is gone, and a ``bootstrap``
 issued meanwhile fails, so ``stop`` waits until ``launchctl print`` no longer
 finds the job and ``bootstrap`` is retried a few times.
 
-systemd units use ``KillMode=process``. With Pi/DSH runners, Linux serve owns
-the external listener and attaches to a persistent execution host, which keeps
-runner stdio, task coroutines and schedules across listener restarts. Only an
-execution-host exit runs agent shutdown/recovery. Command schedule runners
-also live in their own sessions and survive restarts.
+systemd units use ``KillMode=process``: serve ends the agents it started on
+shutdown, and the next startup's ``sweep`` cleans up any left behind; command
+schedule runners live in their own sessions and survive restarts.
 """
 
 from __future__ import annotations

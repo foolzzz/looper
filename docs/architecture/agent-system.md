@@ -954,26 +954,6 @@ does not start ([Channels](#channels)). The web dashboard stays local-only
 
 ### How an agent is stopped
 
-On Linux, when either Pi or DSH uses the default runner path, `looper serve`
-owns the public listener and attaches to a detached execution host
-(`execution_host.py`). The host owns the runners' stdio, tool callbacks,
-budgets, task coroutines, channels and scheduler. SIGTERM, SIGKILL, systemd
-stop/restart and service reinstallation replace only the listener; running
-tasks and schedules continue, including while the listener is stopped. A new
-listener authenticates to the same loopback channel using private state at
-`.local/execution-host.json` and verifies the host's PID and start time. It
-does not run startup recovery or interrupt the host's records. Internal tools
-use the host's own loopback address, independent of the public listener;
-forwarded browser requests retain their real peer and public-port cookies.
-
-The host keeps its loaded code and execution settings until it is stopped.
-Finish active work before terminating that host to reload execution code or
-change the ops settings; an incompatible ops file is refused while the host
-is alive. Its diagnostics remain in `logs/serve.log`. Terminating the
-host itself still follows the shutdown/recovery rules below. macOS and a
-Linux installation with both runtimes on the CLI path retain the direct
-server lifecycle.
-
 Looper starts every agent process in a session of its own: each Worker and
 Reviewer run, the resident Claude Code of the Manager and of each Planner,
 and each Codex or OMP turn. The processes an agent starts share its process
@@ -1057,8 +1037,7 @@ re-parented. Each stop logs one line:
 
 The agents no longer share the server's process group. So when the server
 itself is killed with SIGKILL or crashes, launchd's clean-up of the job's
-group does not reach them. The systemd user unit uses `KillMode=process` so
-it signals only the listener. Each agent
+group does not reach them (systemd still ends the whole cgroup). Each agent
 process is therefore started through `proc_tree.spawn`, which records it in
 `<runtime root>/.local/agent-processes/<pid>.json` until the process is
 reaped: its pid, its start time (`ps -o lstart=`, in UTC) and the pid and
