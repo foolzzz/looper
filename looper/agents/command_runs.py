@@ -225,7 +225,7 @@ class CommandRuns:
         except (KeyError, ValueError, TypeError):
             return None
 
-    def inspect(self, runs: Sequence[Mapping[str, Any]], now: datetime) -> dict[str, Observation]:
+    def inspect(self, runs: Sequence[Mapping[str, Any]], now: datetime, *, strict: bool = False) -> dict[str, Observation]:
         results: dict[str, Observation] = {}
         pending = []
         for run in runs:
@@ -266,6 +266,8 @@ class CommandRuns:
             except (OSError, subprocess.SubprocessError) as exc:
                 unknown = Unknown(f"{type(exc).__name__}: {exc}")
             if unknown is not None:
+                if strict:  # destructive cleanup keeps files when runners cannot be observed
+                    raise OSError(f"runner process query failed: {unknown.reason}")
                 logger.warning("could not observe command runners; retrying next tick: %s", unknown.reason)
         for run, directory, runner, pid, started in pending:
             identity = runner or {}
