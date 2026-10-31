@@ -1494,3 +1494,54 @@ def test_dsh_consult_snapshot_records_answer_and_new_run_without_changing_source
         assert not fork.exists()
 
     run_db(test, monkeypatch)
+
+
+def test_queued_consult_waits_then_answers_once_after_cancel(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents.consult import ConsultService
+    from looper.agents.room import RoomService
+    from tests.run_handle_support import ScriptedRun
+    from looper.agents.drain import DrainScope, DrainState
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        await _ran(pool, tmp_path / "work")
+        question = await _question(pool, "qty?")
+        handle = ScriptedRun([
+            {"type": "system", "subtype": "init", "session_id": "consult-fork"},
+            {"type": "result", "subtype": "success", "total_cost_usd": 0.01,
+             "result": json.dumps({"answers": [{"reply_to": question["id"], "body": "qty"}]})},
+        ], hold=True)
+        calls = _host_consults(monkeypatch, handle)
+        room = RoomService(batch_seconds=0)
+        workers = _service(tmp_path, room, _Pool({"worker-2": "running"})).worker_pool
+        drain = DrainState()
+        service = ConsultService(room=room, worker_pool=workers, runtime_root=tmp_path / "runtime", drain=drain)
+        service._recovered = True
+        room.consults = service
+        drain.add_source(lambda: {"consults": service.drain_waiting()})
+        source = tmp_path / "source-session"
+        source.mkdir()
+        monkeypatch.setattr(service, "_session_dir", lambda *args: source)
+        try:
+            drain.begin(DrainScope.RUNS)
+            member = (await room._context("task-r")).member("backend_rd@s1")
+            assert await service.ask("task-r", member, question) is None
+            # Let the queued coroutine attempt admission without waiting on a wall-clock sleep.
+            await asyncio.sleep(0)
+            assert await pool.fetchval("SELECT state FROM room_consults") == "queued"
+            assert calls == [] and service.drain_waiting() == 0
+            drain.cancel()
+            await asyncio.wait_for(handle.started.wait(), 5)
+            assert service.drain_waiting() == 1
+            assert drain.begin(DrainScope.RUNS)["waiting"]["consults"] == 1
+            handle.release.set()
+            assert (await _settled(pool))["state"] == "answered"
+            await until(lambda: not service._running)
+            assert len(calls) == 1 and service.drain_waiting() == 0
+            assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE kind = 'answer'") == 1
+            assert drain.snapshot()["phase"] == "drained"
+        finally:
+            handle.release.set()
+            await service.stop()
+
+    run_db(test, monkeypatch, timeout=25)

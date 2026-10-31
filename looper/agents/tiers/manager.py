@@ -45,6 +45,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ..broadcast import Broadcaster
+from ..drain import DrainState
 from ..bus import MessageBus
 from ..channels.chat_history import CHAT_RECORD, chat_record
 from ..supervisor import cancel_and_wait
@@ -575,6 +576,26 @@ def _chat_record(envelope: MessageEnvelope, message_id: str) -> dict[str, Any]:
     return {CHAT_RECORD: chat_record(key, message_id)}
 
 
+def _reply_route(envelope: MessageEnvelope) -> dict[str, Any]:
+    """Keep reply routing in the journaled answer, independent of the channel's in-memory correlation map."""
+    origin = _message_origin(envelope)
+    if origin["channel"] == "web":
+        context = envelope.payload.get("channel_context")
+        if isinstance(context, dict):
+            session, client_id = context.get("session_id"), context.get("client_message_id")
+            if isinstance(session, str) and session and isinstance(client_id, str) and client_id:
+                return {"reply_route": {"session_id": session, "message_id": f"{client_id}:reply"}}
+        return {}
+    if not origin["chat"] or not (origin["channel"] == "telegram" or is_lark(origin["channel"])):
+        return {}
+    route = {"chat_id": origin["chat"]}
+    if is_lark(origin["channel"]) and origin["group"]:
+        message_id = envelope.payload["channel_context"].get("message_id")
+        if isinstance(message_id, str) and message_id:
+            route["reply_to"] = message_id
+    return {"reply_route": route}
+
+
 def _with_blocks(text: str, blocks: list[str]) -> str:
     """A reply: Claude's words, then what Looper itself writes to the user (``Turn.blocks``)."""
     return "\n\n".join(part for part in (text.strip(), *blocks) if part)
@@ -658,7 +679,7 @@ def reply_envelope(original: MessageEnvelope, text: str, source: AgentAddress, *
         payload={"text": text, "outcome": outcome.value, **({"error": error} if error else {})},
         correlation_id=original.correlation_id,
         reply_to=original.message_id,
-        metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **record,
+        metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **_reply_route(original), **record,
                   **({gate_commands.SNAPSHOT_TOKEN: snapshot} if snapshot else {})},
     )
 
@@ -674,7 +695,9 @@ class ManagerAgent:
         broadcaster: Broadcaster | None = None,
         definition: ManagerDefinition | None = None,
         clock: Callable[[], float] = time.monotonic,
+        drain: DrainState | None = None,
     ) -> None:
+        self._drain = drain
         self._definition = definition or default_definition()
         self._log = self._definition.id
         # Set when the definition was turned off or deleted; the fleet (card 6) sets ``on_turned_off``.
@@ -861,6 +884,8 @@ class ManagerAgent:
         on, queued or not."""
         if envelope.target.agent_id != self.agent_id:
             return False
+        if self._drain is not None and self._drain.draining:
+            return False
         text = envelope.payload.get("text")
         if not isinstance(text, str) or not is_stop_command(text):
             self._register_turn(envelope)
@@ -1013,6 +1038,10 @@ class ManagerAgent:
             async for envelope in self._bus.subscribe(self.agent_id):
                 if not self._running:
                     break
+                # Before persisting chat, emitting status, commands, or taking _turn_lock.
+                # subscribe() acknowledges only after this handler returns; restart replays held messages.
+                if self._drain is not None:
+                    await self._drain.wait_serving()
                 self._handling = envelope
                 try:
                     await self._handle(envelope)
@@ -2435,6 +2464,7 @@ class ManagerAgent:
             payload=payload,
             correlation_id=last.correlation_id,
             metadata={"origin_channel_id": last.metadata.get("origin_channel_id"),
+                      **_reply_route(last),
                       **_chat_record(last, f"auto-{uuid.uuid4().hex[:12]}")},
         ))
 
@@ -2604,11 +2634,12 @@ class ManagerAgent:
                           persist: bool = True, outcome: ReplyOutcome | None = None,
                           snapshot: str | None = None) -> None:
         """Answer ``original``; ``error`` says why the turn failed (a chat channel shows it on its status line).
-        The channel keeps the answer in the chat's history once it has sent it; without ``persist`` it is not kept
-        (one about a user gate, whose discussion keeps the message). ``outcome`` is how the turn ended; by default
+        The channel keeps the answer in the chat's history once it has sent it; ``persist`` controls external chat
+        history (a user gate keeps its own discussion). Web replies always retain their recovery identity.
+        ``outcome`` is how the turn ended; by default
         failed with an ``error``, else answered."""
         assert self._bus is not None
-        record = _chat_record(original, f"{original.message_id}:reply") if persist else {}
+        record = None if persist else {}
         outcome = outcome or (ReplyOutcome.FAILED if error else ReplyOutcome.ANSWERED)
         await self._bus.publish(reply_envelope(original, text, self.agent_address, error=error, outcome=outcome,
                                                record=record, snapshot=snapshot))
@@ -2658,5 +2689,5 @@ class ManagerAgent:
             payload={"text": text, "delta": delta, "phase": phase, **extra},
             correlation_id=original.correlation_id,
             reply_to=original.message_id,
-            metadata={"origin_channel_id": original.metadata.get("origin_channel_id")},
+            metadata={"origin_channel_id": original.metadata.get("origin_channel_id"), **_reply_route(original)},
         ))

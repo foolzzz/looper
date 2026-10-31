@@ -153,6 +153,14 @@ class LarkChannelAdapter(ChannelAdapter):
             return await self._send_notice(notice.target, notice.text)
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
+        if chat_id is None and envelope.target == self._address:
+            # Restore both destinations: a group's answer/status must reply to its original message.
+            route = envelope.metadata.get("reply_route")
+            if isinstance(route, dict) and isinstance(route.get("chat_id"), str) and route["chat_id"]:
+                chat_id = route["chat_id"]
+                self._correlation_chat[corr_id] = chat_id
+                if isinstance(route.get("reply_to"), str) and route["reply_to"]:
+                    self._group_message[corr_id] = route["reply_to"]
         if chat_id is None:
             return DeliveryReceipt(
                 channel=self.channel_type,

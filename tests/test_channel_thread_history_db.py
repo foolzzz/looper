@@ -302,6 +302,9 @@ def test_web_and_client_messages_keep_the_supplied_session(monkeypatch, tmp_path
             reply = (await _replies(bus, env))[0]
             assert CHAT_RECORD not in reply.metadata
             assert (await web.deliver(reply)).success
+            # A restarted adapter has no awaiting map; replay must retain the session and avoid a duplicate.
+            replay = MessageEnvelope.from_dict(json.loads(json.dumps(reply.to_dict())))
+            assert (await WebChannelAdapter().deliver(replay)).success
             body = {"conversation_id": sid} if client_owned else {"session_id": sid}
             status, answer = await _call(_server(agents, web), "chat" if client_owned else "operator_chat",
                                          "messages", body, principal)

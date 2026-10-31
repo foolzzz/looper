@@ -31,14 +31,15 @@ CODEX: CodexRuntime = adapter("codex")  # type: ignore[assignment]
 def test_native_codex_run_record_preserves_exact_serialized_snapshot(monkeypatch) -> None:
     from looper.agents.runtimes import pricing
 
-    # The pre-launcher snapshot, with an empty price table to avoid unrelated catalog changes.
+    # Include the native launcher identity; an empty price table avoids unrelated catalog changes.
     monkeypatch.setattr(pricing, "BUILTIN_PRICES", {})
     price = {"input_usd_per_mtok": None, "output_usd_per_mtok": None,
              "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None}
     expected = {
         "system_prompt_mode": "append",
         "profile": {"id": "agent-login", "name": "codex/login", "model_id": "model-login",
-            "custom_prompt": "", "runtime": {"id": "rt-codex", "name": "codex", "type": "codex"},
+            "custom_prompt": "", "runtime": {"id": "rt-codex", "name": "codex", "type": "codex",
+                                              "launcher": "native"},
             "model": "gpt-6.1-sol", "provider": {"id": "prov-codex-login", "name": "codex-login",
             "auth": "oauth"}, "source": "builtin"},
         "model_choice": {"model": "gpt-6.1-sol", "source": "builtin", "effort": None},

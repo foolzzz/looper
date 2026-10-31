@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .drain import DrainState
 from ..db import api_clients as db_api_clients
 from ..ops_config import OpsConfig
 from . import (
@@ -169,7 +170,9 @@ class AgentHTTPServer:
         client_ops: ClientOps | None = None,
         ops_config: OpsConfig | None = None,
         channels: ChannelRegistry | None = None,
+        drain: DrainState | None = None,
     ) -> None:
+        self._drain = drain or DrainState()
         self._started_at = datetime.now(timezone.utc)
         self._host = host
         self._port = port
@@ -987,6 +990,7 @@ class AgentHTTPServer:
             counts = overview.group_counts([])
         status = {
             "status": "running",
+            "drain": self._drain.snapshot(),
             "agents": agents,
             # Every task counted; "running" is every task in progress (one waiting for the user too).
             "tasks": {

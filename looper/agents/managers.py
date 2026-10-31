@@ -20,6 +20,7 @@ from ..db import managers as db_managers
 from . import chat_settings
 from .channels.chat_routing import boundary_log
 from .bus import MessageBus
+from .drain import DrainState
 from .managers_api import DEFAULT_MANAGER_ID, MAX_ENABLED_MANAGERS, ManagerDefinition
 from .message import MANAGER_ADDRESS, MessageEnvelope, MessageType, manager_address
 from .ops.service import ManagerOps, Platform, scope_for
@@ -82,7 +83,11 @@ def chat_stop_reply(summary: ChatStopSummary) -> str:
 
 class ManagerFleet:
     def __init__(self, *, platform: Platform, supervisor: AgentSupervisor, runtime_root: Path, url: str,
-                 config: ManagerConfig, broadcaster: Any | None, clock: Callable[[], float] = time.monotonic) -> None:
+                 config: ManagerConfig, broadcaster: Any | None, clock: Callable[[], float] = time.monotonic,
+                 drain: DrainState | None = None) -> None:
+        self._drain = drain
+        if drain is not None:
+            drain.add_source(self.drain_waiting)
         self._platform = platform
         self._supervisor = supervisor
         self._runtime_root = runtime_root
@@ -109,7 +114,7 @@ class ManagerFleet:
 
     def _build(self, definition: ManagerDefinition, template_keys: Sequence[str] = ()) -> ManagerAgent:
         agent = ManagerAgent(config=self._config, runtime_root=self._runtime_root, broadcaster=self._broadcaster,
-                             definition=definition, clock=self._clock)
+                             definition=definition, clock=self._clock, drain=self._drain)
         ops = ManagerOps(dataclasses.replace(self._platform, manager=agent, managers=self), url=self._url,
                          scope=scope_for(definition, template_keys),
                          turn_file=self._runtime_root / ".local" / f"{definition.id}-turn.json")
@@ -198,6 +203,10 @@ class ManagerFleet:
 
     def ops_for(self, authorization: str | None) -> ManagerOps | None:
         return next((ops for ops in list(self._ops.values()) if ops.authorized(authorization)), None)
+
+    def drain_waiting(self) -> dict[str, Any]:
+        return {"manager_turns": [agent.agent_id for agent in self.agents()
+                                  if agent.busy or agent._handling is not None or agent._stop_tasks]}
 
     def agents(self) -> list[ManagerAgent]:
         return [self._agents[i] for i in sorted(self._agents, key=lambda i: (i != DEFAULT_MANAGER_ID, i))]

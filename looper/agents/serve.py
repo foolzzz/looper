@@ -47,6 +47,7 @@ from .channels.web import WebChannelAdapter
 from . import self_check
 from .gate_courier import GateCourier
 from .gate_service import GateReminders
+from .drain import DrainState
 from .wait_service import WaitService
 from .http_server import AgentHTTPServer
 from .log_redaction import log_to_stderr
@@ -617,18 +618,19 @@ async def _run_agent_system_owned(
 
     # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
     # task ends, to record a scheduled run's outcome.
-    scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url)
+    drain = DrainState()  # A new control plane always starts serving; drain is never stored.
+    scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url, drain=drain)
     # It notes the user gates that have waited for the user for their project's reminder interval; the courier
     # posts what the gates' discussions say to the chats their tasks came from.
     gate_reminders = GateReminders()
     gate_courier = GateCourier(registry.post, dashboard_url=dashboard_url)
     task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
                              on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
-    wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url)
+    wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url, drain=drain)
     supervisor.register(task_router)
 
     worker_config = WorkerConfig(claude_bin=claude_bin)
-    worker_pool = WorkerPool(config=worker_config, runtime_root=runtime_root)
+    worker_pool = WorkerPool(config=worker_config, runtime_root=runtime_root, drain=drain)
     supervisor.register(worker_pool)
 
     # The Manager's platform tools: its MCP server reaches this server with a token made now. Each task's Planner
@@ -640,7 +642,7 @@ async def _run_agent_system_owned(
     platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=None,
                         supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
     fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
-                         url=_local_url(host, port), config=manager_config, broadcaster=broadcaster)
+                         url=_local_url(host, port), config=manager_config, broadcaster=broadcaster, drain=drain)
     if ownership is not None:
         ownership.push_async_callback(fleet.stop)
     task_router.manager_running = fleet.is_running
@@ -675,24 +677,20 @@ async def _run_agent_system_owned(
     from .room import RoomService
     room = RoomService(bus=bus, worker_pool=worker_pool)
     from .consult import ConsultService
-    consults = ConsultService(room=room, worker_pool=worker_pool, runtime_root=runtime_root, claude_bin=claude_bin)
+    consults = ConsultService(room=room, worker_pool=worker_pool, runtime_root=runtime_root, claude_bin=claude_bin,
+                              drain=drain)
+    drain.add_source(lambda: task_router.drain_waiting())
+    drain.add_source(lambda: scheduler.drain_waiting())
+    drain.add_source(lambda: {"waits": wait_service.drain_waiting(), "consults": consults.drain_waiting()})
     room.consults = consults
     planner_ops.room = room
     room_ops = RoomOps(room, url=_local_url(host, port))
     worker_pool.room_ops = room_ops
 
-    # The consults the last server left queued or running run again.
-    await consults.resume_all()
-
-    # --- Start ---
-
-    await supervisor.start_all()
-    await fleet.sweep()
-    await carry_on_tasks(task_router, left_running)
-
     # --- HTTP Server ---
 
     http_server = AgentHTTPServer(
+        drain=drain,
         host=host,
         port=port,
         web_adapter=web_adapter,
@@ -716,6 +714,16 @@ async def _run_agent_system_owned(
         channels=registry,
     )
     await http_server.start()
+    if ownership is not None:
+        ownership.push_async_callback(http_server.stop)
+
+    # Serve the agents' tools before journal replay or resumed work can call them.
+    # The consults the last server left queued or running run again.
+    await consults.resume_all()
+    await supervisor.start_all()
+    await fleet.sweep()
+    await carry_on_tasks(task_router, left_running)
+
     # Its first pass handles the fires missed while the server was down.
     await scheduler.start()
     await gate_reminders.start()
