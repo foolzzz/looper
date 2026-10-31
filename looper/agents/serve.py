@@ -689,15 +689,6 @@ async def _run_agent_system_owned(
     room_ops = RoomOps(room, url=_local_url(host, port))
     worker_pool.room_ops = room_ops
 
-    # The consults the last server left queued or running run again.
-    await consults.resume_all()
-
-    # --- Start ---
-
-    await supervisor.start_all()
-    await fleet.sweep()
-    await carry_on_tasks(task_router, left_running)
-
     # --- HTTP Server ---
 
     http_server = AgentHTTPServer(
@@ -726,6 +717,14 @@ async def _run_agent_system_owned(
     )
     await http_server.start()
     tools_ready.set()
+
+    # Replayed messages and resumed runs can probe or call platform tools immediately.
+    # Listen before starting any of their consumers.
+    await consults.resume_all()
+    await supervisor.start_all()
+    await fleet.sweep()
+    await carry_on_tasks(task_router, left_running)
+
     # Its first pass handles the fires missed while the server was down.
     await scheduler.start()
     await gate_reminders.start()
