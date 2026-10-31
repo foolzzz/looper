@@ -4,7 +4,7 @@
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
-- **最近更新：** 2026-10-29
+- **最近更新：** 2026-10-30
 
 ## 1. 工作方式
 
@@ -60,6 +60,7 @@
 | LLM 模型层 | Provider → Endpoint → Model → Profile；配置为 `looper-config/v4` | 已随 2.13 发布；真实 CLI 凭据与两档 dialogs 仍未测，五任务一次重复不是完整基线（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 | M9g | Pi 运行时：API key 的两种协议，四类角色，自有 HTTP 工具桥 | 本分支已实现（假 provider 闭环）；真实 Responses/DeepSeek 与 Claude 对照未验证 | M9e |
+| 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中 | 现有定时任务；排空期间放行依赖热升级排空功能 |
 
 执行顺序：M1 → M1.5 → M1.6 → M1.7 → M2 → M3 → M4 → M5 → M6 → M7a → M7b → M8a → M8b、M8c、M8d（可并行）→ M8e。
 
@@ -733,7 +734,6 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-10-29 | 定时任务按项开启用户关卡：新增 `schedules.user_gates`（默认 `off`），仅在项目和定时任务都开启时允许规划者开关卡；未开启时完整 Planner prompt 与原策略逐字节相同。API、管家列表/配置/差异/启用确认、v4 配置导入导出和项目定时表单/详情均携带该字段；v4 缺省导入为关闭。关卡优先发到定时任务通知对象，否则用系统 dashboard target，再否则仅任务页，复用渠道白名单与 `/gates` 路由。等待计入运行超时，重叠跳过、补跑和预算规则不变。一次性数据库的定向 pytest 以 `-n 2` 验证策略、升级、投递、API 回复恢复、超时和导入导出；隔离 serve 配 fake runtime 与本地 Lark 替身完整跑通。Web 36 项测试及构建通过，1280/390 浏览器验证开关、保存读回和超时提示；无真实渠道发送。 |
 
 | 2026-10-30 | DSH runner 瞬态重试（本分支）：在 `llm/stream` 内最多重试 3 次，逐次使用独立 request id、预算授权和计量；仅无模型输出时按 HTTP 状态及固定 SDK 的类型化错误码表重试，包含 DeepSeek overload。退避为 1/2/4 秒加至多 20% jitter，`Retry-After` 上限 30 秒，cancel、close 或 settle 立即中断等待；耗尽保留最后错误和尝试次数，逐次诊断不含 provider 消息或凭据。已检查 `0.2.1-rc.2` 源码并用安装版 SDK 与 loopback provider 验证：重复 `next()` 会创建新的 adapter stream、HTTP 请求和鉴权，不需重新调用一次性的 prepared-call 入口。新增 22 项覆盖重试、计费、拒绝、中断、输出边界与错误分类；原截断响应夹具按 `TRANSPORT` 重试更新。`-n 2` 定向回归共 201 项分批通过（重试 22 项、请求 26 项完成复测；中途超时批次不计通过），含独立数据库上的 DSH serve 预算/取消/崩溃验证。Dashboard、Telegram、Lark 和 CLI 共用 runner 行为，无需新增入口；未改 Pi、未调用真实 provider。 |
-| 2026-10-30 | TTADK Codex 启动已实现：运行时行增加类型化 launcher，注册与探测 `ttadk-codex`，仅配 codex-login；包含登录门禁、自检、失败 stderr 和启动记录。新增 56 项与原生 Codex 136 项定向测试通过；全新一次性数据库的隔离服务通过运行时列表 HTTP 读回，未调用真实 TTADK。Dashboard、Telegram、Lark 和 CLI 继续通过 runtime_id 选择，界面专属过滤与登录帮助另行交付。 |
 
 ## 5. 不属于本 RFC 的待办
 
@@ -840,9 +840,6 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
-- **TTADK 启动看门狗**（[RFC §9](../architecture/rfcs/ttadk-launch-v0.zh-CN.md#9-风险)）：登录检查与实际启动之间仍可能过期，需在工具启动前识别设备授权等待并终止，避免无人值守挂起。
-- **TTADK-only 模式**（[RFC §11.2](../architecture/rfcs/ttadk-launch-v0.zh-CN.md#112-待决问题附推荐默认值)）：待维护者决定；需要单独的 provider 与模型目录，目前 Codex 经 TTADK 仅支持 mixed 模式。
-
 - **DSH SDK runner 的后续**（[RFC §10.6、§16](../architecture/rfcs/agent-sdk-runner-v0.zh-CN.md#106-实现进展与验证缺口)）：全角色与咨询的单 runner opt-in 已实现，installed 隔离 serve 验证及真实 DeepSeek smoke、CLI/runner 对照已准备，真实结果待 lead。尚余按 provider binding 分运行器、容量数字及完整 composition 长期内存/exit hook 验证、运行时卡；完成门禁后切换默认值并删除 DSH CLI 路径；补齐 state root 中保留的 run sessions 的保留期限与回收，以及 runner 的 web fetch 和 skills。
 
 - **Pi SDK runner 的后续**（[RFC §16](../architecture/rfcs/agent-sdk-runner-v0.zh-CN.md#16-阶段)）：S1 的 Worker/Reviewer RunnerChannel、咨询分叉与取消、`WorkerPool` 运行句柄已实现；隔离 serve 验证与 CLI/runner 真实任务对照已准备，待 lead 实跑，不能计通过。尚余容量测量及数字、运行时卡、完成门禁后切换默认值和删除 Pi CLI 路径；runner 重启退避期间的 fail-fast 重试、服务崩溃后遗留 `runners/pi-N/` generation 目录清扫、`runners/state/pi/<owner>` 的 owner 状态删除与过期清理需分别补齐。S0 的周期健康检查、runner pool 和 compaction 的独立更新事件仍待实现。
@@ -883,6 +880,11 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.3 非核心待办（M6 之后统一做）
 
+- **停止单次命令型运行的按钮**：在控制台停止一条正在运行的命令型定时任务运行。
+- **管家读取运行日志**：让管家能读取命令型定时任务的运行日志。
+- **探活的维护窗口**：`looper service upgrade` 期间暂停告警。
+- **Telegram 探活**：外部探活支持通过 Telegram 发送告警和恢复通知。
+- **命令型定时任务的保留设置**：把日志总量上限（2 GiB）和每个定时任务至少保留的条数（100）做成设置。
 - **任务页「What each step ran on」改读精简的运行记录**：这张表现在用 `GET /api/llm-records?task_id=&role=worker|reviewer&limit=500` 读两个角色的完整记录（`list_records` 是 `SELECT *`，替身 Claude 下每条 12–13 KB，真实 prompt 更大），每当步骤变化就重读一次，长任务一次刷新可能有几 MB。改成只取表格要用的字段：`id`、`agent_id`、`status`、`created_at`、`metadata.step_id`、Profile 及其来源（含 effort）、`prompt_layers.task_role`（新参数或新接口均可，带测试），表格和测试相应改用它。
 - **定时任务的每日花费额度按各自时区清零**：每日额度（`daily_budget_usd`）现在在服务器时区的午夜清零，不看定时任务自己的 `timezone`；要按各定时任务的时区清零另做（2026-10-17 维护者决定暂不改）。
 - **dashboard 收到 401 时转到登录页**（looper #207）：会话过期或密码改过后，已打开的页面各处显示「status 401」，应提示重新加载（本机会自动登录，其他浏览器重新加载后看到 `/login`）。

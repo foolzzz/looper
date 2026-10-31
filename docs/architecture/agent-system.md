@@ -1185,16 +1185,6 @@ Manager tools.
   that nothing has written to for a day are removed when a new one is
   written. `looper serve` registers the read-only runtime `codex`
   (`rt-codex`) when `codex` is on its PATH.
-
-  **Through TTADK:** when `ttadk` is on PATH, `ttadk-codex` (`rt-ttadk-codex`)
-  is another row of type `codex`, with launcher `ttadk`. It accepts only the
-  `codex-login` provider and runs `ttadk codex --skip-check --mode mixed --`
-  before the same Codex arguments and isolated `CODEX_HOME`. A noninteractive,
-  cached sign-in check gates launches; doctor and system status report failures.
-  Runs record the launcher, probed version, tool and mode. The existing stream
-  readers ignore TTADK banners; a run without a usable result fails with stderr
-  even if TTADK exits zero. Native rows keep launcher `native` and their existing
-  commands. See the [TTADK launch RFC](rfcs/ttadk-launch-v0.zh-CN.md).
 - **The Codex login** (`looper/agents/runtimes/codex_login.py`, the RFC's
   P1) is the built-in provider `codex-login` (`prov-codex-login`, OAuth,
   `openai-responses`), which pairs only with Codex runtimes. A run with it
@@ -1543,12 +1533,10 @@ Manager tools.
   keeps Re-detect; a missing package shows the probe's reinstall error.
   See the [API runtime RFC](rfcs/api-runtime-v0.zh-CN.md).
 - **Runtimes** (`agent_runtimes`) are built in, never registered by hand: one
-  per detected type and launcher (`rt-<type>` for `native`, `rt-ttadk-<type>`
-  for `ttadk`; CLI types are found
+  per detected type (`rt-<type>`, named after its type; CLI types are found
   on the server's PATH and in-process types by their Python package;
   Claude Code's `rt-claude-code` comes with the schema and runs the server's
-  `claude`), with a typed `launcher` (`native` by default), an `executable`
-  (`''` = `ttadk` for a TTADK row, otherwise the type's default) and what its
+  `claude`), with an `executable` (`''` = the type's default) and what its
   last probe found (`version`, `capabilities`, `probe_error`). A different
   binary comes from the server's PATH. Settings → Agent Runtimes shows one
   card per type, found or not, with its path, version, capabilities and the
@@ -4105,7 +4093,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `llm_records` | One row per agent run: input and output text, status (`running`, `completed`, `failed`, `interrupted`), the run's own `cost_usd` and its `cost_source` (`runtime` or `provider_price`), `input_tokens`, `output_tokens`, `cache_read_tokens` and `cache_creation_tokens`, its final `context_tokens` and its `compactions`; `metadata` holds the exact argv (`command`), `cwd`, the supplied `system_prompt`, its `system_prompt_mode` (`append` for old records without it), its `system_prompt_sha256`, its `prompt_layers`, the `profile` (`agent` on runs recorded before the rename), the `model_choice`, the Settings `env` names, the `library` items loaded, the `project_instructions` the runtime was given and a task agent's `project_skills`, and for a Worker's or Reviewer's run its `outcome` (`completed`, `reported_failed`, `files_mismatch`, `passed`, `not_passed`, `contract`, `run_failed`; `worker.RunOutcome`) |
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; null: the role's built-in value); one row per layer and place |
-| `agent_runtimes` | Runtimes, built in (one per detected type and launcher) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `launcher` (`native` or `ttadk`), `executable` (`''` = the launcher's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
+| `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
 | `llm_providers` | Account: `name`, `vendor_type`, `auth`, `oauth_runtime_type`, `env`, `max_concurrency`, `builtin`; endpoints and models are separate tables |
 | `llm_provider_endpoints` | One endpoint per `(provider_id, protocol)`: `base_url`, legacy `use_runtime_default` |
 | `llm_models` | Exact `(provider_id, name, protocol)`, context, four price overrides, efforts, background model, catalog order and builtin flag; profile references restrict deletion |

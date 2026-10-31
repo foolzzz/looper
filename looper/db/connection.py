@@ -68,6 +68,46 @@ _SCHEMA_LOCK = 0x6C6F6F70  # "loop"
 REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
 _RUNTIME_LAUNCHER = "runtime_launcher"
+_COMMAND_SCHEDULES = "command_schedules"
+
+_COMMAND_SCHEDULES_DDL: tuple[str, ...] = (
+    """ALTER TABLE schedules
+        ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent', 'command')),
+        ADD COLUMN IF NOT EXISTS command TEXT,
+        ADD COLUMN IF NOT EXISTS env JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(env) = 'object'),
+        ADD COLUMN IF NOT EXISTS env_file TEXT,
+        ADD COLUMN IF NOT EXISTS success_deadline TEXT CHECK (success_deadline ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'),
+        ADD COLUMN IF NOT EXISTS alert_failures_after INTEGER CHECK (alert_failures_after BETWEEN 1 AND 1000),
+        ADD COLUMN IF NOT EXISTS alert_stale_after_seconds INTEGER CHECK (alert_stale_after_seconds BETWEEN 300 AND 2592000),
+        ADD COLUMN IF NOT EXISTS alert_overlap_after INTEGER CHECK (alert_overlap_after BETWEEN 0 AND 10000),
+        ADD COLUMN IF NOT EXISTS consecutive_overlaps INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_overlaps >= 0),
+        ADD COLUMN IF NOT EXISTS deadline_alert_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS overlap_alert_at TIMESTAMPTZ""",
+    """ALTER TABLE schedules ADD CONSTRAINT schedules_kind_fields_check CHECK (
+        (kind = 'command') = (command IS NOT NULL)
+        AND (kind = 'command' OR (env = '{}'::jsonb AND env_file IS NULL))
+        AND (kind = 'agent' OR (gate_command IS NULL AND template_key IS NULL)))""",
+    """ALTER TABLE schedule_runs
+        ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS exit_code INTEGER,
+        ADD COLUMN IF NOT EXISTS exit_signal INTEGER,
+        ADD COLUMN IF NOT EXISTS log_path TEXT,
+        ADD COLUMN IF NOT EXISTS log_bytes BIGINT,
+        ADD COLUMN IF NOT EXISTS log_truncated BOOLEAN NOT NULL DEFAULT false,
+        ADD COLUMN IF NOT EXISTS log_tail TEXT,
+        ADD COLUMN IF NOT EXISTS runner_pid INTEGER,
+        ADD COLUMN IF NOT EXISTS runner_started TEXT""",
+    """ALTER TABLE schedule_runs DROP CONSTRAINT schedule_runs_status_check,
+        ADD CONSTRAINT schedule_runs_status_check CHECK (status IN (
+            'queued', 'gating', 'running', 'completed', 'failed', 'stopped', 'cancelled', 'timed_out',
+            'gate_failed', 'skipped_overlap', 'skipped_missed', 'skipped_gate', 'skipped_budget',
+            'succeeded', 'interrupted'))""",
+    """ALTER TABLE schedule_notifications DROP CONSTRAINT schedule_notifications_kind_check,
+        ADD CONSTRAINT schedule_notifications_kind_check CHECK (kind IN (
+            'run', 'failures_alert', 'failures_recovered', 'stale_alert', 'stale_recovered',
+            'deadline_alert', 'deadline_recovered', 'overlap_alert', 'overlap_recovered'))""",
+    "CREATE INDEX IF NOT EXISTS idx_schedule_runs_finished ON schedule_runs (finished_at) WHERE finished_at IS NOT NULL",
+)
 
 
 async def _runtime_launcher_pending(conn: asyncpg.Connection) -> bool:
@@ -93,6 +133,17 @@ async def _schedule_user_gates_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('schedules') AND attname = 'user_gates' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _command_schedules_pending(conn: asyncpg.Connection) -> bool:
+    """An unmarked baseline lacks ``schedules.kind``; recorded upgrades never repair DDL."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _COMMAND_SCHEDULES):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('schedules') AND attname = 'kind' "
         "AND attnum > 0 AND NOT attisdropped)")
 
 
@@ -202,6 +253,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS launcher "
                                "TEXT NOT NULL DEFAULT 'native' CHECK (launcher IN ('native', 'ttadk'))")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _RUNTIME_LAUNCHER)
+        if await _command_schedules_pending(conn):
+            for ddl in _COMMAND_SCHEDULES_DDL:
+                await conn.execute(ddl)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _COMMAND_SCHEDULES)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -233,4 +288,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
         state = await _classify_schema(conn, sql)
         return state == "bridge" or (state == "current" and (
-            await _schedule_user_gates_pending(conn) or await _runtime_launcher_pending(conn)))
+            await _schedule_user_gates_pending(conn) or await _runtime_launcher_pending(conn)
+            or await _command_schedules_pending(conn)))
