@@ -52,6 +52,7 @@ import subprocess
 import sys
 import time
 import tempfile
+import tomllib
 import urllib.error
 import urllib.request
 import zipfile
@@ -947,6 +948,11 @@ def _checked(host: Host, argv: Sequence[str], *, installing: bool = False) -> st
 
 def _swap_directory(staged: Path, destination: Path) -> None:
     """Publish a complete build with one rename, including an existing nonempty dist."""
+    # mkdtemp is private; published assets must remain readable by the server.
+    staged.chmod(0o755)
+    for path in staged.rglob("*"):
+        if not path.is_symlink():
+            path.chmod(0o755 if path.is_dir() else 0o644)
     if not destination.exists():
         os.replace(staged, destination)
         return
@@ -1060,14 +1066,17 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
         _install_wheel(host, source, dependencies=dependencies)
         return None
     _checked(host, ["git", "-C", str(host.cwd), "merge", "--ff-only", source], installing=True)
-    _checked(host, ["uv", "sync", "--project", str(host.cwd)], installing=True)
+    if dependencies:
+        # Keep deploy's test extra and any other packages already in the venv.
+        _checked(host, ["uv", "sync", "--project", str(host.cwd), "--extra", "test", "--inexact"], installing=True)
     if not build_web:
         return None
     web = host.cwd / "web"
     staged = Path(tempfile.mkdtemp(prefix=".dist-upgrade-", dir=web))
     try:
         _checked(host, ["npm", "ci", "--prefix", str(web)], installing=True)
-        _checked(host, ["npm", "run", "build", "--prefix", str(web), "--", "--outDir", str(staged)], installing=True)
+        _checked(host, ["env", f"PYTHON={host.executable}", "npm", "run", "build", "--prefix", str(web),
+                        "--", "--outDir", str(staged)], installing=True)
         if not (staged / "index.html").is_file():
             raise ServiceError("the dashboard build did not produce index.html")
         record_web_source(host.cwd, staged)
@@ -1120,12 +1129,14 @@ def _deployment_signals():
 @_deployment_signals()
 def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path: Path | None,
                   plan, running, target, installer, timeout: float, drain_timeout: float,
-                  no_force: bool) -> str:
+                  no_force: bool, turns_timeout: float = 180) -> str:
     from ..components import Manifest
     from ..upgrade import UpgradeKind
 
-    if not all(math.isfinite(value) and value > 0 for value in (timeout, drain_timeout)):
-        raise ServiceError("--timeout and --drain-timeout must be positive finite numbers")
+    if not all(math.isfinite(value) and value > 0 for value in (timeout, drain_timeout, turns_timeout)):
+        raise ServiceError("--timeout, --drain-timeout and --turns-timeout must be positive finite numbers")
+    if plan.kind == UpgradeKind.CONTROL_PLANE:
+        drain_timeout = turns_timeout
     token = operator_auth.read_token(root)
     if not token:
         raise ServiceError("the service operator token is missing")
@@ -1133,7 +1144,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
               "gap_seconds": 0.0, "interrupted": [], "kept_before": 0, "adopted": 0,
               "running_code_fingerprint": running.components["control_plane"],
               "installed_package_version": running.version, "status": "failed"}
-    draining, stopped, stop_attempted, restart_started = False, False, False, False
+    draining, stopped, stop_attempted, start_attempted, restart_started = False, False, False, False, False
     state = mgr.state()
     before = state.pid
     if plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE) and (not state.running or before is None):
@@ -1170,8 +1181,9 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             if installer:
                 expected = installer()
                 report["installed_package_version"] = target.version
-            restart_started = True
+            start_attempted = True
             _start_and_wait(mgr, port, log_path, timeout, root)
+            restart_started = True
             report["gap_seconds"] = round(host.clock() - gap_started, 3)
         elif installer:
             expected = installer()
@@ -1188,7 +1200,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 if expected is None and actual.verification.get("web") != target.verification.get("web"):
                     raise ServiceError("the served dashboard does not match the target wheel")
         whoami = host.get_whoami(port, token)
-        report.update(status="ok", running_code_fingerprint=actual.components["control_plane"],
+        report.update(status="ok", serving=True, running_code_fingerprint=actual.components["control_plane"],
                       running_version=whoami["looper_version"], web_fingerprint=actual.components["web"])
     except BaseException as exc:
         report["error"] = str(exc)
@@ -1201,12 +1213,20 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                         stopped = not mgr.state().running
                     except ServiceError:
                         stopped = not host.port_in_use(port)
-                # If installation failed after stop, restore availability before cancelling.
+                # A timed-out start can leave a loaded unit or a partial process.
+                # Retry the current install from a stopped unit before cancelling.
                 if stopped:
+                    if start_attempted:
+                        _stop_for_install(mgr, mgr.state().pid)
                     _start_and_wait(mgr, port, log_path, timeout, root)
                 host.system_operation(port, token, "drain_cancel", {})
             except Exception as cancel_error:
                 report["recovery_error"] = str(cancel_error)
+        try:
+            answer = host.get_status(port, token, "127.0.0.1")
+            report["serving"] = answer is not None and answer.get("status") != "unauthorized"
+        except Exception:
+            report["serving"] = False
         line = _deploy_report(report, log_path)
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
@@ -1236,7 +1256,8 @@ def _planned_restart(host: Host, *, label: str, timeout: float, drain_timeout: f
 
 
 def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dry_run: bool = False,
-            timeout: float = DEFAULT_TIMEOUT_SECONDS, drain_timeout: float = 1200, no_force: bool = False) -> str:
+            timeout: float = DEFAULT_TIMEOUT_SECONDS, drain_timeout: float = 1200, turns_timeout: float = 180,
+            no_force: bool = False) -> str:
     """Compute a plan before mutating files; stop the old interpreter before a full install."""
     from .. import components
     from ..upgrade import UpgradeKind, decide, scan_keepers
@@ -1247,6 +1268,19 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         if not dry_run and not wheel:
             if _checked(host, ["git", "-C", str(host.cwd), "status", "--porcelain", "--untracked-files=no"]):
                 raise ServiceError("the installed checkout has tracked changes; refusing to upgrade")
+            untracked = _checked(host, ["git", "-C", str(host.cwd), "ls-files", "--others", "--exclude-standard", "-z"])
+            specs = tomllib.loads(components.CONFIG.read_text())["components"]
+            # Match the directory/build inputs, including the exception for a
+            # locally generated lock that runtime_fingerprint does not hash.
+            fingerprinted = [path for path in untracked.split("\0")
+                if path and path != "uv.lock" and not {"__pycache__", "node_modules"}.intersection(Path(path).parts)
+                and any(((name == "web" or not path.endswith(".pyc") or (host.cwd / path).is_symlink())
+                         and components._matches(path, spec["include"])
+                         and not components._matches(path, spec.get("exclude", ())))
+                        or components._matches(path, spec.get("verify", ())) for name, spec in specs.items())]
+            if fingerprinted:
+                raise ServiceError("the installed checkout has untracked component files; refusing to upgrade: "
+                                   + ", ".join(sorted(fingerprinted)))
             source = _checked(host, ["git", "-C", str(host.cwd), "rev-parse", "--verify",
                                      "--end-of-options", source + "^{commit}"])
         target = (components.manifest_from_wheel(Path(source)) if wheel
@@ -1269,6 +1303,6 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
             running=running, target=target,
             installer=lambda: _install_target(host, source, wheel=wheel, build_web="web" in plan.changed_components,
                 dependencies=plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE)),
-            timeout=timeout, drain_timeout=drain_timeout, no_force=no_force)
+            timeout=timeout, drain_timeout=drain_timeout, turns_timeout=turns_timeout, no_force=no_force)
     except (ValueError, KeyError, zipfile.BadZipFile) as exc:
         raise ServiceError(str(exc)) from exc

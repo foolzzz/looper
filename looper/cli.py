@@ -139,6 +139,8 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     upgrade.add_argument("--to", metavar="REF_OR_WHEEL", help="Target Git ref (default origin/main) or wheel path.")
     upgrade.add_argument("--timeout", type=float, default=120.0,
                          help="Seconds to wait for the restarted service to answer (default 120).")
+    upgrade.add_argument("--turns-timeout", type=float, default=180.0,
+                         help="Seconds to drain turns for a control-plane upgrade (default 180).")
     restart.add_argument("--drain", action="store_true", help="Drain active runs before restarting.")
     for command in (upgrade, restart):
         command.add_argument("--drain-timeout", type=float, default=1200.0,
@@ -254,7 +256,8 @@ def _service(args: argparse.Namespace) -> int:
                                   timeout=args.timeout))
         elif args.service_command == "upgrade":
             print(service.upgrade(host, label=args.label, to=args.to, dry_run=args.dry_run,
-                                  timeout=args.timeout, drain_timeout=args.drain_timeout, no_force=args.no_force))
+                                  timeout=args.timeout, drain_timeout=args.drain_timeout,
+                                  turns_timeout=args.turns_timeout, no_force=args.no_force))
         elif args.service_command == "restart":
             print(service.restart(host, label=args.label, timeout=args.timeout, drain=args.drain,
                                   drain_timeout=args.drain_timeout, no_force=args.no_force))

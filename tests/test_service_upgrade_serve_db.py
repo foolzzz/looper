@@ -1,7 +1,7 @@
 """Real HTTP/serve verification of upgrades that retain the control-plane process.
 
-Git and npm run for real in a disposable source checkout. Dependency sync and
-wheel package installation are replaced to retain the test interpreter.
+Git and npm run for real in a disposable source checkout. Wheel package
+installation is replaced to retain the test interpreter.
 The zero-dependency dashboard fixture tests installation and HTTP delivery,
 without downloading or rebuilding the product's full frontend.
 """
@@ -66,6 +66,8 @@ def _source(root: Path) -> tuple[str, list[tuple[str, str, str]]]:
     (web / "build.mjs").write_text(
         "import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';\n"
         "import {resolve} from 'node:path';\n"
+        "import {execFileSync} from 'node:child_process';\n"
+        "execFileSync(process.env.PYTHON ?? 'python3', ['-c', 'import tomllib']);\n"
         "const out = resolve(process.argv[process.argv.indexOf('--outDir') + 1]);\n"
         "mkdirSync(out, {recursive: true});\n"
         "writeFileSync(resolve(out, 'index.html'), readFileSync('index.html', 'utf8')"
@@ -86,7 +88,8 @@ def _source(root: Path) -> tuple[str, list[tuple[str, str, str]]]:
         targets.append((target, "WEB_ONLY", label))
     _git(root, "checkout", "-q", "--detach", base)
     subprocess.run(["node", "build.mjs", "--outDir", str(web / "dist")],
-                   cwd=web, check=True, capture_output=True, text=True, timeout=20)
+                   cwd=web, check=True, capture_output=True, text=True, timeout=20,
+                   env={**os.environ, "PYTHON": sys.executable})
     components.record_web_source(root, web / "dist")
     return base, targets
 
@@ -103,6 +106,9 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
     claude = bin_dir / "claude"
     claude.write_text("#!/bin/sh\nprintf '2.0.0\\n'\n")
     claude.chmod(0o755)
+    old_python = bin_dir / "python3"
+    old_python.write_text("#!/bin/sh\nprintf 'old Python has no tomllib\\n' >&2\nexit 1\n")
+    old_python.chmod(0o755)
     # Keep running_server's actual serve startup/cleanup, with a pid readback.
     monkeypatch.setattr(runner, "_SERVE", (
         "import os\nfrom pathlib import Path\n"
@@ -126,12 +132,12 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
             else:
                 assert argv[-1] == "--version"
             return subprocess.CompletedProcess(argv, 0, "", "")
-        assert Path(argv[0]).name in ("git", "npm", "uv")
+        assert Path(argv[0]).name in ("git", "npm", "uv", "env")
         if Path(argv[0]).name == "uv":
-            assert argv[1:] == ["sync", "--project", str(source)]
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            pytest.fail("NOOP and WEB_ONLY must not sync the live service's dependencies")
         return subprocess.run(argv, cwd=source, text=True, capture_output=True, timeout=30,
-                              env={**os.environ, "HOME": str(home), "npm_config_cache": str(tmp_path / "npm-cache")})
+                              env={**os.environ, "HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                                   "npm_config_cache": str(tmp_path / "npm-cache")})
 
     def forbidden(*args, **kwargs):
         pytest.fail("NOOP and WEB_ONLY must not stop, start, restart or drain the service")
@@ -227,6 +233,6 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
                         assert response.status == 200 and response.read() == content
                 assert _git(source, "rev-parse", "HEAD") == target
 
-    assert sum(Path(argv[0]).name == "uv" for argv in installed_commands) == 3
-    assert sum(argv[:3] == ["npm", "run", "build"] for argv in installed_commands) == 2
+    assert not any(Path(argv[0]).name == "uv" for argv in installed_commands)
+    assert sum("npm" in argv and "build" in argv for argv in installed_commands) == 2
     assert sum("install" in argv and "--no-deps" in argv for argv in installed_commands) == 2
