@@ -250,7 +250,24 @@ def test_ttadk_environment_removes_wrapper_controls_and_keeps_native_environment
     native, wrapped = environment(Launcher.NATIVE), environment(Launcher.TTADK)
     assert all(native[name] == "yes" for name in removed)
     assert not removed & wrapped.keys() and wrapped["KEEP"] == "value"
-    assert removed | {"TTADK_DISABLE_COMPLETION_AUTO_INSTALL"} <= CODEX.provider_env_owned
+
+
+def test_provider_wrapper_controls_are_valid_and_cleaned_only_for_ttadk() -> None:
+    controls = {"CI": "1", "TTADK_NO_TELEMETRY": "1", "TTADK_DEBUG": "1", "DEBUG": "1",
+                "FORCE_COLOR": "1", "TTADK_DISABLE_COMPLETION_AUTO_INSTALL": "0", "KEEP": "value"}
+
+    def environment(launcher: Launcher) -> dict[str, str]:
+        launch = _launch(launcher)
+        provider = replace(launch.profile.resolved_model.provider, env=tuple(controls.items()))
+        resolved = replace(launch.profile.resolved_model, provider=provider)
+        profile = replace(launch.profile, resolved_model=resolved)
+        return replace(launch, settings=replace(launch.settings, profile=profile)).environment()
+
+    native, wrapped = environment(Launcher.NATIVE), environment(Launcher.TTADK)
+    assert all(native[name] == value for name, value in controls.items())
+    assert not ttadk.ENV_UNSET & wrapped.keys()
+    assert wrapped["TTADK_DISABLE_COMPLETION_AUTO_INSTALL"] == "1"
+    assert wrapped["KEEP"] == "value"
 
 
 def test_ttadk_record_and_probe_use_launcher_version_and_native_capabilities(

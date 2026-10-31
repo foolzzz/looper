@@ -5,12 +5,41 @@ from pathlib import Path
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents import profile_registry as registry, runtimes
-from looper.db import profile_registry as db
+from looper.agents import agent_settings, profile_registry as registry, runtimes
+from looper.db import agent_setting_layers, profile_registry as db
 from tests.db_support import DSN, run_db
 from tests.test_profile_registry_db import _version_codex
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+def test_existing_native_provider_ci_environment_loads_for_every_role(monkeypatch):
+    monkeypatch.setattr(registry, "_login_modules", lambda: {})
+
+    async def test(pool):
+        provider_id = (await registry.create_provider({
+            "name": "Native account", "vendor_type": "custom", "api_key": "test-native-key",
+            "endpoints": [{"protocol": "anthropic-messages", "base_url": "https://example.invalid"}],
+        }))["provider"]["provider_id"]
+        model_id = (await registry.create_model({"provider_id": provider_id, "name": "native-model",
+            "protocol": "anthropic-messages"}))["model"]["model_id"]
+        profile_id = (await registry.create_profile({"name": "Native profile",
+            "runtime_id": "rt-claude-code", "model_id": model_id}))["profile"]["profile_id"]
+        for role in agent_settings.AgentType:
+            await agent_setting_layers.put_layer("role", role.value, None, {"profile_id": profile_id})
+        # Emulate the provider saved before TTADK was introduced, bypassing today's write validation.
+        await pool.execute("UPDATE llm_providers SET env = '[{\"key\":\"CI\",\"value\":\"1\"}]'::jsonb "
+                           "WHERE id = $1", provider_id)
+        for role in agent_settings.AgentType:
+            settings = await agent_settings.load_agent_settings(role)
+            assert settings.error is None and settings.profile_error is None
+            assert settings.profile.id == profile_id
+            assert settings.profile.runtime.launcher is runtimes.Launcher.NATIVE
+            assert agent_settings.Launch(settings, role=role).environment()["CI"] == "1"
+        saved = await registry.update_provider(provider_id, {"env": [{"key": "CI", "value": "1"}]})
+        assert saved["provider"]["env"] == [{"key": "CI", "value": "1"}]
+
+    run_db(test, monkeypatch, timeout=30)
 
 
 def test_ttadk_on_path_registers_a_separate_builtin_runtime(monkeypatch, tmp_path: Path):

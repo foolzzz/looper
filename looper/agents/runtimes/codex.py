@@ -127,7 +127,7 @@ class CodexRuntime(RuntimeAdapter):
     # A read-only run (a Planner's, a consult) has Codex's read-only sandbox, where a write fails (``launch_args``).
     read_only = ReadOnly.SANDBOX
     # Set by the binding and the run's home: a provider's own variables cannot set them.
-    provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, "CODEX_HOME"}) | ttadk.ENV_OWNED
+    provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, "CODEX_HOME"})
 
     def auth_kinds_for(self, launcher: Launcher) -> frozenset[AuthKind]:
         return frozenset({AuthKind.OAUTH}) if launcher is Launcher.TTADK else self.auth_kinds

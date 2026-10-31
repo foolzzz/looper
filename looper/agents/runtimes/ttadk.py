@@ -55,7 +55,6 @@ def check_args(args: Sequence[str]) -> None:
 
 
 ENV_UNSET = frozenset({"CI", "TTADK_NO_TELEMETRY", "TTADK_DEBUG", "DEBUG", "FORCE_COLOR"})
-ENV_OWNED = ENV_UNSET | {"TTADK_DISABLE_COMPLETION_AUTO_INSTALL"}
 
 
 def environment(base: Mapping[str, str]) -> dict[str, str]:
