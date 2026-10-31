@@ -92,7 +92,7 @@ def test_editing_only_the_tail_of_an_enabled_long_command_shows_the_full_change(
         assert changed["status"] == "ok", changed
         assert changed["result"]["changed"] == ["command"]
         (block,) = chat.turns[-1].blocks
-        assert f"- 命令：`{command}` → `{updated}`" in block
+        assert f"- 命令：\n```\n{command}\n```\n → \n```\n{updated}\n```\n" in block
         assert "没有变化" not in block
         stored = (await _ok("POST", "/api/v1/schedule_admin/get", {
             "schedule_id": schedule["schedule_id"]}))["schedule"]
@@ -124,7 +124,7 @@ def test_changing_a_command_schedule_shows_the_command_and_alert_settings_before
                 "alert_stale_after_seconds": 600, "alert_overlap_after": 0}}))
         assert changed["status"] == "ok", changed
         (block,) = chat.turns[-1].blocks
-        assert "- 命令：`old` → `new`" in block
+        assert "- 命令：\n```\nold\n```\n → \n```\nnew\n```\n" in block
         assert "- 环境变量：没有 → A、B" in block
         assert f"- 环境文件：没有 → {tmp_path / 'pull.env'}" in block
         assert "- 最晚成功时间：不设 → 08:00" in block
