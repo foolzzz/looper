@@ -127,6 +127,15 @@ def test_inspect_start_grace(tmp_path, age, expected):
     assert isinstance(observed, expected)
 
 
+@pytest.mark.parametrize("runner_line", ["101 Z runner start\n", ""])
+def test_inspect_confirmed_dead_runner_does_not_wait_for_start_grace(tmp_path, monkeypatch, runner_line):
+    directory(tmp_path)
+    monkeypatch.setattr(subprocess, "run", lambda args, **kwargs: subprocess.CompletedProcess(
+        args, 0, f"{os.getpid()} S scheduler start\n{runner_line}", ""))
+    run = row(created_at=NOW, runner_pid=101, runner_started="runner start")
+    assert isinstance(CommandRuns(tmp_path).inspect([run], NOW)[run["id"]], Lost)
+
+
 def test_inspect_missing_directory_explains_server_interruption(tmp_path):
     observed = CommandRuns(tmp_path).inspect([row()], NOW)["srun-test"]
     assert observed == Lost("the server stopped before the command started", None)
@@ -284,6 +293,6 @@ def test_inspect_batches_processes_and_rechecks_exit_race(tmp_path, monkeypatch)
     assert isinstance(observed["one"], Finished)
     assert observed["two"] == Running(None, None, 102, "start two")
     assert len(calls) == 1
-    assert calls[0][0] == ["ps", "-o", "pid=,stat=,lstart=", "-p", "101,102"]
+    assert calls[0][0] == ["ps", "-o", "pid=,stat=,lstart=", "-p", ",".join(map(str, sorted({101, 102, os.getpid()})))]
     assert calls[0][1]["env"]["LC_ALL"] == "C"
     assert calls[0][1]["env"]["TZ"] == "UTC"

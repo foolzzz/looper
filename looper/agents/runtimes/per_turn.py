@@ -344,7 +344,8 @@ class PerTurnSession(ABC):
         else:
             self._turn_ended(new_session=resuming is None and session_started)
         return ResidentTurn(result, None if result is not None else process.returncode,
-                            session_started=session_started, usage=self.turn_usage(result), prompt_sent=sent)
+                            session_started=session_started, usage=self.turn_usage(result), prompt_sent=sent,
+                            stderr=errors if result is None else "")
 
     async def interrupt(self) -> StopMethod | None:
         """Request the running turn's cancel and wait (bounded) for the turn to end its process tree; the turn

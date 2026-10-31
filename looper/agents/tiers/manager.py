@@ -1936,6 +1936,13 @@ class ManagerAgent:
             token.settle(ReplyOutcome.STOPPED)
             await self._end_stopped(token, prepared, turn, text_parts)
 
+        stderr_note = ""
+        if turn.result_event is None and not launch.exit_code_reliable:
+            from ..runtimes.ttadk import error_tail
+
+            if stderr := error_tail(turn.stderr):
+                stderr_note = f": {stderr}"
+
         if resume_lost:
             # An overflow rejects the new message, not the saved history. Hand that history over before
             # dropping it; only a genuinely lost session can be retried without its summary.
@@ -1943,7 +1950,7 @@ class ManagerAgent:
                        else f"session {resuming} could not be resumed")
             logger.warning("%s: %s; starting a new session", self._log, failure)
             await recorder.finish(output_text=None, result_event=None, error=(
-                f"{failure}{exit_note(turn.exit_code)}; retried in a new session"))
+                f"{failure}{exit_note(turn.exit_code)}; retried in a new session{stderr_note}"))
             await self._link_turn_task(recorder, ops_turn)
             if token.cancel.requested:
                 raise TurnStopped()
@@ -1990,7 +1997,7 @@ class ManagerAgent:
             output_text=final_text or None,
             result_event=result_event,
             error=over_cap or failed or (None if replied else (
-                f"no reply (exit code {turn.exit_code})" if exited else "no reply"
+                f"no reply (exit code {turn.exit_code}){stderr_note}" if exited else "no reply"
             )),
             usage=turn.usage,
         )
@@ -2019,7 +2026,7 @@ class ManagerAgent:
             raise RuntimeError(failed)
         if not replied:
             raise RuntimeError(
-                f"{launch.runtime.label} 没有返回内容（退出码 {turn.exit_code}）" if exited
+                f"{launch.runtime.label} 没有返回内容（退出码 {turn.exit_code}）{stderr_note}" if exited
                 else f"{launch.runtime.label} 没有返回内容"
             )
         return final_text

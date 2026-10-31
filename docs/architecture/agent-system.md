@@ -4214,8 +4214,8 @@ variables, with the warnings.
 
 `looper service install` (`looper/agents/service.py`) writes a unit that runs
 `looper serve --config <absolute ops file> --runtime-root <absolute root>`,
-plus `--port` only when `--port` was given, or when the unit already installed
-had one and the file names no port. It refuses when there is no ops file, and
+plus `--port` when given, otherwise retaining the installed unit's explicit
+port before falling back to the ops file. It refuses when there is no ops file, and
 while a setting still comes from an environment variable. It no longer copies
 every `LOOPER_*`, `LOOPX_*`, `ANTHROPIC_*` and `LARK_*` variable. It copies
 `PATH`, `TZ`, locale, proxy and CA-certificate variables, the runtimes'
@@ -4310,6 +4310,13 @@ standard v1 result envelope containing `version`, `loaded_at`, `components`,
 directory once per process at HTTP-server startup and remains fixed if files later change.
 The operation is also available through generated `loopercli` commands. Dashboard,
 Telegram and Lark need no change for this read-only planning command.
+
+During a planned-upgrade drain, agent schedules keep their due times and queued
+runs for catch-up after restart or drain cancellation. Run now on an existing
+agent schedule returns 409 with "the service is draining for an upgrade: run it
+after the restart"; an unknown schedule still returns 404. Command schedules
+continue firing, including queued runs and Run now: their runs survive service
+restarts, and the drain does not wait for them.
 
 ## HTTP API
 
