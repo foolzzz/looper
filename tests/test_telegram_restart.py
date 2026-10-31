@@ -54,14 +54,15 @@ class BotAPI:
                         if update["update_id"] < offset:
                             assert db.execute("SELECT 1 FROM updates WHERE update_id = ?",
                                               (update["update_id"],)).fetchone()
-            result = [update for update in self.updates if update["update_id"] >= offset]
+            limit = int(data.get("limit", 100))
+            result = [update for update in self.updates if update["update_id"] >= offset][:limit]
             if not result and data.get("timeout", 0):
                 self.changed.clear()
                 try:
                     await asyncio.wait_for(self.changed.wait(), .05)
                 except TimeoutError:
                     pass
-                result = [update for update in self.updates if update["update_id"] >= offset]
+                result = [update for update in self.updates if update["update_id"] >= offset][:limit]
         else:
             assert method in {"setMyCommands", "setMessageReaction"}, method
             result = True
@@ -154,6 +155,7 @@ def test_crash_does_not_reuse_an_older_clean_stop_boundary(tmp_path, caplog):
         assert second.previous_polling_stopped_at == stopped_at
         second.polling_started()
         assert second.previous_polling_stopped_at == stopped_at
+        second.polling_received([])
         # Simulate process loss: close without recording a clean polling stop.
         second.close()
         third = TelegramInbox(path)
@@ -177,6 +179,181 @@ def test_crash_does_not_reuse_an_older_clean_stop_boundary(tmp_path, caplog):
             third.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("received_before_failure", [0, 100])
+def test_failed_recovery_then_restart_keeps_original_offline_boundary(tmp_path, monkeypatch, received_before_failure):
+    from looper.agents.channels import telegram as channel
+    from telegram.error import NetworkError
+    from telegram.request import HTTPXRequest
+
+    now = int(time.time()) - 2400
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(now, tz=tz)
+
+    monkeypatch.setattr(channel, "datetime", Clock)
+
+    async def run():
+        nonlocal now
+        path = tmp_path / ".local/telegram/channel-telegram/0.sqlite3"
+        api = BotAPI(path)
+        failed = asyncio.Event()
+        network_down = False
+
+        async def request(transport, url, **kwargs):
+            data = kwargs.get("request_data")
+            offset = data.parameters.get("offset", 0) if data else 0
+            if (network_down and url.endswith("/getUpdates")
+                    and (not received_before_failure or offset >= 201)):
+                failed.set()
+                raise NetworkError("synthetic network outage")
+            return await api.request(url, **kwargs)
+
+        monkeypatch.setattr(HTTPXRequest, "do_request", request)
+        bus = MessageBus(tmp_path)
+        await bus.start()
+        adapters = [TelegramChannelAdapter(bot_token="0:synthetic", allowlist=SenderAllowlist(
+            "channel-telegram", frozenset({"7"}))) for _ in range(3)]
+        try:
+            await adapters[0].start(bus)
+            await adapters[0].stop()
+            stopped_at = now
+            texts = [f"sent during upgrade {i}" for i in range(received_before_failure + 1)]
+            for i, text in enumerate(texts, 101):
+                api.send(i, text, sent_at=stopped_at + 10)
+            now += 1200
+            network_down = True
+            await adapters[1].start(bus)
+            await asyncio.wait_for(failed.wait(), 2)
+            assert adapters[1].healthcheck()["healthy"]
+            await adapters[1].stop()
+            with sqlite3.connect(path) as db:
+                assert db.execute("SELECT stopped_at FROM polling").fetchone() == (stopped_at,)
+            network_down = False
+            now += 1200
+            await adapters[2].start(bus)
+            queue = bus.get_queue("manager")
+            messages = [await asyncio.wait_for(queue.get(), 2) for _ in texts]
+            assert [message.payload["text"] for message in messages] == texts
+            await asyncio.wait_for(adapters[2]._app.update_queue.join(), 2)
+            assert bus.get_queue("manager").empty()
+        finally:
+            network_down = False
+            for adapter in adapters:
+                await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 10))
+
+
+@pytest.mark.parametrize("relative_date, delivered", [(-1, True), (0, False), (1, False)])
+def test_downtime_exemption_ends_at_resume(tmp_path, monkeypatch, relative_date, delivered):
+    from looper.agents.channels import telegram as channel
+    from telegram.request import HTTPXRequest
+
+    now = int(time.time()) - 2400
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(now, tz=tz)
+
+    monkeypatch.setattr(channel, "datetime", Clock)
+
+    async def run():
+        nonlocal now
+        path = tmp_path / ".local/telegram/channel-telegram/0.sqlite3"
+        api = BotAPI(path)
+        acknowledged = asyncio.Event()
+
+        async def request(transport, **kwargs):
+            result = await api.request(**kwargs)
+            data = kwargs.get("request_data")
+            if kwargs["url"].endswith("/getUpdates") and data.parameters.get("offset", 0) == 102:
+                acknowledged.set()
+            return result
+
+        monkeypatch.setattr(HTTPXRequest, "do_request", request)
+        bus = MessageBus(tmp_path)
+        await bus.start()
+        adapters = [TelegramChannelAdapter(bot_token="0:synthetic", allowlist=SenderAllowlist(
+            "channel-telegram", frozenset({"7"}))) for _ in range(2)]
+        try:
+            await adapters[0].start(bus)
+            await adapters[0].stop()
+            now += 1200
+            resumed_at = now
+            await adapters[1].start(bus)
+            # The updater stays running across a later network gap or system sleep.
+            now += 1200
+            api.send(101, "delayed update", sent_at=resumed_at + relative_date)
+            await asyncio.wait_for(acknowledged.wait(), 2)
+            await asyncio.wait_for(adapters[1]._app.update_queue.join(), 2)
+            queue = bus.get_queue("manager")
+            assert (not queue.empty()) is delivered
+            if delivered:
+                assert queue.get_nowait().payload["text"] == "delayed update"
+            assert adapters[1]._inbox.processed(101)
+        finally:
+            for adapter in adapters:
+                await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 10))
+
+
+def test_shutdown_saves_offline_boundary_before_agent_drain(tmp_path, monkeypatch):
+    from looper.agents.channels.registry import ChannelRegistry
+    from looper.agents.serve import shut_down_within, stop_signal_handler
+    from telegram.request import HTTPXRequest
+
+    async def run():
+        path = tmp_path / ".local/telegram/channel-telegram/0.sqlite3"
+        api = BotAPI(path)
+
+        async def request(transport, **kwargs):
+            return await api.request(**kwargs)
+
+        monkeypatch.setattr(HTTPXRequest, "do_request", request)
+        bus = MessageBus(tmp_path)
+        adapter = TelegramChannelAdapter(bot_token="0:synthetic", allowlist=SenderAllowlist(
+            "channel-telegram", frozenset({"7"})))
+        registry = ChannelRegistry(bus)
+        registry._channels[adapter.channel_id] = adapter
+        stop, draining = asyncio.Event(), asyncio.Event()
+        exits = []
+
+        async def shutdown():
+            draining.set()
+            await stop.wait()  # A Manager drain that outlasts the hard shutdown deadline.
+            await registry.stop_all()
+
+        try:
+            await adapter.start(bus)
+            handler = stop_signal_handler(asyncio.Event(), prepare_stop=registry.prepare_stop_all)
+            before = int(time.time())
+            handler()
+            with sqlite3.connect(path) as db:
+                boundary = db.execute("SELECT stopped_at FROM polling").fetchone()
+            assert boundary is not None and before <= boundary[0] <= int(time.time())
+            task = asyncio.create_task(shutdown())
+            try:
+                await shut_down_within(task, deadline=.05, exit_now=exits.append)
+                assert draining.is_set() and exits == [1]
+                assert adapter._app.updater.running
+                with sqlite3.connect(path) as db:
+                    assert db.execute("SELECT stopped_at FROM polling").fetchone() == boundary
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        finally:
+            await registry.stop_all()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 10))
 
 
 def test_acknowledged_update_replays_when_handler_never_started(tmp_path):

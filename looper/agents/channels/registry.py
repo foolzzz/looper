@@ -59,6 +59,10 @@ class ChannelRegistry:
             await adapter.stop()
             logger.info("channel %s unregistered", channel_id)
 
+    def prepare_stop_all(self) -> None:
+        for adapter in self._channels.values():
+            adapter.prepare_stop()
+
     async def stop_all(self) -> None:
         for channel_id in list(self._channels):
             await self.unregister(channel_id)

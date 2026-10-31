@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,16 +30,28 @@ class TelegramInbox(asyncio.Queue):
         self._db.commit()
         row = self._db.execute("SELECT stopped_at FROM polling WHERE id = 1").fetchone()
         self.previous_polling_stopped_at: int | None = row[0] if row else None
+        self.polling_resumed_at: int | None = None
+        self._stopping = False
 
-    def polling_started(self) -> None:
-        # A crash while polling has no clean stop boundary. Do not reuse an older
-        # shutdown's exemption on the next start; this process keeps its snapshot.
+    def polling_started(self, resumed_at: int | None = None) -> None:
+        self.polling_resumed_at = int(time.time()) if resumed_at is None else resumed_at
+
+    def polling_received(self, updates: list[dict[str, Any]]) -> None:
+        """Commit the response before PTB sees it; retire the old boundary after the last page."""
         with self._db:
-            self._db.execute("DELETE FROM polling")
+            for update in updates:
+                self._db.execute("INSERT OR IGNORE INTO updates (update_id, payload) VALUES (?, ?)",
+                                 (update["update_id"], json.dumps(update)))
+            # PTB requests the default maximum of 100. A full page can leave old
+            # updates at Telegram; a shutdown's final getUpdates must keep its stop.
+            if len(updates) < 100 and not self._stopping:
+                self._db.execute("DELETE FROM polling")
 
     def polling_stopped(self, stopped_at: int) -> None:
+        self._stopping = True
         with self._db:
-            self._db.execute("INSERT OR REPLACE INTO polling (id, stopped_at) VALUES (1, ?)", (stopped_at,))
+            # A failed recovery or repeated shutdown must not shorten the window.
+            self._db.execute("INSERT OR IGNORE INTO polling (id, stopped_at) VALUES (1, ?)", (stopped_at,))
 
     async def put(self, update: Any) -> None:
         # Application's private stop sentinel is not a Telegram update.

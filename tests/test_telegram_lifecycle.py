@@ -182,6 +182,7 @@ def test_partial_start_releases_resources(
                 app.running = True
             elif name == "deleteWebhook":
                 app.updater.running = True
+                adapter._inbox.polling_received([])
             elif name == "updater.stop":
                 assert app.updater.running
                 app.updater.running = False

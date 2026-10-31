@@ -21,6 +21,7 @@ Fallback when the constructor's token is empty:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -152,18 +153,29 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._running = True
 
         add_secret(self._bot_token)  # python-telegram-bot puts it in every request URL and in the Bot's repr
-        # Own both transports: Application.shutdown is a no-op if initialize failed.
-        # Match ApplicationBuilder's default pool sizes for polling and other calls.
-        self._requests = (HTTPXRequest(connection_pool_size=1), HTTPXRequest(connection_pool_size=256))
         try:
             builder = Application.builder().token(self._bot_token)
-            builder.get_updates_request(self._requests[0])
-            builder.request(self._requests[1])
             # update_id is unique within a bot, not across bots assigned to the same
             # channel row. Rotating one bot's token keeps its numeric identity.
             identity = self._bot_token.partition(":")[0]
             bot_id = identity if identity.isdecimal() else "invalid"
             self._inbox = TelegramInbox(bus.runtime_root / ".local" / "telegram" / self.channel_id / f"{bot_id}.sqlite3")
+            inbox = self._inbox
+
+            class PollingRequest(HTTPXRequest):
+                async def do_request(self, url: str, **kwargs: Any) -> tuple[int, bytes]:
+                    code, payload = await super().do_request(url=url, **kwargs)
+                    if code == 200 and url.endswith("/getUpdates"):
+                        response = json.loads(payload)
+                        if response.get("ok"):
+                            inbox.polling_received(response["result"])
+                    return code, payload
+
+            # Own both transports even if Application.initialize fails. Save polling
+            # responses before PTB acknowledges them, retaining its network retry loop.
+            self._requests = (PollingRequest(connection_pool_size=1), HTTPXRequest(connection_pool_size=256))
+            builder.get_updates_request(self._requests[0])
+            builder.request(self._requests[1])
             builder.update_queue(self._inbox)
             self._app = builder.build()
 
@@ -187,6 +199,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             self._outbound_task = asyncio.create_task(self._outbound_loop())
 
             await self._app.initialize()
+            self._inbox.polling_started(int(datetime.now(timezone.utc).timestamp()))
             await self._inbox.replay(self._app.bot)
             try:
                 from telegram import BotCommand
@@ -198,13 +211,23 @@ class TelegramChannelAdapter(ChannelAdapter):
                 logger.warning("telegram set_my_commands failed", exc_info=True)
             await self._app.start()
             await self._app.updater.start_polling(drop_pending_updates=False)  # type: ignore[union-attr]
-            self._inbox.polling_started()
         except BaseException:
             await self.stop()
             raise
         logger.info("telegram channel adapter started")
 
+    def prepare_stop(self) -> None:
+        if self._inbox is not None and self._app is not None:
+            updater = self._app.updater
+            if updater is not None and updater.running:
+                try:
+                    self._inbox.polling_stopped(int(datetime.now(timezone.utc).timestamp()))
+                except Exception:
+                    logger.warning("%s: telegram polling stop boundary could not be saved",
+                                   self._channel_id, exc_info=True)
+
     async def stop(self) -> None:
+        self.prepare_stop()
         self._running = False
 
         async def cleanup(stage: str, action: Callable[[], Awaitable[Any]]) -> None:
@@ -222,14 +245,6 @@ class TelegramChannelAdapter(ChannelAdapter):
         if self._app:
             updater = self._app.updater
             if updater is not None and updater.running:
-                if self._inbox is not None:
-                    # Persist before awaiting shutdown, including messages arriving
-                    # while the last long poll winds down. Telegram dates use seconds.
-                    try:
-                        self._inbox.polling_stopped(int(datetime.now(timezone.utc).timestamp()))
-                    except Exception:
-                        logger.warning("%s: telegram polling stop boundary could not be saved",
-                                       self._channel_id, exc_info=True)
                 await cleanup("updater.stop", updater.stop)
             if self._app.running:
                 await cleanup("stop", self._app.stop)
@@ -449,7 +464,9 @@ class TelegramChannelAdapter(ChannelAdapter):
             date = getattr(message, "date", None)
             age = (datetime.now(timezone.utc) - date).total_seconds() if date is not None else 0
             stopped_at = self._inbox.previous_polling_stopped_at
-            during_downtime = date is not None and stopped_at is not None and date.timestamp() >= stopped_at
+            resumed_at = self._inbox.polling_resumed_at
+            during_downtime = (date is not None and stopped_at is not None and resumed_at is not None
+                               and stopped_at <= date.timestamp() < resumed_at)
             if age > self._backlog_max_age_seconds and not during_downtime:
                 logger.warning("%s: stale Telegram update_id=%s age_seconds=%.0f backlog_max_age_seconds=%s ignored",
                                self.channel_id, update.update_id, age, self._backlog_max_age_seconds)
