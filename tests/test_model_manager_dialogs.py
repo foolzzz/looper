@@ -250,6 +250,18 @@ def observed(monkeypatch, registry, actions, *, row=None, reply="已完成"):
     return dialogs.Look(ObservedApi(registry), None, reply, "disposable", 0, frozenset(), True)
 
 
+@pytest.mark.parametrize("missing", ["\n```\nbash scripts/pull.sh\n```\n", "- 运行超时：180 秒",
+                                     "- 环境变量：没有", "- 最晚成功时间：", "- 告警阈值：", "不经过 agent，不花模型额度"])
+def test_command_schedule_dialog_rejects_incomplete_enable_confirmation(monkeypatch, missing):
+    reply = "\n```\nbash scripts/pull.sh\n```\n- 运行超时：180 秒\n- 环境变量：没有\n- 最晚成功时间：不设\n- 告警阈值：按默认\n不经过 agent，不花模型额度"
+    look = observed(monkeypatch, {}, [action("looper_schedules", "enable", status="needs_confirmation")], reply=reply)
+    monkeypatch.setattr(dialogs, "_named", lambda *_: {"kind": "command", "enabled": False})
+    check = dialogs.select(["schedule_command_create"])[0].says[1].check
+    assert check(look) is None
+    look.reply = reply.replace(missing, "")
+    assert check(look) is not None
+
+
 def provider_state():
     return {"providers": [{"provider_id": "prov-test", "name": "eval-deepseek", "api_key_set": False,
                            "vendor_type": "deepseek", "endpoints": [

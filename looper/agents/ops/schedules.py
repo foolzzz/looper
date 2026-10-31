@@ -22,6 +22,7 @@ changed, before and after.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -71,7 +72,7 @@ def _run_listed(run: Mapping[str, Any]) -> dict[str, Any]:
     return {"run_id": run["run_id"], "status": run["status"], "trigger": run["trigger"],
             "at": run["fired_at"] or run["scheduled_for"], "task_id": run["task_id"],
             "summary": clip(run["summary"] or run["error"] or "", 200) or None, "cost_usd": run["cost_usd"],
-            "exit_code": run["exit_code"],
+            "exit_code": run["exit_code"], "kind": run["kind"],
             **({"firings": run["firings"]} if run["firings"] > 1 else {})}
 
 
@@ -243,6 +244,7 @@ async def _update(call: Call, row: Mapping[str, Any]) -> dict[str, Any]:
     changed = await _changes(before, view)
     call.turn.blocks.append("\n".join([f"已修改定时任务「{view['name']}」（项目 {view['project_name']}）：",
                                        *(changed.values() or ["- 没有变化"]), *_next_line(before, view),
+                                       *(["不经过 agent，不花模型额度。"] if view["kind"] == "command" else []),
                                        f"它现在{'已启用' if view['enabled'] else '是停用的'}。"]))
     return {"schedule": _listed(await _in_scope(call, view)), "changed": [_ARGUMENT.get(key, key) for key in changed],
             "shown_to_user": "Looper adds what changed, before and after, after your reply; do not repeat it."}
@@ -327,13 +329,19 @@ async def _starting(call: Call) -> str | None:
     names = await _profile_names()
     head = f"定时任务「{row['name']}」（项目 {row['project_name']}）"
     if view["kind"] == "command":
-        lines = [f"- 命令：`{view['command']}`",
+        lines = [f"- 命令：{_shown('command', view, names)}",
                  f"- 时间规则：{_shown('cron', view, names)}，时区 {view['timezone']}"]
         if action == "enable":
             lines.append(f"- 接下来 {NEXT_SHOWN} 次：{_next_fires(view)}")
         project = await db_projects.get_project(row["project_id"])
         directory = view["work_dir"] or f"项目的默认目录（{project['work_dir']}）"
         lines.append(f"- 目录：{directory}")
+        keys = ["run_timeout_seconds", "env"]
+        if view["env_file"]:
+            keys.append("env_file")
+        if action == "enable":
+            keys.extend(("success_deadline", "alert_policy"))
+        lines.extend(f"- {FIELD_WORDS[key]}：{_shown(key, view, names)}" for key in keys)
         first = (f"要现在执行一次{head}的命令吗？（不经过 agent，不花模型额度）" if action == "run" else
                  f"要启用{head}吗？启用后它按规则无人值守地执行这条命令（不经过 agent，不花模型额度）：")
         return "\n".join([first, *lines])
@@ -392,7 +400,11 @@ def _shown(key: str, view: Mapping[str, Any], names: Mapping[str, str]) -> str:
     if key == "kind":
         return "命令（不经过 agent，不花模型额度）" if value == "command" else "agent 任务"
     if key == "command":
-        return f"`{value}`" if value else "没有"
+        if not value:
+            return "没有"
+        # Keep both fences on their own lines, even inside a before → after diff.
+        fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", value)), default=0))
+        return f"\n{fence}\n{value}\n{fence}\n"
     if key == "env":
         return "、".join(sorted(value or {})) or "没有"
     if key == "env_file":
@@ -561,8 +573,8 @@ TOOLS: tuple[Tool, ...] = (
         name="looper_schedules",
         description="Schedules (a project's task, or a shell command with kind command, on a time rule): list; "
                     "get (with latest runs); create (disabled; "
-                    "Looper shows it and asks whether to enable it); update; enable (its runs then start tasks "
-                    "unattended; the user confirms first) or disable; run now (the user confirms first); delete "
+                    "Looper shows it and asks whether to enable it); update; enable (it then fires unattended: "
+                    "its task, or its command; the user confirms first) or disable; run now (the user confirms first); delete "
                     "(the user confirms first; its tasks stay); reset_planner_session (the user confirms first; "
                     "the next run starts fresh; a run in progress keeps its session and will not write it back).",
         schema={

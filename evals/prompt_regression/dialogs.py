@@ -1041,7 +1041,7 @@ def _command_schedule_created_disabled(look: Look) -> str | None:
     given = writes[0]["arguments"].get("fields", {})
     if any(given.get(key) != value for key, value in fields.items()) or "requirement" in given:
         return "the create call lacks command fields or supplies an agent requirement"
-    return (None if all(text in look.reply for text in ("- 定时任务：", "`bash scripts/pull.sh`", "要启用吗"))
+    return (None if all(text in look.reply for text in ("- 定时任务：", "\n```\nbash scripts/pull.sh\n```\n", "要启用吗"))
             else "the reply lacks the command configuration and the question whether to enable it")
 
 
@@ -1099,6 +1099,13 @@ def _schedule_enable_asked(look: Look, name: str = DEPS) -> str | None:
         return f"{name} is missing or was enabled before the user confirmed"
     if not _writes(look, status="needs_confirmation", tool="looper_schedules"):
         return "enabling the schedule does not wait for the user's confirmation"
+    if schedule["kind"] == "command":
+        if not all(text in look.reply for text in ("\n```\nbash scripts/pull.sh\n```\n", "- 运行超时：180 秒",
+                                                  "- 环境变量：没有", "- 最晚成功时间：", "- 告警阈值：",
+                                                  "不经过 agent，不花模型额度")):
+            return "the command confirmation lacks its command, bounds or no-model-spend notice"
+        if any(text in look.reply for text in ("需求", "建任务")):
+            return "the command confirmation describes an agent task"
     return _raw_json(look.reply)
 
 
