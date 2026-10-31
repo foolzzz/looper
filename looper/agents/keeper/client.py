@@ -4,6 +4,10 @@ import asyncio
 import base64
 import inspect
 import logging
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from .protocol import (MAX_FRAME_BYTES, MAX_STREAM_BYTES, PROTOCOL_VERSIONS, KeeperError,
                        Stream, decode_data, encode, read_frame)
@@ -15,7 +19,23 @@ class KeeperGone(ConnectionError):
     """The peer disappeared, or its stream could no longer be consumed safely."""
 
 
+@dataclass
+class _Unread:
+    callback: Callable
+    ranges: dict[Stream, tuple[int, int]] = field(default_factory=dict)
+
+
 class KeeperClient:
+    """Dispatch ordered notifications without letting callbacks block RPC replies.
+
+    The data queue holds at most 64 notifications (4 MiB of data). A bounded
+    overflow stores control events and confirmed byte ranges, replayed from
+    run_dir's logs. Data is
+    contiguous and ordered per stream; stdout/stderr interleaving within a
+    spilled range is not preserved. Control notifications retain their order.
+    run_dir defaults to the socket's parent directory.
+    """
+
     def __init__(self):
         self.on_data = lambda stream, offset, data: None
         self.on_eof = lambda stream, offset: None
@@ -26,17 +46,21 @@ class KeeperClient:
         self._writer = self._reader_task = self._dispatcher_task = None
         self._pending, self._offsets = {}, {}
         self._next_id = 0
+        self._queued_bytes = 0
 
-    async def connect(self, socket_path, *, timeout=10):
+    async def connect(self, socket_path, *, run_dir=None, timeout=10):
         await self.close()
         reader, self._writer = await asyncio.wait_for(
             asyncio.open_unix_connection(socket_path, limit=MAX_FRAME_BYTES), timeout)
         self._offsets.clear()
+        self._run_dir = Path(run_dir) if run_dir is not None else Path(socket_path).parent
+        self._queued_bytes = 0
         # At most 64 queued frames, each carrying at most MAX_STREAM_BYTES of data.
         notifications = asyncio.Queue(maxsize=64)
+        overflow = deque()
         available, finished = asyncio.Event(), asyncio.Event()
-        self._dispatcher_task = asyncio.create_task(self._dispatch(notifications, available, finished))
-        self._reader_task = asyncio.create_task(self._read(reader, notifications, available))
+        self._dispatcher_task = asyncio.create_task(self._dispatch(notifications, overflow, available, finished))
+        self._reader_task = asyncio.create_task(self._read(reader, notifications, overflow, available))
         writer = self._writer
         # A task cancelled before it starts never executes its coroutine's finally.
         self._reader_task.add_done_callback(lambda _: self._disconnected(writer, available, finished))
@@ -103,26 +127,52 @@ class KeeperClient:
         if inspect.isawaitable(result):
             await result
 
-    async def _dispatch(self, notifications, available, finished):
+    async def _deliver(self, callback, args):
+        try:
+            await self._callback(callback, *args)
+        except (Exception, asyncio.CancelledError):
+            logger.exception("keeper notification callback failed")
+            await self.close()
+            if asyncio.current_task().cancelling():
+                raise
+
+    async def _replay(self, unread):
+        for stream, (offset, end) in unread.ranges.items():
+            with (self._run_dir / f"{stream}.log").open("rb", buffering=0) as source:
+                source.seek(offset)
+                # Never read beyond the bytes confirmed by stream/data notifications.
+                while offset < end:
+                    data = source.read(min(MAX_STREAM_BYTES, end - offset))
+                    if not data:
+                        raise KeeperGone("keeper log ends before its confirmed offset")
+                    await self._deliver(unread.callback, (stream, offset, data))
+                    offset += len(data)
+                    await asyncio.sleep(0)
+
+    async def _dispatch(self, notifications, overflow, available, finished):
         try:
             while True:
                 await available.wait()
                 available.clear()
-                while not notifications.empty():
-                    callback, args = notifications.get_nowait()
-                    try:
-                        await self._callback(callback, *args)
-                    except (Exception, asyncio.CancelledError):
-                        logger.exception("keeper notification callback failed")
-                        await self.close()
-                        if asyncio.current_task().cancelling():
-                            raise
+                while not notifications.empty() or overflow:
+                    item = notifications.get_nowait() if not notifications.empty() else overflow.popleft()
+                    if isinstance(item, _Unread):
+                        try:
+                            await self._replay(item)
+                        except (OSError, KeeperGone):
+                            logger.exception("cannot replay keeper log range")
+                            await self.close()
+                            return
+                    else:
+                        callback, args, data_size = item
+                        self._queued_bytes -= data_size
+                        await self._deliver(callback, args)
                 if finished.is_set():
                     break
         finally:
             await self._callback(self.on_closed)
 
-    async def _read(self, reader, notifications, available):
+    async def _read(self, reader, notifications, overflow, available):
         try:
             while True:
                 message = await read_frame(reader)
@@ -138,12 +188,14 @@ class KeeperClient:
                             future.set_result(message["result"])
                     continue
                 method, params = message["method"], message["params"]
+                data_size = 0
                 if method in ("stream/data", "stream/eof"):
                     stream, offset = Stream(params["stream"]), params["offset"]
                     if type(offset) is not int or self._offsets.get(stream) != offset:
                         raise ValueError("noncontiguous keeper stream")
                     if method == "stream/data":
                         data = decode_data(params["data"], MAX_STREAM_BYTES)
+                        data_size = len(data)
                         self._offsets[stream] += len(data)
                         callback, args = self.on_data, (stream, offset, data)
                     else:
@@ -159,7 +211,25 @@ class KeeperClient:
                     callback = self.on_closing
                 else:
                     continue
-                await notifications.put((callback, args))
+                if overflow or notifications.full():
+                    # Coalesce consecutive spilled data, but seal ranges at control
+                    # events so replay cannot move later bytes ahead of those events.
+                    if method == "stream/data":
+                        if not overflow or not isinstance(overflow[-1], _Unread):
+                            if len(overflow) >= notifications.maxsize:
+                                raise ValueError("too many pending keeper notifications")
+                            overflow.append(_Unread(callback))
+                        ranges = overflow[-1].ranges
+                        start = ranges.get(stream, (offset, offset))[0]
+                        ranges[stream] = (start, self._offsets[stream])
+                        del data, args
+                    else:
+                        if len(overflow) >= notifications.maxsize:
+                            raise ValueError("too many pending keeper notifications")
+                        overflow.append((callback, args, 0))
+                else:
+                    notifications.put_nowait((callback, args, data_size))
+                    self._queued_bytes += data_size
                 available.set()
         except (EOFError, KeeperError, ValueError, KeyError, TypeError, ConnectionError, OSError):
             pass

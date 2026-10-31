@@ -2,10 +2,12 @@
 
 Notifications share one ordered channel: stream/data, stream/eof, child/exited,
 controller/replaced and keeper/closing. The client resolves responses in its
-reader and dispatches notifications in wire order on a separate task. Its queue
-holds at most 64 notifications (at most 4 MiB of decoded data); a full queue
-backpressures the reader. Connection loss fails pending RPCs immediately, then
-drains queued callbacks before calling on_closed once.
+reader and dispatches notifications on a separate task. Its queue holds at most
+64 notifications (at most 4 MiB of decoded data); overflow stores bounded,
+offset-only log ranges and control events without blocking the reader. Replay
+preserves per-stream data order and control event order, but not stdout/stderr
+interleaving within a spilled range. Connection loss fails pending RPCs
+immediately, then drains queued callbacks before calling on_closed once.
 
 After child exit, delivery is bounded to 10 seconds. Before closing, the keeper
 queues keeper/closing with {stdout_offset, stderr_offset}, the final byte lengths

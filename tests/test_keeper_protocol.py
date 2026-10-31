@@ -201,7 +201,7 @@ async def connected(run: Run, epoch: int = 0) -> tuple[KeeperClient, Events, dic
     client, events = KeeperClient(), Events()
     events.attach(client)
     try:
-        await client.connect(run.socket, timeout=5)
+        await client.connect(run.socket, run_dir=run.directory, timeout=5)
         result = await client.initialize(epoch=epoch, looper_version="test", timeout=5)
     except BaseException:
         await client.close()
@@ -872,6 +872,94 @@ for line in sys.stdin.buffer:
     exercise(check())
 
 
+def test_a_full_notification_queue_does_not_block_end_from_a_data_callback(launch) -> None:
+    async def check():
+        size = 8 * 1024 * 1024
+        run = launch(f"""\
+import sys
+sys.stdout.buffer.write(bytes(range(256)) * {size // 256})
+sys.stdout.buffer.flush()
+sys.stdin.buffer.read()
+""")
+        await eventually(lambda: (run.directory / keeper.STDOUT).exists()
+                         and (run.directory / keeper.STDOUT).stat().st_size == size)
+        client, events, _ = await connected(run)
+        record_data = client.on_data
+        ended, results, durations = asyncio.Event(), [], []
+        invalid_deliveries = []
+
+        async def on_data(stream, offset, data):
+            if offset != events.offsets[stream] or stream in events.eof:
+                invalid_deliveries.append((stream, offset))
+            record_data(stream, offset, data)
+            if offset == 0:
+                started = time.monotonic()
+                try:
+                    results.append(await client.end(timeout=3))
+                    durations.append(time.monotonic() - started)
+                finally:
+                    ended.set()
+
+        client.on_data = on_data
+        try:
+            await client.subscribe(Stream.STDOUT, 0)
+            await asyncio.wait_for(ended.wait(), 4)
+            assert results == [(None, signal.SIGTERM)]
+            assert durations[0] < 2
+            await asyncio.wait_for(events.closed.wait(), 5)
+            assert not invalid_deliveries
+            assert bytes(events.data[Stream.STDOUT]) == (run.directory / keeper.STDOUT).read_bytes()
+            assert events.offsets[Stream.STDOUT] == size
+            assert events.eof[Stream.STDOUT] == size
+            await run.wait()
+        finally:
+            await client.close()
+
+    exercise(check())
+
+
+def test_a_slow_data_callback_spills_a_large_stdout_with_bounded_memory(launch) -> None:
+    async def check():
+        size = 16 * 1024 * 1024
+        run = launch(f"""\
+import sys
+sys.stdin.buffer.read(1)
+sys.stdout.buffer.write(bytes(range(256)) * {size // 256})
+sys.stdout.buffer.flush()
+""")
+        client, events, _ = await connected(run)
+        record_data = client.on_data
+        queued_bytes, prefetched_bytes = [], []
+        invalid_deliveries = []
+
+        async def on_data(stream, offset, data):
+            if offset != events.offsets[stream] or stream in events.eof:
+                invalid_deliveries.append((stream, offset))
+            record_data(stream, offset, data)
+            queued_bytes.append(client._queued_bytes)
+            prefetched_bytes.append(client._offsets[stream] - events.offsets[stream])
+            await asyncio.sleep(0.01)
+
+        client.on_data = on_data
+        try:
+            await client.subscribe(Stream.STDOUT, 0)
+            await client.stdin_write(b"x", 0)
+            await asyncio.wait_for(events.closed.wait(), 12)
+            assert not invalid_deliveries
+            assert 0 < max(queued_bytes) <= 64 * 65536
+            assert max(prefetched_bytes) > 64 * 65536
+            assert client._queued_bytes == 0
+            assert bytes(events.data[Stream.STDOUT]) == (run.directory / keeper.STDOUT).read_bytes()
+            assert events.offsets[Stream.STDOUT] == size
+            assert events.eof == {Stream.STDOUT: size}
+            assert events.order.index("eof:stdout") < events.order.index("closed")
+            await run.wait()
+        finally:
+            await client.close()
+
+    exercise(check())
+
+
 def test_a_paused_consumer_gets_final_log_offsets_after_the_delivery_deadline(launch) -> None:
     async def check():
         run = launch("""\
@@ -1107,47 +1195,106 @@ def test_the_client_can_close_before_its_reader_starts(launch) -> None:
     exercise(check())
 
 
-def test_a_slow_callback_bounds_the_notification_backlog() -> None:
+@pytest.mark.parametrize("log_state", ["complete", "missing", "truncated"])
+def test_a_slow_callback_bounds_the_notification_backlog(log_state) -> None:
     async def check():
         entered, release, sent = (asyncio.Event() for _ in range(3))
+        prefix, payload = b"ignored", bytes(range(80))
+        start = len(prefix)
+
+        def notification(writer, method, params):
+            writer.write(encode({"jsonrpc": "2.0", "method": method, "params": params}))
+
+        def data(writer, stream, offset, value):
+            notification(writer, "stream/data", {"stream": stream, "offset": offset,
+                                                  "data": base64.b64encode(value).decode("ascii")})
 
         async def notifications(reader, writer):
-            message = await read_frame(reader)
-            assert message["method"] == "stream/subscribe"
-            writer.write(encode({"jsonrpc": "2.0", "id": message["id"], "result": {}}))
-            for offset in range(80):
-                writer.write(encode({"jsonrpc": "2.0", "method": "stream/data", "params": {
-                    "stream": "stdout", "offset": offset, "data": "YQ=="}}))
+            for _ in Stream:
+                message = await read_frame(reader)
+                assert message["method"] == "stream/subscribe"
+                writer.write(encode({"jsonrpc": "2.0", "id": message["id"], "result": {}}))
+                await writer.drain()
+            data(writer, Stream.STDOUT, start, payload[:1])
+            await writer.drain()
+            await entered.wait()
+            for offset in range(1, len(payload)):
+                data(writer, Stream.STDOUT, start + offset, payload[offset:offset + 1])
+                if offset in (70, 75):
+                    index = (offset - 70) // 5
+                    data(writer, Stream.STDERR, start + index, b"bc"[index:index + 1])
+            notification(writer, "child/exited", {"exit_code": 0, "signal": None})
+            data(writer, Stream.STDERR, start + 2, b"d")
+            for stream, length in ((Stream.STDOUT, len(payload)), (Stream.STDERR, 3)):
+                notification(writer, "stream/eof", {"stream": stream, "offset": start + length})
+            notification(writer, "controller/replaced", {"epoch": 1})
+            notification(writer, "keeper/closing", {"stdout_offset": start + len(payload),
+                                                     "stderr_offset": start + 3})
             await writer.drain()
             await close_writer(writer)
             sent.set()
 
         async with fake_server(notifications) as path:
+            if log_state != "missing":
+                logged = payload if log_state == "complete" else payload[:70]
+                (path.parent / keeper.STDOUT).write_bytes(prefix + logged +
+                                                        (b"unconfirmed" if log_state == "complete" else b""))
+            (path.parent / keeper.STDERR).write_bytes(prefix + b"bcd" + b"unconfirmed")
             client, events = KeeperClient(), Events()
             events.attach(client)
-            record_data = client.on_data
+            record_data, record_exited = client.on_data, client.on_exited
+            snapshots = []
 
             async def on_data(stream, offset, data):
-                if offset == 0:
+                if stream == Stream.STDOUT and offset == start:
                     entered.set()
                     await release.wait()
                 record_data(stream, offset, data)
 
+            def on_exited(code, sig):
+                snapshots.append(dict(events.offsets))
+                record_exited(code, sig)
+
+            def on_replaced(epoch):
+                events.replaced.append(epoch)
+                events.order.append("replaced")
+
+            def on_closing(stdout, stderr):
+                snapshots.append((stdout, stderr))
+                events.order.append("closing")
+
             client.on_data = on_data
+            client.on_exited = on_exited
+            client.on_replaced = on_replaced
+            client.on_closing = on_closing
             try:
                 await client.connect(path, timeout=5)
                 await client.initialize(epoch=0, looper_version="test")
-                await client.subscribe(Stream.STDOUT, 0)
+                for stream in Stream:
+                    events.offsets[stream] = start
+                    await client.subscribe(stream, start)
                 await asyncio.wait_for(entered.wait(), 5)
                 await asyncio.wait_for(sent.wait(), 5)
-                # 64 queued, one in the callback, one parsed and waiting for queue space.
-                await eventually(lambda: client._offsets[Stream.STDOUT] >= 66)
-                assert client._offsets[Stream.STDOUT] == 66
+                # The reader drains the entire wire while the first callback is blocked.
+                await eventually(lambda: client._reader_task.done())
+                assert client._offsets == {Stream.STDOUT: start + 80, Stream.STDERR: start + 3}
+                assert client._queued_bytes == 64
                 assert events.data[Stream.STDOUT] == b""
                 release.set()
                 await asyncio.wait_for(events.closed.wait(), 5)
-                assert bytes(events.data[Stream.STDOUT]) == b"a" * 80
-                assert events.order == ["closed"]
+                assert client._queued_bytes == 0
+                if log_state == "complete":
+                    assert bytes(events.data[Stream.STDOUT]) == payload
+                    assert bytes(events.data[Stream.STDERR]) == b"bcd"
+                    assert events.order == ["exited", "eof:stdout", "eof:stderr", "replaced", "closing", "closed"]
+                    assert events.replaced == [1]
+                    assert snapshots == [{Stream.STDOUT: start + 80, Stream.STDERR: start + 2},
+                                         (start + 80, start + 3)]
+                else:
+                    delivered = 65 if log_state == "missing" else 70
+                    assert bytes(events.data[Stream.STDOUT]) == payload[:delivered]
+                    assert not events.eof
+                    assert events.order == ["closed"]
             finally:
                 release.set()
                 await client.close()
