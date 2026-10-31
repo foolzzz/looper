@@ -233,9 +233,9 @@ def test_probe_units_run_once_per_minute_without_service_secrets(tmp_path, check
     host.environ["PATH"] = '/tools/100%/$bin:"quoted"\\path\nnext'
     root = tmp_path / "runtime 100%"
     config = root / ops_config.FILE
-    spec = service.build_probe_spec(host, label=LABEL, runtime_root=root, config=config)
+    spec = service.build_probe_spec(host, label=LABEL, runtime_root=root, config=config, port=9888)
     expected = [str(checkout / ".venv/bin/looper"), "service", "probe", "--config", str(config),
-                "--runtime-root", str(root)]
+                "--runtime-root", str(root), "--port", "9888"]
     assert list(spec.argv) == expected
     environment = {name: host.environ[name] for name in ("PATH", "TZ", "LANG", "HTTPS_PROXY")}
     assert dict(spec.env) == environment
@@ -293,6 +293,56 @@ def test_install_reloads_probe_and_removes_it_when_unconfigured(tmp_path, checko
         assert not fake.probe.loaded
     else:
         assert not fake.probe_active
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_failed_reinstall_removes_old_probe_before_stopping_service(tmp_path, checkout, monkeypatch, capsys, system):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    _configure_probe(tmp_path / "old-runtime")
+    assert _install(monkeypatch, host, tmp_path / "old-runtime") == 0
+    assert all(path.is_file() for path in _probe_paths(host))
+    assert fake.probe.loaded if system == "Darwin" else fake.probe_active
+
+    def run(argv):
+        if (system == "Darwin" and list(argv[1:]) == ["bootout", f"gui/{UID}/{LABEL}"]
+                or system == "Linux" and list(argv[2:]) == ["stop", f"{LABEL}.service"]):
+            assert not any(path.exists() for path in _probe_paths(host))
+            assert not (fake.probe.loaded if system == "Darwin" else fake.probe_active)
+        return fake(argv)
+
+    host.run = run
+    host.port_in_use = lambda port: True
+    assert _install(monkeypatch, host, tmp_path / "new-runtime") == 1
+    assert "port 9876 is in use" in capsys.readouterr().err
+    assert not fake.serving
+    assert not any(path.exists() for path in _probe_paths(host))
+    assert not (fake.probe.loaded if system == "Darwin" else fake.probe_active)
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+@pytest.mark.parametrize("selection", ["flag", "retained", "file"])
+def test_installed_probe_uses_the_serving_port(tmp_path, checkout, monkeypatch, system, selection):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    if selection == "file":
+        config = root / ops_config.FILE
+        config.write_text(config.read_text().replace('[server]\n', '[server]\nport = 9888\n'))
+    if selection == "retained":
+        assert _install(monkeypatch, host, root, port="9888") == 0
+    received = []
+    host.get_status = lambda port, token: received.append(port) or {"status": "running"}
+    assert _install(monkeypatch, host, root, port="9888" if selection == "flag" else None) == 0
+    assert received == [9888]
+    unit = _probe_paths(host)[0].read_bytes()
+    if system == "Darwin":
+        argv = plistlib.loads(unit)["ProgramArguments"]
+    else:
+        argv = service._systemd_words(next(line.removeprefix("ExecStart=") for line in unit.decode().splitlines()
+                                          if line.startswith("ExecStart=")))
+    assert argv[argv.index("--port") + 1] == "9888"
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])

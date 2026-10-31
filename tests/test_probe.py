@@ -474,3 +474,18 @@ def test_service_probe_cli_reads_explicit_config_and_runtime_root(tmp_path):
         assert cli.main(["service", "probe", "--config", str(config), "--runtime-root", str(runtime)]) == 0
     state = json.loads((runtime / ".local/probe/state.json").read_text())
     assert state["last_verdict"] == "ok" and state["last_ok_at"] is not None
+
+
+@pytest.mark.parametrize("configured_port", [False, True])
+def test_service_probe_cli_samples_the_port_override(tmp_path, configured_port):
+    from looper.ops_config import write_private
+
+    runtime = tmp_path / "runtime"
+    with serving(code=500) as other, serving({"status": "ok", "result": HEALTH}) as server:
+        config = tmp_path / "deployment/server.toml"
+        write_private(config, (f'[server]\nport = {other.server_port}\n' if configured_port else "")
+                      + '[probe]\nnotify_channel = "lark"\nnotify_chat = "oc_testchat"\n')
+        assert cli.main(["service", "probe", "--config", str(config), "--runtime-root", str(runtime),
+                         "--port", str(server.server_port)]) == 0
+    state = json.loads((runtime / ".local/probe/state.json").read_text())
+    assert state["last_verdict"] == "ok" and state["last_ok_at"] is not None

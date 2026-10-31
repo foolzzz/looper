@@ -186,12 +186,12 @@ class ProbeSpec:
     log_path: Path
 
 
-def build_probe_spec(host: Host, *, label: str, runtime_root: Path, config: Path) -> ProbeSpec:
+def build_probe_spec(host: Host, *, label: str, runtime_root: Path, config: Path, port: int) -> ProbeSpec:
     check_label(label)
     root = _absolute_root(host, runtime_root)
     return ProbeSpec(label=label,
                      argv=(*looper_command(host.executable), "service", "probe", "--config", str(config),
-                           "--runtime-root", str(root)),
+                           "--runtime-root", str(root), "--port", str(port)),
                      working_dir=host.cwd,
                      env=tuple((name, host.environ[name]) for name in PROBE_ENV_NAMES if name in host.environ),
                      log_path=root / PROBE_LOG_RELATIVE_PATH)
@@ -598,15 +598,13 @@ def _probe_unit_path(host: Host, label: str) -> Path:
             else Systemd(host, f"{label}-probe").unit_path.with_suffix(".timer"))
 
 
-def _install_probe(host: Host, ops: OpsConfig, label: str, runtime_root: Path) -> str:
+def _install_probe(host: Host, ops: OpsConfig, label: str, runtime_root: Path, port: int) -> str:
     path = _probe_unit_path(host, label)
     if not ops.probe_notify_chat:
-        if path.exists() or (host.system == "Linux" and path.with_suffix(".service").exists()):
-            remove_probe_units(host, label)
         return (f"probe      not configured: add [probe] to {ops.path} "
                 "to be alerted when this service stops answering")
     try:
-        spec = build_probe_spec(host, label=label, runtime_root=runtime_root, config=ops.path)
+        spec = build_probe_spec(host, label=label, runtime_root=runtime_root, config=ops.path, port=port)
         if host.system == "Darwin":
             mgr = Launchd(host, f"{label}.probe")
             mgr.stop()
@@ -710,10 +708,14 @@ def install(host: Host, ops: OpsConfig, *, label: str = DEFAULT_LABEL, port: int
     runtime_root.mkdir(mode=0o700, parents=True, exist_ok=True)  # private before logs/ under it (operator_auth)
     spec.log_path.parent.mkdir(parents=True, exist_ok=True)
     write_private(mgr.unit_path, mgr.render(spec))
+    # Retire the old target before stopping it, even if the replacement fails to start.
+    probe_path = _probe_unit_path(host, label)
+    if probe_path.exists() or (host.system == "Linux" and probe_path.with_suffix(".service").exists()):
+        remove_probe_units(host, label)
     mgr.stop()
     serving_port = port if port is not None else ops.port
     serving = _start_and_wait(mgr, serving_port, spec.log_path, timeout, runtime_root)
-    probe_report = _install_probe(host, ops, label, runtime_root)
+    probe_report = _install_probe(host, ops, label, runtime_root, serving_port)
     names = [name for name, _ in spec.env]
     dropped = sorted(name for name in host.environ if name.startswith(FORMER_PREFIXES) and name not in names
                      and name not in ops_config.VARIABLES and name not in ("LOOPER_RUNTIME_ROOT", "LOOPX_RUNTIME_ROOT"))
