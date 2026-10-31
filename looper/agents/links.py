@@ -34,3 +34,8 @@ def task_link(base: str, task_id: str) -> str:
 def schedule_link(base: str, schedule: Mapping[str, Any]) -> str:
     """The schedule's page; relative when ``base`` is empty."""
     return f"{base}/#projects/{schedule['project_id']}/schedules/{schedule['id']}"
+
+
+def run_link(base: str, schedule: Mapping[str, Any], run_id: str) -> str:
+    """The schedule page expanded at this run."""
+    return f"{schedule_link(base, schedule)}/runs/{run_id}"
