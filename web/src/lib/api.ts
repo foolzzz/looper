@@ -1357,7 +1357,7 @@ export async function fetchRunLog(
 }
 
 /** Walk backwards in bounded byte windows; decode only after joining split UTF-8 sequences. */
-export async function fetchRunLogTail(runId: string): Promise<RunLog & { text: string }> {
+export async function fetchRunLogTail(runId: string): Promise<RunLog & { text: string; partialLines: number | null }> {
   const window = 4 * 1024 * 1024;
   const log = await fetchRunLog(runId, { tail_lines: 200, limit_bytes: window });
   const bytes = (page: RunLog) => Uint8Array.from(atob(page.data_base64), (c) => c.charCodeAt(0));
@@ -1380,7 +1380,9 @@ export async function fetchRunLogTail(runId: string): Promise<RunLog & { text: s
   for (let i = data.length - 1; i >= 0; i--) {
     if (data[i] === 10 && ++count === wanted) { data = data.subarray(i + 1); break; }
   }
-  return { ...log, text: new TextDecoder().decode(data) };
+  const partialLines = exact ? null : data.reduce((count, byte) => count + Number(byte === 10), 0)
+    + Number(data.length > 0 && data.at(-1) !== 10);
+  return { ...log, text: new TextDecoder().decode(data), partialLines };
 }
 
 /** Keep bytes intact across page boundaries, including non-UTF-8 output. */

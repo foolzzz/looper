@@ -1531,6 +1531,7 @@ function runStatsText(stats: RunStats, label: string) {
 /** Text decoding belongs only to the preview; downloads retain the original bytes. */
 function CommandRunLog({ run }: { run: ScheduleRunInfo }) {
   const [tail, setTail] = useState<string | null>(null);
+  const [partialLines, setPartialLines] = useState<number | null>(null);
   const [complete, setComplete] = useState(!isActiveRun(run));
   const [truncated, setTruncated] = useState(run.log?.truncated ?? false);
   const [loading, setLoading] = useState(false);
@@ -1538,8 +1539,8 @@ function CommandRunLog({ run }: { run: ScheduleRunInfo }) {
   const [downloadError, setDownloadError] = useState("");
   const [progress, setProgress] = useState<{ downloaded: number; total: number } | null>(null);
 
-  const hasLog = run.log != null;
   const active = isActiveRun(run);
+  const hasLog = run.log != null && (active || run.log.bytes !== 0 || run.started_at != null);
   const latest = useRef(0);
   const refresh = useCallback(async () => {
     if (!hasLog) return;
@@ -1550,6 +1551,7 @@ function CommandRunLog({ run }: { run: ScheduleRunInfo }) {
       const log = await fetchRunLogTail(run.run_id);
       if (mine !== latest.current) return;
       setTail(log.text);
+      setPartialLines(log.partialLines);
       setComplete(log.complete);
       setTruncated(log.truncated);
     } catch (err) {
@@ -1585,7 +1587,12 @@ function CommandRunLog({ run }: { run: ScheduleRunInfo }) {
     }
   };
 
-  if (!hasLog) return <p className="pb-3 text-xs text-muted-foreground">This run did not start the command, so it has no log.</p>;
+  if (!hasLog) return (
+    <div className="space-y-2 pb-3 text-xs text-muted-foreground">
+      {(run.error ?? run.summary) && <p className="break-words">{run.error ?? run.summary}</p>}
+      <p>This run did not start the command, so it has no log.</p>
+    </div>
+  );
 
   return (
     <div className="min-w-0 space-y-2 pb-3 text-xs">
@@ -1593,6 +1600,7 @@ function CommandRunLog({ run }: { run: ScheduleRunInfo }) {
       <pre aria-label="Run log" className="max-h-64 overflow-auto whitespace-pre rounded-md border border-border bg-muted/20 px-3 py-2 font-mono text-[11px]">
         {tail ?? run.log_tail ?? (loading ? "Loading log…" : "")}
       </pre>
+      {partialLines != null && <p className="text-muted-foreground">Showing the last {partialLines} lines; download the full log for the rest.</p>}
       {error && <p role="alert" className="text-destructive">{error}</p>}
       {(truncated || run.log?.truncated) && <p className="text-warning">The log was truncated at 50 MiB; the middle is left out.</p>}
       {(active && !complete) && <p className="text-muted-foreground">Still running: the log grows</p>}
@@ -1628,7 +1636,7 @@ function CommandRun({ run, timeZone, linked }: { run: ScheduleRunInfo; timeZone:
     ["Scheduled", formatInZone(run.scheduled_for, timeZone)],
     ["Started", formatInZone(run.started_at, timeZone)],
     ["Finished", formatInZone(run.finished_at, timeZone)],
-    ["Duration", ["skipped_overlap", "skipped_missed", "skipped_gate", "skipped_budget"].includes(run.status) ? "—" : durationText(run) ?? "—"],
+    ["Duration", !run.started_at || ["skipped_overlap", "skipped_missed", "skipped_gate", "skipped_budget"].includes(run.status) ? "—" : durationText(run) ?? "—"],
     ["Trigger", triggerText(run)],
   ] as const;
   return (

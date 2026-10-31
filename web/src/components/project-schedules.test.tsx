@@ -511,6 +511,20 @@ describe("command run history", () => {
     await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-failed" />));
     expect(container.querySelector('[aria-label="Run log"]')?.textContent === new TextDecoder().decode(data.slice("discard\n".length))).toBe(true);
     expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(2);
+    expect(container.textContent).not.toContain("download the full log for the rest.");
+  });
+
+  it.each([true, false])("reports whole lines when the tail walk reaches its window limit (newline: %s)", async (newline) => {
+    const window = 4 * 1024 * 1024;
+    const ending = `\nsecond\nthird${newline ? "\n" : ""}`;
+    stub((path, body) => path === "schedule_admin/run_log" ? {
+      size: 5 * window, offset: body.offset ?? 4 * window, next_offset: null, complete: true, truncated: false,
+      data_base64: btoa(body.offset == null ? "x".repeat(window - ending.length) + ending : "x".repeat(window)),
+    } : undefined);
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-failed" />));
+    expect(container.querySelector('[aria-label="Run log"]')?.textContent).toBe(`second\nthird${newline ? "\n" : ""}`);
+    expect(container.textContent).toContain("Showing the last 2 lines; download the full log for the rest.");
+    expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(4);
   });
 
   it("shows exit zero on succeeded command runs", async () => {
@@ -566,14 +580,47 @@ describe("command run history", () => {
   });
 
   it("does not request a log for an overlap skip and shows no duration", async () => {
-    stub(() => respond([run({ status: "skipped_overlap", log: null, duration_seconds: 0, exit_code: null })]));
+    const summary = "the previous command run (srun-previous) is still in progress";
+    stub(() => respond([run({ status: "skipped_overlap", log: null, duration_seconds: 0, exit_code: null, summary })]));
     await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-failed" />));
+    expect(container.textContent).toContain(`${summary}This run did not start the command, so it has no log.`);
     expect(container.textContent).toContain("This run did not start the command, so it has no log.");
     expect(container.querySelector('[aria-label="Run log"]')).toBeNull();
     expect(button("Download log")).toBeUndefined();
     expect(button("Refresh log")).toBeUndefined();
     expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(0);
     expect(container.querySelector('[data-run-id] button')?.textContent).toContain("Duration—");
+  });
+
+  it("shows a failed launch's reason without log controls or duration", async () => {
+    const error = "env_file line 2 must be KEY=VALUE";
+    stub(() => respond([run({ started_at: null, log: { file: "run.log", bytes: 0, truncated: false },
+      duration_seconds: null, exit_code: null, error, summary: "Launch failed" })]));
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-failed" />));
+    expect(container.textContent).toContain(`${error}This run did not start the command, so it has no log.`);
+    expect(container.textContent).not.toContain("Launch failed");
+    expect(container.querySelector('[aria-label="Run log"]')).toBeNull();
+    expect(button("Download log")).toBeUndefined();
+    expect(button("Refresh log")).toBeUndefined();
+    expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(0);
+    expect(container.querySelector('[data-run-id] button')?.textContent).toContain("Duration—");
+  });
+
+  it("keeps a complete short log without a partial-preview note", async () => {
+    stub();
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-failed" />));
+    expect(container.querySelector('[aria-label="Run log"]')?.textContent).toBe("fresh tail");
+    expect(container.textContent).not.toContain("download the full log for the rest.");
+  });
+
+  it.each([true, false])("keeps log controls for an empty log when active or started (active: %s)", async (active) => {
+    stub((path) => path === "schedule_admin/runs" ? respond([run({ status: active ? "running" : "succeeded",
+      started_at: active ? null : "2026-10-30T09:01:00Z", finished_at: active ? null : "2026-10-30T09:01:07Z",
+      log: { file: "run.log", bytes: 0, truncated: false } })]) : undefined);
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-failed" />));
+    expect(button("Download log")).toBeDefined();
+    expect(button("Refresh log")).toBeDefined();
+    expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(1);
   });
 
   it.each([[2, 2, "destructive"], [undefined, 2, "warning"], [undefined, 3, "destructive"]] as const)(
