@@ -554,6 +554,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-10-31 | Telegram 长升级间隙积压修复（#974，本分支未合入）：现有 SQLite inbox 持久化轮询停止时间，该时刻起的消息不受年龄上限限制，较早消息仍过滤并记录日志，保留 `update_id` 去重；恢复轮询后清除磁盘上的旧停止边界，启动失败则保留。定向回归（`-n 2`）：508 passed、32 skipped，数据库项因未配置专属临时库未运行；CI 的 PR 标记筛选可收集启动积压测试的全部 12 个参数用例，CI 已配置 PostgreSQL。仅 Telegram 接入路径变化，控制台、Lark 和 CLI 无需改动。 |
 | 2026-10-31 | TTADK Codex 后续修复（本分支，未合入）：运行记录保留原生与 TTADK 的 launcher，控制台选择与已保存 Profile 显示 TTADK 运行时名称及启动器；Worker、Reviewer、Planner 的无结果错误和活动保留末尾 1000 字符的脱敏 stderr，服务先启动 HTTP 工具再重放消息和恢复任务。验证：三个 CI 失败均已复现，修复后与指定 TTADK 回归共 65 项通过（`-n 2`，一次性 PostgreSQL）；此前的 Agent Profiles 组件 48 项、TypeScript 编译及隔离浏览器截图验证保留，未调用真实模型。Telegram、Lark 和 CLI 沿用共同后端结果，无新增配置字段。 |
 | 2026-10-13 | RFC v0 合入（looper #12），4 个待决问题已决定 |
 | 2026-10-13 | M0 交付（looper #13，`c600594ea`）：项目背景；Worker 和 Reviewer 的 prompt 分层，契约移出 stdin；四类 agent 记录 `metadata.system_prompt`。真实 Claude 下 Worker 和 Reviewer 的判定都通过 |

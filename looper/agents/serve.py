@@ -418,7 +418,8 @@ async def carry_on_tasks(task_router: TaskRouter, left: LeftRunning) -> None:
 SHUTDOWN_DEADLINE_SEC = 15.0
 
 
-def stop_signal_handler(stop: asyncio.Event, *, exit_now: Callable[[int], Any] = os._exit) -> Callable[[], None]:
+def stop_signal_handler(stop: asyncio.Event, *, exit_now: Callable[[int], Any] = os._exit,
+                        prepare_stop: Callable[[], None] | None = None) -> Callable[[], None]:
     """What SIGINT and SIGTERM do: the first starts the shutdown (``stop``), another exits at once."""
 
     def handler() -> None:
@@ -427,6 +428,8 @@ def stop_signal_handler(stop: asyncio.Event, *, exit_now: Callable[[int], Any] =
             exit_now(1)
             return
         logger.info("shutdown signal received")
+        if prepare_stop is not None:
+            prepare_stop()
         stop.set()
 
     return handler
@@ -750,7 +753,7 @@ async def _run_agent_system_owned(
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop_signal_handler(stop_event))
+        loop.add_signal_handler(sig, stop_signal_handler(stop_event, prepare_stop=registry.prepare_stop_all))
 
     await stop_event.wait()
 
