@@ -319,6 +319,16 @@ function Schedules({ schedules }: { schedules: OverviewSchedules }) {
                           </span>
                         </Badge>
                       )}
+                      {s.deadline_since && (
+                        <span className="text-destructive">
+                          Missed its success deadline since <ScheduleTime iso={s.deadline_since} timeZone={s.timezone} />
+                        </span>
+                      )}
+                      {s.overlap_since && (
+                        <span className="text-destructive">
+                          Skipping: the previous run is still going since <ScheduleTime iso={s.overlap_since} timeZone={s.timezone} />
+                        </span>
+                      )}
                       {s.last_status && (
                         <span className="flex items-center gap-1.5">
                           last run

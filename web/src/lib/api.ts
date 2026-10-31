@@ -341,6 +341,8 @@ export interface OverviewSchedules {
     failures_since: string | null;
     /** Set while the "no success for a while" alert is active: when it started. */
     stale_since: string | null;
+    deadline_since: string | null;
+    overlap_since: string | null;
     last_success_at: string | null;
     last_status: ScheduleRunStatus | null;
   })[];
@@ -1036,7 +1038,15 @@ export interface ScheduleRunInfo {
   cost_usd: number | null;
   /** Why the run failed or was skipped; for "gate_failed", the reason and the tail of the gate's stderr. */
   error: string | null;
+  started_at: string | null;
   finished_at: string | null;
+  exit_code: number | null;
+  exit_signal: number | null;
+  duration_seconds: number | null;
+  log: (({ file: string; path?: string } | { path: string; file?: string }) & {
+    bytes: number | null; truncated: boolean;
+  }) | null;
+  log_tail: string | null;
   /** What the gate command printed (stored truncated); null without a gate. */
   gate_output: string | null;
   /** The run whose unfinished input this run was given. */
@@ -1297,6 +1307,15 @@ export async function runSchedule(scheduleId: string): Promise<ScheduleRunInfo> 
 /** Runs that only say there was nothing to do: the gate found nothing new, or the previous run was still going. */
 export type RoutineSkip = "skipped_gate" | "skipped_overlap";
 
+export interface RunStats {
+  runs: number;
+  succeeded: number;
+  failed: number;
+  success_rate: number | null;
+  avg_seconds: number | null;
+  max_seconds: number | null;
+}
+
 /** A page of a schedule's runs, newest first. */
 export interface ScheduleRunsPage {
   runs: ScheduleRunInfo[];
@@ -1304,17 +1323,57 @@ export interface ScheduleRunsPage {
   next_before: string | null;
   /** How many routine skips the schedule has had in all, shown or not. */
   routine_skips: Record<RoutineSkip, number>;
+  stats: { day: RunStats; week: RunStats };
 }
 
 /** A page of a schedule's runs: `limit` (default 50, at most 200), older than the run `before`, and without the
  * routine skips when `skips` is "hide". */
 export async function fetchScheduleRuns(
   scheduleId: string,
-  options: { limit?: number; before?: string | null; skips?: "show" | "hide" } = {},
+  options: { limit?: number; before?: string | null; skips?: "show" | "hide"; status?: ScheduleRunStatus } = {},
 ): Promise<ScheduleRunsPage> {
   const result = await callV1<ScheduleRunsPage>("/api/v1/schedule_admin/runs", { schedule_id: scheduleId, ...options });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
+}
+
+export interface RunLog {
+  size: number;
+  offset: number;
+  next_offset: number | null;
+  data_base64: string;
+  complete: boolean;
+  truncated: boolean;
+}
+
+/** Read raw log bytes, either from a byte offset or from the last lines. */
+export async function fetchRunLog(
+  runId: string,
+  options: { offset?: number; limit_bytes?: number; tail_lines?: number } = {},
+): Promise<RunLog> {
+  const result = await callV1<RunLog>("/api/v1/schedule_admin/run_log", { run_id: runId, ...options });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Keep bytes intact across page boundaries, including non-UTF-8 output. */
+export async function downloadRunLog(
+  runId: string,
+  onProgress?: (downloaded: number, total: number) => void,
+): Promise<Blob> {
+  const parts: Uint8Array<ArrayBuffer>[] = [];
+  let offset = 0;
+  let downloaded = 0;
+  do {
+    const page = await fetchRunLog(runId, { offset, limit_bytes: 4 * 1024 * 1024 });
+    const bytes = Uint8Array.from(atob(page.data_base64), (c) => c.charCodeAt(0));
+    parts.push(bytes);
+    downloaded += bytes.length;
+    onProgress?.(downloaded, page.size);
+    if (page.next_offset === null) break;
+    offset = page.next_offset;
+  } while (true);
+  return new Blob(parts, { type: "text/plain" });
 }
 
 /** A message about a schedule: a run's result, or an alert or its recovery. */
