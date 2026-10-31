@@ -207,6 +207,11 @@ async def end(process: asyncio.subprocess.Process, *, label: str, known: Tree | 
         await _reap(process, label)
 
 
+async def end_orphan(pid: int, started: str, *, label: str) -> None:
+    """End an orphan's tree, checking its start time before signalling its pid."""
+    await _end(_Orphan(pid, started), label=label, known={})
+
+
 async def _reap(process: Any, label: str) -> None:
     """Wait for the killed agent, for at most ``REAP_SEC``: a turn never hangs on a process that will not be reaped."""
     try:

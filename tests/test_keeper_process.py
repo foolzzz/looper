@@ -343,19 +343,64 @@ with open('tree.json', 'w') as output:
     json.dump({'grandchild': grandchild.pid}, output)
 print('child finished', flush=True)
 """)
-    tree = run.tree()
     state = run.wait()
+    tree = keeper.read_json(run.cwd / "tree.json")
+    assert tree
     assert time.monotonic() - started < 12
     assert state["exit_code"] == 0 and state["end_reason"] == "exited"
     assert (run.directory / keeper.STDOUT).read_bytes() == b"child finished\n"
     assert not _live(list(tree.values()))
 
 
-def test_stderr_past_the_cap_is_discarded_without_ending_the_run(launch: Callable[..., Run]) -> None:
-    run = launch("import os; os.write(2, b'e' * 10000); os.write(1, b'finished')",
+def test_a_grandchild_with_detached_stdio_is_ended_after_the_child_exits(launch: Callable[..., Run]) -> None:
+    run = launch("""\
+import json, subprocess, sys
+grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+with open('tree.json', 'w') as output:
+    json.dump({'grandchild': grandchild.pid}, output)
+""")
+    state = run.wait()
+    tree = keeper.read_json(run.cwd / "tree.json")
+    assert tree
+    assert state["exit_code"] == 0 and state["end_reason"] == "exited"
+    assert not _live(list(tree.values()))
+
+
+def test_a_descendants_output_during_sigterm_is_logged(launch: Callable[..., Run]) -> None:
+    descendant = """\
+import os, signal, time
+def stop(sig, frame):
+    os.write(1, b'descendant ended\\n')
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+open('ready', 'w').close()
+time.sleep(60)
+"""
+    run = launch(f"""\
+import json, pathlib, subprocess, sys, time
+grandchild = subprocess.Popen([sys.executable, '-c', {descendant!r}])
+with open('tree.json', 'w') as output:
+    json.dump({{'grandchild': grandchild.pid}}, output)
+while not pathlib.Path('ready').exists():
+    time.sleep(0.01)
+""")
+    state = run.wait()
+    tree = keeper.read_json(run.cwd / "tree.json")
+    assert tree
+    assert state["exit_code"] == 0 and state["end_reason"] == "exited"
+    assert not _live(list(tree.values()))
+    assert (run.directory / keeper.STDOUT).read_bytes() == b"descendant ended\n"
+
+
+@pytest.mark.parametrize("size", [999, 1000, 10000])
+def test_stderr_cap_is_recorded_without_ending_the_run(launch: Callable[..., Run], size: int) -> None:
+    run = launch(f"import os; os.write(2, b'e' * {size}); os.write(1, b'finished')",
                  keeper_setup="from looper.agents.keeper import process; process.STDERR_LIMIT_BYTES = 1000")
-    assert run.wait()["end_reason"] == "exited"
-    assert (run.directory / keeper.STDERR).read_bytes() == b"e" * 1000
+    state = run.wait()
+    assert state["end_reason"] == "exited"
+    assert state["stderr_truncated"] is (size >= 1000)
+    assert (run.directory / keeper.STDERR).read_bytes() == b"e" * min(size, 1000)
     assert (run.directory / keeper.STDOUT).read_bytes() == b"finished"
 
 
