@@ -1,12 +1,12 @@
 """Schedule administration through the shared services and scheduler."""
 
-from ...db import projects as db_projects
+from ...db import projects as db_projects, schedules as db_schedules
 from .. import schedules
 from ..agent_settings import BUDGET_MAX_USD, CONCURRENCY_MAX
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
-from ..ops.schedules import _raises_a_cap
+from ..ops.schedules import _raises_a_cap, _shown
 from ..ops.service import _plain
 from .schedule_reads import SCHEDULE, RUN, LISTED_SCHEDULE, LISTED_RUN, _enum, _nullable
 
@@ -84,13 +84,16 @@ async def impact(server, operation, arguments, principal, headers):
     if action == "run" and server._scheduler is None:
         raise OpError(ErrorCode.CONFLICT, "the scheduler is not running in this server")
     row = await answered(schedules._existing(arguments["schedule_id"]))
+    if action in ("run", "update"):
+        # Bind the displayed read; the closed request cannot supply this server-owned version.
+        arguments["_schedule_version"] = db_schedules.configuration_version(row)
     subject = f"schedule {row['name']!r} in project {row['project_name']!r}"
     if action == "delete":
         return f"Delete {subject}, its runs and notifications. Its created tasks stay."
     if action == "run":
         if row["kind"] == "command":
             return (f"Run {subject}'s shell command once now, without an agent or model spend: "
-                    f"{row['command']!r} in {row['work_dir'] or 'the project directory'}. Its next fire stays.")
+                    f"{_shown('command', row, {})} in {row['work_dir'] or 'the project directory'}. Its next fire stays.")
         return f"Run {subject} once now through its overlap check, spending within its caps. Its next fire stays."
     if action == "reset_planner_session":
         return (f"Reset the stored Planner session of {subject}. The next run starts a new session; "
@@ -119,7 +122,7 @@ async def impact(server, operation, arguments, principal, headers):
     if (data.get("enabled") and not row["enabled"]) or raises:
         changes = ", ".join(f"{key}: {row[key]!r} → {data[key]!r}" for key in
                             ("enabled", "run_budget_usd", "daily_budget_usd") if key in data)
-        effect = (f"Enabling runs its shell command {fields.get('command', row['command'])!r} unattended "
+        effect = (f"Enabling runs its shell command {_shown('command', {**row, **fields}, {})} unattended "
                   "at each fire, without an agent or model spend." if command else
                   "Enabling starts unattended scheduled tasks; raised or removed caps allow more spending.")
         return f"Update {subject}: {changes}. {effect}"
@@ -133,12 +136,14 @@ async def run(server, operation, arguments, principal, headers):
                                                           runtime_root=server._runtime_root))
     elif action == "update":
         result = await answered(schedules.update_schedule(arguments["schedule_id"], arguments["fields"],
-                                                          runtime_root=server._runtime_root))
+                                                          runtime_root=server._runtime_root,
+                                                          expected_version=arguments.get("_schedule_version")))
     elif action == "run":
         if server._scheduler is None:
             raise OpError(ErrorCode.CONFLICT, "the scheduler is not running in this server")
         result = await answered(schedules.run_now(arguments["schedule_id"], server._scheduler,
-                                                  runtime_root=server._runtime_root))
+                                                  runtime_root=server._runtime_root,
+                                                  expected_version=arguments.get("_schedule_version")))
     else:
         service = schedules.delete_schedule if action == "delete" else schedules.reset_planner_session
         result = await answered(service(arguments["schedule_id"]))
