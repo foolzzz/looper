@@ -239,6 +239,9 @@ def test_drain_restart_replays_held_runs_and_manager_once_and_keeps_planners_mov
             assert [row["step"] for row in _events(state, "worker", "restart")] == ["s1", "s2"]
             assert len(_events(state, "worker", "fresh")) == 1
             assert sum("held-during-drain" in row["text"] for row in _events(state, "manager")) == 1
+            reply = next(m for m in _messages(api) if m["message_id"] == "held-during-drain:reply")
+            assert reply["content"].startswith("Drain fixture answer: ")
+            assert reply["content"].endswith("held-during-drain")
             _until(lambda: not _query(url, "SELECT id FROM llm_records WHERE status='running'"),
                    "all resumed records to finish")
             assert not _query(url, "SELECT id FROM llm_records WHERE status='interrupted'")

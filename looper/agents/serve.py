@@ -619,7 +619,8 @@ async def _run_agent_system_owned(
     # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
     # task ends, to record a scheduled run's outcome.
     drain = DrainState()  # A new control plane always starts serving; drain is never stored.
-    scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url, drain=drain)
+    scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url,
+                          runtime_root=runtime_root, drain=drain)
     # It notes the user gates that have waited for the user for their project's reminder interval; the courier
     # posts what the gates' discussions say to the chats their tasks came from.
     gate_reminders = GateReminders()
@@ -720,10 +721,14 @@ async def _run_agent_system_owned(
 
     # Replayed messages and resumed runs can probe or call platform tools immediately.
     # Listen before starting any of their consumers.
-    await consults.resume_all()
-    await supervisor.start_all()
-    await fleet.sweep()
-    await carry_on_tasks(task_router, left_running)
+    try:
+        await consults.resume_all()
+        await supervisor.start_all()
+        await fleet.sweep()
+        await carry_on_tasks(task_router, left_running)
+    except BaseException:
+        await http_server.stop()
+        raise
 
     # Its first pass handles the fires missed while the server was down.
     await scheduler.start()
