@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.44] - 2026-10-31
+
+### Fixed
+
+- **Planner keeps the reason of a failed run.** The step activity, the work report, the review report and the closing-note outcome line keep the end of a failed Worker or Reviewer run's error instead of clipping it, and the verify path reads the run's `error` when a Reviewer run ended without a verdict. ([#996](https://github.com/foolzzz/looper/pull/996))
+
 ## [2.14.43] - 2026-10-31
 
 ### Fixed
