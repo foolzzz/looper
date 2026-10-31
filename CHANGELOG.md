@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.45] - 2026-10-31
+
+### Added
+
+- **Command run history in the dashboard.** A command schedule's run history shows each run's status with exit code or signal, times, duration and trigger; a run expands to its last 200 log lines with a full-log download; 24-hour and 7-day statistics and a status filter sit above it; `#projects/<project>/schedules/<schedule>/runs/<run>` opens one run; "Failing now" shows the missed-deadline and overlap alerts. ([#1000](https://github.com/foolzzz/looper/pull/1000))
+
 ## [2.14.44] - 2026-10-31
 
 ### Fixed
