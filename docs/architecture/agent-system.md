@@ -2867,9 +2867,10 @@ Missing references, deleted Manager identities, immutable type/owner conflicts
 and already allocated bot suffixes are explicit errors, not omissions or
 reassignments.
 `--include-projects` adds projects, layers, knowledge, skills, installs and
-schedules. Export is a read-only repeatable-read snapshot through
-`POST /api/v1/config/export`. The CLI needs the running service; catalog files
-remain UTF-8 text.
+schedules. Command schedules travel with their projects; `env_file` carries
+only its path, never the file's contents. Export is a read-only repeatable-read
+snapshot through `POST /api/v1/config/export`. The CLI needs the running
+service; catalog files remain UTF-8 text.
 
 This minimal portable example can be previewed with
 `loopercli --json config import portable.json`, applied with
