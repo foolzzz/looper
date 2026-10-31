@@ -255,7 +255,7 @@ def test_launchd_unit_runs_this_looper_privately_with_the_captured_environment(
     plist_path = tmp_path / "home" / "Library" / "LaunchAgents" / f"{LABEL}.plist"
     assert _mode(plist_path) == 0o600
     log = str(root / "logs" / "serve.log")
-    assert plistlib.loads(plist_path.read_bytes()) == {
+    assert plist_path.read_bytes() == plistlib.dumps({
         "Label": LABEL,
         "ProgramArguments": [str(checkout / ".venv" / "bin" / "looper"), "serve", "--config",
                              str(root / ops_config.FILE), "--runtime-root", str(root), "--port", "9876"],
@@ -265,7 +265,7 @@ def test_launchd_unit_runs_this_looper_privately_with_the_captured_environment(
         "KeepAlive": {"SuccessfulExit": False},
         "StandardOutPath": log,
         "StandardErrorPath": log,
-    }
+    })
     assert (root / "logs").is_dir()
     output = capsys.readouterr().out
     assert "0600" in output and "s3cret" not in output
@@ -286,6 +286,9 @@ def test_systemd_unit_runs_this_looper_privately_with_the_captured_environment(
     unit_path = tmp_path / "home" / ".config" / "systemd" / "user" / f"{LABEL}.service"
     assert _mode(unit_path) == 0o600
     lines = unit_path.read_text().splitlines()
+    assert lines.count("KillMode=process") == 1
+    assert lines.index("[Service]") < lines.index("KillMode=process") < lines.index("[Install]")
+    assert lines[lines.index("RestartSec=5") + 1] == "KillMode=process"
     values = dict(line.split("=", 1) for line in lines if "=" in line and not line.startswith("Environment="))
     assert service._systemd_words(values["ExecStart"]) == [
         str(checkout / ".venv" / "bin" / "looper"), "serve", "--config", str(root / ops_config.FILE),
@@ -464,6 +467,51 @@ def test_status_reads_the_operator_token_from_the_units_runtime_root(
 
     assert _looper(monkeypatch, host, "status", "--label", LABEL) == 0
     assert received == [(9876, "test-operator-token")]
+
+
+@pytest.mark.parametrize("label", [service.DEFAULT_LABEL, LABEL])
+@pytest.mark.parametrize("kill_mode", ["", "KillMode=control-group\n", "#KillMode=process\n", "KillMode=process\n"])
+def test_systemd_status_and_doctor_warn_when_the_unit_cannot_preserve_command_schedules(
+    tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    label: str, kill_mode: str,
+) -> None:
+    fake = FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system="Linux")
+    root = tmp_path / "runtime"
+    config = _write_ops(root)
+    mgr = service.Systemd(host, label)
+    spec = service.build_spec(host, label=label, port=9876, runtime_root=root, config=config)
+    unit = service.render_systemd_unit(spec).replace("KillMode=process\n", "")
+    service.write_private(mgr.unit_path, unit.replace("RestartSec=5\n", f"RestartSec=5\n{kill_mode}").encode())
+    fake.active = True
+    warning = ("the unit predates KillMode=process: restarting it ends running command schedules; "
+               "run `looper service install` again")
+    compatible = kill_mode == "KillMode=process\n"
+
+    assert _looper(monkeypatch, host, "status", "--label", label) == 0
+    assert (f"warning    {warning}" in capsys.readouterr().out) is not compatible
+    check = service.doctor_check(host, label)
+    assert check.status == (service.OK if compatible else service.WARN)
+    if not compatible:
+        assert warning in check.detail
+        assert check.fix == "looper service install"
+
+    fake.active = False
+    assert _looper(monkeypatch, host, "status", "--label", label) == 1
+    assert (f"warning    {warning}" in capsys.readouterr().out) is not compatible
+    check = service.doctor_check(host, label)
+    assert check.status == service.WARN
+    if not compatible:
+        assert check.fix == "looper service install"
+
+
+def test_systemd_missing_unit_does_not_need_a_kill_mode_upgrade(tmp_path: Path, checkout: Path) -> None:
+    host = _host(tmp_path, checkout, FakeSystemd(), system="Linux")
+
+    assert service.Systemd(host, LABEL).kill_mode_ok()
+    code, output = service.status(host, label=LABEL)
+    assert code == 1 and "not installed" in output and "warning" not in output
+    assert service.doctor_check(host, LABEL).status == service.SKIP
 
 
 def test_status_reports_a_refused_operator_token_as_answering(

@@ -21,6 +21,10 @@ launchd: a job is reloaded with ``launchctl bootout`` then ``bootstrap``, never
 started before. ``bootout`` returns before the job is gone, and a ``bootstrap``
 issued meanwhile fails, so ``stop`` waits until ``launchctl print`` no longer
 finds the job and ``bootstrap`` is retried a few times.
+
+systemd units use ``KillMode=process``: serve ends the agents it started on
+shutdown, and the next startup's ``sweep`` cleans up any left behind; command
+schedule runners live in their own sessions and survive restarts.
 """
 
 from __future__ import annotations
@@ -69,6 +73,8 @@ _STOP_WAIT_SECONDS = 30.0  # launchd sends SIGKILL 20 s after SIGTERM by default
 _POLL_SECONDS = 0.5
 _BOOTSTRAP_ATTEMPTS = 10
 _COMMAND_TIMEOUT_SECONDS = 30.0
+_KILL_MODE_WARNING = ("the unit predates KillMode=process: restarting it ends running command schedules; "
+                      "run `looper service install` again")
 
 
 class ServiceError(RuntimeError):
@@ -237,6 +243,7 @@ def render_systemd_unit(spec: ServiceSpec) -> str:
         *(f"Environment={_systemd_quote(f'{name}={value}')}" for name, value in spec.env),
         "Restart=on-failure",
         "RestartSec=5",
+        "KillMode=process",
         f"StandardOutput=append:{log}",
         f"StandardError=append:{log}",
         "",
@@ -411,6 +418,12 @@ class Systemd(_Manager):
 
     def render(self, spec: ServiceSpec) -> bytes:
         return render_systemd_unit(spec).encode()
+
+    def kill_mode_ok(self) -> bool:
+        try:
+            return "KillMode=process" in self.unit_path.read_text().splitlines()
+        except FileNotFoundError:
+            return True
 
     def unit_settings(self, *, explicit_port: bool = False) -> tuple[int | None, Path | None, Path | None]:
         try:
@@ -629,6 +642,8 @@ def status(host: Host, *, label: str = DEFAULT_LABEL) -> tuple[int, str]:
         f"state      {_describe(state)}",
         f"log        {state.log_path or 'unknown'}",
     ]
+    if isinstance(mgr, Systemd) and not mgr.kill_mode_ok():
+        lines.append(f"warning    {_KILL_MODE_WARNING}")
     token = operator_auth.read_token(state.runtime_root) if state.runtime_root is not None else None
     answer = host.get_status(state.port, token) if state.port else None
     if state.port is None:
@@ -653,11 +668,14 @@ def doctor_check(host: Host | None = None, label: str = DEFAULT_LABEL) -> Check:
     """The ``looper doctor`` line: is the background service installed and running? Never a failure."""
     host = host or Host.current()
     try:
-        state = manager(host, label).state()
+        mgr = manager(host, label)
+        state = mgr.state()
     except ServiceError as exc:
         return Check("service", "Service", SKIP, f"not checked: {exc}")
     if not state.installed and not state.loaded:
         return Check("service", "Service", SKIP, f"{label} not installed (optional: `looper service install`)")
+    if isinstance(mgr, Systemd) and not mgr.kill_mode_ok():
+        return Check("service", "Service", WARN, _KILL_MODE_WARNING, "looper service install")
     if state.running:
         return Check("service", "Service", OK, f"{label} running (pid {state.pid})")
     return Check("service", "Service", WARN, f"{label} installed but not running ({_describe(state)})",

@@ -688,9 +688,6 @@ async def _run_agent_system_owned(
     room_ops = RoomOps(room, url=_local_url(host, port))
     worker_pool.room_ops = room_ops
 
-    # The consults the last server left queued or running run again.
-    await consults.resume_all()
-
     # --- HTTP Server ---
 
     http_server = AgentHTTPServer(
@@ -719,8 +716,10 @@ async def _run_agent_system_owned(
     )
     await http_server.start()
 
-    # Replayed Manager messages probe the tools immediately; listen before agents consume the backlog.
+    # Replayed messages and resumed runs can probe or call platform tools immediately.
+    # Listen before starting any of their consumers.
     try:
+        await consults.resume_all()
         await supervisor.start_all()
         await fleet.sweep()
         await carry_on_tasks(task_router, left_running)

@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.28] - 2026-10-31
+
+### Added
+
+- **A drain state for planned restarts.** `system.drain`, `system.drain_status` and `system.drain_cancel` (operator only, POST) hold new Worker and Reviewer runs, Manager turns, schedule fires, consults and wait checks without losing work; Planner turns and `TASK_START` are not held. The drain is in `system.status` and the dashboard shows a banner. Nothing drains unless an operator asks. A Manager answer's reply route is kept in the journaled message so a replayed answer reaches its chat. ([#932](https://github.com/foolzzz/looper/pull/932))
+- **Component fingerprints and an upgrade plan.** `looper/components.toml` declares the components; `POST /api/v1/system/components` serves the loaded fingerprints; `looper service upgrade --dry-run [--to REF_OR_WHEEL]` prints a `NOOP`, `WEB_ONLY`, `CONTROL_PLANE` or `FULL` plan without installing or restarting anything. ([#935](https://github.com/foolzzz/looper/pull/935))
+- **Codex through TTADK.** Runtimes have a typed `launcher` (`native` or `ttadk`) stored in the new column `agent_runtimes.launcher`; the built-in runtime `ttadk-codex` is registered when `ttadk` is on PATH and launches Codex for every role and the consult with login providers only. TTADK problems refuse the launch with a typed cause; runs record the launcher. Native Codex is unchanged. ([#940](https://github.com/foolzzz/looper/pull/940))
+- **A service health probe.** `system.health` returns the scheduler's latest tick and latest healthy tick; the ops file takes an optional `[probe]` section and `looper service probe` runs one check and sends a Lark alert and a recovery message. The unit that runs it periodically is not installed yet. ([#939](https://github.com/foolzzz/looper/pull/939))
+- **Groundwork for command schedules.** The RFC `docs/architecture/rfcs/command-schedules-v0.zh-CN.md` (Chinese) is published and D3 of the scheduled tasks RFC is revised ([#936](https://github.com/foolzzz/looper/pull/936)); `looper/agents/command_runner.py` is a stdlib-only runner that nothing calls yet ([#938](https://github.com/foolzzz/looper/pull/938)); the one-time migration `command_schedules` adds the columns and statuses to `schedules`, `schedule_runs` and `schedule_notifications`, and `succeeded` counts as a success and `interrupted` as a failure ([#941](https://github.com/foolzzz/looper/pull/941)). Command schedules are not usable yet.
+
+No other model-visible change: no prompt, tool or message text changes.
+
 ## [2.14.27] - 2026-10-30
 
 ### Changed
