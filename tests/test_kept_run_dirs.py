@@ -97,7 +97,7 @@ def test_dead_keepers_directories_are_released(tmp_path, monkeypatch, caplog, le
 
 
 @pytest.mark.parametrize("argv", [["/usr/bin/true"], ["/nonexistent-keeper-child"]], ids=["exited", "start_failed"])
-def test_exited_keeper_without_a_child_start_time_is_released(tmp_path, argv):
+def test_exited_keeper_is_released(tmp_path, argv):
     async def run():
         directory = tmp_path / keeper.RUNS_DIR / "worker-short-lived"
         directory.mkdir(parents=True, mode=0o700)
@@ -109,7 +109,9 @@ def test_exited_keeper_without_a_child_start_time_is_released(tmp_path, argv):
         try:
             assert await asyncio.wait_for(process.wait(), 10) == (0 if argv == ["/usr/bin/true"] else 3)
             state = keeper.read_json(directory / keeper.STATE)
-            assert state["state"] == "exited" and state["child_started"] is None
+            assert state["state"] == "exited"
+            if argv == ["/nonexistent-keeper-child"]:
+                assert state["child_started"] is None
             assert kept_dirs.KeeperRecord.read(directory / keeper.STATE) is not None
             scan = await kept_dirs.scan_at_start(tmp_path)
             assert scan.released == 1 and not scan.ended and scan.unidentified == 0
@@ -172,7 +174,8 @@ def test_unidentifiable_keeper_is_left_for_the_next_scan(tmp_path, monkeypatch, 
                         assert not scan.ended and scan.released == 0
             assert directory.exists() and process.returncode is None
             assert state["child_pid"] in proc_tree._snapshot()
-            assert f"cannot identify the keeper of {directory}; leaving it for its orphan timeout" in caplog.text
+            assert (f"cannot identify the keeper of {directory}; directory left in place and will be scanned again "
+                    "at the next start") in caplog.text
 
     asyncio.run(run())
 
@@ -266,7 +269,7 @@ def test_serve_refuses_unknown_liveness_before_interrupting_records(tmp_path, mo
     interrupted = AsyncMock()
     monkeypatch.setattr(llm_records, "end_unfinished_records", interrupted)
     ops = SimpleNamespace(host="127.0.0.1", port=18767, public_url=None,
-                          operator_notes_root=tmp_path, database_url="unused")
+                          operator_notes_root=tmp_path, database_url="unused", keeper_mode=serve.KeeperMode.OFF)
 
     async def run():
         async with running_keeper(tmp_path) as (directory, process, _state):

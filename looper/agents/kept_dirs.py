@@ -153,7 +153,8 @@ async def scan_at_start(runtime_root: Path) -> StartScan:
     verdicts = {}
     for path, record in records.items():
         if record is None:
-            logger.error("cannot identify the keeper of %s; leaving it for its orphan timeout", path)
+            logger.error("cannot identify the keeper of %s; directory left in place and will be scanned again "
+                         "at the next start", path)
             scan.unidentified += 1
         elif path in bad_files:
             verdicts[path] = (Verdict.END, Reason.BAD_FILES)

@@ -231,6 +231,11 @@ class AgentHTTPServer:
             self._port = self._server.sockets[0].getsockname()[1]
         logger.info("HTTP server listening on %s:%d", self._host, self._port)
 
+    def close_listener(self) -> None:
+        """Stop accepting connections immediately, without shutting down services."""
+        if self._server:
+            self._server.close()
+
     async def stop(self) -> None:
         if self._server:
             self._server.close()
