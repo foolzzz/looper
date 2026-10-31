@@ -1063,6 +1063,35 @@ resumes, `proc_tree.sweep` reads every record:
   left alone with its agent, and one whose start times could not be read,
   which is kept for the next start.
 
+Keepers are started outside `proc_tree.spawn`, so this sweep never signals a
+keeper. Their children are recorded with the keeper as owner: the sweep
+leaves a live keeper's child alone and ends a dead keeper's child.
+
+Startup then scans `<runtime root>/.local/runs/*`, even when keepers are
+switched off. No run is adoptable yet. A live keeper is ended with its child
+(`not_adoptable`), then its directory is removed. A dead keeper or an `exited`
+state releases its directory (`keeper_dead`). Missing or invalid `keeper.json`
+releases the directory with a warning (`bad_files`): no process can safely be
+identified from it, so an unidentified live keeper's orphan timer ends its
+child within 30 minutes. Non-directory entries are ignored. Keeper identities
+are checked in one process snapshot before any directory is removed, and
+checked again before each signal. Unknown liveness refuses startup without
+deleting any run directory, so steps cannot be dispatched again while their
+old processes may still run. If `.local/runs` does not exist, the scan creates
+nothing.
+
+Only after this scan does `end_unfinished_records` interrupt every `running`
+LLM record, followed by `step_workspaces.sweep` and `task_workspaces.sweep`.
+Thus worktree cleanup follows keeper cleanup. `reclaim_unused` preserves every
+read-only copy named by a running process's command line; a keeper's command
+line includes its child's arguments.
+
+Housekeeping never touches `.local/runs`: it prunes `.local/command-runs`,
+`logs/schedules` and `.local/command-runner`, and rotates `serve.log` and
+`probe.log`. `scheduler_settings.run_retention_days` prunes only closed
+schedule runs and notifications. No automatic retention pass deletes
+`llm_records`.
+
 Two cases are not covered:
 
 - a process that left the tree before the stop, such as a command that

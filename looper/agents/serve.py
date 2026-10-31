@@ -551,6 +551,11 @@ async def _run_agent_system_owned(
 
     # The tasks the previous server was running: they carry on once the agents are up, or are stopped now.
     left_running = await tasks_left_running(pool)
+    from . import kept_dirs
+    try:
+        await kept_dirs.scan_at_start(runtime_root)
+    except OSError as exc:
+        raise StartupCheckFailed(f"cannot tell whether kept runs are still running: {exc}") from exc
     # The runs the previous server did not see end: nothing runs yet, so every record still running is one.
     from ..db.llm_records import end_unfinished_records
     if unfinished := await end_unfinished_records(pool=pool):
