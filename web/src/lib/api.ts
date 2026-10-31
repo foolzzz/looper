@@ -341,6 +341,8 @@ export interface OverviewSchedules {
     failures_since: string | null;
     /** Set while the "no success for a while" alert is active: when it started. */
     stale_since: string | null;
+    deadline_since: string | null;
+    overlap_since: string | null;
     last_success_at: string | null;
     last_status: ScheduleRunStatus | null;
   })[];
@@ -976,13 +978,16 @@ export async function deleteProject(projectId: string): Promise<void> {
 export type ScheduleOverlap = "skip" | "queue" | "parallel";
 /** After downtime: "once" runs once for all missed fires; "skip" skips them unless the latest was within 2 minutes. */
 export type ScheduleCatchUp = "once" | "skip";
+export type ScheduleKind = "agent" | "command";
 export type ScheduleRunTrigger = "scheduled" | "catch_up" | "manual";
-/** Final: all but "queued", "gating" and "running". Failures: "failed", "timed_out" and "gate_failed". */
+/** Final: all but "queued", "gating" and "running". Failures: "failed", "timed_out", "gate_failed" and "interrupted". */
 export type ScheduleRunStatus =
   | "queued"
   | "gating"
   | "running"
   | "completed"
+  | "succeeded"
+  | "interrupted"
   | "failed"
   | "stopped"
   | "cancelled"
@@ -1033,7 +1038,15 @@ export interface ScheduleRunInfo {
   cost_usd: number | null;
   /** Why the run failed or was skipped; for "gate_failed", the reason and the tail of the gate's stderr. */
   error: string | null;
+  started_at: string | null;
   finished_at: string | null;
+  exit_code: number | null;
+  exit_signal: number | null;
+  duration_seconds: number | null;
+  log: (({ file: string; path?: string } | { path: string; file?: string }) & {
+    bytes: number | null; truncated: boolean;
+  }) | null;
+  log_tail: string | null;
   /** What the gate command printed (stored truncated); null without a gate. */
   gate_output: string | null;
   /** The run whose unfinished input this run was given. */
@@ -1043,6 +1056,16 @@ export interface ScheduleRunInfo {
 }
 
 export interface ScheduleInfo {
+  kind: ScheduleKind;
+  command: string | null;
+  env: Record<string, string>;
+  env_file: string | null;
+  success_deadline: string | null;
+  alert_policy: {
+    failures_after: { value: number; default: boolean };
+    stale_after_seconds: { value: number | null; default: boolean };
+    overlap_after: { value: number; default: boolean };
+  };
   planner_session: {
     active: boolean;
     runtime: string | null;
@@ -1109,7 +1132,7 @@ export interface ScheduleInfo {
   /** This schedule's runs since the server's local midnight (running ones at their cost so far). */
   spent_today_usd: number;
   /** When each alert became active; null while it is not. */
-  alerts: { failures_since: string | null; stale_since: string | null };
+  alerts: { failures_since: string | null; stale_since: string | null; deadline_since: string | null; overlap_since: string | null };
 }
 
 /** How many Workers and Reviewers run at once in each task a schedule creates; null = the default (Settings → Roles). */
@@ -1151,11 +1174,18 @@ export interface SchedulePreview {
 
 /** A new schedule's fields; one is always created disabled. */
 export interface ScheduleFields {
+  command?: string | null;
+  env?: Record<string, string> | null;
+  env_file?: string | null;
+  success_deadline?: string | null;
+  alert_failures_after?: number | null;
+  alert_stale_after_seconds?: number | null;
+  alert_overlap_after?: number | null;
   template_key?: string | null;
   template_inputs?: Record<string, string>;
   name: string;
   cron: string;
-  requirement: string;
+  requirement?: string;
   timezone?: string;
   work_dir?: string;
   overlap?: ScheduleOverlap;
@@ -1177,7 +1207,7 @@ export interface ScheduleFields {
 }
 
 /** Ownership is chosen only when a schedule is created. */
-export type ScheduleCreate = ScheduleFields & { manager_id?: string };
+export type ScheduleCreate = ScheduleFields & { kind?: ScheduleKind; manager_id?: string };
 /** Any mutable schedule field, plus turning it on or off. */
 export type ScheduleUpdate = Partial<ScheduleFields> & { enabled?: boolean };
 
@@ -1195,6 +1225,7 @@ export interface SchedulerSetting {
 export interface SchedulerSettings {
   min_interval_seconds: SchedulerSetting & { gated_value: number };
   run_timeout_seconds: SchedulerSetting;
+  run_retention_days: SchedulerSetting;
 }
 
 /** Null goes back to the built-in value. */
@@ -1276,6 +1307,15 @@ export async function runSchedule(scheduleId: string): Promise<ScheduleRunInfo> 
 /** Runs that only say there was nothing to do: the gate found nothing new, or the previous run was still going. */
 export type RoutineSkip = "skipped_gate" | "skipped_overlap";
 
+export interface RunStats {
+  runs: number;
+  succeeded: number;
+  failed: number;
+  success_rate: number | null;
+  avg_seconds: number | null;
+  max_seconds: number | null;
+}
+
 /** A page of a schedule's runs, newest first. */
 export interface ScheduleRunsPage {
   runs: ScheduleRunInfo[];
@@ -1283,17 +1323,86 @@ export interface ScheduleRunsPage {
   next_before: string | null;
   /** How many routine skips the schedule has had in all, shown or not. */
   routine_skips: Record<RoutineSkip, number>;
+  stats: { day: RunStats; week: RunStats };
 }
 
 /** A page of a schedule's runs: `limit` (default 50, at most 200), older than the run `before`, and without the
  * routine skips when `skips` is "hide". */
 export async function fetchScheduleRuns(
   scheduleId: string,
-  options: { limit?: number; before?: string | null; skips?: "show" | "hide" } = {},
+  options: { limit?: number; before?: string | null; skips?: "show" | "hide"; status?: ScheduleRunStatus } = {},
 ): Promise<ScheduleRunsPage> {
   const result = await callV1<ScheduleRunsPage>("/api/v1/schedule_admin/runs", { schedule_id: scheduleId, ...options });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
+}
+
+export interface RunLog {
+  size: number;
+  offset: number;
+  next_offset: number | null;
+  data_base64: string;
+  complete: boolean;
+  truncated: boolean;
+}
+
+/** Read raw log bytes, either from a byte offset or from the last lines. */
+export async function fetchRunLog(
+  runId: string,
+  options: { offset?: number; limit_bytes?: number; tail_lines?: number } = {},
+): Promise<RunLog> {
+  const result = await callV1<RunLog>("/api/v1/schedule_admin/run_log", { run_id: runId, ...options });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+/** Walk backwards in bounded byte windows; decode only after joining split UTF-8 sequences. */
+export async function fetchRunLogTail(runId: string): Promise<RunLog & { text: string; partialLines: number | null }> {
+  const window = 4 * 1024 * 1024;
+  const log = await fetchRunLog(runId, { tail_lines: 200, limit_bytes: window });
+  const bytes = (page: RunLog) => Uint8Array.from(atob(page.data_base64), (c) => c.charCodeAt(0));
+  let data = bytes(log);
+  let start = log.offset;
+  const wanted = data.at(-1) === 10 ? 201 : 200;
+  let exact = start === 0 || start > Math.max(0, log.size - window);
+  for (let windows = 1; !exact && windows < 4; windows++) {
+    const begin = Math.max(0, start - window);
+    const preceding = bytes(await fetchRunLog(runId, { offset: begin, limit_bytes: start - begin }));
+    const joined = new Uint8Array(preceding.length + data.length);
+    joined.set(preceding); joined.set(data, preceding.length);
+    data = joined;
+    start = begin;
+    exact = start === 0 || data.reduce((count, byte) => count + Number(byte === 10), 0) >= wanted;
+  }
+  // An untouched tail may already start at an exact line boundary (the server trims it).
+  if (start > 0 && !exact) data = data.subarray(data.indexOf(10) < 0 ? data.length : data.indexOf(10) + 1);
+  let count = 0;
+  for (let i = data.length - 1; i >= 0; i--) {
+    if (data[i] === 10 && ++count === wanted) { data = data.subarray(i + 1); break; }
+  }
+  const partialLines = exact ? null : data.reduce((count, byte) => count + Number(byte === 10), 0)
+    + Number(data.length > 0 && data.at(-1) !== 10);
+  return { ...log, text: new TextDecoder().decode(data), partialLines };
+}
+
+/** Keep bytes intact across page boundaries, including non-UTF-8 output. */
+export async function downloadRunLog(
+  runId: string,
+  onProgress?: (downloaded: number, total: number) => void,
+): Promise<Blob> {
+  const parts: Uint8Array<ArrayBuffer>[] = [];
+  let offset = 0;
+  let downloaded = 0;
+  do {
+    const page = await fetchRunLog(runId, { offset, limit_bytes: 4 * 1024 * 1024 });
+    const bytes = Uint8Array.from(atob(page.data_base64), (c) => c.charCodeAt(0));
+    parts.push(bytes);
+    downloaded += bytes.length;
+    onProgress?.(downloaded, page.size);
+    if (page.next_offset === null) break;
+    offset = page.next_offset;
+  } while (true);
+  return new Blob(parts, { type: "text/plain" });
 }
 
 /** A message about a schedule: a run's result, or an alert or its recovery. */

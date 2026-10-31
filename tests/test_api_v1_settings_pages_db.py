@@ -17,7 +17,7 @@ from tests.test_api_v1_auth import _bearer, _send, _serving
 from tests.test_operator_auth import TOKEN
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-_STORED_KEYS = {"scheduler_settings": [scheduler.MIN_INTERVAL_KEY, scheduler.RUN_TIMEOUT_KEY],
+_STORED_KEYS = {"scheduler_settings": [scheduler.MIN_INTERVAL_KEY, scheduler.RUN_TIMEOUT_KEY, scheduler.RUN_RETENTION_KEY],
                 "wait_settings": [waits.MAX_WAIT_KEY, waits.MIN_CHECK_KEY], "knowledge_vault": [vault.SETTING_KEY]}
 
 
@@ -71,7 +71,7 @@ def _vault(tmp_path):
 
 
 @pytest.mark.parametrize("family,fields", [
-    ("scheduler_settings", {"min_interval_seconds", "run_timeout_seconds"}),
+    ("scheduler_settings", {"min_interval_seconds", "run_timeout_seconds", "run_retention_days"}),
     ("wait_settings", {"max_wait_seconds", "min_check_seconds"}),
     ("knowledge_vault", {"configured", "path", "writable", "rules_file", "git", "problem"}),
 ])
@@ -93,6 +93,7 @@ def test_full_get_views_are_nonempty_and_typed(tmp_path, monkeypatch, family, fi
 NUMERIC_RULES = [
     ("scheduler_settings", "min_interval_seconds", 1, None),
     ("scheduler_settings", "run_timeout_seconds", 1, scheduler.RUN_TIMEOUT_MAX_SECONDS),
+    ("scheduler_settings", "run_retention_days", 1, scheduler.RUN_RETENTION_MAX_DAYS),
     ("wait_settings", "max_wait_seconds", *waits.MAX_WAIT_RANGE),
     ("wait_settings", "min_check_seconds", *waits.MIN_CHECK_RANGE),
 ]

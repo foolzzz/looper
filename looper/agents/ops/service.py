@@ -122,6 +122,7 @@ class _Pending:
     block: str  # what the user was shown
     asked_in: str | None  # the message of the turn that asked
     at: float
+    confirmation: dict[str, Any]
     answer_turn: str | None = None  # the message of the turn that may confirm it, once it started
 
 
@@ -403,7 +404,7 @@ class ManagerOps:
             _check_answering(turn)  # stopped while escalate read: nothing runs and the user is asked nothing
             if impact is not None:
                 risk = Risk.HIGH
-                pending = self._ask(tool, arguments, impact, turn)
+                pending = self._ask(tool, arguments, impact, turn, confirmation=call.confirmation)
                 await self._record(turn, tool, arguments, risk, "needs_confirmation", confirmation_id=pending.id)
                 return {"status": "needs_confirmation", "confirmation_id": pending.id,
                         "expires_in_seconds": CONFIRMATION_SECONDS,
@@ -446,7 +447,8 @@ class ManagerOps:
             except OpError:
                 raise OpError(ErrorCode.FORBIDDEN, "the operation was not run: this Manager may no longer do "
                                                    "it") from None
-            result = _plain(await self._run_tool(tool, Call(pending.arguments, turn, self._platform, scope=scope)))
+            result = _plain(await self._run_tool(tool, Call(pending.arguments, turn, self._platform, scope=scope,
+                                                          confirmation=pending.confirmation)))
         except Exception as exc:
             if isinstance(exc, OpError):
                 error = exc
@@ -460,14 +462,15 @@ class ManagerOps:
         await self._record(turn, tool, pending.arguments, Risk.HIGH, "ok", result=result, confirmation_id=pending.id)
         return {"status": "ok", "result": result}
 
-    def _ask(self, tool: Tool, arguments: dict[str, Any], impact: str, turn: Turn) -> _Pending:
+    def _ask(self, tool: Tool, arguments: dict[str, Any], impact: str, turn: Turn, *,
+             confirmation: dict[str, Any]) -> _Pending:
         """Register ``tool``'s call for the user to confirm, replacing the chat's earlier one, and show it."""
         earlier = self._pending.pop(turn.chat_key, None)
         if earlier is not None and earlier.asked_in == turn.message_id and earlier.block in turn.blocks:
             turn.blocks.remove(earlier.block)  # asked in this turn too: only the newest stands
         block = f"需要你确认：\n{impact}\n回复「确认」就执行；回复别的就不执行。"
         pending = _Pending(id=f"c-{uuid.uuid4().hex[:12]}", tool=tool, arguments=arguments, block=block,
-                           asked_in=turn.message_id, at=self._clock())
+                           asked_in=turn.message_id, at=self._clock(), confirmation=dict(confirmation))
         self._pending[turn.chat_key] = pending
         while len(self._pending) > CONFIRMATION_CHATS:
             self._pending.pop(next(iter(self._pending)))

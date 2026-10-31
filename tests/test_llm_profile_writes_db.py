@@ -73,8 +73,7 @@ def test_profile_readback_and_record_keep_only_model_identity():
     assert profile.agent_teams is True
     assert profile.record() == {"id": "agent-test", "name": "Test profile", "model_id": "model-messages",
                                 "custom_prompt": "instructions", "runtime": {
-                                    "id": "rt-claude-code", "name": "claude-code", "type": "claude-code",
-                                    "launcher": "native"}}
+                                    "id": "rt-claude-code", "name": "claude-code", "type": "claude-code"}}
 
 
 @pytest.mark.parametrize("role", runtimes.ROLE_CAPABILITIES)

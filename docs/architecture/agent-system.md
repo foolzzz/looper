@@ -1063,6 +1063,38 @@ resumes, `proc_tree.sweep` reads every record:
   left alone with its agent, and one whose start times could not be read,
   which is kept for the next start.
 
+Keepers are started outside `proc_tree.spawn`, so this sweep never signals a
+keeper. Their children are recorded with the keeper as owner: the sweep
+leaves a live keeper's child alone and ends a dead keeper's child.
+
+Startup then scans `<runtime root>/.local/runs/*`, even when keepers are
+switched off. No run is adoptable yet. A live keeper is ended with its child
+(`not_adoptable`), then its directory is removed. A dead keeper or an `exited`
+state releases its directory (`keeper_dead`). With missing or invalid
+`keeper.json`, a matching spawn record identifies the keeper and its child;
+they are ended before the directory is removed (`bad_files`). Without such a
+record, the directory is left in place and an error is logged: the keeper
+cannot be identified safely, so its orphan timer ends its child within 30
+minutes, and the next startup scans the directory again. An unidentified live
+keeper does not fail startup. Non-directory entries are ignored. Keeper identities
+are checked in one process snapshot before any directory is removed, and
+checked again before each signal. Unknown liveness refuses startup without
+deleting any run directory, so steps cannot be dispatched again while their
+old processes may still run. If `.local/runs` does not exist, the scan creates
+nothing.
+
+Only after this scan does `end_unfinished_records` interrupt every `running`
+LLM record, followed by `step_workspaces.sweep` and `task_workspaces.sweep`.
+Thus worktree cleanup follows keeper cleanup. `reclaim_unused` preserves every
+read-only copy named by a running process's command line; a keeper's command
+line includes its child's arguments.
+
+Housekeeping never touches `.local/runs`: it prunes `.local/command-runs`,
+`logs/schedules` and `.local/command-runner`, and rotates `serve.log` and
+`probe.log`. `scheduler_settings.run_retention_days` prunes only closed
+schedule runs and notifications. No automatic retention pass deletes
+`llm_records`.
+
 Two cases are not covered:
 
 - a process that left the tree before the stop, such as a command that
@@ -2867,9 +2899,10 @@ Missing references, deleted Manager identities, immutable type/owner conflicts
 and already allocated bot suffixes are explicit errors, not omissions or
 reassignments.
 `--include-projects` adds projects, layers, knowledge, skills, installs and
-schedules. Export is a read-only repeatable-read snapshot through
-`POST /api/v1/config/export`. The CLI needs the running service; catalog files
-remain UTF-8 text.
+schedules. Command schedules travel with their projects; `env_file` carries
+only its path, never the file's contents. Export is a read-only repeatable-read
+snapshot through `POST /api/v1/config/export`. The CLI needs the running
+service; catalog files remain UTF-8 text.
 
 This minimal portable example can be previewed with
 `loopercli --json config import portable.json`, applied with
@@ -3226,7 +3259,7 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
 | `looper_catalog` | `list` the items (kind, qualified name, description, `manager_install_count`) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`) | list reads; write |
 | `looper_costs` | One task's cost (`task_id`: `GET /api/tasks/:id`'s `cost`), or what the runs started in a range cost (`period` `today`, `this_week` or `this_month` from the server's local midnight, or `since` and `until`, a day or an ISO date-time, a day as `until` counting whole; all time by default), money and subscription equivalent apart as the overview's today: by project (their tasks' runs; the total also counts the Manager's), or with `project` its total and its 10 costliest tasks (`llm_records.spend_since`, `task_spend`) | read |
 | `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` role: the default for every task), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, a role's default concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
-| `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, enabled, user gates, next fire, last run, failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the `fields` that `POST /api/v1/schedule_admin/create` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, pre-run gate, user gates, caps, notify, profiles, task limits) and 「要启用吗？回复「启用」就启用」 to the reply, and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (and the next 3 fires for a new rule or zone); `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: the call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one; `delete` one (`schedules.delete_schedule`); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (a running task goes on and ends normally, a queued or gating run starts no task) and that its tasks stay while its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
+| `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, kind, enabled, user gates, next fire, last run (kind and exit code included), failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the `fields` that `POST /api/v1/schedule_admin/create` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, pre-run gate, user gates, caps, notify, profiles, task limits for agent schedules; kind, command in a verbatim code fence, timeout, env keys only, env file, success deadline and alert thresholds for command schedules) and 「要启用吗？回复「启用」就启用」 to the reply, and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (commands in verbatim code fences, and the next 3 fires for a new rule or zone); every command schedule update also says it uses no agent or model spend; `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: a command schedule shows its exact command in a code fence, directory, timeout and env keys only (plus env file when set); enabling also shows its success deadline and alert thresholds, and both confirmations say it runs without an agent or model spend. An agent schedule keeps its task and spending confirmation. The call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one; `delete` one (`schedules.delete_schedule`); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (a running task goes on and ends normally, a queued or gating run starts no task) and that its tasks stay while its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
 | `looper_config_export` | Write the portable configuration file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`loopercli config import`, or Settings → Import / Export) | read |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
@@ -4178,7 +4211,8 @@ another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
 in) and `verify_command` (an argv array that lists the dump read on stdin like
 `pg_restore --list`), `[operator_notes] root` (an absolute path), and
-`[runtimes] pi` and `dsh` (`"runner"` by default, or explicit `"cli"` opt-outs; file only). Nothing is expanded: no
+`[runtimes] pi` and `dsh` (`"runner"` by default, or explicit `"cli"` opt-outs; file only), and
+`[agent_host] keeper` (`"off"` by default, or `"on"`; file only). Nothing is expanded: no
 variable, no `~`, no include. An unknown key, a wrong type or a bad value
 stops the command; the message names the key and never shows the value. The
 file must be a regular file (not a symlink), owned by the user, mode 0600, in
@@ -4206,11 +4240,24 @@ NAME`).
 
 `looper config init-ops` writes the file once from the values in effect, mode
 0600, including `[runtimes]` with the commented Pi and DSH runner defaults (or explicit
-`"cli"` opt-outs), and refuses to overwrite a file that exists. With nothing configured it
+`"cli"` opt-outs), and `[agent_host] keeper = "on"` only when keeper is on. It refuses to overwrite a file that exists. With nothing configured it
 writes `postgresql://localhost:5432/loopx` and says so. Remove the old
 variables from the shell and `.env`, then run `looper service install` again
 if the service is used. Until then `looper serve` keeps working from the
 variables, with the warnings.
+
+**One control plane per database.** With `[agent_host] keeper = "on"`,
+`looper serve` holds a PostgreSQL session advisory lock on a dedicated connection
+before it initializes the database pool. A second server refuses to start and
+names the holder's pid, application name, client address and backend start time;
+unavailable fields are reported as unknown. Each successful start increments
+the `control_plane_epoch` key in `system_settings` after the schema check. If the connection
+closes or a health check finds the lock lost (within 10 seconds), the server
+fences its database pool, closes the HTTP listener, ends its own agents and exits
+with code 75, without updating run records or detaching runs. A lock lost during
+startup or shutdown follows the same exit path. The service manager restarts the
+failed process, which must acquire the lock again. With keeper off, the server
+takes no control-plane lock and writes no epoch.
 
 `looper service install` (`looper/agents/service.py`) writes a unit that runs
 `looper serve --config <absolute ops file> --runtime-root <absolute root>`,

@@ -9,8 +9,9 @@ server was down or the computer slept are handled), one pass:
    past the timeout it started with (``schedule_runs.run_timeout_seconds``) is
    recorded ``timed_out`` and its task stopped. A queued run whose previous task has ended starts.
 2. Each enabled schedule whose ``next_fire_at`` has come is handled in a
-   transaction that locks its row (``FOR NO KEY UPDATE SKIP LOCKED``), so two
-   servers on one database fire it once; a foreign key check on the row (a
+   transaction that locks its row (``FOR NO KEY UPDATE SKIP LOCKED``), so when
+   keeper is off, concurrent servers fire it once. With keeper on, one database
+   runs one control plane. A foreign key check on the row (a
    message about its last run being recorded) does not hold it up. The fires
    due since ``next_fire_at`` decide
    (``decide``): one on time fires as ``scheduled``; missed ones fire once as
@@ -61,6 +62,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import asyncpg
+
+from . import housekeeping
 
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import schedules as db_schedules, tasks as db_tasks
@@ -380,6 +383,8 @@ class Scheduler:
         self._notifier = Notifier(sender=sender, clock=clock, dashboard_url=dashboard_url)
         self._day_zone = cron.zone(day_zone or cron.local_zone_name())
         self._commands = CommandRuns(runtime_root) if runtime_root is not None else None
+        self._runtime_root = runtime_root
+        self._housekeeping_at: datetime | None = None
         self._adopted: set[str] = set()
         # Gates and messages under way; stopping cancels them.
         self._background: set[asyncio.Task[Any]] = set()
@@ -484,6 +489,18 @@ class Scheduler:
         await self._fire_due(now, kinds=kinds)
         await self._notifier.check_stale(now)
         await self._notifier.check_deadlines(now)
+        if self._runtime_root is not None and (self._housekeeping_at is None or now >= self._housekeeping_at):
+            self._spawn(self._housekeep(now))
+            self._housekeeping_at = now + housekeeping.INTERVAL
+
+    async def _housekeep(self, now: datetime) -> None:
+        try:
+            assert self._runtime_root is not None
+            await housekeeping.run_once(self._runtime_root, now,
+                                        current_runner=self._commands._runner if self._commands is not None else None,
+                                        commands=self._commands)
+        except Exception:
+            logger.exception("scheduler housekeeping failed; trying again on the next housekeeping pass")
 
     # --- Firing ---
 
@@ -491,15 +508,15 @@ class Scheduler:
         handled: list[str] = []
         while True:
             with ExitStack() as firing_guard:
-                if kinds is None and not firing_guard.enter_context(self._admit_start()):
-                    return
                 launched: _Launched | None = None
                 schedule: dict[str, Any] | None = None
                 try:
                     async with db_connection.transaction() as conn:
-                        schedule = await db_schedules.lock_next_due(conn, now, skip=handled, kinds=kinds)
-                        if schedule is None or (self._drain is not None and self._drain.draining
-                                                and schedule["kind"] != "command"):
+                        # Until the kind is known, count a lookup that may admit agent work. Still look up
+                        # commands when agent admission is closed; release this count before kind admission.
+                        with self._admit_start():
+                            schedule = await db_schedules.lock_next_due(conn, now, skip=handled, kinds=kinds)
+                        if schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"])):
                             return
                         handled.append(schedule["id"])
                         if not firing_guard.enter_context(_project_firing(schedule["project_id"])):
@@ -548,13 +565,15 @@ class Scheduler:
             return None
         return await self._fire(conn, schedule, firing, now)
 
-    async def run_now(self, schedule_id: str) -> str | None:
+    async def run_now(self, schedule_id: str, *, expected_version: str | None = None) -> str | None:
         """Fire a schedule now, enabled or not (``trigger`` manual); None if unknown or admission is refused.
         Its ``next_fire_at`` stays. A gate runs in the background: the run is ``gating`` until it ends."""
         now = self._clock()
         with ExitStack() as firing_guard:
             async with db_connection.transaction() as conn:
                 schedule = await db_schedules.lock_schedule(conn, schedule_id)
+                if schedule is not None:
+                    db_schedules.check_configuration_version(schedule, expected_version)
                 if (schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
                         or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
                     return None

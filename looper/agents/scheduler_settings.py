@@ -1,4 +1,4 @@
-"""The scheduler's two system settings (``system_settings``), edited in Settings → Scheduler.
+"""The scheduler's system settings (``system_settings``).
 
 ``scheduler.min_interval_seconds``: how close two fires of a schedule may be (a minute with a gate command, else
 this many seconds). ``scheduler.run_timeout_seconds``: the run timeout of a schedule that follows the default.
@@ -21,12 +21,15 @@ logger = logging.getLogger(__name__)
 
 MIN_INTERVAL_KEY = "scheduler.min_interval_seconds"
 RUN_TIMEOUT_KEY = "scheduler.run_timeout_seconds"
+RUN_RETENTION_KEY = "scheduler.run_retention_days"
+DEFAULT_RUN_RETENTION_DAYS = 30
+RUN_RETENTION_MAX_DAYS = 3650
 DEFAULT_MIN_INTERVAL_SECONDS = 300
 # A gated schedule may fire every minute: a run with nothing new ends at its gate, without a task.
 MIN_INTERVAL_GATED_SECONDS = 60
 DEFAULT_RUN_TIMEOUT_SECONDS: int | None = None  # no limit, as a schedule without a timeout always had
 RUN_TIMEOUT_MAX_SECONDS = 30 * 86400
-FIELDS = ("min_interval_seconds", "run_timeout_seconds")
+FIELDS = ("min_interval_seconds", "run_timeout_seconds", "run_retention_days")
 
 _min_interval = DEFAULT_MIN_INTERVAL_SECONDS
 _min_source: str | None = None  # "setting"; None: the built-in
@@ -91,6 +94,30 @@ async def default_run_timeout(conn: Any = None) -> int | None:
     return await _stored_run_timeout(conn)
 
 
+def _days(raw: Any) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= RUN_RETENTION_MAX_DAYS:
+        raise ValueError(f"run_retention_days must be a whole number of days from 1 to {RUN_RETENTION_MAX_DAYS}")
+    return raw
+
+
+async def _stored_run_retention(conn: Any = None) -> int | None:
+    stored = (await db_settings.get_settings([RUN_RETENTION_KEY], pool=conn)).get(RUN_RETENTION_KEY)
+    if stored is None:
+        return None
+    try:
+        return _days(int(stored))
+    except (ValueError, TypeError):
+        logger.warning("the stored %s is not a whole number of days from 1 to %d; using %d",
+                       RUN_RETENTION_KEY, RUN_RETENTION_MAX_DAYS, DEFAULT_RUN_RETENTION_DAYS)
+        return None
+
+
+async def run_retention_days(conn: Any = None) -> int:
+    """Read retention on the caller's transaction connection when one is supplied."""
+    stored = await _stored_run_retention(conn)
+    return DEFAULT_RUN_RETENTION_DAYS if stored is None else stored
+
+
 async def effective_run_timeout(mode: str, seconds: int | None, conn: Any = None) -> int | None:
     """A schedule's timeout for a run that starts now (None: no limit); ``conn`` as ``default_run_timeout``."""
     if mode == RunTimeoutMode.INHERIT.value:
@@ -101,6 +128,7 @@ async def effective_run_timeout(mode: str, seconds: int | None, conn: Any = None
 async def settings_view() -> dict[str, Any]:
     """Each setting's effective value and where it comes from (``setting``, ``built-in``)."""
     run_timeout = await _stored_run_timeout()
+    retention = await _stored_run_retention()
     return {
         "min_interval_seconds": {
             "value": _min_interval, "source": _min_source or Source.DEFAULT.value,
@@ -111,6 +139,11 @@ async def settings_view() -> dict[str, Any]:
             "value": run_timeout,
             "source": Source.SETTING.value if run_timeout else Source.DEFAULT.value,
             "built_in": DEFAULT_RUN_TIMEOUT_SECONDS, "minimum": 1, "maximum": RUN_TIMEOUT_MAX_SECONDS,
+        },
+        "run_retention_days": {
+            "value": DEFAULT_RUN_RETENTION_DAYS if retention is None else retention,
+            "source": Source.DEFAULT.value if retention is None else Source.SETTING.value,
+            "built_in": DEFAULT_RUN_RETENTION_DAYS, "minimum": 1, "maximum": RUN_RETENTION_MAX_DAYS,
         },
     }
 
@@ -124,11 +157,13 @@ def checked(body: Mapping[str, Any]) -> dict[str, int | None]:
     values: dict[str, int | None] = {}
     for name, raw in body.items():
         high = RUN_TIMEOUT_MAX_SECONDS if name == "run_timeout_seconds" else None
-        values[name] = None if raw is None else _seconds(raw, name, high=high)
+        values[name] = None if raw is None else (_days(raw) if name == "run_retention_days"
+                                                else _seconds(raw, name, high=high))
     return values
 
 
-_KEYS = {"min_interval_seconds": MIN_INTERVAL_KEY, "run_timeout_seconds": RUN_TIMEOUT_KEY}
+_KEYS = {"min_interval_seconds": MIN_INTERVAL_KEY, "run_timeout_seconds": RUN_TIMEOUT_KEY,
+         "run_retention_days": RUN_RETENTION_KEY}
 
 
 async def store(name: str, value: int, *, conn: Any) -> None:

@@ -679,6 +679,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
     from looper.agents.ops import planner as planner_ops, room as room_ops, service as manager_ops
     from looper.agents.runtimes import codex_login, grok_login
     from looper.db import channel_configs, llm_records, room as db_room, system_settings
+    from looper.ops_config import OpsConfig
 
     monkeypatch.setattr(waits, "_limits", waits.WaitLimits())
     monkeypatch.setattr(waits, "_sources", {})
@@ -715,6 +716,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
                 value.bus = bus  # the Manager fleet's bus
             if name == "ChannelRegistry":
                 value.register = AsyncMock()
+                value.prepare_stop_all = MagicMock(side_effect=lambda: events.append("registry.prepare_stop_all"))
             monkeypatch.setattr(serve, name, constructor)
 
         class WaitService:
@@ -779,10 +781,11 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         loop = asyncio.get_running_loop()
         monkeypatch.setattr(loop, "add_signal_handler", lambda sig, callback: (
             loop.call_soon(callback) if sig == serve.signal.SIGINT else None))
-        # The ops default: the Pi and DSH runners stay off, so this composition starts no runner child.
-        ops = SimpleNamespace(host="127.0.0.1", port=9876, public_url="https://looper.example.com",
-                              operator_notes_root=tmp_path, database_url=DSN,
-                              pi_runtime="cli", dsh_runtime="cli")
+        # Keep the Pi and DSH runners off, so this composition starts no runner child.
+        ops = OpsConfig(runtime_root=tmp_path, path=tmp_path / "ops.toml",
+                        host="127.0.0.1", port=9876, public_url="https://looper.example.com",
+                        operator_notes_root=str(tmp_path), database_url=DSN,
+                        pi_runtime="cli", dsh_runtime="cli")
         await asyncio.wait_for(serve._run_agent_system(ops=ops, runtime_root=tmp_path,
                                                       work_dir=tmp_path), 3)
         assert events[:3] == ["scheduler.load", "waits.load", "waits.created"]
@@ -790,6 +793,8 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         assert events[events.index("gates.stop") + 1] == "waits.stop"
         assert events.count("waits.start") == events.count("waits.stop") == 1
         assert events.index("http.start") < events.index("waits.start")
+        assert events.count("registry.prepare_stop_all") == 1
+        assert events.index("registry.prepare_stop_all") < events.index("waits.stop")
         assert events.index("waits.stop") < events.index("supervisor.stop")
 
     run_db(test, monkeypatch)

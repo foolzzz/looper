@@ -134,7 +134,11 @@ class _Log:
 
     def open(self):
         os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
-        self.fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            self.fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        except FileNotFoundError:
+            os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
+            self.fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 
     def _write(self, data):
         if self.error is None:

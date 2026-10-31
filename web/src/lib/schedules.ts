@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ScheduleFields,
+  ScheduleKind,
   ScheduleNotify,
   ScheduleRunInfo,
   ScheduleRunStatus,
@@ -21,6 +22,8 @@ export const RUN_STATUS: Record<ScheduleRunStatus, { label: string; variant: Var
   queued: { label: "Queued", variant: "warning" },
   gating: { label: "Checking", variant: "default" },
   running: { label: "Running", variant: "default" },
+  succeeded: { label: "Succeeded", variant: "success" },
+  interrupted: { label: "Interrupted", variant: "destructive" },
   completed: { label: "Completed", variant: "success" },
   failed: { label: "Failed", variant: "destructive" },
   stopped: { label: "Stopped", variant: "warning" },
@@ -34,20 +37,24 @@ export const RUN_STATUS: Record<ScheduleRunStatus, { label: string; variant: Var
 };
 
 /** What each `notify` choice sends. */
-export const NOTIFY_OPTIONS: { value: ScheduleNotify; label: string; hint: string }[] = [
-  {
-    value: "failures",
-    label: "Failures",
-    hint: "Failed runs, plus the alerts (3 failures in a row, no success for a while) and their recoveries.",
-  },
-  {
-    value: "alerts",
-    label: "Alerts only",
-    hint: "Only the alerts (3 failures in a row, no success for a while) and their recoveries; no message per run.",
-  },
-  { value: "always", label: "Always", hint: "Every run that ran a task, plus the alerts." },
-  { value: "never", label: "Never", hint: "Nothing is sent; the dashboard still shows failing schedules." },
-];
+export function scheduleNotifyOptions(kind: ScheduleKind = "agent", failures = 3): { value: ScheduleNotify; label: string; hint: string }[] {
+  return [
+    {
+      value: "failures",
+      label: "Failures",
+      hint: `Failed runs, plus the alerts (${failures} failures in a row, no success for a while) and their recoveries.`,
+    },
+    {
+      value: "alerts",
+      label: "Alerts only",
+      hint: `Only the alerts (${failures} failures in a row, no success for a while) and their recoveries; no message per run.`,
+    },
+    { value: "always", label: "Always", hint: `Every run that ran a ${kind === "command" ? "command" : "task"}, plus the alerts.` },
+    { value: "never", label: "Never", hint: "Nothing is sent; the dashboard still shows failing schedules." },
+  ];
+}
+
+export const NOTIFY_OPTIONS = scheduleNotifyOptions();
 
 /** The roles a schedule may limit in each task it creates. */
 export const TASK_LIMIT_ROLES: TaskLimitRole[] = ["worker", "reviewer"];

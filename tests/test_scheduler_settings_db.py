@@ -27,6 +27,35 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 ENV = "LOOPER_SCHEDULE_MIN_INTERVAL_SECONDS"
 
 
+def test_run_retention_default_bounds_and_reset(monkeypatch, tmp_path):
+    async def test(env: ScheduleEnv) -> None:
+        view = await env.ok("POST", "/api/v1/scheduler_settings/get", {})
+        assert view["run_retention_days"] == {
+            "value": 30, "source": "built-in", "built_in": 30, "minimum": 1, "maximum": 3650}
+        for days in (1, 3650):
+            saved = await env.ok("POST", "/api/v1/scheduler_settings/update", {"run_retention_days": days})
+            assert saved["run_retention_days"]["value"] == days
+            assert saved["run_retention_days"]["source"] == "setting"
+            async with env.pool.acquire() as conn:
+                assert await scheduler_settings.run_retention_days(conn) == days
+        reset = await env.ok("POST", "/api/v1/scheduler_settings/update", {"run_retention_days": None})
+        assert reset["run_retention_days"] == view["run_retention_days"]
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("stored", ["broken", "0", "3651"])
+def test_invalid_stored_retention_warns_and_uses_default(monkeypatch, tmp_path, caplog, stored):
+    async def test(env: ScheduleEnv) -> None:
+        await env.pool.execute("INSERT INTO system_settings (key, value) VALUES ($1, $2)",
+                               scheduler_settings.RUN_RETENTION_KEY, stored)
+        assert await scheduler_settings.run_retention_days() == 30
+        assert scheduler_settings.RUN_RETENTION_KEY in caplog.text
+        assert (await scheduler_settings.settings_view())["run_retention_days"]["source"] == "built-in"
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(ENV, raising=False)
@@ -67,6 +96,8 @@ def test_retired_variables_are_ignored_and_stored_values_survive_reset(
     {}, {"min_interval": 5}, {"min_interval_seconds": 0}, {"min_interval_seconds": 1.5},
     {"min_interval_seconds": "60"}, {"min_interval_seconds": True}, {"run_timeout_seconds": 0},
     {"run_timeout_seconds": 2_592_001}, {"run_timeout_seconds": 60, "min_interval_seconds": -1},
+    {"run_retention_days": 0}, {"run_retention_days": 3651}, {"run_retention_days": True},
+    {"run_retention_days": 1.5}, {"run_retention_days": "7"},
 ])
 def test_a_bad_scheduler_setting_is_refused_and_changes_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, body: dict[str, Any],
@@ -211,7 +242,8 @@ def test_an_export_carries_the_scheduler_settings_and_each_schedules_timeout_cho
     async def test(env: ScheduleEnv) -> None:
         from looper.agents import config_transfer
 
-        await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": 60, "run_timeout_seconds": 600})
+        await env.ok("POST", "/api/v1/scheduler_settings/update", {
+            "min_interval_seconds": 60, "run_timeout_seconds": 600, "run_retention_days": 7})
         ids = {name: (await env.schedule(name=name, **fields))["schedule_id"] for name, fields in (
             ("follows", {}), ("numbered", {"run_timeout_seconds": 90}), ("unlimited", {"run_timeout_seconds": None}))}
         path = tmp_path / "config.json"
@@ -220,22 +252,25 @@ def test_an_export_carries_the_scheduler_settings_and_each_schedules_timeout_cho
                 path.write_text("".join([c async for c in config_transfer.export_chunks(
                     conn, include_projects=True, include_secrets=False)]), encoding="utf-8")
         data = json.loads(path.read_text(encoding="utf-8"))
-        assert data["settings"]["scheduler"] == {"min_interval_seconds": 60, "run_timeout_seconds": 600}
+        assert data["settings"]["scheduler"] == {
+            "min_interval_seconds": 60, "run_timeout_seconds": 600, "run_retention_days": 7}
         assert {s["name"]: s["run_timeout_seconds"] for s in data["projects"][0]["schedules"]} == {
             "follows": "default", "numbered": 90, "unlimited": None}
 
         # Changed here, the file puts both back; a setting left at the built-in is not carried.
-        await env.ok("POST", "/api/v1/scheduler_settings/update", {"min_interval_seconds": 200, "run_timeout_seconds": None})
+        await env.ok("POST", "/api/v1/scheduler_settings/update", {
+            "min_interval_seconds": 200, "run_timeout_seconds": None, "run_retention_days": None})
         await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": ids['follows'], "fields": {"run_timeout_seconds": 5}})
         await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": ids['numbered'], "fields": {"run_timeout_seconds": "default"}})
         async with env.pool.acquire() as conn:
             plan = await config_transfer.run_import(conn, config_transfer.read_file(path), apply=False)
         scheduler = {c.key: c.action.value for c in plan.changes if c.section == "settings.scheduler"}
-        assert scheduler == {"min_interval_seconds": "changed", "run_timeout_seconds": "added"}
+        assert scheduler == {"min_interval_seconds": "changed", "run_timeout_seconds": "added", "run_retention_days": "added"}
         async with env.pool.acquire() as conn:
             await config_transfer.run_import(conn, config_transfer.read_file(path), apply=True)
         view = await env.ok("POST", "/api/v1/scheduler_settings/get", {})
         assert (view["min_interval_seconds"]["value"], view["run_timeout_seconds"]["value"]) == (200, 600)
+        assert view["run_retention_days"]["value"] == 7
         got = {s["name"]: s["run_timeout_seconds"] for s in (await env.ok("POST", "/api/v1/schedule_admin/list", {}))["schedules"]}
         assert got == {"follows": "default", "numbered": 90, "unlimited": None}
 
@@ -260,7 +295,8 @@ def test_the_manager_changes_the_scheduler_settings_after_the_user_confirms(
         chat = _Chat(tmp_path)
         (view,) = await chat.say("定时任务的设置", ("looper_settings", {"action": "view"}))
         assert view["result"]["scheduler"] == {"min_interval_seconds": "300 秒（内置默认）",
-                                               "run_timeout_seconds": "不限（内置默认）"}
+                                               "run_timeout_seconds": "不限（内置默认）",
+                                               "run_retention_days": "30 天（内置默认）"}
         (bad,) = await chat.say("改成 0", ("looper_settings", {"action": "scheduler",
                                                                "scheduler": {"min_interval_seconds": 0}}))
         assert _error(bad) == "invalid" and "min_interval_seconds must be a whole number" in bad["error"]["message"]
@@ -280,6 +316,12 @@ def test_the_manager_changes_the_scheduler_settings_after_the_user_confirms(
         assert await _trail(pool) == [("looper_settings", "read", "ok"), ("looper_settings", "write", "error"),
                                       ("looper_settings", "high", "needs_confirmation"),
                                       ("looper_settings", "high", "ok")]
+        (asked,) = await chat.say("保留 7 天的运行记录", ("looper_settings", {
+            "action": "scheduler", "scheduler": {"run_retention_days": 7}}))
+        assert asked["status"] == "needs_confirmation"
+        done = await _confirm(chat, asked)
+        assert done["result"]["changes"] == [
+            {"setting": "run_retention_days", "before": "30 天（内置默认）", "after": "7 天（设置）"}]
 
     run_db(test, monkeypatch)
 

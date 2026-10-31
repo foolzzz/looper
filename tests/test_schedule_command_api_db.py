@@ -297,6 +297,22 @@ def test_run_log_tail_returns_last_lines_and_their_byte_offset(tmp_path, monkeyp
     run_db(run, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("log_bytes,message", [
+    (0, "the command did not start, so this run has no log"),
+    (1, "the log was removed by the retention policy"),
+])
+def test_run_log_reports_missing_finished_log_by_recorded_size(tmp_path, monkeypatch, log_bytes, message):
+    async def run(pool):
+        project = await projects.create_project(name="Example", work_dir=str(tmp_path))
+        async with _api(tmp_path, pool) as call:
+            sid = (await _create(call, project["id"]))["schedule_id"]
+            rid = await _run(pool, sid, status="failed", log_path="logs/schedules/missing.log", started=False)
+            await db_schedules.update_run(pool, rid, log_bytes=log_bytes)
+            status, result = await call("run_log", {"run_id": rid})
+            assert status == 404 and result["error"]["message"] == message
+    run_db(run, monkeypatch, timeout=30)
+
+
 def test_run_log_rejects_escaping_paths_and_reports_missing_files(tmp_path, monkeypatch):
     async def run(pool):
         project = await projects.create_project(name="Example", work_dir=str(tmp_path))

@@ -76,6 +76,9 @@ class ChannelAdapter(ABC):
         """Gracefully shut down the channel."""
         ...
 
+    def prepare_stop(self) -> None:
+        """Persist shutdown state before any agent or channel drain can block."""
+
     @abstractmethod
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Send a message from the system to the user through this channel."""

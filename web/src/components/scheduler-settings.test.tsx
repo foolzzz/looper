@@ -8,9 +8,10 @@ import type { ScheduleInfo } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const view = (min: number, source: string, timeout: number | null = null) => ({
+const view = (min: number, source: string, timeout: number | null = null, retention = 30, retentionSource = "built-in") => ({
   min_interval_seconds: { value: min, source, built_in: 300, minimum: 1, gated_value: Math.min(60, min) },
   run_timeout_seconds: { value: timeout, source: "built-in", built_in: null, minimum: 1, maximum: 2592000 },
+  run_retention_days: { value: retention, source: retentionSource, built_in: 30, minimum: 1, maximum: 3650 },
 });
 const waits = (max = 604800, min = 300, source = "built-in") => ({
   max_wait_seconds: { value: max, default: 604800, min: 60, max: 2592000, source },
@@ -36,7 +37,8 @@ describe("Settings → Scheduler", () => {
         const body = JSON.parse(String(init?.body));
         puts.push(body);
         if (body.min_interval_seconds === 0) return Response.json({ status: "error", error: { code: "invalid", message: "bad value" } }, { status: 400 });
-        return Response.json({ status: "ok", result: view(body.min_interval_seconds ?? 120, "setting") });
+        return Response.json({ status: "ok", result: view(body.min_interval_seconds ?? 120, "setting", null,
+          body.run_retention_days ?? 30, body.run_retention_days == null ? "built-in" : "setting") });
       }
       if (String(_url) === "/api/v1/scheduler_settings/get") return Response.json({ status: "ok", result: view(300, "built-in") });
       throw new Error(`Unexpected request: ${_url}`);
@@ -95,8 +97,51 @@ describe("Settings → Scheduler", () => {
     expect((inputs[1] as HTMLInputElement).value).toBe("45");
   });
 
+  it("shows retention in days, enforces its range, saves and resets through the settings API", async () => {
+    await act(async () => root.render(<SchedulerSection />));
+    await flush();
+    const input = container.querySelector('input[id$="-run_retention_days"]') as HTMLInputElement;
+    expect(input.value).toBe("30");
+    expect(input.type).toBe("number");
+    expect(input.min).toBe("1");
+    expect(input.max).toBe("3650");
+    const form = input.closest("form")!;
+    const save = form.querySelector('button[type="submit"]') as HTMLButtonElement;
+    expect(form.textContent).toContain("Built-in value");
+    expect(form.textContent).toContain("newest 100");
+    expect(save.disabled).toBe(true);
+    for (const invalid of ["", "0", "3651", "1.5"]) {
+      await typeInto(input, invalid);
+      expect(save.disabled).toBe(true);
+    }
+    const timeout = container.querySelector('input[id$="-run_timeout_seconds"]') as HTMLInputElement;
+    await typeInto(timeout, "45");
+    for (const days of ["1", "3650"]) {
+      await typeInto(input, days);
+      expect(save.disabled).toBe(false);
+    }
+    await act(async () => { save.click(); });
+    await flush();
+    expect(puts).toEqual([{ run_retention_days: 3650 }]);
+    expect(input.value).toBe("3650");
+    expect(timeout.value).toBe("45");
+    expect(form.textContent).toContain("Saved here");
+    const reset = form.querySelector('button[type="button"]') as HTMLButtonElement;
+    expect(reset.textContent).toContain("30 days");
+    await act(async () => { reset.click(); });
+    await flush();
+    expect(puts[1]).toEqual({ run_retention_days: null });
+    expect(input.value).toBe("30");
+    expect(timeout.value).toBe("45");
+    expect(form.textContent).toContain("Built-in value");
+    expect(form.querySelector('button[type="button"]')).toBeNull();
+  });
+
   it.each([true, false])("shows a schedule's registered model summary or project inheritance (override: %s)", async (override) => {
     const schedule: ScheduleInfo = {
+      kind: "agent", command: null, env: {}, env_file: null, success_deadline: null,
+      alert_policy: { failures_after: { value: 3, default: true }, stale_after_seconds: { value: 900, default: true },
+        overlap_after: { value: 0, default: true } },
       manager_id: "manager", manager_name: "Manager", template_key: null, template_inputs: {}, template_name: null,
       schedule_id: "schedule", project_id: "project", project_name: "Project", name: "Scheduled task",
       cron: "0 9 * * *", timezone: "UTC", description: "Every morning", requirement: "Check changes", work_dir: "",
@@ -105,7 +150,7 @@ describe("Settings → Scheduler", () => {
       task_limits: { worker: null, reviewer: null }, enabled: false, next_fire_at: null, last_fired_at: null,
       last_success_at: null, consecutive_failures: 0, created_via: "dashboard", created_at: "", updated_at: "",
       last_run: null, gate_command: null, gate_timeout_seconds: null, daily_budget_usd: null, notify: "never", user_gates: override ? "on" : "off",
-      notify_target: null, spent_today_usd: 0, alerts: { failures_since: null, stale_since: null },
+      notify_target: null, spent_today_usd: 0, alerts: { failures_since: null, stale_since: null, deadline_since: null, overlap_since: null },
       planner_session: { active: false, runtime: null, profile: null, last_task_id: null, last_task_title: null, updated_at: null },
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {

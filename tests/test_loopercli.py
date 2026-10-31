@@ -3,6 +3,8 @@ and records the calls. No database; the CLI itself imports nothing of Looper but
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import builtins
 import io
 import json
@@ -1186,6 +1188,202 @@ def test_wait_for_a_missing_task_exits_1_and_json_prints_the_result(
 def test_wait_with_an_unreachable_looper_exits_4(cli: Run, client: Path) -> None:
     write_client_file(client, f"http://127.0.0.1:{closed_port()}")
     assert cli("wait", "t1")[0] == 4
+
+
+# --- schedule logs ---
+
+
+def schedule_log_page(data: bytes, offset: int = 0, next_offset: int | None = None,
+                      **more: Any) -> tuple[int, Any]:
+    return 200, {"status": "ok", "result": {
+        "run_id": "srun-1", "schedule_id": "sched-1", "size": offset + len(data), "offset": offset,
+        "next_offset": next_offset, "data_base64": base64.b64encode(data).decode("ascii"),
+        "complete": True, "truncated": False, **more}}
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_schedule_log_pages_preserve_bytes_and_json_counts_them(
+        client: Path, looper: FakeLooper, capsysbinary: pytest.CaptureFixture[bytes], as_json: bool) -> None:
+    chunks = [b"first\x00\xff\r\n", b"\xe4\xb8", b"\xad\nlast"]
+    offsets = [0, len(chunks[0]), len(chunks[0]) + len(chunks[1])]
+    looper.answers += [schedule_log_page(chunk, offset, offset + len(chunk) if i < 2 else None)
+                       for i, (chunk, offset) in enumerate(zip(chunks, offsets))]
+    last_result = looper.answers[-1][1]["result"].copy()
+    argv = ["--client-file", str(client), "schedule-log", "srun-1", *(["--json"] if as_json else [])]
+    assert loopercli.main(argv) == 0
+    captured = capsysbinary.readouterr()
+    assert captured.err == b""
+    if as_json:
+        del last_result["data_base64"]
+        assert json.loads(captured.out) == {**last_result, "bytes": sum(map(len, chunks))}
+    else:
+        assert captured.out == b"".join(chunks)
+    assert [(r[0], r[1], r[3]) for r in looper.requests] == [
+        ("POST", "/api/v1/schedule_admin/run_log", {"run_id": "srun-1", "offset": offset, "limit_bytes": 4194304})
+        for offset in offsets]
+    assert all(r[2]["authorization"] == f"Bearer {TOKEN}" for r in looper.requests)
+
+
+def test_schedule_log_tail_server_trimmed_makes_one_request(cli: Run, looper: FakeLooper) -> None:
+    looper.answers.append(schedule_log_page(b"last\nlines\n", offset=20))
+    code, out, err = cli("schedule-log", "srun-1", "--tail", "2")
+    assert code == 0 and out == "last\nlines\n" and err == ""
+    assert [(r[1], r[3]) for r in looper.calls()] == [
+        ("/api/v1/schedule_admin/run_log", {"run_id": "srun-1", "tail_lines": 2, "limit_bytes": 4194304})]
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize("ending", [b"", b"\n"])
+def test_schedule_log_tail_pages_back_to_whole_lines(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch, as_json: bool, ending: bytes) -> None:
+    monkeypatch.setattr(loopercli, "_LOG_PAGE", 8)
+    data = b"old\n" + b"x" * 20 + b"\nlast" + ending
+    start = len(data) - 8
+    first = schedule_log_page(data[start:], offset=start, complete=False, truncated=True)
+    looper.answers += [first, schedule_log_page(data[start - 8:start], offset=start - 8),
+                       schedule_log_page(data[start - 16:start - 8], offset=start - 16),
+                       schedule_log_page(data[:start - 16])]
+    code, out, err = cli("schedule-log", "srun-1", "--tail", "2", *(["--json"] if as_json else []))
+    expected = data[4:]
+    assert code == 0
+    assert "still going" in err and "truncated at 50 MiB" in err
+    if as_json:
+        metadata = {key: value for key, value in first[1]["result"].items() if key != "data_base64"}
+        assert json.loads(out) == {**metadata, "offset": 4, "bytes": len(expected)}
+    else:
+        assert out.encode() == expected
+    assert [r[3] for r in looper.calls()] == [
+        {"run_id": "srun-1", "tail_lines": 2, "limit_bytes": 8},
+        {"run_id": "srun-1", "offset": start - 8, "limit_bytes": 8},
+        {"run_id": "srun-1", "offset": start - 16, "limit_bytes": 8},
+        {"run_id": "srun-1", "offset": 0, "limit_bytes": start - 16}]
+
+
+def test_schedule_log_tail_stops_after_enough_whole_lines(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(loopercli, "_LOG_PAGE", 8)
+    looper.answers += [schedule_log_page(b"ne\nlast\n", offset=18),
+                       schedule_log_page(b"\nlong-li", offset=10)]
+    code, out, err = cli("schedule-log", "srun-1", "--tail", "2")
+    assert code == 0 and out == "long-line\nlast\n" and err == ""
+    assert [r[3] for r in looper.calls()] == [
+        {"run_id": "srun-1", "tail_lines": 2, "limit_bytes": 8},
+        {"run_id": "srun-1", "offset": 10, "limit_bytes": 8}]
+
+
+@pytest.mark.parametrize(("data", "tail"), [(b"old\nlast\n", 5), (b"old\nlast\n", 1), (b"", 5)])
+def test_schedule_log_tail_reaches_file_start(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch, data: bytes, tail: int) -> None:
+    monkeypatch.setattr(loopercli, "_LOG_PAGE", 5)
+    start = max(0, len(data) - 5)
+    looper.answers.append(schedule_log_page(data[start:], offset=start))
+    if start:
+        looper.answers.append(schedule_log_page(data[:start]))
+    code, out, err = cli("schedule-log", "srun-1", "--tail", str(tail))
+    assert code == 0 and err == ""
+    assert out.encode() == (b"last\n" if tail == 1 else data)
+    assert len(looper.calls()) == (2 if start else 1)
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_schedule_log_tail_backward_page_error(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch, as_json: bool) -> None:
+    monkeypatch.setattr(loopercli, "_LOG_PAGE", 5)
+    error = {"status": "error", "error": {"code": "not_found", "message": "the log expired"}}
+    looper.answers += [schedule_log_page(b"last\n", offset=4), (404, error)]
+    code, out, err = cli("schedule-log", "srun-1", "--tail", "2", *(["--json"] if as_json else []))
+    assert code == loopercli.EXIT_ERROR
+    if as_json:
+        assert json.loads(out) == error and err == ""
+    else:
+        assert out == "" and err.strip() == "error: not_found: the log expired"
+    assert [r[3] for r in looper.calls()][-1] == {"run_id": "srun-1", "offset": 0, "limit_bytes": 4}
+
+
+@pytest.mark.parametrize("line_bytes", [301, 1001])
+def test_schedule_log_tail_with_real_run_log(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsysbinary: pytest.CaptureFixture[bytes], line_bytes: int) -> None:
+    from looper.agents import schedules
+
+    path = tmp_path / "logs" / "schedules" / "sched-1" / "srun-1.log"
+    path.parent.mkdir(parents=True)
+    data = b"".join(f"{i:04d} ".encode() + b"x" * (line_bytes - 6) + b"\n" for i in range(5000))
+    path.write_bytes(data)
+
+    async def get_run(run_id: str) -> dict[str, Any]:
+        assert run_id == "srun-1"
+        return {"schedule_id": "sched-1", "log_path": str(path.relative_to(tmp_path)), "status": "succeeded"}
+
+    monkeypatch.setattr(schedules.db_schedules, "get_run", get_run)
+
+    def respond(handler: BaseHTTPRequestHandler, request: Request) -> None:
+        if request[1] == "/api/v1/openapi.json":
+            _send(handler, 200, api_v1.document())
+        else:
+            assert request[1] == "/api/v1/schedule_admin/run_log"
+            result = asyncio.run(schedules.run_log(request[3]["run_id"], request[3], tmp_path))
+            _send(handler, 200, {"status": "ok", "result": result})
+
+    server = Server(respond)
+    try:
+        client = write_client_file(tmp_path / "client.json", server.url)
+        assert loopercli.main(["--client-file", str(client), "schedule-log", "srun-1", "--tail", "5000"]) == 0
+        captured = capsysbinary.readouterr()
+        assert captured.err == b""
+        assert len(captured.out.splitlines()) == 5000
+        assert captured.out == b"".join(data.splitlines(keepends=True)[-5000:])
+        assert all(len(line) == line_bytes for line in captured.out.splitlines(keepends=True))
+        assert len([r for r in server.requests if r[0] == "POST"]) == (1 if line_bytes == 301 else 2)
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize("tail", ["0", "5001", "-1", "1.5"])
+def test_schedule_log_rejects_invalid_tail_before_request(cli: Run, looper: FakeLooper, tail: str) -> None:
+    code, _, err = cli("schedule-log", "srun-1", "--tail", tail)
+    assert code == 2 and "--tail" in err
+    assert looper.requests == []
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_schedule_log_page_error_uses_normal_error_output(cli: Run, looper: FakeLooper, as_json: bool) -> None:
+    error = {"status": "error", "error": {"code": "not_found", "message": "the log expired"}}
+    looper.answers += [schedule_log_page(b"first\n", next_offset=6), (404, error)]
+    code, out, err = cli("schedule-log", "srun-1", *(["--json"] if as_json else []))
+    assert code == loopercli.EXIT_ERROR
+    if as_json:
+        assert json.loads(out) == error and err == ""
+    else:
+        assert out == "first\n" and err.strip() == "error: not_found: the log expired"
+    assert len(looper.calls()) == 2
+
+
+@pytest.mark.parametrize(("complete", "truncated", "note"), [
+    (False, False, "(run srun-1 is still going; the log may grow)"),
+    (True, True, "(the log was truncated at 50 MiB on the server)"),
+])
+def test_schedule_log_reports_final_page_state(
+        cli: Run, looper: FakeLooper, complete: bool, truncated: bool, note: str) -> None:
+    looper.answers += [schedule_log_page(b"first\n", next_offset=6),
+                       schedule_log_page(b"", offset=6, complete=complete, truncated=truncated)]
+    code, out, err = cli("schedule-log", "srun-1")
+    assert code == 0 and out == "first\n" and err.strip() == note
+
+
+@pytest.mark.parametrize("tail", [[], ["--tail", "1"]])
+def test_schedule_log_closed_pipe_exits_silently(client: Path, looper: FakeLooper, tail: list[str]) -> None:
+    looper.answers.append(schedule_log_page(b"log\n", next_offset=4))
+    reader, writer = os.pipe()
+    os.close(reader)
+    try:
+        proc = subprocess.run([sys.executable, "-m", "looper.loopercli", "--client-file", str(client),
+                               "schedule-log", "srun-1", *tail], cwd=REPO_ROOT, stdout=writer, stderr=subprocess.PIPE,
+                              timeout=10)
+    finally:
+        os.close(writer)
+    assert proc.returncode == 0 and proc.stderr == b""
+    assert len(looper.calls()) == 1
 
 
 # --- the aliases ---

@@ -18,6 +18,128 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.50] - 2026-10-31
+
+### Added
+
+- **Startup scan of kept-run directories.** `looper serve` now scans `.local/runs/*` after the process sweep and before it interrupts unfinished records, even with keepers off. A live keeper is ended with its child, a dead keeper's child is ended if still running, and the directory is removed; a keeper with unreadable `keeper.json` is identified by a unique spawn record naming its run directory, and is otherwise left in place with an error logged. If keeper liveness cannot be read, startup stops without deleting any run directory. ([#1017](https://github.com/foolzzz/looper/pull/1017))
+
+### Changed
+
+- **`proc_tree` no longer reads a failed `ps` as an empty process list.** A failed listing keeps the tree observed before the stop, never signals a reaped leader's pid or group directly, and keeps the agent's record; new `end_orphan` checks the start time first. Spawn records of a keeper's children carry `run_dir`. ([#1017](https://github.com/foolzzz/looper/pull/1017))
+- **Keeper process.** The keeper ends group members left after its child exits, drains its log pumps with a timeout before waiting, starts only one end task, and sets `stderr_truncated` in its state file when stderr reaches its limit. ([#1017](https://github.com/foolzzz/looper/pull/1017))
+
+## [2.14.49] - 2026-10-31
+
+### Added
+
+- **Keeper switch and single control-plane lock.** The ops file takes `[agent_host] keeper = "off" | "on"` (default `off`; file only). With `on`, `looper serve` takes a PostgreSQL session advisory lock on a dedicated connection before it opens the database pool, refuses to start while another process holds it (the error names the holder), and increments the `control_plane_epoch` key in `system_settings` once the schema is ready. A lost lock is terminal: the server fences its database pool and new agent spawns, closes its listener, ends its own agents and exits with code 75 without touching run records. With `off`, none of this happens. ([#1012](https://github.com/foolzzz/looper/pull/1012))
+
+### Changed
+
+- **Agent process bookkeeping in `proc_tree`, with keeper off too.** `spawn` now tracks in-flight spawns and every owned process, and ending an orphaned agent's tree kills only survivors whose identity and start time it confirmed, one by one, instead of signalling the whole group. ([#1012](https://github.com/foolzzz/looper/pull/1012))
+
+## [2.14.48] - 2026-10-31
+
+### Added
+
+- **Keeper process that holds one run's child.** The new package `looper/agents/keeper/` starts a child in its own session, appends its stdout and stderr to files, keeps its state in `keeper.json`, and ends the child on SIGTERM, after the orphan timeout without a controller, or when stdout passes its cap. `proc_tree.own_records` lets a process that is not a server own the agents it spawns. Nothing in Looper starts the keeper yet. ([#1011](https://github.com/foolzzz/looper/pull/1011))
+
+## [2.14.47] - 2026-10-31
+
+### Changed
+
+- **Telegram handler retry, backlog cap and restored progress route.** A Telegram handler that raised before it reached the bus is retried up to two more times (about 3 s at most, never after publishing, not during shutdown) before the update is left pending. The Telegram channel config schema and the config export accept `backlog_max_age_seconds`. Task progress for a chat restored from `reply_route` is sent without caching the correlation. ([#994](https://github.com/foolzzz/looper/pull/994))
+- **Dashboard command run history and schedule alert follow-ups.** The failures badge follows each schedule's own threshold, the overlap alert is warning-coloured, a second run link reopens its row, the log preview shows the last 200 lines of logs over 1 MiB, succeeded command runs show their exit code, a run with no log shows a note (the log API says the command did not start), skipped runs show no duration, and the command schedule form's hints, alert section, field errors and ownership line fit command schedules. ([#1009](https://github.com/foolzzz/looper/pull/1009))
+
+## [2.14.46] - 2026-10-31
+
+### Changed
+
+- **Command schedule confirmations and client-token API text.** The Manager's enable and run-now confirmations for a command schedule show the command in a verbatim code fence, the directory, the run timeout, the environment keys only, the env file when set, and (for enable) the success deadline and alert thresholds, and say the run uses no agent or model spend. Every command schedule update reply says so too, and the command appears in a code fence in the configuration block and in before → after diffs. The `looper_schedules` tool description no longer says an enabled schedule's runs "start tasks". The client-token API's enable and run confirmations name the shell command and say no task or model spend follows, and the confirmed update or run is bound to the configuration version that was shown. Listed runs and the run-now result carry the schedule `kind`. Agent schedule text is unchanged. ([#1005](https://github.com/foolzzz/looper/pull/1005))
+
+## [2.14.45] - 2026-10-31
+
+### Added
+
+- **Command run history in the dashboard.** A command schedule's run history shows each run's status with exit code or signal, times, duration and trigger; a run expands to its last 200 log lines with a full-log download; 24-hour and 7-day statistics and a status filter sit above it; `#projects/<project>/schedules/<schedule>/runs/<run>` opens one run; "Failing now" shows the missed-deadline and overlap alerts. ([#1000](https://github.com/foolzzz/looper/pull/1000))
+
+## [2.14.44] - 2026-10-31
+
+### Fixed
+
+- **Planner keeps the reason of a failed run.** The step activity, the work report, the review report and the closing-note outcome line keep the end of a failed Worker or Reviewer run's error instead of clipping it, and the verify path reads the run's `error` when a Reviewer run ended without a verdict. ([#996](https://github.com/foolzzz/looper/pull/996))
+
+## [2.14.43] - 2026-10-31
+
+### Fixed
+
+- **Command schedule runtime.** A due schedule is admitted by its kind after it is locked, so a command launch no longer blocks a drain and no tick under way can publish an agent task after the drain begins. Housekeeping runs retention, run pruning, notification pruning and each log rotation as independent steps recorded in `failed_steps`. Run pruning keeps an unfinished run whose gate output has not been handed on. The command runner retries opening its log once when the log directory vanished. Deleting a command schedule with a running run is refused with a 409. ([#993](https://github.com/foolzzz/looper/pull/993))
+
+## [2.14.42] - 2026-10-31
+
+### Added
+
+- **The Manager's `looper_schedules` tool creates, modifies and views command schedules.** It gains `kind`, `command`, `env`, `env_file`, `success_deadline` and three alert thresholds. For a command schedule the configuration, diff and the enable and run-now confirmations show the command verbatim and say it uses no model quota; the list and run summaries include `kind` and `exit_code`. A confirmed enable, disable or run-now is bound to the schedule id and configuration version it showed, and is refused with a 409 if the settings changed. ([#981](https://github.com/foolzzz/looper/pull/981))
+
+## [2.14.41] - 2026-10-31
+
+### Fixed
+
+- **`looper service status` and the install and restart reports use the address the unit listens on.** With `server.host = "::"` the status probe dials `[::1]` and the reports print `http://[::1]:<port>` instead of `http://127.0.0.1:<port>`. When the ops file cannot be read, status falls back to `127.0.0.1`. ([#992](https://github.com/foolzzz/looper/pull/992))
+- **Linux probe units stay consistent.** Reinstalling the probe stops a running probe first; uninstall removes the server unit even when probe cleanup fails (and then reports the failure, so it can be run again); uninstall stops the probe units by name when their files are already gone; and a failed probe update during install or restart restores the previous probe files instead of deleting them. ([#992](https://github.com/foolzzz/looper/pull/992))
+
+## [2.14.40] - 2026-10-31
+
+### Added
+
+- **The dashboard can create and edit command schedules.** The form on a project's Schedules tab has a "Type" selector (Agent task or Command) that is chosen only when creating and is read-only afterwards. A command schedule shows the command (up to 2000 characters), the work directory, `env` (KEY=VALUE lines or a JSON object), `env_file`, the timeout, overlap, catch-up, notifications, the success deadline and the three alert thresholds, and hides the agent-only fields (requirement, template, gate, budgets, profiles, task limits). The schedule list and detail view show a "Command" badge. ([#979](https://github.com/foolzzz/looper/pull/979))
+
+### Fixed
+
+- **Config import skips a command schedule that carries a requirement.** An entry of kind `command` whose `requirement` is non-empty is skipped with the reason "requirement does not apply to a command schedule"; `""` is stored only when the field is absent, null or blank. ([#995](https://github.com/foolzzz/looper/pull/995))
+- **A run's recorded profile omits `runtime.launcher` unless it is `ttadk`.** The run record (`profile.runtime`) no longer lists `"launcher": "native"`. ([#995](https://github.com/foolzzz/looper/pull/995))
+
+No model-visible change.
+
+## [2.14.39] - 2026-10-31
+
+### Fixed
+
+- **`loopercli schedule-log --tail N` prints exactly the last N lines.** The client asks the server for the tail with the largest page (4 MiB); when that page may begin mid-line it reads earlier byte ranges with `offset` and `limit_bytes` until it holds N whole lines or reaches the start of the file. The server API (`schedule_admin.run_log`) is unchanged. ([#991](https://github.com/foolzzz/looper/pull/991))
+
+No model-visible change.
+
+## [2.14.38] - 2026-10-31
+
+### Fixed
+
+- **Telegram messages sent during a long upgrade gap are delivered.** The service saves when Telegram polling stopped (on SIGINT or SIGTERM, through a new `prepare_stop` channel hook), and a message sent from then until polling resumed is no longer ignored as older than `backlog_max_age_seconds`; older messages are still ignored and `update_id` deduplication is unchanged. Polling responses are saved before they are acknowledged, and the stop time is retired after a response with fewer than 100 updates. The inbox database gains a `polling` table. ([#975](https://github.com/foolzzz/looper/pull/975))
+
+No model-visible change.
+
+## [2.14.37] - 2026-10-31
+
+### Changed
+
+- **Housekeeping keeps going after a failed step; the retention setting is in the dashboard and the Manager tool.** The hourly pass runs its five steps (runs and notifications, command logs, run directories, runner files, log rotation) independently: a failure is logged as a warning, recorded in the report's `failed_steps` and in the closing log line, and no longer skips log rotation. Settings → Scheduler gains "Run retention (days)" (1 to 3650), and the Manager settings tool's `scheduler` description and empty-argument message name `run_retention_days`. ([#983](https://github.com/foolzzz/looper/pull/983))
+
+Model-visible change: the Manager settings tool's `scheduler` description now mentions `run_retention_days`; no prompt or skill text changes.
+
+## [2.14.36] - 2026-10-31
+
+### Added
+
+- **`looper service upgrade` executes its plan; `looper service restart --drain`; Telegram updates survive a restart.** The upgrade installs for a NOOP plan, installs and atomically replaces the served dashboard for WEB_ONLY, and for FULL drains, stops, installs, restarts through the service manager and verifies `system.components`; a failed install restarts the old service and cancels the drain. `--timeout`, `--drain-timeout` and `--no-force` are new, a deploy report is printed and appended to the service log, and a drain started through the system API now needs `drain_status` polled at least every 30 seconds. The runtime fingerprint covers `pyproject.toml` dependencies and `uv.lock`, and a built dashboard records its source fingerprint. Telegram polling no longer drops pending updates: they are saved before acknowledgement, replayed after a restart and deduplicated by `update_id`; updates older than `backlog_max_age_seconds` (default 600) are ignored. ([#949](https://github.com/foolzzz/looper/pull/949))
+- **Command schedules in the schedule API, with `schedule_admin.run_log`.** Create takes `kind` (`agent` or `command`; it cannot change later) and validates each kind separately; create and update take `env`, `env_file`, `success_deadline` and the three alert thresholds; the schedule view returns them with the effective `alert_policy`. Runs carry the command columns (`started_at`, `exit_code`, `exit_signal`, `duration_seconds`, `log`, `log_tail`), the run list filters by `status` and returns 24-hour and 7-day statistics, and the new read-only `schedule_admin.run_log` reads a run's log in byte pages. ([#960](https://github.com/foolzzz/looper/pull/960))
+- **Command schedule fields in config export and import.** Schedule entries carry `kind`, `command`, `env`, `env_file`, `success_deadline` and the alert thresholds (written for an agent schedule only when not default, so its export is unchanged). Import validates by kind, still disables the schedules, skips a same-name schedule of the other kind, and imports a schedule whose `env_file` is missing on this machine with a note. ([#980](https://github.com/foolzzz/looper/pull/980))
+
+### Changed
+
+- **Run history and logs are bounded.** The scheduler runs a housekeeping pass at startup and then hourly. New setting `scheduler.run_retention_days` (default 30, 1 to 3650) deletes finished runs and notifications older than that, keeping each schedule's newest 100 runs and every open run; command logs go by age and a 2 GiB cap; `serve.log` and `probe.log` rotate at 20 MiB, keeping 5 copies. Agent schedules no longer keep their run history forever, and the first pass runs at the first start after the upgrade. The setting is not yet in the dashboard's Settings page or the Manager settings tool's description. ([#964](https://github.com/foolzzz/looper/pull/964))
+
+Model-visible change: no prompt or skill text changes. The Manager settings tool accepts and shows `run_retention_days` without a description update, and Telegram messages sent during a restart now reach the Manager instead of being dropped.
+
 ## [2.14.35] - 2026-10-31
 
 ### Added

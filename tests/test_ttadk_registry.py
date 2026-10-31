@@ -26,7 +26,7 @@ def test_runtime_launcher_and_version_survive_rows_and_records(launcher):
     assert profile.runtime == spec
     assert profile.record()["runtime"] == {
         "id": row["id"], "name": row["name"], "type": row["type"],
-        "launcher": launcher.value,
+        **({"launcher": launcher.value} if launcher is Launcher.TTADK else {}),
     }
     view = registry.runtime_view(row)
     assert view["launcher"] == launcher.value
