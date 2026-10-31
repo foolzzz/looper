@@ -68,6 +68,7 @@ from ..message import (
     worker_address,
 )
 from . import journal
+from ..drain import DrainState
 from ..system_prompt import (
     REVIEW_CONTRACT,
     WORK_CONTRACT,
@@ -415,6 +416,7 @@ class WorkerProcess:
     instruction: str = ""
     project_id: str | None = None  # its task's project, once read (the overview shows it there)
     since: datetime = field(default_factory=lambda: datetime.now(timezone.utc))  # when it began to wait, then to run
+    keepable: bool = False  # S0 has no keeper; every run must finish before either drain scope.
     task_role: dict[str, Any] | None = None  # the role its dispatch names (``task_roles.run_role``); None: built-in
 
 
@@ -425,7 +427,11 @@ class WorkerPool:
     subprocess to do the work, and publishes the result back to the Planner.
     """
 
-    def __init__(self, *, config: WorkerConfig, runtime_root: Path) -> None:
+    def __init__(self, *, config: WorkerConfig, runtime_root: Path, drain: DrainState | None = None) -> None:
+        self._drain = drain
+        if drain is not None:
+            drain.add_waker(self._wake_slot_waiters)
+            drain.add_source(self.drain_waiting)
         self._config = config
         self._runtime_root = runtime_root
         self._bus: MessageBus | None = None
@@ -716,6 +722,12 @@ class WorkerPool:
                 if not waiter.done():
                     waiter.set_result(None)
 
+    def drain_waiting(self) -> dict[str, Any]:
+        # Keep the slot counted through result publication, not just subprocess completion.
+        return {"runs": [{"worker_id": wp.worker_id, "task_id": wp.parent_task_id or wp.task_id,
+                          "role": wp.role.value, "since": wp.since.isoformat(), "keepable": wp.keepable}
+                         for wid, wp in self._active.items() if wid in self._slots]}
+
     async def recheck(self) -> None:
         """Let every run waiting for room in its task check its task's limit again (a limit changed)."""
         self._wake_slot_waiters()
@@ -729,6 +741,8 @@ class WorkerPool:
         while True:
             async with self._slot_lock:
                 limit = await load_task_limit(agent, task_id or None)
+                if self._drain is not None and self._drain.draining:
+                    limit = 0
                 running = sum(1 for held in self._slots.values() if held == (agent, task_id))
                 if running < limit:
                     self._slots[worker_id] = (agent, task_id)
@@ -1275,9 +1289,11 @@ class WorkerPool:
             detail = (runtime.failure_detail(result_event, launch=launch, command=command, pid=handle.pid)
                       if not result_ok else None)
             # A run stopped at its spend cap exits non-zero too; its result says why.
-            if return_code != 0 and not result_ok and runtime.budget_error(result_event) is None and not detail:
+            if ((return_code != 0 or not launch.exit_code_reliable) and not result_ok
+                    and runtime.budget_error(result_event) is None and not detail):
                 stderr = await handle.error_output()
-                error = f"{runtime.label} exited with code {return_code}"
+                error = (f"{runtime.label} exited with code {return_code}" if launch.exit_code_reliable
+                         else f"{runtime.label} through TTADK ended without a result")
                 await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value)
                 return {"status": "failed", "error": error, "stderr": stderr[:500]}

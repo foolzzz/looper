@@ -147,6 +147,7 @@ class TaskRouter:
         self._claude_bin = claude_bin  # each task's Planner runs it
         self._bus: MessageBus | None = None
         self._tasks: dict[str, Task] = {}
+        self._handling_message = False
         self._planners: dict[str, PlannerAgent] = {}
         self._loop_task: asyncio.Task[Any] | None = None
         self._running = False
@@ -205,6 +206,15 @@ class TaskRouter:
             })
         return planners
 
+    def drain_waiting(self) -> dict[str, Any]:
+        # Do not hold Planner turns or TASK_START: results must reach the database before a decision.
+        # Restart drops Planner bus queues, so also wait through message handling before its turn lock.
+        return {"planner_turns": [p.agent_id for p in self._planners.values()
+                                  if p._turn_lock.locked() or p._handling_message
+                                  or (self._bus is not None and self._bus.pending_count(p.agent_id))],
+                "starting": int(self._handling_message or bool(
+                    self._bus is not None and self._bus.pending_count(self.agent_id)))}
+
     def has_planner(self, task_id: str) -> bool:
         """Whether the task has a Planner, including while its stop is still running."""
         return task_id in self._planners
@@ -221,10 +231,13 @@ class TaskRouter:
             async for envelope in self._bus.subscribe("task-router"):
                 if not self._running:
                     break
+                self._handling_message = True
                 try:
                     await self._handle(envelope)
                 except Exception:
                     logger.exception("task router error handling %s", envelope.message_id)
+                finally:
+                    self._handling_message = False
         except asyncio.CancelledError:
             pass
 

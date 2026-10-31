@@ -42,6 +42,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,6 +108,23 @@ def _get_status(port: int, token: str | None) -> dict | None:
             and isinstance(payload.get("result"), dict) else None)
 
 
+def _get_components(port: int, token: str | None) -> dict | None:
+    """Read the startup snapshot through the operator-authenticated v1 API."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1/system/components",
+                                    headers={"Authorization": f"Bearer {token}"} if token else {}, method="POST")
+    try:
+        with opener.open(request, timeout=3) as response:
+            payload = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raise ServiceError(f"components endpoint returned HTTP {exc.code}; check the running version and operator token") from exc
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        raise ServiceError("cannot read running component fingerprints") from exc
+    if not isinstance(payload, dict) or payload.get("status") != "ok" or not isinstance(payload.get("result"), dict):
+        raise ServiceError("invalid response from components endpoint")
+    return payload["result"]
+
+
 def _port_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(1.0)
@@ -128,6 +146,7 @@ class Host:
     clock: Callable[[], float] = time.monotonic
     get_status: Callable[[int, str | None], dict | None] = _get_status
     port_in_use: Callable[[int], bool] = _port_in_use
+    get_components: Callable[[int, str | None], dict | None] = _get_components
 
     @classmethod
     def current(cls) -> Host:
@@ -661,3 +680,29 @@ def doctor_check(host: Host | None = None, label: str = DEFAULT_LABEL) -> Check:
         return Check("service", "Service", OK, f"{label} running (pid {state.pid})")
     return Check("service", "Service", WARN, f"{label} installed but not running ({_describe(state)})",
                  f"run `looper service restart`; the log is {state.log_path or 'under the runtime root'}")
+
+
+def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dry_run: bool = False) -> str:
+    """Plan first. S0's first change deliberately cannot install, drain or restart."""
+    if not dry_run:
+        raise ServiceError("the upgrade itself comes with the drain (next change); use --dry-run")
+    from .. import components
+    from ..upgrade import decide, scan_keepers
+
+    try:
+        target = (components.manifest_from_wheel(Path(to)) if to and to.endswith(".whl")
+                  else components.manifest_from_git(host.cwd, to or "origin/main"))
+        port, _, root = manager(host, label).unit_settings()
+        if port is None or root is None:
+            raise ServiceError("cannot locate the service port and runtime root; install the service first")
+        token = operator_auth.read_token(root)
+        if not token:
+            raise ServiceError("the service operator token is missing")
+        running = components.Manifest.from_dict(host.get_components(port, token))
+        plan = decide(target, running, scan_keepers(root), keeper_mode=False)
+    except (ValueError, KeyError, zipfile.BadZipFile) as exc:
+        raise ServiceError(str(exc)) from exc
+    return "\n".join((f"plan       {plan.kind.value}",
+                       f"target     {target.version}", f"running    {running.version} (loaded {running.loaded_at})",
+                       "changed    " + (", ".join(plan.changed_components) or "none"),
+                       *("reason     " + reason for reason in plan.reasons)))

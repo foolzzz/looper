@@ -119,6 +119,12 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     install.add_argument("--port", type=int,
                          help="Port for `looper serve`, written into the unit (default: the ops file's, else 8767).")
     _add_location_flags(install)
+    probe = service_commands.add_parser(
+        "probe", allow_abbrev=False,
+        help="Check once whether the service answers and alert through Lark when it has not for a while "
+             "(run by the probe unit every minute).",
+    )
+    _add_location_flags(probe)
     install.add_argument("--env", action="append", default=[], metavar="NAME",
                          help="Also copy this environment variable into the unit (repeatable).")
     restart = service_commands.add_parser(
@@ -126,13 +132,17 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     for command in (install, restart):
         command.add_argument("--timeout", type=float, default=120.0,
                              help="Seconds to wait for the service to answer (default 120).")
+    upgrade = service_commands.add_parser(
+        "upgrade", allow_abbrev=False, help="Compute a component upgrade plan without installing or restarting.")
+    upgrade.add_argument("--dry-run", action="store_true", help="Print the upgrade plan only.")
+    upgrade.add_argument("--to", metavar="REF_OR_WHEEL", help="Target Git ref (default origin/main) or wheel path.")
     status = service_commands.add_parser(
         "status", allow_abbrev=False,
         help="Show whether the service is installed and running, its PID, last exit and log, and POST /api/v1/system/status.",
         description="Exits 0 when the service runs and answers on its port, else 1.")
     uninstall = service_commands.add_parser(
         "uninstall", allow_abbrev=False, help="Stop the service and remove its unit.")
-    for command in (install, restart, status, uninstall):
+    for command in (install, restart, upgrade, status, uninstall):
         command.add_argument("--label", default="com.looper.serve",
                              help="Service name: the launchd label or systemd unit name (default com.looper.serve).")
 
@@ -182,13 +192,14 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _load_ops(args: argparse.Namespace, port: int | None = None) -> OpsConfig | None:
+def _load_ops(args: argparse.Namespace, port: int | None = None, *, require_database: bool = True) -> OpsConfig | None:
     """The ops settings for this command's --runtime-root, --config (and ``port``), with their warnings printed; None
     (the error printed) when they cannot be used."""
     from . import ops_config
 
     try:
-        ops = ops_config.load(ops_config.Flags(runtime_root=args.runtime_root, config=args.config, port=port))
+        ops = ops_config.load(ops_config.Flags(runtime_root=args.runtime_root, config=args.config, port=port),
+                              require_database=require_database)
     except ops_config.OpsConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return None
@@ -212,6 +223,17 @@ def _init_ops(args: argparse.Namespace) -> int:
 
 
 def _service(args: argparse.Namespace) -> int:
+    if args.service_command == "probe":
+        from .agents import probe
+
+        ops = _load_ops(args, require_database=False)
+        if ops is None:
+            return 1
+        try:
+            return probe.run(ops, ops.runtime_root)
+        except OSError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     from .agents import service
 
     host = service.Host.current()
@@ -222,6 +244,8 @@ def _service(args: argparse.Namespace) -> int:
                 return 1
             print(service.install(host, ops, label=args.label, port=args.port, extra_env=args.env,
                                   timeout=args.timeout))
+        elif args.service_command == "upgrade":
+            print(service.upgrade(host, label=args.label, to=args.to, dry_run=args.dry_run))
         elif args.service_command == "restart":
             print(service.restart(host, label=args.label, timeout=args.timeout))
         elif args.service_command == "uninstall":

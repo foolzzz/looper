@@ -75,8 +75,8 @@ from ..run_usage import Usage, reported_totals, run_usage
 from ..reported_files import prompt_name
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
-    RuntimeUnsupported, codex_login, instructions, runtime_prompt_text,
+    ApiProtocol, AuthKind, Capability, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
+    RuntimeUnsupported, codex_login, instructions, runtime_prompt_text, ttadk,
 )
 from .instructions import InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
@@ -112,6 +112,9 @@ class CodexRuntime(RuntimeAdapter):
     type = "codex"
     label = "Codex"
     default_executable = "codex"
+    launchers = frozenset({Launcher.NATIVE, Launcher.TTADK})
+    ttadk_tool = "codex"
+    ttadk_runtime_name = "ttadk-codex"
     # Verified against Codex CLI 0.162.0: --output-schema holds on resumed turns too (Looper keeps its replies'
     # contracts in the prompt all the same). No compaction events, no turns of its own, tokens only.
     capabilities = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capability.RESUME,
@@ -125,6 +128,26 @@ class CodexRuntime(RuntimeAdapter):
     read_only = ReadOnly.SANDBOX
     # Set by the binding and the run's home: a provider's own variables cannot set them.
     provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, "CODEX_HOME"})
+
+    def auth_kinds_for(self, launcher: Launcher) -> frozenset[AuthKind]:
+        return frozenset({AuthKind.OAUTH}) if launcher is Launcher.TTADK else self.auth_kinds
+
+    def probe_for(self, executable: str, launcher: Launcher) -> Probe:
+        if launcher is Launcher.NATIVE:
+            return self.probe(executable)
+        version, error = ttadk.probe_version(executable)
+        if error:
+            return Probe(None, self.capabilities, error)
+        command = ttadk.tool_command("codex")
+        try:
+            words = shlex.split(command)
+        except ValueError:
+            words = []
+        single = len(words) == 1
+        native = self.probe(words[0] if single else "codex")
+        note = None if single else "TTADK's configured codex command is not a single word; probed PATH's codex instead"
+        return Probe(f"ttadk {version} / {native.version or 'unknown'}", native.capabilities,
+                     native.error or note)
 
     def probe(self, executable: str) -> Probe:
         """The version and steering schema, with empty ``CODEX_HOME`` directories of their own."""
@@ -205,8 +228,12 @@ class CodexRuntime(RuntimeAdapter):
         """``child_env.inherited()``, then the settings' variables and the provider's binding (its own variables
         and its key)."""
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
-        return {**{k: v for k, v in child_env.inherited().items() if k not in binding.unset}, **dict(launch.env),
-                **dict(binding.env)}
+        env = {**{k: v for k, v in child_env.inherited().items() if k not in binding.unset}, **dict(launch.env),
+               **dict(binding.env)}
+        return ttadk.environment(env) if launch.profile.runtime.launcher is Launcher.TTADK else env
+
+    def _program(self, executable: str, launch: Launch) -> list[str]:
+        return ttadk.prefix(executable, "codex") if launch.profile.runtime.launcher is Launcher.TTADK else [executable]
 
     def _command(self, executable: str, prompt_file: Path, launch: Launch) -> list[str]:
         local = _local_dir(prompt_file)
@@ -219,7 +246,10 @@ class CodexRuntime(RuntimeAdapter):
         config = config_toml(launch, shell_home=_shell_home(local) if login else None,
                              model_instructions_file=instructions)
         home = write_home(local, config, agents, login=login)
-        return ["env", f"CODEX_HOME={home}", executable, "exec", *self.launch_args(launch)]
+        args = ["exec", *self.launch_args(launch)]
+        if launch.profile.runtime.launcher is Launcher.TTADK:
+            ttadk.check_args(args)
+        return ["env", f"CODEX_HOME={home}", *self._program(executable, launch), *args]
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         looper = PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch),
@@ -263,7 +293,10 @@ class CodexRuntime(RuntimeAdapter):
             home = session_dir
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         effort_args = list(binding.args[2:])
-        return ["env", f"CODEX_HOME={home}", executable, "app-server", *effort_args]
+        args = ["app-server", *effort_args]
+        if launch.profile.runtime.launcher is Launcher.TTADK:
+            ttadk.check_args(args)
+        return ["env", f"CODEX_HOME={home}", *self._program(executable, launch), *args]
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
                     session_dir: Path | None = None) -> RunChannel:
@@ -355,11 +388,15 @@ class CodexRuntime(RuntimeAdapter):
         """The skills given as documents and what Codex could not load, when there are any (RFC P9)."""
         catalog = materialize(launch.library)
         skipped = [*catalog.skipped, *mcp_servers(launch.library)[1]]
-        if not catalog.skills and not skipped:
-            return {}
-        return {"runtime_catalog": {"runtime": self.type,
-                                    "skills_as_documents": [skill.name for skill in catalog.skills],
-                                    "skipped": skipped}}
+        record: dict[str, Any] = {}
+        if catalog.skills or skipped:
+            record["runtime_catalog"] = {"runtime": self.type,
+                                         "skills_as_documents": [skill.name for skill in catalog.skills],
+                                         "skipped": skipped}
+        if launch.profile.runtime.launcher is Launcher.TTADK:
+            record["launcher"] = {"kind": "ttadk", "version": launch.profile.runtime.version,
+                                  "tool": "codex", "mode": "mixed"}
+        return record
 
 
 # --- What a run's home holds ---
@@ -440,7 +477,7 @@ def config_toml(launch: Launch, *, shell_home: Path | None = None,
     launch.runtime.bind_provider(launch.profile.provider, launch.model, launch.effort)
     if launch.profile.provider.auth is AuthKind.OAUTH:
         assert shell_home is not None
-        lines = _login_config(shell_home)
+        lines = _login_config(shell_home, launcher=launch.profile.runtime.launcher)
         if model_instructions_file is not None:
             lines.insert(lines.index(codex_login.CONFIG_MARKER) + 1,
                          f"model_instructions_file = {_toml_value(str(model_instructions_file))}")
@@ -474,7 +511,7 @@ def config_toml(launch: Launch, *, shell_home: Path | None = None,
     return _with_mcp(lines, launch)
 
 
-def _login_config(shell_home: Path) -> list[str]:
+def _login_config(shell_home: Path, *, launcher: Launcher = Launcher.NATIVE) -> list[str]:
     """A login home's config: Codex's built-in OpenAI provider (no ``model_provider``) and its login read from
     this home's ``auth.json`` (a link to the operator's login file), ChatGPT's apps off, and a ``CODEX_HOME``
     without the login for the agent's shell commands."""
@@ -496,6 +533,7 @@ def _login_config(shell_home: Path) -> list[str]:
         "# The agent's shell commands get a CODEX_HOME without the login, so a codex command there cannot use it",
         "# or log it out.",
         "[shell_environment_policy]",
+        *(['exclude = ["TTADK_OPENAI_API_KEY"]'] if launcher is Launcher.TTADK else []),
         f"set = {_toml_value({'CODEX_HOME': str(shell_home)})}",
     ]
 

@@ -793,3 +793,42 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
         assert events.index("waits.stop") < events.index("supervisor.stop")
 
     run_db(test, monkeypatch)
+
+
+def test_wait_checks_finish_but_new_checks_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents import wait_service as module, waits
+    from looper.agents.drain import DrainScope, DrainState
+
+    async def test(pool: Any) -> None:
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def check(*args: Any, **kwargs: Any) -> Any:
+            entered.set()
+            await release.wait()
+            return waits.CheckResult.READY, "ready", "", {"exit_code": 0, "resolution": "ready"}
+
+        monkeypatch.setattr(module, "run_command", check)
+        await _open(pool, check=waits.CommandCheck("true"))
+        drain = DrainState()
+        bus = Bus()
+        service = module.WaitService(bus=bus, has_planner=lambda _: True, drain=drain)
+        drain.add_source(lambda: {"waits": service.drain_waiting()})
+        job = asyncio.create_task(service.run_once(clock=lambda: NOW))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            assert drain.begin(DrainScope.TURNS)["waiting"]["waits"] == 1
+            await _open(pool, task_id="task-b", earliest=1)
+            assert await service.run_once(clock=lambda: NOW + timedelta(seconds=2)) == 0
+            release.set()
+            assert await asyncio.wait_for(job, 5) == 1
+            assert (await _row())["state"] == "ready"
+            assert (await _row("task-b"))["state"] == "waiting"
+            assert drain.snapshot()["phase"] == "drained"
+            drain.cancel()
+            assert await service.run_once(clock=lambda: NOW + timedelta(seconds=2)) == 1
+            assert (await _row("task-b"))["state"] == "ready"
+        finally:
+            release.set()
+            await asyncio.gather(job, return_exceptions=True)
+
+    run_db(test, monkeypatch, timeout=20)

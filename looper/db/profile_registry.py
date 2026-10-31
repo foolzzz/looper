@@ -29,6 +29,7 @@ PROFILE_JSON = (
     "json_build_object('id', a.id, 'name', a.name, 'model_id', a.model_id, 'effort', a.effort, "
     "'builtin', a.builtin, 'agent_teams', a.agent_teams, 'custom_prompt', a.custom_prompt, "
     "'runtime_id', r.id, 'runtime_name', r.name, 'runtime_type', r.type, 'runtime_executable', r.executable, "
+    "'runtime_launcher', r.launcher, 'runtime_version', r.version, "
     "'runtime_capabilities', r.capabilities, 'provider_id', p.id, 'provider_name', p.name, "
     f"'provider', {_PROVIDER_JSON}, 'model', to_jsonb(m), 'endpoint', to_jsonb(e))"
 )
@@ -89,14 +90,14 @@ async def get_runtime(runtime_id: str, *, pool: asyncpg.Pool | asyncpg.Connectio
 
 async def insert_builtin_runtime(runtime_id: str, fields: Mapping[str, Any], *, pool: asyncpg.Pool | None = None,
                                  ) -> bool:
-    """Add the built-in runtime ``runtime_id`` (``name``, ``type``, ``executable``, ``version``, ``capabilities``,
+    """Add the built-in runtime ``runtime_id`` (``name``, ``type``, ``launcher``, ``executable``, ``version``, ``capabilities``,
     ``probe_error``) unless it, or a runtime of its name, exists; whether it was added."""
     pool = pool or get_pool()
     result = await pool.execute(
-        "INSERT INTO agent_runtimes (id, name, type, executable, version, capabilities, probed_at, probe_error, builtin) "
-        "VALUES ($1, $2, $3, $4, $5, $6, now(), $7, true) ON CONFLICT DO NOTHING",
+        "INSERT INTO agent_runtimes (id, name, type, executable, version, capabilities, probed_at, probe_error, builtin, launcher) "
+        "VALUES ($1, $2, $3, $4, $5, $6, now(), $7, true, $8) ON CONFLICT DO NOTHING",
         runtime_id, fields["name"], fields["type"], fields["executable"], fields["version"],
-        list(fields["capabilities"]), fields["probe_error"],
+        list(fields["capabilities"]), fields["probe_error"], fields.get("launcher", "native"),
     )
     return result == "INSERT 0 1"
 
@@ -301,6 +302,14 @@ async def login_profile_count(runtime_type: str, *, pool: asyncpg.Pool | asyncpg
     return int(await pool.fetchval(
         f"SELECT count(*) FROM {PROFILE_JOIN} "
         "WHERE p.auth = 'oauth' AND p.oauth_runtime_type = $1", runtime_type))
+
+
+async def launcher_profile_count(launcher: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> int:
+    """How many Agent Profiles use a runtime with ``launcher``."""
+    pool = pool or get_pool()
+    return int(await pool.fetchval(
+        "SELECT count(*) FROM agent_profiles a JOIN agent_runtimes r ON r.id = a.runtime_id "
+        "WHERE r.launcher = $1", launcher))
 
 
 async def get_profile(profile_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
