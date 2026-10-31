@@ -1195,6 +1195,7 @@ export interface SchedulerSetting {
 export interface SchedulerSettings {
   min_interval_seconds: SchedulerSetting & { gated_value: number };
   run_timeout_seconds: SchedulerSetting;
+  run_retention_days: SchedulerSetting;
 }
 
 /** Null goes back to the built-in value. */
