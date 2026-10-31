@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.48] - 2026-10-31
+
+### Added
+
+- **Keeper process that holds one run's child.** The new package `looper/agents/keeper/` starts a child in its own session, appends its stdout and stderr to files, keeps its state in `keeper.json`, and ends the child on SIGTERM, after the orphan timeout without a controller, or when stdout passes its cap. `proc_tree.own_records` lets a process that is not a server own the agents it spawns. Nothing in Looper starts the keeper yet. ([#1011](https://github.com/foolzzz/looper/pull/1011))
+
 ## [2.14.47] - 2026-10-31
 
 ### Changed
