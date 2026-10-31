@@ -7,15 +7,17 @@ export type RowState = "open" | "closed";
 /**
  * Which rows of a list of `CollapsibleRow`s are open. Every row starts closed and any number can be open; `linked`
  * (the row an address names) opens, also while the list is showing, and is scrolled into view once `ready`.
+ * A nested link's focus key reopens the same row when its target changes.
  * Returns each row's state, toggle and element ref by id.
  */
-export function useCollapsibleRows(linked: string, ready: boolean) {
+export function useCollapsibleRows(linked: string, ready: boolean, focus = "") {
   const [rows, setRows] = useState<Record<string, RowState>>(() => (linked ? { [linked]: "open" } : {}));
-  const [linkedRow, setLinkedRow] = useState(linked);
+  const key = `${linked}\n${focus}`;
+  const [linkedRow, setLinkedRow] = useState(key);
   const elements = useRef<Record<string, HTMLElement | null>>({});
 
-  if (linked !== linkedRow) {
-    setLinkedRow(linked);
+  if (key !== linkedRow) {
+    setLinkedRow(key);
     if (linked) setRows((current) => ({ ...current, [linked]: "open" }));
   }
 
