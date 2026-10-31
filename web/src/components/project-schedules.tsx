@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { AlertCircle, ArrowRight, CheckCircle2, Loader2, Play, Plus, Trash2 } from "lucide-react";
+import { AlertCircle, ArrowRight, CheckCircle2, ChevronDown, ChevronRight, Loader2, Play, Plus, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,7 +13,7 @@ import {
   fetchSchedule,
   fetchManagers,
   fetchScheduleRuns,
-  fetchRunLog,
+  fetchRunLogTail,
   downloadRunLog,
   fetchSchedules,
   previewSchedule,
@@ -43,7 +43,7 @@ import {
 } from "@/lib/api";
 import { roleLabel } from "@/lib/runtime-catalog";
 import {
-  NOTIFY_OPTIONS,
+  scheduleNotifyOptions,
   RUN_STATUS,
   TASK_LIMIT_ROLES,
   badTaskLimit,
@@ -765,7 +765,7 @@ function GateBudgetNotify({
           legend="Notify"
           value={draft.notify}
           onChange={(value) => set("notify", value)}
-          options={NOTIFY_OPTIONS}
+          options={scheduleNotifyOptions(draft.kind, Number(draft.failuresAfter || 3))}
         />
         <div className="space-y-1">
           {targets.length === 0 && !gone ? (
@@ -929,6 +929,10 @@ function ScheduleForm({
     (!isCommand && Boolean(draft.templateKey && !template && managers && !managerError)) ||
     (isCommand && (Boolean(env.error) || commandTooLong));
   const id = (field: string) => `${idPrefix}-${field}`;
+  // Validation refusals name their field first; match that exact API field.
+  const serverField = error.match(/^([a-z_]+)(?:\s|$)/)?.[1];
+  const fieldError = (field: string) => serverField === field
+    ? <p role="alert" className="text-xs text-destructive">{error}</p> : null;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -963,7 +967,7 @@ function ScheduleForm({
             { value: "command", label: "Command", hint: "Each firing runs a shell command directly: no agent, no model spend." },
           ]} />
       )}
-      {schedule ? (
+      {schedule ? !isCommand && (
         <p className="text-sm text-muted-foreground">
           Owner: {schedule.manager_name || schedule.manager_id}. Ownership cannot be changed.
         </p>
@@ -1028,6 +1032,7 @@ function ScheduleForm({
             placeholder="Nightly dependency check"
             autoFocus={!schedule}
           />
+          {fieldError("name")}
         </div>
         <div className="space-y-1">
           <label htmlFor={id("dir")} className={LABEL}>Work directory{project.work_dir || template?.work_dir ? "" : " *"}</label>
@@ -1040,6 +1045,7 @@ function ScheduleForm({
             spellCheck={false}
             className="font-mono"
           />
+          {fieldError("work_dir")}
           <p id={id("dir-hint")} className="text-xs text-muted-foreground">
             {template?.work_dir ? "Empty: the template's fixed directory when it fires. " : project.work_dir && "Empty: the project's default directory when it fires. "}
             An absolute path or one starting with ~/.
@@ -1058,6 +1064,7 @@ function ScheduleForm({
             aria-describedby={`${id("cron-hint")} ${id("preview")}`}
             className="font-mono aria-invalid:border-destructive"
           />
+          {fieldError("cron")}
           <p id={id("cron-hint")} className="text-xs text-muted-foreground">
             Minute, hour, day of month, month, day of week. Fires at least {interval(isCommand ? limits.min_interval_gated_seconds : limits.min_interval_seconds)} apart{isCommand ? "." : `, or ${interval(limits.min_interval_gated_seconds)} with a gate command.`}
           </p>
@@ -1074,6 +1081,7 @@ function ScheduleForm({
             autoComplete="off"
             aria-describedby={id("zone-hint")}
           />
+          {fieldError("timezone")}
           <p id={id("zone-hint")} className="text-xs text-muted-foreground">
             An IANA name such as Europe/Berlin; the rule is read in it. Empty: {limits.default_timezone}.
           </p>
@@ -1093,13 +1101,15 @@ function ScheduleForm({
               </span>
             </div>
             <textarea id={id("command")} value={draft.command} onChange={(e) => set("command", e.target.value)}
-              rows={4} spellCheck={false} aria-invalid={commandTooLong} className={cn(TEXTAREA, "min-w-0 font-mono whitespace-pre-wrap break-all")} />
+              rows={4} spellCheck={false} aria-invalid={commandTooLong || serverField === "command"} className={cn(TEXTAREA, "min-w-0 font-mono whitespace-pre-wrap break-all")} />
+            {fieldError("command")}
           </div>
           <div className="space-y-1">
             <label htmlFor={id("env")} className={LABEL}>Environment</label>
             <textarea id={id("env")} value={draft.envText} onChange={(e) => set("envText", e.target.value)}
               rows={4} spellCheck={false} aria-invalid={Boolean(env.error)} aria-describedby={id("env-hint")}
               className={cn(TEXTAREA, "font-mono whitespace-pre-wrap break-all")} />
+            {fieldError("env")}
             <p id={id("env-hint")} className="text-xs text-muted-foreground">One KEY=VALUE per line, or a JSON object with string values (use \n for line breaks). Shown as written: put secrets in the env file.</p>
             {env.error && <p role="alert" className="text-xs text-destructive">{env.error}</p>}
             {env.duplicates.length > 0 && <p role="status" className="text-xs text-warning">Duplicate keys: {env.duplicates.join(", ")}; the last value is used.</p>}
@@ -1107,7 +1117,8 @@ function ScheduleForm({
           <div className="space-y-1">
             <label htmlFor={id("env-file")} className={LABEL}>Env file</label>
             <Input id={id("env-file")} value={draft.envFile} onChange={(e) => set("envFile", e.target.value)}
-              spellCheck={false} aria-describedby={id("env-file-hint")} className="font-mono" />
+              spellCheck={false} aria-invalid={serverField === "env_file"} aria-describedby={id("env-file-hint")} className="font-mono" />
+            {fieldError("env_file")}
             <p id={id("env-file-hint")} className="text-xs text-muted-foreground">A file of KEY=VALUE lines, read at each run; only its path is stored.</p>
           </div>
         </div>
@@ -1336,7 +1347,8 @@ function ScheduleForm({
         badDailyBudget={badDailyBudget}
       />
 
-      <details className="space-y-3 border-t border-border pt-4 text-sm">
+      <details open={Boolean(schedule?.success_deadline || Object.values(schedule?.alert_policy ?? {}).some((policy) => !policy.default))}
+        className="space-y-3 border-t border-border pt-4 text-sm">
         <summary className="w-fit cursor-pointer rounded-sm text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">Alerts</summary>
         {alertError && <p role="alert" className="text-xs text-destructive">{alertError}</p>}
         <div className="grid gap-3 sm:grid-cols-2">
@@ -1344,22 +1356,26 @@ function ScheduleForm({
             <label htmlFor={id("deadline")} className={LABEL}>Success deadline</label>
             <Input id={id("deadline")} value={draft.deadline} onChange={(e) => set("deadline", e.target.value)}
               placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" aria-describedby={id("deadline-hint")} />
+            {fieldError("success_deadline")}
             <p id={id("deadline-hint")} className="text-xs text-muted-foreground">Alert once if no run has succeeded since the previous deadline.</p>
           </div>
           <div className="space-y-1">
             <label htmlFor={id("failures-after")} className={LABEL}>Alert after N failures in a row</label>
             <Input id={id("failures-after")} inputMode="numeric" value={draft.failuresAfter}
               onChange={(e) => set("failuresAfter", e.target.value)} placeholder="3" />
+            {fieldError("alert_failures_after")}
           </div>
           <div className="space-y-1">
             <label htmlFor={id("stale-after")} className={LABEL}>Alert after no success for (minutes)</label>
             <Input id={id("stale-after")} inputMode="decimal" value={draft.staleAfterMinutes}
               onChange={(e) => set("staleAfterMinutes", e.target.value)} placeholder="3 periods, 15 min – 24 h" />
+            {fieldError("alert_stale_after_seconds")}
           </div>
           <div className="space-y-1">
             <label htmlFor={id("overlap-after")} className={LABEL}>Alert after N skipped firings in a row</label>
             <Input id={id("overlap-after")} inputMode="numeric" value={draft.overlapAfter}
               onChange={(e) => set("overlapAfter", e.target.value)} placeholder={isCommand ? "10" : "off"} aria-describedby={id("overlap-after-hint")} />
+            {fieldError("alert_overlap_after")}
             <p id={id("overlap-after-hint")} className="text-xs text-muted-foreground">0 turns this alert off.</p>
           </div>
         </div>
@@ -1515,6 +1531,7 @@ function runStatsText(stats: RunStats, label: string) {
 /** Text decoding belongs only to the preview; downloads retain the original bytes. */
 function CommandRunLog({ run }: { run: ScheduleRunInfo }) {
   const [tail, setTail] = useState<string | null>(null);
+  const [partialLines, setPartialLines] = useState<number | null>(null);
   const [complete, setComplete] = useState(!isActiveRun(run));
   const [truncated, setTruncated] = useState(run.log?.truncated ?? false);
   const [loading, setLoading] = useState(false);
@@ -1522,22 +1539,32 @@ function CommandRunLog({ run }: { run: ScheduleRunInfo }) {
   const [downloadError, setDownloadError] = useState("");
   const [progress, setProgress] = useState<{ downloaded: number; total: number } | null>(null);
 
+  const active = isActiveRun(run);
+  const hasLog = run.log != null && (active || run.log.bytes !== 0 || run.started_at != null);
+  const latest = useRef(0);
   const refresh = useCallback(async () => {
+    if (!hasLog) return;
+    const mine = ++latest.current;
     setLoading(true);
     setError("");
     try {
-      const log = await fetchRunLog(run.run_id, { tail_lines: 200 });
-      setTail(new TextDecoder().decode(Uint8Array.from(atob(log.data_base64), (c) => c.charCodeAt(0))));
+      const log = await fetchRunLogTail(run.run_id);
+      if (mine !== latest.current) return;
+      setTail(log.text);
+      setPartialLines(log.partialLines);
       setComplete(log.complete);
       setTruncated(log.truncated);
     } catch (err) {
-      setError(errorText(err));
+      if (mine === latest.current) setError(errorText(err));
     } finally {
-      setLoading(false);
+      if (mine === latest.current) setLoading(false);
     }
-  }, [run.run_id]);
+  }, [run.run_id, hasLog]);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    void refresh();
+    return () => { latest.current++; };
+  }, [refresh, active]);
 
   const download = async () => {
     setProgress({ downloaded: 0, total: run.log?.bytes ?? 0 });
@@ -1560,15 +1587,23 @@ function CommandRunLog({ run }: { run: ScheduleRunInfo }) {
     }
   };
 
+  if (!hasLog) return (
+    <div className="space-y-2 pb-3 text-xs text-muted-foreground">
+      {(run.error ?? run.summary) && <p className="break-words">{run.error ?? run.summary}</p>}
+      <p>This run did not start the command, so it has no log.</p>
+    </div>
+  );
+
   return (
     <div className="min-w-0 space-y-2 pb-3 text-xs">
       {(run.error ?? run.summary) && <p className="break-words text-muted-foreground">{run.error ?? run.summary}</p>}
       <pre aria-label="Run log" className="max-h-64 overflow-auto whitespace-pre rounded-md border border-border bg-muted/20 px-3 py-2 font-mono text-[11px]">
         {tail ?? run.log_tail ?? (loading ? "Loading log…" : "")}
       </pre>
+      {partialLines != null && <p className="text-muted-foreground">Showing the last {partialLines} lines; download the full log for the rest.</p>}
       {error && <p role="alert" className="text-destructive">{error}</p>}
       {(truncated || run.log?.truncated) && <p className="text-warning">The log was truncated at 50 MiB; the middle is left out.</p>}
-      {(!complete || isActiveRun(run)) && <p className="text-muted-foreground">Still running: the log grows</p>}
+      {(active && !complete) && <p className="text-muted-foreground">Still running: the log grows</p>}
       <div className="flex flex-wrap items-center gap-2">
         <Button type="button" size="sm" variant="outline" onClick={refresh} disabled={loading} className="h-11 sm:h-8">
           {loading && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
@@ -1593,16 +1628,15 @@ function CommandRun({ run, timeZone, linked }: { run: ScheduleRunInfo; timeZone:
     setExpanded(true);
     row.current?.scrollIntoView({ block: "center" });
   }, [linked]);
-  const failed = run.status === "failed" || run.status === "timed_out" || run.status === "interrupted";
   const fields = [
     ["Status", <span className="flex flex-wrap items-center gap-1"><RunStatusBadge status={run.status} />
-      {failed && (run.exit_signal != null || run.exit_code != null) && <span>
+      {(run.exit_signal != null || run.exit_code != null) && <span>
         {run.exit_signal != null ? `signal ${run.exit_signal}` : `exit ${run.exit_code}`}
       </span>}</span>],
     ["Scheduled", formatInZone(run.scheduled_for, timeZone)],
     ["Started", formatInZone(run.started_at, timeZone)],
     ["Finished", formatInZone(run.finished_at, timeZone)],
-    ["Duration", durationText(run) ?? "—"],
+    ["Duration", !run.started_at || ["skipped_overlap", "skipped_missed", "skipped_gate", "skipped_budget"].includes(run.status) ? "—" : durationText(run) ?? "—"],
     ["Trigger", triggerText(run)],
   ] as const;
   return (
@@ -1610,7 +1644,10 @@ function CommandRun({ run, timeZone, linked }: { run: ScheduleRunInfo; timeZone:
       <button type="button" aria-expanded={expanded} aria-controls={`${id}-log`} onClick={() => setExpanded((value) => !value)}
         className="grid w-full grid-cols-2 gap-3 rounded-sm py-3 text-left text-xs hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring sm:grid-cols-3 xl:grid-cols-6">
         {fields.map(([label, value]) => <span key={label} className="min-w-0 break-words">
-          <span className="mb-1 block text-muted-foreground">{label}</span>{value}
+          <span className="mb-1 flex items-center gap-1 text-muted-foreground">
+            {label === "Status" && (expanded ? <ChevronDown className="h-3 w-3" aria-hidden="true" /> : <ChevronRight className="h-3 w-3" aria-hidden="true" />)}
+            {label}
+          </span>{value}
         </span>)}
       </button>
       {expanded && <div id={`${id}-log`}><CommandRunLog run={run} /></div>}
@@ -1710,7 +1747,7 @@ export function RunHistory({ schedule, open, version, runId = "" }: {
   const skipCount = page ? page.routine_skips.skipped_gate + page.routine_skips.skipped_overlap : 0;
   return (
     <section aria-labelledby={`${id}-history`} className="space-y-2 border-t border-border pt-4">
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+      <div className={cn("flex flex-wrap items-center gap-x-4 gap-y-1", !isCommand && "justify-between")}>
         <h3 id={`${id}-history`} className="text-xs font-semibold">Run history</h3>
         {isCommand && <select aria-label="Run status" className={cn(SELECT, "w-auto")} value={status}
           onChange={(e) => { shown.current = RUNS_PAGE; setStatus(e.target.value as ScheduleRunStatus | ""); }}>
@@ -1721,10 +1758,11 @@ export function RunHistory({ schedule, open, version, runId = "" }: {
           <option value="interrupted">Interrupted</option>
           <option value="skipped_overlap">Skipped (overlap)</option>
         </select>}
-        {!status && <label className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-muted-foreground sm:min-h-0">
+        <label className="flex min-h-11 cursor-pointer items-center gap-2 text-xs text-muted-foreground sm:min-h-0">
           <input
             type="checkbox"
             checked={hideSkips}
+            disabled={Boolean(status)}
             onChange={(e) => {
               shown.current = RUNS_PAGE;
               setHideSkips(e.target.checked);
@@ -1733,7 +1771,7 @@ export function RunHistory({ schedule, open, version, runId = "" }: {
           />
           Hide routine skips (nothing new, busy)
           {skipCount > 0 && <span className="tabular-nums">· {skipCount.toLocaleString()} in all</span>}
-        </label>}
+        </label>
       </div>
       {isCommand && page?.stats && <p className="text-xs text-muted-foreground">
         {runStatsText(page.stats.day, "Last 24 h")} · {runStatsText(page.stats.week, "Last 7 days")}
@@ -1871,7 +1909,7 @@ export function LastRun({ schedule }: { schedule: ScheduleInfo }) {
         </Badge>
       ) : (
         failures > 0 && (
-          <Badge variant={failures >= 3 ? "destructive" : "warning"} className="shrink-0 gap-1">
+          <Badge variant={failures >= (schedule.alert_policy?.failures_after?.value ?? 3) ? "destructive" : "warning"} className="shrink-0 gap-1">
             <AlertCircle className="h-3 w-3" aria-hidden="true" />
             {count}
           </Badge>
@@ -1928,7 +1966,7 @@ export function ProjectSchedulesSection({
   const [scheduleLink, runLink] = linked.split("/runs/");
   const linkedSchedule = decodeURIComponent(scheduleLink);
   const linkedRun = runLink ? decodeURIComponent(runLink) : "";
-  const row = useCollapsibleRows(linkedSchedule, data !== null);
+  const row = useCollapsibleRows(linkedSchedule, data !== null, linkedRun);
   const latest = useRef(0);
 
   const load = useCallback(() => {
@@ -2074,6 +2112,7 @@ export function ProjectSchedulesSection({
                 marks={schedule.kind === "command" && <Badge variant="outline">Command</Badge>}
                 detail={schedule.description}
                 summary={next}
+                wrapActions={Boolean(schedule.alerts.deadline_since || schedule.alerts.overlap_since)}
                 actions={
                   <>
                     {/* On a phone the summary is cut short: the next run again, for the eye only (the row's button

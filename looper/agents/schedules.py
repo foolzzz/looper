@@ -849,8 +849,13 @@ async def run_log(run_id: str, args: Mapping[str, Any], runtime_root: Path) -> d
     try:
         size, offset, data = await asyncio.to_thread(read)
     except FileNotFoundError:
-        raise RequestError(HTTP_404, "the log was removed by the retention policy" if complete
-                           else "the log has not been written yet") from None
+        if not complete:
+            message = "the log has not been written yet"
+        elif row.get("log_bytes") == 0:
+            message = "the command did not start, so this run has no log"
+        else:
+            message = "the log was removed by the retention policy"
+        raise RequestError(HTTP_404, message) from None
     return {"run_id": run_id, "schedule_id": row["schedule_id"], "size": size, "offset": offset,
             "next_offset": offset + len(data) if offset + len(data) < size else None,
             "data_base64": base64.b64encode(data).decode("ascii"), "complete": complete,

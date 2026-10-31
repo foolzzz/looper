@@ -22,6 +22,7 @@ export function CollapsibleRow({
   summary,
   marks,
   actions,
+  wrapActions = false,
   state,
   onToggle,
   rowRef,
@@ -36,6 +37,8 @@ export function CollapsibleRow({
   marks?: React.ReactNode;
   /** Controls shown open or closed beside the summary, outside its button (below it on a narrow screen). */
   actions?: React.ReactNode;
+  /** Give alerts a full line below the title and its summary. */
+  wrapActions?: boolean;
   state: RowState | undefined;
   onToggle: () => void;
   rowRef: (element: HTMLElement | null) => void;
@@ -81,9 +84,9 @@ export function CollapsibleRow({
   return (
     <section ref={rowRef} className="scroll-mt-4 rounded-lg border border-border bg-card">
       {actions ? (
-        <div className="flex flex-col sm:flex-row sm:items-center">
+        <div className={cn("flex flex-col sm:flex-row sm:items-center", wrapActions && "sm:flex-wrap")}>
           {header}
-          <div className="flex flex-wrap items-center gap-2 px-5 pb-2.5 sm:justify-end sm:py-1.5 sm:pl-0 sm:pr-4">
+          <div className={cn("flex flex-wrap items-center gap-2 px-5 pb-2.5 sm:justify-end sm:py-1.5 sm:pl-0 sm:pr-4", wrapActions && "sm:basis-full sm:pl-5")}>
             {actions}
           </div>
         </div>

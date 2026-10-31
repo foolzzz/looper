@@ -457,7 +457,7 @@ def test_a_failure_names_the_scope_lark_cli_reports_missing(error: dict[str, Any
 
 
 def _tg_message(user_id: int, chat_type: str = "private") -> Any:
-    return SimpleNamespace(effective_user=SimpleNamespace(id=user_id, username="someone"),
+    return SimpleNamespace(update_id=1, effective_user=SimpleNamespace(id=user_id, username="someone"),
                            effective_chat=SimpleNamespace(id=7, type=chat_type),
                            message=SimpleNamespace(message_id=55, text="build it"))
 

@@ -251,7 +251,7 @@ def test_command_environment_multiline_round_trip(dashboard, tmp_path, width):
     expect(env).to_have_value("")
 
 
-@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
+@pytest.mark.parametrize("width", [1440, 390], ids=["desktop", "narrow"])
 def test_command_run_history_deep_link_and_alerts(dashboard, width):
     """Read command outcomes and logs through the built dashboard at both supported widths."""
     from playwright.sync_api import expect
@@ -295,6 +295,11 @@ def test_command_run_history_deep_link_and_alerts(dashboard, width):
             "log": {"file": f"{rid}.log", "bytes": len(log), "truncated": False},
             "log_tail": "Report failed: synthetic input unavailable" if status == "failed" else ""})
         state["logs"][rid] = log
+    skipped = next(run for run in state["runs"] if run["status"] == "skipped_overlap")
+    skipped.update(log=None, started_at=None, duration_seconds=0)
+    del state["logs"][skipped["run_id"]]
+    state["logs"]["run-success"] = b"Report succeeded: synthetic output ready\n"
+    state["runs"][0]["exit_code"] = 0
     schedule["last_run"] = state["runs"][0]
     state["schedules"] = [schedule]
     state["run_page_size"] = 3
@@ -311,7 +316,8 @@ def test_command_run_history_deep_link_and_alerts(dashboard, width):
     expect(history.get_by_text("Last 24 h:", exact=False)).to_contain_text("1/4 succeeded")
     # The linked run reveals its tail without a separate expansion gesture.
     expect(history.locator("pre")).to_contain_text("Report failed: synthetic input unavailable")
-    assert any(path == "schedule_admin/run_log" and body == {"run_id": target, "tail_lines": 200}
+    assert any(path == "schedule_admin/run_log" and body == {
+                   "run_id": target, "tail_lines": 200, "limit_bytes": 4 * 1024 * 1024}
                for path, body in state["calls"])
     hide = history.get_by_role("checkbox", name="Hide routine skips", exact=False)
     if hide.is_checked():
@@ -334,12 +340,49 @@ def test_command_run_history_deep_link_and_alerts(dashboard, width):
     history.scroll_into_view_if_needed()
     page.screenshot(path=str(artifacts / f"runs-{width}.png"), full_page=True)
     page.set_viewport_size({"width": width, "height": 1100})
+
+    # Changing only the hash must reopen the collapsed schedule and reveal the newly named run.
+    schedule_toggle = page.locator(f"#schedule-{sid}-button")
+    schedule_toggle.click()
+    expect(schedule_toggle).to_have_attribute("aria-expanded", "false")
+    if width == 1440:
+        assert schedule_toggle.locator("span").first.evaluate("element => element.scrollWidth <= element.clientWidth")
+    page.screenshot(path=str(artifacts / f"closed-alert-schedule-{width}.png"), full_page=True)
+    page.evaluate("hash => { location.hash = hash; }", f"#projects/proj-example/schedules/{sid}/runs/run-success")
+    success = history.locator('li[data-run-id="run-success"]')
+    expect(schedule_toggle).to_have_attribute("aria-expanded", "true")
+    expect(success.get_by_role("button", expanded=True)).to_be_in_viewport()
+    expect(success.get_by_text("exit 0", exact=True)).to_be_visible()
+    expect(success.get_by_label("Run log", exact=True)).to_have_text("Report succeeded: synthetic output ready\n")
+    page.screenshot(path=str(artifacts / f"linked-run-after-collapse-{width}.png"), full_page=True)
+
+    # An overlap skip never started the command and must not request or offer a log.
+    page.evaluate("hash => { location.hash = hash; }", f"#projects/proj-example/schedules/{sid}/runs/run-overlap")
+    no_log = history.locator('li[data-run-id="run-overlap"]')
+    expect(no_log.get_by_role("button", expanded=True)).to_be_visible()
+    expect(no_log.get_by_text("This run did not start the command, so it has no log.", exact=True)).to_be_visible()
+    expect(no_log.get_by_text("Duration", exact=True).locator("..")).to_contain_text("—")
+    expect(no_log.get_by_label("Run log", exact=True)).to_have_count(0)
+    expect(no_log.get_by_role("button", name="Refresh log", exact=True)).to_have_count(0)
+    expect(no_log.get_by_role("button", name="Download log", exact=True)).to_have_count(0)
+    assert not any(path == "schedule_admin/run_log" and body["run_id"] == "run-overlap"
+                   for path, body in state["calls"])
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.screenshot(path=str(artifacts / f"run-without-log-{width}.png"), full_page=True)
+
+    page.evaluate("hash => { location.hash = hash; }", f"#projects/proj-example/schedules/{sid}/runs/{target}")
+    failed = history.locator(f'li[data-run-id="{target}"]')
+    expect(failed.get_by_role("button", expanded=True)).to_be_visible()
     with page.expect_download() as downloaded:
-        history.get_by_role("button", name="Download log", exact=True).click()
+        failed.get_by_role("button", name="Download log", exact=True).click()
     assert downloaded.value.suggested_filename == f"{target}.log"
     assert Path(downloaded.value.path()).read_bytes() == log
-    history.get_by_role("combobox", name="Run status", exact=True).select_option("failed")
-    expect(history.get_by_role("checkbox", name="Hide routine skips", exact=False)).to_have_count(0)
+    status_filter = history.get_by_role("combobox", name="Run status", exact=True)
+    filter_left = status_filter.bounding_box()["x"]
+    status_filter.select_option("failed")
+    assert status_filter.bounding_box()["x"] == filter_left
+    expect(history.get_by_role("checkbox", name="Hide routine skips", exact=False)).to_be_visible()
+    expect(history.get_by_role("checkbox", name="Hide routine skips", exact=False)).to_be_disabled()
     expect(runs.get_by_text("Succeeded", exact=True)).to_have_count(0)
     assert any(path == "schedule_admin/runs" and body.get("status") == "failed"
                for path, body in state["calls"])
@@ -447,6 +490,14 @@ def test_command_form_create_edit_and_agent_regression(tmp_path, staged_dashboar
             page.get_by_label("Alert after N failures in a row", exact=True).fill("5")
             page.get_by_label("Alert after no success for (minutes)", exact=True).fill("5.5")
             page.get_by_label("Alert after N skipped firings in a row", exact=True).fill("0")
+            env_file = page.get_by_label("Env file", exact=True)
+            env_file.fill(str(tmp_path / "missing.env"))
+            with page.expect_response(lambda r: r.url.endswith("/schedule_admin/create")) as refused:
+                page.get_by_role("button", name="Create", exact=True).click()
+            assert refused.value.status == 400
+            expect(env_file.locator("..").get_by_role("alert")).to_contain_text("env_file")
+            expect(env_file.locator("xpath=ancestor::form").get_by_role("alert")).to_have_count(2)
+            env_file.fill("")
             with page.expect_response(lambda r: r.url.endswith("/schedule_admin/create")) as response:
                 page.get_by_role("button", name="Create", exact=True).click()
             assert response.value.status == 200, response.value.text()
@@ -463,6 +514,8 @@ def test_command_form_create_edit_and_agent_regression(tmp_path, staged_dashboar
             page.reload(wait_until="domcontentloaded")
             expect(page.get_by_label("Command *", exact=True)).to_have_value(command)
             expect(page.get_by_role("button", name="Save", exact=True)).to_be_disabled()
+            assert page.locator("details").filter(has=page.get_by_text("Alerts", exact=True)).evaluate("element => element.open")
+            expect(page.get_by_text("Ownership cannot be changed.", exact=False)).to_have_count(0)
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
             snapshot("command-edit")
             page.get_by_label("Command *", exact=True).fill("printf updated")
@@ -478,6 +531,7 @@ def test_command_form_create_edit_and_agent_regression(tmp_path, staged_dashboar
                 page.goto(f"{base}/#projects/{pid}/schedules/{sid}/runs/{rid}", wait_until="domcontentloaded")
                 row = page.locator("li[data-run-id]").filter(has=page.get_by_role("button", expanded=True))
                 expect(row.get_by_text("Succeeded", exact=True)).to_be_visible(timeout=35000)
+                expect(row.get_by_text("exit 0", exact=True)).to_be_visible()
                 row.get_by_role("button", name="Refresh log", exact=True).click()
                 expect(row.get_by_label("Run log", exact=True)).to_have_text("updated")
                 with page.expect_download() as downloaded:
@@ -488,6 +542,11 @@ def test_command_form_create_edit_and_agent_regression(tmp_path, staged_dashboar
             page.goto(f"{base}/#schedules/{sid}", wait_until="domcontentloaded")
             expect(page.get_by_text("printf updated", exact=True)).to_be_visible()
             expect(page.get_by_text("REPORT=daily=summary", exact=True)).to_be_visible()
+            settings = page.locator('[aria-labelledby="schedule-settings"]')
+            expect(settings.get_by_text("Success deadline: 08:00", exact=True)).to_be_visible()
+            expect(settings.get_by_text("5 failures in a row", exact=True)).to_be_visible()
+            expect(settings.get_by_text("No success for 330 s", exact=True)).to_be_visible()
+            expect(settings.get_by_text("0 skipped firings in a row", exact=True)).to_be_visible()
             expect(page.get_by_text("Requirement", exact=True)).to_have_count(0)
             page.goto(f"{base}/#schedules", wait_until="domcontentloaded")
             expect(page.get_by_text("Command", exact=True)).to_be_visible()

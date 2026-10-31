@@ -16,7 +16,8 @@ _COMMON = {"description": _STR}
 _LARK = {**_COMMON, "allowed_open_ids": _LARK_SENDERS, "allowlist_app_id": _NULL_STR}
 CONFIGS = {
     "telegram": _object({**_COMMON, "bot_token_env": _NULL_STR,
-                          "allowed_user_ids": _TELEGRAM_SENDERS}, [], closed=True),
+                          "allowed_user_ids": _TELEGRAM_SENDERS,
+                          "backlog_max_age_seconds": {"type": "integer", "minimum": 1}}, [], closed=True),
     "lark": _object({**_LARK, "profile": _NULL_STR}, [], closed=True),
     "lark_bot": _object({**_LARK, "app_id": _STR,
                           "domain": {"type": "string", "enum": ["feishu", "lark"]}}, [], closed=True),

@@ -325,7 +325,7 @@ function Schedules({ schedules }: { schedules: OverviewSchedules }) {
                         </span>
                       )}
                       {s.overlap_since && (
-                        <span className="text-destructive">
+                        <span className="text-warning">
                           Skipping: the previous run is still going since <ScheduleTime iso={s.overlap_since} timeZone={s.timezone} />
                         </span>
                       )}

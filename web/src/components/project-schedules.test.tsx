@@ -2,6 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ScheduleDetail } from "@/components/schedule-detail";
 import { PlannerSessionStatus, ProjectSchedulesSection, ResetPlannerSession, RunStatusBadge, RunHistory, LastRun } from "@/components/project-schedules";
 import type { Project, ScheduleInfo, ScheduleRunInfo } from "@/lib/api";
 
@@ -324,6 +325,40 @@ describe("schedule form types", () => {
       overlap: "skip", catch_up: "once", run_timeout_seconds: "default", notify: "failures", user_gates: "off" });
   });
 
+  it.each(["agent", "command"] as const)("shows saved %s alert settings and kind-specific notification hints", async (kind) => {
+    const stored = storedSchedule(kind);
+    stored.success_deadline = "08:00";
+    stored.alert_policy.failures_after = { value: 2, default: false };
+    stored.alert_policy.stale_after_seconds = { value: 7200, default: false };
+    stored.alert_policy.overlap_after = { value: 4, default: false };
+    await render(stored);
+    expect(container.querySelector("details")?.open).toBe(true);
+    expect(container.textContent).toContain("2 failures in a row");
+    expect(container.textContent).toContain(kind === "command" ? "Every run that ran a command" : "Every run that ran a task");
+    expect(container.textContent?.includes("Ownership cannot be changed")).toBe(kind === "agent");
+    const base = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (url, init) => String(url).endsWith("schedule_admin/get")
+      ? Response.json({ status: "ok", result: { schedule: stored } }) : base(url, init));
+    await act(async () => root.render(<ScheduleDetail scheduleId={stored.schedule_id} onDeleted={() => {}} />));
+    expect(container.textContent).toContain("2 failures in a row");
+    const settings = container.querySelector('[aria-labelledby="schedule-settings"]')!;
+    expect(settings.textContent).toContain("08:00");
+    expect(settings.textContent).toContain("2 h");
+    expect(settings.textContent).toContain("4 skipped firings");
+  });
+
+  it.each([["env_file", "env-file"], ["command", "command"]])("shows a server refusal for %s beside its field and at the top", async (serverField, suffix) => {
+    await render(); await command(); await required(); await fill("command", "echo ready");
+    const base = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (url, init) => String(url).endsWith("/create")
+      ? Response.json({ status: "error", error: { code: "invalid", message: `${serverField} was refused` } }, { status: 400 })
+      : base(url, init));
+    await act(async () => button("Create").click());
+    expect(input(suffix).parentElement?.textContent).toContain(`${serverField} was refused`);
+    expect(container.querySelectorAll('[role="alert"]')).toHaveLength(2);
+    expect(input(suffix).getAttribute("aria-invalid")).toBe("true");
+  });
+
   it.each(["agent", "command"] as const)("roundtrips custom alerts and resets %s thresholds to defaults", async (kind) => {
     const stored = storedSchedule(kind);
     stored.success_deadline = "08:00";
@@ -395,7 +430,7 @@ describe("command run history", () => {
     const select = container.querySelector<HTMLSelectElement>('select[aria-label="Run status"]')!;
     await act(async () => { select.value = "skipped_overlap"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     expect(requests.at(-1)?.body).toMatchObject({ status: "skipped_overlap", skips: "show" });
-    expect(container.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(container.querySelector<HTMLInputElement>('input[type="checkbox"]')?.disabled).toBe(true);
   });
 
   it("shows the stored tail immediately, loads the last 200 lines, and refreshes a growing log only on demand", async () => {
@@ -416,7 +451,7 @@ describe("command run history", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
     const logCalls = () => vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/run_log"));
     expect(logCalls()).toHaveLength(1);
-    expect(JSON.parse(String(logCalls()[0][1]?.body))).toEqual({ run_id: "srun-failed", tail_lines: 200 });
+    expect(JSON.parse(String(logCalls()[0][1]?.body))).toEqual({ run_id: "srun-failed", tail_lines: 200, limit_bytes: 4 * 1024 * 1024 });
     await act(async () => button("Refresh log").click());
     expect(logCalls()).toHaveLength(2);
   });
@@ -445,6 +480,159 @@ describe("command run history", () => {
     expect(container.querySelector('[aria-controls="schedule-sched/a-panel"]')?.getAttribute("aria-expanded")).toBe("true");
     expect(container.querySelector('[data-run-id="srun-failed"] button')?.getAttribute("aria-expanded")).toBe("true");
   });
+
+  it("reopens the schedule for a different linked run after collapse", async () => {
+    stub((path) => path === "schedule_admin/project_list" ? { schedules: [storedSchedule("command")], limits: {
+      default_timezone: "UTC", roles: [], notify_targets: [], name_max_chars: 80, requirement_max_chars: 10000,
+    } } : path === "managers/list" ? { managers: [] } : path === "registry/view" ? { profiles: [] }
+      : path === "schedule_admin/runs" ? respond([run(), run({ run_id: "run-b" })]) : undefined);
+    const show = (runId: string) => root.render(<ProjectSchedulesSection project={{ project_id: "project" } as Project}
+      linked={`sched%2Fa/runs/${runId}`} onLink={() => {}} />);
+    await act(async () => show("srun-failed"));
+    const toggle = container.querySelector<HTMLButtonElement>('[aria-controls="schedule-sched/a-panel"]')!;
+    await act(async () => toggle.click());
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => show("run-b"));
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector('[data-run-id="run-b"] button')?.getAttribute("aria-expanded")).toBe("true");
+    expect(Element.prototype.scrollIntoView).toHaveBeenLastCalledWith({ block: "center" });
+  });
+
+  it.each([true, false])("walks byte windows before decoding a 200-line tail (newline: %s)", async (newline) => {
+    const text = "discard\n" + Array.from({ length: 200 }, (_, i) => `${i}:${"x".repeat(30000)}`).join("\n") + (newline ? "\n" : "");
+    const data = new TextEncoder().encode(text);
+    const edge = data.length - 4 * 1024 * 1024;
+    data.set(new TextEncoder().encode("界"), edge - 1);
+    const encode = (bytes: Uint8Array) => { let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary); };
+    stub((path, body) => path === "schedule_admin/run_log" ? {
+      size: data.length, offset: body.offset ?? edge, next_offset: null, complete: true, truncated: false,
+      data_base64: encode(body.offset == null ? data.slice(edge) : data.slice(Number(body.offset), edge)),
+    } : undefined);
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-failed" />));
+    expect(container.querySelector('[aria-label="Run log"]')?.textContent === new TextDecoder().decode(data.slice("discard\n".length))).toBe(true);
+    expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(2);
+    expect(container.textContent).not.toContain("download the full log for the rest.");
+  });
+
+  it.each([true, false])("reports whole lines when the tail walk reaches its window limit (newline: %s)", async (newline) => {
+    const window = 4 * 1024 * 1024;
+    const ending = `\nsecond\nthird${newline ? "\n" : ""}`;
+    stub((path, body) => path === "schedule_admin/run_log" ? {
+      size: 5 * window, offset: body.offset ?? 4 * window, next_offset: null, complete: true, truncated: false,
+      data_base64: btoa(body.offset == null ? "x".repeat(window - ending.length) + ending : "x".repeat(window)),
+    } : undefined);
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-failed" />));
+    expect(container.querySelector('[aria-label="Run log"]')?.textContent).toBe(`second\nthird${newline ? "\n" : ""}`);
+    expect(container.textContent).toContain("Showing the last 2 lines; download the full log for the rest.");
+    expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(4);
+  });
+
+  it("shows exit zero on succeeded command runs", async () => {
+    stub(() => respond([run({ status: "succeeded", exit_code: 0 })]));
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} />));
+    expect(container.textContent).toContain("exit 0");
+    expect(container.querySelector('[data-run-id] button svg')).not.toBeNull();
+  });
+
+  it("refetches the open tail once when the run finishes", async () => {
+    let running = true;
+    stub((path) => path === "schedule_admin/runs" ? respond([run({ status: running ? "running" : "succeeded", exit_code: running ? null : 0 })])
+      : { size: 12, offset: 0, next_offset: null, data_base64: btoa(running ? "before" : "after"), complete: !running, truncated: false });
+    const show = (version: number) => root.render(<RunHistory schedule={storedSchedule("command")} open version={version} runId="srun-failed" />);
+    await act(async () => show(0));
+    expect(container.textContent).toContain("Still running: the log grows");
+    running = false;
+    await act(async () => show(1));
+    await act(async () => show(2));
+    expect(container.textContent).not.toContain("Still running: the log grows");
+    expect(container.querySelector('[aria-label="Run log"]')?.textContent).toBe("after");
+    expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(2);
+  });
+
+  it("fetches once when a queued run acquires a log as it finishes", async () => {
+    let queued = true;
+    stub((path) => path === "schedule_admin/runs" ? respond([run({ status: queued ? "queued" : "succeeded", log: queued ? null : run().log })]) : undefined);
+    const show = (version: number) => root.render(<RunHistory schedule={storedSchedule("command")} open version={version} runId="srun-failed" />);
+    await act(async () => show(0));
+    expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(0);
+    queued = false;
+    await act(async () => show(1));
+    expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(1);
+    expect(container.querySelector('[aria-label="Run log"]')?.textContent).toBe("fresh tail");
+  });
+
+  it("keeps the finished log when a running request returns late", async () => {
+    let running = true;
+    let finish!: (response: Response) => void;
+    stub((path) => path === "schedule_admin/runs" ? respond([run({ status: running ? "running" : "succeeded" })]) : undefined);
+    const base = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (url, init) => String(url).endsWith("/run_log") && running
+      ? new Promise<Response>((resolve) => { finish = resolve; }) : base(url, init));
+    const show = (version: number) => root.render(<RunHistory schedule={storedSchedule("command")} open version={version} runId="srun-failed" />);
+    await act(async () => show(0));
+    running = false;
+    await act(async () => show(1));
+    await act(async () => finish(Response.json({ status: "ok", result: {
+      size: 5, offset: 0, data_base64: btoa("stale"), complete: false, truncated: false,
+    } })));
+    expect(container.querySelector('[aria-label="Run log"]')?.textContent).toBe("fresh tail");
+    expect(container.textContent).not.toContain("Still running: the log grows");
+  });
+
+  it("does not request a log for an overlap skip and shows no duration", async () => {
+    const summary = "the previous command run (srun-previous) is still in progress";
+    stub(() => respond([run({ status: "skipped_overlap", log: null, duration_seconds: 0, exit_code: null, summary })]));
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-failed" />));
+    expect(container.textContent).toContain(`${summary}This run did not start the command, so it has no log.`);
+    expect(container.textContent).toContain("This run did not start the command, so it has no log.");
+    expect(container.querySelector('[aria-label="Run log"]')).toBeNull();
+    expect(button("Download log")).toBeUndefined();
+    expect(button("Refresh log")).toBeUndefined();
+    expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(0);
+    expect(container.querySelector('[data-run-id] button')?.textContent).toContain("Duration—");
+  });
+
+  it("shows a failed launch's reason without log controls or duration", async () => {
+    const error = "env_file line 2 must be KEY=VALUE";
+    stub(() => respond([run({ started_at: null, log: { file: "run.log", bytes: 0, truncated: false },
+      duration_seconds: null, exit_code: null, error, summary: "Launch failed" })]));
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-failed" />));
+    expect(container.textContent).toContain(`${error}This run did not start the command, so it has no log.`);
+    expect(container.textContent).not.toContain("Launch failed");
+    expect(container.querySelector('[aria-label="Run log"]')).toBeNull();
+    expect(button("Download log")).toBeUndefined();
+    expect(button("Refresh log")).toBeUndefined();
+    expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(0);
+    expect(container.querySelector('[data-run-id] button')?.textContent).toContain("Duration—");
+  });
+
+  it("keeps a complete short log without a partial-preview note", async () => {
+    stub();
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-failed" />));
+    expect(container.querySelector('[aria-label="Run log"]')?.textContent).toBe("fresh tail");
+    expect(container.textContent).not.toContain("download the full log for the rest.");
+  });
+
+  it.each([true, false])("keeps log controls for an empty log when active or started (active: %s)", async (active) => {
+    stub((path) => path === "schedule_admin/runs" ? respond([run({ status: active ? "running" : "succeeded",
+      started_at: active ? null : "2026-10-30T09:01:00Z", finished_at: active ? null : "2026-10-30T09:01:07Z",
+      log: { file: "run.log", bytes: 0, truncated: false } })]) : undefined);
+    await act(async () => root.render(<RunHistory schedule={storedSchedule("command")} open version={0} runId="srun-failed" />));
+    expect(button("Download log")).toBeDefined();
+    expect(button("Refresh log")).toBeDefined();
+    expect(requests.filter((r) => r.path.endsWith("/run_log"))).toHaveLength(1);
+  });
+
+  it.each([[2, 2, "destructive"], [undefined, 2, "warning"], [undefined, 3, "destructive"]] as const)(
+    "colours failures at threshold %s with count %s", async (threshold, failures, colour) => {
+      const schedule = storedSchedule("command");
+      schedule.consecutive_failures = failures;
+      if (threshold != null) schedule.alert_policy.failures_after = { value: threshold, default: false };
+      else delete (schedule as Partial<ScheduleInfo>).alert_policy;
+      await act(async () => root.render(<LastRun schedule={schedule} />));
+      const badge = [...container.querySelectorAll("span")].find((el) => el.textContent === `${failures} failures in a row`)!;
+      expect(badge.className).toContain(`text-${colour}`);
+    });
 
   it("reports a retained-history miss and an empty statistics window", async () => {
     stub(() => ({ ...respond([]), stats: { day: { ...stats, runs: 0 }, week: { ...stats, runs: 0 } } }));
