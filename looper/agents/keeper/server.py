@@ -80,6 +80,7 @@ class _Connection:
         self.task = asyncio.current_task()
         self.initialized, self.epoch = False, None
         self.subscriptions = {}
+        self.requests = set()
         self.closed, self.idle = asyncio.Event(), asyncio.Event()
         self.idle.set()
 
@@ -99,27 +100,10 @@ class _Connection:
     async def run(self):
         try:
             while not self.writer.is_closing():
-                request_id = None
-                close = False
                 try:
                     message = await read_frame(self.reader)
-                    self.idle.clear()
-                    if (not isinstance(message, dict) or message.get("jsonrpc") != "2.0"
-                            or type(message.get("id")) is not int or not isinstance(message.get("method"), str)):
-                        raise KeeperError(ErrorCode.INVALID_REQUEST, "invalid request")
-                    request_id = message["id"]
-                    params = message.get("params")
-                    if not isinstance(params, dict):
-                        raise KeeperError(ErrorCode.INVALID_PARAMS, "params must be an object")
-                    result = await self.dispatch(message["method"], params)
-                    await self.send({"id": request_id, "result": result})
                 except KeeperError as exc:
-                    error = {"code": exc.code, "message": exc.message}
-                    if exc.data is not None:
-                        error["data"] = exc.data
-                    await self.send({"id": request_id, "error": error})
-                    close = exc.code in (ErrorCode.FRAME_TOO_LARGE, ErrorCode.VERSION_MISMATCH,
-                                         ErrorCode.STALE_CONTROLLER)
+                    await self.reject(None, exc)
                     if exc.code == ErrorCode.FRAME_TOO_LARGE:
                         # Let the rejection reach a sender still flushing this frame.
                         try:
@@ -132,27 +116,29 @@ class _Connection:
                                         break
                         except TimeoutError:
                             pass
-                self.idle.set()
-                if close:
-                    break
+                        break
+                    continue
+                # Keep reading control requests and EOF while stdin is backpressured.
+                self.idle.clear()
+                self.requests.add(asyncio.create_task(self.respond(message)))
         except (EOFError, ConnectionError, OSError):
             pass
         except Exception:
             logger.exception("keeper control connection failed")
             try:
-                await self.send({"id": request_id, "error": {"code": ErrorCode.INTERNAL,
-                                                             "message": "internal error"}})
+                await self.reject(None, KeeperError(ErrorCode.INTERNAL, "internal error"))
             except (ConnectionError, OSError):
                 pass
         finally:
-            self.idle.set()
             if self.server.controller is self:
                 self.server.controller = None
                 if self.server.keeper.child is not None and self.server.keeper.child.returncode is None:
                     self.server.keeper.controller_detached()
-            for task in self.subscriptions.values():
+            tasks = [*self.requests, *self.subscriptions.values()]
+            for task in tasks:
                 task.cancel()
-            await asyncio.gather(*self.subscriptions.values(), return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.idle.set()
             self.writer.close()
             try:
                 await asyncio.wait_for(self.writer.wait_closed(), 1)
@@ -161,6 +147,48 @@ class _Connection:
             except asyncio.CancelledError:
                 self.writer.transport.abort()
                 raise
+
+    async def reject(self, request_id, exc):
+        error = {"code": exc.code, "message": exc.message}
+        if exc.data is not None:
+            error["data"] = exc.data
+        await self.send({"id": request_id, "error": error})
+
+    async def respond(self, message):
+        request_id = None
+        try:
+            try:
+                if self.writer.is_closing():
+                    return
+                if (not isinstance(message, dict) or message.get("jsonrpc") != "2.0"
+                        or type(message.get("id")) is not int or not isinstance(message.get("method"), str)):
+                    raise KeeperError(ErrorCode.INVALID_REQUEST, "invalid request")
+                request_id = message["id"]
+                params = message.get("params")
+                if not isinstance(params, dict):
+                    raise KeeperError(ErrorCode.INVALID_PARAMS, "params must be an object")
+                result = await self.dispatch(message["method"], params)
+                await self.send({"id": request_id, "result": result})
+            except KeeperError as exc:
+                await self.reject(request_id, exc)
+                if exc.code in (ErrorCode.FRAME_TOO_LARGE, ErrorCode.VERSION_MISMATCH,
+                                ErrorCode.STALE_CONTROLLER):
+                    self.writer.close()
+                    self.task.cancel()
+        except (ConnectionError, OSError):
+            self.task.cancel()
+        except Exception:
+            logger.exception("keeper control request failed")
+            try:
+                await self.reject(request_id, KeeperError(ErrorCode.INTERNAL, "internal error"))
+            except (ConnectionError, OSError):
+                pass
+            finally:
+                self.task.cancel()
+        finally:
+            self.requests.discard(asyncio.current_task())
+            if not self.requests:
+                self.idle.set()
 
     async def dispatch(self, method, params):
         keeper = self.server.keeper
@@ -179,6 +207,8 @@ class _Connection:
                 raise KeeperError(ErrorCode.VERSION_MISMATCH, "no common protocol version",
                                   {"supported": PROTOCOL_VERSIONS})
             await keeper.ready.wait()
+            if self.initialized:
+                raise KeeperError(ErrorCode.INVALID_REQUEST, "already initialized")
             epoch = controller["epoch"]
             if epoch < self.server.highest_epoch:
                 raise KeeperError(ErrorCode.STALE_CONTROLLER, "stale controller", {"epoch": self.server.highest_epoch})
@@ -208,7 +238,7 @@ class _Connection:
                 length = keeper.offsets[f"{stream}.log"]
                 if offset > length:
                     raise KeeperError(ErrorCode.INVALID_PARAMS, "offset past stream length", {"length": length})
-                # Task starts only after the response has been queued by run().
+                # Task starts only after the response has been queued by respond().
                 self.subscriptions[stream] = asyncio.create_task(self.tail(stream, offset))
             elif method == "stdin/write":
                 self.keys(params, "data", "expect_offset")

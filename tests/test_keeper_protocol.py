@@ -318,12 +318,20 @@ def test_initialize_waits_for_the_child_to_be_ready(launch) -> None:
         try:
             await asyncio.sleep(0.1)
             assert not initialization.done(), "initialize returned before child spawning completed"
+            # A second initialization can arrive while the first waits for startup.
+            writer.write(encode({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {
+                "protocol_versions": ["1.0"], "controller": {"looper_version": "test", "epoch": 0}}}))
+            await writer.drain()
+            await asyncio.sleep(0.1)
             (run.cwd / "spawn_allowed").touch()
             result = (await asyncio.wait_for(initialization, 5))["result"]
             assert result["child"]["pid"] is not None
             assert result["child"]["started"] is not None
             assert result["child"]["state"] == "running"
             assert result["child"]["pid"] == run.state()["child_pid"]
+            duplicate = await asyncio.wait_for(read_frame(reader), 5)
+            assert duplicate["id"] == 2
+            assert duplicate["error"]["code"] == ErrorCode.INVALID_REQUEST
         finally:
             (run.cwd / "spawn_allowed").touch()
             initialization.cancel()
@@ -572,6 +580,56 @@ time.sleep(60)
             await run.wait()
         finally:
             await client.close()
+
+    exercise(check())
+
+
+@pytest.mark.parametrize("action", ["end", "signal", "disconnect"])
+def test_blocked_stdin_does_not_block_control_or_disconnect(launch, action) -> None:
+    async def check():
+        run = launch(manifest={"orphan_timeout_s": 1})
+        client, events, _ = await connected(run)
+        payload = bytes(range(256)) * 4096
+        pending = []
+        try:
+            pending.append(asyncio.create_task(client.stdin_write(payload, 0, timeout=15)))
+            await eventually(lambda: (run.directory / keeper.STDIN).stat().st_size == len(payload))
+            assert not pending[0].done(), "the child must keep stdin drain blocked"
+            assert live(run.state()["child_pid"])
+            # Both stdin operations must stay serialized without blocking control or EOF.
+            pending.append(asyncio.create_task(client.stdin_write(b"queued", len(payload), timeout=15)))
+            pending.append(asyncio.create_task(client.stdin_close(timeout=15)))
+            await asyncio.sleep(0.1)
+            assert all(not task.done() for task in pending)
+            assert (run.directory / keeper.STDIN).read_bytes() == payload
+
+            if action == "end":
+                assert await client.end(timeout=5) == (None, signal.SIGTERM)
+            elif action == "signal":
+                await client.signal(KeeperSignal.TERM, timeout=5)
+            else:
+                await client.close()
+            await eventually(lambda: run.state().get("state") == "exited", timeout=5)
+            state = await run.wait()
+            assert state["end_reason"] == {"end": "ended", "signal": "exited",
+                                            "disconnect": "orphaned"}[action]
+            assert state["signal"] == signal.SIGTERM
+            assert not live(state["child_pid"])
+            assert not run.socket.exists()
+            assert (run.directory / keeper.STDIN).read_bytes() == payload
+            await asyncio.wait_for(events.closed.wait(), 5)
+            results = await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), 5)
+            assert all(isinstance(result, (KeeperError, KeeperGone)) for result in results[:2])
+            if action == "disconnect":
+                assert all(isinstance(result, KeeperGone) for result in results)
+            else:
+                assert events.exited == [(None, signal.SIGTERM)]
+        finally:
+            await client.close()
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     exercise(check())
 
