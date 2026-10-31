@@ -8,6 +8,7 @@ read back through the dashboard's HTTP API. Runs only when LOOPER_TEST_DATABASE_
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -90,6 +91,100 @@ async def _confirm(chat: _Chat, asked: dict[str, Any]) -> dict[str, Any]:
     (answer,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
     assert asked["confirmation_id"] in chat.notes[-1]
     return answer
+
+
+@pytest.mark.parametrize("action", ["enable", "run"])
+@pytest.mark.parametrize("when", ["before-confirm", "before-lock", "name-reused"])
+def test_command_confirmation_is_bound_to_the_schedule_and_configuration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str, when: str,
+) -> None:
+    async def test(pool: Any) -> None:
+        from looper.agents import schedules
+        from looper.agents.scheduler import Scheduler
+        from looper.db import schedules as db_schedules
+
+        project = await _project(pool, work_dir=str(tmp_path))
+        sid = (await _schedule(project, "pull", kind="command", command="exit 0", requirement=""))["schedule_id"]
+        chat = _Chat(tmp_path)
+        scheduler = Scheduler(bus=chat.bus, runtime_root=tmp_path / "runtime")
+        scheduler._commands.prepare()
+        chat.ops._platform = replace(chat.ops._platform, scheduler=scheduler)
+        try:
+            arguments = {"action": action, "schedule": "pull"}
+            (asked,) = await chat.say("启用或立即运行", (TOOL, arguments))
+            assert "`exit 0`" in chat.turns[-1].blocks[0]
+            if when == "before-lock":
+                lock = db_schedules.lock_schedule
+
+                async def change_before_lock(conn: Any, schedule_id: str) -> Any:
+                    # Edit after the operation resolves its target, just before its execution lock.
+                    monkeypatch.setattr(db_schedules, "lock_schedule", lock)
+                    await schedules.update_schedule(sid, {"command": "exit 7"})
+                    return await lock(conn, schedule_id)
+
+                monkeypatch.setattr(db_schedules, "lock_schedule", change_before_lock)
+            elif when == "name-reused":
+                await schedules.update_schedule(sid, {"name": "renamed"})
+                await _schedule(project, "pull", kind="command", command="exit 7", requirement="")
+            else:
+                await schedules.update_schedule(sid, {"command": "exit 7"})
+
+            refused = await _confirm(chat, asked)
+            assert _error(refused) == "conflict", refused
+            assert "confirm" in refused["error"]["message"].lower()
+            assert await pool.fetchval("SELECT count(*) FROM schedules WHERE enabled") == 0
+            assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
+
+            # A fresh confirmation describes the new configuration and can execute it.
+            (again,) = await chat.say("重新确认", (TOOL, arguments))
+            assert "`exit 7`" in chat.turns[-1].blocks[0]
+            done = await _confirm(chat, again)
+            assert done["status"] == "ok", done
+            if action == "enable":
+                assert done["result"]["schedule"]["enabled"] is True
+            else:
+                run = await db_schedules.get_run(done["result"]["run"]["run_id"])
+                process = scheduler._commands._owned[run["id"]]
+                await asyncio.to_thread(process.wait, timeout=10)
+                await scheduler.tick()
+                run = await db_schedules.get_run(run["id"])
+                assert (run["status"], run["exit_code"]) == ("failed", 7)
+        finally:
+            await scheduler.stop()
+            for process in list(scheduler._commands._owned.values()):
+                if process.poll() is None:
+                    process.terminate()
+                await asyncio.to_thread(process.wait, timeout=10)
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("action", ["enable", "run"])
+def test_client_command_confirmation_rejects_changed_environment_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, action: str,
+) -> None:
+    async def test(pool: Any) -> None:
+        from looper.agents import schedules
+        from looper.agents.api_v1 import OPERATOR
+        from looper.agents.ops.clients import ClientOps
+        from looper.agents.scheduler import Scheduler
+
+        sid = (await _schedule(await _project(pool, work_dir=str(tmp_path)), "pull", kind="command",
+                               command="exit 0", requirement="", env={"MODE": "dry-run"}))["schedule_id"]
+        chat = _Chat(tmp_path)
+        scheduler = Scheduler(bus=chat.bus)
+        client = ClientOps(replace(chat.ops._platform, scheduler=scheduler))
+        try:
+            asked = await client.call(OPERATOR, "s1", TOOL, {"action": action, "schedule": sid})
+            assert asked["status"] == "needs_confirmation", asked
+            await schedules.update_schedule(sid, {"env": {"MODE": "apply"}})
+            refused = await client.confirm(OPERATOR, "s1", asked["confirmation_id"])
+            assert _error(refused) == "conflict", refused
+            assert await _starting_state(pool, sid) == (False, 0)
+        finally:
+            await scheduler.stop()
+
+    run_db(test, monkeypatch, timeout=30)
 
 
 @asynccontextmanager

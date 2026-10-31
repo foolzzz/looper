@@ -145,7 +145,10 @@ async def _schedules(call: Call) -> dict[str, Any]:
         return {"schedules": [_listed(await _in_scope(call, v)) for v in views]}
     if action == "create":
         return await _create(call)
-    row = await _schedule(arguments)
+    # Resolve a confirmed start by its immutable id, even if another schedule has since taken its name.
+    row = await _schedule({**arguments, "schedule": call.confirmation["schedule_id"], "project": None}
+                          if call.confirmation else arguments)
+    expected = {"expected_version": call.confirmation["schedule_version"]} if call.confirmation else {}
     _not_created_now(call, row)
     if action == "update":
         return await _update(call, row)
@@ -157,7 +160,7 @@ async def _schedules(call: Call) -> dict[str, Any]:
     if action == "run":
         if call.platform.scheduler is None:
             raise OpError(ErrorCode.UNAVAILABLE, "this server runs no scheduler; try again later")
-        run = (await answered(schedules.run_now(row["id"], call.platform.scheduler)))["run"]
+        run = (await answered(schedules.run_now(row["id"], call.platform.scheduler, **expected)))["run"]
         (run,) = await _runs_in_scope(call, [run])
         return {"schedule": row["name"], "project": row["project_name"], "run": _run_listed(run),
                 "note": "it runs once now, through the same overlap check as a fire; its next fire time stays"}
@@ -170,7 +173,7 @@ async def _schedules(call: Call) -> dict[str, Any]:
                 "routine_skips": runs["routine_skips"]}
     if action in ("enable", "disable"):
         enabled = action == "enable"
-        answer = await answered(schedules.update_schedule(row["id"], {"enabled": enabled}))
+        answer = await answered(schedules.update_schedule(row["id"], {"enabled": enabled}, **expected))
         result = {"schedule": _listed(await _in_scope(call, answer["schedule"]))}
         if row["enabled"] is enabled:
             result["note"] = f"it was {action}d already"
@@ -316,9 +319,11 @@ async def _starting(call: Call) -> str | None:
     row = await _schedule(call.arguments)
     _not_created_now(call, row)
     action = call.arguments["action"]
+    # Render and version the same read, so an edit during rendering cannot bind a different command.
+    call.confirmation.update(schedule_id=row["id"], schedule_version=db_schedules.configuration_version(row))
     if action == "enable" and row["enabled"]:
         return None
-    view = await _in_scope(call, (await answered(schedules.get_schedule(row["id"])))["schedule"])
+    view = await _in_scope(call, schedules.schedule_view(row, default_timeout=await schedules.default_run_timeout()))
     names = await _profile_names()
     head = f"定时任务「{row['name']}」（项目 {row['project_name']}）"
     if view["kind"] == "command":
@@ -354,6 +359,14 @@ async def _changes(before: Mapping[str, Any], after: Mapping[str, Any], *,
         if only is not None and key not in only:
             continue
         old, new = _shown(key, before, names), _shown(key, after, names)
+        if key == "env":
+            old_env, new_env = before.get(key) or {}, after.get(key) or {}
+            if old_env != new_env:
+                values_changed = sorted(k for k in old_env.keys() & new_env.keys() if old_env[k] != new_env[k])
+                values_line = f"；值已修改：{'、'.join(values_changed)}" if values_changed else ""
+                lines[key] = (f"- {label}：值已修改：{'、'.join(values_changed)}" if old_env.keys() == new_env.keys()
+                              else f"- {label}：{old} → {new}{values_line}")
+            continue
         if old != new or (key in ("command", "template_inputs") and before.get(key) != after.get(key)):
             lines[key] = f"- {label}：{old} → {new}"
     return lines

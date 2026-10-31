@@ -10,6 +10,7 @@ once; every time comes from the caller, so tests can set the clock.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from collections.abc import Mapping, Sequence
@@ -54,6 +55,23 @@ _RUN = """
 """
 
 Db = asyncpg.Pool | asyncpg.Connection
+
+
+class ConfigurationChanged(ValueError):
+    """The configuration the user confirmed no longer matches the locked schedule."""
+
+
+def configuration_version(row: Mapping[str, Any]) -> str:
+    """Version the settings, including environment values, without runtime counters or fire times."""
+    settings = {key: row.get(key) for key in (*FIELDS, "id", "project_id", "manager_id", "enabled",
+                                            "profile_overrides", "task_limits")}
+    return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
+
+
+def check_configuration_version(row: Mapping[str, Any], expected: str | None) -> None:
+    """Call under the same row lock as enabling or creating the run."""
+    if expected is not None and configuration_version(row) != expected:
+        raise ConfigurationChanged("the schedule configuration changed; run the tool again to ask for confirmation")
 
 
 def new_run_id() -> str:

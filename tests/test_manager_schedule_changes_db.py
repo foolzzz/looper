@@ -50,6 +50,33 @@ def _with(chat: _Chat, **platform: Any) -> _Chat:
 # --- create ---
 
 
+def test_changing_only_environment_values_reports_changed_keys_without_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _schedule(await _project(pool, work_dir=str(tmp_path)), "pull", enabled=True,
+                        kind="command", command="exit 0", requirement="",
+                        env={"MODE": "dry-run", "UNCHANGED": "private-unchanged"})
+        chat = _Chat(tmp_path)
+        arguments = {"action": "update", "schedule": "pull", "fields": {
+            "env": {"MODE": "apply", "UNCHANGED": "private-unchanged"}}}
+        (changed,) = await chat.say("修改环境变量值", (TOOL, arguments))
+        assert changed["status"] == "ok", changed
+        assert changed["result"]["changed"] == ["env"]
+        (block,) = chat.turns[-1].blocks
+        line = next(line for line in block.splitlines() if "值已修改" in line)
+        assert "MODE" in line and "UNCHANGED" not in line
+        assert "没有变化" not in block
+        assert all(value not in block for value in ("dry-run", "apply", "private-unchanged"))
+        stored = await _view("pull")
+        assert stored["enabled"] and stored["env"] == arguments["fields"]["env"]
+        (unchanged,) = await chat.say("重复相同修改", (TOOL, arguments))
+        assert unchanged["result"]["changed"] == []
+        assert "- 没有变化" in chat.turns[-1].blocks[0]
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_editing_only_the_tail_of_an_enabled_long_command_shows_the_full_change(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
