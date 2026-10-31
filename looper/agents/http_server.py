@@ -22,7 +22,7 @@ import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..db import api_clients as db_api_clients
 from ..ops_config import OpsConfig
@@ -50,6 +50,9 @@ from .tiers.manager import ManagerAgent
 from .tiers.task import TaskRouter
 from .tiers.worker import recheck_limits
 from .tiers.worker import WorkerPool
+
+if TYPE_CHECKING:
+    from .. import components
 
 logger = logging.getLogger(__name__)
 
@@ -209,8 +212,13 @@ class AgentHTTPServer:
         # Configuration files uploaded for import, waiting to be applied (under the runtime root).
         self._config_imports = config_imports.ConfigImports(runtime_root) if runtime_root else None
         self._server: asyncio.Server | None = None
+        self._components: components.Manifest | None = None
 
     async def start(self) -> None:
+        from .. import components
+
+        # Snapshot the loaded installation once, before accepting requests.
+        self._components = components.loaded_manifest()
         if self._config_imports:
             self._config_imports.clear()  # what a previous server left pending
         self._server = await asyncio.start_server(
