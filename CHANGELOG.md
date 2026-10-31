@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.33] - 2026-10-31
+
+### Fixed
+
+- **Command schedules keep firing while the service drains for an upgrade.** During a planned-upgrade drain, only agent schedules are paused: command schedules fire, start their queued runs and run now as usual, and their starts do not count toward the `starting` the drain waits for. Run now on an agent schedule during a drain returns 409 "the service is draining for an upgrade: run it after the restart" instead of 404; an unknown schedule still returns 404. ([#962](https://github.com/foolzzz/looper/pull/962))
+
+No model-visible change: no prompt, tool or message text given to a model changes.
+
 ## [2.14.32] - 2026-10-31
 
 ### Fixed
