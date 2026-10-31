@@ -65,6 +65,22 @@ describe("Dashboard waiting gates", () => {
     return input;
   };
 
+  it.each([false, true])("keeps the overlap warning distinct and hides absent alerts: %s", async (alert) => {
+    overview.schedules = { total: 1, enabled: 1, next: [], skipped_today: {}, failing: alert ? [{
+      schedule_id: "schedule", name: "Check", project_id: "project", project_name: "Example", timezone: "UTC",
+      consecutive_failures: 0, overlap_since: "2026-10-20T10:00:00Z", deadline_since: "2026-10-20T10:00:00Z",
+    }] : [] } as unknown as Overview["schedules"];
+    await show();
+    const overlap = [...container.querySelectorAll("span")].find((el) => el.textContent?.startsWith("Skipping: the previous run"));
+    if (alert) {
+      expect(overlap?.className).toContain("text-warning");
+      expect([...container.querySelectorAll("span")].find((el) => el.textContent?.startsWith("Missed its success deadline"))?.className).toContain("text-destructive");
+    } else {
+      expect(overlap).toBeUndefined();
+      expect(container.textContent).toContain("No failing schedules");
+    }
+  });
+
   it.each(["no tasks", "planner", "closed"])("hides the section with no user-waiting gate: %s", async (state) => {
     if (state === "no tasks") overview.tasks.needs_you = 0;
     else details = [task("a", [gate("g1", state === "planner"

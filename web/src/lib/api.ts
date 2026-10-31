@@ -1356,6 +1356,35 @@ export async function fetchRunLog(
   return result;
 }
 
+/** Walk backwards in bounded byte windows; decode only after joining split UTF-8 sequences. */
+export async function fetchRunLogTail(runId: string): Promise<RunLog & { text: string; partialLines: number | null }> {
+  const window = 4 * 1024 * 1024;
+  const log = await fetchRunLog(runId, { tail_lines: 200, limit_bytes: window });
+  const bytes = (page: RunLog) => Uint8Array.from(atob(page.data_base64), (c) => c.charCodeAt(0));
+  let data = bytes(log);
+  let start = log.offset;
+  const wanted = data.at(-1) === 10 ? 201 : 200;
+  let exact = start === 0 || start > Math.max(0, log.size - window);
+  for (let windows = 1; !exact && windows < 4; windows++) {
+    const begin = Math.max(0, start - window);
+    const preceding = bytes(await fetchRunLog(runId, { offset: begin, limit_bytes: start - begin }));
+    const joined = new Uint8Array(preceding.length + data.length);
+    joined.set(preceding); joined.set(data, preceding.length);
+    data = joined;
+    start = begin;
+    exact = start === 0 || data.reduce((count, byte) => count + Number(byte === 10), 0) >= wanted;
+  }
+  // An untouched tail may already start at an exact line boundary (the server trims it).
+  if (start > 0 && !exact) data = data.subarray(data.indexOf(10) < 0 ? data.length : data.indexOf(10) + 1);
+  let count = 0;
+  for (let i = data.length - 1; i >= 0; i--) {
+    if (data[i] === 10 && ++count === wanted) { data = data.subarray(i + 1); break; }
+  }
+  const partialLines = exact ? null : data.reduce((count, byte) => count + Number(byte === 10), 0)
+    + Number(data.length > 0 && data.at(-1) !== 10);
+  return { ...log, text: new TextDecoder().decode(data), partialLines };
+}
+
 /** Keep bytes intact across page boundaries, including non-UTF-8 output. */
 export async function downloadRunLog(
   runId: string,

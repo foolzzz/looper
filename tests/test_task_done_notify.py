@@ -303,7 +303,7 @@ class _Bot:
 
 
 def _tg_update(text: str, message_id: int) -> Any:
-    return SimpleNamespace(effective_user=SimpleNamespace(id=7, username="someone"),
+    return SimpleNamespace(update_id=message_id, effective_user=SimpleNamespace(id=7, username="someone"),
                            effective_chat=SimpleNamespace(id=7, type="private"),
                            message=SimpleNamespace(message_id=message_id, text=text))
 

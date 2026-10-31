@@ -18,6 +18,13 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.47] - 2026-10-31
+
+### Changed
+
+- **Telegram handler retry, backlog cap and restored progress route.** A Telegram handler that raised before it reached the bus is retried up to two more times (about 3 s at most, never after publishing, not during shutdown) before the update is left pending. The Telegram channel config schema and the config export accept `backlog_max_age_seconds`. Task progress for a chat restored from `reply_route` is sent without caching the correlation. ([#994](https://github.com/foolzzz/looper/pull/994))
+- **Dashboard command run history and schedule alert follow-ups.** The failures badge follows each schedule's own threshold, the overlap alert is warning-coloured, a second run link reopens its row, the log preview shows the last 200 lines of logs over 1 MiB, succeeded command runs show their exit code, a run with no log shows a note (the log API says the command did not start), skipped runs show no duration, and the command schedule form's hints, alert section, field errors and ownership line fit command schedules. ([#1009](https://github.com/foolzzz/looper/pull/1009))
+
 ## [2.14.46] - 2026-10-31
 
 ### Changed

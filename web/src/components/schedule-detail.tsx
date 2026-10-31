@@ -7,7 +7,7 @@ import { DeleteSchedule, LastRun, NoticeText, RunHistory, ScheduleTime } from "@
 import { fetchSchedule, runSchedule, updateSchedule, type ScheduleInfo, type TaskRole } from "@/lib/api";
 import { channelLabel } from "@/lib/chat-channels";
 import { roleLabel } from "@/lib/runtime-catalog";
-import { NOTIFY_OPTIONS, TASK_LIMIT_ROLES, runNotice, useNotices } from "@/lib/schedules";
+import { scheduleNotifyOptions, TASK_LIMIT_ROLES, runNotice, useNotices } from "@/lib/schedules";
 import { errorText } from "@/lib/use-action";
 import { runTimeoutText, seconds } from "@/lib/schedule-text";
 import { profileLabel, useRegistry } from "@/lib/use-registry";
@@ -128,7 +128,7 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
   const editHref = `#projects/${encodeURIComponent(schedule.project_id)}/schedules/${encodeURIComponent(schedule.schedule_id)}`;
   const profiles = ROLES.filter((role) => schedule.profile_overrides[role]);
   const limited = TASK_LIMIT_ROLES.some((role) => schedule.task_limits[role] != null);
-  const notifyOption = NOTIFY_OPTIONS.find((option) => option.value === schedule.notify);
+  const notifyOption = scheduleNotifyOptions(schedule.kind, schedule.alert_policy?.failures_after?.value ?? 3).find((option) => option.value === schedule.notify);
   const profileText = (profileId: string) => {
     const profile = registry?.profiles.find((p) => p.profile_id === profileId);
     return profile ? profileLabel(profile) : profileId;
@@ -228,6 +228,14 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
           <Field label="Work directory">
             {schedule.work_dir ? <code className={CODE}>{schedule.work_dir}</code> : schedule.template_key ? "As the template and project set it" : "The project's default"}
           </Field>
+          {(schedule.success_deadline || Object.values(schedule.alert_policy ?? {}).some((policy) => !policy.default)) && (
+            <Field label="Alerts">
+              <span className="block">Success deadline: {schedule.success_deadline ?? "None"}</span>
+              <span className="block">{schedule.alert_policy.failures_after.value} failures in a row</span>
+              <span className="block">No success for {schedule.alert_policy.stale_after_seconds.value == null ? "Off" : seconds(schedule.alert_policy.stale_after_seconds.value)}</span>
+              <span className="block">{schedule.alert_policy.overlap_after.value} skipped firings in a row</span>
+            </Field>
+          )}
           {schedule.kind !== "command" && <Field label="Gate">
             {schedule.gate_command ? (
               <>
