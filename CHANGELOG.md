@@ -18,6 +18,22 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.51] - 2026-10-31
+
+### Added
+
+- **`looper service upgrade --turns-timeout`** (default 180 seconds). A control-plane upgrade drains turns with this timeout; a full upgrade still uses `--drain-timeout`. ([#977](https://github.com/foolzzz/looper/pull/977))
+
+### Changed
+
+- **Checkout upgrades no longer sync dependencies for a no-op or web-only plan.** A full or control-plane upgrade runs `uv sync --extra test --inexact`, which keeps the deploy's test extra and other installed packages. The dashboard build gets the service's Python as `PYTHON`, and the published `web/dist` is made 0755 (directories) and 0644 (files). ([#977](https://github.com/foolzzz/looper/pull/977))
+- **Untracked files that the component fingerprints hash now stop an upgrade of a checkout** before the drain, with the files listed. Git-ignored files are not counted. ([#977](https://github.com/foolzzz/looper/pull/977))
+- **A web-only wheel upgrade installs the rest of the package** (without dependencies), not only the dashboard. ([#977](https://github.com/foolzzz/looper/pull/977))
+
+### Fixed
+
+- **A start failure after the stop and install no longer leaves the unit down.** The upgrade stops any partial process, starts the current install once more, and still reports the failure. The report gains `serving`, which says whether the service answers. ([#977](https://github.com/foolzzz/looper/pull/977))
+
 ## [2.14.50] - 2026-10-31
 
 ### Added
