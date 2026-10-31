@@ -43,10 +43,11 @@ def test_failed_review_summary_keeps_its_final_reason(tmp_path: Path) -> None:
     assert len(report[-1]) == len("- summary: ") + 1000
     outcome = planner.result_outcome({"verify_passed": False, "verify_summary": summary})
     assert outcome.startswith("review failed: Review failed: ") and outcome.endswith(SIGN_IN_ERROR)
-    # Findings still take precedence and retain their existing head-only clipping.
+    # Findings still take precedence, retaining both ends within the same limit.
     finding = "finding " * 40
     assert planner.result_outcome({"verify_passed": False, "verify_findings": [finding],
-                                   "verify_summary": summary}) == f"review failed: {finding.strip()[:199]}…"
+                                   "verify_summary": summary}) == (
+                                       f"review failed: {finding.strip()[:66]}…{finding.strip()[-133:]}")
 
 
 @pytest.fixture
@@ -151,6 +152,53 @@ def test_planner_keeps_reviewer_run_error_without_a_verdict(
     assert error[-100:] in agent_db.insert_activity.await_args.kwargs["summary"]
     assert error in "\n".join(decide.await_args.args[3])
     assert decide.await_args.args[2].succeeded is False
+
+
+def test_native_omp_reviewer_failure_keeps_its_final_reason_in_closing_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+) -> None:
+    from test_omp_runtime import _launch as omp_launch
+
+    error = "Review failed: " + "diagnostic " * 22 + SIGN_IN_ERROR + "." * (100 - len(SIGN_IN_ERROR))
+    executable = fake_claude(tmp_path / "omp", (
+        "import json, sys\n"
+        "sys.stdin.read()\n"
+        "print(json.dumps({'type': 'message_end', 'message': {'role': 'assistant', "
+        f"'stopReason': 'error', 'content': [], 'errorMessage': {error!r}}}}}), flush=True)\n"
+        "print(json.dumps({'type': 'agent_end', 'isTerminal': True}), flush=True)\n"
+        "sys.exit(1)\n"
+    ))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "operator"))
+    _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 5, "max_turns": 0})
+    launch = omp_launch(executable=executable)
+    assert launch.runtime.type == "omp" and launch.profile.runtime.launcher is Launcher.NATIVE
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=launch.settings))
+    agent = planner.PlannerAgent(task_id="t1", runtime_root=tmp_path / "runtime")
+    step = planner.PlanStep(step_id="s1", index=0, instruction="Inspect", status="completed", reviewer_id="r1",
+                            result={"status": "completed"})
+    agent._plan = planner.TaskPlan("p1", "g1", "Inspect", str(tmp_path), steps=[step], status="executing")
+    monkeypatch.setattr(agent, "_decide", AsyncMock())
+
+    async def run() -> dict[str, Any]:
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+        result = await pool._execute(_step_envelope(tmp_path / "work", verify=True), is_verify=True)
+        await agent._handle_verify_result(MessageEnvelope.create(
+            source=worker_address("r1"), target=agent.agent_address, message_type=MessageType.VERIFY_RESULT,
+            payload={**result, "task_id": "s1"},
+        ))
+        return result
+
+    result = asyncio.run(asyncio.wait_for(run(), 8))
+    assert result["passed"] is False
+    assert result["findings"] == [result["summary"]]
+    assert result["summary"].startswith("OMP run did not succeed: Review failed: ")
+    assert result["summary"].endswith(error[-100:])
+    outcome = planner.result_outcome(step.result)
+    assert outcome.startswith("review failed: OMP run did not succeed: ")
+    assert outcome.endswith(error[-100:])
+    assert len(outcome) == len("review failed: ") + 200
+    note = planner.closing_note("Review could not finish", [(step.label, step.status, step.result)])
+    assert outcome in note and note.endswith(error[-100:])
 
 
 def test_planner_failed_worker_summary_keeps_its_final_reason(

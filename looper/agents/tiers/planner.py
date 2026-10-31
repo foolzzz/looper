@@ -746,7 +746,7 @@ def _thread_lines(messages: Sequence[Mapping[str, Any]], limit: int) -> list[str
 
 def _verdict_reason(verdict: Mapping[str, Any], findings: str, summary: str) -> str:
     """Why a review did not pass, in a line: its findings, else its summary."""
-    found = "; ".join(_clip(f, 200) for f in verdict.get(findings) or [] if str(f).strip())
+    found = "; ".join(_clip_ends(f, 200) for f in verdict.get(findings) or [] if str(f).strip())
     return found or _clip_ends(verdict.get(summary), 300) or "no reason given"
 
 
