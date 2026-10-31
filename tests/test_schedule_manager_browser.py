@@ -177,6 +177,57 @@ def test_owner_load_failure_is_visible_and_can_retry_without_losing_draft(dashbo
 
 
 @pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
+def test_command_environment_multiline_round_trip(dashboard, tmp_path, width):
+    import json
+
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    page.set_viewport_size({"width": width, "height": 900})
+    new_schedule(page, base)
+    page.get_by_role("radio", name="Command", exact=False).check()
+    page.get_by_label("Command *", exact=True).fill("printf ready")
+    page.get_by_role("button", name="Create", exact=True).click()
+    expect(page.get_by_text("Type: Command", exact=True)).to_be_visible()
+    # Simulate a schedule supplied by the API/CLI, including values that look like new entries.
+    original = {"SETTINGS": "REGION=us\nTIER=gold", "EMPTY": "",
+                "LITERAL": '  C:\\reports\\n="quoted"  '}
+    state["schedules"][0]["env"] = original.copy()
+    page.reload()
+    page.get_by_label("Name *", exact=True).fill("Renamed command")
+    with page.expect_response(lambda r: r.url.endswith("/schedule_admin/update")) as response:
+        page.get_by_role("button", name="Save", exact=True).click()
+    assert response.value.request.post_data_json["fields"] == {"name": "Renamed command"}
+    assert state["schedules"][0]["env"] == original
+
+    env = page.get_by_label("Environment", exact=True)
+    assert json.loads(env.input_value()) == original
+    updated = {**original, "SETTINGS": "REGION=eu\nTIER=silver\n", "CRLF": "a\r\nb\r", "ADDED": " x=y "}
+    env.fill(json.dumps(updated))
+    with page.expect_response(lambda r: r.url.endswith("/schedule_admin/update")) as response:
+        page.get_by_role("button", name="Save", exact=True).click()
+    assert response.value.request.post_data_json["fields"] == {"env": updated}
+    page.reload()
+    expect(page.get_by_role("button", name="Save", exact=True)).to_be_disabled()
+    assert json.loads(env.input_value()) == updated
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    env.scroll_into_view_if_needed()
+    page.screenshot(path=str(tmp_path / f"command-environment-{width}.png"), full_page=True)
+
+    for invalid in ('{"SETTINGS":', '{"SETTINGS": 1}', '{"SETTINGS": null}', '{"BAD-KEY": "value"}'):
+        env.fill(invalid)
+        expect(env).to_have_attribute("aria-invalid", "true")
+        expect(page.locator("form").get_by_role("alert")).to_be_visible()
+        expect(page.get_by_role("button", name="Save", exact=True)).to_be_disabled()
+    env.fill("{}")
+    with page.expect_response(lambda r: r.url.endswith("/schedule_admin/update")) as response:
+        page.get_by_role("button", name="Save", exact=True).click()
+    assert response.value.request.post_data_json["fields"] == {"env": {}}
+    page.reload()
+    expect(env).to_have_value("")
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
 def test_command_form_create_edit_and_agent_regression(tmp_path, staged_dashboard_dir, width):
     """Exercise form serialization against a fresh database and a real serve process."""
     import os

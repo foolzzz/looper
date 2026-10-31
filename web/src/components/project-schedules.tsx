@@ -308,7 +308,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
   return {
     kind: schedule.kind ?? "agent",
     command: schedule.command ?? "",
-    envText: Object.entries(schedule.env ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join("\n"),
+    envText: environmentText(schedule.env ?? {}),
     envFile: schedule.env_file ?? "",
     deadline: schedule.success_deadline ?? "",
     failuresAfter: thresholdText(schedule, "failures_after"),
@@ -356,7 +356,25 @@ function thresholdText(schedule: ScheduleInfo, key: keyof ScheduleInfo["alert_po
   return value == null ? "" : String(value / divisor);
 }
 
+function environmentText(env: Record<string, string>): string {
+  const entries = Object.entries(env).sort(([a], [b]) => a.localeCompare(b));
+  // JSON escapes line breaks so a value cannot become another KEY=VALUE line.
+  return entries.some(([, value]) => /[\r\n]/.test(value))
+    ? JSON.stringify(Object.fromEntries(entries), null, 2)
+    : entries.map(([key, value]) => `${key}=${value}`).join("\n");
+}
+
 function environmentOf(text: string) {
+  if (text.trimStart().startsWith("{")) {
+    const error = "Environment JSON must be an object with valid environment keys and string values.";
+    try {
+      const env: unknown = JSON.parse(text);
+      if (env && typeof env === "object" && !Array.isArray(env) && Object.entries(env).every(
+        ([key, value]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && typeof value === "string",
+      )) return { env: env as Record<string, string>, error: "", duplicates: [] };
+    } catch { /* Keep invalid JSON visible and block submission. */ }
+    return { env: {}, error, duplicates: [] };
+  }
   const entries: [string, string][] = [];
   const keys = new Set<string>();
   const duplicates = new Set<string>();
@@ -382,7 +400,7 @@ type FormFields = ScheduleFields & Required<Pick<ScheduleFields,
   "alert_failures_after" | "alert_stale_after_seconds" | "alert_overlap_after">>;
 
 /** Command fields are kept separate from task settings before serialization. */
-function fieldsOf(draft: Draft, limits: ScheduleLimits): FormFields {
+function fieldsOf(draft: Draft, limits: ScheduleLimits, schedule: ScheduleInfo | null): FormFields {
   const minutes = numberOf(draft.timeout);
   const common = {
     name: draft.name.trim(), cron: draft.cron.trim(),
@@ -398,7 +416,9 @@ function fieldsOf(draft: Draft, limits: ScheduleLimits): FormFields {
     alert_overlap_after: numberOf(draft.overlapAfter),
   };
   if (draft.kind === "command") return {
-    ...common, command: draft.command.trim(), env: environmentOf(draft.envText).env,
+    ...common, command: draft.command.trim(),
+    env: schedule && draft.envText === environmentText(schedule.env ?? {})
+      ? schedule.env ?? {} : environmentOf(draft.envText).env,
     env_file: draft.envFile.trim() || null,
   };
   return {
@@ -856,7 +876,7 @@ function ScheduleForm({
   };
   const isCommand = draft.kind === "command";
   const env = environmentOf(draft.envText);
-  const fields = fieldsOf(draft, limits);
+  const fields = fieldsOf(draft, limits, schedule);
   const changes = schedule ? changesOf(fields, schedule) : {};
   const dirty = Object.keys(changes).length > 0;
   useEffect(() => onDirtyChange?.(dirty), [dirty, onDirtyChange]);
@@ -1077,7 +1097,7 @@ function ScheduleForm({
             <textarea id={id("env")} value={draft.envText} onChange={(e) => set("envText", e.target.value)}
               rows={4} spellCheck={false} aria-invalid={Boolean(env.error)} aria-describedby={id("env-hint")}
               className={cn(TEXTAREA, "font-mono whitespace-pre-wrap break-all")} />
-            <p id={id("env-hint")} className="text-xs text-muted-foreground">One KEY=VALUE per line. Shown as written: put secrets in the env file.</p>
+            <p id={id("env-hint")} className="text-xs text-muted-foreground">One KEY=VALUE per line, or a JSON object with string values (use \n for line breaks). Shown as written: put secrets in the env file.</p>
             {env.error && <p role="alert" className="text-xs text-destructive">{env.error}</p>}
             {env.duplicates.length > 0 && <p role="status" className="text-xs text-warning">Duplicate keys: {env.duplicates.join(", ")}; the last value is used.</p>}
           </div>
