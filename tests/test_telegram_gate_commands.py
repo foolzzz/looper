@@ -19,6 +19,7 @@ from looper.agents.message import MessageEnvelope, MessageType
 
 def _update(user_id: int, text: str) -> Any:
     return SimpleNamespace(
+        update_id=1,
         effective_user=SimpleNamespace(id=user_id, username="someone"),
         effective_chat=SimpleNamespace(id=99),
         message=SimpleNamespace(text=text, reply_text=AsyncMock(), message_id=41, reply_to_message=None),

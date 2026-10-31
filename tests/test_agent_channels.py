@@ -541,6 +541,7 @@ def _tg_update(user_id: int | None, text: str = "hello", chat_id: int = 99, *, m
     from unittest.mock import AsyncMock
     replied = None if replies_to is None else SimpleNamespace(message_id=replies_to)
     return SimpleNamespace(
+        update_id=1,
         effective_user=None if user_id is None else SimpleNamespace(id=user_id, username="someone"),
         effective_chat=SimpleNamespace(id=chat_id),
         message=SimpleNamespace(text=text, reply_text=AsyncMock(), message_id=message_id, reply_to_message=replied),

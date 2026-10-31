@@ -181,7 +181,7 @@ async def _populate(monkeypatch: pytest.MonkeyPatch, pool: Any, work_dir: Path) 
                                                           "max_concurrency": 6})
     await _ok("PUT", "/api/roles/planner", {"system_prompt": "Plan in small steps.", "timeout_seconds": 900})
     await _ok("POST", "/api/v1/channel_configs/update", {"channel_id": "channel-telegram", "fields": {"enabled": True, "config": {
-        "bot_token_env": "MY_TG_TOKEN", "allowed_user_ids": ["123456789"]}}})
+        "bot_token_env": "MY_TG_TOKEN", "allowed_user_ids": ["123456789"], "backlog_max_age_seconds": 1800}}})
     # An older installation may still hold an extension secret; export must mask it.
     await pool.execute("UPDATE channel_configs SET config = config || $1::jsonb WHERE channel_id = 'channel-telegram'",
                        json.dumps({"webhook_secret": SECRET}))
@@ -411,6 +411,7 @@ def test_a_round_trip_into_a_new_database_reproduces_the_configuration(
             for schedule in before["schedules"].values():
                 schedule.update(work_dir="", enabled=False, created_via="import")
             assert after == before
+            assert after["channels"]["telegram"][2]["backlog_max_age_seconds"] == 1800
             assert after["schedules"][("calc", "nightly")]["notify_chat"] == "123456789"
             assert [n.split(":")[0] for n in plan["notes"]] == [
                 "project calc", "2 schedule(s) come in disabled (calc / nightly, calc / weekly)", "calc / nightly"]
@@ -509,6 +510,7 @@ def test_secrets_are_placeholders_by_default_and_never_replace_stored_ones(
             assert next(p for p in json.loads(text)["providers"] if p["name"] == "anthropic-key")["api_key"] == {
                 "secret": "omitted"}
             data = json.loads(text)
+            assert next(c for c in data["channels"] if c["channel_type"] == "telegram")["config"]["backlog_max_age_seconds"] == 1800
             search = next(i for i in data["catalog"] if i["name"] == "search")
             assert search["server"]["env"] == {"API_KEY": {"secret": "omitted"}}
             assert next(i for i in data["catalog"] if i["name"] == "local-only")["source"] is None
@@ -522,6 +524,7 @@ def test_secrets_are_placeholders_by_default_and_never_replace_stored_ones(
             code, out, _ = await _transfer_file(target_url, "import", str(exported), apply=True, json_output=True)
             assert code == 0
             plan = _plan(out)
+            assert (await _state(target))["channels"]["telegram"][2]["backlog_max_age_seconds"] == 1800
             from looper.db import library as db_library
 
             servers = {row["name"]: row for row in (await db_library.get_mcp_servers(

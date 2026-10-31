@@ -81,10 +81,11 @@ V4_FORMAT = FORMAT
 PLACEHOLDER = {"secret": "omitted"}
 
 # The channel config keys that are not secrets: the sender allowlist (Lark's with the app it was made for), the
-# name of the environment variable Telegram may read its token from, Lark's lark-cli profile, and the description.
+# name of the environment variable Telegram may read its token from, its backlog cap, Lark's lark-cli profile,
+# and the description.
 # Any other key is treated as a secret.
 _CHANNEL_PUBLIC_KEYS = {
-    "telegram": frozenset({"allowed_user_ids", "bot_token_env", "description"}),
+    "telegram": frozenset({"allowed_user_ids", "bot_token_env", "backlog_max_age_seconds", "description"}),
     "lark": frozenset({"allowed_open_ids", "allowlist_app_id", "profile", "description"}),
     "lark_bot": frozenset({"allowed_open_ids", "allowlist_app_id", "app_id", "domain", "description"}),
 }

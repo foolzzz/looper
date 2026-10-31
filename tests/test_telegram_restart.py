@@ -418,3 +418,123 @@ def test_replacing_bot_on_same_channel_does_not_reuse_another_bots_dedupe_keys(t
             await bus.shutdown()
 
     asyncio.run(asyncio.wait_for(run(), 10))
+
+
+@pytest.mark.parametrize("failure_stage,failures,stopping,attempts", [
+    ("before_publish", 2, False, 3),
+    ("publish", 1, False, 1),
+    ("after_publish", 1, False, 1),
+    ("before_publish", 3, False, 3),
+    ("before_publish", 1, True, 1),
+])
+def test_handler_failure_retry_and_restart(tmp_path, monkeypatch, caplog,
+                                          failure_stage, failures, stopping, attempts):
+    from telegram.request import HTTPXRequest
+
+    async def run():
+        path = tmp_path / ".local/telegram/channel-telegram/0.sqlite3"
+        api = BotAPI(path)
+
+        async def request(transport, **kwargs):
+            return await api.request(**kwargs)
+
+        monkeypatch.setattr(HTTPXRequest, "do_request", request)
+        bus = MessageBus(tmp_path)
+        await bus.start()
+        adapter = TelegramChannelAdapter(bot_token="0:synthetic", allowlist=SenderAllowlist(
+            "channel-telegram", frozenset({"7"})))
+        original = adapter._on_message
+        calls = 0
+        failed = asyncio.Event()
+        handled = asyncio.Event()
+
+        async def handler(update, context):
+            nonlocal calls
+            calls += 1
+            if failure_stage in {"publish", "after_publish"}:
+                await original(update, context)
+            if calls <= failures:
+                if stopping:
+                    adapter._running = False
+                raise RuntimeError("synthetic handler failure")
+            await original(update, context)
+            handled.set()
+
+        async def on_error(update, context):
+            failed.set()
+
+        monkeypatch.setattr(adapter, "_on_message", handler)
+        if failure_stage == "publish":
+            monkeypatch.setattr(bus, "publish", AsyncMock(side_effect=RuntimeError("synthetic handler failure")))
+        try:
+            await adapter.start(bus)
+            adapter._app.add_error_handler(on_error)
+            api.send(201, "retry this update")
+            await asyncio.wait_for((handled if failures == 2 else failed).wait(), 5)
+            await asyncio.wait_for(adapter._app.update_queue.join(), 2)
+            assert calls == attempts
+            success = failures == 2
+            assert adapter._inbox.processed(201) is success
+            assert not adapter._reached_publish
+            queue = bus.get_queue("manager")
+            delivered = success or failure_stage == "after_publish"
+            if delivered:
+                assert queue.get_nowait().payload["text"] == "retry this update"
+            assert queue.empty()
+            with sqlite3.connect(path) as db:
+                payload, processed = db.execute("SELECT payload, processed FROM updates WHERE update_id = 201").fetchone()
+                assert bool(processed) is success
+                assert (payload is None) is success
+            if not success:
+                assert "Telegram update_id=201" in caplog.text
+                assert "synthetic handler failure" in caplog.text
+            await adapter.stop()
+            if failures == 3:
+                # Acknowledged by polling, but still pending: only the durable inbox can replay it.
+                api.updates.clear()
+                adapter = TelegramChannelAdapter(bot_token="0:synthetic", allowlist=SenderAllowlist(
+                    "channel-telegram", frozenset({"7"})))
+                await adapter.start(bus)
+                replayed = await asyncio.wait_for(queue.get(), 2)
+                assert replayed.payload["text"] == "retry this update"
+                await asyncio.wait_for(adapter._app.update_queue.join(), 2)
+                assert adapter._inbox.processed(201)
+                assert not adapter._reached_publish and queue.empty()
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 10))
+
+
+def test_handler_does_not_retry_when_stopped_during_backoff(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from telegram import Bot, Update
+
+    from looper.agents.channels import telegram as channel
+
+    async def run():
+        inbox = TelegramInbox(tmp_path / "inbox.sqlite3")
+        adapter = TelegramChannelAdapter(allowlist=SenderAllowlist("channel-telegram", frozenset({"7"})))
+        adapter._inbox, adapter._running = inbox, True
+        update = Update.de_json({"update_id": 202}, Bot("0:synthetic"))
+        callback = AsyncMock(side_effect=RuntimeError("synthetic handler failure"))
+        delays = []
+
+        async def stop_during_sleep(delay):
+            delays.append(delay)
+            adapter._running = False
+
+        monkeypatch.setattr(channel, "asyncio", SimpleNamespace(sleep=stop_during_sleep))
+        try:
+            await inbox.put(update)
+            with pytest.raises(RuntimeError, match="synthetic handler failure"):
+                await adapter._durable(callback)(await inbox.get(), None)
+            inbox.task_done()
+            assert callback.await_count == 1 and delays == [1]
+            assert not inbox.processed(202) and not adapter._reached_publish
+        finally:
+            inbox.close()
+
+    asyncio.run(run())

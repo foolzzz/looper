@@ -255,7 +255,7 @@ def test_held_chat_reply_survives_restart(agent_db, tmp_path, monkeypatch, chann
         await manager.start(bus)
         try:
             if channel == "telegram":
-                update = SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id),
+                update = SimpleNamespace(update_id=1, effective_chat=SimpleNamespace(id=chat_id),
                                          effective_user=SimpleNamespace(id=7, username="sender"),
                                          message=SimpleNamespace(text="hello", message_id=41, reply_to_message=None))
                 await inbound._on_message(update, None)
