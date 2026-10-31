@@ -56,6 +56,17 @@ def test_step_seats_include_the_reviewer_and_each_review_role() -> None:
 # --- TaskPlan unit tests ---
 
 
+@pytest.mark.parametrize("passed", [True, False])
+def test_review_report_keeps_verdict_summary_and_findings(passed: bool, tmp_path: Path) -> None:
+    agent = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+    step = PlanStep(step_id="s1", index=0, instruction="Inspect", reviewer_id="r1")
+    assert agent._review_report(step, {"passed": passed, "summary": "Checked the result.",
+                                       "findings": ["One finding."]}) == [
+        "Review of step s1 by r1:", f"- passed: {'yes' if passed else 'no'}",
+        "- summary: Checked the result.", "- finding: One finding.",
+    ]
+
+
 class TestTaskPlan:
     def test_completed_not_treated_as_done(self) -> None:
         plan = TaskPlan(
