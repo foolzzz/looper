@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.52] - 2026-10-31
+
+### Added
+
+- **Keeper control protocol 1.0 and an asyncio client.** A keeper listens on `keeper.sock` in its run directory (JSON-RPC 2.0, one fenced controller by epoch, stream subscriptions from any offset, stdin writes with an expected offset, signals, `child/end`, an orphan timer tied to controller presence). `looper.agents.keeper.client.KeeperClient` talks to it. The control plane does not use it yet. ([#1016](https://github.com/foolzzz/looper/pull/1016))
+
 ## [2.14.51] - 2026-10-31
 
 ### Added
