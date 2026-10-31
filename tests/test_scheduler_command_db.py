@@ -141,6 +141,34 @@ def test_command_success_records_exit_times_log_and_no_task(monkeypatch, tmp_pat
     run_scheduled(test, monkeypatch, tmp_path)
 
 
+@pytest.mark.parametrize("restart", [False, True])
+def test_nul_output_settles_and_allows_the_next_trigger(monkeypatch, tmp_path, restart):
+    async def test(env: ScheduleEnv):
+        sid = await _command(env, r"printf 'first\000second\000'")
+        run = await _fire(env, sid)
+        process = env.scheduler._commands._owned[run["id"]]
+        assert await asyncio.to_thread(process.wait, timeout=5) == 0
+        directory = env.runtime_root / ".local" / "command-runs" / run["id"]
+        # Existing exit records must also settle after an upgrade or restart.
+        assert json.loads((directory / "exit.json").read_text())["tail"] == "first\0second\0"
+        if restart:
+            await env.scheduler.stop()
+            env.scheduler = Scheduler(bus=env.bus, clock=env.clock, runtime_root=env.runtime_root)
+            await asyncio.to_thread(env.scheduler._commands.prepare)
+        [finished] = await _ended(env, sid)
+        assert finished["id"] == run["id"]
+        assert finished["status"] == "succeeded" and finished["exit_code"] == 0
+        assert finished["finished_at"]
+        assert finished["log_tail"] == "firstsecond"
+        assert finished["log_bytes"] == 13 and not finished["log_truncated"]
+        assert (env.runtime_root / finished["log_path"]).read_bytes() == b"first\0second\0"
+        assert not directory.exists()
+        await _fire(env, sid)
+        rows = await _ended(env, sid, count=2)
+        assert len(rows) == 2 and all(row["status"] == "succeeded" for row in rows)
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
 def test_nonzero_command_exit_counts_one_failure(monkeypatch, tmp_path):
     async def test(env: ScheduleEnv):
         sid = await _command(env, "exit 3")

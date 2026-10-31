@@ -977,8 +977,10 @@ class Scheduler:
             fields["started_at"] = obs.started_at
         elif isinstance(obs, Finished):
             status, at, error = obs.status, obs.ended_at, obs.error
+            # PostgreSQL TEXT rejects NUL; keep raw output in the log file and exit record.
             fields = {"started_at": obs.started_at, "exit_code": obs.exit_code, "exit_signal": obs.signal,
-                      "log_bytes": obs.log_bytes, "log_truncated": obs.log_truncated, "log_tail": obs.tail}
+                      "log_bytes": obs.log_bytes, "log_truncated": obs.log_truncated,
+                      "log_tail": obs.tail.replace("\0", "")}
         else:
             assert isinstance(obs, Lost)
             if self._commands is not None:
