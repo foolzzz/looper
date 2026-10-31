@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.34] - 2026-10-31
+
+### Fixed
+
+- **A failed `ps` no longer kills live command runs, and queued catch-up fires keep `missed_since`.** A non-zero, timed-out, failed or empty `ps` is now an unknown observation: the run is left alone and retried on the next tick. A runner whose recorded process is confirmed gone is lost at once instead of after the 60-second start grace. A catch-up fire that waits in the overlap queue keeps its `missed_since` (new nullable column `schedule_runs.missed_since`, added by one additive migration), so `LOOPER_SCHEDULE_MISSED_SINCE` is set when it starts. ([#958](https://github.com/foolzzz/looper/pull/958))
+- **The probe service install checks the port the service really uses and keeps its unit.** Install uses an explicit `--port`, else the installed unit's explicit port, else the ops file's; the readiness wait connects to the configured host (`::` through `::1`). A failed reinstall no longer deletes the probe unit first; `looper service restart` recreates a missing or stale probe unit when `[probe]` is configured; uninstall stops the probe before removing units and does not fail when none exists. ([#961](https://github.com/foolzzz/looper/pull/961))
+
+No model-visible change: no prompt, tool or message text given to a model changes.
+
 ## [2.14.33] - 2026-10-31
 
 ### Fixed
