@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import posixpath
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -214,8 +215,11 @@ def _manifest(files: Mapping[str, bytes], *, packaged: bool) -> Manifest:
 
 
 def _git(repo: Path, *args: str, data: bytes | None = None) -> bytes:
+    # Isolated service environments may omit system tools from PATH. Keep Git
+    # available for distinguishing distributed locks from locally generated ones.
+    git = shutil.which("git") or shutil.which("git", path=os.defpath) or "git"
     try:
-        return subprocess.run(["git", "-C", str(repo), *args], input=data, stdout=subprocess.PIPE,
+        return subprocess.run([git, "-C", str(repo), *args], input=data, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, check=True, timeout=30).stdout
     except subprocess.SubprocessError as exc:
         raise ValueError("cannot read target Git tree: " + " ".join(args[:2])) from exc

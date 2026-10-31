@@ -73,6 +73,20 @@ def test_manifest_round_trip_preserves_all_fingerprints():
     assert Manifest.from_dict(manifest.to_dict()) == manifest
 
 
+@pytest.mark.parametrize("tracked", [False, True], ids=["generated-lock", "distributed-lock"])
+def test_runtime_fingerprint_with_an_isolated_path(component_tree, tmp_path, monkeypatch, tracked):
+    before = runtime_fingerprint(component_tree)
+    (component_tree / "uv.lock").write_text("version = 1\n")
+    if tracked:
+        _git(component_tree, "add", "uv.lock")
+    expected = runtime_fingerprint(component_tree)
+    assert (expected != before) is tracked
+    empty_bin = tmp_path / "bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("PATH", str(empty_bin))
+    assert runtime_fingerprint(component_tree) == expected
+
+
 def _git(root: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(root), *args], check=True, capture_output=True, text=True, timeout=10,

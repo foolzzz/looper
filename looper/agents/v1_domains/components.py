@@ -9,7 +9,7 @@ _ADOPTION = _object({"run_manifest_version": _INT, "work_contract": _STR, "revie
 RESULTS = {}
 OPERATIONS = (Operation(
     "system.components", "POST", "/api/v1/system/components", "Read loaded component fingerprints.",
-    "Read startup control-plane and adoption fingerprints, plus current served dashboard source and asset fingerprints.",
+    "Read loaded component fingerprints. Includes startup control-plane and adoption fingerprints, plus current served dashboard source and asset fingerprints.",
     None, _object({"version": _STR, "loaded_at": _STR, "components": _HASHES,
                    "adoption": _ADOPTION, "verification": _HASHES}), risk="read", operator_only=True,
     audit_operator=False),)

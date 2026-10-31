@@ -21,7 +21,7 @@ OPERATIONS = (
                       ["scope"], closed=True), DRAIN, risk="write", operator_only=True,
               audit_operator=False),
     Operation("system.drain_status", "POST", "/api/v1/system/drain_status", "Read drain status and blockers.",
-              "Read drain status and blockers, renewing the 30-second controller lease.", _object({}, closed=True), DRAIN, risk="read", operator_only=True),
+              "Read drain status and blockers. Renew the 30-second controller lease.", _object({}, closed=True), DRAIN, risk="read", operator_only=True),
     Operation("system.drain_cancel", "POST", "/api/v1/system/drain_cancel", "Cancel drain and resume admission.",
               "Cancel drain and resume admission. Resume held messages and runs.",
               _object({}, closed=True), DRAIN, risk="write",
