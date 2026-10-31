@@ -198,6 +198,7 @@ class TelegramChannelAdapter(ChannelAdapter):
                 logger.warning("telegram set_my_commands failed", exc_info=True)
             await self._app.start()
             await self._app.updater.start_polling(drop_pending_updates=False)  # type: ignore[union-attr]
+            self._inbox.polling_started()
         except BaseException:
             await self.stop()
             raise
@@ -221,6 +222,14 @@ class TelegramChannelAdapter(ChannelAdapter):
         if self._app:
             updater = self._app.updater
             if updater is not None and updater.running:
+                if self._inbox is not None:
+                    # Persist before awaiting shutdown, including messages arriving
+                    # while the last long poll winds down. Telegram dates use seconds.
+                    try:
+                        self._inbox.polling_stopped(int(datetime.now(timezone.utc).timestamp()))
+                    except Exception:
+                        logger.warning("%s: telegram polling stop boundary could not be saved",
+                                       self._channel_id, exc_info=True)
                 await cleanup("updater.stop", updater.stop)
             if self._app.running:
                 await cleanup("stop", self._app.stop)
@@ -439,7 +448,9 @@ class TelegramChannelAdapter(ChannelAdapter):
             message = update.effective_message
             date = getattr(message, "date", None)
             age = (datetime.now(timezone.utc) - date).total_seconds() if date is not None else 0
-            if age > self._backlog_max_age_seconds:
+            stopped_at = self._inbox.previous_polling_stopped_at
+            during_downtime = date is not None and stopped_at is not None and date.timestamp() >= stopped_at
+            if age > self._backlog_max_age_seconds and not during_downtime:
                 logger.warning("%s: stale Telegram update_id=%s age_seconds=%.0f backlog_max_age_seconds=%s ignored",
                                self.channel_id, update.update_id, age, self._backlog_max_age_seconds)
             else:

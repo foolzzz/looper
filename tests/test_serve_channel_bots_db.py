@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -469,7 +470,7 @@ def test_first_successful_bot_owns_identity_and_failed_listener_is_stopped(
                                                      ("manager-review", True)])
 def test_startup_bot_backlog_reaches_only_an_enabled_manager(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, channel_type: str, manager_id: str, enabled: bool,
-    first_fails: bool,
+    first_fails: bool, caplog: pytest.LogCaptureFixture,
 ) -> None:
     from unittest.mock import AsyncMock, MagicMock
 
@@ -478,9 +479,10 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
     from looper.agents.channels import lark_cli
     from looper.agents.channels.lark import LarkChannelAdapter
     from looper.agents.channels.telegram import TelegramChannelAdapter
+    from looper.agents.channels.telegram_inbox import TelegramInbox
     from looper.agents.runtimes import ADAPTERS, codex_login, grok_login
     from looper.agents.tiers.manager import TURNED_OFF_REPLY
-    from tests.test_agent_channels import _lark_event, _tg_update
+    from tests.test_agent_channels import _lark_event
     from tests.test_channel_post import _Bot
     from tests.test_lark_transport import StubTransport
 
@@ -506,6 +508,23 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
         incoming: list[str] = ["sent while offline"] if channel_type == "telegram" else []
         bot, transport = _Bot(), StubTransport()
         pending = incoming.copy()
+        update_id = 0
+        stopped_at = int(time.time()) - 1200
+
+        async def telegram_update(adapter: Any, text: str, *, sent_at: int | None = None,
+                                  duplicate: bool = False) -> None:
+            from telegram import Update
+
+            nonlocal update_id
+            update_id += 1
+            update = Update.de_json({"update_id": update_id, "message": {
+                "message_id": update_id, "date": int(time.time()) if sent_at is None else sent_at,
+                "text": text, "chat": {"id": 7, "type": "private"},
+                "from": {"id": 7, "is_bot": False, "first_name": "Synthetic"}}}, bot)
+            for _ in range(2 if duplicate else 1):
+                await adapter._inbox.put(update)
+                await adapter._durable(adapter._on_message)(await adapter._inbox.get(), None)
+                adapter._inbox.task_done()
 
         if channel_type == "telegram":
             from telegram.ext import ApplicationBuilder
@@ -527,7 +546,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             text = f"backlog {len(incoming)}"
             incoming.append(text)
             if channel_type == "telegram":
-                await adapter._on_message(_tg_update(7, text), None)
+                await telegram_update(adapter, text)
             else:
                 await adapter._handle_lark_event(_lark_event(OPEN_ID, text, message_id=f"om_{len(incoming)}"))
 
@@ -535,10 +554,15 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             if first_fails and adapter.channel_id == f"channel-{channel_type}":
                 raise RuntimeError("synthetic startup failure")
             if channel_type == "telegram":
+                inbox = TelegramInbox(tmp_path / ".local" / "telegram" / adapter.channel_id / "111.sqlite3")
+                inbox.polling_stopped(stopped_at)
+                inbox.close()
+
                 async def start_polling(*, drop_pending_updates: bool) -> None:
                     assert drop_pending_updates is False
                     for text in pending:
-                        await adapter._on_message(_tg_update(7, text), None)
+                        await telegram_update(adapter, text, sent_at=stopped_at + 10, duplicate=True)
+                    await telegram_update(adapter, "stale private content", sent_at=stopped_at - 601)
                     pending.clear()
 
                 app.updater.start_polling = start_polling
@@ -630,6 +654,8 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             assert len(incoming) == (6 if channel_type == "telegram" else 5)
             if channel_type == "telegram":
                 assert pending == []
+                assert "stale Telegram update_id=" in caplog.text
+                assert "stale private content" not in caplog.text
             queued = await adapters[0]._bus.drain_queue(manager_id)
             replies = [s["text"] for s in bot.sent] if channel_type == "telegram" else [
                 fields["text"] for method, fields in transport.calls if method == "send" and "text" in fields]

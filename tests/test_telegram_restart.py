@@ -6,7 +6,9 @@ import asyncio
 import json
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -24,9 +26,9 @@ class BotAPI:
         self.drops: list[bool] = []
         self.changed = asyncio.Event()
 
-    def send(self, update_id: int, text: str, *, age: int = 0) -> None:
+    def send(self, update_id: int, text: str, *, age: int = 0, sent_at: int | None = None) -> None:
         self.updates.append({"update_id": update_id, "message": {
-            "message_id": update_id, "date": int(time.time()) - age, "text": text,
+            "message_id": update_id, "date": int(time.time()) - age if sent_at is None else sent_at, "text": text,
             "chat": {"id": 7, "type": "private"},
             "from": {"id": 7, "is_bot": False, "first_name": "Synthetic"}}})
         self.changed.set()
@@ -67,10 +69,24 @@ class BotAPI:
 
 
 @pytest.mark.parametrize("backlog_seconds", [600, 30])
-def test_restart_delivers_gap_updates_once_and_logs_stale_backlog(tmp_path, monkeypatch, caplog, backlog_seconds):
+@pytest.mark.parametrize("gap_seconds", [0, 1200])
+def test_restart_delivers_gap_updates_once_and_logs_stale_backlog(
+    tmp_path, monkeypatch, caplog, backlog_seconds, gap_seconds,
+):
+    from looper.agents.channels import telegram as channel
     from telegram.request import HTTPXRequest
 
+    now = int(time.time()) - gap_seconds
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(now, tz=tz)
+
+    monkeypatch.setattr(channel, "datetime", Clock)
+
     async def run():
+        nonlocal now
         inbox = tmp_path / ".local" / "telegram" / "channel-telegram" / "0.sqlite3"
         api = BotAPI(inbox)
 
@@ -88,13 +104,15 @@ def test_restart_delivers_gap_updates_once_and_logs_stale_backlog(tmp_path, monk
         first, second, third = adapter(), adapter(), adapter()
         try:
             await first.start(bus)
-            api.send(100, "before restart")
+            api.send(99, "stale on first start", sent_at=now - backlog_seconds - 1)
+            api.send(100, "before restart", sent_at=now)
             queue = bus.get_queue("manager")
             before = await asyncio.wait_for(queue.get(), 2)
             await first.stop()
+            now += gap_seconds
             bus.settle(before.message_id)
-            api.send(101, "during gap")
-            api.send(102, "stale private content", age=backlog_seconds + 1)
+            api.send(101, "during gap", sent_at=now - max(0, gap_seconds - 10))
+            api.send(102, "stale private content", sent_at=now - gap_seconds - backlog_seconds - 1)
             await second.start(bus)
             gap = await asyncio.wait_for(queue.get(), 2)
             assert gap.payload["text"] == "during gap"
@@ -110,16 +128,55 @@ def test_restart_delivers_gap_updates_once_and_logs_stale_backlog(tmp_path, monk
             assert api.drops == [False, False, False]
             assert 103 in api.offsets
             assert "stale Telegram update_id=102" in caplog.text
+            assert "stale Telegram update_id=99" in caplog.text
             assert "stale private content" not in caplog.text
             with sqlite3.connect(inbox) as db:
                 assert db.execute("SELECT update_id, payload, processed FROM updates ORDER BY update_id").fetchall() == [
-                    (100, None, 1), (101, None, 1), (102, None, 1)]
+                    (99, None, 1), (100, None, 1), (101, None, 1), (102, None, 1)]
         finally:
             for item in (first, second, third):
                 await item.stop()
             await bus.shutdown()
 
     asyncio.run(asyncio.wait_for(run(), 10))
+
+
+def test_crash_does_not_reuse_an_older_clean_stop_boundary(tmp_path, caplog):
+    from telegram import Bot, Update
+
+    async def run():
+        path = tmp_path / "inbox.sqlite3"
+        stopped_at = int(time.time()) - 2400
+        first = TelegramInbox(path)
+        first.polling_stopped(stopped_at)
+        first.close()
+        second = TelegramInbox(path)
+        assert second.previous_polling_stopped_at == stopped_at
+        second.polling_started()
+        assert second.previous_polling_stopped_at == stopped_at
+        # Simulate process loss: close without recording a clean polling stop.
+        second.close()
+        third = TelegramInbox(path)
+        adapter = TelegramChannelAdapter(bot_token="0:synthetic", allowlist=SenderAllowlist(
+            "channel-telegram", frozenset({"7"})))
+        adapter._inbox = third
+        try:
+            assert third.previous_polling_stopped_at is None
+            update = Update.de_json({"update_id": 23, "message": {
+                "message_id": 23, "date": stopped_at + 10,
+                "chat": {"id": 7, "type": "private"}, "text": "old pending content"}}, Bot("0:synthetic"))
+            await third.put(update)
+            callback = AsyncMock()
+            await adapter._durable(callback)(await third.get(), None)
+            third.task_done()
+            callback.assert_not_awaited()
+            assert third.processed(23)
+            assert "stale Telegram update_id=23" in caplog.text
+            assert "old pending content" not in caplog.text
+        finally:
+            third.close()
+
+    asyncio.run(run())
 
 
 def test_acknowledged_update_replays_when_handler_never_started(tmp_path):

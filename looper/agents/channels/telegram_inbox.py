@@ -13,7 +13,8 @@ class TelegramInbox(asyncio.Queue):
     """SQLite commits precede Queue.put; processed ids survive journal compaction and restart.
 
     A planned stop drains Application's handlers. Pending rows additionally protect
-    updates acknowledged by polling before their handler started.
+    updates acknowledged by polling before their handler started. A clean polling
+    stop also saves the boundary after which offline messages bypass the age cap.
     """
 
     def __init__(self, path: Path) -> None:
@@ -23,7 +24,21 @@ class TelegramInbox(asyncio.Queue):
         self._db.execute("PRAGMA synchronous = FULL")
         self._db.execute("CREATE TABLE IF NOT EXISTS updates ("
                          "update_id INTEGER PRIMARY KEY, payload TEXT, processed INTEGER NOT NULL DEFAULT 0)")
+        self._db.execute("CREATE TABLE IF NOT EXISTS polling ("
+                         "id INTEGER PRIMARY KEY CHECK (id = 1), stopped_at INTEGER NOT NULL)")
         self._db.commit()
+        row = self._db.execute("SELECT stopped_at FROM polling WHERE id = 1").fetchone()
+        self.previous_polling_stopped_at: int | None = row[0] if row else None
+
+    def polling_started(self) -> None:
+        # A crash while polling has no clean stop boundary. Do not reuse an older
+        # shutdown's exemption on the next start; this process keeps its snapshot.
+        with self._db:
+            self._db.execute("DELETE FROM polling")
+
+    def polling_stopped(self, stopped_at: int) -> None:
+        with self._db:
+            self._db.execute("INSERT OR REPLACE INTO polling (id, stopped_at) VALUES (1, ?)", (stopped_at,))
 
     async def put(self, update: Any) -> None:
         # Application's private stop sentinel is not a Telegram update.
