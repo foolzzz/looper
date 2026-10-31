@@ -303,6 +303,8 @@ class DrainStatus: phase: DrainPhase; scope: DrainScope | None; since: datetime 
 
 **判定排空完成（DRAINED）：** 所有 Manager 的 `busy()` 都是 false；每个 Planner 的 `_turn_lock` 都空闲，而且 `bus.pending_count(planner_id) == 0`；没有正在做前置检查的定时运行；没有正在进行的等待检查；没有正在跑的咨询；没有正在启动的运行。scope 是 `runs` 时，还要求 WorkerPool 里没有正在跑的运行；scope 是 `turns` 时，只要求没有不可托管的运行（S1）。Claude 自己发起的 Manager 回合不算在 `busy()` 里（`manager.py:1005-1008`），排空不等它们，重启时照今天的方式处理。
 
+**任务进度的回复路由：** 与 web 回复一样，重放依赖消息携带的 `reply_route`，不依赖渠道实例的 correlation 缓存。Manager 创建 Telegram/Lark 任务时把原聊天和 Lark 原消息 ID 存为 `tasks.origin_reply_route`；TaskRouter 的任务报告和 Manager 的进度消息沿用该路由及完整的渠道地址。缓存命中时仍按原方式发送，缓存缺失时 Telegram 发往原聊天，Lark 回复原消息；任务报告处理后由总线确认，后续启动不再重放。`STATUS_UPDATE` 本身仍是瞬时消息；本保证覆盖 drain 持有的 `TASK_ACCEPTED`、`GOAL_STATUS` 在重启后的重放，不保证平台已收到但总线尚未确认时崩溃的严格 exactly-once。升级前未保存原消息路由的任务保留旧行为，无法补出历史 Lark 消息 ID。
+
 **期限：** `turns` 默认 180 秒，`runs` 默认 1200 秒。到期后部署照常往下走，剩下的运行像今天一样被中断，报告里逐个列出来；`--no-force` 时放弃这次部署，回到 SERVING。
 
 **接口（要操作者令牌，放在 v1 的 system 域里，loopercli 自动生成对应命令）：** 域操作统一使用 POST（现有 `system.status` 见 `looper/agents/v1_domains/status.py:29-30`）：

@@ -92,6 +92,8 @@ class Task:
     # The Manager it belongs to, and the web chat thread it was asked in ('' when it was not asked in one).
     manager_id: str = "manager"
     origin_thread: str = ""
+    # The original chat/message for progress, independent of the task's end-notice recipient.
+    origin_reply_route: dict[str, str] | None = None
 
     @classmethod
     def from_row(cls, task_id: str, row: dict[str, Any]) -> Task:
@@ -111,6 +113,7 @@ class Task:
             workspace_base=row.get("workspace_base") or "",
             manager_id=row.get("manager_id") or "manager",
             origin_thread=row.get("origin_thread") or "",
+            origin_reply_route=row.get("origin_reply_route"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -476,7 +479,10 @@ class TaskRouter:
     def _report_metadata(envelope: MessageEnvelope, task: Task | None) -> dict[str, Any]:
         if task is None:
             return envelope.metadata
-        return {**envelope.metadata, "origin_thread": task.origin_thread, "task_title": task.title}
+        return {**envelope.metadata,
+                "origin_channel_id": task.origin_channel_id or envelope.metadata.get("origin_channel_id"),
+                "origin_thread": task.origin_thread, "task_title": task.title,
+                **({"reply_route": task.origin_reply_route} if task.origin_reply_route else {})}
 
     async def _handle_task_accepted(self, envelope: MessageEnvelope) -> None:
         assert self._bus is not None

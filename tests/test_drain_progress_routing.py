@@ -1,0 +1,174 @@
+"""Task reports held by drain retain their original reply destination across restart."""
+
+import asyncio
+import json
+from types import SimpleNamespace
+
+import pytest
+from telegram import Bot
+from telegram.request import BaseRequest
+
+from looper.agents.bus import MessageBus
+from looper.agents.channels.allowlist import SenderAllowlist
+from looper.agents.channels.lark import LarkChannelAdapter
+from looper.agents.channels.telegram import TelegramChannelAdapter
+from looper.agents.drain import DrainScope, DrainState
+from looper.agents.message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageEnvelope, MessageType
+from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+from looper.agents.tiers.task import Task, TaskRouter
+from tests.db_support import until
+from tests.test_lark_transport import StubTransport
+
+
+class _TelegramAPI(BaseRequest):
+    """Exercise Bot's real serialization and response handling without network access."""
+
+    def __init__(self):
+        self.sent = []
+
+    @property
+    def read_timeout(self):
+        return 1
+
+    async def initialize(self):
+        pass
+
+    async def shutdown(self):
+        pass
+
+    async def do_request(self, url, method, request_data=None, **kwargs):
+        operation = url.rsplit("/", 1)[-1]
+        if operation == "getMe":
+            result = {"id": 1, "is_bot": True, "first_name": "Synthetic"}
+        else:
+            assert operation == "sendMessage", operation
+            values = request_data.parameters
+            self.sent.append(values)
+            result = {"message_id": 42, "date": 0, "chat": {"id": values["chat_id"], "type": "private"},
+                      "text": values["text"]}
+        return 200, json.dumps({"ok": True, "result": result}).encode()
+
+
+@pytest.mark.parametrize("channel,chat,channel_id", [
+    ("telegram", "99", "channel-telegram"), ("telegram", "-99", "channel-telegram-2"),
+    ("lark", "oc_group", "channel-lark"), ("lark", "oc_dm", "channel-lark-2"),
+    ("lark_bot", "oc_group", "channel-lark_bot"),
+])
+@pytest.mark.parametrize("kind", [MessageType.TASK_ACCEPTED, MessageType.GOAL_STATUS])
+@pytest.mark.parametrize("restart", [False, True])
+def test_task_progress_reaches_original_chat_once(agent_db, tmp_path, monkeypatch, channel, chat, channel_id,
+                                                 kind, restart):
+    text = "任务已分解为 3 个步骤，开始执行..." if kind is MessageType.TASK_ACCEPTED else "进度更新: 1/3 完成"
+    route = {"chat_id": chat, **({"reply_to": "om_question"} if channel != "telegram" else {})}
+    api = _TelegramAPI()
+    bot = Bot("0:synthetic", request=api, get_updates_request=_TelegramAPI()) if channel == "telegram" else None
+    transport = StubTransport()
+
+    def adapter(bus):
+        allowlist = SenderAllowlist(channel_id, frozenset({"7"}))
+        if channel == "telegram":
+            result = TelegramChannelAdapter(allowlist=allowlist, channel_id=channel_id)
+            result._app = SimpleNamespace(bot=bot)
+        else:
+            result = LarkChannelAdapter(allowlist=allowlist, channel_type=channel, channel_id=channel_id,
+                                        transport=transport, runtime_root=tmp_path)
+        result._bus, result._running = bus, True
+        return result
+
+    async def consume(bus, outbound):
+        outbound._outbound_task = asyncio.create_task(outbound._outbound_loop())
+        try:
+            await until(lambda: bool(api.sent or transport.calls), timeout=3)
+            await until(lambda: not bus.journal.undelivered(), timeout=3)
+            assert bus.pending_count(channel_id) == 0
+        finally:
+            outbound._outbound_task.cancel()
+            await asyncio.gather(outbound._outbound_task, return_exceptions=True)
+
+    async def run():
+        bus = MessageBus(runtime_root=tmp_path)
+        await bus.start()
+        drain = DrainState()
+        held = asyncio.Event()
+        wait = drain.wait_serving
+
+        async def waiting():
+            held.set()
+            await wait()
+
+        monkeypatch.setattr(drain, "wait_serving", waiting)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path, drain=drain)
+        outbound = adapter(bus)
+        if restart:
+            drain.begin(DrainScope.TURNS)
+        else:
+            # A live correlation wins over durable routing, including the Lark group's existing broadcast.
+            outbound._correlation_chat["c1"] = 101 if channel == "telegram" else "oc_live"
+            if channel != "telegram":
+                outbound._group_message["c1"] = "om_live"
+        router = TaskRouter(runtime_root=tmp_path)
+        router._bus = bus
+        router._tasks["t1"] = Task.from_row("t1", {
+            "requirement": "finish", "project_id": "p1", "correlation_id": "c1",
+            "origin_channel_id": channel_id, "origin_reply_route": route,
+        })
+        report = MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=kind,
+            payload={"task_id": "t1", "status": "executing", "step_count": 3, "summary": text},
+            correlation_id="c1")
+        await manager.start(bus)
+        try:
+            if kind is MessageType.TASK_ACCEPTED:
+                await router._handle_task_accepted(report)
+            else:
+                await router._handle_planner_status(report)
+            if restart:
+                await asyncio.wait_for(held.wait(), 2)
+                assert not api.sent and not transport.calls
+                (pending,) = bus.journal.undelivered()
+                assert pending.message_type is kind and pending.target == MANAGER_ADDRESS
+            else:
+                await consume(bus, outbound)
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+        if restart:
+            bus = MessageBus(runtime_root=tmp_path)
+            await bus.start()
+            manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+            outbound = adapter(bus)
+            assert not outbound._correlation_chat
+            await manager.start(bus)
+            try:
+                await consume(bus, outbound)
+            finally:
+                await manager.stop()
+                await bus.shutdown()
+
+        if channel == "telegram":
+            (sent,) = api.sent
+            assert sent["text"] == text
+            assert sent["chat_id"] == (int(chat) if restart else 101)
+        elif restart:
+            assert transport.calls == [("reply", {"message_id": "om_question", "markdown": text})]
+        else:
+            assert transport.calls == [("send", {"chat_id": "oc_live", "markdown": text})]
+
+        # Another startup replays the same journal; the acknowledged task report cannot send again.
+        bus = MessageBus(runtime_root=tmp_path)
+        await bus.start()
+        try:
+            assert not bus.journal.undelivered()
+            assert bus.pending_count("manager") == bus.pending_count(channel_id) == 0
+        finally:
+            await bus.shutdown()
+
+    async def main():
+        if bot is not None:
+            async with bot:
+                await run()
+        else:
+            await run()
+
+    asyncio.run(asyncio.wait_for(main(), 10))

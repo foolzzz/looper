@@ -735,6 +735,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 2026-10-30 | DSH runner 瞬态重试（本分支）：在 `llm/stream` 内最多重试 3 次，逐次使用独立 request id、预算授权和计量；仅无模型输出时按 HTTP 状态及固定 SDK 的类型化错误码表重试，包含 DeepSeek overload。退避为 1/2/4 秒加至多 20% jitter，`Retry-After` 上限 30 秒，cancel、close 或 settle 立即中断等待；耗尽保留最后错误和尝试次数，逐次诊断不含 provider 消息或凭据。已检查 `0.2.1-rc.2` 源码并用安装版 SDK 与 loopback provider 验证：重复 `next()` 会创建新的 adapter stream、HTTP 请求和鉴权，不需重新调用一次性的 prepared-call 入口。新增 22 项覆盖重试、计费、拒绝、中断、输出边界与错误分类；原截断响应夹具按 `TRANSPORT` 重试更新。`-n 2` 定向回归共 201 项分批通过（重试 22 项、请求 26 项完成复测；中途超时批次不计通过），含独立数据库上的 DSH serve 预算/取消/崩溃验证。Dashboard、Telegram、Lark 和 CLI 共用 runner 行为，无需新增入口；未改 Pi、未调用真实 provider。 |
 
+| 2026-10-31 | drain 后任务进度回复路由（本分支）：创建 Telegram/Lark 任务时持久化原聊天和 Lark 原消息 ID，任务报告及 Manager 进度沿用 web 的 `reply_route` 信封机制，渠道缓存命中时保留原行为；Dashboard 和 CLI 入口不变。Manager 等 HTTP 工具端点就绪后才消费重放消息，避免启动竞态把用户消息确认为工具不可用的错误回复；新增 27 项覆盖重启投递、再次启动不重复、实时发送、schema 升级及启动等待/取消，`-n 2` 定向回归共 1005 项通过，含独立数据库上的真实 serve drain 验证。未保存过原路由的旧任务无法补出历史消息 ID，详见热升级 RFC §7.3。 |
+
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。
