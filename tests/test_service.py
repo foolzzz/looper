@@ -476,7 +476,7 @@ def test_uninstall_waits_for_running_probe_before_removing_units(tmp_path, check
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
-def test_uninstall_keeps_units_if_probe_does_not_stop(tmp_path, checkout, monkeypatch, capsys, system):
+def test_uninstall_removes_server_if_probe_does_not_stop(tmp_path, checkout, monkeypatch, capsys, system):
     fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
     host = _host(tmp_path, checkout, fake, system=system)
     root = tmp_path / "runtime"
@@ -493,24 +493,29 @@ def test_uninstall_keeps_units_if_probe_does_not_stop(tmp_path, checkout, monkey
 
     host.run = run
     assert _looper(monkeypatch, host, "uninstall", "--label", LABEL) == 1
-    assert capsys.readouterr().err
+    assert "probe cleanup failed:" in capsys.readouterr().err
     assert all(path.is_file() for path in _probe_paths(host))
-    assert service.manager(host, LABEL).unit_path.is_file() and fake.serving
+    assert not service.manager(host, LABEL).unit_path.exists() and not fake.serving
 
 
 def test_missing_probe_units_do_not_reload_systemd(tmp_path, checkout):
     fake = FakeSystemd()
     host = _host(tmp_path, checkout, fake, system="Linux")
 
+    fake.probe_active = fake.probe_service_active = True
     def run(argv):
-        pytest.fail(f"no probe is installed: unexpected command {argv}")
-
+        fake(argv)
+        return subprocess.CompletedProcess(argv, 1, "", "unit file missing")
     host.run = run
     assert "not installed" in service.uninstall(host, label=LABEL)
+    assert fake.commands() == [f"disable --now {LABEL}-probe.timer", f"stop {LABEL}-probe.service"]
+    assert not fake.probe_active and not fake.probe_service_active
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
-def test_install_and_restart_check_ipv6_loopback_for_wildcard_host(tmp_path, checkout, monkeypatch, system):
+@pytest.mark.parametrize("answer", [{"status": "running"}, {"status": "unauthorized"}, None])
+def test_install_and_restart_check_ipv6_loopback_for_wildcard_host(tmp_path, checkout, monkeypatch, capsys,
+                                                                system, answer):
     fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
     host = _host(tmp_path, checkout, fake, system=system)
     root = tmp_path / "runtime"
@@ -528,8 +533,16 @@ def test_install_and_restart_check_ipv6_loopback_for_wildcard_host(tmp_path, che
 
     host.port_in_use, host.get_status = port_in_use, get_status
     assert _install(monkeypatch, host, root, "--timeout", "2") == 0
+    assert "serving    http://[::1]:9876" in capsys.readouterr().out
     assert _looper(monkeypatch, host, "restart", "--label", LABEL, "--timeout", "2") == 0
+    assert "serving http://[::1]:9876" in capsys.readouterr().out
     assert addresses == [("connect", "::1"), ("status", "::1")] * 2
+    def status(port, token, address):
+        assert address == "::1"
+        return answer
+    host.get_status = status
+    assert _looper(monkeypatch, host, "status", "--label", LABEL) == (1 if answer is None else 0)
+    assert "http://[::1]:9876/api/v1/system/status:" in capsys.readouterr().out
 
 
 def test_start_checks_dial_ipv6_loopback(monkeypatch):
@@ -558,6 +571,27 @@ def test_start_checks_dial_ipv6_loopback(monkeypatch):
     monkeypatch.setattr(service.socket, "socket", Socket)
     assert service._get_status(18834, None, "::1") == {"status": "running"}
     assert service._port_in_use(18834, "::1")
+
+
+@pytest.mark.parametrize("failure", [None, service.ServiceError("unreadable ops"), OSError("missing unit")])
+def test_status_falls_back_to_loopback_without_readable_ops(tmp_path, checkout, monkeypatch, failure):
+    fake = FakeLaunchd()
+    host = _host(tmp_path, checkout, fake, system="Darwin")
+    assert _install(monkeypatch, host, tmp_path / "runtime") == 0
+
+    def ops(mgr):
+        if failure:
+            raise failure
+        return None
+
+    def get_status(port, token, address):
+        assert address == "127.0.0.1"
+        return {"status": "running"}
+
+    monkeypatch.setattr(service.Launchd, "ops", ops)
+    host.get_status = get_status
+    code, report = service.status(host, label=LABEL)
+    assert code == 0 and "http://127.0.0.1:9876/api/v1/system/status: running" in report
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
@@ -680,6 +714,103 @@ def test_probe_load_failure_keeps_service_successful_and_cleans_units(tmp_path, 
     assert fake.serving and not any(path.exists() for path in _probe_paths(host))
     assert _looper(monkeypatch, host, "status", "--label", LABEL) == 0
     assert "probe      not installed" in capsys.readouterr().out
+
+
+def test_linux_reinstall_stops_and_confirms_probe_before_writing(tmp_path, checkout, monkeypatch):
+    fake = FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system="Linux")
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    assert _install(monkeypatch, host, root) == 0
+    previous = {path: path.read_bytes() for path in _probe_paths(host)}
+    fake.probe_service_active = True
+    fake.calls.clear()
+    write = service.write_private
+
+    def write_private(path, data):
+        if path in previous:
+            assert not fake.probe_active and not fake.probe_service_active
+            assert {argv[3] for argv in fake.calls if argv[2] == "show"} >= {
+                f"{LABEL}-probe.timer", f"{LABEL}-probe.service"}
+        write(path, data)
+
+    monkeypatch.setattr(service, "write_private", write_private)
+    assert _install(monkeypatch, host, root) == 0
+    assert fake.probe_active
+
+
+def test_uninstall_removes_server_after_probe_reload_failure(tmp_path, checkout, monkeypatch, capsys):
+    fake = FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system="Linux")
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    assert _install(monkeypatch, host, root) == 0
+    unit = service.manager(host, LABEL).unit_path
+
+    def run(argv):
+        if argv[2:] == ["daemon-reload"] and unit.exists() and not any(p.exists() for p in _probe_paths(host)):
+            return subprocess.CompletedProcess(argv, 1, "", "reload rejected")
+        return fake(argv)
+
+    host.run = run
+    assert _looper(monkeypatch, host, "uninstall", "--label", LABEL) == 1
+    error = capsys.readouterr().err
+    assert f"uninstalled {LABEL}; probe cleanup failed:" in error
+    assert "reload rejected" in error and "run uninstall again" in error
+    assert not unit.exists() and not fake.serving
+    assert not any(p.exists() for p in _probe_paths(host))
+    fake.calls.clear()
+    assert _looper(monkeypatch, host, "uninstall", "--label", LABEL) == 0
+    assert fake.commands() == [f"disable --now {LABEL}-probe.timer", f"stop {LABEL}-probe.service"]
+
+
+@pytest.mark.parametrize(("system", "missing"), [("Darwin", None), ("Linux", None),
+                                               ("Linux", "service"), ("Linux", "timer")])
+@pytest.mark.parametrize("restore_fails", [False, True])
+def test_restart_restores_previous_probe_after_update_failure(tmp_path, checkout, monkeypatch, capsys,
+                                                             system, missing, restore_fails):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    assert _install(monkeypatch, host, root) == 0
+    stale = service.build_probe_spec(host, label=LABEL, runtime_root=root, config=root / ops_config.FILE, port=9887)
+    contents = ((service.render_probe_plist(stale),) if system == "Darwin"
+                else tuple(text.encode() for text in service.render_probe_systemd(stale)))
+    previous = dict(zip(_probe_paths(host), contents))
+    for path, data in previous.items():
+        path.write_bytes(data)
+    if missing:
+        path = next(p for p in previous if p.suffix == f".{missing}")
+        path.unlink()
+        del previous[path]
+    capsys.readouterr()
+    restored_loads = []
+
+    def run(argv):
+        if (system == "Darwin" and argv[1] == "bootstrap" and argv[-1].endswith(".probe.plist")
+                or system == "Linux" and argv[2:] == ["enable", "--now", f"{LABEL}-probe.timer"]):
+            restored = {p: p.read_bytes() for p in _probe_paths(host) if p.is_file()} == previous
+            if restored:
+                restored_loads.append(list(argv))
+            if not restored or restore_fails:
+                return subprocess.CompletedProcess(argv, 1, "", "restore rejected" if restored else "update rejected")
+        return fake(argv)
+
+    host.run = run
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
+    output = capsys.readouterr().out
+    assert "probe      failed to update:" in output and "update rejected" in output
+    assert ("restoring it failed:" if restore_fails else "kept the previous probe") in output
+    assert restored_loads and fake.serving
+    assert {p: p.read_bytes() for p in _probe_paths(host) if p.is_file()} == previous
+    if not restore_fails:
+        assert fake.probe.loaded if system == "Darwin" else fake.probe_active
+    # The restored port is stale, so the next restart must attempt the update again.
+    host.run = fake
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
+    assert service._given_port(_probe_argv(host)) == 9876
+    assert fake.probe.loaded if system == "Darwin" else fake.probe_active
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
@@ -897,7 +1028,9 @@ def test_systemd_unit_runs_this_looper_privately_with_the_captured_environment(
                    for line in lines if line.startswith("Environment=")]
     assert dict(item.split("=", 1) for item in environment) == {
         **CAPTURED, "LOOPER_ODD": 'a "quoted" 100% $HOME\\path\nline2'}
-    assert fake.commands()[:3] == ["daemon-reload", f"stop {LABEL}.service", f"enable --now {LABEL}.service"]
+    assert fake.commands()[:5] == ["daemon-reload", f"stop {LABEL}.service",
+                                   f"disable --now {LABEL}-probe.timer", f"stop {LABEL}-probe.service",
+                                   f"enable --now {LABEL}.service"]
     output = capsys.readouterr()
     assert "not copied" in output.out and "LARK_APP_ID" in output.out
     assert "cli_test" not in output.out + output.err and "s3cret" not in output.out + output.err
