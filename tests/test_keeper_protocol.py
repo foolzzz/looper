@@ -834,6 +834,42 @@ sys.stderr.buffer.write(b'error\\x00\\xff' * 1000)
     exercise(check())
 
 
+def test_an_exit_callback_can_gather_rpc_cleanup_after_connection_loss(launch) -> None:
+    async def check():
+        run = launch("""\
+import pathlib, time
+while not pathlib.Path('continue').exists():
+    time.sleep(0.01)
+""")
+        client, events, _ = await connected(run)
+        record_exited = client.on_exited
+        results = []
+
+        async def on_exited(code, sig):
+            record_exited(code, sig)
+            results.extend(await asyncio.gather(
+                client.stdin_close(timeout=2), client.signal(KeeperSignal.TERM, timeout=2),
+                return_exceptions=True))
+            events.order.append("cleanup")
+
+        client.on_exited = on_exited
+        reader, dispatcher = client._reader_task, client._dispatcher_task
+        try:
+            (run.cwd / "continue").touch()
+            await asyncio.wait_for(events.closed.wait(), 5)
+            assert events.exited == [(0, None)]
+            assert events.order == ["exited", "cleanup", "closed"]
+            assert len(results) == 2
+            assert all(isinstance(result, KeeperGone) for result in results)
+            assert client._pending == {}
+            assert (await run.wait())["exit_code"] == 0
+        finally:
+            await client.close()
+        assert reader.done() and dispatcher.done()
+
+    exercise(check())
+
+
 def test_a_data_callback_can_write_to_the_same_interactive_child(launch) -> None:
     async def check():
         run = launch("""\

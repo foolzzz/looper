@@ -112,8 +112,10 @@ class KeeperClient:
                 await writer.drain()
                 return await future
         except (ConnectionError, OSError) as exc:
-            await self.close()
-            # close() has failed every future; retrieve this one's exception too.
+            # A dispatcher callback may be awaiting this RPC in a child task.
+            # Disconnect without joining the dispatcher, which would deadlock.
+            self._disconnect(writer)
+            # Disconnect has failed every future; retrieve this one's exception too.
             if future.done() and not future.cancelled():
                 future.exception()
             raise KeeperGone("keeper connection dropped") from exc
@@ -234,13 +236,16 @@ class KeeperClient:
         except (EOFError, KeeperError, ValueError, KeyError, TypeError, ConnectionError, OSError):
             pass
 
-    def _disconnected(self, writer, available, finished):
+    def _disconnect(self, writer):
         writer.close()
         if self._writer is writer:
             self._writer = None
             for future in self._pending.values():
                 if not future.done():
                     future.set_exception(KeeperGone("keeper connection dropped"))
+
+    def _disconnected(self, writer, available, finished):
+        self._disconnect(writer)
         # Wake the dispatcher without needing space for a sentinel in a full queue.
         finished.set()
         available.set()
