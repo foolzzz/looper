@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.67] - 2026-10-31
+
+### Changed
+
+- **A detached kept run can be replayed and resumed in another WorkerPool.** `WorkerPool.adopt_dir(run_dir, *, expect)` rebuilds a detached run from its manifest, takes its slot again, reattaches to the keeper (`KeptRun.attach`, over the socket or from the files alone), replays the consumed output without side effects, consumes the live output and publishes the result once; `ClaudeRunRecorder.resume` continues the running record. `WorkerPool._execute` is split into `_prepare` and `_consume`. Nothing calls `adopt_dir` at startup yet, so the next start still ends detached runs. No migration. ([#1058](https://github.com/foolzzz/looper/pull/1058))
+
 ## [2.14.66] - 2026-10-31
 
 ### Changed
