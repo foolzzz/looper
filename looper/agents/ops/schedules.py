@@ -421,20 +421,24 @@ async def _starting(call: Call) -> str | None:
 
 
 async def _disabling(call: Call) -> str | None:
-    """Disabling a schedule whose delete this turn refused: the user asked to delete it, not to disable it."""
+    """Ask before disabling a running command schedule, including after a refused delete."""
     row = await _schedule(call.arguments)
-    if row["id"] not in call.turn.refused_deletes or not row["enabled"]:
+    if not row["enabled"]:
+        return None
+    running = await db_schedules.open_runs(db_connection.get_pool(), row["id"]) if row["kind"] == "command" else []
+    refused = row["id"] in call.turn.refused_deletes
+    if not refused and not schedules.blocks_delete(row, running):
         return None
     project = await db_projects.get_project(row["project_id"])
     if project is None:
         raise OpError(ErrorCode.NOT_FOUND, "the schedule's project no longer exists")
     call.confirmation.update(schedule_id=row["id"], schedule_version=db_schedules.configuration_version(
         row, project_work_dir=project["work_dir"]))
-    lines = [f"要停用定时任务「{row['name']}」（项目 {row['project_name']}）吗？",
-             "- 删除没有执行：它的命令正在运行，命令结束后才能删除。",
-             "- 停用后它不再按规则触发；正在运行的命令照常结束。"]
-    if any(run["status"] == db_schedules.QUEUED
-           for run in await db_schedules.open_runs(db_connection.get_pool(), row["id"])):
+    lines = [f"要停用定时任务「{row['name']}」（项目 {row['project_name']}）吗？"]
+    if refused:
+        lines.append("- 删除没有执行：它的命令正在运行，命令结束后才能删除。")
+    lines.append("- 停用后它不再按规则触发；正在运行的命令照常结束。")
+    if any(run["status"] == db_schedules.QUEUED for run in running):
         lines.append("- 它有一次排队中的运行：停用不会取消它，正在运行的命令结束后它就开始；它也结束后才能删除。")
     return "\n".join(lines)
 
@@ -667,7 +671,8 @@ TOOLS: tuple[Tool, ...] = (
                     "its task, or its command; the user confirms first) or disable; run now (the user confirms first); delete "
                     "(the user confirms first; an agent schedule's tasks stay; a command schedule is not deleted while its "
                     "command runs: tell the user it can be deleted once the command finishes and that disabling it stops new "
-                    "fires, and disable it only if the user asks (in that turn, disabling asks the user first); otherwise the delete "
+                    "fires but a queued run still starts after the running one, even when disabled; "
+                    "disable it only if the user asks (disabling a running command schedule asks the user first); otherwise the delete "
                     "removes "
                     "its runs and messages, and a queued run will not execute; a command schedule has no tasks); "
                     "reset_planner_session (the user confirms first; "

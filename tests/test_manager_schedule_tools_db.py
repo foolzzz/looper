@@ -37,7 +37,8 @@ def test_schedule_tool_delete_description_distinguishes_command_and_agent_schedu
     assert delete == (
         "(the user confirms first; an agent schedule's tasks stay; a command schedule is not deleted while its "
         "command runs: tell the user it can be deleted once the command finishes and that disabling it stops new "
-        "fires, and disable it only if the user asks (in that turn, disabling asks the user first); otherwise the delete "
+        "fires but a queued run still starts after the running one, even when disabled; "
+        "disable it only if the user asks (disabling a running command schedule asks the user first); otherwise the delete "
         "removes "
         "its runs and messages, and a queued run will not execute; a command schedule has no tasks)")
 
@@ -567,8 +568,14 @@ def test_disabling_right_after_a_refused_delete_asks_first(monkeypatch, tmp_path
         assert not await pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", sid)
         await pool.execute("UPDATE schedules SET enabled = true WHERE id = $1", sid)
         (done,) = await chat.say("停用 pull", (TOOL, {"action": "disable", "schedule": "pull"}))
+        assert done["status"] == "needs_confirmation", done
+        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", sid)
+        assert "- 删除没有执行" not in chat.turns[-1].blocks[0]
+        if queued:
+            assert "停用不会取消它" in chat.turns[-1].blocks[0]
+        done = await _confirm(chat, done)
         assert done["status"] == "ok", done
-        assert not chat.turns[-1].blocks
+        assert not await pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", sid)
     run_db(test, monkeypatch, timeout=30)
 
 

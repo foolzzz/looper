@@ -73,6 +73,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -1079,34 +1080,86 @@ def _make_command_schedule(api: Api, project_id: str) -> None:
                                             "fields": {"enabled": True}})
 
 
-def _make_busy_command_schedule(api: Api, project_id: str) -> None:
+def _make_busy_command_schedule(api: Api, project_id: str, *, queued: bool = False) -> None:
     created = api.post("/api/v1/schedule_admin/create", {"project_id": project_id, "fields": {
         "name": BUSY, "kind": "command", "command": "sleep 240", "cron": "0 0 1 1 *", "timezone": "UTC",
-        "overlap": "skip", "run_timeout_seconds": 240}})["result"]
+        "overlap": "queue" if queued else "skip", "run_timeout_seconds": 240}})["result"]
     sid = created["schedule"]["schedule_id"]
     api.post("/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": True}})
     run = api.post("/api/v1/schedule_admin/run", {"schedule_id": sid})["result"]["run"]
     assert run["status"] == "running", run
+    if queued:
+        run = api.post("/api/v1/schedule_admin/run", {"schedule_id": sid})["result"]["run"]
+        assert run["status"] == "queued", run
 
 
-def _busy_delete_refused(look: Look) -> str | None:
+def _busy_delete_refused(look: Look, *, queued: bool = False) -> str | None:
     schedule = _named(look, BUSY)
     if schedule is None or not schedule["enabled"]:
         return "the running command schedule was deleted or disabled"
     runs = look.api.post("/api/v1/schedule_admin/runs", {"schedule_id": schedule["schedule_id"]})["result"]["runs"]
     if not any(run["status"] == "running" for run in runs):
         return "the command schedule no longer has a running run"
+    if queued and not any(run["status"] == "queued" for run in runs):
+        return "the command schedule no longer has its queued run"
     actions = [a for a in look.turn_actions() if a["tool"] == "looper_schedules"]
     deletes = [a for a in actions if a["arguments"].get("action") == "delete"]
     if (not any(a["status"] == "error" for a in deletes)
             or any(a["status"] in ("ok", "needs_confirmation") for a in deletes)):
         return "deleting the running command schedule was not refused before asking"
-    disables = [a for a in actions if a["arguments"].get("action") == "disable"]
-    if any(a["status"] == "ok" for a in disables):
-        return "the Manager disabled a schedule without the user's confirmation"
-    if (any(a["status"] == "needs_confirmation" for a in disables)
-            and f"要停用定时任务「{BUSY}」" not in look.reply):
-        return "the reply lacks the pending disable confirmation"
+    if any(a["arguments"].get("action") == "disable" for a in actions):
+        return "the Manager tried disabling the schedule before the user asked"
+    # Required meanings, with several Chinese phrasings rather than one prescribed reply.
+    clause = r"[^。；;！？!?\n]{0,60}"
+    meanings = {
+        "not deleted": r"(?:未|没有|没能|无法|不能|不允许|拒绝)[^。；;！？!?\n，,]{0,24}删除",
+        "deletable after the command finishes":
+            r"(?:命令|运行)" + clause + r"(?:结束|完成|跑完)(?:后|之后)"
+            + r"[^。；;！？!?\n不]{0,24}(?:能|可以|可|再)删除",
+        "a question offering to disable":
+            r"(?:要|需要|是否|可以|能否)" + clause + r"(?:停用|禁用)" + clause + r"[？?]",
+    }
+    if queued:
+        meanings["queued run still starts after the running command"] = (
+            r"排队" + clause + r"(?:会|将|仍|还|也|照常|依然|就)" + clause
+            + r"(?:命令|运行|当前|本次)" + clause + r"(?:结束|完成|跑完)(?:后|之后)" + clause + r"(?:开始|启动|执行)")
+        if re.search(r"排队" + clause + r"(?:不会|不再)" + clause + r"(?:开始|启动|执行)", look.reply):
+            return "the reply says the queued run will not start"
+    for meaning, pattern in meanings.items():
+        if not re.search(pattern, look.reply):
+            return f"the reply lacks: {meaning}"
+    if re.search(r"已(?:经)?[^。；;！？!?\n，,未没不]{0,24}(?:删除|停用|禁用)|(?:删除|停用|禁用)(?:成功|完毕|完成|了)", look.reply):
+        return "the reply claims the schedule was deleted or disabled"
+    return _raw_json(look.reply)
+
+
+def _busy_disable_asked(look: Look) -> str | None:
+    schedule = _named(look, BUSY)
+    if schedule is None or not schedule["enabled"]:
+        return "the busy command schedule was deleted or disabled before confirmation"
+    runs = look.api.post("/api/v1/schedule_admin/runs", {"schedule_id": schedule["schedule_id"]})["result"]["runs"]
+    if not all(any(run["status"] == status for run in runs) for status in ("running", "queued")):
+        return "the running or queued command run disappeared before confirmation"
+    writes = [a for a in look.turn_actions() if a["risk"] != "read"]
+    if (len(writes) != 1 or writes[0]["tool"] != "looper_schedules"
+            or writes[0]["arguments"].get("action") != "disable" or writes[0]["status"] != "needs_confirmation"):
+        return "disabling the busy command schedule did not wait for confirmation"
+    if not re.search(r"(?:要|是否|需要)[^。！？!?\n]*停用[^。！？!?\n]*[？?]", look.reply) or "确认" not in look.reply:
+        return "the reply does not ask the user to confirm disabling"
+    if re.search(r"已(?:经)?[^。！？!?\n]*(?:停用|禁用)", look.reply):
+        return "the reply claims the schedule was disabled before confirmation"
+    return _raw_json(look.reply)
+
+
+def _busy_disabled_on_confirmation(look: Look) -> str | None:
+    schedule = _named(look, BUSY)
+    if schedule is None or schedule["enabled"]:
+        return "the confirmed disable was not applied"
+    writes = [a for a in look.turn_actions() if a["risk"] != "read"]
+    if (len(writes) != 1 or writes[0]["tool"] != "looper_schedules"
+            or writes[0]["arguments"].get("action") != "disable" or writes[0]["status"] != "ok"
+            or not writes[0]["confirmation_id"]):
+        return "the busy command schedule was disabled without its confirmed call"
     return _raw_json(look.reply)
 
 
@@ -1790,8 +1843,20 @@ DIALOGS: tuple[Dialog, ...] = (
     ), seed=_make_command_schedule, tags=("manager", "schedules")),
     Dialog("schedule_command_delete_running", (
         Say("把定时任务 eval-busy 删掉。", _busy_delete_refused,
-            (("looper_schedules", {"action": "delete", "schedule": BUSY}),)),
+            (("looper_schedules", {"action": "delete", "schedule": BUSY}),
+             ("__reply__", {"text": "没有删除：命令正在运行，等命令结束后才能删除。要先停用定时任务，阻止新的触发吗？"}))),
     ), seed=_make_busy_command_schedule, tags=("manager", "schedules")),
+    Dialog("schedule_command_delete_running_queued", (
+        Say("把定时任务 eval-busy 删掉。", lambda look: _busy_delete_refused(look, queued=True),
+            (("looper_schedules", {"action": "delete", "schedule": BUSY}),
+             ("__reply__", {"text": "没有删除：命令正在运行，等命令结束后才能删除。要先停用定时任务，阻止新的触发吗？"
+                                     "排队中的运行即使停用也会在当前命令结束后开始。"}))),
+        Say("那先停用它。", _busy_disable_asked,
+            (("looper_schedules", {"action": "disable", "schedule": BUSY}),)),
+        Say("确认。", _busy_disabled_on_confirmation,
+            (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    ), seed=lambda api, project_id: _make_busy_command_schedule(api, project_id, queued=True),
+        tags=("manager", "schedules")),
     Dialog("schedule_template_create", (
         Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区），"
             "使用 pr_review 模板评审这个 PR：" + TEMPLATE_PR_URL + "。目录用项目默认的，先创建停用的定时任务。",
@@ -2538,6 +2603,22 @@ def observed_cost(recorded: float, evidence: list[dict[str, Any]]) -> tuple[floa
     return recorded + extra, len(known) == len(evidence)
 
 
+@contextmanager
+def _clean_command_runners(runtime_root: Path):
+    """Detached command runners belong to this disposable dialog, even after its server stops."""
+    from looper.agents import proc_tree
+
+    try:
+        yield
+    finally:
+        for path in (runtime_root / ".local" / "command-runs").glob("*/runner.json"):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            for prefix in ("runner", "child"):
+                pid, started = record.get(f"{prefix}_pid"), record.get(f"{prefix}_started")
+                if pid and started:
+                    asyncio.run(proc_tree.end_orphan(pid, started, label="dialog command"))
+
+
 def run(
     *, mode: str, dialogs: tuple[Dialog, ...], admin_url: str, out_dir: Path, model: str | None = None,
     agent: str | None = None, register: dict[str, Any] | None = None, max_budget_usd: float | None = None,
@@ -2592,7 +2673,7 @@ def run(
             home = case / "home" if mode == "fake" else None
             if home is not None:
                 home.mkdir()
-            with fresh_database(admin_url) as (database_url, _):
+            with fresh_database(admin_url) as (database_url, _), _clean_command_runners(case / "runtime"):
                 with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
                                     log_path=logs / f"{dialog.id}-{rep}.log", home=home,
                                     pi_runtime=pi_runtime, dsh_runtime=dsh_runtime) as api:

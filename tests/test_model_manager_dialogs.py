@@ -287,23 +287,87 @@ def test_command_edit_dialog_rejects_incomplete_or_early_update(monkeypatch, mut
     assert check(look) is not None
 
 
-@pytest.mark.parametrize("mutation", ["deleted", "disabled_ok", "delete_asked"])
-def test_command_delete_running_dialog_rejects_a_delete_or_an_unasked_disable(monkeypatch, mutation):
+BUSY_EXPLANATION = "没有删除：命令正在运行，等命令结束后才能删除。要先停用定时任务，阻止新的触发吗？"
+QUEUED_EXPLANATION = "排队中的运行即使停用也会在当前命令结束后开始。"
+
+
+@pytest.mark.parametrize("queued,mutation", [
+    (queued, mutation) for queued in (False, True)
+    for mutation in (None, "deleted", "no_running", "no_queued", "disabled_ok", "disable_asked",
+                     "delete_asked", "empty", "claims_deleted", "claims_disabled", "old_advice",
+                     "missing_refusal", "missing_finish", "missing_offer", "no_question",
+                     "missing_queue", "queue_cancelled", "not_deletable_after_finish")
+    if queued or mutation not in {"no_queued", "missing_queue", "queue_cancelled"}
+])
+def test_command_delete_running_dialog_checks_state_and_explanation(monkeypatch, queued, mutation):
     actions = [action("looper_schedules", "delete", status="error")]
     schedule = {"schedule_id": "busy-id", "enabled": True}
-    look = observed(monkeypatch, {}, actions)
+    runs = [{"status": "running"}] + ([{"status": "queued"}] if queued else [])
+    look = observed(monkeypatch, {}, actions, reply=BUSY_EXPLANATION + (QUEUED_EXPLANATION if queued else ""))
     monkeypatch.setattr(dialogs, "_named", lambda *_: schedule)
-    monkeypatch.setattr(look.api, "post", lambda *_: {"result": {"runs": [{"status": "running"}]}})
-    check = dialogs.select(["schedule_command_delete_running"])[0].says[0].check
+    monkeypatch.setattr(look.api, "post", lambda *_: {"result": {"runs": runs}})
+    case_id = "schedule_command_delete_running" + ("_queued" if queued else "")
+    check = dialogs.select([case_id])[0].says[0].check
     assert check(look) is None
     if mutation == "deleted":
         monkeypatch.setattr(dialogs, "_named", lambda *_: None)
         actions[0]["status"] = "ok"
-    elif mutation == "disabled_ok":
-        actions.append(action("looper_schedules", "disable"))
-    else:
+    elif mutation in {"no_running", "no_queued"}:
+        runs[:] = [run for run in runs if run["status"] != mutation.removeprefix("no_")]
+    elif mutation in {"disabled_ok", "disable_asked"}:
+        actions.append(action("looper_schedules", "disable",
+                              status="ok" if mutation == "disabled_ok" else "needs_confirmation"))
+    elif mutation == "delete_asked":
         actions[0]["status"] = "needs_confirmation"
-    assert check(look) is not None
+    elif mutation in {"empty", "claims_deleted", "claims_disabled", "old_advice"}:
+        look.reply = {"empty": "", "claims_deleted": "已删除。", "claims_disabled": BUSY_EXPLANATION + "已停用。",
+                      "old_advice": "请先停用并等待。"}[mutation]
+    elif mutation in {"missing_refusal", "missing_finish", "missing_offer", "no_question", "missing_queue"}:
+        removed = {"missing_refusal": "没有删除：", "missing_finish": "等命令结束后才能删除。",
+                   "missing_offer": "要先停用定时任务，阻止新的触发吗？", "no_question": "吗？",
+                   "missing_queue": QUEUED_EXPLANATION}[mutation]
+        look.reply = look.reply.replace(removed, "")
+    elif mutation == "not_deletable_after_finish":
+        look.reply = look.reply.replace("才能删除", "仍不能删除")
+    elif mutation == "queue_cancelled":
+        look.reply = look.reply.replace(QUEUED_EXPLANATION, "排队中的运行不会在当前命令结束后开始。")
+    assert (check(look) is None) is (mutation is None)
+
+
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("reply", [
+    "未删除，需等正在运行的命令完成后再删除。是否需要我禁用这个定时任务？",
+    "当前无法删除；待本次运行结束后就可以删除。需要先停用吗？",
+])
+def test_command_delete_running_dialog_accepts_alternative_explanations(monkeypatch, reply, queued):
+    look = observed(monkeypatch, {}, [action("looper_schedules", "delete", status="error")], reply=reply)
+    monkeypatch.setattr(dialogs, "_named", lambda *_: {"schedule_id": "busy-id", "enabled": True})
+    runs = [{"status": "running"}] + ([{"status": "queued"}] if queued else [])
+    monkeypatch.setattr(look.api, "post", lambda *_: {"result": {"runs": runs}})
+    if queued:
+        look.reply += "排队中的运行会在当前命令完成后照常启动。"
+    case_id = "schedule_command_delete_running" + ("_queued" if queued else "")
+    assert dialogs.select([case_id])[0].says[0].check(look) is None
+
+
+@pytest.mark.parametrize("mutation", [None, "disabled", "no_confirmation", "no_question", "claims_disabled"])
+def test_busy_disable_followup_waits_for_confirmation(monkeypatch, mutation):
+    actions = [action("looper_schedules", "disable", status="needs_confirmation")]
+    schedule = {"schedule_id": "busy-id", "enabled": True}
+    look = observed(monkeypatch, {}, actions, reply="要停用这个定时任务吗？回复「确认」就执行。")
+    monkeypatch.setattr(dialogs, "_named", lambda *_: schedule)
+    monkeypatch.setattr(look.api, "post", lambda *_: {"result": {"runs": [{"status": "running"}, {"status": "queued"}]}})
+    check = dialogs.select(["schedule_command_delete_running_queued"])[0].says[1].check
+    assert check(look) is None
+    if mutation == "disabled":
+        schedule["enabled"] = False
+    elif mutation == "no_confirmation":
+        actions[0]["status"] = "ok"
+    elif mutation == "no_question":
+        look.reply = "请等待命令结束。"
+    elif mutation == "claims_disabled":
+        look.reply += "已停用。"
+    assert (check(look) is None) is (mutation is None)
 
 
 def provider_state():
@@ -500,6 +564,7 @@ def test_repricing_keeps_historical_spend_and_other_protocol_price(monkeypatch, 
 @pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"), reason="disposable PostgreSQL unavailable")
 @pytest.mark.parametrize("dialog_id", ["provider_key", "config_tools", "task_cost", "schedule_planner_profile",
                                        "schedule_command_create", "schedule_command_edit", "schedule_create",
+                                       "schedule_command_delete_running", "schedule_command_delete_running_queued",
                                        "model_custom", "model_dual_protocol", "model_login_runtime",
                                        "model_missing_endpoint", "model_price_history", "template_review_task",
                                        "template_missing_input"])
