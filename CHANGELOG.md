@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.57] - 2026-10-31
+
+### Fixed
+
+- **`looper service upgrade` refuses import and repository overrides from the caller's shell, and runs its tools without them.** The upgrade did not check where the running CLI code came from and passed the caller's whole environment to `uv sync`, `npm ci` and the dashboard build, which git also inherits. It now refuses, before it reads the unit and also with `--dry-run`, when the shell sets `PYTHONPATH`, `PYTHONHOME` or `PYTHONUSERBASE` (non-empty) or `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` or `GIT_ALTERNATE_OBJECT_DIRECTORIES`; and, before it contacts the service, when the running CLI's package root is not the unit's. `uv`, `npm` and the wheel installers run without any `PYTHON*` variable or `VIRTUAL_ENV`; PATH, HOME, proxies, certificates, package indexes, mirrors and caches still reach them. ([#1031](https://github.com/foolzzz/looper/pull/1031))
+
 ## [2.14.56] - 2026-10-31
 
 ### Fixed
