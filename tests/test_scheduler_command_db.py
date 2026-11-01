@@ -325,6 +325,8 @@ def test_catch_up_command_receives_missed_count_and_trigger(monkeypatch, tmp_pat
 @pytest.mark.parametrize("missing_identity", [False, True])
 def test_backstop_kills_a_stopped_runner_and_its_command_group(monkeypatch, tmp_path, missing_identity):
     async def test(env: ScheduleEnv):
+        # This test advances from the real runner's timestamp, so start its schedule on that clock too.
+        env.clock.now = datetime.now(UTC)
         sid = await _command(env, "sleep 30", run_timeout_mode="seconds", run_timeout_seconds=1)
         run = await _fire(env, sid)
         identity = await _runner(env, run["id"])

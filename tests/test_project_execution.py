@@ -388,9 +388,16 @@ class TestPlanner:
         async def scenario(h: Harness) -> None:
             await h.start()
             await h.until(lambda: len(h.work_items) == 2)  # s1 is held, s2 is answered and accepted ($0.5)
+            interrupted = h.work_items[0]
             await h.until(lambda: len(claude.turns()) == 2)
-            await h.release(WORK_OK)  # s1's result arrives over the cap: dropped, and the task fails
+            # Settling s2 checks the cap immediately, cancelling s1 before it can report a result.
             assert (await h.finished()).payload["fail_kind"] == "task_budget"
+            assert [kill.target for kill in h.killed] == [interrupted.target]
+            assert h.held == []
+            # Even a result already in transit from the cancelled Worker must be ignored.
+            await h.answer(interrupted, WORK_OK)
+            await h.until(lambda: h.bus.pending_count(h.planner.agent_id) == 0 and not h.planner._handling_message)
+            assert s1()["result"] is None
             await h.planner.stop()
             starts.append(s1()["started_at"])
 
