@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.68] - 2026-11-01
+
+### Changed
+
+- **A planned control-plane restart adopts detached kept runs.** With the keeper on, startup keeps each eligible detached run as a candidate (valid manifest, detach, grant and keeper files, an unchanged adoption contract, a `running` record and a step that holds it) and leaves its record `running`; other runs end with a reason. Room tokens are restored as pending (HTTP 503 with `Retry-After: 2` until adopted) from `grant.json`. Each Planner adopts its dispatched Worker or in-review Reviewer before dispatching anew; a failed adoption ends the old run and runs the step again. A candidate not claimed within 300 seconds ends as `not_adopted`. `system.status` gains an optional `keepers` object. The bridge's retry and the upgrade CLI are not part of this release. No migration. ([#1060](https://github.com/foolzzz/looper/pull/1060))
+
 ## [2.14.67] - 2026-10-31
 
 ### Changed
