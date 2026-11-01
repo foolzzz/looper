@@ -1031,7 +1031,7 @@ class Scheduler:
             self._starting -= 1
 
     async def _start_queued(self, schedule_id: str) -> None:
-        """Start the schedule's queued run when none of its tasks or gates is in progress any more."""
+        """Start a queued run when overlap permits; a drain-deferred parallel gate needs only a free slot."""
         now = self._clock()
         with ExitStack() as firing_guard:
             try:
@@ -1044,11 +1044,16 @@ class Scheduler:
                     queued = [run for run in runs if run["status"] == db_schedules.QUEUED]
                     if not queued or any(run["status"] == db_schedules.GATING for run in runs):
                         return
-                    busy = (any(run["status"] == db_schedules.RUNNING for run in runs)
-                            if schedule["kind"] == "command" else await self._busy_task(conn, schedule_id))
+                    run = queued[0]
+                    if run["deferred_by_drain"] and schedule["overlap"] == "parallel":
+                        # Resume this firing under the same capacity rule as a new parallel gate.
+                        busy = (sum(one["status"] == db_schedules.RUNNING for one in runs)
+                                >= schedule["max_parallel_runs"])
+                    else:
+                        busy = (any(one["status"] == db_schedules.RUNNING for one in runs)
+                                if schedule["kind"] == "command" else await self._busy_task(conn, schedule_id))
                     if busy:
                         return
-                    run = queued[0]
                     firing = Firing(Trigger(run["trigger"]), run["scheduled_for"], missed=run["missed"],
                                     missed_since=run["missed_since"])
                     launched = await self._launch(conn, schedule, firing, now, run_id=run["id"])

@@ -295,6 +295,128 @@ def test_drain_as_a_gated_firing_commits_defers_its_gate(monkeypatch: pytest.Mon
     run_scheduled(test, monkeypatch, tmp_path)
 
 
+@pytest.mark.parametrize("recovery", ["cancel", "restart"])
+def test_parallel_deferred_gate_resumes_before_the_next_due_fire(monkeypatch: pytest.MonkeyPatch,
+                                                                tmp_path: Path, recovery: str) -> None:
+    from looper.agents import scheduler as module
+    from looper.agents.schedule_gate import GateResult
+
+    async def test(env: ScheduleEnv) -> None:
+        release = asyncio.Event()
+        release.set()
+        checked = []
+
+        async def gate(*args: Any, **kwargs: Any) -> GateResult:
+            checked.append(kwargs["env"]["LOOPER_SCHEDULE_RUN_ID"])
+            await release.wait()
+            return GateResult(0, "work", "")
+
+        monkeypatch.setattr(module, "run_gate", gate)
+        drain = DrainState()
+        env.scheduler = Scheduler(bus=env.bus, clock=env.clock, drain=drain)
+        sid = (await env.enabled(cron="* * * * *", gate_command="echo work", overlap="parallel",
+                                 max_parallel_runs=2))["schedule_id"]
+        first_id = await env.scheduler.run_now(sid)
+        await asyncio.wait_for(env.scheduler.idle(), 5)
+        first = await db_schedules.get_run(first_id)
+        assert await db_tasks.start_ready_task(first["task_id"]) is not None
+        await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", first["task_id"])
+        transaction = db_connection.transaction
+
+        @asynccontextmanager
+        async def draining_commit() -> AsyncIterator[Any]:
+            async with transaction() as conn:
+                yield conn
+            drain.begin(DrainScope.RUNS)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(db_connection, "transaction", draining_commit)
+            deferred_id = await env.scheduler.run_now(sid)
+        deferred = await db_schedules.get_run(deferred_id)
+        assert deferred["status"] == db_schedules.QUEUED and deferred["deferred_by_drain"]
+        assert checked == [first_id]
+        await env.scheduler.tick()
+        assert (await db_schedules.get_run(deferred_id))["status"] == db_schedules.QUEUED
+
+        # The next minute is due while the earlier task still runs. Hold the resumed gate to
+        # observe which firing gets the free slot, without depending on coroutine timing.
+        env.clock.now = (env.clock.now + timedelta(minutes=1)).replace(second=10, microsecond=0)
+        await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1", sid,
+                               env.clock.now.replace(second=0))
+        release.clear()
+        if recovery == "cancel":
+            drain.cancel()
+            await env.scheduler.tick()
+        else:
+            await env.scheduler.stop()
+            env.scheduler = Scheduler(bus=env.bus, clock=env.clock, drain=DrainState())
+            await env.scheduler.start()
+        try:
+            await until(lambda: len(checked) == 2, timeout=5)
+            assert checked == [first_id, deferred_id]
+            resumed = await db_schedules.get_run(deferred_id)
+            assert resumed["status"] == db_schedules.GATING and not resumed["deferred_by_drain"]
+            # Finish the background tick before inspecting the newer firing.
+            if recovery == "restart":
+                await until(lambda: env.scheduler.health()["last_ok_tick_at"] is not None, timeout=5)
+            runs = await env.runs(sid)
+            assert len(runs) == 3
+            newer = [run for run in runs if run["run_id"] not in {first_id, deferred_id}]
+            assert [run["status"] for run in newer] == ["skipped_overlap"]
+            release.set()
+            await asyncio.wait_for(env.scheduler.idle(), 5)
+            resumed = await db_schedules.get_run(deferred_id)
+            assert resumed["status"] == db_schedules.RUNNING and resumed["gate_output"] == "work"
+            assert (await db_schedules.get_run(first_id))["task_status"] == "running"
+            assert env.bus.of("task_start") == [first["task_id"], resumed["task_id"]]
+            await env.scheduler.tick()
+            assert checked == [first_id, deferred_id]
+        finally:
+            release.set()
+            await env.scheduler.stop()
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("blocker", ["capacity", "gate"])
+def test_parallel_deferred_gate_waits_for_admission(monkeypatch: pytest.MonkeyPatch,
+                                                   tmp_path: Path, blocker: str) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        sid = (await env.schedule(gate_command="printf work", overlap="parallel",
+                                  max_parallel_runs=2))["schedule_id"]
+        first_id = await env.scheduler.run_now(sid)
+        await asyncio.wait_for(env.scheduler.idle(), 5)
+        first = await db_schedules.get_run(first_id)
+        assert await db_tasks.start_ready_task(first["task_id"]) is not None
+        await env.pool.execute("UPDATE tasks SET status = 'running' WHERE id = $1", first["task_id"])
+        deferred_id = await db_schedules.insert_run(env.pool, schedule_id=sid, scheduled_for=env.clock.now,
+                                                    trigger="manual", status=db_schedules.QUEUED)
+        await env.pool.execute("UPDATE schedule_runs SET deferred_by_drain = true WHERE id = $1", deferred_id)
+        if blocker == "capacity":
+            await db_schedules.update_schedule(env.pool, sid, {"max_parallel_runs": 1})
+        else:
+            gating_id = await db_schedules.insert_run(env.pool, schedule_id=sid, scheduled_for=env.clock.now,
+                                                      trigger="manual", status=db_schedules.GATING)
+
+        await env.scheduler.tick()
+        await asyncio.wait_for(env.scheduler.idle(), 5)
+        waiting = await db_schedules.get_run(deferred_id)
+        assert waiting["status"] == db_schedules.QUEUED and waiting["deferred_by_drain"]
+        assert env.bus.of("task_start") == [first["task_id"]]
+        if blocker == "capacity":
+            await db_schedules.update_schedule(env.pool, sid, {"max_parallel_runs": 2})
+        else:
+            await db_schedules.update_run(env.pool, gating_id, status="skipped_gate", finished_at=env.clock.now)
+        await env.scheduler.tick()
+        await asyncio.wait_for(env.scheduler.idle(), 5)
+        resumed = await db_schedules.get_run(deferred_id)
+        assert resumed["status"] == db_schedules.RUNNING and not resumed["deferred_by_drain"]
+        assert resumed["gate_output"] == "work"
+        assert env.bus.of("task_start") == [first["task_id"], resumed["task_id"]]
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
 @pytest.mark.parametrize("entry", ["manual", "queued"])
 @pytest.mark.parametrize("start_via", ["scheduler", "task_api", "task_api_concurrent_anchor"])
 def test_drain_as_an_agent_firing_commits_defers_its_task_start(monkeypatch: pytest.MonkeyPatch,
