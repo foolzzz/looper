@@ -2224,6 +2224,8 @@ class PlannerAgent:
             logger.info("planner %s ignores a review that is not for a step in review", self.agent_id)
             return
 
+        # This run ended; a following review must check the task cap without deferring to it.
+        self._adopted_runs.discard(envelope.source.agent_id)
         passed = result.get("passed") is True
         summary = str(result.get("summary") or result.get("error") or "")
         findings = result.get("findings") or []

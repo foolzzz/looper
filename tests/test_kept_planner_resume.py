@@ -8,8 +8,8 @@ import pytest
 
 from looper.agents.agent_settings import AgentType
 from looper.agents.kept_run import AdoptFailure, AdoptOutcome, AdoptResult, RunHold
-from looper.agents.message import MessageEnvelope, MessageType, planner_address
-from looper.agents.tiers.planner import PlannerAgent
+from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+from looper.agents.tiers.planner import PlanStep, PlannerAgent, ReviewStage, StepReviewRole, TaskPlan
 
 
 @pytest.mark.parametrize('review', [False, True])
@@ -88,5 +88,53 @@ def test_the_task_cap_blocks_new_work_without_ending_an_adopted_run(tmp_path, mo
         running.status = 'verified'
         assert not await planner._within_budget(plan)
         planner._stop_at_budget.assert_awaited_once_with(plan, 2, 1)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('stage', [ReviewStage.BUILTIN, ReviewStage.ROLE])
+def test_an_adopted_review_reaching_the_task_cap_stops_before_the_next_review(
+    tmp_path, monkeypatch, agent_db, stage,
+):
+    from looper.agents.project_execution import ProjectExecution
+    from looper.db import llm_records
+
+    async def run():
+        planner = PlannerAgent(task_id='task-resume', runtime_root=tmp_path,
+                               adopter=AsyncMock(return_value=AdoptResult(AdoptOutcome.ADOPTED)))
+        planner._bus = SimpleNamespace(publish=AsyncMock(), request=AsyncMock(
+            return_value=SimpleNamespace(payload={'killed': False})))
+        planner._execution = ProjectExecution(task_budget_usd=1)
+        step = PlanStep(step_id='step-resume', index=0, instruction='check the change', status='completed',
+                        worker_id='worker-original', reviewer_id='reviewer-original', review=True,
+                        result={'status': 'completed'}, review_stage=stage,
+                        review_position=0 if stage is ReviewStage.ROLE else None,
+                        review_roles=[StepReviewRole('security'), StepReviewRole('style')])
+        plan = planner._plan = TaskPlan('plan-resume', 'goal-resume', 'check the change', str(tmp_path),
+                                        steps=[step], status='executing')
+        monkeypatch.setattr(llm_records, 'task_costs', AsyncMock(return_value={'task-resume': {'cost_usd': 1}}))
+        await planner._handle(MessageEnvelope.create(
+            source=planner_address('old'), target=planner.agent_address,
+            message_type=MessageType.TASK_RESUME, payload={}))
+        assert step.reviewer_id in planner._adopted_runs
+
+        # A stale result must not retire the Reviewer still running across the restart.
+        for source in ('reviewer-stale', 'reviewer-original'):
+            await planner._handle(MessageEnvelope.create(
+                source=worker_address(source), target=planner.agent_address,
+                message_type=MessageType.VERIFY_RESULT,
+                payload={'task_id': step.step_id, 'passed': True, 'summary': 'checks passed'}))
+            if source == 'reviewer-stale':
+                assert plan.status == 'executing'
+                assert step.reviewer_id in planner._adopted_runs
+
+        assert plan.status == 'failed'
+        assert step.reviewer_id not in planner._adopted_runs
+        verdict = step.result['verify_passed'] if stage is ReviewStage.BUILTIN else step.result['role_reviews'][0]['passed']
+        assert verdict is True
+        messages = [call.args[0] for call in planner._bus.publish.await_args_list]
+        assert not any(message.message_type is MessageType.VERIFY_REQUEST for message in messages)
+        assert messages[-1].payload['fail_kind'] == 'task_budget'
+        assert agent_db.store.plans['task-resume']['status'] == 'failed'
 
     asyncio.run(run())
