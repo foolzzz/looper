@@ -344,3 +344,25 @@ def test_domain_stream_receives_validated_body_principal_and_request_headers(tmp
             assert code == 200 and headers["content-type"] == "text/event-stream"
             assert body == 'event: changed\ndata: {"ok":true}\n\n' and domain.audit == []
     asyncio.run(run())
+
+
+def test_keeper_status_is_optional_and_reports_pending_adoptions(tmp_path, status_data):
+    from looper.agents.kept_run import KeeperSettings
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+
+    async def run():
+        async with _serving(tmp_path, listen=True) as server:
+            prepare_status(server)
+            server._worker_pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path,
+                                             keeper=KeeperSettings(2))
+            code, _, answer = await _send(server, f"POST {STATUS}", _bearer(TOKEN), "{}")
+            assert code == 200
+            assert answer['result']['keepers'] == {
+                'mode': 'on', 'attached': 0, 'candidates_at_start': 0, 'adopted_at_start': 0,
+                'pending': 0, 'ended_at_start': {}}
+            api_v1.validate_arguments(api_v1.find('POST', STATUS).result, answer['result'])
+            server._worker_pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+            code, _, answer = await _send(server, f"POST {STATUS}", _bearer(TOKEN), "{}")
+            assert code == 200 and 'keepers' not in answer['result']
+
+    asyncio.run(run())

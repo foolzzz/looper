@@ -115,6 +115,7 @@ from typing import Any, TypeVar
 
 from ..bus import MessageBus
 from ..supervisor import cancel_and_wait
+from ..kept_run import AdoptOutcome, AdoptResult, RunHold
 from ..agent_settings import AgentSettings, AgentType, Harness, Launch, load_agent_settings
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
@@ -850,13 +851,16 @@ class _NoWorkspace(Exception):
 class PlannerAgent:
     """Per-task Planner: one instance and one resident Claude per task."""
 
-    def __init__(self, *, task_id: str, runtime_root: Path, claude_bin: str = "claude", ops: Any = None) -> None:
+    def __init__(self, *, task_id: str, runtime_root: Path, claude_bin: str = "claude", ops: Any = None,
+                 adopter: Callable[[str, RunHold], Awaitable[AdoptResult]] | None = None) -> None:
         self._task_id = task_id
         self._runtime_root = runtime_root
         self._claude_bin = claude_bin
         # The Planner's own platform tools (``ops.planner.PlannerOps``), and the token they know it by while it runs;
         # without them it has none.
         self._ops = ops
+        self._adopter = adopter
+        self._adopted_runs: set[str] = set()
         self._token: str | None = None
         # The MCP configuration files that carry the token, removed when the Planner stops.
         self._token_files: set[str] = set()
@@ -1041,7 +1045,8 @@ class PlannerAgent:
             # Turns this event runs see the project as it is now, in their
             # message and in the system prompt (a new plan reads it itself).
             await self._refresh_project(self._plan)
-            if envelope.message_type is not MessageType.TASK_CANCEL:
+            if (envelope.message_type is not MessageType.TASK_CANCEL
+                    and not (envelope.message_type is MessageType.TASK_RESUME and self._adopter is not None)):
                 # A task at its spend cap stops before another turn; the handlers below see it ended.
                 await self._within_budget(self._plan)
             # Steps this event dispatches see every change stored so far; Claude gets them in a turn below.
@@ -2532,10 +2537,9 @@ class PlannerAgent:
     async def _resume(self, envelope: MessageEnvelope) -> None:
         """Carry on with the plan a previous Planner of this task saved: no new plan, the same session.
 
-        The server's stop ended every run of the task: a step whose Worker was
-        running runs again (the same attempt, its retries and feedback kept), a
-        step in review gets a new Reviewer, and a decision that was cut off is
-        taken again from the step's saved result.
+        Adopt a held Worker or Reviewer across a planned restart when available.
+        Otherwise run the same attempt again, keeping retries and feedback. A
+        decision cut off by the restart uses the step's saved result.
         """
         assert self._bus is not None
         plan = self._plan
@@ -2561,6 +2565,17 @@ class PlannerAgent:
                 return  # it stopped at its spend cap
             if step.status != status:
                 continue
+            run_id = step.worker_id if status == "dispatched" else step.reviewer_id if status == "completed" else None
+            if self._adopter is not None and run_id:
+                role = AgentType.WORKER if status == "dispatched" else AgentType.REVIEWER
+                result = await self._adopter(run_id, RunHold(self._task_id, step.step_id, role))
+                if result.outcome is AdoptOutcome.ADOPTED:
+                    self._adopted_runs.add(run_id)
+                    await self._activity("phase", f"Worker {run_id} carried on across the restart", worker=run_id)
+                    continue
+                if result.outcome is AdoptOutcome.FAILED:
+                    await self._activity("phase", f"Worker {run_id} could not carry on across the restart "
+                                         f"({result.failure}); running the step again", worker=run_id)
             if status == "dispatched":
                 await self._dispatch_step(plan, step, same_attempt=True)
             elif status == "completed":
@@ -4415,6 +4430,8 @@ class PlannerAgent:
 
         At the cap the task stops for good (``_stop_at_budget``). Without a
         cap nothing is read. A cost that cannot be read lets the task go on.
+        Carried-on runs finish under their own caps before task-cap stopping;
+        reaching the task cap still blocks every new dispatch.
         """
         cap = self._execution.task_budget_usd
         if cap is None:
@@ -4430,6 +4447,10 @@ class PlannerAgent:
             return True
         if spent < cap:
             return True
+        if any((step.status == "dispatched" and step.worker_id in self._adopted_runs)
+               or (step.status == "completed" and step.reviewer_id in self._adopted_runs) for step in plan.steps):
+            # New dispatches wait; runs carried across the restart keep their own spend caps.
+            return False
         await self._stop_at_budget(plan, spent, cap)
         return False
 

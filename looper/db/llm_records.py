@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
@@ -152,8 +152,8 @@ async def end_record_interrupted(record_id: int, reason: str, *, pool: asyncpg.P
     )
 
 
-async def end_unfinished_records(*, pool: asyncpg.Pool | None = None) -> int:
-    """End every record still ``running`` as ``interrupted``; returns how many.
+async def end_unfinished_records(*, keep: Collection[int] = (), pool: asyncpg.Pool | None = None) -> int:
+    """End unkept records still ``running`` as ``interrupted``; returns how many.
 
     Called at startup before any agent runs, when each such record is a run the
     previous server did not see end: it was killed, crashed or stopped first.
@@ -162,11 +162,14 @@ async def end_unfinished_records(*, pool: asyncpg.Pool | None = None) -> int:
     run ends, is not known. Running it again changes nothing.
     """
     pool = pool or get_pool()
-    result = await pool.execute(
+    statement = (
         "UPDATE llm_records SET status = $1, finished_at = COALESCE(last_output_at, created_at), "
-        "error = COALESCE(error, $2) WHERE status = $3",
-        RecordStatus.INTERRUPTED.value, UNFINISHED_AT_START, RecordStatus.RUNNING.value,
-    )
+        "error = COALESCE(error, $2) WHERE status = $3")
+    args = [RecordStatus.INTERRUPTED.value, UNFINISHED_AT_START, RecordStatus.RUNNING.value]
+    if keep:
+        statement += " AND NOT (id = ANY($4::bigint[]))"
+        args.append(list(keep))
+    result = await pool.execute(statement, *args)
     return int(result.split()[-1])
 
 

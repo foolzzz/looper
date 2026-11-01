@@ -633,12 +633,13 @@ async def _run_agent_system_owned(
         left_running = await tasks_left_running(pool)
         from . import kept_dirs
         try:
-            await kept_dirs.scan_at_start(runtime_root)
+            scan = await kept_dirs.scan_at_start(runtime_root, epoch=epoch if lease is not None else None,
+                                                 resumable=left_running.resumable, pool=pool)
         except OSError as exc:
             raise StartupCheckFailed(f"cannot tell whether kept runs are still running: {exc}") from exc
         # The runs the previous server did not see end: nothing runs yet, so every record still running is one.
         from ..db.llm_records import end_unfinished_records
-        if unfinished := await end_unfinished_records(pool=pool):
+        if unfinished := await end_unfinished_records(pool=pool, keep=scan.record_ids):
             logger.info("ended %d run record(s) a previous server left running as interrupted", unfinished)
 
         # The step worktrees no task keeps any more (after the orphaned tasks stopped: those keep their unmerged ones).
@@ -724,6 +725,10 @@ async def _run_agent_system_owned(
         worker_pool = WorkerPool(config=worker_config, runtime_root=runtime_root, drain=drain,
                                  keeper=KeeperSettings(epoch) if lease is not None else None,
                                  on_stale=lease.lose if lease is not None else None)
+        worker_pool.set_candidates(scan.candidates)
+        worker_pool._ended_at_start.update(scan.ended)
+        if lease is not None:
+            task_router.adopter = worker_pool.adopt
         fence.worker_pool = worker_pool
         supervisor.register(worker_pool)
 
@@ -782,6 +787,9 @@ async def _run_agent_system_owned(
         planner_ops.room = room
         room_ops = RoomOps(room, url=_local_url(host, port))
         worker_pool.room_ops = room_ops
+        for candidate in scan.candidates:
+            if candidate.grant:
+                room_ops.import_pending(candidate.grant)
 
         # --- HTTP Server ---
 
@@ -821,6 +829,8 @@ async def _run_agent_system_owned(
             await supervisor.start_all()
             await fleet.sweep()
             await carry_on_tasks(task_router, left_running)
+            if lease is not None:
+                worker_pool.schedule_candidate_expiry()
         except BaseException:
             await http_server.stop()
             raise

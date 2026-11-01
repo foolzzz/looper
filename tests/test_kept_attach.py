@@ -182,6 +182,53 @@ def test_a_zero_replay_boundary_starts_live(tmp_path):
     exercise(run())
 
 
+def test_a_truncated_file_log_is_never_adopted(tmp_path):
+    directory = stored_run(tmp_path, [{"type": "result", "result": "incomplete"}])
+    state = keeper.read_json(directory / keeper.STATE)
+    keeper.write_json(directory / keeper.STATE, {**state, "stdout_truncated": True})
+
+    async def run():
+        with pytest.raises(AttachError, match="truncated") as error:
+            await attach(directory)
+        assert error.value.failure is AdoptFailure.LOG_SHORT
+        assert (directory / keeper.DETACH).exists()
+
+    exercise(run())
+
+
+@pytest.mark.parametrize("exited", [True, False])
+def test_connect_failure_rechecks_whether_the_keeper_finished(tmp_path, monkeypatch, exited):
+    from looper.agents.keeper.client import KeeperClient
+
+    event = {"type": "result", "result": "finished during connect"}
+    directory = stored_run(tmp_path, [event])
+    final_state = keeper.read_json(directory / keeper.STATE)
+    keeper.write_json(directory / keeper.STATE, {**final_state, "state": "running"})
+
+    async def connect(*args, **kwargs):
+        if exited:
+            keeper.write_json(directory / keeper.STATE, final_state)
+        raise ConnectionRefusedError("keeper exited before connect")
+
+    monkeypatch.setattr(KeeperClient, "connect", connect)
+
+    async def run():
+        if not exited:
+            with pytest.raises(ConnectionRefusedError):
+                await attach(directory)
+            assert (directory / keeper.DETACH).exists()
+            return
+        handle = await attach(directory)
+        try:
+            assert handle._file_mode
+            assert [item async for item in handle.channel.events()] == [event]
+            assert await handle.wait() == 7
+        finally:
+            handle.release()
+
+    exercise(run())
+
+
 def test_attach_reads_files_after_the_keeper_exits_during_the_gap(tmp_path):
     async def run():
         async with opened(tmp_path) as original:

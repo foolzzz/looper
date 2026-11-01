@@ -85,18 +85,39 @@ async def clean_directory(directory: Path) -> None:
 
 
 @asynccontextmanager
-async def opened(tmp_path: Path, body: str = ECHO, *, on_stale=None) -> AsyncIterator[KeptRun]:
+async def opened(tmp_path: Path, body: str = ECHO, *, on_stale=None, grant=None) -> AsyncIterator[KeptRun]:
     directory = short_directory()
     executable = fake_claude(tmp_path / 'claude', body)
     handle = KeptRun(CLAUDE_CODE, [executable], launch=builtin_launch(), cwd=tmp_path,
                      session_dir=None, label='kept-run test', run_dir=directory,
-                     runtime_root=tmp_path / 'runtime', epoch=1, on_stale=on_stale or (lambda reason: None))
+                     runtime_root=tmp_path / 'runtime', epoch=1, on_stale=on_stale or (lambda reason: None),
+                     grant=grant)
     try:
         await handle.launch()
         yield handle
     finally:
         await handle.end()
         await clean_directory(directory)
+
+
+def test_kept_launch_persists_only_its_exported_grant(tmp_path: Path) -> None:
+    from looper.agents.ops.room import RoomOps
+    from looper.agents.room import MemberKind, Seat
+
+    async def run():
+        ops = RoomOps(Mock(), url='http://localhost:1234')
+        token = ops.issue('task-1', Seat('worker@s1', 'worker', MemberKind.WORK, run='worker-1'))
+        grant = ops.export_run('worker-1')
+        async with opened(tmp_path, grant=grant) as kept:
+            path = kept.run_dir / keeper.GRANT
+            assert keeper.read_json(path) == grant
+            assert path.stat().st_mode & 0o777 == 0o600
+            assert token not in path.read_text()
+            assert not (kept.run_dir / f'.{keeper.GRANT}.tmp').exists()
+        async with opened(tmp_path) as kept:
+            assert not (kept.run_dir / keeper.GRANT).exists()
+
+    exercise(run())
 
 
 def test_a_kept_run_streams_the_same_events_as_a_process_run(tmp_path: Path) -> None:

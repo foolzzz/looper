@@ -19,13 +19,15 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import keeper, proc_tree
+from looper.agents import keeper, kept_dirs, proc_tree
 from looper.agents.agent_settings import AgentSettings, AgentType
 from looper.agents.bus import MessageBus
 from looper.agents.drain import DrainScope, DrainState
 from looper.agents.kept_run import AdoptFailure, AdoptOutcome, DetachKind, KeeperSettings, KeptRun, RunHold
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+from looper.agents.ops.room import RoomOps
 from looper.agents.profile_registry import BUILTIN_RUNTIME, LegacyProviderSpec
+from looper.agents.room import RoomService
 from looper.agents.runtimes import ApiProtocol, AuthKind
 from looper.agents.runtimes.channel import DeliveryResult
 from looper.agents.tiers import worker
@@ -46,6 +48,7 @@ def emit(event):
     print(json.dumps(event), flush=True)
 
 first = json.loads(sys.stdin.readline())
+reminders = []
 emit({'type': 'system', 'subtype': 'init', 'session_id': 'adopt-test'})
 emit(first)
 emit({'type': 'assistant', 'message': {'content': [
@@ -60,13 +63,24 @@ while not Path('release').exists():
         line = sys.stdin.readline()
         if not line:
             break
-        emit(json.loads(line))
+        message = json.loads(line)
+        if str(message.get('uuid', '')).startswith('looper-reminder-'):
+            reminders.append(message['uuid'])
+        emit(message)
 emit({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'Finished the held work.'}]}})
 emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'total_cost_usd': .375,
       'result': json.dumps({'status': 'completed', 'summary': 'done', 'changed_files': {}})})
 Path('result-written').touch()
+if Path('reminder-turn').exists():
+    while not Path('reminder-result').exists():
+        time.sleep(.02)
+    emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'total_cost_usd': .625,
+          'user_message_uuids': reminders,
+          'result': json.dumps({'status': 'completed', 'summary': 'only a reminder', 'changed_files': {}})})
 if Path('delay-exit').exists():
     time.sleep(3)
+    emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'total_cost_usd': .625,
+          'result': json.dumps({'status': 'completed', 'summary': 'teammate finished', 'changed_files': {}})})
 """
 
 
@@ -93,7 +107,7 @@ async def _stored(db, count: int) -> None:
 
 
 @asynccontextmanager
-async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None):
+async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None, rooms=False):
     run_dir = _short_directory()
     run_id = run_dir.name
     saved = {}
@@ -139,6 +153,9 @@ async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None):
     pools = [worker.WorkerPool(config=worker.WorkerConfig(claude_bin=executable),
                                runtime_root=tmp_path / 'runtime', drain=drains[i], keeper=KeeperSettings(i + 1))
              for i in range(2)]
+    if rooms:
+        for pool in pools:
+            pool.room_ops = RoomOps(RoomService(worker_pool=pool, batch_seconds=0), url='http://127.0.0.1:9')
     envelope = MessageEnvelope.create(
         source=planner_address('original-planner'), target=worker_address(run_id),
         message_type=MessageType.WORK_ITEM, correlation_id='dispatch-correlation', metadata={'dispatch': 'original'},
@@ -235,6 +252,102 @@ def test_an_adopted_run_continues_its_record(tmp_path, monkeypatch):
     run_db(run, monkeypatch, timeout=35)
 
 
+def _candidate(case):
+    manifest = keeper.read_json(case.run_dir / keeper.MANIFEST)
+    grant = keeper.read_json(case.run_dir / keeper.GRANT)
+    assert grant is not None, 'the real room grant must have been persisted at launch'
+    candidate = kept_dirs.Candidate(case.run_dir, case.run_id, case.expect, manifest['record_id'], grant)
+    case.b.room_ops.import_pending(grant)
+    case.b.set_candidates([candidate])
+    return candidate
+
+
+def test_killing_a_candidate_ends_it(tmp_path, monkeypatch):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch, rooms=True) as case:
+            await _detach(case)
+            candidate = _candidate(case)
+            assert case.b.room_ops.export_run(case.run_id) is not None
+            assert case.b.keeper_status()['pending'] == 1
+
+            assert await case.b.kill(case.run_id)
+
+            await asyncio.wait_for(case.original._keeper_process.wait(), 5)
+            assert not _live(case.identity['child_pid'])
+            assert not _live(case.identity['keeper_pid'])
+            assert await db.fetchval('SELECT status FROM llm_records') == 'interrupted'
+            assert await db.fetchval('SELECT error FROM llm_records') == (
+                'its task stopped it before the run was adopted')
+            assert case.b.room_ops.export_run(case.run_id) is None
+            assert not any(Path(path).exists() for path in candidate.grant['mcp_files'])
+            assert not case.run_dir.exists()
+            assert case.b.keeper_status()['pending'] == 0
+            assert not case.results
+            assert not await case.b.kill(case.run_id)
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+def test_unadopted_candidates_expire(tmp_path, monkeypatch):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch, rooms=True) as case:
+            await _detach(case)
+            candidate = _candidate(case)
+
+            await case.b.expire_candidates(window=.01)
+
+            await asyncio.wait_for(case.original._keeper_process.wait(), 5)
+            assert not _live(case.identity['child_pid'])
+            assert not _live(case.identity['keeper_pid'])
+            assert await db.fetchval('SELECT status FROM llm_records') == 'interrupted'
+            assert await db.fetchval('SELECT error FROM llm_records') == 'not_adopted'
+            assert case.b.room_ops.export_run(case.run_id) is None
+            assert not any(Path(path).exists() for path in candidate.grant['mcp_files'])
+            assert not case.run_dir.exists()
+            assert case.b.keeper_status() == {
+                'mode': 'on', 'attached': 0, 'candidates_at_start': 1, 'adopted_at_start': 0,
+                'pending': 0, 'ended_at_start': {'not_adopted': 1},
+            }
+            assert not case.results
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+def test_room_reminders_survive_adoption(tmp_path, monkeypatch):
+    async def run(db):
+        (tmp_path / 'reminder-turn').touch()
+        async with _pools(db, tmp_path, monkeypatch, rooms=True) as case:
+            assert await case.a.remind(case.run_id, 'The room has a message for you')
+            await _stored(db, 4)
+            stdin = [json.loads(line) for line in (case.run_dir / keeper.STDIN).read_text().splitlines()]
+            reminders = {message['uuid'] for message in stdin if str(message.get('uuid', '')).startswith(
+                'looper-reminder-')}
+            assert len(reminders) == 1
+            (tmp_path / 'release').touch()
+            await _stored(db, 6)
+            await _detach(case)
+            _candidate(case)
+
+            adopted = await case.b.adopt(case.run_id, case.expect)
+            assert adopted.outcome is AdoptOutcome.ADOPTED
+            assert case.b._reminders[case.run_id].uuids == reminders
+            (tmp_path / 'reminder-result').touch()
+            result = (await _finished(case)).payload
+
+            assert result['status'] == 'completed'
+            assert result['summary'] == 'done'
+            assert await db.fetchval('SELECT count(*) FROM llm_records') == 1
+            assert await db.fetchval('SELECT status FROM llm_records') == 'completed'
+            assert float(await db.fetchval('SELECT cost_usd FROM llm_records')) == .625
+            events = [json.loads(row['event']) for row in await db.fetch(
+                'SELECT event FROM llm_record_events ORDER BY seq')]
+            assert events[-1]['user_message_uuids'] == list(reminders)
+            assert json.loads(events[-1]['result'])['summary'] == 'only a reminder'
+            assert case.b.room_ops.export_run(case.run_id) is None
+
+    run_db(run, monkeypatch, timeout=35)
+
+
 def test_steering_reaches_an_adopted_run(tmp_path, monkeypatch):
     async def run(db):
         async with _pools(db, tmp_path, monkeypatch) as case:
@@ -315,7 +428,7 @@ def test_a_run_that_finished_during_the_gap_is_reported_once(tmp_path, monkeypat
     run_db(run, monkeypatch, timeout=35)
 
 
-def test_a_result_consumed_before_detach_finishes_without_waiting_for_exit(tmp_path, monkeypatch):
+def test_a_result_consumed_before_detach_keeps_later_output(tmp_path, monkeypatch):
     async def run(db):
         async with _pools(db, tmp_path, monkeypatch) as case:
             (tmp_path / 'delay-exit').touch()
@@ -327,14 +440,42 @@ def test_a_result_consumed_before_detach_finishes_without_waiting_for_exit(tmp_p
             output = (case.run_dir / keeper.STDOUT).read_bytes()
             assert detached['consumed']['stdout'] == len(output)
             assert json.loads(output.splitlines()[-1])['type'] == 'result'
-            started = asyncio.get_running_loop().time()
             await _adopt(case)
-            assert (await _finished(case)).payload['status'] == 'completed'
-            assert asyncio.get_running_loop().time() - started < 2
+            result = (await _finished(case)).payload
+            assert result['status'] == 'completed'
+            assert result['summary'] == 'teammate finished'
             assert await db.fetchval('SELECT status FROM llm_records') == 'completed'
-            assert float(await db.fetchval('SELECT cost_usd FROM llm_records')) == .375
+            assert float(await db.fetchval('SELECT cost_usd FROM llm_records')) == .625
+            events = await db.fetch('SELECT event FROM llm_record_events ORDER BY seq')
+            assert [json.loads(row['event']) for row in events] == [
+                json.loads(line) for line in case.saved['stdout'].splitlines()]
             assert len(case.results) == 1
             assert not _live(case.identity['child_pid'])
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+def test_a_stale_adoption_preserves_the_newer_controllers_keeper_and_record(tmp_path, monkeypatch):
+    from looper.agents.keeper.client import KeeperClient
+
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch) as case:
+            await _detach(case)
+            newer = KeeperClient()
+            try:
+                await newer.connect(case.run_dir / keeper.SOCKET)
+                await newer.initialize(epoch=3, looper_version='test')
+                answer = await case.b.adopt_dir(case.run_dir, expect=case.expect)
+                assert answer.outcome is AdoptOutcome.FAILED
+                assert answer.failure is AdoptFailure.PROTOCOL
+                assert _live(case.identity['child_pid'])
+                assert _live(case.identity['keeper_pid'])
+                assert (case.run_dir / keeper.DETACH).exists()
+                assert await db.fetchval('SELECT status FROM llm_records') == 'running'
+                assert not case.results
+            finally:
+                await newer.close()
+                await newer.wait_closed()
 
     run_db(run, monkeypatch, timeout=35)
 
