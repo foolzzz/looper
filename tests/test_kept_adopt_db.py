@@ -1,0 +1,376 @@
+"""A second pool resumes the same kept process, record, stream and reply."""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+from dataclasses import replace
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import random
+import shutil
+import signal
+import string
+import subprocess
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from looper.agents import keeper, proc_tree
+from looper.agents.agent_settings import AgentSettings, AgentType
+from looper.agents.bus import MessageBus
+from looper.agents.drain import DrainScope, DrainState
+from looper.agents.kept_run import AdoptFailure, AdoptOutcome, DetachKind, KeeperSettings, KeptRun, RunHold
+from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+from looper.agents.profile_registry import BUILTIN_RUNTIME, LegacyProviderSpec
+from looper.agents.runtimes import ApiProtocol, AuthKind
+from looper.agents.runtimes.channel import DeliveryResult
+from looper.agents.tiers import worker
+from tests.db_support import DSN, run_db, until
+from tests.fake_claude import fake_claude
+from tests.runtime_model_helpers import builtin_launch, resolved_profile, with_model_name
+
+pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+ROOT = Path(__file__).resolve().parents[1]
+
+# The initial input is echoed just as --replay-user-messages does. A tool call
+# remains in flight across detach; every later stdin line is echoed as well.
+BODY = """\
+import json, select, sys, time
+from pathlib import Path
+
+def emit(event):
+    print(json.dumps(event), flush=True)
+
+first = json.loads(sys.stdin.readline())
+emit({'type': 'system', 'subtype': 'init', 'session_id': 'adopt-test'})
+emit(first)
+emit({'type': 'assistant', 'message': {'content': [
+    {'type': 'tool_use', 'id': 'tool-one', 'name': 'Read', 'input': {'file_path': 'sample.txt'}}]}})
+while not Path('release').exists():
+    if Path('gap-usage').exists():
+        Path('gap-usage').unlink()
+        emit({'type': 'usage', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 1000000}})
+        Path('gap-usage-written').touch()
+    readable, _, _ = select.select([sys.stdin], [], [], .02)
+    if readable:
+        line = sys.stdin.readline()
+        if not line:
+            break
+        emit(json.loads(line))
+emit({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'Finished the held work.'}]}})
+emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'total_cost_usd': .375,
+      'result': json.dumps({'status': 'completed', 'summary': 'done', 'changed_files': {}})})
+Path('result-written').touch()
+if Path('delay-exit').exists():
+    time.sleep(3)
+"""
+
+
+def _short_directory() -> Path:
+    for suffix in random.sample(string.ascii_letters + string.digits, 62):
+        directory = ROOT / f'.k{suffix}'
+        if not directory.exists():
+            assert len(os.fsencode(directory / keeper.SOCKET)) <= keeper.SOCKET_PATH_MAX
+            return directory
+    raise AssertionError('no short keeper directory is available')
+
+
+def _live(pid: int) -> bool:
+    result = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)], capture_output=True,
+                            text=True, check=False, timeout=5)
+    assert result.returncode in (0, 1), result.stderr
+    return bool(result.stdout.strip()) and not result.stdout.strip().startswith('Z')
+
+
+async def _stored(db, count: int) -> None:
+    async with asyncio.timeout(10):
+        while await db.fetchval('SELECT count(*) FROM llm_record_events') < count:
+            await asyncio.sleep(.02)
+
+
+@asynccontextmanager
+async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None):
+    run_dir = _short_directory()
+    run_id = run_dir.name
+    saved = {}
+    handles = []
+
+    class ShortKeptRun(KeptRun):
+        def __init__(self, *args, **kwargs):
+            kwargs['run_dir'] = run_dir
+            kwargs['runtime_root'] = tmp_path / 'runtime'
+            super().__init__(*args, **kwargs)
+            handles.append(self)
+
+        def release(self):
+            if (self.run_dir / keeper.STDOUT).exists():
+                saved['stdout'] = (self.run_dir / keeper.STDOUT).read_bytes()
+            super().release()
+
+    launch = builtin_launch()
+    settings = replace(launch.settings, max_budget_usd=cap)
+    if cap is not None:
+        profile = resolved_profile(
+            "profile-priced", "priced Claude", BUILTIN_RUNTIME,
+            LegacyProviderSpec("provider-priced", "test account", AuthKind.API_KEY,
+                               frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
+                               base_url="http://127.0.0.1:1", api_key="test-key"),
+            "claude-opus-5-5",
+        )
+        settings = AgentSettings(profile=profile, max_budget_usd=cap)
+    load = AsyncMock(side_effect=lambda *args, **kwargs: settings)
+    monkeypatch.setattr(worker, 'KeptRun', ShortKeptRun)
+    monkeypatch.setattr(worker, 'load_agent_settings', load)
+    monkeypatch.setattr(worker, 'load_task_limit', AsyncMock(return_value=1))
+    monkeypatch.setattr(worker, '_load_settings', AsyncMock(return_value=worker.WorkerSettings(timeout, 0, 'work')))
+    monkeypatch.setattr(worker.WorkerPool, '_task_project', AsyncMock(return_value=None))
+    await db.execute("INSERT INTO projects (id, name) VALUES ('project-adopt', 'Adoption test')")
+    await db.execute("INSERT INTO tasks (id, requirement, work_dir, project_id) "
+                     "VALUES ('task-adopt', 'hold a run', $1, 'project-adopt')", str(tmp_path))
+    executable = fake_claude(tmp_path / 'claude', BODY)
+    bus = MessageBus(runtime_root=tmp_path / 'runtime')
+    results = []
+    bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
+    drains = [DrainState(), DrainState()]
+    pools = [worker.WorkerPool(config=worker.WorkerConfig(claude_bin=executable),
+                               runtime_root=tmp_path / 'runtime', drain=drains[i], keeper=KeeperSettings(i + 1))
+             for i in range(2)]
+    envelope = MessageEnvelope.create(
+        source=planner_address('original-planner'), target=worker_address(run_id),
+        message_type=MessageType.WORK_ITEM, correlation_id='dispatch-correlation', metadata={'dispatch': 'original'},
+        payload={'task_id': 'step-adopt', 'parent_task_id': 'task-adopt', 'plan_id': 'plan-adopt',
+                 'step_key': 'implement', 'instruction': 'finish the held work',
+                 'context': {'work_dir': str(tmp_path)}},
+    )
+    case = SimpleNamespace(a=pools[0], b=pools[1], run_dir=run_dir, run_id=run_id, results=results,
+                           settings=settings, load=load, saved=saved, envelope=envelope,
+                           expect=RunHold('task-adopt', 'step-adopt', AgentType.WORKER), db=db, root=tmp_path)
+    try:
+        for pool in pools:
+            await pool.start(bus)
+        await pools[0]._dispatch(envelope)
+        await _stored(db, 3)
+        case.original = pools[0]._active[run_id].handle
+        case.identity = keeper.read_json(run_dir / keeper.STATE)
+        case.started_at = pools[0]._active[run_id].since
+        yield case
+    finally:
+        (tmp_path / 'release').touch()
+        for pool in pools:
+            await pool.stop()
+        await bus.shutdown()
+        # A detached old handle deliberately does not own shutdown; clean the
+        # actual process identity even if adoption raised before taking ownership.
+        identity = getattr(case, 'identity', keeper.read_json(run_dir / keeper.STATE) or {})
+        child, child_started = identity.get('child_pid'), identity.get('child_started')
+        if child and child_started and _live(child):
+            await proc_tree.end_orphan(child, child_started, label='adoption test cleanup')
+        pid, started = identity.get('keeper_pid'), identity.get('keeper_started')
+        if pid and started and _live(pid) and proc_tree._start_time(pid) == started:
+            os.kill(pid, signal.SIGTERM)
+            await until(lambda: not _live(pid), 'keeper to exit', timeout=10)
+        for handle in handles:
+            if handle._keeper_process is not None:
+                await asyncio.wait_for(handle._keeper_process.wait(), 5)
+        shutil.rmtree(run_dir, ignore_errors=True)
+        assert not child or not _live(child), 'test left the Claude stand-in running'
+        assert not pid or not _live(pid), 'test left its keeper running'
+
+
+async def _detach(case):
+    assert case.a._drain.begin(DrainScope.TURNS)['phase'] == 'drained'
+    assert await case.a.detach_kept(epoch=1) == {DetachKind.DETACHED: [case.run_id]}
+    assert not case.results
+    return keeper.read_json(case.run_dir / keeper.DETACH)
+
+
+async def _adopt(case):
+    answer = await case.b.adopt_dir(case.run_dir, expect=case.expect)
+    assert answer.outcome is AdoptOutcome.ADOPTED, answer
+    assert not (case.run_dir / keeper.DETACH).exists()
+    return case.b._active[case.run_id].handle
+
+
+async def _finished(case):
+    await until(lambda: len(case.results) == 1, 'one adopted result')
+    await until(lambda: case.run_id not in case.b._tasks, 'adopted run cleanup')
+    result = case.results[0]
+    assert result.target == case.envelope.source
+    assert result.correlation_id == case.envelope.correlation_id
+    assert result.metadata == case.envelope.metadata
+    assert result.payload['task_id'] == 'step-adopt'
+    assert result.payload['plan_id'] == 'plan-adopt'
+    assert not case.b._inputs and not case.b._slots
+    return result
+
+
+def test_an_adopted_run_continues_its_record(tmp_path, monkeypatch):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch) as case:
+            await _detach(case)
+            await _adopt(case)
+            (tmp_path / 'release').touch()
+            result = await _finished(case)
+            assert result.payload['status'] == 'completed'
+            records = await db.fetch('SELECT * FROM llm_records')
+            assert len(records) == 1
+            assert records[0]['status'] == 'completed'
+            assert float(records[0]['cost_usd']) == .375
+            events = await db.fetch('SELECT seq, event FROM llm_record_events ORDER BY seq')
+            assert [row['seq'] for row in events] == list(range(1, len(events) + 1))
+            assert [json.loads(row['event']) for row in events] == [
+                json.loads(line) for line in case.saved['stdout'].splitlines()]
+            activity = await db.fetch('SELECT kind, summary FROM activity ORDER BY seq')
+            assert sum(row['summary'] == 'Worker started execution' for row in activity) == 1
+            assert sum(row['kind'] == 'tool_use' and not row['summary'].startswith('$ ')
+                       for row in activity) == 1
+            assert sum(row['summary'].startswith('Worker finished') for row in activity) == 1
+            assert sum(row['kind'] == 'text' for row in activity) == 1
+            assert len(case.results) == 1
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+def test_steering_reaches_an_adopted_run(tmp_path, monkeypatch):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch) as case:
+            detached = await _detach(case)
+            previous = (case.run_dir / keeper.STDIN).read_bytes()
+            assert len(previous) == detached['stdin_offset']
+            await _adopt(case)
+            assert await case.b.send_input(case.run_id, 'continue with this correction') is DeliveryResult.ACCEPTED
+            await _stored(db, 4)
+            written = (case.run_dir / keeper.STDIN).read_bytes()
+            assert written.startswith(previous)
+            turn = json.loads(written[len(previous):])
+            assert turn['message']['content'] == 'continue with this correction'
+            (tmp_path / 'release').touch()
+            assert (await _finished(case)).payload['status'] == 'completed'
+            echoes = [json.loads(row['event']) for row in await db.fetch('SELECT event FROM llm_record_events')]
+            assert turn in echoes
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+def test_the_timeout_counts_from_the_original_start(tmp_path, monkeypatch):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch, timeout=3) as case:
+            async def at_age(age):
+                remaining = age - (datetime.now(timezone.utc) - case.started_at).total_seconds()
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+            await at_age(1)
+            await _detach(case)
+            await at_age(2.5)
+            started = asyncio.get_running_loop().time()
+            await _adopt(case)
+            result = await _finished(case)
+            elapsed = asyncio.get_running_loop().time() - started
+            assert elapsed < 1.5, f'adoption restarted the original timeout: {elapsed:.2f} s'
+            assert '3 s limit (timeout_seconds)' in result.payload['error']
+            assert await db.fetchval('SELECT status FROM llm_records') == 'failed'
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+def test_the_spend_cap_stops_at_the_first_live_event(tmp_path, monkeypatch):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch, cap=.01) as case:
+            await _detach(case)
+            (tmp_path / 'gap-usage').touch()
+            await until(lambda: (tmp_path / 'gap-usage-written').exists(), 'gap usage output')
+            # Changing the configured cap applies to a future run, not this one.
+            case.load.side_effect = lambda *args, **kwargs: replace(case.settings, max_budget_usd=100)
+            await _adopt(case)
+            result = await _finished(case)
+            assert result.payload['status'] == 'failed'
+            assert 'per-run spend cap' in result.payload['error']
+            assert '$0.01 cap' in result.payload['error']
+            activity = await db.fetch('SELECT kind, summary FROM activity')
+            assert sum(row['kind'] == 'tool_use' and not row['summary'].startswith('$ ')
+                       for row in activity) == 1
+            assert not any(row['kind'] == 'text' for row in activity)
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+def test_a_run_that_finished_during_the_gap_is_reported_once(tmp_path, monkeypatch):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch) as case:
+            await _detach(case)
+            (tmp_path / 'release').touch()
+            await asyncio.wait_for(case.original._keeper_process.wait(), 10)
+            assert keeper.read_json(case.run_dir / keeper.STATE)['state'] == keeper.KeeperState.EXITED
+            handle = await _adopt(case)
+            assert handle._process.stdin.is_closing()
+            assert (await _finished(case)).payload['status'] == 'completed'
+            assert await db.fetchval('SELECT count(*) FROM llm_records') == 1
+            assert await db.fetchval('SELECT status FROM llm_records') == 'completed'
+            assert len(case.results) == 1
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+def test_a_result_consumed_before_detach_finishes_without_waiting_for_exit(tmp_path, monkeypatch):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch) as case:
+            (tmp_path / 'delay-exit').touch()
+            (tmp_path / 'release').touch()
+            await _stored(db, 5)
+            assert (tmp_path / 'result-written').exists()
+            assert _live(case.identity['child_pid'])
+            detached = await _detach(case)
+            output = (case.run_dir / keeper.STDOUT).read_bytes()
+            assert detached['consumed']['stdout'] == len(output)
+            assert json.loads(output.splitlines()[-1])['type'] == 'result'
+            started = asyncio.get_running_loop().time()
+            await _adopt(case)
+            assert (await _finished(case)).payload['status'] == 'completed'
+            assert asyncio.get_running_loop().time() - started < 2
+            assert await db.fetchval('SELECT status FROM llm_records') == 'completed'
+            assert float(await db.fetchval('SELECT cost_usd FROM llm_records')) == .375
+            assert len(case.results) == 1
+            assert not _live(case.identity['child_pid'])
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+def _adoption_failure(tmp_path, monkeypatch, *, closed):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch) as case:
+            await _detach(case)
+            if closed:
+                await db.execute("UPDATE llm_records SET status = 'failed'")
+                expected, status = AdoptFailure.RECORD_NOT_RUNNING, 'failed'
+            else:
+                changed = replace(case.settings, profile=with_model_name(case.settings.profile, 'sonnet'))
+                case.load.side_effect = lambda *args, **kwargs: changed
+                expected, status = AdoptFailure.LAUNCH_CHANGED, 'interrupted'
+            answer = await case.b.adopt_dir(case.run_dir, expect=case.expect)
+            assert answer.outcome is AdoptOutcome.FAILED
+            assert answer.failure is expected
+            assert not case.run_dir.exists()
+            assert not case.b._active and not case.b._slots and not case.b._tasks
+            assert not _live(case.identity['child_pid'])
+            await asyncio.wait_for(case.original._keeper_process.wait(), 5)
+            assert not _live(case.identity['keeper_pid'])
+            assert await db.fetchval('SELECT status FROM llm_records') == status
+            if not closed:
+                error = await db.fetchval('SELECT error FROM llm_records')
+                assert 'could not be adopted after a restart' in error
+                assert expected.value in error
+            assert not case.results
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+def test_a_changed_launch_fails_adoption_cleanly(tmp_path, monkeypatch):
+    _adoption_failure(tmp_path, monkeypatch, closed=False)
+
+
+def test_a_closed_record_fails_adoption_cleanly(tmp_path, monkeypatch):
+    _adoption_failure(tmp_path, monkeypatch, closed=True)

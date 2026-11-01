@@ -37,21 +37,25 @@ import asyncio
 import contextlib
 import json
 import logging
+import shutil
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
+from enum import Enum, StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..agent_settings import AgentType, Launch, load_agent_settings, load_task_limit
 from ..bus import MessageBus
-from ..claude_cli import ClaudeRunRecorder, budget_error, ended_by
+from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, budget_error, ended_by
 from .. import proc_tree, reported_files, vault
-from .. import keeper
-from ..kept_run import DetachKind, KeptRun, KeptRunState, KeeperLost, KeeperSettings
+from .. import keeper, kept_dirs
+from ..keeper.client import KeeperGone
+from ..keeper.protocol import KeeperError
+from ..kept_run import (AdoptFailure, AdoptOutcome, AdoptResult, AttachError, DetachKind, DetachOutcome,
+                        KeptRun, KeptRunState, KeeperLost, KeeperSettings, RunHold)
 from ..ops.vault import run_section
 from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
@@ -82,6 +86,8 @@ from ..system_prompt import (
 )
 
 if TYPE_CHECKING:
+    from ..room import Seat
+    from ..system_prompt import SystemPrompt
     from ..runtimes.runner.turn import TurnLimits
 
 from ...db import activity as db_activity
@@ -422,6 +428,38 @@ class WorkerProcess:
     task_role: dict[str, Any] | None = None  # the role its dispatch names (``task_roles.run_role``); None: built-in
 
 
+class ConsumeStart(StrEnum):
+    NEW = "new"
+    ADOPTED = "adopted"
+
+
+@dataclass
+class RunContext:
+    worker_id: str
+    parent_task_id: str
+    step_id: str | None
+    work_dir: str
+    prompt: str
+    is_verify: bool
+    launch: Launch
+    runtime: RuntimeAdapter
+    seat: Seat | None
+    run_timeout: float
+    started_at: datetime
+    hosted: bool
+    command: list[str]
+    # Preparation already constructs the handle and prompt; keep their ownership unchanged.
+    handle: RunHandle | None = None
+    system_prompt: SystemPrompt | None = None
+
+
+@dataclass(frozen=True)
+class RunReply:
+    target: AgentAddress
+    correlation_id: str
+    metadata: dict[str, Any]
+
+
 class WorkerPool:
     """Manages a pool of Worker runs.
 
@@ -517,6 +555,8 @@ class WorkerPool:
                 and wid in self._tasks]
 
         async def detach(wid, handle, recorder):
+            if recorder is None:
+                return DetachOutcome(DetachKind.FINISHING)
             outcome = await handle.detach(epoch=epoch, timeout=timeout)
             if outcome.kind is DetachKind.DETACHED:
                 if recorder is not None:
@@ -545,8 +585,135 @@ class WorkerPool:
                 finishing.append(task)
         if finishing:
             await asyncio.wait(finishing, timeout=timeout)
-        logger.info("detach outcomes=%s", grouped)
+        logger.info("detach outcomes=%s", {kind.value: runs for kind, runs in grouped.items()})
         return grouped
+
+    async def adopt_dir(self, run_dir: Path, *, expect: RunHold) -> AdoptResult:
+        """Resume a held run's consumer; callers must establish the step's hold first."""
+        run_dir = Path(run_dir)
+        manifest = keeper.read_json(run_dir / keeper.MANIFEST) or {}
+        record_id, handle = manifest.get("record_id"), None
+        run_id = run_dir.name
+        try:
+            if not manifest or manifest.get("run_id") != run_id:
+                raise AttachError(AdoptFailure.FILES, "invalid run manifest")
+            if (manifest.get("task_id"), manifest.get("step_id"), manifest.get("role")) != (
+                    expect.task_id, expect.step_id, expect.role.value):
+                raise AttachError(AdoptFailure.HOLD_MISMATCH, "the run does not match the held step")
+            if run_id in self._tasks or run_id in self._active:
+                return AdoptResult(AdoptOutcome.FAILED, AdoptFailure.HOLD_MISMATCH, "the run is already attached")
+            task_id, step_id, agent = expect.task_id, expect.step_id, expect.role
+            started_at = datetime.fromisoformat(manifest["started_at"])
+            if started_at.tzinfo is None or type(record_id) is not int or record_id <= 0:
+                raise ValueError("invalid run start or record id")
+            run_timeout = manifest["timeout_s"]
+            if type(run_timeout) is not int or run_timeout < 0:
+                raise ValueError("invalid run timeout")
+            consume = manifest["consume"]
+            command, work_dir = manifest["command"], manifest["work_dir"]
+            reply_data = manifest["reply"]
+            reply = RunReply(AgentAddress.from_dict(reply_data["target"]), reply_data["correlation_id"],
+                             reply_data["metadata"])
+            task_role = TaskRole.from_payload(manifest.get("task_role"))
+            if manifest.get("task_role") is not None and (task_role is None or task_role.kind.agent is not agent):
+                raise ValueError("invalid run task role")
+            try:
+                project = await self._task_project(task_id, run_id)
+                project_id = str((project or {}).get("id") or "") or None
+                settings = await load_agent_settings(
+                    agent, project_id, task_id, step_id=step_id,
+                    task_role=(task_role.key, task_role.version) if task_role is not None else None)
+                launch = Launch(settings, role=agent)
+                if settings.profile_error or (launch.runtime.type, launch.profile.provider.id, launch.model,
+                                              launch.profile.runtime.launcher.value) != (
+                        manifest["runtime_type"], consume["provider_id"], consume["model"], consume["launcher"]):
+                    raise ValueError(settings.profile_error or "the run's consuming launch changed")
+            except Exception as exc:
+                raise AttachError(AdoptFailure.LAUNCH_CHANGED, str(exc)) from exc
+            recorder = await ClaudeRunRecorder.resume(
+                record_id, agent_id=run_id, task_id=task_id, command=command, cwd=work_dir,
+                step_id=step_id, launch=launch, max_budget_usd=consume["max_budget_usd"])
+            if self._keeper is None:
+                raise AttachError(AdoptFailure.PROTOCOL, "keeper mode is off")
+            handle = await KeptRun.attach(run_dir, runtime=launch.runtime, launch=launch, epoch=self._keeper.epoch,
+                                          on_stale=self._on_stale or (lambda reason: None), label=f"worker {run_id}")
+            is_verify = agent is AgentType.REVIEWER
+            seat = run_seat(manifest, is_verify=is_verify, run=run_id) \
+                if self.room_ops is not None and manifest.get("room_seat") else None
+            ctx = RunContext(run_id, task_id, step_id, work_dir, "", is_verify, launch, launch.runtime, seat,
+                             run_timeout, started_at, False, command)
+            wp = WorkerProcess(worker_id=run_id, task_id=step_id, plan_id=manifest.get("plan_id") or "",
+                               role=agent, parent_task_id=task_id, step=manifest.get("step_key") or "",
+                               instruction=manifest.get("instruction") or "", task_role=run_role(manifest.get("task_role")),
+                               status="running", since=started_at, keepable=True, handle=handle, project_id=project_id)
+            if seat is not None:
+                reminders = _Reminders()
+                for line in (run_dir / keeper.STDIN).read_text().splitlines():
+                    message = json.loads(line)
+                    reminder_id = message.get("uuid")
+                    if isinstance(reminder_id, str) and reminder_id.startswith("looper-reminder-"):
+                        reminders.uuids.add(reminder_id)
+                self._reminders[run_id] = reminders
+            self._active[run_id] = wp
+            self._slots[run_id] = (agent, task_id)
+            self._input_ready[run_id] = asyncio.Event()
+            task = asyncio.create_task(self._run_adopted(wp, ctx, handle, recorder, reply))
+            self._tasks[run_id] = task
+            task.add_done_callback(lambda t: self._cleanup_worker(run_id))
+            logger.info("adopt run=%s offset=%d", run_id, handle.replay_until)
+            return AdoptResult(AdoptOutcome.ADOPTED)
+        except AttachError as exc:
+            failure, detail = exc.failure, str(exc)
+        except RecordNotResumable as exc:
+            failure, detail = AdoptFailure.RECORD_NOT_RUNNING, str(exc)
+        except KeeperError as exc:
+            failure, detail = AdoptFailure.PROTOCOL, str(exc)
+        except (KeeperGone, ConnectionError, OSError) as exc:
+            failure, detail = AdoptFailure.KEEPER_UNREACHABLE, str(exc)
+        except (KeyError, TypeError, ValueError) as exc:
+            failure, detail = AdoptFailure.FILES, str(exc)
+        except BaseException:
+            await self._discard_adoption(run_dir, handle, record_id, AdoptFailure.PROTOCOL)
+            raise
+        await self._discard_adoption(run_dir, handle, record_id, failure)
+        return AdoptResult(AdoptOutcome.FAILED, failure, detail)
+
+    async def _discard_adoption(self, run_dir: Path, handle: KeptRun | None,
+                                record_id: int | None, failure: AdoptFailure) -> None:
+        ended = False
+        try:
+            if handle is not None:
+                await handle.end()
+            elif run_dir.exists():
+                record = kept_dirs.KeeperRecord.read(run_dir / keeper.STATE) or kept_dirs._recover(
+                    run_dir, self._runtime_root / proc_tree.RECORDS_DIR)
+                if record is None:
+                    raise OSError("cannot identify the unadopted keeper")
+                await kept_dirs.end_keeper(record, run_dir)
+            ended = True
+        except Exception:
+            # Keep identity files if termination cannot be confirmed, for the next startup sweep.
+            logger.exception("could not end unadopted run=%s", run_dir.name)
+        try:
+            if type(record_id) is int:
+                await db_llm_records.end_record_interrupted(
+                    record_id, f"the run could not be adopted after a restart: {failure.value}")
+        finally:
+            if not ended:
+                (run_dir / keeper.DETACH).unlink(missing_ok=True)
+            elif handle is not None:
+                handle.release()
+            else:
+                shutil.rmtree(run_dir, ignore_errors=True)
+            self._cleanup_worker(run_dir.name)
+
+    async def _run_adopted(self, wp: WorkerProcess, ctx: RunContext, handle: KeptRun,
+                           recorder: ClaudeRunRecorder, reply: RunReply) -> None:
+        async def run() -> dict:
+            async with self._record_run(wp.worker_id, recorder):
+                return await self._consume(ctx, handle, recorder, start=ConsumeStart.ADOPTED)
+
+        await self._finish_run(wp, ctx.seat, reply, run)
 
     async def _listen_loop(self) -> None:
         """Listen for work items addressed to any worker-* queue.
@@ -866,9 +1033,18 @@ class WorkerPool:
             except Exception:
                 pass
 
+        reply = RunReply(envelope.source, envelope.correlation_id, envelope.metadata)
+        await self._finish_run(wp, seat, reply,
+                               lambda: self._execute(envelope, is_verify=is_verify, started_at=wp.since))
+
+    async def _finish_run(self, wp: WorkerProcess, seat: Any, reply: RunReply,
+                          run: Callable[[], Awaitable[dict]]) -> None:
+        assert self._bus is not None
+        worker_id, task_id, plan_id = wp.worker_id, wp.task_id, wp.plan_id
+        parent_task_id, is_verify = wp.parent_task_id, wp.role is AgentType.REVIEWER
         try:
             try:
-                result = await self._execute(envelope, is_verify=is_verify, started_at=wp.since)
+                result = await run()
                 wp.status = "completed"
                 wp.result = result
             except asyncio.CancelledError:
@@ -906,15 +1082,15 @@ class WorkerPool:
             await self._bus.publish(MessageEnvelope.create(
                 source=worker_address(worker_id),
                 # Reply to the dispatching per-task Planner (planner-<task_id>).
-                target=envelope.source,
+                target=reply.target,
                 message_type=result_type,
                 payload={
                     "task_id": task_id,
                     "plan_id": plan_id,
                     **(wp.result or {}),
                 },
-                correlation_id=envelope.correlation_id,
-                metadata=envelope.metadata,
+                correlation_id=reply.correlation_id,
+                metadata=reply.metadata,
             ))
         finally:
             # _execute has waited for or ended the run before its logs can be released.
@@ -930,13 +1106,13 @@ class WorkerPool:
         finally:
             self._recorders.pop(worker_id, None)
 
-    async def _execute(
+    async def _prepare(
         self,
         envelope: MessageEnvelope,
         *,
         is_verify: bool = False,
         started_at: datetime | None = None,
-    ) -> dict[str, Any]:
+    ) -> RunContext | dict[str, Any]:
         """Execute a runtime run with streaming progress; ``started_at`` is the run's start (now without
         one): commits made since count as its work (``judge_result``)."""
         started_at = started_at or datetime.now(timezone.utc)
@@ -1159,14 +1335,26 @@ class WorkerPool:
             except Exception:
                 pass
 
+        return RunContext(worker_id, parent_task_id, payload.get("task_id") or None, work_dir, prompt,
+                          is_verify, launch, runtime, seat, run_timeout, started_at, hosted, command,
+                          handle, system_prompt)
+
+    async def _execute(self, envelope: MessageEnvelope, *, is_verify: bool = False,
+                       started_at: datetime | None = None) -> dict[str, Any]:
+        ctx = await self._prepare(envelope, is_verify=is_verify, started_at=started_at)
+        if isinstance(ctx, dict):
+            return ctx
+        worker_id, parent_task_id, work_dir, prompt = ctx.worker_id, ctx.parent_task_id, ctx.work_dir, ctx.prompt
+        command, launch, runtime, hosted, handle = ctx.command, ctx.launch, ctx.runtime, ctx.hosted, ctx.handle
+        assert handle is not None
         recorder = ClaudeRunRecorder(
             agent_id=worker_id,
             task_id=parent_task_id,
             command=command,
             cwd=work_dir,
             input_text=prompt,
-            step_id=payload.get("task_id") or None,
-            system_prompt=system_prompt,
+            step_id=ctx.step_id,
+            system_prompt=ctx.system_prompt,
             launch=launch,
             whole_process=True,
         )
@@ -1191,241 +1379,292 @@ class WorkerPool:
                                       outcome=RunOutcome.RUN_FAILED.value)
                 return {"status": "failed", "error": error}
 
-            waited, ended = False, False
+            return await self._consume(ctx, handle, recorder, start=ConsumeStart.NEW)
 
-            async def _end_run() -> None:
-                nonlocal ended
-                if not ended:
-                    ended = True
-                    await handle.end()
+    async def _consume(self, ctx: RunContext, handle: RunHandle, recorder: ClaudeRunRecorder, *,
+                       start: ConsumeStart) -> dict[str, Any]:
+        worker_id, parent_task_id, work_dir, prompt = ctx.worker_id, ctx.parent_task_id, ctx.work_dir, ctx.prompt
+        is_verify, launch, runtime, seat = ctx.is_verify, ctx.launch, ctx.runtime, ctx.seat
+        run_timeout, started_at, command = ctx.run_timeout, ctx.started_at, ctx.command
+        waited, ended = False, False
 
-            channel = handle.channel
-            input_ended = False
+        async def _end_run() -> None:
+            nonlocal ended
+            if not ended:
+                ended = True
+                await handle.end()
 
-            def _end_input() -> None:
-                # Without this Claude would wait on stdin for another user turn.
-                nonlocal input_ended
-                self._inputs.pop(worker_id, None)
-                if not input_ended:
-                    channel.end_input()
-                    input_ended = True
+        channel = handle.channel
+        input_ended = False
 
-            result_event: dict[str, Any] | None = None
-            finished: dict[str, Any] | None = None  # the last result Claude wrote (result_event, unless capped)
-            # The last result, for the run's cost (a session's totals), when a later turn answered only room
-            # reminders: result_event stays the outcome then.
-            last_result: dict[str, Any] | None = None
+        def _end_input() -> None:
+            # Without this Claude would wait on stdin for another user turn.
+            nonlocal input_ended
+            self._inputs.pop(worker_id, None)
+            if not input_ended:
+                channel.end_input()
+                input_ended = True
 
-            async def _read_stream() -> None:
-                nonlocal result_event, finished, last_result
-                async for event in channel.events():
-                    await recorder.record(event)
-                    if (capped := recorder.cap_stop) is not None:
-                        # Over its per-run cap at the provider's prices: stopped now, ending with the cap's result.
-                        # That result is Looper's, not a line the process wrote, so the transcript has to keep it.
-                        result_event = capped.result_event
-                        await recorder.record(result_event)
-                        _end_input()
+        result_event: dict[str, Any] | None = None
+        finished: dict[str, Any] | None = None  # the last result Claude wrote (result_event, unless capped)
+        # The last result, for the run's cost (a session's totals), when a later turn answered only room
+        # reminders: result_event stays the outcome then.
+        last_result: dict[str, Any] | None = None
+
+        replay_events, replay_started = 0, time.monotonic()
+        replay_result = False
+
+        async def _read_stream() -> None:
+            nonlocal result_event, finished, last_result, replay_events, replay_result
+            async for event in channel.events():
+                replaying = isinstance(handle, KeptRun) and handle.replaying
+                if replaying:
+                    recorder.account(event)
+                    replay_events += 1
+                else:
+                    # A result consumed before detach already decides this run.
+                    if start is ConsumeStart.ADOPTED and replay_result:
                         await _end_run()
                         return
+                    # On adoption the replay's usage must stop the first live event before any writes.
+                    if recorder.cap_stop is None:
+                        await recorder.record(event)
+                if not replaying and (capped := recorder.cap_stop) is not None:
+                    # Over its per-run cap at the provider's prices: stopped now, ending with the cap's result.
+                    # That result is Looper's, not a line the process wrote, so the transcript has to keep it.
+                    result_event = capped.result_event
+                    await recorder.record(result_event)
+                    _end_input()
+                    await _end_run()
+                    return
 
-                    event_type = event.get("type", "")
+                event_type = event.get("type", "")
 
-                    if event_type == "system" and parent_task_id:
-                        runner = event.get("runner") or {}
-                        if event.get("subtype") == "steer_applied":
-                            await self._activity(parent_task_id, worker_id, "phase",
-                                                 "Planner message reached the model in the run's turn "
-                                                 f"(after request {runner.get('after_request_id')})")
-                        elif event.get("subtype") == "steer_dropped":
-                            await self._activity(parent_task_id, worker_id, "phase",
-                                                 f"Planner message dropped ({runner.get('reason')}); "
-                                                 "kept for the Planner's decision")
+                if event_type == "system" and parent_task_id and not replaying:
+                    runner = event.get("runner") or {}
+                    if event.get("subtype") == "steer_applied":
+                        await self._activity(parent_task_id, worker_id, "phase",
+                                             "Planner message reached the model in the run's turn "
+                                             f"(after request {runner.get('after_request_id')})")
+                    elif event.get("subtype") == "steer_dropped":
+                        await self._activity(parent_task_id, worker_id, "phase",
+                                             f"Planner message dropped ({runner.get('reason')}); "
+                                             "kept for the Planner's decision")
 
-                    if event_type == "assistant":
-                        msg = event.get("message", {})
-                        content_blocks = msg.get("content", [])
-                        if not isinstance(content_blocks, list):
-                            content_blocks = []
-                        if (reminders := self._reminders.get(worker_id)) is not None and (
-                                calls := sum(1 for b in content_blocks if b.get("type") == "tool_use")):
-                            # A tool call runs: a reminder written now is folded into this turn.
-                            reminders.tools_running += calls
+                if event_type == "assistant":
+                    msg = event.get("message", {})
+                    content_blocks = msg.get("content", [])
+                    if not isinstance(content_blocks, list):
+                        content_blocks = []
+                    if (reminders := self._reminders.get(worker_id)) is not None and (
+                            calls := sum(1 for b in content_blocks if b.get("type") == "tool_use")):
+                        # A tool call runs: a reminder written now is folded into this turn.
+                        reminders.tools_running += calls
+                        if not replaying:
                             await self._flush_reminder(worker_id)
-                        for block in content_blocks:
-                            block_type = block.get("type", "")
-                            if block_type == "tool_use":
-                                tool_name = block.get("name", "unknown")
-                                tool_input = block.get("input", {})
-                                summary = runtime.tool_summary(tool_name, tool_input)
-                                if parent_task_id:
+                    for block in content_blocks:
+                        block_type = block.get("type", "")
+                        if block_type == "tool_use":
+                            tool_name = block.get("name", "unknown")
+                            tool_input = block.get("input", {})
+                            summary = runtime.tool_summary(tool_name, tool_input)
+                            if parent_task_id and not replaying:
+                                try:
+                                    await db_activity.insert_activity(
+                                        task_id=parent_task_id,
+                                        worker=worker_id,
+                                        kind="tool_use",
+                                        summary=summary,
+                                    )
+                                except Exception:
+                                    logger.debug("failed to insert tool_use activity", exc_info=True)
+                        elif block_type == "text":
+                            text = block.get("text", "")
+                            if text:
+                                if parent_task_id and not replaying and len(text.strip()) > 5:
                                     try:
                                         await db_activity.insert_activity(
                                             task_id=parent_task_id,
                                             worker=worker_id,
-                                            kind="tool_use",
-                                            summary=summary,
+                                            kind="text",
+                                            summary=text[:300],
                                         )
                                     except Exception:
-                                        logger.debug("failed to insert tool_use activity", exc_info=True)
-                            elif block_type == "text":
-                                text = block.get("text", "")
-                                if text:
-                                    if parent_task_id and len(text.strip()) > 5:
-                                        try:
-                                            await db_activity.insert_activity(
-                                                task_id=parent_task_id,
-                                                worker=worker_id,
-                                                kind="text",
-                                                summary=text[:300],
-                                            )
-                                        except Exception:
-                                            logger.debug("failed to insert text activity", exc_info=True)
+                                        logger.debug("failed to insert text activity", exc_info=True)
 
-                    elif event_type == "user" and (reminders := self._reminders.get(worker_id)) is not None:
-                        content = (event.get("message") or {}).get("content")
-                        done = sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_result") \
-                            if isinstance(content, list) else 0
-                        reminders.tools_running = max(0, reminders.tools_running - done)
+                elif event_type == "user" and (reminders := self._reminders.get(worker_id)) is not None:
+                    content = (event.get("message") or {}).get("content")
+                    done = sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_result") \
+                        if isinstance(content, list) else 0
+                    reminders.tools_running = max(0, reminders.tools_running - done)
 
-                    elif event_type == "result":
-                        # Background work (an agent team's teammates) can end in turns of Claude's own after this
-                        # one, each with a result of its own, also once stdin is closed: the run's last result is
-                        # its outcome, unless its turn only answered room reminders (``answers_only_reminders``).
-                        reminders = self._reminders.get(worker_id)
-                        if result_event is not None and reminders is not None \
-                                and answers_only_reminders(event, reminders.uuids):
-                            last_result = finished = event
-                            logger.info("worker %s: a turn that only answered room reminders keeps the outcome "
-                                        "before it", worker_id)
-                        else:
-                            result_event = finished = event
-                            last_result = None
-                        _end_input()
+                elif event_type == "result":
+                    replay_result = replay_result or replaying
+                    # Background work (an agent team's teammates) can end in turns of Claude's own after this
+                    # one, each with a result of its own, also once stdin is closed: the run's last result is
+                    # its outcome, unless its turn only answered room reminders (``answers_only_reminders``).
+                    reminders = self._reminders.get(worker_id)
+                    if result_event is not None and reminders is not None \
+                            and answers_only_reminders(event, reminders.uuids):
+                        last_result = finished = event
+                        logger.info("worker %s: a turn that only answered room reminders keeps the outcome "
+                                    "before it", worker_id)
+                    else:
+                        result_event = finished = event
+                        last_result = None
+                    _end_input()
 
-            async def _report_finished(event: dict[str, Any]) -> None:
-                # The run's cost as recorded: Claude Code's figure, or its tokens at the provider's prices.
-                cost = run_usage(event, price=launch.price).cost_usd if launch.price is not None \
-                    else event.get("total_cost_usd", event.get("cost_usd"))
-                duration_ms = event.get("duration_ms")
-                if parent_task_id:
-                    try:
-                        parts = ["Worker finished"]
-                        if cost is not None:
-                            parts[0] = f"Worker finished (cost: ${cost:.4f})"
-                        meta: dict[str, Any] = {}
-                        if cost is not None:
-                            meta["cost_usd"] = cost
-                        if duration_ms is not None:
-                            meta["duration_ms"] = duration_ms
-                        await db_activity.insert_activity(
-                            task_id=parent_task_id,
-                            worker=worker_id,
-                            kind="phase",
-                            summary=parts[0],
-                            metadata=meta or None,
-                        )
-                    except Exception:
-                        logger.debug("failed to insert result activity", exc_info=True)
-
+        async def _read_output() -> None:
+            if start is ConsumeStart.NEW:
+                await _read_stream()
+                return
+            reading = asyncio.create_task(_read_stream())
+            boundary = asyncio.create_task(handle.replay_finished.wait())
             try:
-                try:
-                    await channel.start(prompt)
-                    self._inputs[worker_id] = channel
-                    if ready := self._input_ready.get(worker_id):
-                        ready.set()
-                    if seat is not None and runtime.run_input:
-                        self._reminders[worker_id] = _Reminders()
-                except (BrokenPipeError, ConnectionResetError):
-                    # Claude exited before reading; its output decides the outcome.
-                    logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
-                if (ready := self._input_ready.get(worker_id)) is not None:
-                    ready.set()
-
-                await asyncio.wait_for(_read_stream(), timeout=run_timeout if run_timeout > 0 else None)
-                _end_input()
-                return_code = await handle.wait()
-                waited = True
-            except BaseException as exc:
-                if isinstance(handle, KeptRun) and handle.state is KeptRunState.DETACHED:
-                    recorder.detach()
-                    raise
-                _end_input()
-                # Never leave Claude, or anything it started, running unsupervised once the worker gives up.
-                await _end_run()
-                timed_out = isinstance(exc, asyncio.TimeoutError)
-                error = (
-                    f"Claude ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
-                    else str(exc) if isinstance(exc, KeeperLost)
-                    else f"worker stopped reading Claude: {type(exc).__name__}"
-                )
-                await recorder.finish(output_text=None, result_event=result_event, error=error,
-                                      outcome=RunOutcome.RUN_FAILED.value, status=ended_by(exc))
-                if timed_out:
-                    raise asyncio.TimeoutError(error) from exc
-                raise
+                await asyncio.wait((reading, boundary), return_when=asyncio.FIRST_COMPLETED)
+                if boundary.done():
+                    logger.info("adopt run=%s replay_events=%d replay_ms=%d", worker_id, replay_events,
+                                int((time.monotonic() - replay_started) * 1000))
+                    if replay_result:
+                        reading.cancel()
+                        await asyncio.gather(reading, return_exceptions=True)
+                        await _end_run()
+                        return
+                await reading
             finally:
-                self._inputs.pop(worker_id, None)
-                if not waited:
-                    await _end_run()
-            if finished is not None and finished in (result_event, last_result):
-                await _report_finished(finished)
-            # The cost is the last result's (the session's totals); the outcome is result_event's.
-            recorded = last_result or result_event
+                reading.cancel()
+                boundary.cancel()
+                await asyncio.gather(reading, boundary, return_exceptions=True)
 
-            final_text = str((result_event or {}).get("result") or "") or None
-            # A successful result decides the outcome even when the process then
-            # exits non-zero: Claude Code can exit 1 for reasons unrelated to the
-            # work (an MCP server or hook erroring on teardown, for example). Only
-            # when there is no usable result does the exit code become the failure.
-            result_ok = (
-                result_event is not None
-                and not result_event.get("is_error")
-                and result_event.get("subtype") == "success"
+        async def _report_finished(event: dict[str, Any]) -> None:
+            # The run's cost as recorded: Claude Code's figure, or its tokens at the provider's prices.
+            cost = run_usage(event, price=launch.price).cost_usd if launch.price is not None \
+                else event.get("total_cost_usd", event.get("cost_usd"))
+            duration_ms = event.get("duration_ms")
+            if parent_task_id:
+                try:
+                    parts = ["Worker finished"]
+                    if cost is not None:
+                        parts[0] = f"Worker finished (cost: ${cost:.4f})"
+                    meta: dict[str, Any] = {}
+                    if cost is not None:
+                        meta["cost_usd"] = cost
+                    if duration_ms is not None:
+                        meta["duration_ms"] = duration_ms
+                    await db_activity.insert_activity(
+                        task_id=parent_task_id,
+                        worker=worker_id,
+                        kind="phase",
+                        summary=parts[0],
+                        metadata=meta or None,
+                    )
+                except Exception:
+                    logger.debug("failed to insert result activity", exc_info=True)
+
+        try:
+            try:
+                if start is ConsumeStart.NEW:
+                    await channel.start(prompt)
+                self._inputs[worker_id] = channel
+                if ready := self._input_ready.get(worker_id):
+                    ready.set()
+                if seat is not None and runtime.run_input:
+                    self._reminders.setdefault(worker_id, _Reminders())
+            except (BrokenPipeError, ConnectionResetError):
+                # Claude exited before reading; its output decides the outcome.
+                logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
+            if (ready := self._input_ready.get(worker_id)) is not None:
+                ready.set()
+
+            remaining = run_timeout
+            if start is ConsumeStart.ADOPTED and run_timeout > 0:
+                remaining -= (datetime.now(timezone.utc) - started_at).total_seconds()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+            await asyncio.wait_for(_read_output(), timeout=remaining if run_timeout > 0 else None)
+            _end_input()
+            return_code = await handle.wait()
+            waited = True
+        except BaseException as exc:
+            if isinstance(handle, KeptRun) and handle.state is KeptRunState.DETACHED:
+                recorder.detach()
+                raise
+            _end_input()
+            # Never leave Claude, or anything it started, running unsupervised once the worker gives up.
+            await _end_run()
+            timed_out = isinstance(exc, asyncio.TimeoutError)
+            error = (
+                f"Claude ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out
+                else str(exc) if isinstance(exc, KeeperLost)
+                else f"worker stopped reading Claude: {type(exc).__name__}"
             )
-            detail = (runtime.failure_detail(result_event, launch=launch, command=command, pid=handle.pid)
-                      if not result_ok else None)
-            # A run stopped at its spend cap exits non-zero too; its result says why.
-            if ((return_code != 0 or not launch.exit_code_reliable) and not result_ok
-                    and runtime.budget_error(result_event) is None and not detail):
-                stderr = await handle.error_output()
-                error = (f"{runtime.label} exited with code {return_code}" if launch.exit_code_reliable
-                         else f"{runtime.label} through TTADK ended without a result")
-                if not launch.exit_code_reliable:
-                    from ..runtimes.ttadk import error_tail
+            await recorder.finish(output_text=None, result_event=result_event, error=error,
+                                  outcome=RunOutcome.RUN_FAILED.value, status=ended_by(exc))
+            if timed_out:
+                raise asyncio.TimeoutError(error) from exc
+            raise
+        finally:
+            self._inputs.pop(worker_id, None)
+            if not waited:
+                await _end_run()
+        if finished is not None and finished in (result_event, last_result):
+            await _report_finished(finished)
+        # The cost is the last result's (the session's totals); the outcome is result_event's.
+        recorded = last_result or result_event
 
-                    stderr = error_tail(stderr)
-                    if stderr:
-                        error += f": {stderr}"
-                    if parent_task_id:
-                        await self._activity(parent_task_id, worker_id, "error", error)
-                await recorder.finish(output_text=final_text, result_event=recorded, error=error,
-                                      outcome=RunOutcome.RUN_FAILED.value)
-                return {"status": "failed", "error": error,
-                        "stderr": stderr[:500] if launch.exit_code_reliable else stderr}
-            if return_code != 0 and result_ok:
-                logger.warning(
-                    "worker %s: Claude exited %d but produced a successful result; judging the result",
-                    worker_id, return_code,
-                )
+        final_text = str((result_event or {}).get("result") or "") or None
+        # A successful result decides the outcome even when the process then
+        # exits non-zero: Claude Code can exit 1 for reasons unrelated to the
+        # work (an MCP server or hook erroring on teardown, for example). Only
+        # when there is no usable result does the exit code become the failure.
+        result_ok = (
+            result_event is not None
+            and not result_event.get("is_error")
+            and result_event.get("subtype") == "success"
+        )
+        detail = (runtime.failure_detail(result_event, launch=launch, command=command, pid=handle.pid)
+                  if not result_ok else None)
+        # A run stopped at its spend cap exits non-zero too; its result says why.
+        if ((return_code != 0 or not launch.exit_code_reliable) and not result_ok
+                and runtime.budget_error(result_event) is None and not detail):
+            stderr = await handle.error_output()
+            error = (f"{runtime.label} exited with code {return_code}" if launch.exit_code_reliable
+                     else f"{runtime.label} through TTADK ended without a result")
+            if not launch.exit_code_reliable:
+                from ..runtimes.ttadk import error_tail
 
-            outcome = await asyncio.to_thread(judge_result, result_event, work_dir=Path(work_dir), is_verify=is_verify,
-                                              started_at=started_at, runtime_label=runtime.label, failure_detail=detail)
-            if (elsewhere := reported_files.locations(outcome.get("found_elsewhere"))) and parent_task_id:
-                places = []
-                for item in elsewhere:
-                    where = (f"in worktree {item['worktree']} on {item['branch']}" if item["where"] == "worktree"
-                             else f"in commit {item['commit'][:12]}")
-                    places.append(f"{item['path']} {'deleted ' if item['deleted'] else ''}{where}")
-                await self._activity(parent_task_id, worker_id, "phase",
-                                     ("Reported files found outside the working directory: "
-                                      + "; ".join(places))[:500])
-            # A review that says "not passed" is still a successful run; only work
-            # failures are the run's error.
-            error = outcome.get("error") if not is_verify and outcome.get("status") == "failed" else None
+                stderr = error_tail(stderr)
+                if stderr:
+                    error += f": {stderr}"
+                if parent_task_id:
+                    await self._activity(parent_task_id, worker_id, "error", error)
             await recorder.finish(output_text=final_text, result_event=recorded, error=error,
-                                  outcome=run_outcome(result_event, outcome, is_verify=is_verify).value)
-            return outcome
+                                  outcome=RunOutcome.RUN_FAILED.value)
+            return {"status": "failed", "error": error,
+                    "stderr": stderr[:500] if launch.exit_code_reliable else stderr}
+        if return_code != 0 and result_ok:
+            logger.warning(
+                "worker %s: Claude exited %d but produced a successful result; judging the result",
+                worker_id, return_code,
+            )
+
+        outcome = await asyncio.to_thread(judge_result, result_event, work_dir=Path(work_dir), is_verify=is_verify,
+                                          started_at=started_at, runtime_label=runtime.label, failure_detail=detail)
+        if (elsewhere := reported_files.locations(outcome.get("found_elsewhere"))) and parent_task_id:
+            places = []
+            for item in elsewhere:
+                where = (f"in worktree {item['worktree']} on {item['branch']}" if item["where"] == "worktree"
+                         else f"in commit {item['commit'][:12]}")
+                places.append(f"{item['path']} {'deleted ' if item['deleted'] else ''}{where}")
+            await self._activity(parent_task_id, worker_id, "phase",
+                                 ("Reported files found outside the working directory: "
+                                  + "; ".join(places))[:500])
+        # A review that says "not passed" is still a successful run; only work
+        # failures are the run's error.
+        error = outcome.get("error") if not is_verify and outcome.get("status") == "failed" else None
+        await recorder.finish(output_text=final_text, result_event=recorded, error=error,
+                              outcome=run_outcome(result_event, outcome, is_verify=is_verify).value)
+        return outcome
 
     @staticmethod
     def _run_limits(launch: Launch, project: dict[str, Any] | None,

@@ -12,6 +12,7 @@ import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
@@ -1281,6 +1282,10 @@ def _compact_event(event: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+class RecordNotResumable(Exception):
+    """A detached run's record is missing or has already ended."""
+
+
 class ClaudeRunRecorder:
     """Record one Claude CLI run in ``llm_records``.
 
@@ -1332,6 +1337,7 @@ class ClaudeRunRecorder:
         self._record_id: int | None = None
         self._closed = False
         self._detached = False
+        self._resumed = False
         self._seq = 0
         # seq of the row holding the current thinking phase's progress, if it is the latest row
         self._thinking_seq: int | None = None
@@ -1348,6 +1354,28 @@ class ClaudeRunRecorder:
             from .runtimes.pricing import RunSpend
 
             self._spend = RunSpend(launch.price, launch.model, launch.max_budget_usd)
+
+    @classmethod
+    async def resume(
+        cls, record_id: int, *, agent_id: str, task_id: str | None, command: list[str], cwd: str,
+        step_id: str | None, launch: Launch, max_budget_usd: float | None,
+    ) -> ClaudeRunRecorder:
+        """Continue a running record; replay rebuilds usage without writing its events again."""
+        from ..db import llm_records
+        from .runtimes.pricing import RunSpend
+
+        state = await llm_records.record_state(record_id)
+        if state is None or state["status"] != llm_records.RecordStatus.RUNNING.value:
+            raise RecordNotResumable(f"record {record_id} is not running")
+        recorder = cls(agent_id=agent_id, task_id=task_id, command=command, cwd=cwd, input_text="",
+                       step_id=step_id, launch=launch, whole_process=True)
+        recorder._record_id = record_id
+        recorder._seq = await llm_records.max_event_seq(record_id)
+        recorder._started = _clock() - (datetime.now(timezone.utc) - state["created_at"]).total_seconds()
+        if launch.price is not None:
+            recorder._spend = RunSpend(launch.price, launch.model, max_budget_usd)
+        recorder._resumed = True
+        return recorder
 
     @property
     def record_id(self) -> int | None:
@@ -1390,7 +1418,8 @@ class ClaudeRunRecorder:
             logger.warning("could not open llm record for %s", self._agent_id, exc_info=True)
 
     async def __aenter__(self) -> ClaudeRunRecorder:
-        await self.start()
+        if not self._resumed:
+            await self.start()
         return self
 
     async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: Any) -> None:

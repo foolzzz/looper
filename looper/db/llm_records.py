@@ -128,6 +128,30 @@ async def link_task(record_id: int, task_id: str, *, pool: asyncpg.Pool | None =
     await pool.execute("UPDATE llm_records SET task_id = $2 WHERE id = $1 AND task_id IS NULL", record_id, task_id)
 
 
+async def record_state(record_id: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """The record's status and original start time, without presentation conversion."""
+    pool = pool or get_pool()
+    row = await pool.fetchrow("SELECT status, created_at FROM llm_records WHERE id = $1", record_id)
+    return dict(row) if row is not None else None
+
+
+async def max_event_seq(record_id: int, *, pool: asyncpg.Pool | None = None) -> int:
+    """The last persisted transcript position, or zero before its first event."""
+    pool = pool or get_pool()
+    return await pool.fetchval(
+        "SELECT COALESCE(MAX(seq), 0) FROM llm_record_events WHERE record_id = $1", record_id,
+    )
+
+
+async def end_record_interrupted(record_id: int, reason: str, *, pool: asyncpg.Pool | None = None) -> None:
+    """Interrupt an abandoned run, preserving a record that has already ended."""
+    pool = pool or get_pool()
+    await pool.execute(
+        "UPDATE llm_records SET status = 'interrupted', finished_at = COALESCE(last_output_at, created_at), "
+        "error = $2 WHERE id = $1 AND status = 'running'", record_id, reason,
+    )
+
+
 async def end_unfinished_records(*, pool: asyncpg.Pool | None = None) -> int:
     """End every record still ``running`` as ``interrupted``; returns how many.
 

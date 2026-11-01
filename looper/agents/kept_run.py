@@ -16,6 +16,7 @@ from pathlib import Path
 
 import looper
 from . import keeper, proc_tree
+from .agent_settings import AgentType
 from .keeper.client import KeeperClient, KeeperGone
 from .keeper.protocol import ErrorCode, KeeperError, MAX_STDIN_BYTES, Stream
 from .runtimes.channel import RunStartError
@@ -47,6 +48,42 @@ class DetachOutcome:
 
 
 @dataclass(frozen=True)
+class RunHold:
+    task_id: str
+    step_id: str
+    role: AgentType
+
+
+class AdoptOutcome(StrEnum):
+    ADOPTED = "adopted"
+    FAILED = "failed"
+    NOT_CANDIDATE = "not_candidate"
+
+
+class AdoptFailure(StrEnum):
+    FILES = "files"
+    LOG_SHORT = "log_short"
+    HOLD_MISMATCH = "hold_mismatch"
+    LAUNCH_CHANGED = "launch_changed"
+    RECORD_NOT_RUNNING = "record_not_running"
+    KEEPER_UNREACHABLE = "keeper_unreachable"
+    PROTOCOL = "protocol"
+
+
+@dataclass(frozen=True)
+class AdoptResult:
+    outcome: AdoptOutcome
+    failure: AdoptFailure | None = None
+    detail: str = ""
+
+
+class AttachError(Exception):
+    def __init__(self, failure: AdoptFailure, detail: str = ""):
+        self.failure = failure
+        super().__init__(detail or failure.value)
+
+
+@dataclass(frozen=True)
 class KeeperSettings:
     epoch: int
 
@@ -65,6 +102,8 @@ class KeptStream:
         self._pending, self._readable = bytearray(), bytearray()
         self._paused = self._eof = False
         self.eof_delivered = False
+        self.replay_until: int | None = None
+        self.replay_finished = asyncio.Event()
 
     def feed(self, offset, data):
         if offset != self.offset or self._eof:
@@ -82,6 +121,8 @@ class KeptStream:
     def _publish(self):
         if not self._paused:
             end = len(self._pending) if self._eof else self._pending.rfind(b"\n") + 1
+            if self.replay_until is not None and not self.replay_finished.is_set():
+                end = min(end, self.replay_until - self.delivered - len(self._readable))
             self._readable.extend(self._pending[:end])
             del self._pending[:end]
             if self._readable or self._eof:
@@ -99,6 +140,15 @@ class KeptStream:
         if n == 0:
             return b""
         while not self._readable:
+            if (self.replay_until is not None and not self.replay_finished.is_set()
+                    and self.delivered == self.replay_until):
+                # read() is called again only once the parser has yielded every buffered event.
+                self.idle.set()
+                self.replay_finished.set()
+                await asyncio.sleep(0)
+                self._publish()
+                if self._readable:
+                    break
             if self._eof and not self._paused:
                 self.eof_delivered = True
                 return b""
@@ -204,6 +254,7 @@ class KeptRun:
         self._finished = asyncio.Event()
         self._ending = False
         self._owns_dir = False
+        self._file_mode = False
         self._client.on_data = self._data
         self._client.on_eof = self._eof
         self._client.on_exited = self._exited
@@ -231,6 +282,100 @@ class KeptRun:
 
     def set_record(self, record_id):
         self.manifest["record_id"] = record_id
+
+    @property
+    def replay_until(self):
+        return self._process.stdout.replay_until
+
+    @property
+    def replay_finished(self):
+        return self._process.stdout.replay_finished
+
+    @property
+    def replaying(self):
+        return self.replay_until is not None and not self.replay_finished.is_set()
+
+    @classmethod
+    async def attach(cls, run_dir, *, runtime, launch, epoch, on_stale, label):
+        run_dir = Path(run_dir)
+        manifest = keeper.read_json(run_dir / keeper.MANIFEST)
+        state = keeper.read_json(run_dir / keeper.STATE)
+        detach = keeper.read_json(run_dir / keeper.DETACH)
+        try:
+            if manifest is None or state is None or detach is None:
+                raise ValueError("missing or invalid keeper files")
+            if (manifest.get("manifest_version") != 1 or state.get("format") != keeper.STATE_FORMAT
+                    or detach.get("format") != 1):
+                raise ValueError("invalid keeper file format")
+            replay_until = detach["consumed"]["stdout"]
+            if type(replay_until) is not int or replay_until < 0:
+                raise ValueError("invalid consumed stdout offset")
+            command, cwd = manifest["command"], Path(manifest["work_dir"])
+            if (not isinstance(command, list) or not command
+                    or any(not isinstance(arg, str) for arg in command)):
+                raise ValueError("invalid keeper command")
+            child_state = keeper.KeeperState(state["state"])
+            if child_state == keeper.KeeperState.EXITED:
+                for name in ("exit_code", "signal"):
+                    if state[name] is not None and type(state[name]) is not int:
+                        raise ValueError(f"invalid keeper {name}")
+            size = (run_dir / keeper.STDOUT).stat().st_size
+            if replay_until > size:
+                raise AttachError(AdoptFailure.LOG_SHORT, "stdout log ends before its consumed offset")
+            if replay_until:
+                with (run_dir / keeper.STDOUT).open("rb") as source:
+                    source.seek(replay_until - 1)
+                    if source.read(1) != b"\n":
+                        raise ValueError("consumed stdout offset is not an event boundary")
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            raise AttachError(AdoptFailure.FILES, str(exc)) from exc
+        runtime_root = run_dir.parents[2]
+        session_dir = None
+        if manifest.get("room_seat"):
+            from .room import run_session_dir
+            session_dir = run_session_dir(runtime_root, runtime.type, manifest["task_id"], manifest["run_id"])
+        run = cls(runtime, command, launch=launch, cwd=cwd, session_dir=session_dir, label=label,
+                  run_dir=run_dir, runtime_root=runtime_root, epoch=epoch, on_stale=on_stale)
+        run.manifest = manifest
+        stream = run._process.stdout
+        stream.replay_until = replay_until
+        if replay_until == 0:
+            stream.replay_finished.set()
+        try:
+            if child_state == keeper.KeeperState.EXITED:
+                run._file_mode = True
+                run.state = KeptRunState.ATTACHED
+                run._process.stdin._closing = True
+                run._process.stdin.offset = detach.get("stdin_offset", 0)
+                with (run_dir / keeper.STDOUT).open("rb") as source:
+                    while data := source.read(keeper.CHUNK):
+                        stream.feed(stream.offset, data)
+                        await asyncio.sleep(0)
+                stream.feed_eof(stream.offset)
+                run._exited(state["exit_code"], state["signal"])
+            else:
+                await run._client.connect(run_dir / keeper.SOCKET)
+                result = await run._client.initialize(epoch=epoch, looper_version=looper.__version__)
+                run._process.pid = result["child"]["pid"]
+                run._process.stdin.offset = result["offsets"]["stdin"]
+                run._process.stdin._closing = result["stdin_closed"]
+                if result["child"]["state"] == keeper.KeeperState.EXITED:
+                    run._exited(result["child"]["exit_code"], result["child"]["signal"])
+                await run._client.subscribe(Stream.STDOUT, 0)
+                if not run._active():
+                    raise KeeperGone("keeper connection ended during attachment")
+                run.state = KeptRunState.ATTACHED
+            run._channel = runtime.run_channel(run._process, launch=launch, cwd=cwd, session_dir=session_dir)
+            (run_dir / keeper.DETACH).unlink()
+            run._owns_dir = True
+            return run
+        except BaseException as exc:
+            if isinstance(exc, KeeperError) and exc.code == ErrorCode.STALE_CONTROLLER:
+                run._stale()
+            # Adoption's caller owns interruption and process cleanup on failure.
+            await run._client.close()
+            await run._client.wait_closed()
+            raise
 
     def _active(self):
         return self.state in (KeptRunState.STARTING, KeptRunState.ATTACHED)
@@ -404,6 +549,8 @@ class KeptRun:
         return DetachOutcome(DetachKind.DETACHED, consumed)
 
     async def end(self):
+        if self._file_mode:
+            return
         if self.state in (KeptRunState.DETACHED, KeptRunState.ENDED, KeptRunState.FENCED):
             return
         if self._ending:
