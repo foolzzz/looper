@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.64] - 2026-10-31
+
+### Changed
+
+- **A project directory change that moves enabled command schedules is confirmed first.** A command schedule without its own `work_dir` runs in its project's directory, so changing the project's `work_dir` moved the next run of every such schedule without a question. When the change affects command schedules that inherit the directory and will run again (enabled, or holding a queued run), the Manager's `looper_projects` `update` and a client token's `project_admin.update` (`POST /api/v1/project_admin/update`, `POST /api/v1/ops/projects/update`, `loopercli`) answer `needs_confirmation` first, listing each schedule's name, state, exact command and old → new directory. The confirmed call applies only if the project's directory and each listed schedule's configuration are unchanged and no schedule was added to or dropped from the list; otherwise it answers `conflict` / 409. A scoped Manager is refused, before anything is asked, when a listed schedule belongs to another Manager. Unchanged and without a question: projects without such schedules, agent schedules, command schedules with their own `work_dir`, disabled command schedules without a queued run, and changes of name or background only; the dashboard project dialog still applies at once. No migration. ([#1053](https://github.com/foolzzz/looper/pull/1053))
+
 ## [2.14.63] - 2026-10-31
 
 ### Fixed
