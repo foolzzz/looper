@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.61] - 2026-10-31
+
+### Fixed
+
+- **The lost-lock restart test ends the system pool's own connection too.** `test_a_database_restart_is_a_lost_lock` exempted the connection of the fixture's pool, which the test reuses as the system's pool, so the simulated restart left a system connection open and the later pool-closing fence hid the gap. The test now asserts that the restart ends every connection the system holds (the pool's connection made before startup, the lease's, and all opened later) and keeps only the schema administrator and unrelated connections. Test-only: no production code changes, no behavior change, no migration. ([#1045](https://github.com/foolzzz/looper/pull/1045))
+
 ## [2.14.60] - 2026-10-31
 
 ### Fixed
