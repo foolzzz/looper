@@ -424,6 +424,15 @@ async def _created_project(
 
 
 @pytest.fixture(autouse=True)
+def _gate_command_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gate lists belong to one server lifetime, not to earlier tests in this worker."""
+    from looper.agents import gate_commands
+
+    monkeypatch.setattr(gate_commands, "_snapshots", {})
+    monkeypatch.setattr(gate_commands, "_pending", {})
+
+
+@pytest.fixture(autouse=True)
 def _chat_stop_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts with stopping a reply off, its default (``chat_settings``), whatever an earlier one set."""
     from looper.agents import chat_settings

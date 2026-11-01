@@ -40,7 +40,9 @@ async def running_keeper(runtime_root):
     state = {}
     try:
         async with asyncio.timeout(10):
-            while (state := keeper.read_json(directory / keeper.STATE) or {}).get("state") != "running":
+            # RUNNING is published before controller_detached finishes writing the startup state.
+            while ((state := keeper.read_json(directory / keeper.STATE) or {}).get("state") != "running"
+                   or state.get("controller_disconnected_at") is None):
                 assert process.returncode is None, state
                 await asyncio.sleep(0.03)
         yield directory, process, state
