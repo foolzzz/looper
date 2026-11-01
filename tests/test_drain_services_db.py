@@ -32,7 +32,7 @@ def test_a_gate_counts_toward_the_run_timeout_without_a_drain(monkeypatch: pytes
         await asyncio.wait_for(env.scheduler.idle(), 5)
         run = await db_schedules.get_run(run_id)
         assert run["status"] == db_schedules.RUNNING
-        assert run["fired_at"] == fired_at and run["started_at"] == env.clock.now
+        assert run["fired_at"] == fired_at and run["started_at"] is None
         assert run["deferred_by_drain"] is False
         assert env.bus.of("task_start") == [run["task_id"]]
         if task_started:
@@ -41,6 +41,10 @@ def test_a_gate_counts_toward_the_run_timeout_without_a_drain(monkeypatch: pytes
         await env.scheduler.tick()
         assert (await db_schedules.get_run(run_id))["status"] == "timed_out"
         assert env.bus.of("task_stop") == [run["task_id"]]
+        assert (await env.runs(sid))[0]["duration_seconds"] == 2
+        stats = await db_schedules.run_stats(sid, env.clock.now)
+        for window in ("day", "week"):
+            assert stats[window]["avg_seconds"] == stats[window]["max_seconds"] == 2
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -214,7 +218,8 @@ def test_drain_as_a_gated_firing_commits_defers_its_gate(monkeypatch: pytest.Mon
         drain = DrainState()
         env.scheduler = Scheduler(bus=env.bus, clock=env.clock, drain=drain)
         drain.add_source(env.scheduler.drain_waiting)
-        sid = (await env.enabled(gate_command="printf work >> gate-started; printf work"))["schedule_id"]
+        sid = (await env.enabled(gate_command="sleep 2; printf work >> gate-started; printf work",
+                                 run_timeout_seconds=1))["schedule_id"]
         queued_id = None
         if entry == "due":
             await env.due(sid)
@@ -256,6 +261,12 @@ def test_drain_as_a_gated_firing_commits_defers_its_gate(monkeypatch: pytest.Mon
         await env.scheduler.tick()
         assert (await db_schedules.get_run(run["run_id"]))["status"] == db_schedules.QUEUED
         assert not marker.exists()
+        if entry == "queued":
+            await db_schedules.update_run(env.pool, run["run_id"], started_at=env.clock.now)
+        env.clock.now += timedelta(hours=1)
+        await env.pool.execute("UPDATE schedules SET next_fire_at = $2 WHERE id = $1",
+                               sid, env.clock.now + timedelta(hours=1))
+        fired_at = env.clock.now
         if recovery == "cancel":
             drain.cancel()
             await env.scheduler.tick()
@@ -263,24 +274,32 @@ def test_drain_as_a_gated_firing_commits_defers_its_gate(monkeypatch: pytest.Mon
             await env.scheduler.stop()
             env.scheduler = Scheduler(bus=env.bus, clock=env.clock, drain=DrainState())
             await env.scheduler.start()
-            await until(lambda: env.bus.of("task_start"), timeout=5)
+            await until(lambda: env.scheduler.drain_waiting()["gates"], timeout=5)
+        env.clock.now += timedelta(seconds=2)
+        await until(lambda: env.bus.of("task_start"), timeout=5)
         await asyncio.wait_for(env.scheduler.idle(), 5)
         started, = await env.runs(sid)
         assert started["run_id"] == run["run_id"]
         assert started["status"] == db_schedules.RUNNING
         assert started["gate_output"] == "work"
-        assert (await db_schedules.get_run(started["run_id"]))["deferred_by_drain"] is True
+        row = await db_schedules.get_run(started["run_id"])
+        assert row["deferred_by_drain"] is False and row["started_at"] is None
+        assert row["fired_at"] == fired_at
         assert marker.read_text() == "work"
         assert env.bus.of("task_start") == [started["task_id"]]
         assert await env.pool.fetchval("SELECT consecutive_failures FROM schedules WHERE id = $1", sid) == 0
+        await env.scheduler.tick()
+        assert (await db_schedules.get_run(row["id"]))["status"] == "timed_out"
+        assert env.bus.of("task_stop") == [started["task_id"]]
 
     run_scheduled(test, monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize("entry", ["manual", "queued"])
+@pytest.mark.parametrize("start_via", ["scheduler", "task_api", "task_api_concurrent_anchor"])
 def test_drain_as_an_agent_firing_commits_defers_its_task_start(monkeypatch: pytest.MonkeyPatch,
                                                              tmp_path: Path, caplog: pytest.LogCaptureFixture,
-                                                             entry: str) -> None:
+                                                             entry: str, start_via: str) -> None:
     async def test(env: ScheduleEnv) -> None:
         drain = DrainState()
         env.scheduler = Scheduler(bus=env.bus, clock=env.clock, drain=drain)
@@ -331,16 +350,45 @@ def test_drain_as_an_agent_firing_commits_defers_its_task_start(monkeypatch: pyt
         drain.cancel()
         # Recovery also keeps the deferred timeout decision across a scheduler restart.
         env.scheduler = Scheduler(bus=env.bus, clock=env.clock, drain=DrainState())
-        await env.scheduler.tick()
+        if start_via != "scheduler":
+            from types import SimpleNamespace
+
+            from looper.agents.http_server import AgentHTTPServer
+            from tests.db_support import call_v1
+
+            server = AgentHTTPServer(web_adapter=None, task_router=None,
+                                     supervisor=SimpleNamespace(bus=env.bus), runtime_root=env.runtime_root)
+            status, answer = await call_v1(server, "/api/v1/ops/task_control/start", {"task_id": run["task_id"]})
+            assert status == 200 and answer["started"] is True
+            # The TaskRouter claims the API's TASK_START, without the scheduler publishing it.
+            assert await db_tasks.start_ready_task(run["task_id"]) is not None
+            assert (await db_schedules.get_run(run_id))["started_at"] is None
+        started_at = env.clock.now
+        with monkeypatch.context() as patch:
+            if start_via == "task_api_concurrent_anchor":
+                started_at -= timedelta(seconds=10)
+                running_runs = db_schedules.running_runs
+
+                async def concurrently_anchored_runs() -> list[dict[str, Any]]:
+                    rows = await running_runs()
+                    # Another start writes the anchor after the tick reads its snapshot.
+                    await db_schedules.update_run(env.pool, run_id, started_at=started_at)
+                    return rows
+
+                patch.setattr(db_schedules, "running_runs", concurrently_anchored_runs)
+            await env.scheduler.tick()
         assert env.bus.of("task_start") == [run["task_id"]]
         started = await db_schedules.get_run(run_id)
-        assert started["started_at"] == env.clock.now and started["fired_at"] == waiting["fired_at"]
+        assert started["started_at"] == started_at and started["fired_at"] == waiting["fired_at"]
         assert started["deferred_by_drain"] is True
         # The TaskRouter claims TASK_START; time spent draining is outside the run's timeout.
-        await db_tasks.start_ready_task(run["task_id"])
-        env.clock.now += timedelta(seconds=59)
+        if start_via == "scheduler":
+            await db_tasks.start_ready_task(run["task_id"])
+        env.clock.now = started_at + timedelta(seconds=59)
         await env.scheduler.tick()
-        assert (await db_schedules.get_run(run_id))["status"] == db_schedules.RUNNING
+        running = await db_schedules.get_run(run_id)
+        assert running["status"] == db_schedules.RUNNING
+        assert running["started_at"] == started["started_at"]
         assert env.bus.of("task_stop") == []
         env.clock.now += timedelta(seconds=1)
         await env.scheduler.tick()

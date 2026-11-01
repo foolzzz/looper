@@ -746,6 +746,12 @@ class Scheduler:
                 return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id)
             import json
             expected = fingerprint(schedule, effective)
+            if run_id is not None:
+                # A restarted gate gets the normal timeout from its new firing.
+                await conn.execute(
+                    "UPDATE schedule_runs SET deferred_by_drain = false, started_at = NULL "
+                    "WHERE id = $1 AND deferred_by_drain", run_id,
+                )
             run_id = await self._put(conn, run_id, common, status=db_schedules.GATING, fired_at=now, **timeout)
             await db_schedules.update_run(conn, run_id, execution_snapshot=json.loads(expected))
             recovered = await db_schedules.reset_overlaps(conn, schedule["id"])
@@ -1017,7 +1023,8 @@ class Scheduler:
                 ))
                 await db_connection.get_pool().execute(
                     "UPDATE schedule_runs SET started_at = $2 "
-                    "WHERE task_id = $1 AND status = 'running' AND started_at IS NULL", task_id, started_at,
+                    "WHERE task_id = $1 AND status = 'running' AND deferred_by_drain AND started_at IS NULL",
+                    task_id, started_at,
                 )
                 return True
         finally:
@@ -1162,6 +1169,12 @@ class Scheduler:
                 await db_schedules.finish_run(conn, run["id"], status="stopped", at=now,
                                               error="its task was deleted")
             return
+        if run["deferred_by_drain"] and run["started_at"] is None and task_status != db_tasks.READY:
+            # The task API or TaskRouter may have started it without our TASK_START write.
+            run["started_at"] = await db_connection.get_pool().fetchval(
+                "UPDATE schedule_runs SET started_at = COALESCE(started_at, $2) "
+                "WHERE id = $1 AND status = 'running' AND deferred_by_drain RETURNING started_at", run["id"], now,
+            )
         if task_status in _OUTCOMES:
             task = {"result_summary": run["result_summary"], "error": run["task_error"]}
             await self._finish(run, task, task_status, now)
