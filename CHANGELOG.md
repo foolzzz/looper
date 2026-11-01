@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.58] - 2026-10-31
+
+### Fixed
+
+- **`looper service upgrade` and `looper service restart --drain` start a service that exited during the drain.** The service may exit while it drains (a crash, an OOM kill or `kill`); recovery then only cancelled the drain and left the unit down until `looper service restart`. When the saved PID is gone, the service manager reports nothing running and nothing listens on the port, recovery now starts the unit (the code that was running, since nothing is installed yet). If the port is closed but the old PID is still alive, it waits for it to exit first. If something runs or listens, it starts nothing, only cancels the drain, and reports a port conflict or waits up to `--timeout` for a unit the service manager already restarted. Behavior with a live PID is unchanged. ([#1030](https://github.com/foolzzz/looper/pull/1030))
+
 ## [2.14.57] - 2026-10-31
 
 ### Fixed
