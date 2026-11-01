@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.55] - 2026-10-31
+
+### Fixed
+
+- **The lost-lock database-restart test terminates only the connections the system opened.** A connection left open by an earlier test in the same worker no longer makes the test fail; the test records the existing connections before the system starts and spares them, and a new case with an extra idle connection covers it. Test-only change: no production code changes and the lost-lock assertions are unchanged. ([#1033](https://github.com/foolzzz/looper/pull/1033))
+
 ## [2.14.54] - 2026-10-31
 
 ### Changed
