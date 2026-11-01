@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.59] - 2026-10-31
+
+### Fixed
+
+- **A drain that begins during an agent schedule firing no longer lets the firing create or start a task.** An agent firing (a due tick, Run now or the start of a queued run) checked the drain only at admission, so a drain that began while its transaction waited on the database still got a new task and a new Planner turn. The drain is now rechecked as the last step of the transaction and before `TASK_START` is published. An open transaction rolls back (the schedule stays due, a queued run stays queued, Run now answers the existing 409). A commit that landed after the drain began keeps its task ready and publishes no `TASK_START` during the drain; the task starts after the restart or a cancelled drain. The run timeout of such a deferred run counts from the real start. Command schedules and gates admitted before the drain are unchanged. Adds the migration `schedule_deferred_by_drain` (column `schedule_runs.deferred_by_drain`, additive). ([#1029](https://github.com/foolzzz/looper/pull/1029))
+
 ## [2.14.58] - 2026-10-31
 
 ### Fixed
