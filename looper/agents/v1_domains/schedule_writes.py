@@ -1,6 +1,6 @@
 """Schedule administration through the shared services and scheduler."""
 
-from ...db import projects as db_projects, schedules as db_schedules
+from ...db import connection as db_connection, projects as db_projects, schedules as db_schedules
 from .. import schedules
 from ..agent_settings import BUDGET_MAX_USD, CONCURRENCY_MAX
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL
@@ -89,6 +89,11 @@ async def impact(server, operation, arguments, principal, headers):
         arguments["_schedule_version"] = db_schedules.configuration_version(row)
     subject = f"schedule {row['name']!r} in project {row['project_name']!r}"
     if action == "delete":
+        if row["kind"] == "command":
+            runs = await db_schedules.open_runs(db_connection.get_pool(), row["id"])
+            if schedules.blocks_delete(row, runs):
+                raise OpError(ErrorCode.CONFLICT, schedules.RUNNING_COMMAND_DELETE)
+            return f"Delete {subject}, its runs and notifications."
         return f"Delete {subject}, its runs and notifications. Its created tasks stay."
     if action == "run":
         if row["kind"] == "command":

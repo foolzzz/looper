@@ -497,6 +497,47 @@ def test_deleting_a_schedule_asks_first_and_runs_only_on_the_next_messages_confi
     run_db(test, monkeypatch)
 
 
+def test_deleting_a_command_schedule_with_a_running_run_is_refused_before_asking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        sid = (await _schedule(await _project(pool), "pull", kind="command",
+                               command="exit 0", requirement=""))["schedule_id"]
+        await _run_of(pool, sid, "running")
+        chat = _Chat(tmp_path)
+
+        (refused,) = await chat.say("删掉 pull", (TOOL, {"action": "delete", "schedule": "pull"}))
+        assert _error(refused) == "conflict", refused
+        assert "disable" in refused["error"]["message"] and "wait" in refused["error"]["message"]
+        assert not chat.turns[-1].blocks
+        assert (await _call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))[0] == 200
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_deleting_a_command_schedule_with_a_queued_run_says_it_will_not_execute(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        sid = (await _schedule(await _project(pool), "pull", kind="command",
+                               command="exit 0", requirement=""))["schedule_id"]
+        await _run_of(pool, sid, "queued")
+        chat = _Chat(tmp_path)
+
+        (asked,) = await chat.say("删掉 pull", (TOOL, {"action": "delete", "schedule": "pull"}))
+        assert asked["status"] == "needs_confirmation", asked
+        (block,) = chat.turns[-1].blocks
+        assert "排队中的运行不会再执行" in block
+        assert "它建出的任务都保留" not in block
+        done = await _confirm(chat, asked)
+        assert done["status"] == "ok", done
+        assert done["result"]["note"] == "its run history was deleted with it"
+        assert (await _call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))[0] == 404
+        assert await pool.fetchval("SELECT count(*) FROM schedule_runs WHERE schedule_id = $1", sid) == 0
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_a_schedule_without_a_run_in_progress_says_so_when_asked_for(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

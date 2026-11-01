@@ -301,6 +301,21 @@ def test_client_delete_and_reset_wait_without_mutation_until_confirmed(tmp_path,
     run_db(run, monkeypatch, timeout=30)
 
 
+def test_client_delete_of_a_running_command_schedule_is_refused_before_asking(tmp_path, monkeypatch):
+    async def run(pool):
+        _, sid = await _seed(pool, kind="command", command="exit 0", requirement="")
+        await db_schedules.insert_run(pool, schedule_id=sid, scheduled_for=datetime.now(timezone.utc),
+                                      trigger="manual", status="running")
+        async with _api(tmp_path, pool) as call:
+            status, refused = await call("delete", {"schedule_id": sid}, client=True)
+            assert status == 409, refused
+            assert refused["error"]["code"] == "conflict"
+            assert "disable" in refused["error"]["message"] and "wait" in refused["error"]["message"]
+            assert "confirmation_id" not in refused
+            assert await db_schedules.get_schedule(sid) is not None
+    run_db(run, monkeypatch, timeout=30)
+
+
 def test_confirming_deleted_schedule_rechecks_existence(tmp_path, monkeypatch):
     async def run(pool):
         _, sid = await _seed(pool)
