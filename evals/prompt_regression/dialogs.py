@@ -996,6 +996,7 @@ def _created_without_a_mode(look: Look) -> str | None:
 DEPS = "eval-deps"
 PULL = "pull"
 BUSY = "eval-busy"
+MOVED_DIR = "/tmp/eval-calc-moved"
 LIGHT = "eval/light"  # a lower-effort profile for a repetitive schedule's Planner
 OPS = "eval-ops"
 
@@ -1095,7 +1096,8 @@ def _make_busy_command_schedule(api: Api, project_id: str, *, queued: bool = Fal
 
 def _says_not_deleted(reply: str) -> bool:
     """Accept common ways to say the delete request was refused."""
-    return any(text in reply for text in ("没删", "未删", "没有删除", "删不掉", "删不了", "无法删除", "不能删除", "拒绝"))
+    return any(text in reply for text in ("没删", "未删", "没有删除", "没有删掉", "没删成", "没能删",
+                                          "不允许删除", "删不掉", "删不了", "无法删除", "不能删除", "拒绝"))
 
 
 def _says_delete_after_finish(reply: str) -> bool:
@@ -1105,7 +1107,7 @@ def _says_delete_after_finish(reply: str) -> bool:
 
 def _says_disable_stops_fires(reply: str) -> bool:
     """Accept an explanation of disabling without requiring a question."""
-    return "停用" in reply and any(text in reply for text in ("触发", "运行", "不再"))
+    return any(text in reply for text in ("停用", "禁用")) and any(text in reply for text in ("触发", "运行", "不再"))
 
 
 def _says_queued_run_starts(reply: str) -> bool:
@@ -1146,6 +1148,13 @@ def _busy_delete_refused(look: Look, *, queued: bool = False) -> str | None:
             return f"the reply lacks: {meaning}"
     if _claims_deleted_or_disabled(look.reply):
         return "the reply claims the schedule was deleted or disabled"
+    for sentence in re.split(r"[。！？!?\n；;]", look.reply):
+        if (any(text in sentence for text in ("结束", "跑完", "完成", "执行完"))
+                and any(text in sentence for text in ("不能删", "删不了", "无法删除"))):
+            return "the reply says the schedule cannot be deleted after the command finishes"
+        if (queued and "排队" in sentence and "删" not in sentence
+                and any(text in sentence for text in ("不会再运行", "不会执行", "不会开始", "不会启动"))):
+            return "the reply says the queued run will not start"
     return _raw_json(look.reply)
 
 
@@ -1161,6 +1170,43 @@ def _busy_disabled(look: Look) -> str | None:
             or writes[0]["arguments"].get("action") != "disable" or writes[0]["status"] != "ok"
             or writes[0].get("confirmation_id")):
         return "the busy command schedule was not disabled immediately on the user's request"
+    return _raw_json(look.reply)
+
+
+def _project_dir_change_asked(look: Look) -> str | None:
+    project = _project(look, PROJECT)
+    if project is None or project["work_dir"] == MOVED_DIR:
+        return "the project's directory changed before the user confirmed"
+    writes = _writes(look)
+    if (len(writes) != 1 or writes[0]["tool"] != "looper_projects"
+            or writes[0]["arguments"].get("action") != "update" or writes[0]["status"] != "needs_confirmation"
+            or writes[0]["arguments"].get("work_dir") != MOVED_DIR):
+        return "the project directory update did not wait for confirmation without other writes"
+    if not all(text in look.reply for text in (f"要修改项目「{PROJECT}」的默认目录吗？", "定时任务「pull」（已启用）：",
+                                              "\n```\nexit 0\n```\n", f"- 目录：{project['work_dir']} → {MOVED_DIR}")):
+        return "the project directory confirmation lacks the schedule, command or old/new directory"
+    return _raw_json(look.reply)
+
+
+def _project_dir_changed_on_confirmation(look: Look) -> str | None:
+    project = _project(look, PROJECT)
+    if project is None or project["work_dir"] != MOVED_DIR:
+        return "the confirmed project directory change was not applied"
+    writes = [a for a in look.turn_actions() if a["risk"] != "read"]
+    if (len(writes) != 1 or writes[0]["tool"] != "looper_projects" or writes[0]["status"] != "ok"
+            or writes[0]["arguments"].get("action") != "update" or not writes[0].get("confirmation_id")):
+        return "the project directory change did not run through its confirmed update"
+    return _raw_json(look.reply)
+
+
+def _project_dir_changed_at_once(look: Look) -> str | None:
+    project = _project(look, PROJECT)
+    if project is None or project["work_dir"] != MOVED_DIR:
+        return "the project directory change without command schedules was not applied at once"
+    writes = _writes(look)
+    if (len(writes) != 1 or writes[0]["tool"] != "looper_projects" or writes[0]["status"] != "ok"
+            or writes[0]["arguments"].get("action") != "update" or writes[0].get("confirmation_id")):
+        return "the project directory change without command schedules did not run once without confirmation"
     return _raw_json(look.reply)
 
 
@@ -1856,6 +1902,16 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_schedules", {"action": "disable", "schedule": BUSY}),)),
     ), seed=lambda api, project_id: _make_busy_command_schedule(api, project_id, queued=True),
         tags=("manager", "schedules")),
+    Dialog("project_dir_command_schedule", (
+        Say(f"把 {PROJECT} 项目的默认目录改成 {MOVED_DIR}。", _project_dir_change_asked,
+            (("looper_projects", {"action": "update", "project": PROJECT, "work_dir": MOVED_DIR}),)),
+        Say("确认。", _project_dir_changed_on_confirmation,
+            (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    ), seed=_make_command_schedule, tags=("manager", "projects")),
+    Dialog("project_dir_plain", (
+        Say(f"把 {PROJECT} 项目的默认目录改成 {MOVED_DIR}。", _project_dir_changed_at_once,
+            (("looper_projects", {"action": "update", "project": PROJECT, "work_dir": MOVED_DIR}),)),
+    ), tags=("manager", "projects")),
     Dialog("schedule_template_create", (
         Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区），"
             "使用 pr_review 模板评审这个 PR：" + TEMPLATE_PR_URL + "。目录用项目默认的，先创建停用的定时任务。",

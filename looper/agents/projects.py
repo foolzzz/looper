@@ -19,18 +19,20 @@ roles, and how many of its Workers or Reviewers run at once.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import asyncpg
 
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
-from ..db import projects as db_projects, tasks as db_tasks
+from ..db import projects as db_projects, schedules as db_schedules, tasks as db_tasks
 from .agent_settings import CONCURRENCY_MAX, PLANNER_CHOICE_ROLES, TASK_LIMIT_ROLES, AgentType, SettingsError
 from .agent_settings import concurrency, index_layers, task_agents_view
 from .agent_settings import TASK_ROLES, AgentSettings, Layer, resolve, resolve_task_concurrency
@@ -205,7 +207,35 @@ async def create_project(data: dict[str, Any]) -> dict[str, Any]:
     return project_view(row)
 
 
-async def update_project(project_id: str, data: dict[str, Any], *, manager_id: str | None = None) -> dict[str, Any]:
+DIRECTORY_CHANGED = ("the project's directory or the command schedules that run in it changed; run the tool again "
+                     "to ask for confirmation")
+
+
+@dataclass(frozen=True)
+class DirectoryChange:
+    """A project directory change and the command schedules it moves."""
+
+    old: str
+    new: str
+    schedules: tuple[dict[str, Any], ...]  # directory_dependents; none when the directory stays
+    version: str  # the project, both directories and each moved schedule's configuration
+
+
+async def directory_change(project: Mapping[str, Any], raw: Any, *, db: Any = None) -> DirectoryChange:
+    try:
+        new = project_work_dir(raw)
+    except ValueError as exc:
+        raise RequestError(HTTP_400, str(exc)) from None
+    old = project["work_dir"] or ""
+    rows = await db_schedules.directory_dependents(project["id"], pool=db) if new != old else []
+    settings = {"project_id": project["id"], "old": old, "new": new,
+                "schedules": [db_schedules.configuration_version(row, project_work_dir=old) for row in rows]}
+    version = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
+    return DirectoryChange(old, new, tuple(rows), version)
+
+
+async def update_project(project_id: str, data: dict[str, Any], *, manager_id: str | None = None,
+                         expected_directory_version: str | None = None) -> dict[str, Any]:
     fields = _project_fields(data, update=True)
     if not fields:
         raise RequestError(
@@ -213,7 +243,16 @@ async def update_project(project_id: str, data: dict[str, Any], *, manager_id: s
                                                           *EXECUTION_FIELDS)),
         )
     try:
-        updated = await db_projects.update_project(project_id, **fields)
+        if expected_directory_version is None:
+            updated = await db_projects.update_project(project_id, **fields)
+        else:
+            async with db_connection.transaction() as conn:
+                # The row an enable or run-now confirmation's directory check holds FOR SHARE.
+                current = await conn.fetchrow("SELECT * FROM projects WHERE id = $1 FOR UPDATE", project_id)
+                if current is not None and (await directory_change(current, data["work_dir"], db=conn)).version \
+                        != expected_directory_version:
+                    raise RequestError(HTTP_409, DIRECTORY_CHANGED)
+                updated = await db_projects.update_project(project_id, **fields, pool=conn)
     except asyncpg.UniqueViolationError:
         raise _name_taken(fields["name"]) from None
     if not updated:

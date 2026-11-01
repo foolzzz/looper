@@ -3,6 +3,7 @@
 import asyncio
 from copy import deepcopy
 from dataclasses import asdict
+import importlib
 import json
 import os
 import threading
@@ -50,6 +51,9 @@ class SeedApi(RegistryApi):
 def test_fake_api_manager_dialog_reads_back_each_completed_turn(
     monkeypatch, tmp_path, mutation, problem, cross_provider,
 ):
+    # Load the SDK's lazy Responses schemas before the per-reply I/O deadline.
+    # This test checks persisted turns, not Python import speed on a cold worker.
+    importlib.import_module("openai.resources.responses")
     from tests.api_manager_support import _manager, _message, _replies
     from tests.fake_model_api import ResponseScript, text_events
 
@@ -295,8 +299,9 @@ QUEUED_EXPLANATION = "排队中的运行即使停用也会在当前命令结束�
     (queued, mutation) for queued in (False, True)
     for mutation in (None, "deleted", "disabled", "no_running", "no_queued", "disabled_ok", "disable_asked",
                      "delete_asked", "empty", "claims_deleted", "claims_disabled", "old_advice",
-                     "missing_refusal", "missing_finish", "missing_disable", "missing_queue")
-    if queued or mutation not in {"no_queued", "missing_queue"}
+                     "missing_refusal", "missing_finish", "missing_disable", "missing_queue",
+                     "queue_cancelled", "not_deletable_after_finish")
+    if queued or mutation not in {"no_queued", "missing_queue", "queue_cancelled"}
 ])
 def test_command_delete_running_dialog_checks_state_and_explanation(monkeypatch, queued, mutation):
     actions = [action("looper_schedules", "delete", status="error")]
@@ -323,6 +328,10 @@ def test_command_delete_running_dialog_checks_state_and_explanation(monkeypatch,
     elif mutation in {"empty", "claims_deleted", "claims_disabled", "old_advice"}:
         look.reply = {"empty": "", "claims_deleted": "已删除。", "claims_disabled": BUSY_EXPLANATION + "已停用。",
                       "old_advice": "请先停用并等待。"}[mutation]
+    elif mutation == "not_deletable_after_finish":
+        look.reply = "没删。命令结束后也不能删。停用后不再触发。排队的那次不会再运行。"
+    elif mutation == "queue_cancelled":
+        look.reply = "删不掉。等命令结束后删。停用后不再触发。排队的那次不会执行。"
     elif mutation in {"missing_refusal", "missing_finish", "missing_disable", "missing_queue"}:
         removed = {"missing_refusal": "没有删除：", "missing_finish": "结束",
                    "missing_disable": "停用",
@@ -337,11 +346,19 @@ def test_command_delete_running_dialog_checks_state_and_explanation(monkeypatch,
     "未删，跑完再删。停用后不再触发。",
     "没有删除，等命令结束再删。停用后不会产生新的运行。",
     "删不掉，执行完就可以删。停用后不再调度。",
-    "删不了，完成后可以删。要先停用来阻止新的触发吗？",
+    "删不了。完成后可以删。要先停用来阻止新的触发吗？",
     "当前无法删除；待本次运行结束后就可以删除。需要先停用来阻止新的触发吗？",
-    "不能删除，跑完再删。停用会阻止新的触发。",
+    "不能删除。跑完再删。停用会阻止新的触发。",
     "拒绝了删除请求，跑完再删。停用后不再触发。",
     "停用后不再触发。跑完再删，现在没删。删除后它就不会再执行。",
+    "没有删掉，等命令跑完才能删。如果想先停止新的触发，可以先把它禁用。",
+    "现在删不掉，等命令跑完再删。也可以先禁用它，这样不会再触发新的运行。",
+    "没有删掉。运行期间 Looper 不允许删除。等这次运行结束后才能删。禁用后阻止新的触发。",
+    "没删成，等命令运行结束后，你再叫我删一次就行。禁用会阻止新的触发。",
+    "没能删，等这次命令跑完就能删。禁用后不会再触发新的运行。",
+    "还没有删除，等命令结束后可以删。要先禁用来阻止新的触发吗？",
+    "不允许删除。执行完后就可以删。禁用后不再调度。",
+    "没有删掉，等命令跑完再删。停用后不会再触发新的运行。",
 ])
 def test_command_delete_running_dialog_accepts_alternative_explanations(monkeypatch, reply, queued):
     look = observed(monkeypatch, {}, [action("looper_schedules", "delete", status="error")], reply=reply)
@@ -376,6 +393,42 @@ def test_command_delete_running_dialog_rejects_false_claims(monkeypatch, claim):
         "the reply claims the schedule was deleted or disabled")
 
 
+@pytest.mark.parametrize("queued,claim", [
+    (False, "命令结束后也不能删"),
+    (False, "命令跑完后删不了"),
+    (False, "命令完成后无法删除"),
+    (False, "命令执行完后也不能删"),
+    (True, "排队的那次不会再运行"),
+    (True, "排队的那次不会执行"),
+    (True, "排队的那次不会开始"),
+    (True, "排队的那次不会启动"),
+])
+def test_command_delete_running_dialog_rejects_sentence_false_claims(monkeypatch, queued, claim):
+    look = observed(monkeypatch, {}, [action("looper_schedules", "delete", status="error")],
+                    reply=BUSY_EXPLANATION + QUEUED_EXPLANATION + claim)
+    monkeypatch.setattr(dialogs, "_named", lambda *_: {"schedule_id": "busy-id", "enabled": True})
+    monkeypatch.setattr(look.api, "post", lambda *_: {"result": {"runs": [{"status": "running"}, {"status": "queued"}]}})
+    case_id = "schedule_command_delete_running" + ("_queued" if queued else "")
+    assert dialogs.select([case_id])[0].says[0].check(look) is not None
+
+
+@pytest.mark.parametrize("separator", list("。！？!?\n；;"))
+def test_command_delete_running_dialog_keeps_claims_within_sentences(monkeypatch, separator):
+    reply = separator.join([
+        "当前无法删除", "等命令结束后可以删", "禁用后不再触发", "排队的那次仍会启动",
+        "如果排队的那次还没开始，删除后它就不会再执行",
+        "如果删掉它，排队的那次不会执行", "如果删了它，排队的那次不会启动",
+    ])
+    look = observed(monkeypatch, {}, [action("looper_schedules", "delete", status="error")], reply=reply)
+    monkeypatch.setattr(dialogs, "_named", lambda *_: {"schedule_id": "busy-id", "enabled": True})
+    monkeypatch.setattr(look.api, "post", lambda *_: {"result": {"runs": [{"status": "running"}, {"status": "queued"}]}})
+    check = dialogs.select(["schedule_command_delete_running_queued"])[0].says[0].check
+    assert check(look) is None
+    # A deletion clause in the previous sentence must not exempt this false claim.
+    look.reply += separator + "排队的那次不会执行"
+    assert check(look) is not None
+
+
 @pytest.mark.parametrize("mutation", [None, "enabled", "deleted", "needs_confirmation", "error", "confirmed",
                                       "no_running", "no_queued", "extra_write", "wrong_action"])
 def test_busy_disable_followup_runs_without_confirmation(monkeypatch, mutation):
@@ -402,6 +455,26 @@ def test_busy_disable_followup_runs_without_confirmation(monkeypatch, mutation):
     elif mutation == "wrong_action":
         actions[0]["arguments"]["action"] = "delete"
     assert (check(look) is None) is (mutation is None)
+
+
+@pytest.mark.parametrize("mutation", ["missing_command", "missing_directory", "already_changed", "no_wait"])
+def test_project_directory_dialog_rejects_incomplete_or_early_update(monkeypatch, mutation):
+    command = "\n```\nexit 0\n```\n"
+    directory = f"- 目录：/srv/eval → {dialogs.MOVED_DIR}"
+    heading = f"要修改项目「{dialogs.PROJECT}」的默认目录吗？\n定时任务「pull」（已启用）："
+    actions = [action("looper_projects", "update", status="needs_confirmation", work_dir=dialogs.MOVED_DIR)]
+    project = {"work_dir": "/srv/eval"}
+    look = observed(monkeypatch, {}, actions, reply=heading + command + directory)
+    monkeypatch.setattr(dialogs, "_project", lambda *_: project)
+    check = dialogs.select(["project_dir_command_schedule"])[0].says[0].check
+    assert check(look) is None
+    if mutation.startswith("missing_"):
+        look.reply = heading + (directory if mutation == "missing_command" else command)
+    elif mutation == "already_changed":
+        project["work_dir"] = dialogs.MOVED_DIR
+    else:
+        actions[0]["status"] = "ok"
+    assert check(look) is not None
 
 
 def provider_state():
@@ -599,6 +672,7 @@ def test_repricing_keeps_historical_spend_and_other_protocol_price(monkeypatch, 
 @pytest.mark.parametrize("dialog_id", ["provider_key", "config_tools", "task_cost", "schedule_planner_profile",
                                        "schedule_command_create", "schedule_command_edit", "schedule_create",
                                        "schedule_command_delete_running", "schedule_command_delete_running_queued",
+                                       "project_dir_command_schedule", "project_dir_plain",
                                        "model_custom", "model_dual_protocol", "model_login_runtime",
                                        "model_missing_endpoint", "model_price_history", "template_review_task",
                                        "template_missing_input"])
