@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.69] - 2026-11-01
+
+### Changed
+
+- **`looper service upgrade` plans and reports control-plane upgrades with kept runs.** It plans `CONTROL_PLANE` only when the running control plane has keeper on, the service unit keeps keepers alive (launchd always; systemd only with `KillMode=process`), every live keeper offers a protocol the target supports and the adoption contract is unchanged; otherwise `FULL`. For `CONTROL_PLANE` the drain deadline is tiered (`--drain-timeout` while a run is not keepable, then `--turns-timeout`), only non-keepable runs are interrupted (reason `not_keepable`), and the report fills `kept_before`, `adopted` and `failed_after_start`, with a P1 alert when fewer runs were adopted than kept. `system.status` gains `keepers.failed_after_start` and keeper warnings in `checks` (P1 incomplete adoption, P2 live keepers without a controller for over ten minutes). No migration. ([#1063](https://github.com/foolzzz/looper/pull/1063))
+
 ## [2.14.68] - 2026-11-01
 
 ### Changed
