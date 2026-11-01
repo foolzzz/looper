@@ -158,6 +158,10 @@ async def impact(server, operation, arguments, principal, headers):
                 lines.append(f"env_file: {row['env_file'] or 'none'} → {fields['env_file'] or 'none'}")
             elif key == "work_dir":
                 lines.append(f"directory: {directory(row)} → {directory({**row, **fields})}")
+        if "work_dir" not in edit[1]:
+            lines.append(f"directory: {directory({**row, **fields})}")
+        lines.extend(f"{key}: {row[key]!r} → {data[key]!r}" for key in
+                     ("enabled", "run_budget_usd", "daily_budget_usd") if key in data and data[key] != row[key])
         return f"Update {subject}: {'; '.join(lines)}. {EDIT_EFFECT[edit[0]]}"
     if (data.get("enabled") and not row["enabled"]) or raises:
         changes = ", ".join(f"{key}: {row[key]!r} → {data[key]!r}" for key in

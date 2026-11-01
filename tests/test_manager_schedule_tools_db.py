@@ -709,6 +709,8 @@ def test_command_edit_of_a_schedule_that_will_run_asks_first(monkeypatch, tmp_pa
         assert asked["status"] == "needs_confirmation", asked
         assert await db_schedules.get_schedule(sid) == before
         block = chat.turns[-1].blocks[0]
+        if "work_dir" not in fields:
+            assert f"- 目录：项目的默认目录（{tmp_path}）" in block
         if "command" in fields:
             assert "\n```\nexit 0\n```\n → \n```\nexit 7\n```\n" in block
         elif "env" in fields:
@@ -726,6 +728,34 @@ def test_command_edit_of_a_schedule_that_will_run_asks_first(monkeypatch, tmp_pa
         assert "已修改定时任务" in chat.turns[-1].blocks[0]
         row = await db_schedules.get_schedule(sid)
         assert all((row[key] or None) == (value or None) for key, value in fields.items())
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("own_dir", [False, True])
+def test_command_edit_directory_is_shown_again_after_project_conflict(monkeypatch, tmp_path, own_dir):
+    async def test(pool):
+        from looper.db import projects, schedules as db_schedules
+
+        project = await _project(pool, work_dir="/srv/project-before")
+        sid = (await _schedule(project, "pull", enabled=True, kind="command", command="exit 0", requirement="",
+                               work_dir=str(tmp_path) if own_dir else ""))["schedule_id"]
+        chat = _Chat(tmp_path)
+        arguments = {"action": "update", "schedule": sid, "fields": {"command": "exit 7"}}
+        (asked,) = await chat.say("修改命令", (TOOL, arguments))
+        assert asked["status"] == "needs_confirmation", asked
+        directory = str(tmp_path) if own_dir else "项目的默认目录（/srv/project-before）"
+        assert f"- 目录：{directory}" in chat.turns[-1].blocks[0]
+        await projects.update_project(project["id"], work_dir="/srv/project-after")
+        done = await _confirm(chat, asked)
+        if not own_dir:
+            assert _error(done) == "conflict", done
+            assert (await db_schedules.get_schedule(sid))["command"] == "exit 0"
+            (asked,) = await chat.say("重新确认修改", (TOOL, arguments))
+            assert asked["status"] == "needs_confirmation", asked
+            assert "- 目录：项目的默认目录（/srv/project-after）" in chat.turns[-1].blocks[0]
+            done = await _confirm(chat, asked)
+        assert done["status"] == "ok", done
+        assert (await db_schedules.get_schedule(sid))["command"] == "exit 7"
     run_db(test, monkeypatch, timeout=30)
 
 

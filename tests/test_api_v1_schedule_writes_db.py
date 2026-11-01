@@ -453,10 +453,43 @@ def test_client_command_edit_of_an_enabled_schedule_waits_for_confirmation(tmp_p
                           "It is disabled but has a queued run, which executes the changed command when it starts, without an agent or model spend.")
                 assert pending["impact"] == (
                     "Update schedule 'Hourly' in project 'Reports': command: \n```\nexit 0\n```\n → "
-                    "\n```\nexit 7\n```\n; env keys: MODE → MODE (values changed: MODE). " + effect)
+                    "\n```\nexit 7\n```\n; env keys: MODE → MODE (values changed: MODE); "
+                    "directory: the project directory (/srv/reports). " + effect)
                 assert await db_schedules.get_schedule(sid) == before
                 status, _ = await call("/api/v1/confirm", {"confirmation_id": pending["confirmation_id"]}, client=True)
             assert status == 200
+            row = await db_schedules.get_schedule(sid)
+            assert all(row[key] == value for key, value in fields.items())
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("state,extra", [
+    ("enabled", {"run_budget_usd": None, "daily_budget_usd": None}),
+    ("enabled", {"enabled": False}),
+    ("queued", {"run_budget_usd": None, "daily_budget_usd": None}),
+])
+def test_client_command_edit_names_and_applies_combined_changes(tmp_path, monkeypatch, state, extra):
+    async def run(pool):
+        _, sid = await _seed(pool, kind="command", command="exit 0", requirement="")
+        if state == "enabled":
+            await schedules.update_schedule(sid, {"enabled": True})
+        else:
+            await db_schedules.insert_run(pool, schedule_id=sid, scheduled_for=datetime.now(timezone.utc),
+                                          trigger="manual", status="queued")
+        if "run_budget_usd" in extra:
+            # Nonempty caps are rejected for command schedules; removing stored caps is allowed.
+            await pool.execute("UPDATE schedules SET run_budget_usd=1, daily_budget_usd=2 WHERE id=$1", sid)
+        before = await db_schedules.get_schedule(sid)
+        fields = {"command": "exit 7", **extra}
+        async with _api(tmp_path, pool) as call:
+            status, pending = await call("update", {"schedule_id": sid, "fields": fields}, client=True)
+            assert status == 202, pending
+            assert "\n```\nexit 0\n```\n → \n```\nexit 7\n```\n" in pending["impact"]
+            for key, value in extra.items():
+                assert f"{key}: {before[key]!r} → {value!r}" in pending["impact"]
+            assert await db_schedules.get_schedule(sid) == before
+            status, done = await call("/api/v1/confirm", {"confirmation_id": pending["confirmation_id"]}, client=True)
+            assert status == 200, done
             row = await db_schedules.get_schedule(sid)
             assert all(row[key] == value for key, value in fields.items())
     run_db(run, monkeypatch, timeout=30)

@@ -1045,6 +1045,39 @@ def _command_schedule_created_disabled(look: Look) -> str | None:
             else "the reply lacks the command configuration and the question whether to enable it")
 
 
+def _command_edit_asked(look: Look) -> str | None:
+    schedule = _named(look, PULL)
+    if schedule is None or not schedule["enabled"] or schedule["command"] != "exit 0":
+        return "the enabled command schedule changed before the user confirmed"
+    writes = _writes(look)
+    if (len(writes) != 1 or writes[0]["tool"] != "looper_schedules"
+            or writes[0]["arguments"].get("action") != "update" or writes[0]["status"] != "needs_confirmation"):
+        return "the command update did not wait for confirmation without other writes"
+    directory = schedule["work_dir"] or f"项目的默认目录（{_project(look, PROJECT)['work_dir']}）"
+    if not all(text in look.reply for text in ("\n```\nexit 0\n```\n → \n```\nexit 7\n```\n",
+                                              f"- 目录：{directory}")):
+        return "the command-edit confirmation lacks the before/after command or effective directory"
+    return _raw_json(look.reply)
+
+
+def _command_edited_on_confirmation(look: Look) -> str | None:
+    schedule = _named(look, PULL)
+    if schedule is None or not schedule["enabled"] or schedule["command"] != "exit 7":
+        return "the confirmed command edit was not applied to the enabled schedule"
+    writes = [a for a in look.turn_actions() if a["risk"] != "read"]
+    if (len(writes) != 1 or writes[0]["tool"] != "looper_schedules" or writes[0]["status"] != "ok"
+            or writes[0]["arguments"].get("action") != "update" or not writes[0]["confirmation_id"]):
+        return "the command edit did not run through its confirmed update"
+    return _raw_json(look.reply)
+
+
+def _make_command_schedule(api: Api, project_id: str) -> None:
+    created = api.post("/api/v1/schedule_admin/create", {"project_id": project_id, "fields": {
+        "name": PULL, "kind": "command", "command": "exit 0", "cron": "0 0 1 1 *", "timezone": "UTC"}})["result"]
+    api.post("/api/v1/schedule_admin/update", {"schedule_id": created["schedule"]["schedule_id"],
+                                            "fields": {"enabled": True}})
+
+
 def _planner_profile_names(look: Look, schedule: dict[str, Any]) -> dict[str, str]:
     names = {p["profile_id"]: p["name"] for p in look.api.post("/api/v1/registry/view", {})["result"]["profiles"]}
     return {role: names.get(profile, profile) for role, profile in schedule["profile_overrides"].items()}
@@ -1715,6 +1748,14 @@ DIALOGS: tuple[Dialog, ...] = (
         Say("确认。", lambda look: _schedule_enabled_on_confirmation(look, PULL),
             (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     )),
+    Dialog("schedule_command_edit", (
+        Say(f"把 {PROJECT} 项目里已启用的命令型定时任务 {PULL} 的命令从 `exit 0` 改成 `exit 7`，目录不变。",
+            _command_edit_asked,
+            (("looper_schedules", {"action": "update", "project": PROJECT, "schedule": PULL,
+                                   "fields": {"command": "exit 7"}}),)),
+        Say("确认。", _command_edited_on_confirmation,
+            (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    ), seed=_make_command_schedule, tags=("manager", "schedules")),
     Dialog("schedule_template_create", (
         Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区），"
             "使用 pr_review 模板评审这个 PR：" + TEMPLATE_PR_URL + "。目录用项目默认的，先创建停用的定时任务。",
