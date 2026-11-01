@@ -438,6 +438,47 @@ def test_cli_upgrade_can_inspect_a_wheel_without_installing(upgrade_host, monkey
     assert targets == [wheel]
 
 
+@pytest.mark.parametrize("target_kind", ["git", "wheel"])
+def test_cli_upgrade_preview_with_the_released_seat_tool_probe(
+    upgrade_host, monkeypatch, tmp_path, capsys, target_kind,
+):
+    host, _ = upgrade_host
+    root = Path(components.__file__).resolve().parent.parent
+    sources = {name: (root / name).read_bytes() for name in (
+        "looper/components.toml", "looper/__init__.py", "looper/agents/system_prompt.py",
+        "pyproject.toml", *components.SEAT_SOURCES,
+    )}
+    if target_kind == "wheel":
+        wheel = tmp_path / "candidate.whl"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            for name, source in sources.items():
+                archive.writestr(name, source)
+        arguments = ["--to", str(wheel)]
+    else:
+        for name, source in sources.items():
+            destination = host.cwd / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(source)
+        for args in (("init", "-q"), ("add", "looper", "pyproject.toml"),
+                     ("commit", "-qm", "upgrade candidate"), ("update-ref", "refs/remotes/origin/main", "HEAD")):
+            subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+                            "-c", "user.name=Upgrade fixture", "-c", "user.email=upgrade@example.invalid",
+                            "-C", str(host.cwd), *args], check=True, capture_output=True, timeout=10)
+        arguments = []  # The default target is origin/main.
+
+    # Frozen from v2.14.69, blob c668178e663718836a2821c39a6a7aa79c006577.
+    # Planning uses the installed reader before any candidate code is installed.
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    (installed / "_component_probe.py").write_bytes(
+        (root / "tests/fixtures/component_probe_v2_14_69.py").read_bytes())
+    monkeypatch.setattr(components, "__file__", str(installed / "components.py"))
+    monkeypatch.setattr(components, "_seat_tools", components._seat_tools.__wrapped__)
+
+    assert cli.main(["service", "upgrade", "--dry-run", *arguments]) == 0
+    assert "plan       FULL" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("path, needle, replacement", [
     ("looper/agents/ops/__init__.py", '    READ = "read"',
      '    READ = (MARK, "read")[1]'),

@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 SEARCH, READ, WRITE = "looper_vault_search", "looper_vault_read", "looper_vault_write"
 
+RETRY_SAFETY: dict[str, RetrySafety] = {
+    SEARCH: RetrySafety.READ_ONLY,
+    READ: RetrySafety.READ_ONLY,
+}
+
 
 async def _never(call: Any) -> dict[str, Any]:
     raise AssertionError("vault tools run through run_tool")
@@ -32,7 +37,7 @@ TOOLS: tuple[Tool, ...] = (
             "query": {"type": "string", "minLength": 1},
             "limit": {"type": "integer", "minimum": 1, "maximum": 30},
         }},
-        risk=Risk.READ, run=_never, retry_safety=RetrySafety.READ_ONLY,
+        risk=Risk.READ, run=_never,
     ),
     Tool(
         name=READ,
@@ -41,7 +46,7 @@ TOOLS: tuple[Tool, ...] = (
         schema={"type": "object", "required": ["path"], "additionalProperties": False, "properties": {
             "path": {"type": "string", "minLength": 1},
         }},
-        risk=Risk.READ, run=_never, retry_safety=RetrySafety.READ_ONLY,
+        risk=Risk.READ, run=_never,
     ),
     Tool(
         name=WRITE,

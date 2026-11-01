@@ -308,13 +308,21 @@ def test_only_kept_grants_list_retry_safety(tmp_path, kept, room) -> None:
     if not kept:
         assert "retry_safety" not in payload
     else:
-        tools = (*room_ops.TOOLS, *vault_ops.TOOLS) if room else vault_ops.TOOLS
-        listed = {tool["name"] for tool in payload["tools"]}
-        assert payload["retry_safety"] == {tool.name: tool.retry_safety.value for tool in tools if tool.name in listed}
+        expected = {
+            vault_ops.SEARCH: RetrySafety.READ_ONLY.value,
+            vault_ops.READ: RetrySafety.READ_ONLY.value,
+            vault_ops.WRITE: RetrySafety.NOT_RETRYABLE.value,
+        }
         if room:
-            assert payload["retry_safety"][room_ops.INBOX] == RetrySafety.READ_ONLY_IF_PEEK.value
-            assert payload["retry_safety"][room_ops.POST] == RetrySafety.NOT_RETRYABLE.value
-            assert payload["retry_safety"][room_ops.WATCH] == RetrySafety.NOT_RETRYABLE.value
+            expected.update({
+                room_ops.ROSTER: RetrySafety.READ_ONLY.value,
+                room_ops.INBOX: RetrySafety.READ_ONLY_IF_PEEK.value,
+                room_ops.READ: RetrySafety.READ_ONLY.value,
+                room_ops.POST: RetrySafety.NOT_RETRYABLE.value,
+                room_ops.WATCH: RetrySafety.NOT_RETRYABLE.value,
+            })
+        assert payload["retry_safety"] == expected
+        assert set(expected) == {tool["name"] for tool in payload["tools"]}
 
 
 @pytest.fixture

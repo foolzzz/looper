@@ -194,7 +194,6 @@ class Tool:
     # The task a call acts on, for the audit trail and the task page; None for none.
     task_id: Callable[[Mapping[str, Any]], str | None] = lambda arguments: None
     read_actions: frozenset[str] = frozenset()
-    retry_safety: RetrySafety = RetrySafety.NOT_RETRYABLE
 
     def risk_of(self, arguments: Mapping[str, Any]) -> Risk:
         """The tier of a call with these (checked) arguments, before ``escalate``."""

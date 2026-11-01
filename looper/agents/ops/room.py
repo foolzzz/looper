@@ -47,6 +47,13 @@ TOKEN_PREFIX = "run."
 ROSTER, POST, INBOX, READ, WATCH = ("looper_room_roster", "looper_room_post", "looper_room_inbox", "looper_room_read",
                                     "looper_room_watch")
 
+# Keep retry metadata outside Tool declarations so installed upgrade probes can read them.
+RETRY_SAFETY: dict[str, RetrySafety] = {
+    ROSTER: RetrySafety.READ_ONLY,
+    INBOX: RetrySafety.READ_ONLY_IF_PEEK,
+    READ: RetrySafety.READ_ONLY,
+}
+
 
 async def _never(call: Any) -> dict[str, Any]:
     raise AssertionError("room tools run through run_tool")
@@ -59,7 +66,7 @@ TOOLS: tuple[Tool, ...] = (
         description="Who is in this task's room: each seat (role@step), its step and whether it is online, waiting, "
                     "offline or not started yet; which seat you are; your unread counts.",
         schema={"type": "object", "additionalProperties": False, "properties": {}},
-        risk=Risk.READ, run=_never, retry_safety=RetrySafety.READ_ONLY,
+        risk=Risk.READ, run=_never,
     ),
     Tool(
         name=POST,
@@ -86,7 +93,7 @@ TOOLS: tuple[Tool, ...] = (
             "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 120},
             "peek": {"type": "boolean", "description": "Read without marking them read."},
         }},
-        risk=Risk.READ, run=_never, retry_safety=RetrySafety.READ_ONLY_IF_PEEK,
+        risk=Risk.READ, run=_never,
     ),
     Tool(
         name=READ,
@@ -100,7 +107,7 @@ TOOLS: tuple[Tool, ...] = (
             "before": {"type": "integer", "minimum": 1},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50},
         }},
-        risk=Risk.READ, run=_never, retry_safety=RetrySafety.READ_ONLY,
+        risk=Risk.READ, run=_never,
     ),
     Tool(
         name=WATCH,
@@ -296,7 +303,9 @@ class RoomOps:
         if grant is None or not grant.kept:
             return None
         room_tools = tools_for(grant.seat.kind) if grant.room else ()
-        return {tool.name: tool.retry_safety.value for tool in (*room_tools, *grant.vault_tools)}
+        safety = {**RETRY_SAFETY, **vault_ops.RETRY_SAFETY}
+        return {tool.name: safety.get(tool.name, RetrySafety.NOT_RETRYABLE).value
+                for tool in (*room_tools, *grant.vault_tools)}
 
     async def call(self, header: str | None, name: str, raw: Any) -> dict[str, Any]:
         grant = self._grant(header)
