@@ -7,13 +7,13 @@ import os
 from pathlib import Path
 import signal
 import subprocess
-from urllib.parse import urlsplit
 
 import pytest
 
 from evals.prompt_regression.runner import running_server
 from looper.agents import keeper
 from tests.db_support import DSN
+from tests.runner_support import require_disposable_database
 from tests.test_drain_serve_db import _completed, _drain, _events, _project, _query, _task, _until
 from tests.test_kept_run_serve_db import CLI, _live, _records, _running, fixture
 
@@ -38,9 +38,8 @@ STREAMING_CLI = CLI.replace(
 
 @contextmanager
 def _fixture():
-    # This lane is allowed only its own disposable databases on the test server.
-    assert urlsplit(str(DSN)).hostname == "127.0.0.1"
-    assert urlsplit(str(DSN)).port == 54329
+    # Use the shared isolation policy for both local and CI disposable servers.
+    require_disposable_database(str(DSN), served=False)
     with fixture() as values:
         root, _, _, _ = values
         (root / "fake.py").write_text(STREAMING_CLI)
