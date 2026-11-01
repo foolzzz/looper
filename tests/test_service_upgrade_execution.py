@@ -397,6 +397,72 @@ def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs
             assert "pid 123456791" in data["recovery_error"]
 
 
+@pytest.mark.parametrize("case", ["listener_closes_late", "still_serving", "stalled", "port_taken_after_exit"])
+def test_upgrade_recovery_decides_after_the_wait_whatever_the_first_port_probe_saw(
+        deployment, case, capsys):
+    failed_poll = []
+
+    def operation(port, token, name, args):
+        deployment.events.append(name)
+        if name == "drain":
+            return {"phase": "draining", "waiting": {"runs": []}}
+        if name == "drain_status":
+            assert not failed_poll, "recovery must not renew the drain"
+            failed_poll.append(deployment.elapsed[0])
+            if case == "still_serving":
+                return {"phase": "serving"}
+            raise service.ServiceError("timed out")
+        if name == "health":
+            return {}
+        assert name == "drain_cancel"
+        return {"phase": "serving"}
+
+    def alive(pid):
+        if pid != 123456789:
+            return deployment.state.pid == pid
+        if case in ("still_serving", "stalled") or not failed_poll:
+            return True
+        if deployment.elapsed[0] < failed_poll[0] + 3:
+            return True
+        if "start" not in deployment.events:
+            deployment.state.running = False
+            deployment.state.pid = None
+        return False
+
+    def status(*args):
+        if "start" in deployment.events:
+            return {"status": "ok", "pid": 123456790}
+        if case == "still_serving":
+            return {"status": "ok", "pid": 123456789}
+        return None
+
+    deployment.host.system_operation = operation
+    deployment.host.pid_alive = alive
+    deployment.host.port_in_use = lambda *args: (
+        case != "listener_closes_late" or not failed_poll or deployment.elapsed[0] < failed_poll[0] + 1)
+    deployment.host.get_status = status
+
+    assert cli.main(["service", "upgrade"]) == 1
+    data = report(deployment)
+    error = capsys.readouterr().err
+    assert data["status"] == "failed"
+    assert "install" not in deployment.events
+    assert deployment.events[-1] == "drain_cancel"
+    assert deployment.events.count("start") == int(case == "listener_closes_late")
+    assert data["serving"] is (case in ("listener_closes_late", "still_serving"))
+    assert deployment.elapsed[0] - failed_poll[0] == (
+        0 if case == "still_serving" else service._STOP_WAIT_SECONDS if case == "stalled" else 3)
+    if case == "listener_closes_late":
+        assert deployment.state.running
+        assert "serving: yes" in error
+    if case in ("listener_closes_late", "still_serving"):
+        assert "recovery_error" not in data
+    elif case == "stalled":
+        assert "old service process 123456789 is still running" in data["recovery_error"]
+    else:
+        assert "port 18841 is served by another process" in data["recovery_error"]
+
+
 @pytest.mark.parametrize("pid, response_delay", [(123456790, 3), (None, 3), (123456790, 6)])
 def test_manager_restart_during_drain_waits_for_serving_without_starting(
         deployment, pid, response_delay, capsys):

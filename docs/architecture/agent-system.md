@@ -4383,7 +4383,10 @@ and the reason. Keeper mode is off in S0, so every control-plane change plans
 
 If the service is stopped or killed during the drain, the upgrade starts it
 again, undoing even an explicit stop during the drain, unless the old process
-is still alive or another process holds the port. If the service manager has
+is still alive or another process holds the port. When a drain poll fails, the
+upgrade waits up to 30 s for the old process to exit unless it still answers
+as itself, and decides when that wait ends, whether or not the port was still
+open when the poll failed. If the service manager has
 already restarted the unit, the upgrade starts nothing and waits up to
 `--timeout` for it to answer before reporting whether it is serving.
 

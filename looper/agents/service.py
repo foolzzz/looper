@@ -1347,21 +1347,24 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                         host.sleep(_POLL_SECONDS)
                     else:
                         stopped = True
-                elif not stop_attempted and before is not None and not host.port_in_use(port):
-                    # Shutdown closes HTTP before the process exits; wait without renewing the drain.
+                elif not stop_attempted and before is not None:
+                    # Shutdown closes HTTP before the process exits, and a failed poll can still find the
+                    # listener open: wait while the old process lives and does not answer as itself,
+                    # without renewing the drain.
                     deadline = host.clock() + _STOP_WAIT_SECONDS
                     while host.pid_alive(before):
+                        if (host.get_status(port, token, "127.0.0.1") or {}).get("pid") == before:
+                            break  # It still serves: cancelling the drain below is the whole recovery.
                         if host.clock() >= deadline:
                             report["recovery_error"] = (f"the old service process {before} is still running; "
                                                         "start it with `looper service restart` once it exits")
                             break
                         host.sleep(_POLL_SECONDS)
-                    else:
-                        if not mgr.state().running and not host.port_in_use(port):
-                            stopped = True
-                if (not stop_attempted and not stopped and before is not None and not host.pid_alive(before)
-                        and not mgr.state().running and host.port_in_use(port)):
-                    raise port_conflict()
+                    # Decide at the end of the wait, whatever the first probe found.
+                    if not host.pid_alive(before) and not mgr.state().running:
+                        if host.port_in_use(port):
+                            raise port_conflict()
+                        stopped = True
                 # A timed-out start can leave a loaded unit or a partial process.
                 # Retry the current install from a stopped unit before cancelling.
                 if stopped:
