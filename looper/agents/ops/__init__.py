@@ -40,6 +40,14 @@ class Risk(str, Enum):
     HIGH = "high"
 
 
+class RetrySafety(str, Enum):
+    """Whether a possibly executed call can be repeated, independently of its permission tier."""
+
+    NOT_RETRYABLE = "not_retryable"
+    READ_ONLY = "read_only"
+    READ_ONLY_IF_PEEK = "read_only_if_peek"
+
+
 class ErrorCode(str, Enum):
     NOT_FOUND = "not_found"
     INVALID = "invalid"

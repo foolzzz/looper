@@ -3272,6 +3272,25 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
   `POST /api/agent/v1/ops/<tool>` with the arguments as the body, and the
   answer is the tool result's text (an error result when its `status` is
   `error`). The endpoint refuses any other token with 401.
+  Kept runs' MCP entries also set `LOOPER_AGENT_RECONNECT_SECONDS=120`:
+  their bridge retries refused connections and HTTP 503 with an integer
+  `Retry-After`, since neither executed the call. Other connection failures
+  retry only `GET /tools` or calls allowed by the kept grant's `retry_safety`
+  sidecar, derived from the `RETRY_SAFETY` maps in `looper/agents/ops/room.py`
+  and `looper/agents/ops/vault.py` independently of its permission tier. This
+  metadata lives in separate maps because the `Tool` declaration shape must
+  remain readable by the previous release's upgrade probe.
+  The room inbox allows these retries only with `peek=true`: its default call
+  marks messages read before sending the response. With reconnect enabled, a
+  lost response returns an error directing the agent to peek at remaining
+  unread messages and recover recent messages with `looper_room_read`.
+  Retried inbox waits are capped at the reconnect time left minus 2 s (never
+  below 0). Timeouts never retry. Backoff starts at 0.5 s
+  and doubles to 5 s; `Retry-After`, clamped to that range, overrides it.
+  The window starts at the first failure, is configurable up to 600 s,
+  and logs one `agent api retry` summary per retried call to stderr.
+  With the variable unset or empty, requests still make one attempt and return
+  the same error text as without reconnect support.
 - **The contract and `/profile`.** `TOOLS_CONTRACT` tells the Manager that
   the user switches the Agent Profile of the conversation with `/profile` and
   starts a new one with `/new`, that Looper answers both itself, that the

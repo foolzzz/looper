@@ -678,10 +678,12 @@ class ManagerOps:
         return library
 
 
-def server_config(url: str, token: str) -> dict[str, Any]:
+def server_config(url: str, token: str, *, reconnect_seconds: int | None = None) -> dict[str, Any]:
     """Looper's MCP entry for an agent with ``token``: ``looper mcp-server``, reaching the server at ``url``."""
-    return {"command": sys.executable, "args": ["-m", "looper.cli", "mcp-server"],
-            "env": {URL_ENV: url, TOKEN_ENV: token}}
+    env = {URL_ENV: url, TOKEN_ENV: token}
+    if reconnect_seconds is not None:
+        env["LOOPER_AGENT_RECONNECT_SECONDS"] = str(reconnect_seconds)
+    return {"command": sys.executable, "args": ["-m", "looper.cli", "mcp-server"], "env": env}
 
 
 async def library_with_server(library: Any, runtime_root: Path, config: Mapping[str, Any], *, who: str) -> Any:

@@ -645,8 +645,7 @@ class WorkerPool:
             raise RuntimeError("a newer control plane holds the candidate")
         await kept_dirs.end_keeper(record, candidate.run_dir)
         await db_llm_records.end_record_interrupted(candidate.record_id, reason)
-        if self.room_ops is not None:
-            self.room_ops.revoke_run(candidate.run_id)
+        await self._end_room_run(candidate.run_id)
         if resume:
             assert self._bus is not None
             # Keep the identity files until publication succeeds so cleanup can be retried.
@@ -831,8 +830,7 @@ class WorkerPool:
             if type(record_id) is int:
                 await db_llm_records.end_record_interrupted(
                     record_id, f"the run could not be adopted after a restart: {failure.value}")
-            if self.room_ops is not None:
-                self.room_ops.revoke_run(run_dir.name)
+            await self._end_room_run(run_dir.name)
             if handle is not None:
                 handle.release()
             else:
@@ -1188,6 +1186,21 @@ class WorkerPool:
         await self._finish_run(wp, seat, reply,
                                lambda: self._execute(envelope, is_verify=is_verify, started_at=wp.since))
 
+    async def _end_room_run(self, worker_id: str, task_id: str | None = None, seat: Seat | None = None) -> None:
+        if self.room_ops is None:
+            return
+        if seat is None and (grant := self.room_ops.export_run(worker_id)) is not None:
+            task_id = grant["task_id"]
+            data = grant["seat"]
+            seat = Seat(**{**data, "kind": MemberKind(data["kind"])})
+        # Revoke before awaiting presence, which also closes this run's watches.
+        self.room_ops.revoke_run(worker_id)
+        if seat is not None:
+            try:
+                await self.room_ops.room.presence_changed(task_id, seat, online=False)
+            except Exception:
+                logger.exception("worker %s could not announce it left task %s's room", worker_id, task_id)
+
     async def _finish_run(self, wp: WorkerProcess, seat: Any, reply: RunReply,
                           run: Callable[[], Awaitable[dict]]) -> None:
         assert self._bus is not None
@@ -1219,12 +1232,7 @@ class WorkerPool:
                     raise asyncio.CancelledError
                 self._reminders.pop(worker_id, None)
                 if seat is not None:
-                    # Its token stops working, with the files that carry it, before anything else waits.
-                    self.room_ops.revoke_run(worker_id)
-                    try:
-                        await self.room_ops.room.presence_changed(parent_task_id, seat, online=False)
-                    except Exception:
-                        logger.exception("worker %s could not announce it left task %s's room", worker_id, parent_task_id)
+                    await self._end_room_run(worker_id, parent_task_id, seat)
 
             if wp.handle is not None and (missed := wp.handle.dropped_input()):
                 wp.result = {**(wp.result or {}), "missed_input": missed}
@@ -1327,6 +1335,10 @@ class WorkerPool:
             return {"status": "failed", "error": agent_settings.profile_error}
         profile_runtime = ADAPTERS.get(agent_settings.profile.runtime.type)
         hosted = profile_runtime is not None and profile_runtime.hosts_runs
+        launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
+        runtime = launch.runtime
+        kept = (self._keeper is not None and runtime.keepable and not hosted and not launch.steers
+                and launch.exit_code_reliable and bool(parent_task_id))
         token: str | None = None
         # The task's room and knowledge vault share the run's token and MCP entry.
         execution = ProjectExecution.from_row(project)
@@ -1336,9 +1348,10 @@ class WorkerPool:
         if self.room_ops is not None and parent_task_id and (room_on or vault_config is not None):
             seat = run_seat(payload, is_verify=is_verify, run=worker_id)
             try:
-                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config)
+                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config, kept=kept)
                 if not hosted:
-                    library = await self.room_ops.library_with_server(library, self._runtime_root, token, worker_id)
+                    library = await self.room_ops.library_with_server(
+                        library, self._runtime_root, token, worker_id, reconnect_seconds=120 if kept else None)
                 if room_on:
                     prompt = f"{prompt}\n\n{await self.room_ops.room.first_turn(parent_task_id, seat)}"
                     room_text = room_section(seat)
@@ -1421,9 +1434,6 @@ class WorkerPool:
             if is_verify:
                 return {"passed": False, "findings": [problem], "summary": problem}
             return {"status": "failed", "error": problem}
-        runtime = launch.runtime
-        kept = (self._keeper is not None and runtime.keepable and not hosted and not launch.steers
-                and launch.exit_code_reliable and bool(parent_task_id))
         # A run in a room keeps its session, for a later consult (Codex and OMP keep none otherwise).
         session_dir = run_session_dir(self._runtime_root, runtime.type, parent_task_id, worker_id) \
             if seat is not None else None

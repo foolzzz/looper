@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import subprocess
+import time
 from unittest.mock import patch
 
 import pytest
@@ -84,14 +85,73 @@ ADOPT_CLI = (CLI[:_START] + _HELD + CLI[_END:]).replace(
 )
 
 
+_RETRY_HELD = r'''
+    import threading
+    import subprocess
+
+    def receive():
+        for line in sys.stdin:
+            log("input", pid=os.getpid(), line=line)
+    threading.Thread(target=receive, daemon=True).start()
+
+    config = json.loads(Path(args[args.index("--mcp-config") + 1]).read_text())["mcpServers"]["looper"]
+    assert config["env"]["LOOPER_AGENT_RECONNECT_SECONDS"] == "120", config["env"]
+    with (state / "bridge.stderr").open("w") as stderr:
+        bridge = subprocess.Popen([config["command"], *config["args"]],
+            env={**os.environ, **config["env"]}, text=True,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr)
+        log("bridge", pid=bridge.pid)
+        def rpc(message):
+            bridge.stdin.write(json.dumps(message) + "\n")
+            bridge.stdin.flush()
+            response = json.loads(bridge.stdout.readline())
+            assert response["id"] == message["id"], response
+            assert "error" not in response, response
+            return response["result"]
+        try:
+            rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "retry-fixture"}}})
+            rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+            print(json.dumps({"type": "system", "subtype": "init", "session_id": "retry-worker", "model": "fake"}), flush=True)
+            sequence, next_call = 0, 0
+            limit = time.monotonic() + 90
+            while not (state / ("release-" + label)).exists():
+                if time.monotonic() >= limit:
+                    raise RuntimeError("test did not release its Worker")
+                if time.monotonic() >= next_call:
+                    log("room_attempt", sequence=sequence, at=time.monotonic())
+                    result = rpc({"jsonrpc": "2.0", "id": sequence + 3, "method": "tools/call", "params": {
+                        "name": "looper_room_post", "arguments": {
+                            "kind": "info", "body": "restart message " + str(sequence), "to": ["all"]}}})
+                    log("room", sequence=sequence, answer=result)
+                    assert not result.get("isError"), result
+                    sequence += 1
+                    next_call = time.monotonic() + 2
+                print(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "working " + str(sequence)}]}}), flush=True)
+                time.sleep(0.2)
+        finally:
+            bridge.stdin.close()
+            try:
+                bridge.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                bridge.kill()
+                bridge.wait(timeout=5)
+            bridge.stdout.close()
+        assert bridge.returncode == 0, bridge.returncode
+'''
+
+RETRY_CLI = ADOPT_CLI.replace(_HELD, _RETRY_HELD)
+
+
 @contextmanager
-def _fixture(*, keeper_mode="on"):
+def _fixture(*, keeper_mode="on", cli=ADOPT_CLI):
     # Tokens retain their original HTTP URL: restarting on another port would
     # test a different contract and make the old peer's MCP bridge unreachable.
     port = free_port()
     with fixture() as values, patch("evals.prompt_regression.runner.free_port", return_value=port):
         root, _, _, server = values
-        (root / "fake.py").write_text(ADOPT_CLI)
+        (root / "fake.py").write_text(cli)
         server["keeper_mode"] = keeper_mode
         try:
             yield values
@@ -199,6 +259,52 @@ def test_a_run_that_finished_while_the_server_was_down_reports_once():
             print("before restart ps:\n" + before_ps)
             print("system.status.keepers:", json.dumps(status, sort_keys=True))
         print("\n".join(line for line in (root / "after.log").read_text().splitlines() if "adopt run=" in line))
+
+
+def test_room_posts_retry_through_the_real_bridge_across_a_restart():
+    with _fixture(cli=RETRY_CLI) as (root, url, state, server):
+        with running_server(**server, log_path=root / "before.log") as api:
+            project = _project(api, root, "retry")
+            api.post("/api/v1/project_admin/update", {"project_id": project, "fields": {
+                "agent_room": "on", "room_post_per_minute": 60, "room_broadcasts_per_run": 50}})
+            task = _task(api, project, "held")
+            _until(lambda: _events(state, "room"), "the first post through the real bridge")
+            directory, before = next(iter(_running(server["runtime_root"]).values()))
+            worker = _step(url, task)["worker_id"]
+            bridge = _events(state, "bridge")[0]["pid"]
+            _drained_turns(api)
+            _stop(url)
+
+        # Start only after a post is blocked while no HTTP listener exists.
+        # This proves retry was needed, rather than racing a call between servers.
+        def waiting_post():
+            completed = {row["sequence"] for row in _events(state, "room")}
+            return next((row for row in _events(state, "room_attempt")
+                         if row["sequence"] not in completed and time.monotonic() - row["at"] >= 0.6), None)
+
+        waiting = _until(waiting_post, "a write waiting for the control plane to return")
+        assert _live(before["child_pid"]) and _live(bridge)
+        with running_server(**server, log_path=root / "after.log") as api:
+            _adopted(api)
+            _until(lambda: any(row["sequence"] == waiting["sequence"] for row in _events(state, "room")),
+                   "the pending post succeeding after adoption")
+            _until(lambda: any(row["sequence"] > waiting["sequence"] for row in _events(state, "room")),
+                   "the next periodic post succeeding")
+            assert _step(url, task)["worker_id"] == worker
+            assert keeper.read_json(directory / keeper.STATE)["child_pid"] == before["child_pid"]
+            (state / "release-s1").touch()
+            _finished_once(api, url, task, state)
+            attempts = _events(state, "room_attempt")
+            answers = _events(state, "room")
+            assert [row["sequence"] for row in answers] == [row["sequence"] for row in attempts]
+            assert all(not row["answer"].get("isError") for row in answers)
+            messages = _query(url, "SELECT body FROM room_messages WHERE task_id=$1 AND sender_run=$2 ORDER BY id",
+                              task, worker)
+            assert [row["body"] for row in messages] == ["restart message " + str(row["sequence"]) for row in answers]
+            retry_log = (state / "bridge.stderr").read_text()
+            assert "agent api retry attempts=" in retry_log and "outcome=success" in retry_log, retry_log
+            assert len(_events(state, "bridge")) == 1 and not _live(bridge)
+            print(retry_log)
 
 
 @pytest.mark.parametrize("reason", ["contract_changed", "epoch_mismatch", "not_held", "no_detach"])

@@ -10,11 +10,16 @@ from typing import Any
 
 from .. import vault
 from ..vault import VaultConfig
-from . import ErrorCode, OpError, Risk, Tool
+from . import ErrorCode, OpError, RetrySafety, Risk, Tool
 
 logger = logging.getLogger(__name__)
 
 SEARCH, READ, WRITE = "looper_vault_search", "looper_vault_read", "looper_vault_write"
+
+RETRY_SAFETY: dict[str, RetrySafety] = {
+    SEARCH: RetrySafety.READ_ONLY,
+    READ: RetrySafety.READ_ONLY,
+}
 
 
 async def _never(call: Any) -> dict[str, Any]:

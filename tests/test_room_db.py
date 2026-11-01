@@ -239,6 +239,68 @@ def test_the_inbox_reads_in_order_flags_what_is_for_the_seat_and_peek_marks_noth
     run_db(test, monkeypatch)
 
 
+@pytest.mark.parametrize("peek", [None, False, True], ids=["default", "mark-read", "peek"])
+def test_a_lost_inbox_response_only_retries_peek(monkeypatch: pytest.MonkeyPatch, peek: bool | None) -> None:
+    from types import SimpleNamespace
+
+    from looper.agents.http_server import AGENT_API, AgentHTTPServer
+    from looper.agents.mcp_server import AgentClient, handle
+    from looper.agents.ops.room import INBOX, READ, RoomOps
+    from looper.db import room as db_room
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        room, _ = _room()
+        posted = await room.post("task-r", BACKEND, kind="info", body="keep this message", to=[FE.key])
+        ops = RoomOps(room, url="http://localhost:0")
+        token = ops.issue("task-r", FE, kept=True)
+        server = AgentHTTPServer(port=0, web_adapter=None, task_router=None, supervisor=None, room_ops=ops)
+        inbox_results = []
+        original = server._handle_room_api
+
+        async def drop_first_inbox(method, path, headers, body, writer):
+            if method == "POST" and path == f"{AGENT_API}ops/{INBOX}":
+                def write(data):
+                    inbox_results.append(json.loads(data.split(b"\r\n\r\n", 1)[1]))
+                    if len(inbox_results) == 1:
+                        writer.transport.abort()  # the DB commit already happened; lose only its response
+                    else:
+                        writer.write(data)
+
+                await original(method, path, headers, body, SimpleNamespace(write=write, drain=writer.drain))
+            else:
+                await original(method, path, headers, body, writer)
+
+        monkeypatch.setattr(server, "_handle_room_api", drop_first_inbox)
+        await server.start()
+        try:
+            client = AgentClient(f"http://127.0.0.1:{server._port}", token, reconnect_seconds=3, timeout=2)
+            await asyncio.to_thread(client.list_tools)
+            result = await asyncio.to_thread(handle, {
+                "id": 1, "method": "tools/call", "params": {"name": INBOX, "arguments": {} if peek is None else {"peek": peek}},
+            }, client)
+            result = result["result"]
+            assert [m["id"] for m in inbox_results[0]["result"]["messages"]] == [posted["id"]]
+            if peek:
+                assert result["isError"] is False
+                delivered = json.loads(result["content"][0]["text"])
+                assert delivered == inbox_results[0] == inbox_results[1]
+                assert await db_room.last_read("task-r", FE.key) == 0
+            else:
+                assert result["isError"] is True
+                assert len(inbox_results) == 1
+                assert await db_room.last_read("task-r", FE.key) == posted["id"]
+                error = result["content"][0]["text"]
+                assert "may have been marked read" in error and "peek=true" in error and READ in error
+                assert (await asyncio.to_thread(client.call_tool, INBOX, {}))["result"]["messages"] == []
+                history = await asyncio.to_thread(client.call_tool, READ, {})
+                assert [m["id"] for m in history["result"]["messages"]] == [posted["id"]]
+        finally:
+            await server.stop()
+
+    run_db(test, monkeypatch, timeout=20)
+
+
 def test_an_inbox_wait_ends_when_a_message_for_the_seat_comes_and_otherwise_at_its_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
