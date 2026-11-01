@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.56] - 2026-10-31
+
+### Fixed
+
+- **Deleting a command schedule with a running run is refused before the user is asked.** The service already refused with 409 because the runner outlives the server, but the Manager (`looper_schedules`) and the client API (`/api/v1/schedule_admin/delete`) still asked for confirmation, and the Manager said the running task "goes on and ends normally". Both now answer `conflict` up front with the service's message (disable the schedule and wait for the run to end); the service's check stays the authority for a run that starts after the question. For a command schedule without a running run, the confirmation says a queued run will not execute and that there are no tasks. Agent schedule deletion is unchanged. The `looper_schedules` tool description changes accordingly. ([#1032](https://github.com/foolzzz/looper/pull/1032))
+
 ## [2.14.55] - 2026-10-31
 
 ### Fixed
