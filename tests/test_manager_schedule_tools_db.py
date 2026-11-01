@@ -632,3 +632,268 @@ def test_a_schedule_made_through_an_added_bot_gets_no_default_notify_target(
         assert (await _view("deps"))["notify_target"] == target
 
     run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("action", ["enable", "run"])
+@pytest.mark.parametrize("own_dir", [False, True])
+def test_command_confirmation_is_bound_to_the_directory_it_runs_in(monkeypatch, tmp_path, action, own_dir):
+    async def test(pool):
+        from looper.agents.scheduler import Scheduler
+        from looper.db import projects, schedules as db_schedules
+
+        first, second, third = (tmp_path / name for name in ("first", "second", "third"))
+        for directory in (first, second, third):
+            directory.mkdir()
+        project = await _project(pool, work_dir=str(first))
+        sid = (await _schedule(project, "pull", kind="command", command="pwd", requirement="",
+                               work_dir=str(third) if own_dir else ""))["schedule_id"]
+        chat = _Chat(tmp_path)
+        scheduler = Scheduler(bus=chat.bus, runtime_root=tmp_path / "runtime")
+        scheduler._commands.prepare()
+        chat.ops._platform = replace(chat.ops._platform, scheduler=scheduler)
+        try:
+            arguments = {"action": action, "schedule": sid}
+            (asked,) = await chat.say("启用或立即运行", (TOOL, arguments))
+            await projects.update_project(project["id"], work_dir=str(second))
+            answer = await _confirm(chat, asked)
+            if not own_dir:
+                assert _error(answer) == "conflict", answer
+                assert await _starting_state(pool, sid) == (False, 0)
+                (asked,) = await chat.say("重新确认", (TOOL, arguments))
+                assert f"项目的默认目录（{second}）" in chat.turns[-1].blocks[0]
+                answer = await _confirm(chat, asked)
+            assert answer["status"] == "ok", answer
+            if action == "run":
+                run_id = answer["result"]["run"]["run_id"]
+                process = scheduler._commands._owned[run_id]
+                await asyncio.to_thread(process.wait, timeout=10)
+                await scheduler.tick()
+                run = await db_schedules.get_run(run_id)
+                assert run["status"] == "succeeded", run
+                assert (third if own_dir else second).name in run["log_tail"]
+        finally:
+            await scheduler.stop()
+            for process in list(scheduler._commands._owned.values()):
+                if process.poll() is None:
+                    process.terminate()
+                await asyncio.to_thread(process.wait, timeout=10)
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("entry", ["manager", "client"])
+@pytest.mark.parametrize("when", ["before-confirm", "before-lock"])
+def test_command_directory_edit_confirmation_binds_the_inherited_destination(monkeypatch, tmp_path, entry, when):
+    async def test(pool):
+        from looper.agents.api_v1 import OPERATOR
+        from looper.agents.ops.clients import ClientOps
+        from looper.db import projects, schedules as db_schedules
+
+        project = await _project(pool, work_dir="/srv/project-before")
+        sid = (await _schedule(project, "pull", enabled=True, kind="command", command="pwd",
+                               requirement="", work_dir=str(tmp_path)))["schedule_id"]
+        before = await db_schedules.get_schedule(sid)
+        chat = _Chat(tmp_path)
+        client = ClientOps(chat.ops._platform)
+        arguments = {"action": "update", "schedule": sid, "fields": {"work_dir": ""}}
+
+        async def ask():
+            if entry == "client":
+                answer = await client.call(OPERATOR, "s1", TOOL, arguments)
+                return answer, answer.get("impact", "")
+            (answer,) = await chat.say("继承项目目录", (TOOL, arguments))
+            return answer, chat.turns[-1].blocks[0]
+
+        async def confirm(answer):
+            if entry == "client":
+                return await client.confirm(OPERATOR, "s1", answer["confirmation_id"])
+            return await _confirm(chat, answer)
+
+        asked, impact = await ask()
+        assert asked["status"] == "needs_confirmation", asked
+        assert "/srv/project-before" in impact
+        destination = "/srv/project-after"
+        if when == "before-lock":
+            lock = db_schedules.lock_schedule
+
+            async def change_before_lock(conn, schedule_id):
+                monkeypatch.setattr(db_schedules, "lock_schedule", lock)
+                await projects.update_project(project["id"], work_dir=destination)
+                return await lock(conn, schedule_id)
+
+            monkeypatch.setattr(db_schedules, "lock_schedule", change_before_lock)
+        else:
+            await projects.update_project(project["id"], work_dir=destination)
+        refused = await confirm(asked)
+        assert _error(refused) == "conflict", refused
+        assert await db_schedules.get_schedule(sid) == before
+        again, impact = await ask()
+        assert again["status"] == "needs_confirmation", again
+        assert destination in impact
+        done = await confirm(again)
+        assert done["status"] == "ok", done
+        assert (await db_schedules.get_schedule(sid))["work_dir"] == ""
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("state,stored,fields", [
+    ("enabled", {}, {"command": "exit 7"}),
+    ("queued", {}, {"command": "exit 7"}),
+    ("enabled", {"env": {"MODE": "dry-run"}}, {"env": {"MODE": "apply"}}),
+    ("enabled", {"work_dir": "/srv/own"}, {"work_dir": ""}),
+    ("enabled", {}, {"env_file": "settings.env"}),
+])
+def test_command_edit_of_a_schedule_that_will_run_asks_first(monkeypatch, tmp_path, state, stored, fields):
+    async def test(pool):
+        from looper.db import schedules as db_schedules
+
+        if "env_file" in fields:
+            env_file = tmp_path / fields["env_file"]
+            env_file.write_text("MODE=test\n")
+            fields["env_file"] = str(env_file)
+        project = await _project(pool, work_dir=str(tmp_path))
+        sid = (await _schedule(project, "pull", enabled=state == "enabled", kind="command", command="exit 0",
+                               requirement="", **stored))["schedule_id"]
+        if state == "queued":
+            await _run_of(pool, sid, "queued")
+        before = await db_schedules.get_schedule(sid)
+        chat = _Chat(tmp_path)
+        (asked,) = await chat.say("修改定时任务", (TOOL, {"action": "update", "schedule": sid, "fields": fields}))
+        assert asked["status"] == "needs_confirmation", asked
+        assert await db_schedules.get_schedule(sid) == before
+        block = chat.turns[-1].blocks[0]
+        if "work_dir" not in fields:
+            assert f"- 目录：项目的默认目录（{tmp_path}）" in block
+        if "command" in fields:
+            assert "\n```\nexit 0\n```\n → \n```\nexit 7\n```\n" in block
+        elif "env" in fields:
+            assert "值已修改：MODE" in block and "dry-run" not in block and "apply" not in block
+        elif "work_dir" in fields:
+            assert f"/srv/own → 项目的默认目录（{tmp_path}）" in block
+        else:
+            assert "settings.env" in block
+        effect = ("它已启用：之后的运行都按修改后的设置无人值守地执行（不经过 agent，不花模型额度）。"
+                  if state == "enabled" else
+                  "它是停用的，但有一次排队中的运行：那次运行开始时按修改后的设置执行（不经过 agent，不花模型额度）。")
+        assert effect in block
+        done = await _confirm(chat, asked)
+        assert done["status"] == "ok", done
+        assert "已修改定时任务" in chat.turns[-1].blocks[0]
+        row = await db_schedules.get_schedule(sid)
+        assert all((row[key] or None) == (value or None) for key, value in fields.items())
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("own_dir", [False, True])
+def test_command_edit_directory_is_shown_again_after_project_conflict(monkeypatch, tmp_path, own_dir):
+    async def test(pool):
+        from looper.db import projects, schedules as db_schedules
+
+        project = await _project(pool, work_dir="/srv/project-before")
+        sid = (await _schedule(project, "pull", enabled=True, kind="command", command="exit 0", requirement="",
+                               work_dir=str(tmp_path) if own_dir else ""))["schedule_id"]
+        chat = _Chat(tmp_path)
+        arguments = {"action": "update", "schedule": sid, "fields": {"command": "exit 7"}}
+        (asked,) = await chat.say("修改命令", (TOOL, arguments))
+        assert asked["status"] == "needs_confirmation", asked
+        directory = str(tmp_path) if own_dir else "项目的默认目录（/srv/project-before）"
+        assert f"- 目录：{directory}" in chat.turns[-1].blocks[0]
+        await projects.update_project(project["id"], work_dir="/srv/project-after")
+        done = await _confirm(chat, asked)
+        if not own_dir:
+            assert _error(done) == "conflict", done
+            assert (await db_schedules.get_schedule(sid))["command"] == "exit 0"
+            (asked,) = await chat.say("重新确认修改", (TOOL, arguments))
+            assert asked["status"] == "needs_confirmation", asked
+            assert "- 目录：项目的默认目录（/srv/project-after）" in chat.turns[-1].blocks[0]
+            done = await _confirm(chat, asked)
+        assert done["status"] == "ok", done
+        assert (await db_schedules.get_schedule(sid))["command"] == "exit 7"
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("kind,enabled,fields", [
+    ("command", False, {"command": "exit 7"}),
+    ("command", True, {"command": "exit 0"}),
+    ("command", True, {"env": None}),
+    ("agent", True, {"requirement": "Look at the logs."}),
+])
+def test_command_edit_that_runs_nothing_new_applies_at_once(monkeypatch, tmp_path, kind, enabled, fields):
+    async def test(pool):
+        from looper.db import schedules as db_schedules
+
+        sid = (await _schedule(await _project(pool, work_dir=str(tmp_path)), "pull", enabled=enabled, kind=kind,
+                               **({"command": "exit 0", "requirement": ""} if kind == "command" else {})))["schedule_id"]
+        chat = _Chat(tmp_path)
+        (answer,) = await chat.say("修改定时任务", (TOOL, {"action": "update", "schedule": sid, "fields": fields}))
+        assert answer["status"] == "ok", answer
+        row = await db_schedules.get_schedule(sid)
+        assert all((row[key] or None) == (value or None) for key, value in fields.items())
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("changed", [{"env": {"MODE": "apply"}}, {"enabled": False}])
+def test_confirmed_command_edit_is_refused_when_the_schedule_changed(monkeypatch, tmp_path, changed):
+    async def test(pool):
+        from looper.agents import schedules
+        from looper.db import schedules as db_schedules
+
+        sid = (await _schedule(await _project(pool, work_dir=str(tmp_path)), "pull", enabled=True,
+                               kind="command", command="exit 0", requirement=""))["schedule_id"]
+        chat = _Chat(tmp_path)
+        (asked,) = await chat.say("修改命令", (TOOL, {"action": "update", "schedule": sid,
+                                                    "fields": {"command": "exit 7"}}))
+        assert asked["status"] == "needs_confirmation", asked
+        await schedules.update_schedule(sid, changed)
+        refused = await _confirm(chat, asked)
+        assert _error(refused) == "conflict", refused
+        assert refused["error"]["message"] == "the schedule configuration changed; run the tool again to ask for confirmation"
+        assert (await db_schedules.get_schedule(sid))["command"] == "exit 0"
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("fields", [{"command": ""}, {"command": "exit 7", "cron": "not a rule"}, {"work_dir": ""}])
+def test_invalid_command_edit_is_refused_before_confirmation(monkeypatch, tmp_path, fields):
+    async def test(pool):
+        from looper.db import schedules as db_schedules
+
+        project = await _project(pool, work_dir="")
+        sid = (await _schedule(project, "pull", enabled=True, kind="command", command="exit 0",
+                               requirement="", work_dir=str(tmp_path)))["schedule_id"]
+        before = await db_schedules.get_schedule(sid)
+        chat = _Chat(tmp_path)
+        (answer,) = await chat.say("修改命令", (TOOL, {"action": "update", "schedule": sid, "fields": fields}))
+        assert _error(answer) == "invalid", answer
+        assert not chat.turns[-1].blocks
+        assert await db_schedules.get_schedule(sid) == before
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_queued_run_created_after_edit_question_executes_the_confirmed_command(monkeypatch, tmp_path):
+    async def test(pool):
+        from looper.agents.scheduler import Scheduler
+        from looper.db import schedules as db_schedules
+
+        sid = (await _schedule(await _project(pool, work_dir=str(tmp_path)), "pull", enabled=True,
+                               kind="command", command="exit 0", requirement=""))["schedule_id"]
+        chat = _Chat(tmp_path)
+        scheduler = Scheduler(bus=chat.bus, runtime_root=tmp_path / "runtime")
+        scheduler._commands.prepare()
+        try:
+            (asked,) = await chat.say("修改命令", (TOOL, {"action": "update", "schedule": sid,
+                                                        "fields": {"command": "exit 7"}}))
+            assert asked["status"] == "needs_confirmation", asked
+            run_id = await _run_of(pool, sid, "queued")
+            done = await _confirm(chat, asked)
+            assert done["status"] == "ok", done
+            await scheduler.tick()
+            await asyncio.to_thread(scheduler._commands._owned[run_id].wait, timeout=10)
+            await scheduler.tick()
+            run = await db_schedules.get_run(run_id)
+            assert (run["status"], run["exit_code"]) == ("failed", 7)
+        finally:
+            await scheduler.stop()
+            for process in list(scheduler._commands._owned.values()):
+                if process.poll() is None:
+                    process.terminate()
+                await asyncio.to_thread(process.wait, timeout=10)
+    run_db(test, monkeypatch, timeout=30)

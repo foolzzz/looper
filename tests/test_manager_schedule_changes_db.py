@@ -2,7 +2,8 @@
 
 A new schedule is disabled, its configuration is shown with the question whether to enable it, and the turn that
 created it can neither enable nor run it; a change is made at once and shown before and after, but one raising or
-removing a spend cap, enabling or running now waits for the user's word in the next message; a confirmed Run now
+removing a spend cap, one changing what an enabled or queued command schedule runs, enabling or running now waits
+for the user's word in the next message; a confirmed Run now
 fires it as the dashboard's button does.
 The configuration export writes the file, without secrets, into the runtime directory. Each call goes through
 ``ManagerOps`` in a turn of a Lark chat (``tests.test_ops_tasks_db._Chat``); what changed is read back through the
@@ -61,6 +62,10 @@ def test_changing_only_environment_values_reports_changed_keys_without_values(
         arguments = {"action": "update", "schedule": "pull", "fields": {
             "env": {"MODE": "apply", "UNCHANGED": "private-unchanged"}}}
         (changed,) = await chat.say("修改环境变量值", (TOOL, arguments))
+        assert changed["status"] == "needs_confirmation", changed
+        assert all(value not in chat.turns[-1].blocks[0] for value in
+                   ("dry-run", "apply", "private-unchanged"))
+        changed = await _confirm(chat, changed)
         assert changed["status"] == "ok", changed
         assert changed["result"]["changed"] == ["env"]
         (block,) = chat.turns[-1].blocks
@@ -89,6 +94,9 @@ def test_editing_only_the_tail_of_an_enabled_long_command_shows_the_full_change(
         arguments = {"action": "update", "schedule": "pull", "fields": {"command": updated}}
 
         (changed,) = await chat.say("只修改命令末尾", (TOOL, arguments))
+        assert changed["status"] == "needs_confirmation", changed
+        assert command in chat.turns[-1].blocks[0] and updated in chat.turns[-1].blocks[0]
+        changed = await _confirm(chat, changed)
         assert changed["status"] == "ok", changed
         assert changed["result"]["changed"] == ["command"]
         (block,) = chat.turns[-1].blocks

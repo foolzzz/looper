@@ -7,7 +7,7 @@ import pytest
 
 from looper import loopercli
 from looper.agents import api_v1
-from looper.agents.ops import OpError
+from looper.agents.ops import ErrorCode, OpError
 from looper.agents.v1_domains import schedule_writes
 
 
@@ -96,7 +96,7 @@ def test_update_impact_checks_minute_cron_for_schedule_kind(monkeypatch, kind):
                 "gate_command": None, "cron": "0 * * * *", "timezone": "UTC"}
 
     async def project(project_id):
-        return None
+        return {"work_dir": None, "task_budget_usd": None}
 
     monkeypatch.setattr(schedule_writes.schedules, "_existing", existing)
     monkeypatch.setattr(schedule_writes.db_projects, "get_project", project)
@@ -104,7 +104,8 @@ def test_update_impact_checks_minute_cron_for_schedule_kind(monkeypatch, kind):
     request = schedule_writes.impact(None, operation,
                                      {"schedule_id": "sched-example", "fields": {"cron": "* * * * *"}}, None, {})
     if kind == "agent":
-        with pytest.raises(OpError):
+        with pytest.raises(OpError, match="at least") as exc:
             asyncio.run(request)
+        assert exc.value.code == ErrorCode.INVALID
     else:
         assert asyncio.run(request) is None

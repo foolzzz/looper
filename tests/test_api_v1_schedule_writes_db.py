@@ -198,10 +198,10 @@ def test_client_start_impact_describes_schedule_kind(tmp_path, monkeypatch, acti
             if kind == "command":
                 fenced = f"\n{fence}\n{command_patch or command}\n{fence}\n"
                 expected = (f"Update {subject}: enabled: False → True. Enabling runs its shell command "
-                            f"{fenced} unattended at each fire, without an agent or model spend."
+                            f"{fenced} in {work_dir or 'the project directory (/srv/reports)'} unattended at each fire, without an agent or model spend."
                             if action == "enable" else
                             f"Run {subject}'s shell command once now, without an agent or model spend: "
-                            f"{fenced} in {work_dir or 'the project directory'}. Its next fire stays.")
+                            f"{fenced} in {work_dir or 'the project directory (/srv/reports)'}. Its next fire stays.")
             else:
                 expected = (f"Update {subject}: enabled: False → True. Enabling starts unattended scheduled tasks; "
                             "raised or removed caps allow more spending." if action == "enable" else
@@ -420,4 +420,151 @@ def test_retired_write_is_404_with_successful_authenticated_v1_control(tmp_path,
             path = f"/api/projects/{pid}/schedules" if suffix is None else f"/api/schedules/{sid}{suffix}"
             assert (await call(path, body.get("fields", {}), method=method))[0] == 404
             assert (await call(action, body))[0] == 200
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("action", ["enable", "run"])
+def test_client_command_confirmation_is_bound_to_the_project_directory(tmp_path, monkeypatch, action):
+    async def run(pool):
+        pid, sid = await _seed(pool, kind="command", command="pwd", requirement="")
+        async with _api(tmp_path, pool) as call:
+            body = {"schedule_id": sid, **({"fields": {"enabled": True}} if action == "enable" else {})}
+            status, pending = await call("update" if action == "enable" else "run", body, client=True)
+            assert status == 202, pending
+            await projects.update_project(pid, work_dir=str(tmp_path))
+            status, answer = await call("/api/v1/confirm", {"confirmation_id": pending["confirmation_id"]}, client=True)
+            assert status == 409 and answer["error"]["code"] == "conflict", answer
+            assert not (await db_schedules.get_schedule(sid))["enabled"]
+            assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("when", ["before-confirm", "before-lock"])
+def test_client_directory_edit_confirmation_binds_the_inherited_destination(tmp_path, monkeypatch, when):
+    async def run(pool):
+        pid, sid = await _seed(pool, kind="command", command="pwd", requirement="", work_dir=str(tmp_path))
+        await schedules.update_schedule(sid, {"enabled": True})
+        before = await db_schedules.get_schedule(sid)
+        body = {"schedule_id": sid, "fields": {"work_dir": ""}}
+        async with _api(tmp_path, pool) as call:
+            status, pending = await call("update", body, client=True)
+            assert status == 202, pending
+            assert "the project directory (/srv/reports)" in pending["impact"]
+            destination = "/srv/reports-after"
+            if when == "before-lock":
+                lock = db_schedules.lock_schedule
+
+                async def change_before_lock(conn, schedule_id):
+                    monkeypatch.setattr(db_schedules, "lock_schedule", lock)
+                    await projects.update_project(pid, work_dir=destination)
+                    return await lock(conn, schedule_id)
+
+                monkeypatch.setattr(db_schedules, "lock_schedule", change_before_lock)
+            else:
+                await projects.update_project(pid, work_dir=destination)
+            status, refused = await call("/api/v1/confirm", {"confirmation_id": pending["confirmation_id"]}, client=True)
+            assert status == 409 and refused["error"]["code"] == "conflict", refused
+            assert await db_schedules.get_schedule(sid) == before
+            status, fresh = await call("update", body, client=True)
+            assert status == 202, fresh
+            assert f"the project directory ({destination})" in fresh["impact"]
+            status, done = await call("/api/v1/confirm", {"confirmation_id": fresh["confirmation_id"]}, client=True)
+            assert status == 200, done
+            assert (await db_schedules.get_schedule(sid))["work_dir"] == ""
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("state", ["enabled", "queued", "disabled"])
+def test_client_command_edit_of_an_enabled_schedule_waits_for_confirmation(tmp_path, monkeypatch, state):
+    async def run(pool):
+        _, sid = await _seed(pool, kind="command", command="exit 0", requirement="", env={"MODE": "dry-run"})
+        if state == "enabled":
+            await schedules.update_schedule(sid, {"enabled": True})
+        elif state == "queued":
+            await db_schedules.insert_run(pool, schedule_id=sid, scheduled_for=datetime.now(timezone.utc),
+                                          trigger="manual", status="queued")
+        before = await db_schedules.get_schedule(sid)
+        fields = {"command": "exit 7", "env": {"MODE": "apply"}}
+        async with _api(tmp_path, pool) as call:
+            status, pending = await call("update", {"schedule_id": sid, "fields": fields}, client=True)
+            if state != "disabled":
+                assert status == 202, pending
+                effect = ("It is enabled: its later runs execute the changed command unattended, without an agent or model spend."
+                          if state == "enabled" else
+                          "It is disabled but has a queued run, which executes the changed command when it starts, without an agent or model spend.")
+                assert pending["impact"] == (
+                    "Update schedule 'Hourly' in project 'Reports': command: \n```\nexit 0\n```\n → "
+                    "\n```\nexit 7\n```\n; env keys: MODE → MODE (values changed: MODE); "
+                    "directory: the project directory (/srv/reports). " + effect)
+                assert await db_schedules.get_schedule(sid) == before
+                status, _ = await call("/api/v1/confirm", {"confirmation_id": pending["confirmation_id"]}, client=True)
+            assert status == 200
+            row = await db_schedules.get_schedule(sid)
+            assert all(row[key] == value for key, value in fields.items())
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("state,extra", [
+    ("enabled", {"run_budget_usd": None, "daily_budget_usd": None}),
+    ("enabled", {"enabled": False}),
+    ("queued", {"run_budget_usd": None, "daily_budget_usd": None}),
+])
+def test_client_command_edit_names_and_applies_combined_changes(tmp_path, monkeypatch, state, extra):
+    async def run(pool):
+        _, sid = await _seed(pool, kind="command", command="exit 0", requirement="")
+        if state == "enabled":
+            await schedules.update_schedule(sid, {"enabled": True})
+        else:
+            await db_schedules.insert_run(pool, schedule_id=sid, scheduled_for=datetime.now(timezone.utc),
+                                          trigger="manual", status="queued")
+        if "run_budget_usd" in extra:
+            # Nonempty caps are rejected for command schedules; removing stored caps is allowed.
+            await pool.execute("UPDATE schedules SET run_budget_usd=1, daily_budget_usd=2 WHERE id=$1", sid)
+        before = await db_schedules.get_schedule(sid)
+        fields = {"command": "exit 7", **extra}
+        async with _api(tmp_path, pool) as call:
+            status, pending = await call("update", {"schedule_id": sid, "fields": fields}, client=True)
+            assert status == 202, pending
+            assert "\n```\nexit 0\n```\n → \n```\nexit 7\n```\n" in pending["impact"]
+            for key, value in extra.items():
+                assert f"{key}: {before[key]!r} → {value!r}" in pending["impact"]
+            assert await db_schedules.get_schedule(sid) == before
+            status, done = await call("/api/v1/confirm", {"confirmation_id": pending["confirmation_id"]}, client=True)
+            assert status == 200, done
+            row = await db_schedules.get_schedule(sid)
+            assert all(row[key] == value for key, value in fields.items())
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("fields", [{"command": ""}, {"command": "exit 7", "cron": "not a rule"}, {"work_dir": ""}])
+def test_client_invalid_command_edit_is_refused_before_confirmation(tmp_path, monkeypatch, fields):
+    async def run(pool):
+        pid, sid = await _seed(pool, kind="command", command="exit 0", requirement="", work_dir=str(tmp_path))
+        await schedules.update_schedule(sid, {"enabled": True})
+        await projects.update_project(pid, work_dir="")
+        before = await db_schedules.get_schedule(sid)
+        async with _api(tmp_path, pool) as call:
+            status, answer = await call("update", {"schedule_id": sid, "fields": fields}, client=True)
+            assert status == 400 and answer["error"]["code"] == "invalid", answer
+            assert await db_schedules.get_schedule(sid) == before
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("key", ["env_file", "work_dir"])
+def test_client_command_edit_shows_environment_file_and_effective_directory(tmp_path, monkeypatch, key):
+    async def run(pool):
+        _, sid = await _seed(pool, kind="command", command="exit 0", requirement="", work_dir=str(tmp_path))
+        await schedules.update_schedule(sid, {"enabled": True})
+        env_file = tmp_path / "settings.env"
+        env_file.write_text("MODE=private-mode\n")
+        fields = {key: str(env_file) if key == "env_file" else ""}
+        line = (f"env_file: none → {env_file}" if key == "env_file" else
+                f"directory: {tmp_path} → the project directory (/srv/reports)")
+        async with _api(tmp_path, pool) as call:
+            status, pending = await call("update", {"schedule_id": sid, "fields": fields}, client=True)
+            assert status == 202, pending
+            assert line in pending["impact"] and "private-mode" not in pending["impact"]
+            status, _ = await call("/api/v1/confirm", {"confirmation_id": pending["confirmation_id"]}, client=True)
+            assert status == 200
+            assert ((await db_schedules.get_schedule(sid))[key] or "") == fields[key]
     run_db(run, monkeypatch, timeout=30)

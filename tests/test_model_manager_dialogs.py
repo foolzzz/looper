@@ -154,8 +154,13 @@ def test_fake_api_manager_dialog_reads_back_each_completed_turn(
                                            "WHERE session_id = $1", sid)
                 return _replies(chat.bus)[-1].payload["text"]
 
-            def ask(_api, _session, text, **_):
-                return asyncio.run_coroutine_threadsafe(answer(text), loop).result(timeout=15)
+            def ask(_api, _session, text, *, timeout, **_):
+                # Wait for cancellation and DB cleanup before the dialog can tear down its pool.
+                pending = asyncio.run_coroutine_threadsafe(asyncio.wait_for(answer(text), timeout=timeout), loop)
+                try:
+                    return pending.result()
+                except TimeoutError:
+                    raise dialogs.ReplyTimeout(f"no reply to {text!r} within {timeout:g} s") from None
 
             def newest(*_):
                 return asyncio.run_coroutine_threadsafe(
@@ -259,6 +264,26 @@ def test_command_schedule_dialog_rejects_incomplete_enable_confirmation(monkeypa
     check = dialogs.select(["schedule_command_create"])[0].says[1].check
     assert check(look) is None
     look.reply = reply.replace(missing, "")
+    assert check(look) is not None
+
+
+@pytest.mark.parametrize("mutation", ["missing_command", "missing_directory", "already_changed", "no_wait"])
+def test_command_edit_dialog_rejects_incomplete_or_early_update(monkeypatch, mutation):
+    command = "\n```\nexit 0\n```\n → \n```\nexit 7\n```\n"
+    directory = "- 目录：项目的默认目录（/srv/eval）"
+    actions = [action("looper_schedules", "update", status="needs_confirmation")]
+    schedule = {"enabled": True, "command": "exit 0", "work_dir": ""}
+    look = observed(monkeypatch, {}, actions, reply=command + directory)
+    monkeypatch.setattr(dialogs, "_named", lambda *_: schedule)
+    monkeypatch.setattr(dialogs, "_project", lambda *_: {"work_dir": "/srv/eval"})
+    check = dialogs.select(["schedule_command_edit"])[0].says[0].check
+    assert check(look) is None
+    if mutation.startswith("missing_"):
+        look.reply = directory if mutation == "missing_command" else command
+    elif mutation == "already_changed":
+        schedule["command"] = "exit 7"
+    else:
+        actions[0]["status"] = "ok"
     assert check(look) is not None
 
 
@@ -455,7 +480,7 @@ def test_repricing_keeps_historical_spend_and_other_protocol_price(monkeypatch, 
 
 @pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"), reason="disposable PostgreSQL unavailable")
 @pytest.mark.parametrize("dialog_id", ["provider_key", "config_tools", "task_cost", "schedule_planner_profile",
-                                       "schedule_command_create", "schedule_create",
+                                       "schedule_command_create", "schedule_command_edit", "schedule_create",
                                        "model_custom", "model_dual_protocol", "model_login_runtime",
                                        "model_missing_endpoint", "model_price_history", "template_review_task",
                                        "template_missing_input"])

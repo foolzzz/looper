@@ -706,7 +706,7 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
             row = await db_schedules.lock_schedule(conn, schedule_id)
             if row is None:
                 raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
-            db_schedules.check_configuration_version(row, expected_version)
+            await db_schedules.check_configuration_version(conn, row, expected_version, changes=fields)
             kind = row["kind"]
             _check_kind_fields(kind, {**row, **fields,
                 "profile_overrides": profiles if "profile_overrides" in data else row["profile_overrides"],
