@@ -4410,7 +4410,11 @@ runs for catch-up after restart or drain cancellation. An agent firing that was
 already under way when the drain began creates nothing: its transaction rolls
 back, its schedule stays due and a queued run stays queued (Run now answers the
 same 409). If its commit completed just as the drain began, its task stays ready
-and starts after the restart or the cancelled drain. A gate admitted before the
+and starts after the restart or the cancelled drain. A gated firing whose commit
+completed just as the drain began is queued with its gate unstarted. After the
+restart or the cancelled drain, it starts before any newer firing of its schedule:
+a newer due fire or Run now that finds the free slot is recorded as an overlap
+skip while that gate runs. A gate admitted before the
 drain still finishes and starts its task. Run now on an existing
 agent schedule returns 409 with "the service is draining for an upgrade: run it
 after the restart"; an unknown schedule still returns 404. Command schedules
