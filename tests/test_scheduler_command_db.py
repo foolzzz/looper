@@ -732,7 +732,9 @@ def test_delete_running_command_is_refused_until_the_run_ends(monkeypatch, tmp_p
         status, answer = await env.call("POST", "/api/v1/schedule_admin/delete", {"schedule_id": sid})
         assert status == 409, answer
         assert answer["error"]["code"] == "conflict"
-        assert "disable" in answer["error"]["message"] and "wait" in answer["error"]["message"]
+        assert answer["error"]["message"] == (
+            "a command schedule is not deleted while its command runs: it can be deleted once the command "
+            "finishes; disabling it first stops new fires")
         assert await env.pool.fetchval("SELECT count(*) FROM schedules WHERE id=$1", sid) == 1
         assert (await _rows(env, sid))[0]["status"] == "running"
         assert _alive(identity["runner_pid"])
