@@ -171,5 +171,5 @@ async def scan_at_start(runtime_root: Path) -> StartScan:
         else:
             scan.released += 1
     logger.info("kept runs at start ended=%s released=%d unidentified=%d",
-                dict(scan.ended), scan.released, scan.unidentified)
+                {reason.value: count for reason, count in scan.ended.items()}, scan.released, scan.unidentified)
     return scan

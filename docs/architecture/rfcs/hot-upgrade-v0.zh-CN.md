@@ -337,7 +337,7 @@ class DrainStatus: phase: DrainPhase; scope: DrainScope | None; since: datetime 
 | `keeper.json` | 看护进程写，每次原子替换 | `{format: 1, protocol_versions: ["1.0"], keeper_version, keeper_pid, keeper_started, child_pid, child_started, state: starting\|running\|exited, exit_code, signal, ended_at, end_reason: exited\|ended\|orphaned, stdout_truncated, stdout_truncated_at}` |
 | `stdout.log`、`stderr.log`、`stdin.log` | 看护进程写 | 三个方向的原始字节，只追加。stdout 设磁盘上限（默认 512 MiB，超过后只停止追加日志，继续向当前订阅者推送实时输出，不结束运行）；`keeper.json` 记录截断标记和偏移，截断的运行不能接管 |
 | `grant.json` | 控制面写 | 这个运行的席位令牌授权：哈希、任务、席位、room、vault 配置（第 7.8 节） |
-| `detach.json` | 控制面在脱离时写 | `{epoch, consumed: {stdout, stderr}, stdin_offset, at}` |
+| `detach.json` | 控制面在脱离时写 | `{epoch, consumed: {stdout}, stdin_offset, at}` |
 | `keeper.sock` | 看护进程 | Unix 套接字，权限 0600 |
 
 **进程模型：** 控制面直接用 `asyncio.create_subprocess_exec(..., start_new_session=True)` 启动 `sys.executable -m looper.agents.keeper --dir <run dir> -- <argv…>`，不经过 `proc_tree.spawn`，从启动起就不为 keeper 写以控制面为所有者的 `proc_tree` 记录。`proc_tree.spawn` 会把调用方登记为所有者（`looper/agents/proc_tree.py:335-346`），而新控制面先执行 `sweep`、后执行 `end_unfinished_records`（`looper/agents/serve.py:539-551`），到接管扫描时再豁免已经来不及。看护进程自己的 stdin/stdout/stderr 都接 `/dev/null`，诊断写进 `keeper.log`。子进程的环境变量就是看护进程的环境去掉 `LOOPER_KEEPER_*`，这样 provider 的 key 不会落盘；cwd 由参数指定。看护进程用 `proc_tree` 的方式启动子进程（子进程在自己的 session 里），并以 keeper 自己的 pid 和启动时间作为「服务」写一份子进程记录，这样控制面启动时的 `sweep` 会因为 keeper 还活着而不去碰子进程（`looper/agents/proc_tree.py:369-410`）。子进程退出、日志落盘之后，看护进程写 `state=exited` 然后退出，运行目录留到控制面释放。**孤儿保护：** 连续 `orphan_timeout_s`（默认 30 分钟）都没有控制者连上，看护进程就结束子进程（`end_reason=orphaned`），防止控制面再也回不来时一直在花钱。
