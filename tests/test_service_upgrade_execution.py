@@ -511,7 +511,7 @@ def test_manager_restart_during_drain_waits_for_serving_without_starting(
 
     deployment.host.system_operation = operation
     deployment.host.get_status = lambda *args: (
-        deployment.responses.status if deployment.elapsed[0] >= restart_time[0] + response_delay else None)
+        deployment.responses.status if not restart_time or deployment.elapsed[0] >= restart_time[0] + response_delay else None)
     assert cli.main(["service", "upgrade", "--timeout", "5"]) == 1
     assert "start" not in deployment.events
     assert "stop" not in deployment.events
@@ -1208,7 +1208,84 @@ def test_upgrade_uses_scope_specific_drain_deadline(deployment, monkeypatch, kin
     flags = [] if turns_timeout is None else ["--turns-timeout", turns_timeout]
     assert cli.main(["service", "upgrade", "--drain-timeout", "11", *flags]) == 0
     assert requests == [{"scope": "turns" if kind == UpgradeKind.CONTROL_PLANE else "runs",
-                         "timeout_seconds": (float(turns_timeout or 180) if kind == UpgradeKind.CONTROL_PLANE else 11)}]
+                         "timeout_seconds": 11}]
+
+
+@pytest.mark.parametrize("adopted,failures,pending", [
+    (1, {}, 0), (0, {"keeper_unreachable": 1}, 0), (0, {}, 1), (1, {"keeper_unreachable": 1}, 0),
+])
+def test_control_plane_reports_kept_runs_and_adoption_outcome(deployment, adopted, failures, pending, capsys):
+    deployment.responses.status["keepers"] = {"mode": "on", "pending": pending,
+        "adopted_at_start": adopted, "failed_after_start": failures}
+    deployment.statuses[:] = [{"phase": "drained", "waiting": {"runs": [
+        {"worker_id": "kept-worker", "role": "worker", "keepable": True}]}}]
+    assert cli.main(["service", "upgrade"]) == 0
+    data = report(deployment)
+    assert data["plan"] == "CONTROL_PLANE"
+    assert data["kept_before"] == 1 and data["adopted"] == adopted
+    assert data["failed_after_start"] == failures
+    assert data["interrupted"] == []
+    output = capsys.readouterr().out
+    if adopted and not failures:
+        assert "alerts" not in data and "warning" not in output.lower()
+    else:
+        message = f"adopted {adopted} of 1 kept runs"
+        assert data["alerts"] == [{"level": "P1", "message": message}]
+        assert "warning" in output.lower() and message in output
+    if pending:
+        assert deployment.elapsed[0] == 330
+
+
+def test_control_plane_waits_until_adoption_finishes(deployment):
+    deployment.responses.status["keepers"] = {"mode": "on", "pending": 1, "adopted_at_start": 0}
+    read = deployment.host.get_status
+    def status(*args):
+        if deployment.elapsed[0] >= 3:
+            deployment.responses.status["keepers"].update(pending=0, adopted_at_start=1)
+        return read(*args)
+    deployment.host.get_status = status
+    deployment.statuses[:] = [{"phase": "drained", "waiting": {"runs": [
+        {"worker_id": "kept-worker", "role": "worker", "keepable": True}]}}]
+    assert cli.main(["service", "upgrade"]) == 0
+    assert deployment.elapsed[0] >= 3
+    assert report(deployment)["adopted"] == 1
+    assert "alerts" not in report(deployment)
+
+
+@pytest.mark.parametrize("non_keepable,server_deadline", [(True, False), (False, False), (False, True)])
+def test_control_plane_deadline_depends_on_non_keepable_runs(deployment, non_keepable, server_deadline):
+    deployment.responses.status["keepers"] = {"mode": "on", "pending": 0, "adopted_at_start": 1}
+    runs = [{"worker_id": "kept-worker", "role": "worker", "keepable": True}]
+    if non_keepable:
+        runs.append({"worker_id": "plain-worker", "role": "reviewer", "keepable": False})
+    deployment.statuses[:] = [{"phase": "draining", "deadline_passed": server_deadline,
+                              "waiting": {"runs": runs, "manager_turns": ["manager"]}}]
+    mgr = service.manager(deployment.host, "test")
+    plan = UpgradePlan(UpgradeKind.CONTROL_PLANE, (), ("control_plane",))
+    service._execute_plan(deployment.host, mgr, port=18841, root=deployment.root,
+        log_path=deployment.root / "logs/serve.log", plan=plan, running=manifest(), target=None,
+        installer=None, timeout=120, drain_timeout=8, turns_timeout=2, no_force=False)
+    data = report(deployment)
+    assert data["drain_seconds"] == (8 if non_keepable else 2)
+    assert data["kept_before"] == data["adopted"] == 1
+    assert data["interrupted"] == ([{"worker_id": "plain-worker", "role": "reviewer", "reason": "not_keepable"}]
+                                   if non_keepable else [])
+
+
+def test_turns_deadline_applies_when_non_keepable_runs_finish(deployment):
+    deployment.responses.status["keepers"] = {"mode": "on", "pending": 0, "adopted_at_start": 1}
+    held = {"worker_id": "kept-worker", "role": "worker", "keepable": True}
+    deployment.statuses[:] = [
+        {"phase": "draining", "waiting": {"runs": [held,
+            {"worker_id": "plain-worker", "role": "worker", "keepable": False}]}},
+        {"phase": "draining", "waiting": {"runs": [held], "manager_turns": ["manager"]}},
+    ]
+    mgr = service.manager(deployment.host, "test")
+    service._execute_plan(deployment.host, mgr, port=18841, root=deployment.root,
+        log_path=deployment.root / "logs/serve.log", plan=UpgradePlan(UpgradeKind.CONTROL_PLANE, (), ()),
+        running=manifest(), target=None, installer=None, timeout=120, drain_timeout=8, turns_timeout=2, no_force=False)
+    data = report(deployment)
+    assert data["drain_seconds"] == 2 and data["kept_before"] == 1 and data["interrupted"] == []
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])

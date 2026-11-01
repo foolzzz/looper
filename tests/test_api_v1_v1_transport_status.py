@@ -6,6 +6,7 @@ import importlib.util
 import json
 from contextlib import nullcontext
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -359,10 +360,105 @@ def test_keeper_status_is_optional_and_reports_pending_adoptions(tmp_path, statu
             assert code == 200
             assert answer['result']['keepers'] == {
                 'mode': 'on', 'attached': 0, 'candidates_at_start': 0, 'adopted_at_start': 0,
-                'pending': 0, 'ended_at_start': {}}
+                'pending': 0, 'ended_at_start': {}, 'failed_after_start': {}}
             api_v1.validate_arguments(api_v1.find('POST', STATUS).result, answer['result'])
             server._worker_pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
             code, _, answer = await _send(server, f"POST {STATUS}", _bearer(TOKEN), "{}")
             assert code == 200 and 'keepers' not in answer['result']
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('adopted,pending,failed', [(1, 0, {}), (0, 1, {}),
+                                                    (0, 0, {'keeper_unreachable': 1}),
+                                                    (1, 0, {'keeper_unreachable': 1})])
+def test_keeper_adoption_checks_report_startup_gaps(tmp_path, status_data, adopted, pending, failed):
+    from looper.agents.kept_run import AdoptFailure, KeeperSettings
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+
+    async def run():
+        async with _serving(tmp_path, listen=True) as server:
+            prepare_status(server)
+            pool = server._worker_pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path,
+                                                    keeper=KeeperSettings(2))
+            pool._candidates_at_start, pool._adopted_at_start = 1, adopted
+            pool._candidates = {'pending': None} if pending else {}
+            pool._failed_after_start.update({AdoptFailure(reason): count for reason, count in failed.items()})
+            code, _, answer = await _send(server, f'POST {STATUS}', _bearer(TOKEN), '{}')
+            assert code == 200
+            result = answer['result']
+            assert result['keepers']['failed_after_start'] == failed
+            checks = [check for check in result['checks'] if check['id'] == 'kept_runs']
+            assert len(checks) == (0 if adopted and not failed else 1)
+            if checks:
+                assert checks[0]['status'] == 'warn' and 'P1' in checks[0]['label']
+                for reason in failed:
+                    assert reason in checks[0]['detail']
+            api_v1.validate_arguments(api_v1.find('POST', STATUS).result, result)
+
+    asyncio.run(run())
+
+
+def test_orphan_keeper_check_uses_live_identity_ownership_age_and_a_cache(tmp_path, status_data, monkeypatch):
+    from looper.agents import http_server, keeper, proc_tree
+    from looper.agents.kept_run import KeeperSettings
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+
+    clock = [1_800_000_000.0]
+    monkeypatch.setattr(http_server.time, 'time', lambda: clock[0])
+    starts = {}
+    probes = []
+
+    def start_times(pids):
+        probes.append(pids)
+        return starts
+
+    monkeypatch.setattr(proc_tree, '_start_times', start_times)
+
+    def record(name, age, *, alive=True):
+        run_dir = tmp_path / keeper.RUNS_DIR / name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        pid = 100 + len(starts)
+        starts[pid] = 'started' if alive else 'reused pid'
+        keeper.write_json(run_dir / keeper.STATE, {
+            'format': 1, 'keeper_pid': pid, 'keeper_started': 'started',
+            'child_pid': pid + 100, 'child_started': 'child-started', 'state': 'running',
+            'end_reason': None, 'controller_epoch': 2, 'socket': 'keeper.sock',
+            'controller_disconnected_at': datetime.fromtimestamp(clock[0] - age, timezone.utc).isoformat(),
+        })
+        return run_dir
+
+    old = record('orphan', 601)
+    record('young', 600)
+    record('dead', 900, alive=False)
+    record('held', 900)
+    held = SimpleNamespace(handle=SimpleNamespace(state='attached'))
+
+    async def run():
+        async with _serving(tmp_path, listen=True) as server:
+            prepare_status(server)
+            pool = server._worker_pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+            # Keeper mode off never probes the process table or changes existing checks.
+            assert await server._checks_now() == [WARNING] and not probes
+            pool._keeper = KeeperSettings(2)
+            pool._active['held'] = held
+            checks = await server._checks_now()
+            warnings = [check for check in checks if check['id'] == 'kept_runs']
+            assert len(warnings) == 1 and 'P2' in warnings[0]['label']
+            assert '1' in warnings[0]['detail']
+            assert len(probes) == 1
+            state = keeper.read_json(old / keeper.STATE)
+            state['controller_disconnected_at'] = None
+            keeper.write_json(old / keeper.STATE, state)
+            clock[0] += 29
+            assert await server._checks_now() == checks and len(probes) == 1
+            # Refresh sees that the old keeper reattached, and the young keeper aged out.
+            clock[0] += 1
+            refreshed = await server._checks_now()
+            assert len(probes) == 2
+            assert len([check for check in refreshed if check['id'] == 'kept_runs']) == 1
+            starts.clear()
+            clock[0] += 30
+            assert await server._checks_now() == [WARNING]
 
     asyncio.run(run())

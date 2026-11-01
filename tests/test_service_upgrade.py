@@ -63,7 +63,7 @@ def upgrade_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     host = service.Host(
         system="Linux", home=tmp_path / "home", uid=501, environ={},
         executable=str(tmp_path / ".venv/bin/python"), cwd=checkout, package_root=checkout, run=run,
-        sleep=forbidden, get_status=forbidden, port_in_use=forbidden, get_components=get_components,
+        sleep=forbidden, get_status=lambda *args: {"status": "ok"}, port_in_use=forbidden, get_components=get_components,
         get_whoami=forbidden,
     )
     state = service.State(installed=True, loaded=True, running=True, pid=1234, port=18834,
@@ -308,13 +308,104 @@ def test_cli_upgrade_dry_run_rfc_examples(upgrade_host, monkeypatch, capsys, cha
 
     assert cli.main(["service", "upgrade", "--dry-run", "--to", "candidate"]) == 0
     output = capsys.readouterr().out
-    assert expected in output
-    assert "reason" in output.lower()
-    assert "changed" in output.lower()
-    if changed_component:
-        assert changed_component in output
+    reasons = {"NOOP": "No component or adoption contract changed.",
+               "WEB_ONLY": "Only web changed; the control plane can keep running.",
+               "FULL": "Keeper mode is off; control-plane changes require a full drain."}
+    assert output == (f"plan       {expected}\ntarget     1.0.0\n"
+                      "running    1.0.0 (loaded 2026-10-30T00:00:00+00:00)\n"
+                      f"changed    {changed_component or 'none'}\nreason     {reasons[expected]}\n")
     assert targets == [(host.cwd, "candidate")]
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("system,preserves,keeper_on,expected", [
+    ("Darwin", True, False, "FULL"),
+    ("Darwin", True, True, "CONTROL_PLANE"),
+    ("Linux", False, True, "FULL"),
+    ("Linux", True, True, "CONTROL_PLANE"),
+])
+def test_upgrade_preview_uses_running_keeper_mode_and_unit(
+        upgrade_host, monkeypatch, system, preserves, keeper_on, expected):
+    host, _ = upgrade_host
+    host.system = system
+    monkeypatch.setattr(service, "_unit_package_root", lambda *args: host.package_root)
+    host.get_status = lambda *args: {"keepers": {"mode": "on"}} if keeper_on else {"status": "ok"}
+    if system == "Linux":
+        original = service.manager(host, "test")
+        mgr = service.Systemd(host, "upgrade-test")
+        monkeypatch.setattr(mgr, "unit_argv", original.unit_argv)
+        monkeypatch.setattr(mgr, "unit_settings", original.unit_settings)
+        monkeypatch.setattr(mgr, "kill_mode_ok", lambda: preserves)
+        monkeypatch.setattr(service, "manager", lambda *args: mgr)
+        monkeypatch.setattr(service, "_unit_package_root", lambda *args: host.package_root)
+    target = _manifest("control_plane")
+    monkeypatch.setattr(components, "manifest_from_git", lambda *args: target)
+    output = service.upgrade(host, dry_run=True)
+    assert f"plan       {expected}" in output
+    if keeper_on:
+        assert "keepers    on (0 live)" in output
+        assert ("reinstall the service" in output) is not preserves
+    else:
+        assert output == "\n".join((
+            "plan       FULL", "target     1.0.0", "running    1.0.0 (loaded 2026-10-30T00:00:00+00:00)",
+            "changed    control_plane",
+            "reason     Keeper mode is off; control-plane changes require a full drain."))
+
+
+def test_upgrade_preview_refuses_unsupported_live_keeper(upgrade_host, monkeypatch):
+    from looper import upgrade
+    host, _ = upgrade_host
+    host.get_status = lambda *args: {"keepers": {"mode": "on"}}
+    target = _manifest("control_plane")
+    target.adoption["keeper_protocols"] = ["1.0"]
+    running = _manifest()
+    running.adoption["keeper_protocols"] = ["1.0"]
+    host.get_components = lambda *args: running.to_dict()
+    monkeypatch.setattr(components, "manifest_from_git", lambda *args: target)
+    monkeypatch.setattr(upgrade, "scan_keepers", lambda root: (upgrade.Keeper(protocols=("2.0",)),))
+    output = service.upgrade(host, dry_run=True)
+    assert "plan       FULL" in output and "2.0" in output
+    assert "keepers    on (1 live)" in output
+
+
+def test_upgrade_refuses_when_keeper_liveness_is_unknown(upgrade_host, monkeypatch, capsys):
+    from looper import upgrade
+    host, _ = upgrade_host
+    monkeypatch.setattr(components, "manifest_from_git", lambda *args: _manifest("control_plane"))
+    def unknown(root):
+        raise ValueError("cannot tell which keepers are running")
+    monkeypatch.setattr(upgrade, "scan_keepers", unknown)
+    assert cli.main(["service", "upgrade", "--dry-run"]) == 1
+    assert "cannot tell which keepers are running" in capsys.readouterr().err
+
+
+def test_upgrade_preview_rejects_a_git_work_contract_change(upgrade_host):
+    host, _ = upgrade_host
+    root = Path(components.__file__).resolve().parent.parent
+    for name in ("looper/components.toml", "looper/__init__.py", "looper/agents/system_prompt.py",
+                 "pyproject.toml", *components.SEAT_SOURCES):
+        destination = host.cwd / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((root / name).read_bytes())
+    def git(*args):
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false",
+                        "-C", str(host.cwd), *args], check=True, capture_output=True, text=True, timeout=10)
+    git("init", "-q")
+    git("config", "user.name", "Upgrade fixture")
+    git("config", "user.email", "upgrade@example.invalid")
+    git("add", "looper", "pyproject.toml")
+    git("commit", "-qm", "initial source")
+    running = components.manifest_from_git(host.cwd, "HEAD")
+    host.get_components = lambda *args: running.to_dict()
+    host.get_status = lambda *args: {"keepers": {"mode": "on"}}
+    contract = host.cwd / "looper/agents/system_prompt.py"
+    contract.write_text(contract.read_text().replace('WORK_CONTRACT = """\\\n',
+        'WORK_CONTRACT = """\\\nUpdated work contract.\n', 1))
+    git("add", "looper/agents/system_prompt.py")
+    git("commit", "-qm", "work contract update")
+    output = service.upgrade(host, to="HEAD", dry_run=True)
+    assert "plan       FULL" in output
+    assert "adoption contract changed" in output.lower()
 
 
 def test_cli_upgrade_defaults_to_checkout_origin_main(upgrade_host, monkeypatch, capsys):

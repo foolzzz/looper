@@ -42,6 +42,7 @@ class Keeper:
             "keeper_pid": os.getpid(), "keeper_started": None, "child_pid": None, "child_started": None,
             "state": KeeperState.STARTING, "exit_code": None, "signal": None, "ended_at": None,
             "end_reason": None, "error": None, "controller_epoch": None, "socket": None,
+            "controller_disconnected_at": None,
             "stderr_truncated": False, "stdout_truncated": False, "stdout_truncated_at": None,
         }
 
@@ -63,9 +64,11 @@ class Keeper:
         if self._orphan_task is not None:
             self._orphan_task.cancel()
             self._orphan_task = None
+        self._write_state(controller_disconnected_at=None)
 
     def controller_detached(self):
         self.controller_attached()
+        self._write_state(controller_disconnected_at=datetime.now(timezone.utc).isoformat())
         self._orphan_task = asyncio.create_task(self._orphan())
 
     async def _orphan(self):

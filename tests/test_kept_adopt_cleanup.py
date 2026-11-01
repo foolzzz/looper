@@ -23,6 +23,30 @@ from looper.db import llm_records
 from tests.runtime_model_helpers import builtin_launch
 
 
+@pytest.mark.parametrize('outcome', [AdoptOutcome.FAILED, AdoptOutcome.END_PENDING])
+def test_status_counts_failed_adoptions_after_start_without_counting_pending(tmp_path, monkeypatch, outcome):
+    async def run():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path,
+                                 keeper=KeeperSettings(2))
+        hold = RunHold('task-kept', 'step-kept', AgentType.WORKER)
+        candidate = kept_dirs.Candidate(tmp_path / 'worker-kept', 'worker-kept', hold, 41, None)
+        pool.set_candidates([candidate])
+        monkeypatch.setattr(pool, 'adopt_dir', AsyncMock(return_value=AdoptResult(
+            outcome, AdoptFailure.KEEPER_UNREACHABLE)))
+
+        assert (await pool.adopt(candidate.run_id, hold)).outcome is outcome
+        status = pool.keeper_status()
+        assert status['failed_after_start'] == (
+            {'keeper_unreachable': 1} if outcome is AdoptOutcome.FAILED else {})
+        assert status['pending'] == (1 if outcome is AdoptOutcome.END_PENDING else 0)
+        assert status['adopted_at_start'] == 0
+        assert (await pool.adopt(candidate.run_id, hold)).outcome is (
+            AdoptOutcome.NOT_CANDIDATE if outcome is AdoptOutcome.FAILED else AdoptOutcome.END_PENDING)
+        assert pool.keeper_status()['failed_after_start'] == status['failed_after_start']
+
+    asyncio.run(asyncio.wait_for(run(), 3))
+
+
 @pytest.mark.parametrize("attached", [False, True])
 def test_a_failed_keeper_end_preserves_identity_and_the_running_record(tmp_path, monkeypatch, attached):
     async def run():
@@ -182,7 +206,8 @@ def test_output_after_a_replayed_result_is_recorded_until_eof(tmp_path):
     asyncio.run(asyncio.wait_for(run(), 3))
 
 
-def test_a_newer_controller_keeps_its_keeper_and_record_on_adoption_failure(tmp_path, monkeypatch):
+@pytest.mark.parametrize('failure', ['newer_controller', 'keeper_unreachable'])
+def test_adoption_reports_unreachable_keepers_and_preserves_newer_controllers(tmp_path, monkeypatch, failure):
     async def run():
         pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path,
                                  keeper=KeeperSettings(2))
@@ -201,18 +226,31 @@ def test_a_newer_controller_keeps_its_keeper_and_record_on_adoption_failure(tmp_
         monkeypatch.setattr(pool, '_task_project', AsyncMock(return_value=None))
         monkeypatch.setattr(worker, 'load_agent_settings', AsyncMock(return_value=launch.settings))
         monkeypatch.setattr(worker.ClaudeRunRecorder, 'resume', AsyncMock())
-        monkeypatch.setattr(KeptRun, 'attach', AsyncMock(side_effect=KeeperError(
-            ErrorCode.STALE_CONTROLLER, 'a newer control plane holds this run')))
-        discard = AsyncMock()
+        error = (KeeperError(ErrorCode.STALE_CONTROLLER, 'a newer control plane holds this run')
+                 if failure == 'newer_controller' else OSError('keeper is unreachable'))
+        monkeypatch.setattr(KeptRun, 'attach', AsyncMock(side_effect=error))
+        discard = AsyncMock(return_value=True)
         monkeypatch.setattr(pool, '_discard_adoption', discard)
         interrupt = AsyncMock()
         monkeypatch.setattr(llm_records, 'end_record_interrupted', interrupt)
 
-        result = await pool.adopt_dir(run_dir, expect=RunHold('task-kept', 'step-kept', AgentType.WORKER))
+        hold = RunHold('task-kept', 'step-kept', AgentType.WORKER)
+        pool.set_candidates([kept_dirs.Candidate(run_dir, run_dir.name, hold, 41, None)])
+        result = await pool.adopt(run_dir.name, hold)
 
-        assert result.outcome is AdoptOutcome.END_PENDING
-        assert result.failure is AdoptFailure.PROTOCOL
-        discard.assert_not_awaited()
+        if failure == 'newer_controller':
+            assert result.outcome is AdoptOutcome.END_PENDING
+            assert result.failure is AdoptFailure.PROTOCOL
+            discard.assert_not_awaited()
+            assert pool.keeper_status()['failed_after_start'] == {}
+            assert pool.keeper_status()['pending'] == 1
+        else:
+            assert result.outcome is AdoptOutcome.FAILED
+            assert result.failure is AdoptFailure.KEEPER_UNREACHABLE
+            discard.assert_awaited_once()
+            assert pool.keeper_status()['failed_after_start'] == {'keeper_unreachable': 1}
+            assert pool.keeper_status()['pending'] == 0
+            assert pool.keeper_status()['adopted_at_start'] == 0
         interrupt.assert_not_awaited()
         assert (run_dir / keeper.MANIFEST).exists()
 
