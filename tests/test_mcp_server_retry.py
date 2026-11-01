@@ -124,14 +124,15 @@ def _call(client: AgentClient, name: str = "write") -> dict[str, Any]:
 
 
 @pytest.fixture
-def retry_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+def retry_stderr(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
     class StderrHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             print(self.format(record), file=sys.stderr)
 
     handler = StderrHandler()
     monkeypatch.setattr(mcp_server.logger, "handlers", [handler])
-    monkeypatch.setattr(mcp_server.logger, "level", logging.INFO)
+    # setLevel also clears cached isEnabledFor decisions and caplog restores the level afterwards.
+    caplog.set_level(logging.INFO, logger=mcp_server.__name__)
 
 
 def test_a_refused_call_is_retried_until_the_server_listens(capsys, retry_stderr) -> None:
