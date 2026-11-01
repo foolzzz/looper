@@ -511,14 +511,16 @@ class WorkerPool:
                 wp.handle.fence()
 
     async def detach_kept(self, *, epoch: int, timeout: float = 3.0) -> dict[DetachKind, list[str]]:
-        runs = [(wid, wp.handle, self._tasks[wid], self._recorders[wid]) for wid, wp in self._active.items()
+        # A completed run can still be announcing its offline seat after its recorder has closed.
+        runs = [(wid, wp.handle, self._tasks[wid], self._recorders.get(wid)) for wid, wp in self._active.items()
                 if isinstance(wp.handle, KeptRun) and wp.handle.state is KeptRunState.ATTACHED
                 and wid in self._tasks]
 
         async def detach(wid, handle, recorder):
             outcome = await handle.detach(epoch=epoch, timeout=timeout)
             if outcome.kind is DetachKind.DETACHED:
-                recorder.detach()
+                if recorder is not None:
+                    recorder.detach()
                 self._inputs.pop(wid, None)
                 self._reminders.pop(wid, None)
             return outcome

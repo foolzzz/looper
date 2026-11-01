@@ -132,6 +132,103 @@ def test_a_kept_run_streams_the_same_events_as_a_process_run(tmp_path: Path) -> 
     exercise(run())
 
 
+def test_pool_detaches_a_peer_while_a_completed_run_is_leaving_its_seat(tmp_path, monkeypatch, agent_db):
+    from looper.agents.bus import MessageBus
+    from looper.agents.drain import DrainScope, DrainState
+    from looper.agents.kept_run import KeeperSettings
+    from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from looper.agents.ops.room import RoomOps
+    from looper.agents.tiers import worker
+
+    handles = []
+
+    class ShortKeptRun(KeptRun):
+        def __init__(self, *args, **kwargs):
+            kwargs['run_dir'] = short_directory()
+            super().__init__(*args, **kwargs)
+            handles.append(self)
+
+    body = """\
+import json, sys, time
+from pathlib import Path
+sys.stdin.readline()
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'seat-test'}), flush=True)
+while not Path('release').exists():
+    time.sleep(.02)
+print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                  'result': json.dumps({'status': 'completed', 'summary': 'done', 'changed_files': {}})}), flush=True)
+"""
+    executable = fake_claude(tmp_path / 'claude', body)
+    monkeypatch.setattr(worker, 'KeptRun', ShortKeptRun)
+    monkeypatch.setattr(worker, 'load_task_limit', AsyncMock(return_value=2))
+    monkeypatch.setattr(worker, '_load_settings', AsyncMock(return_value=worker.WorkerSettings(0, 0, 'work')))
+
+    async def run():
+        bus = MessageBus(runtime_root=tmp_path)
+        drain = DrainState()
+        pool = worker.WorkerPool(config=worker.WorkerConfig(claude_bin=executable), runtime_root=tmp_path,
+                                 drain=drain, keeper=KeeperSettings(1))
+        leaving, release_seat = asyncio.Event(), asyncio.Event()
+        results = []
+
+        async def presence(task_id, seat, *, online):
+            if not online and seat.run == 'w1':
+                leaving.set()
+                await release_seat.wait()
+
+        room = Mock(presence_changed=presence, first_turn=AsyncMock(return_value='room'))
+        pool.room_ops = RoomOps(room, url='http://127.0.0.1:1')
+        bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
+        await pool.start(bus)
+        detaching = None
+        try:
+            for wid in ('w1', 'w2'):
+                directory = tmp_path / wid
+                directory.mkdir()
+                await pool._dispatch(MessageEnvelope.create(
+                    source=planner_address('t1'), target=worker_address(wid), message_type=MessageType.WORK_ITEM,
+                    payload={'task_id': wid, 'parent_task_id': 't1', 'instruction': 'do it',
+                             'context': {'work_dir': str(directory)}},
+                ))
+            await eventually(lambda: len(pool._inputs) == 2)
+            completed, held = (pool._active[wid].handle for wid in ('w1', 'w2'))
+            assert drain.begin(DrainScope.TURNS)['phase'] == 'drained'
+            (tmp_path / 'w1' / 'release').touch()
+            await leaving.wait()
+            assert completed.state is KeptRunState.ATTACHED and 'w1' not in pool._recorders
+            assert not pool._tasks['w1'].done() and not results
+
+            detaching = asyncio.create_task(pool.detach_kept(epoch=1, timeout=3))
+            await eventually(lambda: held.state is KeptRunState.DETACHED or detaching.done())
+            if detaching.done():
+                await detaching
+            assert held.state is KeptRunState.DETACHED
+            assert (held.run_dir / keeper.DETACH).is_file()
+            assert live(keeper.read_json(held.run_dir / keeper.STATE)['child_pid'])
+            assert not pool._tasks['w1'].done()  # Seat cleanup still owns result publication.
+            assert not detaching.done()
+            release_seat.set()
+            assert await detaching == {DetachKind.FINISHING: ['w1'], DetachKind.DETACHED: ['w2']}
+            assert len(results) == 1 and results[0].payload['task_id'] == 'w1'
+            assert results[0].payload['status'] == 'completed'
+            assert [call.kwargs['status'] for call in agent_db.finish_record.await_args_list] == ['completed']
+            await pool.stop()
+            assert not pool._active and not pool._tasks and not pool._recorders
+        finally:
+            release_seat.set()
+            if detaching is not None:
+                await asyncio.gather(detaching, return_exceptions=True)
+            await pool.stop()
+            await bus.shutdown()
+            for handle in handles:
+                if handle.state is KeptRunState.DETACHED:
+                    (Path(handle._cwd) / 'release').touch()
+                    await asyncio.wait_for(handle._keeper_process.wait(), 5)
+                await clean_directory(handle.run_dir)
+
+    exercise(run())
+
+
 def test_partial_lines_reach_the_parser_whole(tmp_path: Path) -> None:
     body = """\
 import json, os, time
