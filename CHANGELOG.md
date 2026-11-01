@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.65] - 2026-10-31
+
+### Changed
+
+- **A running command schedule that is not deleted says why, and disabling it right after the refusal asks first.** Deleting a command schedule while its command runs is still refused, but the text (409 from the service, the client token and the Manager) now says it can be deleted once the command finishes, that disabling it first stops new fires, and, when it has a queued run, that this run still starts after the running one even when the schedule is disabled. Before, the text told the reader to "disable it and wait", and in the pull request's real-mode eval the Manager then disabled the schedule on its own in 4 of 6 runs. In the Manager, a `disable` of a schedule whose delete was refused earlier in the same turn answers `needs_confirmation`; a disable the user asks for in a later message, and the client token's disable, run at once. The Manager's delete confirmation for a command schedule now says it has no tasks. Agent schedules and the queued-run behavior are unchanged. No migration. ([#1046](https://github.com/foolzzz/looper/pull/1046))
+
 ## [2.14.64] - 2026-10-31
 
 ### Changed
