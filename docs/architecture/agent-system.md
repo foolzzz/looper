@@ -3275,8 +3275,13 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
   Kept runs' MCP entries also set `LOOPER_AGENT_RECONNECT_SECONDS=120`:
   their bridge retries refused connections and HTTP 503 with an integer
   `Retry-After`, since neither executed the call. Other connection failures
-  retry only `GET /tools` or tools in the kept grant's `read_only` sidecar,
-  derived from `Tool.risk`. Timeouts never retry. Backoff starts at 0.5 s
+  retry only `GET /tools` or calls allowed by the kept grant's `retry_safety`
+  sidecar, derived from `Tool.retry_safety` independently of its permission tier.
+  The room inbox allows these retries only with `peek=true`: its default call
+  marks messages read before sending the response. A lost response returns an
+  error directing the agent to peek at remaining unread messages and recover
+  recent messages with `looper_room_read`. Retried inbox waits are capped at
+  the reconnect time left minus 2 s (never below 0). Timeouts never retry. Backoff starts at 0.5 s
   and doubles to 5 s; `Retry-After`, clamped to that range, overrides it.
   The window starts at the first failure, is configurable up to 600 s,
   and logs one `agent api retry` summary per retried call to stderr.

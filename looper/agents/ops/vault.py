@@ -10,7 +10,7 @@ from typing import Any
 
 from .. import vault
 from ..vault import VaultConfig
-from . import ErrorCode, OpError, Risk, Tool
+from . import ErrorCode, OpError, RetrySafety, Risk, Tool
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ TOOLS: tuple[Tool, ...] = (
             "query": {"type": "string", "minLength": 1},
             "limit": {"type": "integer", "minimum": 1, "maximum": 30},
         }},
-        risk=Risk.READ, run=_never,
+        risk=Risk.READ, run=_never, retry_safety=RetrySafety.READ_ONLY,
     ),
     Tool(
         name=READ,
@@ -41,7 +41,7 @@ TOOLS: tuple[Tool, ...] = (
         schema={"type": "object", "required": ["path"], "additionalProperties": False, "properties": {
             "path": {"type": "string", "minLength": 1},
         }},
-        risk=Risk.READ, run=_never,
+        risk=Risk.READ, run=_never, retry_safety=RetrySafety.READ_ONLY,
     ),
     Tool(
         name=WRITE,

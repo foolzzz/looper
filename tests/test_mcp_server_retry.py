@@ -24,7 +24,7 @@ import pytest
 from looper.agents import mcp_server
 from looper.agents.http_server import AGENT_API, AgentHTTPServer
 from looper.agents.mcp_server import AgentClient, handle
-from looper.agents.ops import Risk, room as room_ops, vault as vault_ops
+from looper.agents.ops import RetrySafety, room as room_ops, vault as vault_ops
 from looper.agents.room import MemberKind, Seat
 from looper.agents.vault import VaultConfig
 
@@ -32,10 +32,10 @@ from looper.agents.vault import VaultConfig
 class _RetryAPI(ThreadingHTTPServer):
     daemon_threads = False
 
-    def __init__(self, address: tuple[str, int], actions: list[tuple[str, Any]], read_only: Any) -> None:
+    def __init__(self, address: tuple[str, int], actions: list[tuple[str, Any]], retry_safety: Any) -> None:
         super().__init__(address, _Handler, bind_and_activate=False)
         self.actions = list(actions)
-        self.read_only = read_only
+        self.retry_safety = retry_safety
         self.requests: list[str] = []
         self.executions = 0
         self.release = threading.Event()
@@ -58,7 +58,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self.server.requests.append(self.path)
-        self._answer(200, {"tools": [{"name": "read"}, {"name": "write"}], "read_only": self.server.read_only})
+        self._answer(200, {"tools": [{"name": "read"}, {"name": "write"}], "retry_safety": self.server.retry_safety})
 
     def do_POST(self) -> None:
         self.rfile.read(int(self.headers["Content-Length"]))
@@ -78,12 +78,12 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def _api(*actions: tuple[str, Any], read_only: Any = None, delay: float = 0) -> Iterator[_RetryAPI]:
+def _api(*actions: tuple[str, Any], retry_safety: Any = None, delay: float = 0) -> Iterator[_RetryAPI]:
     # Reserve a port without listening, so the delayed-start test gets actual ECONNREFUSED.
     with socket.socket() as reserved:
         reserved.bind(("127.0.0.1", 0))
         address = reserved.getsockname()
-    server = _RetryAPI(address, list(actions), read_only)
+    server = _RetryAPI(address, list(actions), retry_safety)
     stop = threading.Event()
     listening = threading.Event()
 
@@ -170,7 +170,7 @@ def test_a_write_is_not_retried_after_it_was_sent() -> None:
 
 
 def test_a_read_only_tool_is_retried_after_a_reset() -> None:
-    with _api(("drop", None), read_only=["read"]) as server:
+    with _api(("drop", None), retry_safety={"read": RetrySafety.READ_ONLY.value}) as server:
         client = _client(server)
         assert len(client.list_tools()) == 2
         assert _call(client, "read")["isError"] is False
@@ -178,27 +178,27 @@ def test_a_read_only_tool_is_retried_after_a_reset() -> None:
         assert server.executions == 1
 
 
-@pytest.mark.parametrize("read_only", [None, "read", {"read": True}, ["read", 1]])
-def test_a_malformed_read_only_sidecar_never_authorizes_a_retry(read_only) -> None:
-    with _api(("drop", None), read_only=read_only) as server:
+@pytest.mark.parametrize("retry_safety", [None, "read", ["read"], {"read": True}, {"read": "unknown"}, {"read": []}])
+def test_a_malformed_retry_safety_sidecar_never_authorizes_a_retry(retry_safety) -> None:
+    with _api(("drop", None), retry_safety=retry_safety) as server:
         client = _client(server)
         client.list_tools()
         assert _call(client, "read")["isError"] is True
         assert server.requests.count("/api/agent/v1/ops/read") == 1
 
 
-def test_a_new_tools_list_clears_the_previous_read_only_sidecar() -> None:
-    with _api(("drop", None), read_only=["read"]) as server:
+def test_a_new_tools_list_clears_the_previous_retry_safety_sidecar() -> None:
+    with _api(("drop", None), retry_safety={"read": RetrySafety.READ_ONLY.value}) as server:
         client = _client(server)
         client.list_tools()
-        server.read_only = None
+        server.retry_safety = None
         client.list_tools()
         assert _call(client, "read")["isError"] is True
         assert server.requests.count("/api/agent/v1/ops/read") == 1
 
 
 def test_a_timeout_is_never_retried() -> None:
-    with _api(("timeout", None), read_only=["read"]) as server:
+    with _api(("timeout", None), retry_safety={"read": RetrySafety.READ_ONLY.value}) as server:
         client = _client(server, timeout=0.1)
         client.list_tools()
         result = _call(client, "read")
@@ -285,7 +285,7 @@ def test_main_passes_the_reconnect_window_to_the_client(monkeypatch, value, expe
 
 @pytest.mark.parametrize("kept", [False, True, "imported"])
 @pytest.mark.parametrize("room", [False, True])
-def test_only_kept_grants_list_read_only_tools(tmp_path, kept, room) -> None:
+def test_only_kept_grants_list_retry_safety(tmp_path, kept, room) -> None:
     ops = room_ops.RoomOps(Mock(), url="http://localhost:1234")
     token = ops.issue("task-1", Seat("worker@s1", "worker", MemberKind.WORK, run="worker-1"),
                       room=room, vault=VaultConfig(tmp_path, ("notes",), None), kept=kept is True)
@@ -306,13 +306,15 @@ def test_only_kept_grants_list_read_only_tools(tmp_path, kept, room) -> None:
 
     payload = asyncio.run(request())
     if not kept:
-        assert "read_only" not in payload
+        assert "retry_safety" not in payload
     else:
         tools = (*room_ops.TOOLS, *vault_ops.TOOLS) if room else vault_ops.TOOLS
         listed = {tool["name"] for tool in payload["tools"]}
-        assert set(payload["read_only"]) == {tool.name for tool in tools if tool.risk is Risk.READ and tool.name in listed}
-        assert "looper_room_post" not in payload["read_only"]
-        assert "looper_room_watch" not in payload["read_only"]
+        assert payload["retry_safety"] == {tool.name: tool.retry_safety.value for tool in tools if tool.name in listed}
+        if room:
+            assert payload["retry_safety"][room_ops.INBOX] == RetrySafety.READ_ONLY_IF_PEEK.value
+            assert payload["retry_safety"][room_ops.POST] == RetrySafety.NOT_RETRYABLE.value
+            assert payload["retry_safety"][room_ops.WATCH] == RetrySafety.NOT_RETRYABLE.value
 
 
 @pytest.fixture
@@ -350,7 +352,7 @@ def test_a_failure_before_sending_is_retryable_for_any_tool(retry_clock, failure
 @pytest.mark.parametrize("request_kind", ["tools", "read", "write"])
 def test_only_read_requests_retry_other_transport_failures(retry_clock, failure, request_kind):
     client = AgentClient("http://127.0.0.1:1", "token", reconnect_seconds=2)
-    client._read_only = frozenset({"read"})
+    client._retry_safety = {"read": RetrySafety.READ_ONLY}
     client._opener.open = Mock(side_effect=[failure, _answer()])
     if request_kind == "tools":
         assert client.list_tools() == []
@@ -376,3 +378,38 @@ def test_retry_after_is_clamped_to_half_a_second_through_five_seconds(retry_cloc
     client._opener.open = Mock(side_effect=[failure, _answer()])
     assert _call(client)["isError"] is False
     assert retry_clock == [expected_wait]
+
+
+@pytest.mark.parametrize(("window", "expected_wait"), [(9.25, 0), (12.75, 2), (150, 120)])
+def test_a_retried_inbox_wait_fits_the_remaining_window(retry_clock, window, expected_wait):
+    client = AgentClient("http://127.0.0.1:1", "token", reconnect_seconds=window)
+    arguments = {"peek": True, "wait_seconds": 120}
+    seen = []
+
+    def open_request(request, timeout):
+        seen.append((json.loads(request.data), timeout))
+        if len(seen) == 1:
+            raise ConnectionRefusedError("refused")
+        if len(seen) == 2:
+            retry_clock.append(6.5)  # most of the short reconnect window passed before this attempt failed
+            raise ConnectionRefusedError("still refused")
+        return _answer()
+
+    client._opener.open = Mock(side_effect=open_request)
+    assert client.call_tool(room_ops.INBOX, arguments)["status"] == "ok"
+    assert seen[0][0] == arguments
+    assert seen[-1][0]["wait_seconds"] == expected_wait
+    assert all(0 <= body["wait_seconds"] <= timeout for body, timeout in seen[1:])
+    assert arguments == {"peek": True, "wait_seconds": 120}
+
+
+@pytest.mark.parametrize(("peek", "reconnect_seconds"), [(1, 3), ("true", 3), (True, 0)])
+def test_peek_retries_require_true_and_an_enabled_reconnect_window(peek, reconnect_seconds):
+    with _api(("drop", None), retry_safety={room_ops.INBOX: RetrySafety.READ_ONLY_IF_PEEK.value}) as server:
+        client = _client(server, reconnect_seconds=reconnect_seconds)
+        client.list_tools()
+        response = handle({"id": 1, "method": "tools/call", "params": {
+            "name": room_ops.INBOX, "arguments": {"peek": peek},
+        }}, client)
+        assert response["result"]["isError"] is True
+        assert server.requests.count(f"/api/agent/v1/ops/{room_ops.INBOX}") == 1

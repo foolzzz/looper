@@ -926,8 +926,8 @@ class AgentHTTPServer:
                 headers={"Retry-After": "2"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
             answer = {"tools": ops.listing(header)}
-            if (read_only := ops.read_only(header)) is not None:
-                answer["read_only"] = read_only
+            if (retry_safety := ops.retry_safety(header)) is not None:
+                answer["retry_safety"] = retry_safety
             writer.write(_json_response(HTTP_200, answer))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:

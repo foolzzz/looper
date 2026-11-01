@@ -40,6 +40,14 @@ class Risk(str, Enum):
     HIGH = "high"
 
 
+class RetrySafety(str, Enum):
+    """Whether a possibly executed call can be repeated, independently of its permission tier."""
+
+    NOT_RETRYABLE = "not_retryable"
+    READ_ONLY = "read_only"
+    READ_ONLY_IF_PEEK = "read_only_if_peek"
+
+
 class ErrorCode(str, Enum):
     NOT_FOUND = "not_found"
     INVALID = "invalid"
@@ -186,6 +194,7 @@ class Tool:
     # The task a call acts on, for the audit trail and the task page; None for none.
     task_id: Callable[[Mapping[str, Any]], str | None] = lambda arguments: None
     read_actions: frozenset[str] = frozenset()
+    retry_safety: RetrySafety = RetrySafety.NOT_RETRYABLE
 
     def risk_of(self, arguments: Mapping[str, Any]) -> Risk:
         """The tier of a call with these (checked) arguments, before ``escalate``."""

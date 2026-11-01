@@ -36,7 +36,7 @@ from ..vault import VaultConfig
 from . import vault as vault_ops
 from .vault import TOOL_NAMES as VAULT_TOOL_NAMES, VaultUsage
 from ..room import POSTABLE, MemberKind, MessageKind, RoomService, Seat
-from . import ErrorCode, OpError, Risk, Tool, check_arguments
+from . import ErrorCode, OpError, RetrySafety, Risk, Tool, check_arguments
 from .service import library_with_server, server_config
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ TOOLS: tuple[Tool, ...] = (
         description="Who is in this task's room: each seat (role@step), its step and whether it is online, waiting, "
                     "offline or not started yet; which seat you are; your unread counts.",
         schema={"type": "object", "additionalProperties": False, "properties": {}},
-        risk=Risk.READ, run=_never,
+        risk=Risk.READ, run=_never, retry_safety=RetrySafety.READ_ONLY,
     ),
     Tool(
         name=POST,
@@ -86,7 +86,7 @@ TOOLS: tuple[Tool, ...] = (
             "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 120},
             "peek": {"type": "boolean", "description": "Read without marking them read."},
         }},
-        risk=Risk.READ, run=_never,
+        risk=Risk.READ, run=_never, retry_safety=RetrySafety.READ_ONLY_IF_PEEK,
     ),
     Tool(
         name=READ,
@@ -100,7 +100,7 @@ TOOLS: tuple[Tool, ...] = (
             "before": {"type": "integer", "minimum": 1},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50},
         }},
-        risk=Risk.READ, run=_never,
+        risk=Risk.READ, run=_never, retry_safety=RetrySafety.READ_ONLY,
     ),
     Tool(
         name=WATCH,
@@ -291,12 +291,12 @@ class RoomOps:
         room_tools = tools_for(grant.seat.kind) if grant.room else ()
         return [tool.listing() for tool in (*room_tools, *grant.vault_tools)]
 
-    def read_only(self, header: str | None) -> list[str] | None:
+    def retry_safety(self, header: str | None) -> dict[str, str] | None:
         grant = self._grant(header)
         if grant is None or not grant.kept:
             return None
         room_tools = tools_for(grant.seat.kind) if grant.room else ()
-        return [tool.name for tool in (*room_tools, *grant.vault_tools) if tool.risk is Risk.READ]
+        return {tool.name: tool.retry_safety.value for tool in (*room_tools, *grant.vault_tools)}
 
     async def call(self, header: str | None, name: str, raw: Any) -> dict[str, Any]:
         grant = self._grant(header)

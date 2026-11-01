@@ -14,7 +14,7 @@ forwards: every validation, confirmation and execution happens in ``looper serve
   or no answer within 120 s, is a failure. A failed ``tools/list`` is a JSON-RPC error; a failed ``tools/call``
   is an error tool result that tells the model why, since it can read that and decide what to do.
   With ``LOOPER_AGENT_RECONNECT_SECONDS`` set, retry refused connections and 503s with ``Retry-After``;
-  other connection failures retry only ``GET /tools`` or tools listed as read-only. Timeouts never retry.
+  other connection failures retry only ``GET /tools`` or calls declared safe to repeat. Timeouts never retry.
 - **Trace.** With ``LOOPER_MCP_TRACE=<file>``, each ``tools/call`` appends the keys of its ``_meta`` to the file.
 """
 
@@ -33,6 +33,7 @@ from typing import Any, BinaryIO, Protocol
 
 from looper import __version__
 from looper.agents.log_redaction import log_to_stderr
+from looper.agents.ops import RetrySafety
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ REQUEST_TIMEOUT_SECONDS = 120.0
 # A call that waits on Looper's side (the agent room's inbox, ``wait_seconds``) gets that long more than the rest.
 WAITING_TOOL = "looper_room_inbox"
 WAIT_MARGIN_SECONDS = 20.0
+RETRY_WAIT_MARGIN_SECONDS = 2.0
 
 # JSON-RPC 2.0 error codes.
 PARSE_ERROR = -32700
@@ -77,16 +79,20 @@ class AgentClient:
         self._turn_file = turn_file
         self._timeout = timeout
         self._reconnect_seconds = reconnect_seconds
-        self._read_only: frozenset[str] = frozenset()
+        self._retry_safety: dict[str, RetrySafety] = {}
         # The URL is the local server that started the Manager; a proxy from the environment must not carry it.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def list_tools(self) -> list[Any]:
         """The ``tools`` list of ``GET /api/agent/v1/tools``; raises LooperUnavailable."""
         answer = self._request("/api/agent/v1/tools")
-        names = answer.get("read_only")
-        self._read_only = frozenset(names) if isinstance(names, list) and all(isinstance(n, str) for n in names) \
-            else frozenset()
+        safety = answer.get("retry_safety")
+        self._retry_safety = {}
+        if isinstance(safety, dict) and all(isinstance(name, str) for name in safety):
+            try:
+                self._retry_safety = {name: RetrySafety(value) for name, value in safety.items()}
+            except (ValueError, TypeError):
+                pass  # unknown or malformed policies never authorize a retry
         tools = answer.get("tools")
         if not isinstance(tools, list):
             raise LooperUnavailable("its answer has no tools list")
@@ -134,9 +140,11 @@ class AgentClient:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(self.url + path, data=data, headers=headers,
                                          method="GET" if body is None else "POST")
-        read_only = (body is None and path == "/api/agent/v1/tools") or (
-            body is not None and path.removeprefix("/api/agent/v1/ops/") != path
-            and urllib.parse.unquote(path.removeprefix("/api/agent/v1/ops/")) in self._read_only)
+        name = urllib.parse.unquote(path.removeprefix("/api/agent/v1/ops/")) if body is not None else None
+        safety = self._retry_safety.get(name, RetrySafety.NOT_RETRYABLE)
+        safe_to_repeat = (body is None and path == "/api/agent/v1/tools") or (
+            body is not None and (safety is RetrySafety.READ_ONLY or (
+                safety is RetrySafety.READ_ONLY_IF_PEEK and body.get("peek") is True)))
         started, attempts, backoff, outcome = None, 0, 0.5, "failed"
         attempt_timeout = timeout
         try:
@@ -158,7 +166,7 @@ class AgentClient:
                             raise exc
                     elif isinstance(cause, (OSError, http.client.HTTPException)):
                         reason = cause.reason if isinstance(cause, urllib.error.URLError) else cause
-                        if not isinstance(reason, (ConnectionRefusedError, FileNotFoundError)) and not read_only:
+                        if not isinstance(reason, (ConnectionRefusedError, FileNotFoundError)) and not safe_to_repeat:
                             raise
                     else:
                         raise
@@ -173,6 +181,12 @@ class AgentClient:
                     if remaining <= 0:
                         raise
                     attempt_timeout = min(timeout, remaining)
+                    wait = body.get("wait_seconds") if name == WAITING_TOOL else None
+                    if isinstance(wait, int) and not isinstance(wait, bool) and wait > 0:
+                        # Keep the original arguments intact; each retry must fit the reconnect time still left.
+                        retry_wait = min(wait, max(0, int(remaining - RETRY_WAIT_MARGIN_SECONDS)))
+                        retry_body = {**body, "wait_seconds": retry_wait}
+                        request.data = json.dumps(retry_body, ensure_ascii=False).encode("utf-8")
                     backoff = min(5.0, backoff * 2)
                 else:
                     outcome = "success"
@@ -255,12 +269,16 @@ def _call_tool(message_id: Any, params: dict[str, Any], client: Client) -> dict[
         meta = params.get("_meta")
         _trace_meta(meta)
         answer = client.call_tool(name, arguments, meta if isinstance(meta, dict) else None)
-    except LooperTimedOut as exc:
-        logger.warning("tools/call %s: %s", name, exc)
-        return _tool_result(message_id, f"Looper did not answer the call to {name}: {exc}. It may still have run, "
-                                        "so check its effect before calling it again.", is_error=True)
     except LooperUnavailable as exc:
         logger.warning("tools/call %s: %s", name, exc)
+        if name == WAITING_TOOL and arguments.get("peek") is not True:
+            return _tool_result(message_id, f"Looper did not answer the call to {name}: {exc}. Messages may have "
+                                            "been marked read before the response was lost. Call looper_room_inbox "
+                                            "with peek=true to check remaining unread messages, and looper_room_read "
+                                            "to recover recent messages even if already marked read.", is_error=True)
+        if isinstance(exc, LooperTimedOut):
+            return _tool_result(message_id, f"Looper did not answer the call to {name}: {exc}. It may still have run, "
+                                            "so check its effect before calling it again.", is_error=True)
         return _tool_result(message_id, f"Looper did not run the tool {name}: {exc}", is_error=True)
     status = answer.get("status")
     logger.info("tools/call %s: %s", name, status)

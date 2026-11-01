@@ -32,6 +32,9 @@ class Tool:
     def listing(self) -> dict[str, Any]:
         return {"name": self.name, "description": self.description, "inputSchema": dict(self.schema)}
 '''
+TOOL_WITH_RETRY_SAFETY = TOOL.replace(
+    "    read_actions: frozenset[str] = frozenset()",
+    "    read_actions: frozenset[str] = frozenset()\n    retry_safety: RetrySafety = RetrySafety.NOT_RETRYABLE")
 TOOLS_FOR = '''
 def tools_for(kind: MemberKind) -> tuple[Tool, ...]:
     if kind is MemberKind.WORK:
@@ -133,9 +136,14 @@ def _value(node, namespace):
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Tool":
         fields = {kw.arg: kw.value for kw in node.keywords}
         if (not node.args and len(fields) == len(node.keywords)
-                and set(fields) == {"name", "description", "schema", "risk", "run"}
+                and {"name", "description", "schema", "risk", "run"} <= set(fields)
+                <= {"name", "description", "schema", "risk", "run", "retry_safety"}
                 and isinstance(fields["run"], ast.Name) and fields["run"].id == "_never"):
             risk = _value(fields["risk"], namespace)
+            if "retry_safety" in fields:
+                safety = _value(fields["retry_safety"], namespace)
+                if not isinstance(safety, _Member) or safety.enum != "RetrySafety":
+                    raise ValueError("unsupported target retry safety")
             name, description, schema = (_value(fields[key], namespace) for key in ("name", "description", "schema"))
             if (isinstance(risk, _Member) and risk.enum == "Risk" and isinstance(name, str)
                     and isinstance(description, str) and isinstance(schema, dict)):
@@ -171,7 +179,10 @@ def declarations(sources, path, names, namespace):
         found.update(selected)
         if isinstance(node, ast.ClassDef):
             if node.name == "Tool":
-                _require_shape(node, TOOL)
+                template = TOOL_WITH_RETRY_SAFETY if any(
+                    isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+                    and item.target.id == "retry_safety" for item in node.body) else TOOL
+                _require_shape(node, template)
             else:
                 namespace[node.name] = _enum(node)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -193,6 +204,9 @@ def main():
     sources = json.load(sys.stdin)
     namespace = {}
     declarations(sources, "looper/agents/ops/__init__.py", {"Risk", "Tool"}, namespace)
+    if any(isinstance(node, ast.ClassDef) and node.name == "RetrySafety"
+           for node in ast.parse(sources["looper/agents/ops/__init__.py"]).body):
+        declarations(sources, "looper/agents/ops/__init__.py", {"RetrySafety"}, namespace)
     declarations(sources, "looper/agents/room.py", {"MemberKind", "MessageKind", "POSTABLE"}, namespace)
     declarations(sources, "looper/agents/ops/room.py",
                  {"ROSTER", "POST", "INBOX", "READ", "WATCH", "_NAMES", "_never", "TOOLS", "tools_for"}, namespace)
