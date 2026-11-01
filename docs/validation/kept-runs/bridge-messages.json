@@ -1,10 +1,10 @@
 [
   {
-    "body": "restart message 0",
+    "message_index": 0,
     "count": 1
   },
   {
-    "body": "restart message 1",
+    "message_index": 1,
     "count": 1
   }
 ]

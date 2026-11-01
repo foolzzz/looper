@@ -1,50 +1,31 @@
-2026-11-01 05:47:52,490 looper.agents.serve INFO shutdown mode=detach_kept
-2026-11-01 05:47:52,493 looper.agents.tiers.worker INFO detach run=worker-5f9c3e834b42 offset=628
-2026-11-01 05:47:54,737 looper.agents.kept_dirs INFO kept runs at start ended={} released=0 unidentified=0 candidates=1
-2026-11-01 05:47:55,173 looper.agents.tiers.worker INFO adopt run=worker-5f9c3e834b42 offset=628
-2026-11-01 05:47:55,174 looper.agents.tiers.worker INFO adopt run=worker-5f9c3e834b42 replay_events=6 replay_ms=0
-2026-11-01 05:48:17,074 looper.agents.serve INFO shutdown mode=end_runs
-2026-11-01 05:48:17,902 looper.agents.kept_dirs INFO kept runs at start ended={} released=0 unidentified=0 candidates=0
-2026-11-01 05:48:22,073 looper.agents.serve INFO shutdown mode=detach_kept
-2026-11-01 05:48:22,076 looper.agents.tiers.worker INFO detach run=worker-aa2b0e157d01 offset=412
-2026-11-01 05:48:29,681 looper.agents.kept_dirs INFO kept runs at start ended={} released=0 unidentified=0 candidates=1
-2026-11-01 05:48:30,304 looper.agents.tiers.worker INFO adopt run=worker-aa2b0e157d01 offset=412
-2026-11-01 05:48:30,305 looper.agents.tiers.worker INFO adopt run=worker-aa2b0e157d01 replay_events=4 replay_ms=0
-2026-11-01 05:49:03,123 looper.agents.serve INFO shutdown mode=end_runs
-2026-11-01 05:49:04,187 looper.agents.kept_dirs INFO kept runs at start ended={} released=0 unidentified=0 candidates=0
-2026-11-01 05:49:06,027 looper.agents.serve INFO shutdown mode=end_runs
-2026-11-01 05:49:07,263 looper.agents.kept_dirs INFO kept runs at start ended={} released=0 unidentified=0 candidates=0
-2026-11-01 05:49:09,870 looper.agents.serve INFO shutdown mode=detach_kept
-2026-11-01 05:49:09,872 looper.agents.tiers.worker INFO detach run=worker-0fa16df034f7 offset=0
-2026-11-01 05:49:26,286 looper.agents.kept_dirs INFO kept runs at start ended={} released=0 unidentified=0 candidates=1
-2026-11-01 05:49:26,877 looper.agents.tiers.worker INFO adopt run=worker-0fa16df034f7 offset=0
-2026-11-01 05:49:26,878 looper.agents.tiers.worker INFO adopt run=worker-0fa16df034f7 replay_events=0 replay_ms=0
-2026-11-01 05:49:40,788 looper.agents.serve INFO shutdown mode=detach_kept
-2026-11-01 05:49:40,792 looper.agents.tiers.worker INFO detach run=worker-172380917f3a offset=196
-2026-11-01 05:49:42,430 looper.agents.kept_dirs INFO kept runs at start ended={} released=0 unidentified=0 candidates=1
-2026-11-01 05:49:42,827 looper.agents.tiers.worker INFO adopt run=worker-172380917f3a offset=196
-2026-11-01 05:49:42,828 looper.agents.tiers.worker INFO adopt run=worker-172380917f3a replay_events=2 replay_ms=0
-2026-11-01 05:49:45,672 looper.agents.serve INFO shutdown mode=detach_kept
-2026-11-01 05:49:45,674 looper.agents.tiers.worker INFO detach run=worker-eda2c32c5c5e offset=304
-2026-11-01 05:49:47,116 looper.agents.kept_dirs INFO kept runs at start ended={} released=0 unidentified=0 candidates=1
-2026-11-01 05:49:47,526 looper.agents.tiers.worker INFO adopt run=worker-eda2c32c5c5e offset=304
-2026-11-01 05:49:47,526 looper.agents.tiers.worker INFO adopt run=worker-eda2c32c5c5e replay_events=3 replay_ms=0
-2026-11-01 05:49:50,943 looper.agents.serve INFO shutdown mode=end_runs
-2026-11-01 05:49:52,087 looper.agents.kept_dirs INFO kept runs at start ended={} released=0 unidentified=0 candidates=0
-    raise KeeperLost("the run's keeper process ended unexpectedly")
-looper.agents.kept_run.KeeperLost: the run's keeper process ended unexpectedly
-2026-11-01 05:50:41,719 looper.agents.control_plane ERROR control plane lock lost reason=lock connection closed; exiting without touching runs
-2026-11-01 05:50:42,711 looper.agents.kept_dirs INFO kept runs at start ended={'no_detach': 1} released=0 unidentified=0 candidates=0
-2026-11-01 05:50:44,672 looper.agents.serve INFO shutdown mode=detach_kept
-2026-11-01 05:50:44,676 looper.agents.tiers.worker INFO detach run=worker-ce86e1110de0 offset=304
-2026-11-01 05:50:45,956 looper.agents.kept_dirs INFO kept runs at start ended={'keeper_dead': 1} released=0 unidentified=0 candidates=0
-2026-11-01 05:51:50,583 looper.agents.serve INFO shutdown mode=detach_kept
-2026-11-01 05:51:50,586 looper.agents.tiers.worker INFO detach run=worker-8aa3c02a9628 offset=301
-2026-11-01 05:51:56,752 looper.agents.kept_dirs INFO kept runs at start ended={} released=0 unidentified=0 candidates=1
-2026-11-01 05:51:57,837 looper.agents.tiers.worker INFO adopt run=worker-8aa3c02a9628 offset=301
-2026-11-01 05:51:57,838 looper.agents.tiers.worker INFO adopt run=worker-8aa3c02a9628 replay_events=3 replay_ms=0
-2026-11-01 05:53:29,992 looper.agents.serve INFO shutdown mode=detach_kept
-2026-11-01 05:53:30,017 looper.agents.tiers.worker INFO detach run=worker-06640957f4b8 offset=193
-2026-11-01 05:53:35,973 looper.agents.kept_dirs INFO kept runs at start ended={} released=0 unidentified=0 candidates=1
-2026-11-01 05:53:36,893 looper.agents.tiers.worker INFO adopt run=worker-06640957f4b8 offset=193
-2026-11-01 05:53:36,894 looper.agents.tiers.worker INFO adopt run=worker-06640957f4b8 replay_events=2 replay_ms=0
+[upgrade]
+detach run=worker-aa2b0e157d01 offset=412
+adopt run=worker-aa2b0e157d01 offset=412
+adopt run=worker-aa2b0e157d01 replay_events=4 replay_ms=0
+
+[finished while down]
+detach run=worker-172380917f3a offset=196
+adopt run=worker-172380917f3a offset=196
+adopt run=worker-172380917f3a replay_events=2 replay_ms=0
+
+[turns drain restart]
+detach run=worker-eda2c32c5c5e offset=304
+adopt run=worker-eda2c32c5c5e offset=304
+adopt run=worker-eda2c32c5c5e replay_events=3 replay_ms=0
+
+[plain restart]
+shutdown mode=end_runs
+
+[lock loss]
+control plane lock lost reason=lock connection closed; exiting without touching runs
+kept runs at start ended={'no_detach': 1} released=0 unidentified=0 candidates=0
+last exit code = 75: EX_TEMPFAIL
+
+[keeper dies in gap]
+detach run=worker-ce86e1110de0 offset=304
+kept runs at start ended={'keeper_dead': 1} released=0 unidentified=0 candidates=0
+
+[bridge reconnect]
+detach run=worker-8aa3c02a9628 offset=301
+adopt run=worker-8aa3c02a9628 offset=301
+adopt run=worker-8aa3c02a9628 replay_events=3 replay_ms=0

@@ -49,7 +49,7 @@ with a no-package installer hook, not another package upgrade.
 | Scenario | Observed result | Evidence |
 |---|---|---|
 | Scripted upgrade, supplementary to RFC case 7 | CLI plans `CONTROL_PLANE`; `kept_before=1`, `adopted=1`; keeper 61357 and child 61360 retain PID, PGID and start time. Record 5 is completed, event counts are 35/35, step `s1` retains its Worker id. | [Plan](plan.txt), [reports](deploy-reports.json), [process snapshots](processes.txt), [SQL readback](sql.txt) |
-| Dashboard continuity | Exactly one “Worker dispatched”, one “carried on across the restart”, one “Worker finished”; asserted against the rendered DOM. The command row containing local paths is masked. | [Timeline screenshot](timeline.png) |
+| Dashboard continuity | Exactly one “Worker dispatched”, one “carried on across the restart”, one “Worker finished”; asserted against the rendered DOM. The curated timeline extract omits command and transcript rows. | [Timeline extract](timeline.txt) |
 | RFC case 8 | The child exits while launchd has no loaded service; startup replays its log. One completed Worker record, one dispatch and one finish; event counts 6/6. | [Outcomes](outcomes.json), [log excerpts](log-excerpts.txt) |
 | RFC case 12, turns drain then CLI restart | Keeper and child survive launchd `bootout`/`bootstrap` with unchanged PIDs; startup adopts one of one. | [Process snapshots](processes.txt), [outcomes](outcomes.json), [log excerpts](log-excerpts.txt) |
 | RFC case 12, plain CLI restart | The previous keeper and child end; the old record is interrupted and adopted count is zero. The saved task then resumes with a replacement run, which is stopped during cleanup. | [Outcomes](outcomes.json), [log excerpts](log-excerpts.txt) |
@@ -91,9 +91,11 @@ with a no-package installer hook, not another package upgrade.
 
 - **RFC case 7 with the real Claude CLI:** isolated `claude auth status` returned
   `loggedIn=false`; isolated `codex login status` returned `Not logged in`.
-  The requested sonnet edits and two Bash `sleep 90` calls were not executed.
-  The scripted upgrade and screenshot are supplementary evidence, not a pass
-  of this real-model acceptance case.
+  The requested sonnet edits and two Bash `sleep 90` calls were not executed
+  in this PR.
+  The scripted upgrade and timeline extract are supplementary evidence, not a pass
+  of this real-model acceptance case. This case is being run separately, and its
+  result will be posted on this PR.
 - **Linux user systemd:** no Linux host with an available user systemd session
   was supplied. Effective-KillMode/drop-in handling has regression coverage;
   real `systemctl --user` restart survival and the harmless “left-over process”
@@ -105,7 +107,10 @@ with a no-package installer hook, not another package upgrade.
 ## Metrics
 
 These are single observations with scripted peers, not performance estimates
-for real Claude runs. RSS is in KiB from `ps`.
+for real Claude runs. RSS is in KiB from `ps`. The curated process snapshots
+retain only process identity and start time; `ppid=unknown` means it was not
+captured, and `sid` retains the captured `SESS` value. RSS observations from the
+original snapshots are retained in the table below.
 
 | Observation | Keepers | Keeper RSS | Drain seconds | Gap seconds | Replay |
 |---|---:|---|---:|---:|---|
