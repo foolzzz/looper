@@ -14,7 +14,7 @@ import pytest
 from looper.agents.drain import DrainScope, DrainState
 from looper.agents.scheduler import START_RETRY_AFTER, Scheduler
 from looper.db import connection as db_connection, schedules as db_schedules, tasks as db_tasks
-from tests.db_support import DSN
+from tests.db_support import DSN, until
 from tests.schedule_support import ScheduleEnv, run_scheduled
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -202,6 +202,77 @@ def test_drain_during_an_agent_firing_rolls_it_back(monkeypatch: pytest.MonkeyPa
         finally:
             release.set()
             await asyncio.gather(job, return_exceptions=True)
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("entry", ["due", "manual", "queued"])
+@pytest.mark.parametrize("recovery", ["cancel", "restart"])
+def test_drain_as_a_gated_firing_commits_defers_its_gate(monkeypatch: pytest.MonkeyPatch,
+                                                       tmp_path: Path, entry: str, recovery: str) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        drain = DrainState()
+        env.scheduler = Scheduler(bus=env.bus, clock=env.clock, drain=drain)
+        drain.add_source(env.scheduler.drain_waiting)
+        sid = (await env.enabled(gate_command="printf work >> gate-started; printf work"))["schedule_id"]
+        queued_id = None
+        if entry == "due":
+            await env.due(sid)
+        elif entry == "queued":
+            queued_id = await db_schedules.insert_run(env.pool, schedule_id=sid, scheduled_for=env.clock.now,
+                                                      trigger="manual", status=db_schedules.QUEUED)
+        transaction = db_connection.transaction
+        armed = True
+
+        @asynccontextmanager
+        async def draining_commit() -> AsyncIterator[Any]:
+            nonlocal armed
+            async with transaction() as conn:
+                yield conn
+            if armed:
+                armed = False
+                assert drain.begin(DrainScope.RUNS)["waiting"]["starting"] == 1
+
+        with monkeypatch.context() as patch:
+            patch.setattr(db_connection, "transaction", draining_commit)
+            if entry == "manual":
+                await env.scheduler.run_now(sid)
+            else:
+                await env.scheduler.tick()
+        await asyncio.wait_for(env.scheduler.idle(), 5)
+        run, = await env.runs(sid)
+        assert run["status"] == db_schedules.QUEUED
+        if queued_id is not None:
+            assert run["run_id"] == queued_id
+        assert (await db_schedules.get_run(run["run_id"]))["deferred_by_drain"] is True
+        assert run["task_id"] is None
+        marker = tmp_path / "gate-started"
+        assert not marker.exists()
+        assert await env.pool.fetchval("SELECT count(*) FROM tasks WHERE schedule_id = $1", sid) == 0
+        assert env.bus.of("task_start") == []
+        assert env.scheduler.drain_waiting() == {"gates": 0, "starting": 0}
+        assert drain.snapshot()["phase"] == "drained"
+
+        await env.scheduler.tick()
+        assert (await db_schedules.get_run(run["run_id"]))["status"] == db_schedules.QUEUED
+        assert not marker.exists()
+        if recovery == "cancel":
+            drain.cancel()
+            await env.scheduler.tick()
+        else:
+            await env.scheduler.stop()
+            env.scheduler = Scheduler(bus=env.bus, clock=env.clock, drain=DrainState())
+            await env.scheduler.start()
+            await until(lambda: env.bus.of("task_start"), timeout=5)
+        await asyncio.wait_for(env.scheduler.idle(), 5)
+        started, = await env.runs(sid)
+        assert started["run_id"] == run["run_id"]
+        assert started["status"] == db_schedules.RUNNING
+        assert started["gate_output"] == "work"
+        assert (await db_schedules.get_run(started["run_id"]))["deferred_by_drain"] is True
+        assert marker.read_text() == "work"
+        assert env.bus.of("task_start") == [started["task_id"]]
+        assert await env.pool.fetchval("SELECT consecutive_failures FROM schedules WHERE id = $1", sid) == 0
 
     run_scheduled(test, monkeypatch, tmp_path)
 

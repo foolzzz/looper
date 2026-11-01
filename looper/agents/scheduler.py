@@ -423,9 +423,19 @@ class Scheduler:
             raise _DrainBegan(schedule["id"])
 
     async def _defer_start(self, schedule: Mapping[str, Any], launched: _Launched) -> None:
-        """The commit landed after drain.begin: the task stays ready, and _settle's start retry starts it once
-        the service serves again. A gate was admitted with its run and still finishes during the drain."""
-        if launched.task_id and self._agent_admission_closed(schedule["kind"]):
+        """The commit landed after drain.begin: keep the task ready or queue the unstarted gate before
+        releasing admission. Both resume once the service serves again."""
+        if not self._agent_admission_closed(schedule["kind"]):
+            return
+        if launched.gate is not None:
+            await db_connection.get_pool().execute(
+                "UPDATE schedule_runs SET status = 'queued', deferred_by_drain = true "
+                "WHERE id = $1 AND status = 'gating'", launched.run_id,
+            )
+            logger.info("schedule %s: a drain began as run %s committed; gate start deferred by the drain",
+                        schedule["id"], launched.run_id)
+            launched.gate = None
+        if launched.task_id:
             await db_connection.get_pool().execute(
                 "UPDATE schedule_runs SET deferred_by_drain = true "
                 "WHERE task_id = $1 AND status = 'running' AND started_at IS NULL", launched.task_id,
