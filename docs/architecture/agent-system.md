@@ -4381,6 +4381,12 @@ It prints `NOOP`, `WEB_ONLY`, `CONTROL_PLANE` or `FULL`, the changed components
 and the reason. Keeper mode is off in S0, so every control-plane change plans
 `FULL`. The upgrade refuses unless it runs with the service's own `looper` and checkout.
 
+If the service is stopped or killed during the drain, the upgrade starts it
+again, undoing even an explicit stop during the drain, unless the old process
+is still alive or another process holds the port. If the service manager has
+already restarted the unit, the upgrade starts nothing and waits up to
+`--timeout` for it to answer before reporting whether it is serving.
+
 `looper/components.toml` declares component globs, runner packaging aliases
 and explicit ignores. A normal-suite test rejects unclassified tracked files.
 Git objects are read with `git cat-file --batch`; wheels are read as ZIP files.
