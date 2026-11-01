@@ -75,7 +75,10 @@ async def clean_directory(directory: Path) -> None:
         await proc_tree.end_orphan(child, started, label='kept-run test cleanup')
     pid, started = state.get('keeper_pid'), state.get('keeper_started')
     if pid and started and live(pid) and proc_tree._start_time(pid) == started:
-        os.kill(pid, signal.SIGTERM)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass  # The keeper can exit after its child, between the identity check and the signal.
         await eventually(lambda: not live(pid), timeout=10)
     shutil.rmtree(directory, ignore_errors=True)
     if child:
