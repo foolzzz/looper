@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.70] - 2026-11-01
+
+### Changed
+
+- **The Agent API bridge reconnects and retries for kept runs.** The MCP entry of a kept run now sets `LOOPER_AGENT_RECONNECT_SECONDS=120` (configurable up to 600). `looper mcp-server` then retries refused connections and HTTP 503 with an integer `Retry-After`, since neither executed the call. Other connection failures retry only `GET /tools` and tools the kept grant lists as read-only (`looper_room_roster`, `looper_room_read`, `looper_vault_search`, `looper_vault_read`, and `looper_room_inbox` only with `peek=true`); timeouts and writes never retry. For kept runs' tokens, `GET /api/agent/v1/tools` adds a `retry_safety` map. A lost `looper_room_inbox` response without `peek` now returns an error that tells the agent to peek and to recover messages with `looper_room_read`. Manager, Planner, runs that are not kept and installations with keeper off are unchanged. A kept run that ends or fails adoption now also announces that it left its task's room. ([#1062](https://github.com/foolzzz/looper/pull/1062))
+
 ## [2.14.69] - 2026-11-01
 
 ### Changed
