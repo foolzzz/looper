@@ -25,7 +25,7 @@ async def fresh_schema(*, max_size: int = 3) -> AsyncIterator[Any]:
     import asyncpg
 
     schema = f"looper_test_{uuid.uuid4().hex[:12]}"
-    admin = await asyncpg.connect(DSN)
+    admin = await asyncpg.connect(DSN, server_settings={"application_name": f"looper test schema {schema}"})
     await admin.execute(f'CREATE SCHEMA "{schema}"')
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=max_size, server_settings={"search_path": schema})
     try:

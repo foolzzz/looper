@@ -18,6 +18,24 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.58] - 2026-10-31
+
+### Fixed
+
+- **`looper service upgrade` and `looper service restart --drain` start a service that exited during the drain.** The service may exit while it drains (a crash, an OOM kill or `kill`); recovery then only cancelled the drain and left the unit down until `looper service restart`. When the saved PID is gone, the service manager reports nothing running and nothing listens on the port, recovery now starts the unit (the code that was running, since nothing is installed yet). If the port is closed but the old PID is still alive, it waits for it to exit first. If something runs or listens, it starts nothing, only cancels the drain, and reports a port conflict or waits up to `--timeout` for a unit the service manager already restarted. Behavior with a live PID is unchanged. ([#1030](https://github.com/foolzzz/looper/pull/1030))
+
+## [2.14.57] - 2026-10-31
+
+### Fixed
+
+- **`looper service upgrade` refuses import and repository overrides from the caller's shell, and runs its tools without them.** The upgrade did not check where the running CLI code came from and passed the caller's whole environment to `uv sync`, `npm ci` and the dashboard build, which git also inherits. It now refuses, before it reads the unit and also with `--dry-run`, when the shell sets `PYTHONPATH`, `PYTHONHOME` or `PYTHONUSERBASE` (non-empty) or `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY` or `GIT_ALTERNATE_OBJECT_DIRECTORIES`; and, before it contacts the service, when the running CLI's package root is not the unit's. `uv`, `npm` and the wheel installers run without any `PYTHON*` variable or `VIRTUAL_ENV`; PATH, HOME, proxies, certificates, package indexes, mirrors and caches still reach them. ([#1031](https://github.com/foolzzz/looper/pull/1031))
+
+## [2.14.56] - 2026-10-31
+
+### Fixed
+
+- **Deleting a command schedule with a running run is refused before the user is asked.** The service already refused with 409 because the runner outlives the server, but the Manager (`looper_schedules`) and the client API (`/api/v1/schedule_admin/delete`) still asked for confirmation, and the Manager said the running task "goes on and ends normally". Both now answer `conflict` up front with the service's message (disable the schedule and wait for the run to end); the service's check stays the authority for a run that starts after the question. For a command schedule without a running run, the confirmation says a queued run will not execute and that there are no tasks. Agent schedule deletion is unchanged. The `looper_schedules` tool description changes accordingly. ([#1032](https://github.com/foolzzz/looper/pull/1032))
+
 ## [2.14.55] - 2026-10-31
 
 ### Fixed

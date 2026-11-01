@@ -89,6 +89,12 @@ CAPTURED_NAMES = (
 # What `install` copied before the ops file, by prefix: a variable of these it no longer copies is named in its report.
 FORMER_PREFIXES = ("LOOPER_", "LOOPX_", "ANTHROPIC_", "LARK_")
 
+# What makes a Python process import from elsewhere than its own install: refused in the unit and in the caller's shell.
+_PYTHON_IMPORT_OVERRIDES = ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE")
+# What makes git act on another repository than the one `-C` names.
+_GIT_REPOSITORY_OVERRIDES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                             "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _STOP_WAIT_SECONDS = 30.0  # launchd sends SIGKILL 20 s after SIGTERM by default
 _POLL_SECONDS = 0.5
@@ -1076,6 +1082,14 @@ def _dashboard_safe_wheel(source: str, directory: Path):
                     csv.writer(output).writerows(dashboard_rows)
 
 
+def _tool_environment(host: Host) -> dict[str, str]:
+    """The caller's environment for the upgrade's uv, npm and installers, without what makes a Python child import
+    from, or a tool target, another environment: every PYTHON* variable and an active virtual environment.
+    Package sources, proxies, certificates and caches stay."""
+    return {name: value for name, value in host.environ.items()
+            if not name.startswith("PYTHON") and name != "VIRTUAL_ENV"}
+
+
 def _wheel_install_environment(host: Host, package_root: Path) -> dict[str, str]:
     # Inspect the interpreter's prefix scheme, then use that same prefix for both
     # installers. An editable checkout or a user/target install is not this scheme.
@@ -1091,10 +1105,10 @@ def _wheel_install_environment(host: Host, package_root: Path) -> dict[str, str]
                            f"paths {purelib} and {platlib}; refusing to install a wheel")
     redirects = {"PIP_TARGET", "PIP_PREFIX", "PIP_ROOT", "PIP_USER", "PIP_PYTHON",
                  "UV_TARGET", "UV_PREFIX", "UV_PYTHON", "UV_PROJECT_ENVIRONMENT", "UV_SYSTEM_PYTHON",
-                 "UV_CONFIG_FILE", "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"}
+                 "UV_CONFIG_FILE"}
     # PIP_CONFIG_FILE=/dev/null disables global, user and venv-local pip config;
     # uv's no-config mode likewise prevents project/user config from retargeting.
-    return {**{name: value for name, value in host.environ.items() if name not in redirects},
+    return {**{name: value for name, value in _tool_environment(host).items() if name not in redirects},
             "PIP_CONFIG_FILE": os.devnull, "PIP_PREFIX": str(prefix), "UV_NO_CONFIG": "true"}
 
 
@@ -1153,15 +1167,15 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
         # Pin the preflight result even if the caller's environment changes while draining.
         _checked(host, ["uv", "sync", "--project", str(host.cwd), "--python", host.executable,
                         "--extra", "test", "--inexact"], installing=True,
-                 env={**host.environ, "UV_PROJECT_ENVIRONMENT": str(sync_environment)})
+                 env={**_tool_environment(host), "UV_PROJECT_ENVIRONMENT": str(sync_environment)})
     if not build_web:
         return None
     web = host.cwd / "web"
     staged = Path(tempfile.mkdtemp(prefix=".dist-upgrade-", dir=web))
     try:
-        _checked(host, ["npm", "ci", "--prefix", str(web)], installing=True)
+        _checked(host, ["npm", "ci", "--prefix", str(web)], installing=True, env=_tool_environment(host))
         _checked(host, ["env", f"PYTHON={host.executable}", "npm", "run", "build", "--prefix", str(web),
-                        "--", "--outDir", str(staged)], installing=True)
+                        "--", "--outDir", str(staged)], installing=True, env=_tool_environment(host))
         if not (staged / "index.html").is_file():
             raise ServiceError("the dashboard build did not produce index.html")
         record_web_source(host.cwd, staged)
@@ -1244,6 +1258,16 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
         except (ServiceError, OSError):
             pass  # The old process may already have closed its listener.
 
+    def port_conflict() -> ServiceError:
+        answer = host.get_status(port, token, "127.0.0.1") or {}
+        if "pid" not in answer:
+            try:
+                answer = host.system_operation(port, token, "health", {})
+            except (ServiceError, OSError):
+                pass
+        owner = f" (pid {answer['pid']})" if answer.get("pid") is not None else ""
+        return ServiceError(f"port {port} is served by another process{owner}; not starting a second server")
+
     report = {"plan": plan.kind.value, "reasons": list(plan.reasons), "drain_seconds": 0.0,
               "gap_seconds": 0.0, "interrupted": [], "kept_before": 0, "adopted": 0,
               "running_code_fingerprint": running.components["control_plane"],
@@ -1317,12 +1341,27 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                     while host.pid_alive(before):
                         renew()
                         if host.clock() >= deadline:
-                            report["recovery_error"] = ("the old service process is still running; "
-                                                        "run `looper service restart` once it exits")
+                            report["recovery_error"] = (f"the old service process {before} is still running; "
+                                                        "start it with `looper service restart` once it exits")
                             break
                         host.sleep(_POLL_SECONDS)
                     else:
                         stopped = True
+                elif not stop_attempted and before is not None and not host.port_in_use(port):
+                    # Shutdown closes HTTP before the process exits; wait without renewing the drain.
+                    deadline = host.clock() + _STOP_WAIT_SECONDS
+                    while host.pid_alive(before):
+                        if host.clock() >= deadline:
+                            report["recovery_error"] = (f"the old service process {before} is still running; "
+                                                        "start it with `looper service restart` once it exits")
+                            break
+                        host.sleep(_POLL_SECONDS)
+                    else:
+                        if not mgr.state().running and not host.port_in_use(port):
+                            stopped = True
+                if (not stop_attempted and not stopped and before is not None and not host.pid_alive(before)
+                        and not mgr.state().running and host.port_in_use(port)):
+                    raise port_conflict()
                 # A timed-out start can leave a loaded unit or a partial process.
                 # Retry the current install from a stopped unit before cancelling.
                 if stopped:
@@ -1336,14 +1375,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                         # bootstrap needs a completed bootout even without a PID.
                         _stop_with_renewal(mgr, renew)
                     if host.port_in_use(port):
-                        answer = host.get_status(port, token, "127.0.0.1") or {}
-                        if "pid" not in answer:
-                            try:
-                                answer = host.system_operation(port, token, "health", {})
-                            except (ServiceError, OSError):
-                                pass
-                        raise ServiceError(f"port {port} is served by pid {answer.get('pid', 'unknown')}; "
-                                           "refusing to start another service")
+                        raise port_conflict()
                     _start_and_wait(mgr, port, log_path, timeout, root)
             except Exception as cancel_error:
                 report["recovery_error"] = str(cancel_error)
@@ -1353,6 +1385,14 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 report["recovery_error"] = "; ".join(filter(None, (report.get("recovery_error"), str(cancel_error))))
         try:
             answer = host.get_status(port, token, "127.0.0.1")
+            if answer is None and draining and not stop_attempted and before is not None:
+                state = mgr.state()
+                if state.running and ((state.pid is not None and state.pid != before) or not host.pid_alive(before)):
+                    # KeepAlive may have respawned the unit before it opens HTTP.
+                    deadline = host.clock() + timeout
+                    while answer is None and host.clock() < deadline:
+                        host.sleep(min(1.0, deadline - host.clock()))
+                        answer = host.get_status(port, token, "127.0.0.1")
             report["serving"] = answer is not None and answer.get("status") != "unauthorized"
         except Exception:
             report["serving"] = False
@@ -1406,7 +1446,7 @@ def _unit_package_root(host: Host, mgr: _Manager) -> Path:
             environment = dict(word.split("=", 1)
                 for line in mgr.unit_path.read_text().splitlines() if line.startswith("Environment=")
                 for word in _systemd_words(line.removeprefix("Environment=").replace("$$", "$$$$")) if "=" in word)
-        overrides = [name for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE") if environment.get(name)]
+        overrides = [name for name in _PYTHON_IMPORT_OVERRIDES if environment.get(name)]
         if overrides:
             raise ServiceError("the service unit overrides Python imports with " + ", ".join(overrides)
                                + "; reinstall the unit without these overrides before upgrading")
@@ -1443,6 +1483,13 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
     from ..upgrade import UpgradeKind, decide, scan_keepers
 
     try:
+        # Python ignores empty import overrides (including an exported PYTHONPATH=""); git's empty overrides still act.
+        overrides = [name for name in _PYTHON_IMPORT_OVERRIDES if host.environ.get(name)]
+        overrides += [name for name in _GIT_REPOSITORY_OVERRIDES if name in host.environ]
+        if overrides:
+            raise ServiceError(f"{', '.join(overrides)} set in this shell can make the upgrade run other code or act on "
+                               f"another repository than the service's; unset {'it' if len(overrides) == 1 else 'them'} "
+                               "and run looper service upgrade again")
         wheel = bool(to and to.endswith(".whl"))
         source = str(Path(to).resolve()) if wheel else to or "origin/main"
         mgr = manager(host, label)
@@ -1460,6 +1507,9 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         package_root = _unit_package_root(host, mgr)
         if not wheel and host.cwd.resolve() != package_root:
             raise ServiceError(f"{host.cwd.resolve()} is not the service's checkout {package_root}")
+        if host.package_root.resolve() != package_root:
+            raise ServiceError(f"this looper runs the code in {host.package_root.resolve()}, not the service's "
+                               f"{package_root}; run looper service upgrade with the service's own looper")
         if not dry_run and not wheel:
             if _checked(host, ["git", "-C", str(host.cwd), "status", "--porcelain", "--untracked-files=no"]):
                 raise ServiceError("the installed checkout has tracked changes; refusing to upgrade")

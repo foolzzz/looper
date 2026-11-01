@@ -122,7 +122,8 @@ def test_smoke_readiness_uses_v1_and_checks_the_response(tmp_path, status_data, 
     def no_retry(_seconds):
         raise AssertionError("readiness request failed")
 
-    monkeypatch.setattr(smoke.time, "sleep", no_retry)
+    # Keep the retry guard local: subprocess timeout waits also use time.sleep.
+    monkeypatch.setattr(smoke, "time", SimpleNamespace(sleep=no_retry, monotonic=smoke.time.monotonic))
 
     class Ready(Exception):
         pass
