@@ -350,23 +350,31 @@ def test_command_delete_running_dialog_accepts_alternative_explanations(monkeypa
     assert dialogs.select([case_id])[0].says[0].check(look) is None
 
 
-@pytest.mark.parametrize("mutation", [None, "disabled", "no_confirmation", "no_question", "claims_disabled"])
-def test_busy_disable_followup_waits_for_confirmation(monkeypatch, mutation):
-    actions = [action("looper_schedules", "disable", status="needs_confirmation")]
-    schedule = {"schedule_id": "busy-id", "enabled": True}
-    look = observed(monkeypatch, {}, actions, reply="要停用这个定时任务吗？回复「确认」就执行。")
+@pytest.mark.parametrize("mutation", [None, "enabled", "deleted", "needs_confirmation", "error", "confirmed",
+                                      "no_running", "no_queued", "extra_write", "wrong_action"])
+def test_busy_disable_followup_runs_without_confirmation(monkeypatch, mutation):
+    actions = [action("looper_schedules", "disable")]
+    schedule = {"schedule_id": "busy-id", "enabled": False}
+    runs = [{"status": "running"}, {"status": "queued"}]
+    look = observed(monkeypatch, {}, actions, reply="已停用。当前命令照常结束，排队中的运行随后启动。")
     monkeypatch.setattr(dialogs, "_named", lambda *_: schedule)
-    monkeypatch.setattr(look.api, "post", lambda *_: {"result": {"runs": [{"status": "running"}, {"status": "queued"}]}})
+    monkeypatch.setattr(look.api, "post", lambda *_: {"result": {"runs": runs}})
     check = dialogs.select(["schedule_command_delete_running_queued"])[0].says[1].check
     assert check(look) is None
-    if mutation == "disabled":
-        schedule["enabled"] = False
-    elif mutation == "no_confirmation":
-        actions[0]["status"] = "ok"
-    elif mutation == "no_question":
-        look.reply = "请等待命令结束。"
-    elif mutation == "claims_disabled":
-        look.reply += "已停用。"
+    if mutation == "enabled":
+        schedule["enabled"] = True
+    elif mutation == "deleted":
+        monkeypatch.setattr(dialogs, "_named", lambda *_: None)
+    elif mutation in {"needs_confirmation", "error"}:
+        actions[0]["status"] = mutation
+    elif mutation == "confirmed":
+        actions[0]["confirmation_id"] = "c-test"
+    elif mutation in {"no_running", "no_queued"}:
+        runs[:] = [run for run in runs if run["status"] != mutation.removeprefix("no_")]
+    elif mutation == "extra_write":
+        actions.append(action("looper_schedules", "delete"))
+    elif mutation == "wrong_action":
+        actions[0]["arguments"]["action"] = "delete"
     assert (check(look) is None) is (mutation is None)
 
 

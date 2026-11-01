@@ -1133,33 +1133,18 @@ def _busy_delete_refused(look: Look, *, queued: bool = False) -> str | None:
     return _raw_json(look.reply)
 
 
-def _busy_disable_asked(look: Look) -> str | None:
-    schedule = _named(look, BUSY)
-    if schedule is None or not schedule["enabled"]:
-        return "the busy command schedule was deleted or disabled before confirmation"
-    runs = look.api.post("/api/v1/schedule_admin/runs", {"schedule_id": schedule["schedule_id"]})["result"]["runs"]
-    if not all(any(run["status"] == status for run in runs) for status in ("running", "queued")):
-        return "the running or queued command run disappeared before confirmation"
-    writes = [a for a in look.turn_actions() if a["risk"] != "read"]
-    if (len(writes) != 1 or writes[0]["tool"] != "looper_schedules"
-            or writes[0]["arguments"].get("action") != "disable" or writes[0]["status"] != "needs_confirmation"):
-        return "disabling the busy command schedule did not wait for confirmation"
-    if not re.search(r"(?:要|是否|需要)[^。！？!?\n]*停用[^。！？!?\n]*[？?]", look.reply) or "确认" not in look.reply:
-        return "the reply does not ask the user to confirm disabling"
-    if re.search(r"已(?:经)?[^。！？!?\n]*(?:停用|禁用)", look.reply):
-        return "the reply claims the schedule was disabled before confirmation"
-    return _raw_json(look.reply)
-
-
-def _busy_disabled_on_confirmation(look: Look) -> str | None:
+def _busy_disabled(look: Look) -> str | None:
     schedule = _named(look, BUSY)
     if schedule is None or schedule["enabled"]:
-        return "the confirmed disable was not applied"
+        return "the busy command schedule was deleted or remains enabled"
+    runs = look.api.post("/api/v1/schedule_admin/runs", {"schedule_id": schedule["schedule_id"]})["result"]["runs"]
+    if not all(any(run["status"] == status for run in runs) for status in ("running", "queued")):
+        return "the running or queued command run disappeared after disabling"
     writes = [a for a in look.turn_actions() if a["risk"] != "read"]
     if (len(writes) != 1 or writes[0]["tool"] != "looper_schedules"
             or writes[0]["arguments"].get("action") != "disable" or writes[0]["status"] != "ok"
-            or not writes[0]["confirmation_id"]):
-        return "the busy command schedule was disabled without its confirmed call"
+            or writes[0].get("confirmation_id")):
+        return "the busy command schedule was not disabled immediately on the user's request"
     return _raw_json(look.reply)
 
 
@@ -1851,10 +1836,8 @@ DIALOGS: tuple[Dialog, ...] = (
             (("looper_schedules", {"action": "delete", "schedule": BUSY}),
              ("__reply__", {"text": "没有删除：命令正在运行，等命令结束后才能删除。要先停用定时任务，阻止新的触发吗？"
                                      "排队中的运行即使停用也会在当前命令结束后开始。"}))),
-        Say("那先停用它。", _busy_disable_asked,
+        Say("那先停用它。", _busy_disabled,
             (("looper_schedules", {"action": "disable", "schedule": BUSY}),)),
-        Say("确认。", _busy_disabled_on_confirmation,
-            (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     ), seed=lambda api, project_id: _make_busy_command_schedule(api, project_id, queued=True),
         tags=("manager", "schedules")),
     Dialog("schedule_template_create", (

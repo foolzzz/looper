@@ -38,7 +38,8 @@ def test_schedule_tool_delete_description_distinguishes_command_and_agent_schedu
         "(the user confirms first; an agent schedule's tasks stay; a command schedule is not deleted while its "
         "command runs: tell the user it can be deleted once the command finishes and that disabling it stops new "
         "fires but a queued run still starts after the running one, even when disabled; "
-        "disable it only if the user asks (disabling a running command schedule asks the user first); otherwise the delete "
+        "disable it only if the user asks (disabling it in the same turn after its delete was refused "
+        "asks the user first); otherwise the delete "
         "removes "
         "its runs and messages, and a queued run will not execute; a command schedule has no tasks)")
 
@@ -546,7 +547,10 @@ def test_disabling_right_after_a_refused_delete_asks_first(monkeypatch, tmp_path
         await _run_of(pool, sid, "running")
         if queued:
             await _run_of(pool, sid, "queued")
-        other = (await _schedule(project, "push", enabled=True))["schedule_id"] if target == "other" else None
+        other = (await _schedule(project, "push", enabled=True, kind="command", command="exit 0",
+                                 requirement=""))["schedule_id"] if target == "other" else None
+        if other:
+            await _run_of(pool, other, "running")
         chat = _Chat(tmp_path)
         refused, asked = await chat.say("删掉 pull", (TOOL, {"action": "delete", "schedule": "pull"}),
                                        (TOOL, {"action": "disable", "schedule": "push" if other else "pull"}))
@@ -566,16 +570,32 @@ def test_disabling_right_after_a_refused_delete_asks_first(monkeypatch, tmp_path
         done = await _confirm(chat, asked)
         assert done["status"] == "ok", done
         assert not await pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", sid)
-        await pool.execute("UPDATE schedules SET enabled = true WHERE id = $1", sid)
-        (done,) = await chat.say("停用 pull", (TOOL, {"action": "disable", "schedule": "pull"}))
-        assert done["status"] == "needs_confirmation", done
-        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", sid)
-        assert "- 删除没有执行" not in chat.turns[-1].blocks[0]
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("refused_delete", [False, True])
+def test_disabling_a_running_command_in_a_new_turn_runs_at_once(monkeypatch, tmp_path, queued, refused_delete):
+    async def test(pool):
+        sid = (await _schedule(await _project(pool, work_dir=str(tmp_path)), "pull", enabled=True,
+                               kind="command", command="exit 0", requirement="", overlap="queue"))["schedule_id"]
+        await _run_of(pool, sid, "running")
         if queued:
-            assert "停用不会取消它" in chat.turns[-1].blocks[0]
-        done = await _confirm(chat, done)
+            await _run_of(pool, sid, "queued")
+        runs = await pool.fetch("SELECT * FROM schedule_runs WHERE schedule_id = $1 ORDER BY id", sid)
+        chat = _Chat(tmp_path)
+        if refused_delete:
+            (refused,) = await chat.say("删掉 pull", (TOOL, {"action": "delete", "schedule": "pull"}))
+            assert _error(refused) == "conflict", refused
+            assert await pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", sid)
+        (done,) = await chat.say("停用 pull", (TOOL, {"action": "disable", "schedule": "pull"}))
         assert done["status"] == "ok", done
-        assert not await pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", sid)
+        assert not done["result"]["schedule"]["enabled"]
+        assert not chat.turns[-1].blocks
+        view = await _ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid})
+        assert view["schedule"]["enabled"] is False
+        assert view["schedule"]["next_fire_at"] is None
+        assert await pool.fetch("SELECT * FROM schedule_runs WHERE schedule_id = $1 ORDER BY id", sid) == runs
     run_db(test, monkeypatch, timeout=30)
 
 

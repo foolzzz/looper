@@ -2768,8 +2768,9 @@ evaluation is required before the original schedule requirement is complete.
   schedule has no tasks, and deletion is refused only while its command is
   running (409, saying it can be deleted once the command finishes, that disabling it first stops new fires,
   and that a queued run still starts after the running one even when the schedule is disabled;
-  the Manager and the client API refuse before asking, and the Manager's disable of a running command schedule
-  asks the user first, including in a later turn), because its runner
+  the Manager and the client API refuse before asking; disabling that schedule in the same Manager turn after
+  its delete was refused asks the user first, while a later user message or an independent client disable runs
+  immediately), because its runner
   outlives the server. Otherwise deleting a command schedule removes its runs
   and messages, and a queued run will not execute. For an agent schedule, a
   run in progress does not hold deletion up: a running task goes on and ends

@@ -351,6 +351,32 @@ def test_client_delete_of_a_running_command_schedule_is_refused_before_asking(tm
     run_db(run, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("refused_delete", [False, True])
+def test_client_disables_a_running_command_without_confirmation(tmp_path, monkeypatch, queued, refused_delete):
+    async def run(pool):
+        _, sid = await _seed(pool, kind="command", command="exit 0", requirement="", overlap="queue")
+        await schedules.update_schedule(sid, {"enabled": True})
+        await db_schedules.insert_run(pool, schedule_id=sid, scheduled_for=datetime.now(timezone.utc),
+                                      trigger="manual", status="running")
+        if queued:
+            await db_schedules.insert_run(pool, schedule_id=sid, scheduled_for=datetime.now(timezone.utc),
+                                          trigger="manual", status="queued")
+        runs = await db_schedules.open_runs(pool, sid)
+        async with _api(tmp_path, pool) as call:
+            if refused_delete:
+                status, refused = await call("/api/v1/ops/schedules/delete", {"schedule": sid}, client=True)
+                assert status == 409 and refused["error"]["code"] == "conflict"
+                assert (await db_schedules.get_schedule(sid))["enabled"]
+            status, result = await call("/api/v1/ops/schedules/disable", {"schedule": sid}, client=True)
+            assert status == 200, result
+            assert result["schedule"]["enabled"] is False
+            assert result["schedule"]["next_fire_at"] is None
+            assert (await call("get", {"schedule_id": sid}, client=True))[1]["schedule"]["enabled"] is False
+            assert await db_schedules.open_runs(pool, sid) == runs
+    run_db(run, monkeypatch, timeout=30)
+
+
 def test_confirming_deleted_schedule_rechecks_existence(tmp_path, monkeypatch):
     async def run(pool):
         _, sid = await _seed(pool)
