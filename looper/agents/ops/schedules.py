@@ -215,7 +215,8 @@ async def _schedules(call: Call) -> dict[str, Any]:
         return result
     await answered(schedules.delete_schedule(row["id"]))
     return {"deleted": row["name"], "schedule_id": row["id"], "project": row["project_name"],
-            "note": "the tasks it created stay; its run history was deleted with it"}
+            "note": "its run history was deleted with it" if row["kind"] == "command" else
+                    "the tasks it created stay; its run history was deleted with it"}
 
 
 def _fields(arguments: Mapping[str, Any], action: str) -> dict[str, Any]:
@@ -563,16 +564,23 @@ async def _deleting(call: Call) -> str | None:
     """What deleting a schedule does, for the user to confirm."""
     row = await _schedule(call.arguments)
     running = await db_schedules.open_runs(db_connection.get_pool(), row["id"])
+    if schedules.blocks_delete(row, running):
+        raise OpError(ErrorCode.CONFLICT, f"schedule {row['name']!r} in project {row['project_name']}: "
+                      f"{schedules.RUNNING_COMMAND_DELETE}")
     lines = [f"要删除定时任务「{row['name']}」（项目 {row['project_name']}）吗？",
              f"- 时间规则：{row['cron']}（{schedules.describe(row['cron'], row['timezone'])}），时区 {row['timezone']}",
              f"- 状态：{'已启用' if row['enabled'] else '已停用'}"]
     if running:
         states = "、".join(OPEN_WORDS.get(run["status"], run["status"]) for run in running)
-        lines.append(f"- 正在进行的运行：{len(running)} 次（{states}）。运行中的任务会继续，照常结束，之后不再记入这个"
-                     "定时任务，也不发通知；排队中和前置检查中的不会再开始任务。")
+        if row["kind"] == "command":
+            lines.append(f"- 正在进行的运行：{len(running)} 次（{states}）。排队中的运行不会再执行。")
+        else:
+            lines.append(f"- 正在进行的运行：{len(running)} 次（{states}）。运行中的任务会继续，照常结束，之后不再记入这个"
+                         "定时任务，也不发通知；排队中和前置检查中的不会再开始任务。")
     else:
         lines.append("- 正在进行的运行：没有")
-    lines.append("它建出的任务都保留；它的运行记录和通知记录会一起删除，不能恢复。")
+    lines.append("它的运行记录和通知记录会一起删除，不能恢复。" if row["kind"] == "command" else
+                 "它建出的任务都保留；它的运行记录和通知记录会一起删除，不能恢复。")
     return "\n".join(lines)
 
 
@@ -630,7 +638,10 @@ TOOLS: tuple[Tool, ...] = (
                     "get (with latest runs); create (disabled; "
                     "Looper shows it and asks whether to enable it); update; enable (it then fires unattended: "
                     "its task, or its command; the user confirms first) or disable; run now (the user confirms first); delete "
-                    "(the user confirms first; its tasks stay); reset_planner_session (the user confirms first; "
+                    "(the user confirms first; an agent schedule's tasks stay; deleting a command schedule is refused only "
+                    "while its command is running: disable it and wait for the run to end; otherwise the delete removes "
+                    "its runs and messages, and a queued run will not execute; a command schedule has no tasks); "
+                    "reset_planner_session (the user confirms first; "
                     "the next run starts fresh; a run in progress keeps its session and will not write it back).",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,

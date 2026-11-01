@@ -23,6 +23,11 @@ _REAL_INSTALLER = service._install_target
 _REAL_UNIT_PACKAGE_ROOT = service._unit_package_root
 
 
+def shell_environment():
+    return {name: value for name, value in os.environ.items()
+            if name not in (*service._PYTHON_IMPORT_OVERRIDES, *service._GIT_REPOSITORY_OVERRIDES)}
+
+
 def wheel_paths(host):
     return json.dumps([str(host.cwd / ".venv"), str(host.package_root), str(host.package_root)])
 
@@ -111,6 +116,48 @@ def report(deployment):
     return json.loads((deployment.root / "logs/serve.log").read_text().splitlines()[-1])
 
 
+@pytest.mark.parametrize("name,value", [
+    ("PYTHONPATH", "other"), ("GIT_DIR", "other"),
+    *((name, "") for name in service._GIT_REPOSITORY_OVERRIDES),
+])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_upgrade_refuses_shell_import_or_repository_overrides_before_contacting_service(
+        deployment, monkeypatch, name, value, dry_run, capsys):
+    deployment.host.environ = {name: value}
+    deployment.host.run = lambda *args, **kwargs: pytest.fail("must refuse before running git or Python")
+    deployment.host.get_components = lambda *args: pytest.fail("must refuse first")
+    monkeypatch.setattr(service, "manager", lambda *args: pytest.fail("must refuse before reading the unit"))
+    assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 1
+    assert deployment.events == []
+    assert name in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", service._PYTHON_IMPORT_OVERRIDES)
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_upgrade_allows_empty_shell_python_import_overrides(deployment, name, dry_run, capsys):
+    deployment.host.environ = {name: ""}
+    assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 0
+    if dry_run:
+        assert "FULL" in capsys.readouterr().out
+        assert deployment.events == []
+    else:
+        assert report(deployment)["status"] == "ok"
+        assert deployment.events[-3:] == ["stop", "install", "start"]
+
+
+@pytest.mark.parametrize("wheel", [False, True])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_upgrade_refuses_code_from_another_package_root(
+        deployment, tmp_path, monkeypatch, wheel, dry_run, capsys):
+    deployment.host.package_root = tmp_path / "other-checkout"
+    monkeypatch.setattr(service, "_unit_package_root", lambda *args: tmp_path.resolve())
+    flags = (["--to", "target.whl"] if wheel else []) + (["--dry-run"] if dry_run else [])
+    assert cli.main(["service", "upgrade", *flags]) == 1
+    assert deployment.events == []
+    error = capsys.readouterr().err
+    assert str(deployment.host.package_root) in error and str(tmp_path.resolve()) in error
+
+
 @pytest.mark.parametrize("dry_run", [False, True])
 @pytest.mark.parametrize("argv", [["/other/bin/looper", "serve"], []])
 def test_upgrade_refuses_another_interpreter_before_contacting_service(deployment, dry_run, argv, capsys):
@@ -197,7 +244,7 @@ def test_checkout_upgrade_refuses_foreign_sync_environment_before_drain(
     venv.EnvBuilder().create(environment)
     deployment.host.executable = str(environment / "bin/python")
     foreign = tmp_path / "other-venv"
-    deployment.host.environ = {**os.environ, "UV_PROJECT_ENVIRONMENT": str(foreign)}
+    deployment.host.environ = {**shell_environment(), "UV_PROJECT_ENVIRONMENT": str(foreign)}
     monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(foreign))
     run = deployment.host.run
 
@@ -235,7 +282,7 @@ def test_checkout_upgrade_pins_real_sync_to_preflight_interpreter(deployment, tm
         '[project]\nname = "sync-fixture"\nversion = "1.0.0"\nrequires-python = ">=3.11"\n'
         f'[project.optional-dependencies]\ntest = ["sync-probe @ {wheel.as_uri()}"]\n')
     deployment.host.executable = python
-    deployment.host.environ = {**os.environ, "HOME": str(deployment.host.home),
+    deployment.host.environ = {**shell_environment(), "HOME": str(deployment.host.home),
         "UV_PROJECT_ENVIRONMENT": environment.name, "UV_OFFLINE": "1", "UV_NO_CONFIG": "1",
         "UV_CACHE_DIR": str(tmp_path / "uv-cache"), "UV_PYTHON_DOWNLOADS": "never"}
     monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
@@ -712,7 +759,7 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_in_service_environment(
     monkeypatch.setenv("PIP_CONFIG_FILE", str(pip_config))
     # A venv-local config must also be ignored, independently of PIP_CONFIG_FILE.
     (environment / "pip.conf").write_text(f"[install]\ntarget = {redirected / 'site-config'}\n")
-    deployment.host.environ = dict(os.environ)
+    deployment.host.environ = shell_environment()
     operation = deployment.host.system_operation
 
     def drain(port, token, name, args):
@@ -845,6 +892,44 @@ def test_checkout_dashboard_build_uses_service_python(checkout_install):
     _REAL_INSTALLER(checkout_install.host, "candidate", wheel=False, build_web=True, dependencies=False)
     build = next(argv for argv in checkout_install.commands if "--outDir" in argv)
     assert build[:3] == ["env", "PYTHON=/service venv/bin/python", "npm"]
+
+
+@pytest.mark.parametrize("path", ["checkout", "wheel"])
+def test_upgrade_tools_run_without_python_or_virtualenv_overrides(
+        deployment, checkout_install, tmp_path, path):
+    host = deployment.host
+    host.environ = {"PATH": "/usr/bin", "HOME": str(tmp_path), "PYTHONSAFEPATH": "1", "PYTHONSTARTUP": "x",
+                    "VIRTUAL_ENV": str(tmp_path / "other-venv"), "HTTPS_PROXY": "http://proxy.example:3128",
+                    "UV_INDEX_URL": "https://mirror.example/simple", "npm_config_registry": "https://mirror.example/npm"}
+    if path == "checkout":
+        environments = []
+        run = host.run
+
+        def record(argv, **kwargs):
+            if argv[0] != "git":
+                environments.append(kwargs.get("env"))
+            return run(argv, **kwargs)
+
+        host.run = record
+        _REAL_INSTALLER(host, "candidate", wheel=False, build_web=True, dependencies=True,
+                        sync_environment=tmp_path / ".venv")
+        assert len(environments) == 3  # uv sync, npm ci and npm run build
+        assert environments[0]["UV_PROJECT_ENVIRONMENT"] == str(tmp_path / ".venv")
+    else:
+        host.environ["PIP_TARGET"] = "/x"
+        host.run = lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, wheel_paths(host), "")
+        environment = service._wheel_install_environment(host, host.package_root)
+        assert "PIP_TARGET" not in environment
+        assert environment["PIP_CONFIG_FILE"] == os.devnull
+        assert environment["PIP_PREFIX"] == str(tmp_path / ".venv")
+        assert environment["UV_NO_CONFIG"] == "true"
+        environments = [environment]
+    for environment in environments:
+        assert environment is not None
+        assert not any(name.startswith("PYTHON") for name in environment)
+        assert "VIRTUAL_ENV" not in environment
+        for name in ("PATH", "HOME", "HTTPS_PROXY", "UV_INDEX_URL", "npm_config_registry"):
+            assert environment[name] == host.environ[name]
 
 
 @pytest.mark.parametrize("existing", [False, True])
