@@ -45,27 +45,40 @@ def _manifest(*, changed: tuple[str, ...] = (), adoption_change: bool = False,
         (("web",), False, (), (), False, UpgradeKind.WEB_ONLY),
         (("control_plane",), False, (), (), False, UpgradeKind.FULL),
         (("web", "control_plane"), False, (), (), False, UpgradeKind.FULL),
-        (("control_plane",), True, (), ("1.0",), False, UpgradeKind.FULL),
-        (("control_plane",), True, ("1.0",), ("1.0",), True, UpgradeKind.FULL),
+        (("control_plane",), True, (), (("1.0",),), False, UpgradeKind.FULL),
+        (("control_plane",), True, ("1.0",), (("1.0",),), True, UpgradeKind.FULL),
         ((), True, (), (), True, UpgradeKind.FULL),
-        (("control_plane",), True, ("1.0",), ("1.0",), False, UpgradeKind.CONTROL_PLANE),
+        (("control_plane",), True, ("1.0",), (("1.0",),), False, UpgradeKind.CONTROL_PLANE),
         (("keeper", "control_plane"), False, (), (), False, UpgradeKind.FULL),
         (("keeper", "control_plane"), True, (), (), False, UpgradeKind.CONTROL_PLANE),
         (("runners", "control_plane"), False, (), (), False, UpgradeKind.FULL),
+        (("control_plane",), True, ("1.0",), (("1.0", "1.1"),), False, UpgradeKind.CONTROL_PLANE),
+        (("control_plane",), True, ("1.0",), (("2.0",),), False, UpgradeKind.FULL),
+        (("control_plane",), True, ("1.0",), (("1.0",), ("2.0",)), False, UpgradeKind.FULL),
     ],
     ids=["unchanged", "web-only", "keeper-off", "web-and-control-plane", "protocol-mismatch",
          "adoption-mismatch", "adoption-only-mismatch", "adoptable", "keeper-full-overlap", "keeper-compatible",
-         "runners-full-overlap"],
+         "runners-full-overlap", "keeper-protocol-overlap", "keeper-protocol-no-overlap", "one-unsupported-keeper"],
 )
 def test_upgrade_decision_branches(changed, keeper_mode, protocols, keepers, adoption_change, expected):
     running = _manifest(protocols=protocols)
     target = _manifest(changed=changed, protocols=protocols, adoption_change=adoption_change)
 
-    plan = decide(target, running, [Keeper(protocol=protocol) for protocol in keepers], keeper_mode)
+    plan = decide(target, running, [Keeper(protocols=versions) for versions in keepers], keeper_mode)
 
     assert plan.kind is expected
     assert set(plan.changed_components) == set(changed)
     assert plan.reasons and all(isinstance(reason, str) and reason for reason in plan.reasons)
+
+
+def test_unsupported_keeper_reason_lists_only_incompatible_keepers():
+    running = _manifest(protocols=("1.0",))
+    target = _manifest(changed=("control_plane",), protocols=("1.0",))
+
+    plan = decide(target, running, [Keeper(("1.0", "1.1")), Keeper(("2.0", "2.1"))], keeper_mode=True)
+
+    assert plan.kind is UpgradeKind.FULL
+    assert plan.reasons == ("Target does not support live keeper protocols: 2.0, 2.1",)
 
 
 def test_manifest_round_trip_preserves_all_fingerprints():

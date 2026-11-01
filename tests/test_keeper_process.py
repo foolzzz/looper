@@ -498,7 +498,9 @@ def test_attaching_cancels_the_orphan_timer_and_detaching_restarts_it(tmp_path: 
         held = Keeper(tmp_path, tmp_path, str(tmp_path), [])
         held.orphan_timeout_s = 0.05
         held.controller_detached()
+        assert keeper.read_json(tmp_path / keeper.STATE)['controller_disconnected_at']
         held.controller_attached()
+        assert keeper.read_json(tmp_path / keeper.STATE)['controller_disconnected_at'] is None
         await asyncio.sleep(0.1)
         assert held.end_reason is None
         held.controller_detached()

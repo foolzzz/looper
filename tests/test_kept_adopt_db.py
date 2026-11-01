@@ -308,7 +308,7 @@ def test_unadopted_candidates_expire(tmp_path, monkeypatch):
             assert not case.run_dir.exists()
             assert case.b.keeper_status() == {
                 'mode': 'on', 'attached': 0, 'candidates_at_start': 1, 'adopted_at_start': 0,
-                'pending': 0, 'ended_at_start': {'not_adopted': 1},
+                'pending': 0, 'ended_at_start': {'not_adopted': 1}, 'failed_after_start': {},
             }
             assert not case.results
 

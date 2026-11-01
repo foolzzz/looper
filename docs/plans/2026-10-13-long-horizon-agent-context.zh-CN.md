@@ -840,7 +840,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
       - ⑧ CPA 真实验证与全部对话评测（已完成，D11 已满足，依赖 ⑤⑥⑦）：`dialogs --manager-agent SPEC.json` 每个用例登记一次 Profile，仅选择 Manager 的角色层，其他角色保持 `--model` / `--agent`；api/Codex CPA 示例显式声明协议，参数互斥且拒绝 fake 模式。本地 CPA 代理提供 `gpt-6-astra`，两份 spec 均用它，其他角色 Claude Code sonnet，key 仅在运行时通过 `LOOPER_EVAL_API_KEY` 提供。api smoke（`status`、`confirm_create_start`、`cancel_confirmation`、`stop_then_continue`，`--reps 1`）4/4、$0.44；全部对话 `--reps 2 --jobs 2`，Codex 78/84 个已评分项通过，另有 4 个 harness error（`stop_then_continue`、`withdraw_then_continue` 两次重复均出错），记录 $13.68；api 82/88、$9.06。双方均评分对话的记录花费为 $6.82 / $4.53。每个对话 api 均持平或更好，符合对照减 1 的门槛；对照出错的两个对话 api 均 2/2，`cancel_confirmation`、`config_tools`、`provider_key`、全部 `schedule_*` 和 `client_relay_cancel` 均 2/2。共同失败非 api 回归：`model_missing_endpoint` 0/2（未通过工具读取内容）、`start_no_wait` 0/2（未说明任务的问题会交给用户）；`session_profile_switch` 首轮双方 0/2 是 eval 比较了带 effort 后缀的显示名，分支修正后定向复跑双方均 2/2，与首轮总数分开记录。逐请求 token 差值、会话条目与协议读回及 Opus 描述性比较不在本次测量结论内。完整结果见 RFC 第 8.4、9、15 节，运行说明保留在 evals README；#688 已通过的真实 Claude CLI 交接提示词专项对照保持独立且不变。
     - **阶段 2**（阶段 1 之后）：`anthropic` 编解码器，DeepSeek 真实验证；GLM、Kimi、OpenCode 有 key 时补跑。
 
-24. **热升级 v0**（[RFC](../architecture/rfcs/hot-upgrade-v0.zh-CN.md)）：S0（组件指纹与升级计划、排空、`looper service upgrade`、Telegram 不丢积压）进行中；S1（每个运行一个看护进程，先托管 Claude Code）、S2、S3 待做；#909 的多实例问题按 RFC 第 9 节第 3 条以「拒绝第二个实例」处理（S1）。
+24. **热升级 v0**（[RFC](../architecture/rfcs/hot-upgrade-v0.zh-CN.md)）：组件指纹、升级计划、排空、`looper service upgrade` 与重启恢复已交付；Claude Code 看护与启动接管已交付，默认关闭。本分支补齐保留运行的 `CONTROL_PLANE` 安全规划、分级排空期限、接管报告与 P1/P2 状态检查，真实链路验证见交付结果；S2、S3 待做。#909 的多实例问题按 RFC 第 9 节第 3 条以「拒绝第二个实例」处理。
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 
@@ -891,6 +891,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.3 非核心待办（M6 之后统一做）
 
+- **保留运行接管异常通知管家**：升级后接管数量不足或接管失败产生 P1 时，向 Manager 通知并附可定位的原因；当前只在升级报告和 dashboard 检查中展示。
 - **停止单次命令型运行的按钮**：在控制台停止一条正在运行的命令型定时任务运行。
 - **管家读取运行日志**：让管家能读取命令型定时任务的运行日志。
 - **探活的维护窗口**：`looper service upgrade` 期间暂停告警。

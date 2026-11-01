@@ -55,6 +55,6 @@ def test_system_status_refreshes_the_ttadk_startup_check(monkeypatch):
     monkeypatch.setitem(self_check.LOGIN_CHECKS, "ttadk", current)
     startup = self_check.Check("ttadk", "TTADK", self_check.FAIL, "signed out earlier").to_dict()
     other = self_check.Check("database", "PostgreSQL", self_check.OK, "ready").to_dict()
-    server = SimpleNamespace(_self_checks=[other, startup])
+    server = SimpleNamespace(_self_checks=[other, startup], _worker_pool=None)
     result = asyncio.run(AgentHTTPServer._checks_now(server))
     assert result == [other, asyncio.run(current()).to_dict()]
