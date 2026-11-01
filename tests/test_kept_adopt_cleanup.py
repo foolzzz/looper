@@ -24,7 +24,7 @@ from tests.runtime_model_helpers import builtin_launch
 
 
 @pytest.mark.parametrize("attached", [False, True])
-def test_a_failed_keeper_end_preserves_identity_and_interrupts_the_record(tmp_path, monkeypatch, attached):
+def test_a_failed_keeper_end_preserves_identity_and_the_running_record(tmp_path, monkeypatch, attached):
     async def run():
         pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path)
         run_dir = tmp_path / 'worker-kept'
@@ -42,16 +42,15 @@ def test_a_failed_keeper_end_preserves_identity_and_interrupts_the_record(tmp_pa
         pool._slots[run_dir.name] = (AgentType.WORKER, 'task-kept')
         ready = pool._input_ready[run_dir.name] = asyncio.Event()
 
-        await pool._discard_adoption(run_dir, handle, 41, AdoptFailure.KEEPER_UNREACHABLE)
+        assert not await pool._discard_adoption(run_dir, handle, 41, AdoptFailure.KEEPER_UNREACHABLE)
 
-        interrupt.assert_awaited_once_with(
-            41, 'the run could not be adopted after a restart: keeper_unreachable')
+        interrupt.assert_not_awaited()
         end.assert_awaited_once()
         release.assert_not_called()
         assert (run_dir / keeper.MANIFEST).exists()
         assert (run_dir / keeper.STATE).exists()
         assert (run_dir / keeper.STDOUT).exists()
-        assert not (run_dir / keeper.DETACH).exists()
+        assert (run_dir / keeper.DETACH).exists()
         assert run_dir.name not in pool._active
         assert run_dir.name not in pool._slots
         assert ready.is_set()
@@ -73,10 +72,10 @@ def test_an_unidentifiable_keeper_keeps_its_directory(tmp_path, monkeypatch):
 
         await pool._discard_adoption(run_dir, None, 41, AdoptFailure.FILES)
 
-        interrupt.assert_awaited_once()
+        interrupt.assert_not_awaited()
         end.assert_not_awaited()
         assert (run_dir / keeper.STATE).exists()
-        assert not (run_dir / keeper.DETACH).exists()
+        assert (run_dir / keeper.DETACH).exists()
 
     asyncio.run(asyncio.wait_for(run(), 3))
 
@@ -211,7 +210,7 @@ def test_a_newer_controller_keeps_its_keeper_and_record_on_adoption_failure(tmp_
 
         result = await pool.adopt_dir(run_dir, expect=RunHold('task-kept', 'step-kept', AgentType.WORKER))
 
-        assert result.outcome is AdoptOutcome.FAILED
+        assert result.outcome is AdoptOutcome.END_PENDING
         assert result.failure is AdoptFailure.PROTOCOL
         discard.assert_not_awaited()
         interrupt.assert_not_awaited()
@@ -228,7 +227,7 @@ def test_adoption_waits_for_candidate_expiry_to_finish(tmp_path, monkeypatch):
         pool.set_candidates([candidate])
         ending, release = asyncio.Event(), asyncio.Event()
 
-        async def end_candidate(*args):
+        async def end_candidate(*args, **kwargs):
             ending.set()
             await release.wait()
 

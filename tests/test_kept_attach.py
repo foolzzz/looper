@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from looper.agents import keeper, proc_tree
-from looper.agents.kept_run import AdoptFailure, AttachError, DetachKind, KeptRun, KeptStream
+from looper.agents.kept_run import AdoptFailure, AttachError, DetachKind, KeptRun, KeptRunState, KeptStream
 from looper.agents.runtimes import CLAUDE_CODE
 from looper.agents.keeper.protocol import ErrorCode, KeeperError
 from tests.runtime_model_helpers import builtin_launch
@@ -83,6 +83,44 @@ def test_file_replay_yields_between_chunks(tmp_path, monkeypatch):
             assert handle.replay_finished.is_set()
         finally:
             handle.release()
+
+    exercise(run())
+
+
+def test_detach_during_replay_preserves_the_previous_consumed_cursor(tmp_path):
+    first, second, live = ({"type": "system", "subtype": name} for name in ("first", "second", "live"))
+    first_line = json.dumps(first).encode() + b"\n"
+    replay_until = len(first_line) + len(json.dumps(second).encode()) + 1
+    directory = stored_run(tmp_path, [first, second, live], consumed=replay_until)
+
+    async def run():
+        handle = KeptRun(CLAUDE_CODE, ["unused"], launch=builtin_launch(), cwd=tmp_path,
+                         session_dir=None, label="partial replay", run_dir=directory,
+                         runtime_root=tmp_path, epoch=2, on_stale=lambda reason: None)
+        handle.state = KeptRunState.ATTACHED
+        stream = handle._process.stdout
+        stream.replay_until = replay_until
+        # The keeper has only delivered the first chunk of an already-persisted prefix.
+        stream.feed(0, first_line)
+        assert await stream.read() == first_line
+        reader = asyncio.create_task(stream.read())
+        try:
+            await stream.idle.wait()
+            assert handle.replaying and stream.delivered < replay_until
+            outcome = await handle.detach(epoch=2, timeout=.1)
+            assert outcome.kind is DetachKind.DETACHED
+            assert outcome.consumed == replay_until
+            assert keeper.read_json(directory / keeper.DETACH)["consumed"]["stdout"] == replay_until
+        finally:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+
+        adopted = await attach(directory)
+        try:
+            seen = [(event, adopted.replaying) async for event in adopted.channel.events()]
+            assert seen == [(first, True), (second, True), (live, False)]
+        finally:
+            adopted.release()
 
     exercise(run())
 

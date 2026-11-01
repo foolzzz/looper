@@ -31,6 +31,8 @@ from looper.agents.room import RoomService
 from looper.agents.runtimes import ApiProtocol, AuthKind
 from looper.agents.runtimes.channel import DeliveryResult
 from looper.agents.tiers import worker
+from looper.agents.tiers.planner import PlannerAgent
+from looper.db import llm_records
 from tests.db_support import DSN, run_db, until
 from tests.fake_claude import fake_claude
 from tests.runtime_model_helpers import builtin_launch, resolved_profile, with_model_name
@@ -313,6 +315,142 @@ def test_unadopted_candidates_expire(tmp_path, monkeypatch):
     run_db(run, monkeypatch, timeout=35)
 
 
+def test_failed_adoption_waits_for_keeper_end_before_repeating_the_step(tmp_path, monkeypatch):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch, rooms=True) as case:
+            await _detach(case)
+            _candidate(case)
+            end_keeper = kept_dirs.end_keeper
+            attempts = 0
+
+            async def end(*args):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise OSError('transient ps failure')
+                await end_keeper(*args)
+
+            monkeypatch.setattr(kept_dirs, 'end_keeper', end)
+            monkeypatch.setattr(worker.KeptRun, 'attach', AsyncMock(side_effect=OSError('attach failed')))
+            outcomes = []
+
+            async def adopt(*args):
+                result = await case.b.adopt(*args)
+                outcomes.append(result.outcome.value)
+                return result
+
+            planner = PlannerAgent(task_id='task-adopt', runtime_root=tmp_path / 'runtime', adopter=adopt)
+            planner._bus = case.b._bus
+            step = SimpleNamespace(step_id='step-adopt', status='dispatched', worker_id=case.run_id)
+            planner._plan = SimpleNamespace(status='executing', steps=[step], has_failed=False,
+                                            is_complete=False, progress_summary=lambda: 'running')
+            for name in ('_activity', '_dispatch_step', '_dispatch_ready', '_report_progress'):
+                setattr(planner, name, AsyncMock())
+            planner._within_budget = AsyncMock(return_value=True)
+            resumes = []
+            case.b._bus.subscribe_topic(MessageType.TASK_RESUME, resumes.append)
+            resume = MessageEnvelope.create(source=planner_address('old'), target=planner.agent_address,
+                                             message_type=MessageType.TASK_RESUME, payload={})
+
+            await planner._resume(resume)
+
+            assert outcomes == ['end_pending']
+            planner._dispatch_step.assert_not_awaited()
+            assert _live(case.identity['child_pid'])
+            assert _live(case.identity['keeper_pid'])
+            assert (case.run_dir / keeper.DETACH).exists()
+            assert await db.fetchval('SELECT status FROM llm_records') == 'running'
+            assert case.b.room_ops.export_run(case.run_id) is not None
+            # A second resume while termination is pending cannot attach or repeat it either.
+            await planner._resume(resume)
+            assert outcomes == ['end_pending', 'end_pending']
+            assert attempts == 1
+            planner._dispatch_step.assert_not_awaited()
+
+            await case.b.expire_candidates(window=.01)
+
+            await asyncio.wait_for(case.original._keeper_process.wait(), 5)
+            assert not _live(case.identity['child_pid'])
+            assert not _live(case.identity['keeper_pid'])
+            assert await db.fetchval('SELECT status FROM llm_records') == 'interrupted'
+            assert case.b.room_ops.export_run(case.run_id) is None
+            assert not case.run_dir.exists()
+            assert len(resumes) == 1
+            assert resumes[0].target == planner.agent_address
+            await planner._resume(resumes[0])
+            planner._dispatch_step.assert_awaited_once_with(planner._plan, step, same_attempt=True)
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+@pytest.mark.parametrize('failure', ['keeper', 'record'])
+def test_expiry_retries_transient_failures_until_cleanup_finishes(tmp_path, monkeypatch, failure):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch, rooms=True) as case:
+            await _detach(case)
+            candidate = _candidate(case)
+            target, name = (kept_dirs, 'end_keeper') if failure == 'keeper' else (llm_records, 'end_record_interrupted')
+            original = getattr(target, name)
+            calls = 0
+
+            async def transient(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    assert case.b.keeper_status()['pending'] == 1
+                    assert case.b.room_ops.export_run(case.run_id) is not None
+                    assert await db.fetchval('SELECT status FROM llm_records') == 'running'
+                    raise OSError('transient cleanup failure')
+                return await original(*args, **kwargs)
+
+            monkeypatch.setattr(target, name, transient)
+            await case.b.expire_candidates(window=.01)
+
+            assert calls == 2
+            await asyncio.wait_for(case.original._keeper_process.wait(), 5)
+            assert not _live(case.identity['child_pid'])
+            assert not _live(case.identity['keeper_pid'])
+            assert await db.fetchval('SELECT status FROM llm_records') == 'interrupted'
+            assert case.b.room_ops.export_run(case.run_id) is None
+            assert not any(Path(path).exists() for path in candidate.grant['mcp_files'])
+            assert not case.run_dir.exists()
+            assert case.b.keeper_status()['pending'] == 0
+            assert case.b.keeper_status()['ended_at_start'] == {'not_adopted': 1}
+
+    run_db(run, monkeypatch, timeout=35)
+
+
+def test_expiry_releases_a_closed_run_even_if_directory_removal_fails(tmp_path, monkeypatch):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch, rooms=True) as case:
+            await _detach(case)
+            _candidate(case)
+            resumes = []
+            case.b._bus.subscribe_topic(MessageType.TASK_RESUME, resumes.append)
+            remove = shutil.rmtree
+
+            def partial_remove(path, *args, **kwargs):
+                if Path(path) == case.run_dir:
+                    (case.run_dir / keeper.STATE).unlink()
+                    raise OSError('partial directory removal')
+                return remove(path, *args, **kwargs)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(worker.shutil, 'rmtree', partial_remove)
+                await case.b.expire_candidates(window=.01)
+
+            await asyncio.wait_for(case.original._keeper_process.wait(), 5)
+            assert not _live(case.identity['child_pid'])
+            assert not _live(case.identity['keeper_pid'])
+            assert await db.fetchval('SELECT status FROM llm_records') == 'interrupted'
+            assert case.b.room_ops.export_run(case.run_id) is None
+            assert case.b.keeper_status()['pending'] == 0
+            assert len(resumes) == 1 and resumes[0].payload == {'ended_run_id': case.run_id}
+            assert (await case.b.adopt(case.run_id, case.expect)).outcome is AdoptOutcome.NOT_CANDIDATE
+
+    run_db(run, monkeypatch, timeout=35)
+
+
 def test_room_reminders_survive_adoption(tmp_path, monkeypatch):
     async def run(db):
         (tmp_path / 'reminder-turn').touch()
@@ -466,7 +604,7 @@ def test_a_stale_adoption_preserves_the_newer_controllers_keeper_and_record(tmp_
                 await newer.connect(case.run_dir / keeper.SOCKET)
                 await newer.initialize(epoch=3, looper_version='test')
                 answer = await case.b.adopt_dir(case.run_dir, expect=case.expect)
-                assert answer.outcome is AdoptOutcome.FAILED
+                assert answer.outcome is AdoptOutcome.END_PENDING
                 assert answer.failure is AdoptFailure.PROTOCOL
                 assert _live(case.identity['child_pid'])
                 assert _live(case.identity['keeper_pid'])

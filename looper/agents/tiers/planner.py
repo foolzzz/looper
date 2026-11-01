@@ -861,6 +861,7 @@ class PlannerAgent:
         self._ops = ops
         self._adopter = adopter
         self._adopted_runs: set[str] = set()
+        self._ending_runs: set[str] = set()
         self._token: str | None = None
         # The MCP configuration files that carry the token, removed when the Planner stops.
         self._token_files: set[str] = set()
@@ -1045,8 +1046,7 @@ class PlannerAgent:
             # Turns this event runs see the project as it is now, in their
             # message and in the system prompt (a new plan reads it itself).
             await self._refresh_project(self._plan)
-            if (envelope.message_type is not MessageType.TASK_CANCEL
-                    and not (envelope.message_type is MessageType.TASK_RESUME and self._adopter is not None)):
+            if envelope.message_type not in (MessageType.TASK_CANCEL, MessageType.TASK_RESUME):
                 # A task at its spend cap stops before another turn; the handlers below see it ended.
                 await self._within_budget(self._plan)
             # Steps this event dispatches see every change stored so far; Claude gets them in a turn below.
@@ -2563,22 +2563,46 @@ class PlannerAgent:
             return
         await self._activity("phase", f"Planner resumed after a server restart ({plan.progress_summary()})")
         cut_off = [(step, step.status) for step in plan.steps if step.status in ("dispatched", "completed", "deciding")]
+        if ended_run_id := envelope.payload.get("ended_run_id"):
+            # Expiry releases one held step; other steps may already be running on this control plane.
+            cut_off = [(step, status) for step, status in cut_off
+                       if (step.worker_id if status == "dispatched" else
+                           step.reviewer_id if status == "completed" else None) == ended_run_id]
+        repeat = []
         for step, status in cut_off:
-            if plan.status not in _LIVE:
-                return  # it stopped at its spend cap
             if step.status != status:
                 continue
             run_id = step.worker_id if status == "dispatched" else step.reviewer_id if status == "completed" else None
+            if run_id in self._adopted_runs:
+                continue  # expiry of another run can resume this Planner again
             if self._adopter is not None and run_id:
                 role = AgentType.WORKER if status == "dispatched" else AgentType.REVIEWER
                 result = await self._adopter(run_id, RunHold(self._task_id, step.step_id, role))
+                if result.outcome is AdoptOutcome.END_PENDING:
+                    self._ending_runs.add(run_id)
+                    await self._activity("phase", f"{role.value.title()} {run_id} could not carry on across the "
+                                         "restart; waiting for its keeper to end before running the step again",
+                                         worker=run_id)
+                    continue
+                self._ending_runs.discard(run_id)
                 if result.outcome is AdoptOutcome.ADOPTED:
                     self._adopted_runs.add(run_id)
-                    await self._activity("phase", f"Worker {run_id} carried on across the restart", worker=run_id)
+                    await self._activity("phase", f"{role.value.title()} {run_id} carried on across the restart",
+                                         worker=run_id)
                     continue
                 if result.outcome is AdoptOutcome.FAILED:
-                    await self._activity("phase", f"Worker {run_id} could not carry on across the restart "
-                                         f"({result.failure}); running the step again", worker=run_id)
+                    await self._activity("phase", f"{role.value.title()} {run_id} could not carry on across the "
+                                         f"restart ({result.failure}); running the step again", worker=run_id)
+            repeat.append((step, status))
+        # Identify all carried-on runs before checking the cap; only they may finish at the cap.
+        # Every new decision or dispatch below still needs the ordinary budget check.
+        if not await self._within_budget(plan):
+            return
+        for step, status in repeat:
+            if plan.status not in _LIVE:
+                return
+            if step.status != status:
+                continue
             if status == "dispatched":
                 await self._dispatch_step(plan, step, same_attempt=True)
             elif status == "completed":
@@ -4450,9 +4474,10 @@ class PlannerAgent:
             return True
         if spent < cap:
             return True
-        if any((step.status == "dispatched" and step.worker_id in self._adopted_runs)
-               or (step.status == "completed" and step.reviewer_id in self._adopted_runs) for step in plan.steps):
-            # New dispatches wait; runs carried across the restart keep their own spend caps.
+        held = self._adopted_runs | self._ending_runs
+        if any((step.status == "dispatched" and step.worker_id in held)
+               or (step.status == "completed" and step.reviewer_id in held) for step in plan.steps):
+            # New dispatches wait; carried-on runs keep their caps, and pending keepers must end first.
             return False
         await self._stop_at_budget(plan, spent, cap)
         return False

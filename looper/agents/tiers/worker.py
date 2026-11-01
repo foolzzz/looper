@@ -72,6 +72,7 @@ from ..message import (
     AgentAddress,
     MessageEnvelope,
     MessageType,
+    planner_address,
     worker_address,
 )
 from . import journal
@@ -475,7 +476,7 @@ class WorkerPool:
         self._candidates: dict[str, kept_dirs.Candidate] = {}
         self._candidate_locks: dict[str, asyncio.Lock] = {}
         self._candidates_at_start = self._adopted_at_start = 0
-        self._adopting: set[str] = set()
+        self._ending_candidates: set[str] = set()
         self._ended_at_start: Counter[kept_dirs.Reason] = Counter()
         self._expiry_task: asyncio.Task | None = None
         self._drain = drain
@@ -558,6 +559,7 @@ class WorkerPool:
 
     def set_candidates(self, candidates: Collection[kept_dirs.Candidate]) -> None:
         self._candidates = {candidate.run_id: candidate for candidate in candidates}
+        self._ending_candidates.clear()
         self._candidates_at_start = len(self._candidates)
         self._candidate_locks = {run_id: asyncio.Lock() for run_id in self._candidates}
 
@@ -567,7 +569,7 @@ class WorkerPool:
         return {"mode": "on", "attached": sum(isinstance(wp.handle, KeptRun)
                     and wp.handle.state is KeptRunState.ATTACHED for wp in self._active.values()),
                 "candidates_at_start": self._candidates_at_start, "adopted_at_start": self._adopted_at_start,
-                "pending": len(self._candidates) + len(self._adopting),
+                "pending": len(self._candidates),
                 "ended_at_start": {reason.value: n for reason, n in self._ended_at_start.items()}}
 
     async def adopt(self, run_id: str, expect: RunHold) -> AdoptResult:
@@ -578,44 +580,52 @@ class WorkerPool:
             return await self._adopt_candidate(run_id, expect)
 
     async def _adopt_candidate(self, run_id: str, expect: RunHold) -> AdoptResult:
-        candidate = self._candidates.pop(run_id, None)
+        candidate = self._candidates.get(run_id)
         if candidate is None:
             return AdoptResult(AdoptOutcome.NOT_CANDIDATE)
+        if run_id in self._ending_candidates:
+            return AdoptResult(AdoptOutcome.END_PENDING)
         seat = None
         if candidate.grant is not None:
             data = candidate.grant["seat"]
             seat = Seat(**{**data, "kind": MemberKind(data["kind"])})
-        self._adopting.add(run_id)
-        try:
-            result = await self.adopt_dir(candidate.run_dir, expect=expect, seat=seat)
-            if result.outcome is AdoptOutcome.ADOPTED:
-                self._adopted_at_start += 1
-                if self.room_ops is not None:
-                    self.room_ops.activate_run(run_id)
-            elif self.room_ops is not None:
-                self.room_ops.revoke_run(run_id)
+        result = await self.adopt_dir(candidate.run_dir, expect=expect, seat=seat)
+        if result.outcome is AdoptOutcome.END_PENDING:
+            self._ending_candidates.add(run_id)
             return result
-        finally:
-            self._adopting.discard(run_id)
+        self._candidates.pop(run_id)
+        if result.outcome is AdoptOutcome.ADOPTED:
+            self._adopted_at_start += 1
+            if self.room_ops is not None:
+                self.room_ops.activate_run(run_id)
+        elif self.room_ops is not None:
+            self.room_ops.revoke_run(run_id)
+        return result
 
     def schedule_candidate_expiry(self) -> None:
         self._expiry_task = asyncio.create_task(self.expire_candidates())
 
     async def expire_candidates(self, *, window: float = ADOPT_WINDOW_SECONDS) -> None:
         await asyncio.sleep(window)
-        for run_id in list(self._candidates):
-            async with self._candidate_locks[run_id]:
-                candidate = self._candidates.get(run_id)
-                if candidate is not None:
-                    try:
-                        await self._end_candidate(candidate, kept_dirs.Reason.NOT_ADOPTED.value)
-                    except Exception:
-                        logger.exception("could not end expired candidate run=%s", run_id)
-                        continue
-                    self._candidates.pop(run_id)
-                    self._ended_at_start[kept_dirs.Reason.NOT_ADOPTED] += 1
+        while self._candidates:
+            for run_id in list(self._candidates):
+                async with self._candidate_locks[run_id]:
+                    candidate = self._candidates.get(run_id)
+                    if candidate is not None:
+                        # Expired runs cannot become adoptable again after a partial cleanup.
+                        self._ending_candidates.add(run_id)
+                        try:
+                            await self._end_candidate(candidate, kept_dirs.Reason.NOT_ADOPTED.value, resume=True)
+                        except Exception:
+                            logger.exception("could not end expired candidate run=%s; retrying in 5 s", run_id)
+                            continue
+                        self._candidates.pop(run_id)
+                        self._ending_candidates.discard(run_id)
+                        self._ended_at_start[kept_dirs.Reason.NOT_ADOPTED] += 1
+            if self._candidates:
+                await asyncio.sleep(5)
 
-    async def _end_candidate(self, candidate: kept_dirs.Candidate, reason: str) -> None:
+    async def _end_candidate(self, candidate: kept_dirs.Candidate, reason: str, *, resume: bool = False) -> None:
         if proc_tree.spawns_fenced():
             raise RuntimeError("the control plane is fenced; candidate left for its next owner")
         record = kept_dirs.KeeperRecord.read(candidate.run_dir / keeper.STATE)
@@ -628,7 +638,18 @@ class WorkerPool:
         await db_llm_records.end_record_interrupted(candidate.record_id, reason)
         if self.room_ops is not None:
             self.room_ops.revoke_run(candidate.run_id)
-        shutil.rmtree(candidate.run_dir)
+        if resume:
+            assert self._bus is not None
+            # Keep the identity files until publication succeeds so cleanup can be retried.
+            await self._bus.publish(MessageEnvelope.create(
+                source=self.agent_address, target=planner_address(candidate.hold.task_id),
+                message_type=MessageType.TASK_RESUME, payload={"ended_run_id": candidate.run_id}))
+        try:
+            shutil.rmtree(candidate.run_dir)
+        except OSError:
+            # Keeper, record and grant are closed; leftover files must not hold the step forever.
+            logger.warning("ended candidate run=%s left files for the next startup sweep", candidate.run_id,
+                           exc_info=True)
         logger.info("ended candidate run=%s reason=%s", candidate.run_id, reason)
 
     def fence_kept(self) -> None:
@@ -759,28 +780,29 @@ class WorkerPool:
         except KeeperError as exc:
             if exc.code == ErrorCode.STALE_CONTROLLER:
                 logger.warning("adopt run=%s refused: a newer control plane holds the run", run_id)
-                return AdoptResult(AdoptOutcome.FAILED, AdoptFailure.PROTOCOL, str(exc))
+                return AdoptResult(AdoptOutcome.END_PENDING, AdoptFailure.PROTOCOL, str(exc))
             failure, detail = AdoptFailure.PROTOCOL, str(exc)
         except (KeeperGone, ConnectionError, OSError) as exc:
             failure, detail = AdoptFailure.KEEPER_UNREACHABLE, str(exc)
         except (KeyError, TypeError, ValueError) as exc:
             failure, detail = AdoptFailure.FILES, str(exc)
+        except Exception as exc:
+            failure, detail = AdoptFailure.PROTOCOL, str(exc)
         except BaseException:
             await self._discard_adoption(run_dir, handle, record_id, AdoptFailure.PROTOCOL)
             raise
-        await self._discard_adoption(run_dir, handle, record_id, failure)
-        return AdoptResult(AdoptOutcome.FAILED, failure, detail)
+        ended = await self._discard_adoption(run_dir, handle, record_id, failure)
+        return AdoptResult(AdoptOutcome.FAILED if ended else AdoptOutcome.END_PENDING, failure, detail)
 
     async def _discard_adoption(self, run_dir: Path, handle: KeptRun | None,
-                                record_id: int | None, failure: AdoptFailure) -> None:
+                                record_id: int | None, failure: AdoptFailure) -> bool:
         if proc_tree.spawns_fenced():
             logger.warning("adopt run=%s cleanup skipped: the control plane is fenced", run_dir.name)
-            return
-        ended = False
+            return False
         try:
             if handle is not None:
                 await handle.end()
-            elif run_dir.exists():
+            if run_dir.exists():
                 record = kept_dirs.KeeperRecord.read(run_dir / keeper.STATE) or kept_dirs._recover(
                     run_dir, self._runtime_root / proc_tree.RECORDS_DIR)
                 if record is None:
@@ -788,29 +810,30 @@ class WorkerPool:
                 if (self._keeper is not None and record.controller_epoch is not None
                         and record.controller_epoch > self._keeper.epoch):
                     logger.warning("adopt run=%s cleanup skipped: a newer control plane holds the run", run_dir.name)
-                    return
+                    return False
+                # end() may swallow a transport/liveness error; confirm the keeper and child ended.
                 await kept_dirs.end_keeper(record, run_dir)
-            ended = True
-        except Exception:
-            # Keep identity files if termination cannot be confirmed, for the next startup sweep.
-            logger.exception("could not end unadopted run=%s", run_dir.name)
-        if proc_tree.spawns_fenced():
-            return
-        current = kept_dirs.KeeperRecord.read(run_dir / keeper.STATE)
-        if (self._keeper is not None and current is not None and current.controller_epoch is not None
-                and current.controller_epoch > self._keeper.epoch):
-            return
-        try:
+            if proc_tree.spawns_fenced():
+                return False
+            current = kept_dirs.KeeperRecord.read(run_dir / keeper.STATE)
+            if (self._keeper is not None and current is not None and current.controller_epoch is not None
+                    and current.controller_epoch > self._keeper.epoch):
+                return False
             if type(record_id) is int:
                 await db_llm_records.end_record_interrupted(
                     record_id, f"the run could not be adopted after a restart: {failure.value}")
-        finally:
-            if not ended:
-                (run_dir / keeper.DETACH).unlink(missing_ok=True)
-            elif handle is not None:
+            if self.room_ops is not None:
+                self.room_ops.revoke_run(run_dir.name)
+            if handle is not None:
                 handle.release()
             else:
                 shutil.rmtree(run_dir, ignore_errors=True)
+            return True
+        except Exception:
+            # Preserve the detach marker and identity until expiry confirms all cleanup succeeded.
+            logger.exception("could not end unadopted run=%s", run_dir.name)
+            return False
+        finally:
             self._cleanup_worker(run_dir.name)
 
     async def _run_adopted(self, wp: WorkerProcess, ctx: RunContext, handle: KeptRun,
@@ -905,6 +928,7 @@ class WorkerPool:
         if candidate is not None:
             await self._end_candidate(candidate, "its task stopped it before the run was adopted")
             self._candidates.pop(worker_id)
+            self._ending_candidates.discard(worker_id)
             return True
         task = self._tasks.get(worker_id)
         if task is None or task.done():

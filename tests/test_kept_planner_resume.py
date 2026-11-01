@@ -37,13 +37,36 @@ def test_resume_adopts_or_repeats_the_same_attempt(tmp_path, review, outcome):
             adopter.assert_awaited_once_with(run_id, RunHold('task-resume', 'step-resume',
                                                    AgentType.REVIEWER if review else AgentType.WORKER))
         dispatch = planner._spawn_reviewer if review else planner._dispatch_step
+        role = 'Reviewer' if review else 'Worker'
         if outcome is AdoptOutcome.ADOPTED:
             dispatch.assert_not_awaited()
-            planner._activity.assert_any_await('phase', f'Worker {run_id} carried on across the restart', worker=run_id)
+            planner._activity.assert_any_await('phase', f'{role} {run_id} carried on across the restart', worker=run_id)
+            # Expiring a different run can send TASK_RESUME again without restarting this one.
+            await planner._resume(envelope)
+            adopter.assert_awaited_once()
+            dispatch.assert_not_awaited()
+        elif outcome is AdoptOutcome.END_PENDING:
+            dispatch.assert_not_awaited()
+            assert run_id in planner._ending_runs
+            # Cleanup releases only this run; another step can already be running or awaiting a decision.
+            planner._plan.steps.extend([
+                SimpleNamespace(step_id='step-other', status='dispatched', worker_id='worker-other'),
+                SimpleNamespace(step_id='step-deciding', status='deciding', workspace=None),
+            ])
+            planner._decide_again = AsyncMock()
+            adopter.return_value = AdoptResult(AdoptOutcome.NOT_CANDIDATE)
+            await planner._resume(MessageEnvelope.create(
+                source=worker_address('pool'), target=planner.agent_address,
+                message_type=MessageType.TASK_RESUME, payload={'ended_run_id': run_id}))
+            dispatch.assert_awaited_once_with(planner._plan, step, same_attempt=True)
+            other_dispatch = planner._dispatch_step if review else planner._spawn_reviewer
+            other_dispatch.assert_not_awaited()
+            planner._decide_again.assert_not_awaited()
+            assert run_id not in planner._ending_runs
         else:
             dispatch.assert_awaited_once_with(planner._plan, step, same_attempt=True)
             if outcome is AdoptOutcome.FAILED:
-                planner._activity.assert_any_await('phase', f'Worker {run_id} could not carry on across the restart '
+                planner._activity.assert_any_await('phase', f'{role} {run_id} could not carry on across the restart '
                                                   '(log_short); running the step again', worker=run_id)
 
     asyncio.run(run())
@@ -109,20 +132,37 @@ def test_parallel_adopted_results_enforce_the_task_cap_after_the_last_run(
 
 
 @pytest.mark.parametrize('enabled', [False, True])
-def test_adoption_precedes_the_budget_gate_for_new_dispatches(tmp_path, enabled):
+@pytest.mark.parametrize('status', ['deciding', 'dispatched'])
+def test_resume_checks_the_budget_before_any_new_decision_or_dispatch(
+    tmp_path, monkeypatch, agent_db, enabled, status,
+):
+    from looper.agents.project_execution import ProjectExecution
+    from looper.db import llm_records
+
     async def run():
-        planner = PlannerAgent(task_id='task-resume', runtime_root=tmp_path,
-                               adopter=AsyncMock() if enabled else None)
-        planner._plan = SimpleNamespace(status='executing')
-        for name in ('_refresh_project', '_read_changes', '_read_gates', '_resume', '_deliver_changes',
-                     '_deliver_gate_messages', '_deliver_room_messages', '_deliver_waits', '_pending_changes'):
-            setattr(planner, name, AsyncMock())
-        planner._within_budget = AsyncMock(return_value=False)
-        envelope = MessageEnvelope.create(source=planner_address('old'), target=planner.agent_address,
-                                          message_type=MessageType.TASK_RESUME, payload={})
-        await planner._handle(envelope)
-        planner._resume.assert_awaited_once_with(envelope)
-        assert planner._within_budget.await_count == (0 if enabled else 1)
+        adopter = AsyncMock(return_value=AdoptResult(AdoptOutcome.NOT_CANDIDATE)) if enabled else None
+        planner = PlannerAgent(task_id='task-resume', runtime_root=tmp_path, adopter=adopter)
+        planner._bus = SimpleNamespace(publish=AsyncMock(), request=AsyncMock(
+            return_value=SimpleNamespace(payload={'killed': False})))
+        planner._execution = ProjectExecution(task_budget_usd=1)
+        step = PlanStep(step_id='step-resume', index=0, instruction='finish the change', status=status,
+                        worker_id='worker-original', result={'status': 'completed'})
+        plan = planner._plan = TaskPlan('plan-resume', 'goal-resume', 'finish the change', str(tmp_path),
+                                        steps=[step], status='executing')
+        costs = AsyncMock(return_value={'task-resume': {'cost_usd': 2}})
+        monkeypatch.setattr(llm_records, 'task_costs', costs)
+        planner._decide_again = AsyncMock()
+        planner._dispatch_step = AsyncMock()
+        await planner._handle(MessageEnvelope.create(
+            source=planner_address('old'), target=planner.agent_address,
+            message_type=MessageType.TASK_RESUME, payload={}))
+        costs.assert_awaited()
+        planner._decide_again.assert_not_awaited()
+        planner._dispatch_step.assert_not_awaited()
+        assert plan.status == 'failed'
+        assert agent_db.store.plans['task-resume']['status'] == 'failed'
+        if adopter is not None:
+            assert adopter.await_count == (1 if status == 'dispatched' else 0)
 
     asyncio.run(run())
 

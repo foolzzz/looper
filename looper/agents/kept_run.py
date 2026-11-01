@@ -56,6 +56,7 @@ class RunHold:
 
 class AdoptOutcome(StrEnum):
     ADOPTED = "adopted"
+    END_PENDING = "end_pending"
     FAILED = "failed"
     NOT_CANDIDATE = "not_candidate"
 
@@ -549,7 +550,8 @@ class KeptRun:
             if self._ending or stdin.inflight is not None:
                 stream.resume()
                 return DetachOutcome(DetachKind.BUSY)
-            consumed = stream.delivered
+            # A second restart must retain the prefix persisted before this replay began.
+            consumed = max(stream.delivered, stream.replay_until or 0)
             keeper.write_json(self.run_dir / keeper.DETACH, {
                 "format": 1, "epoch": epoch, "consumed": {"stdout": consumed},
                 "stdin_offset": stdin.offset, "at": datetime.now(timezone.utc).isoformat(),
