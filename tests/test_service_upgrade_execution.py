@@ -10,8 +10,10 @@ import signal
 import subprocess
 import venv
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -41,7 +43,28 @@ def manifest(change=None, version="1.0.0"):
 
 
 @pytest.fixture
-def deployment(tmp_path, monkeypatch):
+def system_responses(monkeypatch):
+    from looper.agents.drain import DrainState
+    from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.v1_domains import status
+    from looper.db import tasks
+
+    monkeypatch.setattr(tasks, "status_counts", AsyncMock(return_value=[]))
+    server = SimpleNamespace(
+        _supervisor=SimpleNamespace(agent_status=lambda: {}),
+        _web_adapter=SimpleNamespace(healthcheck=lambda: {
+            "channel": "web", "healthy": True, "active_sse_streams": 0}),
+        _drain=DrainState(), _checks_now=AsyncMock(return_value=[]),
+        _can_sign_out=lambda headers: False, _managers=None, _manager_ops=None,
+        _started_at=datetime.now(timezone.utc), _scheduler=None)
+    # Use the handlers' result shapes: only health identifies the serving process.
+    dashboard = asyncio.run(AgentHTTPServer._status_result(server, {}))
+    health = asyncio.run(status.run(server, SimpleNamespace(operation_id="system.health"), {}, None, {}))
+    return SimpleNamespace(status=dashboard, health=lambda pid: {**health, "pid": pid})
+
+
+@pytest.fixture
+def deployment(tmp_path, monkeypatch, system_responses):
     root = tmp_path / "runtime"
     operator_auth.ensure_token(root)
     unit = tmp_path / "unit"
@@ -57,6 +80,10 @@ def deployment(tmp_path, monkeypatch):
 
     def operation(port, token, name, args):
         events.append(name)
+        if name == "health":
+            if not state.running:
+                raise service.ServiceError("health unavailable")
+            return system_responses.health(state.pid)
         if name == "drain_cancel":
             return {"phase": "serving"}
         return statuses.pop(0) if len(statuses) > 1 else statuses[0]
@@ -96,7 +123,7 @@ def deployment(tmp_path, monkeypatch):
         executable="python", cwd=tmp_path, package_root=tmp_path, run=run, clock=lambda: elapsed[0],
         sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
         get_components=lambda port, token: (current if scenario.verify_error else scenario.current).to_dict(),
-        system_operation=operation, get_status=lambda *args: {"status": "ok"},
+        system_operation=operation, get_status=lambda *args: system_responses.status,
         get_whoami=lambda *args: {"looper_version": scenario.current.version},
         port_in_use=lambda port, address="127.0.0.1": False, pid_alive=lambda pid: scenario.process_lingers)
     manager = SimpleNamespace(host=host, state=lambda: state, unit_path=unit,
@@ -109,7 +136,7 @@ def deployment(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "_unit_package_root", lambda host, mgr: host.package_root.resolve())
     monkeypatch.setattr(service, "__file__", str(tmp_path / "looper/agents/service.py"))
     return SimpleNamespace(host=host, events=events, statuses=statuses, state=state, scenario=scenario,
-                           root=root, elapsed=elapsed)
+                           root=root, elapsed=elapsed, responses=system_responses)
 
 
 def report(deployment):
@@ -347,7 +374,9 @@ def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs
                 raise service.ServiceError("connection refused")
             return {"phase": "drained"}
         if name == "health":
-            return {"pid": 123456791} if case == "port_taken_known" else {}
+            if case == "port_taken_known":
+                return deployment.responses.health(123456791)
+            raise service.ServiceError("health unavailable")
         assert name == "drain_cancel"
         return {"phase": "serving"}
 
@@ -363,7 +392,7 @@ def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs
     deployment.host.pid_alive = alive
     deployment.host.port_in_use = lambda *args: case in ("port_taken", "port_taken_known")
     deployment.host.get_status = lambda *args: (
-        {"status": "ok"} if deployment.state.running and (not shutting_down or "start" in deployment.events) else None)
+        deployment.responses.status if deployment.state.running and (not shutting_down or "start" in deployment.events) else None)
 
     assert cli.main(["service", "upgrade"]) == 1
     assert "install" not in deployment.events
@@ -397,9 +426,10 @@ def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs
             assert "pid 123456791" in data["recovery_error"]
 
 
-@pytest.mark.parametrize("case", ["listener_closes_late", "still_serving", "stalled", "port_taken_after_exit"])
+@pytest.mark.parametrize("command", [["upgrade"], ["restart", "--drain"]], ids=["upgrade", "restart"])
+@pytest.mark.parametrize("case", ["listener_closes_late", "still_serving", "health_recovers", "stalled", "port_taken_after_exit"])
 def test_upgrade_recovery_decides_after_the_wait_whatever_the_first_port_probe_saw(
-        deployment, case, capsys):
+        deployment, case, command, capsys):
     failed_poll = []
 
     def operation(port, token, name, args):
@@ -409,18 +439,20 @@ def test_upgrade_recovery_decides_after_the_wait_whatever_the_first_port_probe_s
         if name == "drain_status":
             assert not failed_poll, "recovery must not renew the drain"
             failed_poll.append(deployment.elapsed[0])
-            if case == "still_serving":
-                return {"phase": "serving"}
             raise service.ServiceError("timed out")
         if name == "health":
-            return {}
+            if case == "still_serving" or (case == "health_recovers" and deployment.elapsed[0] >= failed_poll[0] + 1):
+                return deployment.responses.health(123456789)
+            if case == "stalled":
+                raise service.ServiceError("health timed out")
+            raise OSError("connection refused")
         assert name == "drain_cancel"
         return {"phase": "serving"}
 
     def alive(pid):
         if pid != 123456789:
             return deployment.state.pid == pid
-        if case in ("still_serving", "stalled") or not failed_poll:
+        if case in ("still_serving", "health_recovers", "stalled") or not failed_poll:
             return True
         if deployment.elapsed[0] < failed_poll[0] + 3:
             return True
@@ -430,10 +462,8 @@ def test_upgrade_recovery_decides_after_the_wait_whatever_the_first_port_probe_s
         return False
 
     def status(*args):
-        if "start" in deployment.events:
-            return {"status": "ok", "pid": 123456790}
-        if case == "still_serving":
-            return {"status": "ok", "pid": 123456789}
+        if "start" in deployment.events or case in ("still_serving", "health_recovers"):
+            return deployment.responses.status
         return None
 
     deployment.host.system_operation = operation
@@ -442,20 +472,20 @@ def test_upgrade_recovery_decides_after_the_wait_whatever_the_first_port_probe_s
         case != "listener_closes_late" or not failed_poll or deployment.elapsed[0] < failed_poll[0] + 1)
     deployment.host.get_status = status
 
-    assert cli.main(["service", "upgrade"]) == 1
+    assert cli.main(["service", *command]) == 1
     data = report(deployment)
     error = capsys.readouterr().err
     assert data["status"] == "failed"
     assert "install" not in deployment.events
     assert deployment.events[-1] == "drain_cancel"
     assert deployment.events.count("start") == int(case == "listener_closes_late")
-    assert data["serving"] is (case in ("listener_closes_late", "still_serving"))
+    assert data["serving"] is (case in ("listener_closes_late", "still_serving", "health_recovers"))
     assert deployment.elapsed[0] - failed_poll[0] == (
-        0 if case == "still_serving" else service._STOP_WAIT_SECONDS if case == "stalled" else 3)
+        0 if case == "still_serving" else 1 if case == "health_recovers" else service._STOP_WAIT_SECONDS if case == "stalled" else 3)
     if case == "listener_closes_late":
         assert deployment.state.running
         assert "serving: yes" in error
-    if case in ("listener_closes_late", "still_serving"):
+    if case in ("listener_closes_late", "still_serving", "health_recovers"):
         assert "recovery_error" not in data
     elif case == "stalled":
         assert "old service process 123456789 is still running" in data["recovery_error"]
@@ -481,7 +511,7 @@ def test_manager_restart_during_drain_waits_for_serving_without_starting(
 
     deployment.host.system_operation = operation
     deployment.host.get_status = lambda *args: (
-        {"status": "ok"} if deployment.elapsed[0] >= restart_time[0] + response_delay else None)
+        deployment.responses.status if deployment.elapsed[0] >= restart_time[0] + response_delay else None)
     assert cli.main(["service", "upgrade", "--timeout", "5"]) == 1
     assert "start" not in deployment.events
     assert "stop" not in deployment.events
@@ -1123,7 +1153,7 @@ def test_failed_start_retries_new_install_and_reports_serving(deployment, recove
     log.parent.mkdir(parents=True)
     log.write_text("startup output\n")
     deployment.host.get_status = lambda *args: (
-        {"status": "ok"} if recovery_serves and deployment.events.count("start") == 2 else None)
+        deployment.responses.status if recovery_serves and deployment.events.count("start") == 2 else None)
     assert cli.main(["service", "upgrade", "--timeout", "1"]) == 1
     assert deployment.events.count("start") == 2
     assert deployment.events.count("install") == 1

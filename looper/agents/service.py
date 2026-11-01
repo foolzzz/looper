@@ -1353,7 +1353,11 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                     # without renewing the drain.
                     deadline = host.clock() + _STOP_WAIT_SECONDS
                     while host.pid_alive(before):
-                        if (host.get_status(port, token, "127.0.0.1") or {}).get("pid") == before:
+                        try:
+                            serving_pid = host.system_operation(port, token, "health", {}).get("pid")
+                        except (ServiceError, OSError):
+                            serving_pid = None
+                        if serving_pid == before:
                             break  # It still serves: cancelling the drain below is the whole recovery.
                         if host.clock() >= deadline:
                             report["recovery_error"] = (f"the old service process {before} is still running; "
