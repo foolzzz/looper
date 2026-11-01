@@ -422,10 +422,14 @@ class Scheduler:
         if self._agent_admission_closed(schedule["kind"]):
             raise _DrainBegan(schedule["id"])
 
-    def _defer_start(self, schedule: Mapping[str, Any], launched: _Launched) -> None:
+    async def _defer_start(self, schedule: Mapping[str, Any], launched: _Launched) -> None:
         """The commit landed after drain.begin: the task stays ready, and _settle's start retry starts it once
         the service serves again. A gate was admitted with its run and still finishes during the drain."""
         if launched.task_id and self._agent_admission_closed(schedule["kind"]):
+            await db_connection.get_pool().execute(
+                "UPDATE schedule_runs SET deferred_by_drain = true "
+                "WHERE task_id = $1 AND status = 'running' AND started_at IS NULL", launched.task_id,
+            )
             logger.info("schedule %s: a drain began as run %s committed; task %s start deferred by the drain",
                         schedule["id"], launched.run_id, launched.task_id)
             launched.task_id = None
@@ -553,7 +557,7 @@ class Scheduler:
                     logger.exception("could not fire schedule %s", schedule["id"])
                     continue
                 if launched is not None:
-                    self._defer_start(schedule, launched)
+                    await self._defer_start(schedule, launched)
                     await self._follow(schedule, launched)
 
     async def _fire_schedule(self, conn: asyncpg.Connection, schedule: dict[str, Any],
@@ -607,7 +611,7 @@ class Scheduler:
                     self._check_still_admitted(schedule)
             except _DrainBegan:
                 return None
-            self._defer_start(schedule, launched)
+            await self._defer_start(schedule, launched)
             await self._follow(schedule, launched)
             return launched.run_id
 
@@ -990,6 +994,10 @@ class Scheduler:
                 # Recheck after the read, immediately before publication. A gate admitted before
                 # the drain still runs to completion, including starting its task.
                 if not admitted_gate and self._agent_admission_closed("agent"):
+                    await db_connection.get_pool().execute(
+                        "UPDATE schedule_runs SET deferred_by_drain = true "
+                        "WHERE task_id = $1 AND status = 'running' AND started_at IS NULL", task_id,
+                    )
                     logger.info("task %s: start deferred by the drain", task_id)
                     return False
                 started_at = self._clock()
@@ -1030,7 +1038,7 @@ class Scheduler:
                     self._check_still_admitted(schedule)
             except _DrainBegan:
                 return
-            self._defer_start(schedule, launched)
+            await self._defer_start(schedule, launched)
             started = await self._follow(schedule, launched)
             if started or launched.command is not None or launched.gate is not None:
                 logger.info("schedule %s: the queued run %s starts now", schedule_id, launched.run_id)
@@ -1149,9 +1157,9 @@ class Scheduler:
             await self._finish(run, task, task_status, now)
             return
         timeout = run["run_timeout_seconds"]
-        # A ready task may have waited through a drain. Older started runs have only fired_at.
-        started_at = run["started_at"] or run["fired_at"]
-        if task_status != db_tasks.READY and timeout and started_at and now - started_at >= timedelta(seconds=timeout):
+        # Only a start actually deferred by a drain excludes the wait before TASK_START.
+        timeout_from = run["started_at"] if run["deferred_by_drain"] else run["fired_at"]
+        if timeout and timeout_from and now - timeout_from >= timedelta(seconds=timeout):
             cost = (await db_llm_records.task_costs([run["task_id"]]))[run["task_id"]]["cost_usd"]
             async with db_connection.transaction() as conn:
                 finished = await db_schedules.finish_run(

@@ -20,6 +20,31 @@ from tests.schedule_support import ScheduleEnv, run_scheduled
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
+@pytest.mark.parametrize("task_started", [False, True])
+def test_a_gate_counts_toward_the_run_timeout_without_a_drain(monkeypatch: pytest.MonkeyPatch,
+                                                            tmp_path: Path, task_started: bool) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        sid = (await env.schedule(gate_command="sleep 2; echo work", run_timeout_seconds=1))["schedule_id"]
+        fired_at = env.clock.now
+        run_id = await env.scheduler.run_now(sid)
+        # Advance the scheduler's clock with the real gate, before TASK_START is published.
+        env.clock.now += timedelta(seconds=2)
+        await asyncio.wait_for(env.scheduler.idle(), 5)
+        run = await db_schedules.get_run(run_id)
+        assert run["status"] == db_schedules.RUNNING
+        assert run["fired_at"] == fired_at and run["started_at"] == env.clock.now
+        assert run["deferred_by_drain"] is False
+        assert env.bus.of("task_start") == [run["task_id"]]
+        if task_started:
+            await db_tasks.start_ready_task(run["task_id"])
+
+        await env.scheduler.tick()
+        assert (await db_schedules.get_run(run_id))["status"] == "timed_out"
+        assert env.bus.of("task_stop") == [run["task_id"]]
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
 def test_due_schedule_stays_due_until_restart_catches_up(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(env: ScheduleEnv) -> None:
         drain = DrainState()
@@ -227,14 +252,19 @@ def test_drain_as_an_agent_firing_commits_defers_its_task_start(monkeypatch: pyt
         waiting = await db_schedules.get_run(run_id)
         assert waiting["status"] == db_schedules.RUNNING
         assert waiting["run_timeout_seconds"] == 60 and waiting["started_at"] is None
+        assert waiting["deferred_by_drain"] is True
         assert await env.pool.fetchval("SELECT status FROM tasks WHERE id = $1", run["task_id"]) == db_tasks.READY
         assert await env.pool.fetchval("SELECT consecutive_failures FROM schedules WHERE id = $1", sid) == 0
         assert env.bus.of("task_stop") == []
         assert env.bus.of("task_start") == []
         drain.cancel()
+        # Recovery also keeps the deferred timeout decision across a scheduler restart.
+        env.scheduler = Scheduler(bus=env.bus, clock=env.clock, drain=DrainState())
         await env.scheduler.tick()
         assert env.bus.of("task_start") == [run["task_id"]]
-        assert (await db_schedules.get_run(run_id))["started_at"] == env.clock.now
+        started = await db_schedules.get_run(run_id)
+        assert started["started_at"] == env.clock.now and started["fired_at"] == waiting["fired_at"]
+        assert started["deferred_by_drain"] is True
         # The TaskRouter claims TASK_START; time spent draining is outside the run's timeout.
         await db_tasks.start_ready_task(run["task_id"])
         env.clock.now += timedelta(seconds=59)
@@ -282,6 +312,7 @@ def test_drain_during_task_lookup_defers_its_start(monkeypatch: pytest.MonkeyPat
         assert "starts now" not in caplog.text
         assert "defer" in caplog.text
 
+        assert (await db_schedules.get_run(run["run_id"]))["deferred_by_drain"] is True
         env.clock.now += START_RETRY_AFTER
         await env.scheduler.tick()
         assert env.bus.of("task_start") == []

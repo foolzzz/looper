@@ -97,6 +97,7 @@ _RUNTIME_LAUNCHER = "runtime_launcher"
 _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
 _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
+_SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
 
 _COMMAND_SCHEDULES_DDL: tuple[str, ...] = (
     """ALTER TABLE schedules
@@ -192,6 +193,16 @@ async def _schedule_missed_since_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('schedule_runs') AND attname = 'missed_since' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _schedule_deferred_by_drain_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _SCHEDULE_DEFERRED_BY_DRAIN):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('schedule_runs') AND attname = 'deferred_by_drain' "
         "AND attnum > 0 AND NOT attisdropped)")
 
 
@@ -312,6 +323,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _schedule_missed_since_pending(conn):
             await conn.execute("ALTER TABLE schedule_runs ADD COLUMN missed_since TIMESTAMPTZ")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_MISSED_SINCE)
+        if await _schedule_deferred_by_drain_pending(conn):
+            await conn.execute("ALTER TABLE schedule_runs ADD COLUMN deferred_by_drain BOOLEAN NOT NULL DEFAULT false")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_DEFERRED_BY_DRAIN)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -345,4 +359,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         return state == "bridge" or (state == "current" and (
             await _schedule_user_gates_pending(conn) or await _runtime_launcher_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
-            or await _schedule_missed_since_pending(conn)))
+            or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)))
