@@ -1323,10 +1323,16 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                         host.sleep(_POLL_SECONDS)
                     else:
                         stopped = True
-                elif (not stop_attempted and before is not None and not host.pid_alive(before)
-                      and not mgr.state().running and not host.port_in_use(port)):
-                    # The service exited during the drain, before any stop (a crash or a kill): nothing is left to stop.
-                    stopped = True
+                elif not stop_attempted and before is not None and not host.port_in_use(port):
+                    # Shutdown closes HTTP before the process exits; wait without renewing the drain.
+                    deadline = host.clock() + _STOP_WAIT_SECONDS
+                    while host.pid_alive(before):
+                        if host.clock() >= deadline:
+                            break
+                        host.sleep(_POLL_SECONDS)
+                    else:
+                        if not mgr.state().running and not host.port_in_use(port):
+                            stopped = True
                 # A timed-out start can leave a loaded unit or a partial process.
                 # Retry the current install from a stopped unit before cancelling.
                 if stopped:

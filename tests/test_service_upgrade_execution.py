@@ -280,26 +280,41 @@ def test_checkout_must_be_its_package_root_but_wheel_allows_any_cwd(
         assert str(deployment.host.package_root) in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("case", ["exited", "restarted_by_manager", "port_taken", "pid_alive"])
+@pytest.mark.parametrize("case", ["exited", "restarted_by_manager", "port_taken", "pid_alive",
+                                 "shutting_down", "shutting_down_forever"])
 def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs(
         deployment, case, capsys):
+    shutting_down = case in ("shutting_down", "shutting_down_forever")
+    shutdown_started = []
+
     def operation(port, token, name, args):
         deployment.events.append(name)
         if name == "drain":
             return {"phase": "draining", "waiting": {"runs": []}}
         if name == "drain_status":
             if deployment.events.count("drain_status") == 1:
-                deployment.state.running = case == "restarted_by_manager"
-                deployment.state.pid = 123456790 if deployment.state.running else None
+                shutdown_started.append(deployment.elapsed[0])
+                if not shutting_down:
+                    deployment.state.running = case == "restarted_by_manager"
+                    deployment.state.pid = 123456790 if deployment.state.running else None
                 raise service.ServiceError("connection refused")
             return {"phase": "drained"}
         assert name == "drain_cancel"
         return {"phase": "serving"}
 
+    def alive(pid):
+        if case == "shutting_down":
+            if deployment.elapsed[0] < shutdown_started[0] + 3:
+                return True
+            deployment.state.running = False
+            deployment.state.pid = None
+        return case in ("pid_alive", "shutting_down_forever")
+
     deployment.host.system_operation = operation
-    deployment.host.pid_alive = lambda pid: case == "pid_alive"
+    deployment.host.pid_alive = alive
     deployment.host.port_in_use = lambda *args: case == "port_taken"
-    deployment.host.get_status = lambda *args: {"status": "ok"} if deployment.state.running else None
+    deployment.host.get_status = lambda *args: (
+        {"status": "ok"} if deployment.state.running and (not shutting_down or "start" in deployment.events) else None)
 
     assert cli.main(["service", "upgrade"]) == 1
     assert "install" not in deployment.events
@@ -307,7 +322,7 @@ def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs
     data = report(deployment)
     assert data["status"] == "failed"
     error = capsys.readouterr().err
-    if case == "exited":
+    if case in ("exited", "shutting_down"):
         assert deployment.events.count("start") == 1
         assert deployment.state.running
         assert data["serving"] is True
@@ -315,6 +330,15 @@ def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs
         assert "serving: yes" in error
     else:
         assert "start" not in deployment.events
+    if shutting_down:
+        assert deployment.events.count("drain_status") == 1
+        assert deployment.elapsed[0] - shutdown_started[0] == (
+            3 if case == "shutting_down" else service._STOP_WAIT_SECONDS)
+    if case == "shutting_down_forever":
+        assert data["serving"] is False
+        assert data["restart_hint"] == "looper service restart"
+        assert "serving: no" in error
+        assert "looper service restart" in error
 
 
 @pytest.mark.parametrize("late_exit", [True, False])
