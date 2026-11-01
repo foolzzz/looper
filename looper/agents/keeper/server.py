@@ -39,6 +39,19 @@ class KeeperServer:
             self.connections.discard(connection)
             connection.closed.set()
 
+    async def feed_stdout(self, offset, data):
+        connection = self.controller
+        if connection is None or Stream.STDOUT not in connection.subscriptions:
+            return
+        put = asyncio.create_task(connection.live_stdout.put((offset, data)))
+        closed = asyncio.create_task(connection.closed.wait())
+        try:
+            await asyncio.wait((put, closed), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (put, closed):
+                task.cancel()
+            await asyncio.gather(put, closed, return_exceptions=True)
+
     async def finish(self):
         async def deliver():
             while self.controller is not None:
@@ -83,6 +96,7 @@ class _Connection:
         self.task = asyncio.current_task()
         self.initialized, self.epoch = False, None
         self.subscriptions = {}
+        self.live_stdout = asyncio.Queue(maxsize=64)
         self.closing_offsets = None
         self.requests = set()
         self.closed, self.idle = asyncio.Event(), asyncio.Event()
@@ -246,6 +260,8 @@ class _Connection:
                 stream, offset = Stream(params["stream"]), self.offset(params["from_offset"])
                 if stream in self.subscriptions:
                     raise KeeperError(ErrorCode.INVALID_REQUEST, "stream already subscribed")
+                if stream is Stream.STDOUT and keeper.state["stdout_truncated"]:
+                    raise KeeperError(ErrorCode.INVALID_REQUEST, "stdout log truncated; replay unavailable")
                 length = keeper.offsets[f"{stream}.log"]
                 if offset > length:
                     raise KeeperError(ErrorCode.INVALID_PARAMS, "offset past stream length", {"length": length})
@@ -262,20 +278,13 @@ class _Connection:
                     if offset != actual:
                         raise KeeperError(ErrorCode.OFFSET_MISMATCH, "stdin offset mismatch", {"actual": actual})
                     keeper.append_stdin(data)
-                    try:
-                        keeper.child.stdin.write(data)
-                        await keeper.child.stdin.drain()
-                    except (BrokenPipeError, ConnectionResetError):
-                        keeper.stdin_closed = True
-                        raise KeeperError(ErrorCode.CHILD_EXITED, "child stdin closed") from None
                     return {"offset": keeper.offsets[STDIN]}
             elif method == "stdin/close":
                 self.keys(params)
                 async with self.server.stdin_lock:
                     self.check_controller()
                     keeper.stdin_closed = True
-                    if keeper.child is not None:
-                        keeper.child.stdin.close()
+                    keeper._stdin_ready.set()
             elif method == "child/signal":
                 self.keys(params, "signal")
                 sig = KeeperSignal(params["signal"])
@@ -315,10 +324,19 @@ class _Connection:
                 while True:
                     async with keeper.conditions[name]:
                         await keeper.conditions[name].wait_for(lambda: keeper.offsets[name] > offset or name in keeper.eof)
-                        data = source.read(CHUNK)
+                        if stream is Stream.STDOUT and offset >= keeper.stdout_limit_bytes:
+                            data = None
+                        else:
+                            data = source.read(CHUNK)
                         final = name in keeper.eof
+                    live = data is None and offset < keeper.offsets[name]
+                    if live:
+                        queued_offset, data = await self.live_stdout.get()
+                        if queued_offset != offset:
+                            raise OSError("noncontiguous live stdout")
                     if data:
-                        await self.notify("stream/data", {"stream": stream, "offset": offset, "data": base64.b64encode(data).decode("ascii")})
+                        await self.notify("stream/data", {"stream": stream, "offset": offset, "data": base64.b64encode(data).decode("ascii"),
+                                                          **({"replayable": False} if live else {})})
                         offset += len(data)
                     elif final:
                         await self.notify("stream/eof", {"stream": stream, "offset": offset})

@@ -30,6 +30,11 @@ CLI = _CLI.replace(
     'log("worker", step=label)',
     'log("worker", step=label, pid=os.getpid(), args=args)\n'
     '    if variant == "review" and "The step under review:" in prompt:\n'
+    '        limit = time.monotonic() + 90\n'
+    '        while not (state / "release-review").exists():\n'
+    '            if time.monotonic() >= limit:\n'
+    '                raise RuntimeError("test did not release its Reviewer")\n'
+    '            time.sleep(0.05)\n'
     '        answer(json.dumps({"passed": True, "findings": [], "summary": "verified"}))\n'
     '        sys.exit(0)',
 ).replace(
@@ -91,12 +96,13 @@ def fixture():
                 asyncio.run(cleanup())
 
 
-def _running(runtime, count=1):
+def _running(runtime, count=1, *, role=None):
     def check():
         runs = {}
         for directory in (runtime / keeper.RUNS_DIR).glob('*'):
             state = keeper.read_json(directory / keeper.STATE) or {}
-            if state.get('state') == 'running':
+            manifest = keeper.read_json(directory / keeper.MANIFEST) or {}
+            if state.get('state') == 'running' and (role is None or manifest.get('role') == role):
                 runs[directory.name] = (directory, state)
         return runs if len(runs) == count else None
     return _until(check, f'{count} running keepers')
@@ -128,6 +134,12 @@ def test_a_worker_runs_through_a_keeper(variant):
                 assert process_record['pid'] == status['child_pid']
                 assert api.post('/api/v1/system/drain_status', {})['result']['waiting']['runs'][0]['keepable']
                 (state / 'release-s1').touch()
+            else:
+                directory, status = next(iter(_running(server['runtime_root'], role='reviewer').values()))
+                assert directory.is_dir() and status['state'] == 'running'
+                manifest = keeper.read_json(directory / keeper.MANIFEST)
+                assert manifest['record_id'] is not None and manifest['task_id'] == task
+                (state / 'release-review').touch()
             _completed(api, task)
             _until(lambda: not list((server['runtime_root'] / keeper.RUNS_DIR).glob('*')), 'released runs')
             if variant == 'review':
@@ -177,7 +189,7 @@ def test_a_shutdown_ends_kept_runs():
         with running_server(**server, log_path=root / 'serve.log') as api:
             task = _task(api, _project(api, root, 'held'), 'held')
             _, status = next(iter(_running(server['runtime_root']).values()))
-            holder = _query(url, "SELECT application_name FROM pg_stat_activity WHERE application_name LIKE 'looper serve %'")[0]
+            holder = _query(url, "SELECT application_name FROM pg_stat_activity WHERE datname=current_database() AND application_name LIKE 'looper serve %'")[0]
             serve_pid = int(holder['application_name'].split()[2].split('@')[0])
             os.kill(serve_pid, signal.SIGTERM)
             _until(lambda: not _live(serve_pid), 'serve stopping')
@@ -199,7 +211,7 @@ def test_stopping_a_task_releases_its_kept_run_directory():
 
 
 @pytest.mark.parametrize('scope', ['turns', 'runs'])
-def test_a_drain_waits_for_a_live_kept_run(scope):
+def test_only_a_runs_drain_waits_for_a_live_kept_run(scope):
     with fixture() as (root, url, state, server):
         with running_server(**server, log_path=root / 'serve.log') as api:
             task = _task(api, _project(api, root, 'held'), 'held')
@@ -211,9 +223,10 @@ def test_a_drain_waits_for_a_live_kept_run(scope):
             assert waiting['waiting']['runs'][0]['keepable']
             assert not any(value for key, value in waiting['waiting'].items() if key != 'runs')
             draining = api.post('/api/v1/system/drain', {'scope': scope})['result']
-            assert draining['phase'] == 'draining'
+            phase = 'drained' if scope == 'turns' else 'draining'
+            assert draining['phase'] == phase
             assert draining['waiting']['runs'] == waiting['waiting']['runs']
-            assert api.post('/api/v1/system/drain_status', {})['result']['phase'] == 'draining'
+            assert api.post('/api/v1/system/drain_status', {})['result']['phase'] == phase
             (state / 'release-s1').touch()
             _until(lambda: api.post('/api/v1/system/drain_status', {})['result']['phase'] == 'drained',
                    'the drain finishing after the run')

@@ -23,6 +23,7 @@ class KeeperGone(ConnectionError):
 class _Unread:
     callback: Callable
     ranges: dict[Stream, tuple[int, int]] = field(default_factory=dict)
+    live: dict[Stream, tuple[int, bytearray]] = field(default_factory=dict)
 
 
 class KeeperClient:
@@ -33,6 +34,7 @@ class KeeperClient:
     run_dir's logs. Data is
     contiguous and ordered per stream; stdout/stderr interleaving within a
     spilled range is not preserved. Control notifications retain their order.
+    Data beyond a truncated stdout log is retained until its callback runs.
     run_dir defaults to the socket's parent directory.
     """
 
@@ -141,16 +143,25 @@ class KeeperClient:
 
     async def _replay(self, unread):
         for stream, (offset, end) in unread.ranges.items():
-            with (self._run_dir / f"{stream}.log").open("rb", buffering=0) as source:
-                source.seek(offset)
-                # Never read beyond the bytes confirmed by stream/data notifications.
+            live_start, live_data = unread.live.get(stream, (end, b""))
+            source = None
+            try:
+                if offset < live_start:
+                    source = (self._run_dir / f"{stream}.log").open("rb", buffering=0)
+                    source.seek(offset)
                 while offset < end:
-                    data = source.read(min(MAX_STREAM_BYTES, end - offset))
+                    if offset >= live_start:
+                        data = bytes(live_data[offset - live_start:offset - live_start + MAX_STREAM_BYTES])
+                    else:
+                        data = source.read(min(MAX_STREAM_BYTES, live_start - offset))
                     if not data:
                         raise KeeperGone("keeper log ends before its confirmed offset")
                     await self._deliver(unread.callback, (stream, offset, data))
                     offset += len(data)
                     await asyncio.sleep(0)
+            finally:
+                if source is not None:
+                    source.close()
 
     async def _dispatch(self, notifications, overflow, available, finished):
         try:
@@ -225,6 +236,11 @@ class KeeperClient:
                         ranges = overflow[-1].ranges
                         start = ranges.get(stream, (offset, offset))[0]
                         ranges[stream] = (start, self._offsets[stream])
+                        if not params.get("replayable", True):
+                            # Beyond the disk cap the active session still owns these bytes.
+                            # Keep the suffix itself; it cannot be recovered from the log.
+                            _, buffered = overflow[-1].live.setdefault(stream, (offset, bytearray()))
+                            buffered.extend(data)
                         del data, args
                     else:
                         if len(overflow) >= notifications.maxsize:

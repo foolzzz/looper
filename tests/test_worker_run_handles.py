@@ -324,3 +324,39 @@ def test_run_limits_read_task_costs_only_when_capped(tmp_path: Path, monkeypatch
         costs.assert_awaited_once_with([task_id])
     else:
         costs.assert_not_awaited()
+
+
+def test_kept_handle_is_fenced_before_the_activity_write_returns(tmp_path, monkeypatch, agent_db):
+    from looper.agents.kept_run import KeptRun, KeptRunState, KeeperSettings
+
+    async def scenario():
+        monkeypatch.setattr(proc_tree, '_spawns_fenced', False)
+        spawn = AsyncMock(side_effect=AssertionError('a fenced keeper started'))
+        monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+        bus = MessageBus(runtime_root=tmp_path)
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path, keeper=KeeperSettings(1))
+        seen = []
+
+        async def lose_lock(**values):
+            if values.get('kind') == 'tool_use' and values.get('metadata', {}).get('cwd'):
+                handle = pool._active['w1'].handle
+                assert isinstance(handle, KeptRun)
+                proc_tree.fence_spawns()
+                pool.fence_kept()
+                seen.append(handle)
+                await asyncio.sleep(0)
+                raise RuntimeError('database fenced while writing activity')
+
+        monkeypatch.setattr(worker.db_activity, 'insert_activity', AsyncMock(side_effect=lose_lock))
+        await pool.start(bus)
+        try:
+            await _finish(pool, tmp_path)
+            assert len(seen) == 1 and seen[0].state is KeptRunState.FENCED
+            assert not seen[0].run_dir.exists()
+            spawn.assert_not_awaited()
+            assert not pool._recorders
+        finally:
+            await pool.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))

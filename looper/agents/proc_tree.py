@@ -342,6 +342,11 @@ def fence_spawns() -> None:
     _spawns_fenced = True
 
 
+def spawns_fenced() -> bool:
+    """Whether this control plane has lost permission to start agents."""
+    return _spawns_fenced
+
+
 async def end_owned(*, deadline: float) -> None:
     """Wait for in-flight spawns, then end this server's agents within the same ``deadline`` seconds.
 

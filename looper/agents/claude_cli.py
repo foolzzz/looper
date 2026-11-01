@@ -1331,6 +1331,7 @@ class ClaudeRunRecorder:
         self._system_prompt = system_prompt
         self._record_id: int | None = None
         self._closed = False
+        self._detached = False
         self._seq = 0
         # seq of the row holding the current thinking phase's progress, if it is the latest row
         self._thinking_seq: int | None = None
@@ -1532,6 +1533,8 @@ class ClaudeRunRecorder:
         """
         from ..db.llm_records import RecordStatus
 
+        if self._detached:
+            return
         await self._after_run()
         result = result_event or {}
         succeeded = error is None and result.get("subtype") == "success" and not result.get("is_error")
@@ -1565,10 +1568,16 @@ class ClaudeRunRecorder:
         except Exception:
             logger.warning("could not annotate llm record for %s", self._agent_id, exc_info=True)
 
+    def detach(self) -> None:
+        """Leave the running record for the next control plane to resume."""
+        self._detached = self._closed = True
+
     async def end_left_open(self, exc: BaseException | None = None, *, output_text: str | None = None) -> None:
         """Close the record if the run left it open, ended as ``ended_by(exc)`` says, with what the run's usage
         events added up to, or, for a whole process whose result came, what that result reports; nothing for a
         record closed already. ``output_text`` retains what the owner handled before being interrupted."""
+        if self._detached:
+            return
         ended = "the run had ended with its result; " if self._result is not None else ""
         if isinstance(exc, Exception):
             why = f"{ended}Looper stopped following the run after an error: {type(exc).__name__}: {exc}"

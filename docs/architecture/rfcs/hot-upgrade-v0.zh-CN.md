@@ -334,8 +334,8 @@ class DrainStatus: phase: DrainPhase; scope: DrainScope | None; since: datetime 
 | 文件 | 谁写 | 内容 |
 |---|---|---|
 | `manifest.json` | 控制面在启动看护进程之前写 | `{manifest_version: 1, run_id, role, task_id, step_id, record_id, runtime_type, started_at, work_dir, is_verify, task_role, timeout_s, orphan_timeout_s, adoption: {...}}`，不含任何秘密 |
-| `keeper.json` | 看护进程写，每次原子替换 | `{format: 1, protocol_versions: ["1.0"], keeper_version, keeper_pid, keeper_started, child_pid, child_started, state: starting\|running\|exited, exit_code, signal, ended_at, end_reason: exited\|ended\|orphaned\|log_limit}` |
-| `stdout.log`、`stderr.log`、`stdin.log` | 看护进程写 | 三个方向的原始字节，只追加。stdout 设上限（默认 512 MB，超过就结束运行，`end_reason=log_limit`） |
+| `keeper.json` | 看护进程写，每次原子替换 | `{format: 1, protocol_versions: ["1.0"], keeper_version, keeper_pid, keeper_started, child_pid, child_started, state: starting\|running\|exited, exit_code, signal, ended_at, end_reason: exited\|ended\|orphaned, stdout_truncated, stdout_truncated_at}` |
+| `stdout.log`、`stderr.log`、`stdin.log` | 看护进程写 | 三个方向的原始字节，只追加。stdout 设磁盘上限（默认 512 MiB，超过后只停止追加日志，继续向当前订阅者推送实时输出，不结束运行）；`keeper.json` 记录截断标记和偏移，截断的运行不能接管 |
 | `grant.json` | 控制面写 | 这个运行的席位令牌授权：哈希、任务、席位、room、vault 配置（第 7.8 节） |
 | `detach.json` | 控制面在脱离时写 | `{epoch, consumed: {stdout, stderr}, stdin_offset, at}` |
 | `keeper.sock` | 看护进程 | Unix 套接字，权限 0600 |
@@ -347,8 +347,8 @@ class DrainStatus: phase: DrainPhase; scope: DrainScope | None; since: datetime 
 | 方向 | 方法 | 参数 → 结果 | 说明 |
 |---|---|---|---|
 | 控制面 → 看护 | `initialize` | `{protocol_versions, controller: {looper_version, epoch}}` → `{protocol_version, keeper: {version, pid, started}, child: {pid, started, state, exit_code}, offsets: {stdout, stderr, stdin}}` | 双方取共同的最高版本；没有共同版本就返回 `VERSION_MISMATCH`。纪元低于已经见过的，返回 `STALE_CONTROLLER`；纪元更高的会顶替当前控制者，旧连接收到 `REPLACED` 后被关闭 |
-| | `stream/subscribe` | `{stream: stdout\|stderr, from_offset}` → `{}` | 先从日志补读，再推实时数据 |
-| | `stdin/write` | `{data, expect_offset}` → `{offset}` | 只有 `stdin.log` 的长度等于 `expect_offset` 时才写，否则返回 `OFFSET_MISMATCH` 和实际长度。这样重连后不会重复写 |
+| | `stream/subscribe` | `{stream: stdout\|stderr, from_offset}` → `{}` | 先从日志补读，再推实时数据；stdout 已截断时拒绝新订阅 |
+| | `stdin/write` | `{data, expect_offset}` → `{offset}` | 只有 `stdin.log` 的长度等于 `expect_offset` 时才写，否则返回 `OFFSET_MISMATCH` 和实际长度。日志追加并排队后即确认偏移，由独立写任务向子进程 drain；这样慢读不会延迟确认，重连后也不会重复写 |
 | | `stdin/close` | → `{}` | 幂等 |
 | | `child/signal` | `{signal: TERM\|INT\|KILL}` → `{}` | 发给整个进程组 |
 | | `child/end` | `{grace_seconds}` → `{exit_code}` | 按 `proc_tree` 的方式结束整棵树并回收 |
@@ -460,3 +460,5 @@ Looper 是本机服务，没有独立的指标系统。可观测性落在三个�
 2. **看护层放在哪：每个运行一个看护进程，还是一个常驻宿主。** 推荐每个运行一个（B2）：看护代码升级不打断任何运行，一次崩溃只影响一个运行，协议也最简单。代价是每个运行多一个约 24 MB 的 Python 进程。运行器（S3）由同一种看护进程持有。
 3. **要不要把「一个数据库只跑一个 `looper serve`」做成启动检查。** 推荐要。这是 B 依赖的前提，而且第二个实例会被明确拒绝，而不是悄悄地不安全。#909 里剩下的两条多实例问题，以「拒绝第二个实例」为由关闭；方案 C 不做。
 4. **部署顺序和安装布局。** 推荐：S0 起部署脚本先从 git 树或 wheel 算出计划；需要重启时，排空完成或到期后先停止旧控制面，S1 还要完成托管运行的脱离，确认旧进程退出后才 `git merge --ff-only` 或 `pip install`，最后启动新控制面。S1 继续就地安装，并约束看护进程只用启动时导入的代码。按版本分开的不可变安装目录（`releases/<version>` 加一个 `current` 链接）先记成待办，等到看护进程跨好几个版本长期存活成为常态再做。
+
+维护者于 2026-10-31 确认本阶段的五项决定：只有在回合排空期间收到 SIGTERM 才脱离托管运行；`CONTROL_PLANE` 升级对不能托管的运行等待到 `--drain-timeout`；失去控制面锁时，控制面结束自己直接启动的 agent 进程，保留托管运行；单控制面锁在 keeper 开关默认开启的同一次变更中改为无条件启用；维护者的服务经过约一周、至少 20 次 `CONTROL_PLANE` 部署且未出现 P1（接管数少于保留数）后，再翻转默认值。

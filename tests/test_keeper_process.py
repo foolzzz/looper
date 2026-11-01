@@ -287,13 +287,16 @@ def test_no_controller_means_the_orphan_timeout_ends_the_child(launch: Callable[
     assert f"keeper orphaned run={run.directory.name}" in (run.directory / keeper.LOG).read_text()
 
 
-def test_stdout_past_the_cap_ends_the_run(launch: Callable[..., Run]) -> None:
-    run = launch("import os, time; os.write(1, b'x' * 10_000_000); time.sleep(60)",
+def test_stdout_past_the_cap_keeps_the_child_running(launch: Callable[..., Run]) -> None:
+    run = launch("import os, time; os.write(1, b'x' * 10000); time.sleep(60)",
                  manifest={"stdout_limit_bytes": 1000})
-    state = run.wait()
+    state = run.running()
+    _wait_for(lambda: run.state().get("stdout_truncated"))
     assert (run.directory / keeper.STDOUT).read_bytes() == b"x" * 1000
-    assert state["end_reason"] == "log_limit"
-    assert not _live([state["child_pid"]])
+    assert run.state()["stdout_truncated_at"] == 1000
+    assert _live([state["child_pid"]]) == {state["child_pid"]}
+    run.stop()
+    assert run.wait()["end_reason"] == "ended"
 
 
 def test_a_child_that_cannot_start_is_recorded(launch: Callable[..., Run]) -> None:

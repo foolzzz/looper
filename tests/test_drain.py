@@ -22,12 +22,13 @@ def test_deadline_reports_without_aborting_and_restart_starts_serving(scope, sec
     runs = [{"worker_id": "w1", "task_id": "t1", "role": "worker", "since": now.isoformat(), "keepable": keepable}]
     drain.add_source(lambda: {"runs": runs})
     initial = drain.begin(scope)
-    assert initial["phase"] == DrainPhase.DRAINING
+    phase = DrainPhase.DRAINED if scope == DrainScope.TURNS and keepable else DrainPhase.DRAINING
+    assert initial["phase"] == phase
     assert datetime.fromisoformat(initial["deadline"]) - now == timedelta(seconds=seconds)
     now += timedelta(seconds=seconds)
     expired = drain.snapshot()
     assert expired["deadline_passed"] and expired["waiting"]["runs"] == runs
-    assert expired["phase"] == "draining" and drain.draining
+    assert expired["phase"] == phase and drain.draining
     runs.clear()
     assert drain.snapshot()["phase"] == "drained"
     assert drain.draining  # DRAINED still holds admission.

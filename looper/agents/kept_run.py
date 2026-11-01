@@ -10,6 +10,7 @@ import shutil
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 
@@ -31,6 +32,20 @@ class KeptRunState(StrEnum):
     FENCED = "fenced"
 
 
+class DetachKind(StrEnum):
+    DETACHED = "detached"
+    BUSY = "busy"
+    FINISHING = "finishing"
+    NOT_ATTACHED = "not_attached"
+    LOST = "lost"
+
+
+@dataclass(frozen=True)
+class DetachOutcome:
+    kind: DetachKind
+    consumed: int | None = None
+
+
 @dataclass(frozen=True)
 class KeeperSettings:
     epoch: int
@@ -49,13 +64,13 @@ class KeptStream:
         self._ready = asyncio.Event()
         self._pending, self._readable = bytearray(), bytearray()
         self._paused = self._eof = False
+        self.eof_delivered = False
 
     def feed(self, offset, data):
         if offset != self.offset or self._eof:
             raise ValueError("noncontiguous keeper stdout")
         self.offset += len(data)
         self._pending.extend(data)
-        self.idle.clear()
         self._publish()
 
     def feed_eof(self, offset):
@@ -85,6 +100,7 @@ class KeptStream:
             return b""
         while not self._readable:
             if self._eof and not self._paused:
+                self.eof_delivered = True
                 return b""
             self._ready.clear()
             self.idle.set()
@@ -107,19 +123,25 @@ class KeptStdin:
         self._close_task: asyncio.Task | None = None
 
     def write(self, data):
-        if self._active():
-            if self._closing:
-                raise BrokenPipeError("keeper stdin is closed")
-            self._buffer.extend(data)
+        if not self._active() or self._closing:
+            raise BrokenPipeError("keeper stdin is closed")
+        self._buffer.extend(data)
 
     async def drain(self):
+        if self.inflight is None:
+            self.inflight = asyncio.create_task(self._drain())
+            # A channel's send timeout does not retract a queued write. Keep its ACK and
+            # offset update alive even if the sender stops waiting.
+            self.inflight.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+        await asyncio.shield(self.inflight)
+
+    async def _drain(self):
         async with self._lock:
-            self.inflight = asyncio.get_running_loop().create_future()
             try:
                 while self._buffer and self._active():
                     piece = bytes(self._buffer[:MAX_STDIN_BYTES])
-                    del self._buffer[:len(piece)]
                     self.offset = await self._client.stdin_write(piece, expect_offset=self.offset)
+                    del self._buffer[:len(piece)]
             except KeeperError as exc:
                 if exc.code == ErrorCode.OFFSET_MISMATCH:
                     raise RuntimeError("keeper stdin offset mismatch") from exc
@@ -132,8 +154,6 @@ class KeptStdin:
             except KeeperGone as exc:
                 raise ConnectionResetError(str(exc)) from exc
             finally:
-                if not self.inflight.done():
-                    self.inflight.set_result(None)
                 self.inflight = None
 
     def close(self):
@@ -220,7 +240,15 @@ class KeptRun:
             self.fence()
             self._on_stale("a keeper reported a newer control plane")
 
+    def _check_launch(self):
+        if proc_tree.spawns_fenced() or self.state is KeptRunState.FENCED:
+            self.fence()
+            raise RunStartError("keeper launch refused: control plane is fenced")
+        if not self._active():
+            raise RunStartError("keeper connection ended during startup")
+
     async def launch(self):
+        self._check_launch()
         created = False
         try:
             self.run_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -239,8 +267,7 @@ class KeptRun:
                 os.close(fd)
             deadline = asyncio.get_running_loop().time() + 10
             while True:
-                if not self._active():
-                    raise RunStartError("keeper controller replaced")
+                self._check_launch()
                 if self._keeper_process.returncode is not None:
                     state = keeper.read_json(self.run_dir / keeper.STATE) or {}
                     raise RunStartError(state.get("error") or "keeper exited before connecting")
@@ -251,7 +278,9 @@ class KeptRun:
                     if asyncio.get_running_loop().time() >= deadline:
                         raise RunStartError("keeper did not open its control socket within 10 s") from None
                     await asyncio.sleep(0.05)
+            self._check_launch()
             result = await self._client.initialize(epoch=self._epoch, looper_version=looper.__version__)
+            self._check_launch()
             self._process.pid = result["child"]["pid"]
             self._process.stdin.offset = result["offsets"]["stdin"]
             if result["child"]["state"] == keeper.KeeperState.EXITED:
@@ -314,8 +343,10 @@ class KeptRun:
             return
         self.state = KeptRunState.LOST
         self._process.stdout.feed_eof(self._process.stdout.offset)
-        self._finished.set()
-        await self._end_orphan()
+        try:
+            await self._end_orphan()
+        finally:
+            self._finished.set()
 
     async def _end_orphan(self):
         if self.state in (KeptRunState.FENCED, KeptRunState.DETACHED):
@@ -323,6 +354,54 @@ class KeptRun:
         state = keeper.read_json(self.run_dir / keeper.STATE) or {}
         if state.get("child_pid") and state.get("child_started"):
             await proc_tree.end_orphan(state["child_pid"], state["child_started"], label=self._label)
+            path = self._runtime_root / proc_tree.RECORDS_DIR / f"{state['child_pid']}.json"
+            record = keeper.read_json(path) or {}
+            if record.get("started") == state["child_started"]:
+                path.unlink(missing_ok=True)
+
+    async def detach(self, *, epoch: int, timeout: float) -> DetachOutcome:
+        if self.state is not KeptRunState.ATTACHED:
+            return DetachOutcome(DetachKind.LOST if self.state is KeptRunState.LOST else DetachKind.NOT_ATTACHED)
+        if self._ending:
+            return DetachOutcome(DetachKind.BUSY)
+        stream, stdin = self._process.stdout, self._process.stdin
+        if stdin.inflight is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(stdin.inflight), timeout)
+            except TimeoutError:
+                return DetachOutcome(DetachKind.BUSY)
+        if self.state is not KeptRunState.ATTACHED:
+            return DetachOutcome(DetachKind.LOST if self.state is KeptRunState.LOST else DetachKind.NOT_ATTACHED)
+        stream.pause()
+        if stream.eof_delivered:
+            stream.resume()
+            return DetachOutcome(DetachKind.FINISHING)
+        try:
+            await asyncio.wait_for(stream.idle.wait(), timeout)
+            if self.state is not KeptRunState.ATTACHED:
+                stream.resume()
+                return DetachOutcome(DetachKind.LOST if self.state is KeptRunState.LOST else DetachKind.NOT_ATTACHED)
+            if stream._eof:
+                stream.resume()
+                return DetachOutcome(DetachKind.FINISHING)
+            if self._ending or stdin.inflight is not None:
+                stream.resume()
+                return DetachOutcome(DetachKind.BUSY)
+            consumed = stream.delivered
+            keeper.write_json(self.run_dir / keeper.DETACH, {
+                "format": 1, "epoch": epoch, "consumed": {"stdout": consumed},
+                "stdin_offset": stdin.offset, "at": datetime.now(timezone.utc).isoformat(),
+            })
+        except (TimeoutError, OSError):
+            stream.resume()
+            return DetachOutcome(DetachKind.BUSY)
+        except BaseException:
+            stream.resume()
+            raise
+        self.state = KeptRunState.DETACHED
+        await self._client.close()
+        await self._client.wait_closed()
+        return DetachOutcome(DetachKind.DETACHED, consumed)
 
     async def end(self):
         if self.state in (KeptRunState.DETACHED, KeptRunState.ENDED, KeptRunState.FENCED):

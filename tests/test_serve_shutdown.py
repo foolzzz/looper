@@ -4,11 +4,42 @@ exits at once, and so does a second signal."""
 from __future__ import annotations
 
 import asyncio
+import signal
 from types import SimpleNamespace
 
 import pytest
 
 from looper.agents import serve
+from looper.agents.drain import DrainScope, DrainState
+
+
+@pytest.mark.parametrize('keeper_on,scope,sig,blocked,expected', [
+    (True, None, signal.SIGTERM, False, 'end_runs'),
+    (True, DrainScope.TURNS, signal.SIGTERM, False, 'detach_kept'),
+    (True, DrainScope.TURNS, signal.SIGTERM, True, 'detach_kept'),
+    (True, DrainScope.TURNS, signal.SIGINT, False, 'end_runs'),
+    (True, DrainScope.RUNS, signal.SIGTERM, False, 'end_runs'),
+    (False, DrainScope.TURNS, signal.SIGTERM, False, 'end_runs'),
+])
+def test_shutdown_mode_detaches_only_on_sigterm_during_a_kept_turns_drain(keeper_on, scope, sig,
+                                                                      blocked, expected):
+    drain = DrainState()
+    drain.add_source(lambda: {'gates': int(blocked)})
+    if scope is not None:
+        drain.begin(scope)
+    mode = serve.shutdown_mode(keeper_on=keeper_on, drain=drain, sig=sig)
+    assert mode is serve.ShutdownMode(expected)
+    drain.cancel()
+    assert mode is serve.ShutdownMode(expected)  # Lease expiry after the first signal cannot change it.
+
+
+def test_a_turns_drain_lease_expired_before_sigterm_ends_runs():
+    async def run():
+        drain = DrainState()
+        drain.begin(DrainScope.TURNS, poll_timeout_seconds=0.01)
+        await asyncio.wait_for(drain.wait_serving(), 1)
+        assert serve.shutdown_mode(keeper_on=True, drain=drain, sig=signal.SIGTERM) is serve.ShutdownMode.END_RUNS
+    asyncio.run(run())
 
 
 def test_a_shutdown_that_ends_in_time_exits_normally() -> None:
