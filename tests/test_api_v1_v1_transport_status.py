@@ -122,7 +122,8 @@ def test_smoke_readiness_uses_v1_and_checks_the_response(tmp_path, status_data, 
     def no_retry(_seconds):
         raise AssertionError("readiness request failed")
 
-    monkeypatch.setattr(smoke.time, "sleep", no_retry)
+    # Keep subprocess's timed waits on the real clock during server startup.
+    monkeypatch.setattr(smoke, "time", SimpleNamespace(sleep=no_retry, monotonic=smoke.time.monotonic))
 
     class Ready(Exception):
         pass
@@ -149,11 +150,13 @@ def test_smoke_readiness_uses_v1_and_checks_the_response(tmp_path, status_data, 
                 monkeypatch.setattr(projects, "list_projects", no_projects)
                 (tmp_path / "index.html").write_text('<div id="root"></div>')
                 monkeypatch.setattr(smoke, "free_port", lambda: server._port)
-                monkeypatch.setattr(smoke.subprocess, "Popen", lambda *_, **__: process)
+                monkeypatch.setattr(smoke, "subprocess", SimpleNamespace(
+                    Popen=lambda *_, **__: process, DEVNULL=smoke.subprocess.DEVNULL,
+                    STDOUT=smoke.subprocess.STDOUT))
                 call = lambda: smoke.serve_check(tmp_path / "venv", tmp_path, "unused")
             else:
                 monkeypatch.setattr(smoke, "managed_process", lambda *_, **__: nullcontext(process))
-                monkeypatch.setattr(smoke.shutil, "which", lambda _: None)
+                monkeypatch.setattr(smoke, "shutil", SimpleNamespace(which=lambda _: None))
                 original_request = smoke.request
 
                 def request(base, path, *args):

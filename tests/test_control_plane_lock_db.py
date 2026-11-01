@@ -247,8 +247,11 @@ def test_lock_loss_during_pool_growth_refuses_writes(monkeypatch: pytest.MonkeyP
 
 async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root: Path, *, restart: bool) -> None:
     # Keep the fixture's schema owner alive: it is part of the test driver and drops the schema afterwards.
+    # Other backends (including ones still disconnecting) are not test-driver exemptions.
+    schema = await pool.fetchval("SELECT current_schema()")
     driver_pids = {row["pid"] for row in await pool.fetch("""SELECT pid FROM pg_stat_activity
-        WHERE datname=current_database() AND pid<>pg_backend_pid()""")}
+        WHERE datname=current_database() AND pid<>pg_backend_pid() AND application_name=$1""",
+        f"looper test schema {schema}")}
     assert len(driver_pids) == 1, "only fresh_schema's administrator is exempt from the restart"
     probe = await asyncpg.connect(DSN)
     agent = None
@@ -352,5 +355,11 @@ def test_losing_the_lock_fences_and_exits(monkeypatch: pytest.MonkeyPatch, tmp_p
 def test_a_database_restart_is_a_lost_lock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test() -> None:
         async with fresh_schema(max_size=3) as pool:
-            await _lose_running_system(pool, monkeypatch, tmp_path, restart=True)
+            # A previous test's backend may still be visible when the restart begins.
+            extra = await asyncpg.connect(DSN)
+            try:
+                await _lose_running_system(pool, monkeypatch, tmp_path, restart=True)
+                assert extra.is_closed(), "only the schema owner survives the database restart"
+            finally:
+                await extra.close()
     asyncio.run(asyncio.wait_for(test(), 30))
