@@ -147,14 +147,15 @@ def test_enabling_sets_the_next_fire_from_now_and_never_back_fills(monkeypatch: 
         schedule = await env.enabled()
         sid = schedule["schedule_id"]
         first = datetime.fromisoformat(schedule["next_fire_at"])
-        assert datetime.now(UTC) < first <= datetime.now(UTC) + timedelta(minutes=5)
+        assert first == env.clock.now + timedelta(minutes=5)
 
         # Disabled for a day, then enabled again: nothing that fell due meanwhile runs.
         disabled = (await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": False}}))["schedule"]
         assert disabled["next_fire_at"] is None
-        await env.pool.execute("UPDATE schedules SET last_fired_at = now() - interval '1 day' WHERE id = $1", sid)
+        await env.pool.execute("UPDATE schedules SET last_fired_at = $2 WHERE id = $1", sid,
+                               env.clock.now - timedelta(days=1))
         again = (await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": True}}))["schedule"]
-        assert datetime.fromisoformat(again["next_fire_at"]) > datetime.now(UTC)
+        assert datetime.fromisoformat(again["next_fire_at"]) == first
         await env.scheduler.tick()
         assert await env.runs(sid) == []
 
@@ -202,7 +203,7 @@ def test_a_schedules_runs_page_by_cursor_and_can_leave_out_the_routine_skips(mon
         sid = (await env.enabled())["schedule_id"]
         run = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]  # the oldest, with its task
         await env.pool.execute("UPDATE tasks SET title = 'Look at the new alerts' WHERE id = $1", run["task_id"])
-        start = datetime.now(UTC)
+        start = env.clock.now
         statuses = ["skipped_gate", "completed", "skipped_overlap", "skipped_gate", "failed", "skipped_budget"]
         for i, status in enumerate(statuses):  # oldest first, after the manual run
             await env.pool.execute(

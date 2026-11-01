@@ -25,6 +25,8 @@ output/playwright/
 .loopx/
 .goal-harness/
 .goal-wrapper.local/
+# Short Unix-socket directories used by keeper process tests.
+/.k?/
 .codex/goals/
 .opencode/goals/
 goals/**/ACTIVE_GOAL_STATE.md

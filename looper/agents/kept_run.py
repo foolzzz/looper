@@ -56,6 +56,7 @@ class RunHold:
 
 class AdoptOutcome(StrEnum):
     ADOPTED = "adopted"
+    END_PENDING = "end_pending"
     FAILED = "failed"
     NOT_CANDIDATE = "not_candidate"
 
@@ -240,13 +241,14 @@ class KeptProcess:
 
 class KeptRun:
     def __init__(self, runtime, command, *, launch, cwd, session_dir, label, run_dir,
-                 runtime_root, epoch, on_stale: Callable[[str], None]):
+                 runtime_root, epoch, on_stale: Callable[[str], None], grant: dict | None = None):
         from looper import components
 
         self._runtime, self._command, self._launch = runtime, command, launch
         self._cwd, self._session_dir, self._label = cwd, session_dir, label
         self.run_dir, self._runtime_root = Path(run_dir), Path(runtime_root)
         self._epoch, self._on_stale = epoch, on_stale
+        self._grant = grant
         self.state = KeptRunState.STARTING
         self._client = KeeperClient()
         self._process = KeptProcess(self)
@@ -342,7 +344,22 @@ class KeptRun:
         if replay_until == 0:
             stream.replay_finished.set()
         try:
+            if child_state != keeper.KeeperState.EXITED:
+                try:
+                    await run._client.connect(run_dir / keeper.SOCKET)
+                except (ConnectionError, OSError):
+                    # The keeper can finish normally between the state read and connect.
+                    latest = keeper.read_json(run_dir / keeper.STATE)
+                    if not latest or latest.get("state") != keeper.KeeperState.EXITED:
+                        raise
+                    state, child_state = latest, keeper.KeeperState.EXITED
             if child_state == keeper.KeeperState.EXITED:
+                if state.get("stdout_truncated"):
+                    raise AttachError(AdoptFailure.LOG_SHORT, "stdout log truncated; replay unavailable")
+                if state.get("format") != keeper.STATE_FORMAT or any(
+                        name not in state or (state[name] is not None and type(state[name]) is not int)
+                        for name in ("exit_code", "signal")):
+                    raise AttachError(AdoptFailure.FILES, "invalid exited keeper state")
                 run._file_mode = True
                 run.state = KeptRunState.ATTACHED
                 run._process.stdin._closing = True
@@ -354,7 +371,6 @@ class KeptRun:
                 stream.feed_eof(stream.offset)
                 run._exited(state["exit_code"], state["signal"])
             else:
-                await run._client.connect(run_dir / keeper.SOCKET)
                 result = await run._client.initialize(epoch=epoch, looper_version=looper.__version__)
                 run._process.pid = result["child"]["pid"]
                 run._process.stdin.offset = result["offsets"]["stdin"]
@@ -401,6 +417,8 @@ class KeptRun:
             created = True
             self._owns_dir = True
             keeper.write_json(self.run_dir / keeper.MANIFEST, self.manifest)
+            if self._grant is not None:
+                keeper.write_json(self.run_dir / keeper.GRANT, self._grant)
             fd = os.open(self.run_dir / keeper.LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             try:
                 self._keeper_process = await asyncio.create_subprocess_exec(
@@ -532,7 +550,8 @@ class KeptRun:
             if self._ending or stdin.inflight is not None:
                 stream.resume()
                 return DetachOutcome(DetachKind.BUSY)
-            consumed = stream.delivered
+            # A second restart must retain the prefix persisted before this replay began.
+            consumed = max(stream.delivered, stream.replay_until or 0)
             keeper.write_json(self.run_dir / keeper.DETACH, {
                 "format": 1, "epoch": epoch, "consumed": {"stdout": consumed},
                 "stdin_offset": stdin.offset, "at": datetime.now(timezone.utc).isoformat(),

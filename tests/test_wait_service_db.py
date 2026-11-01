@@ -717,6 +717,9 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
             if name == "ChannelRegistry":
                 value.register = AsyncMock()
                 value.prepare_stop_all = MagicMock(side_effect=lambda: events.append("registry.prepare_stop_all"))
+            if name == "WorkerPool":
+                value.set_candidates = MagicMock()
+                value._ended_at_start = {}
             monkeypatch.setattr(serve, name, constructor)
 
         class WaitService:

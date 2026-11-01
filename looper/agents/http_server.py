@@ -44,7 +44,7 @@ from .task_roles import record_role
 from .ops import Call, ErrorCode, OpError, PublicOpError, Risk, Tool, check_arguments
 from .ops.clients import DEFAULT_SESSION, ClientOps
 from .ops.planner import PlannerOps
-from .ops.room import RoomOps
+from .ops.room import GrantState, RoomOps
 from .managers import ManagerFleet
 from .ops.service import ManagerOps
 from .tiers.manager import ManagerAgent
@@ -917,8 +917,13 @@ class AgentHTTPServer:
         still works (its run runs), for its task and seat."""
         ops, header = self._room_ops, headers.get("authorization")
         assert ops is not None
-        if not ops.authorized(header):
+        state = ops.grant_state(header)
+        if state is None:
             writer.write(_json_response(HTTP_401, {"error": "this run's token no longer works: its run ended"}))
+        elif state is GrantState.PENDING_ADOPTION:
+            writer.write(_json_response(
+                HTTP_503, {"error": "this run is being adopted after a restart; retry shortly"},
+                headers={"Retry-After": "2"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
             writer.write(_json_response(HTTP_200, {"tools": ops.listing(header)}))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
@@ -1007,6 +1012,8 @@ class AgentHTTPServer:
             "checks": await self._checks_now(),
             "can_sign_out": self._can_sign_out(headers),
         }
+        if self._worker_pool is not None and (keepers := self._worker_pool.keeper_status()):
+            status["keepers"] = keepers
         if self._managers is not None:
             # Whether tool calls are refused by their turn binding, and the mismatches seen (chat-stop-v2 §10).
             status["turn_binding"] = self._managers.binding_report()

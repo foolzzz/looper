@@ -18,9 +18,9 @@ import pytest
 from tests.db_support import run_db
 
 UTC = timezone.utc
-# Noon in Los Angeles, where the scheduler's day (``run_scheduled``, ``with_sender``) starts at midnight: far from a
-# day's end.
-NOON = datetime(2030, 1, 15, 20, 0, tzinfo=UTC)
+# A fixed historical noon in Los Angeles: far from DST changes and midnight, and before the real command files'
+# timestamps so housekeeping does not expire files the test just created.
+NOON = datetime(2026, 1, 15, 20, 0, tzinfo=UTC)
 TELEGRAM_CHAT = "1000001"  # a stand-in id in the test database's allowlist; nothing is sent anywhere
 
 
@@ -37,7 +37,7 @@ class Bus:
 
 class Clock:
     def __init__(self) -> None:
-        self.now = datetime.now(UTC)
+        self.now = NOON
 
     def __call__(self) -> datetime:
         return self.now
@@ -149,7 +149,7 @@ class Sender:
 def run_scheduled(test: Callable[[ScheduleEnv], Awaitable[None]], monkeypatch: pytest.MonkeyPatch,
                   tmp_path: Path) -> None:
     """Run ``test(env)`` on a new, migrated schema that is also the server's, with a project in ``tmp_path``."""
-    from looper.agents import scheduler as scheduler_module, scheduler_settings
+    from looper.agents import scheduler as scheduler_module, scheduler_settings, schedules
     from looper.agents.command_runs import CommandRuns
     from looper.agents.scheduler import Scheduler
     from looper.db import projects
@@ -164,6 +164,8 @@ def run_scheduled(test: Callable[[ScheduleEnv], Awaitable[None]], monkeypatch: p
         monkeypatch.setattr(scheduler_module, "CommandRuns", FastCommands)
         project = await projects.create_project(name="alerts", work_dir=str(tmp_path), pool=pool)
         bus, clock = Bus(), Clock()
+        # API enable/edit times and scheduler ticks must use the same controlled clock, including on DST days.
+        monkeypatch.setattr(schedules, "_utcnow", clock)
         runtime_root = tmp_path / "runtime"
         scheduler = Scheduler(bus=bus, clock=clock, day_zone="America/Los_Angeles", runtime_root=runtime_root)
         await asyncio.to_thread(scheduler._commands.prepare)

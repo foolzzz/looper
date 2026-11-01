@@ -32,6 +32,7 @@ from typing import Any
 
 from .. import step_workspaces, task_workspaces
 from ..room import remove_run_sessions
+from ..kept_run import AdoptResult, RunHold
 from ..broadcast import Broadcaster
 from ..bus import MessageBus
 from ..supervisor import cancel_and_wait
@@ -157,6 +158,7 @@ class TaskRouter:
         self._broadcaster = broadcaster
         # Each Planner's own platform tools (``ops.planner.PlannerOps``; set by ``looper serve``); None: it has none.
         self.planner_ops: Any = None
+        self.adopter: Callable[[str, RunHold], Awaitable[AdoptResult]] | None = None
         # Whether a Manager runs now (``ManagerFleet.is_running``; set by ``looper serve``); None: every one does.
         self.manager_running: Callable[[str], bool] | None = None
         self._fallback_warned: set[str] = set()
@@ -404,7 +406,7 @@ class TaskRouter:
                 envelope = replace(envelope, payload={**envelope.payload, "work_dir": work_dir})
         task.status = "assigned"
         planner = PlannerAgent(task_id=task.task_id, runtime_root=self._runtime_root, claude_bin=self._claude_bin,
-                               ops=self.planner_ops)
+                               ops=self.planner_ops, adopter=self.adopter)
         task.planner_id = planner.agent_id
         self._planners[task.task_id] = planner
         # What an earlier Planner of the task left unread is not for this one: the cancel of a stop that came

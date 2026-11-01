@@ -982,9 +982,53 @@ and publishes no result. The shutdown mode is captured at the first signal;
 a later drain lease expiry does not change it. A lease that expired before
 SIGTERM uses the normal shutdown. Every other shutdown, including
 `looper service restart`, `stop`, Ctrl-C and a runs drain followed by SIGTERM,
-ends runs as usual. Runs that cannot detach are ended too. Until startup
-adoption is implemented, the next start ends detached runs and interrupts
-their records so their steps can run again.
+ends runs as usual. Runs that cannot detach are ended too. A planned restart
+can adopt detached runs as described below.
+
+### Kept runs across a planned restart
+
+A turns-drain SIGTERM writes `detach.json` at the last fully processed stdout
+line and leaves the run's record `running`. On startup, `proc_tree.sweep`
+runs first, then the server identifies resumable tasks and scans run directories
+before interrupting unfinished records. With keeper mode on, a candidate needs
+valid version-1 manifest, keeper and detach files, an unchanged adoption
+contract, a `running` record and a persisted step holding the run in a resumable
+task (`dispatched` for Workers, `completed` for Reviewers). The detach epoch must
+match the keeper's highest controller epoch and be below the new controller's;
+a failed intermediate startup that never attached does not prevent adoption.
+A live keeper or a normally exited keeper with a complete log can qualify.
+
+Candidates and their records remain untouched until their Planners resume.
+Other identifiable runs are ended before steps run again. Startup reasons are
+`no_detach` (no clean detach), `epoch_mismatch` (another controller attached or
+an invalid epoch ordering), `keeper_ended` (the keeper stopped its child),
+`keeper_dead` (the keeper died without a completed exit), `contract_changed`,
+`not_held` (no resumable task's step holds it), `no_record` (no running record),
+`log_short` (stdout ends before its consumed offset), and `bad_files` (invalid
+files, including a missing or invalid room grant). With keeper mode off,
+live leftovers end as `not_adoptable`; dead or exited directories are released.
+
+A Planner tries adoption before dispatching a replacement Worker or Reviewer.
+Successful adoption keeps the run id, process, record and attempt; activity
+shows `Worker … carried on across the restart`. The consumer replays the
+processed prefix to rebuild usage and room reminder state without duplicating
+stored events, then records output through EOF and delivers the result once.
+A run that finished while the server was down follows the same path using its
+log. Truncated logs are refused. Adoption failure ends the old run before
+retrying the same attempt; a newer controller's keeper and record are left
+alone. Adoption continues under the run's original spend cap; task budget
+checks gate new dispatches.
+
+Room grants are stored as token hashes in atomic mode-0600 `grant.json` files.
+They are imported before HTTP starts, initially pending: tool requests receive
+HTTP 503 with `Retry-After: 2` until adoption activates the grant. Ended runs'
+grants are revoked. The vault's per-run write counter restarts at zero after
+adoption. Candidates not claimed within 300 seconds after task resumption is
+scheduled are ended with `not_adopted`; stopping a task can end its candidate
+immediately. `system.status.keepers`, present only with keeper mode on, reports
+attached runs, candidates at start, adopted at start, pending adoptions and
+ended runs by reason. The dashboard needs no change for this optional field;
+Telegram, Lark and CLI entry points are unchanged.
 
 The keeper bounds `stdout.log` at 512 MiB. At the limit it stops appending
 to that file, marks `stdout_truncated` and `stdout_truncated_at` in
@@ -1116,9 +1160,10 @@ keeper. Their children are recorded with the keeper as owner: the sweep
 leaves a live keeper's child alone and ends a dead keeper's child.
 
 Startup then scans `<runtime root>/.local/runs/*`, even when keepers are
-switched off. No run is adoptable yet. A live keeper is ended with its child
-(`not_adoptable`), then its directory is removed. A dead keeper or an `exited`
-state releases its directory (`keeper_dead`). With missing or invalid
+switched off. Eligible runs become candidates as described in "Kept runs across
+a planned restart"; other runs are ended before their directories are removed.
+With keeper off, live keepers are ended (`not_adoptable`) and dead or exited
+keepers release their directories (`keeper_dead`). With missing or invalid
 `keeper.json`, a matching spawn record identifies the keeper and its child;
 they are ended before the directory is removed (`bad_files`). Without such a
 record, the directory is left in place and an error is logged: the keeper
@@ -1131,8 +1176,8 @@ deleting any run directory, so steps cannot be dispatched again while their
 old processes may still run. If `.local/runs` does not exist, the scan creates
 nothing.
 
-Only after this scan does `end_unfinished_records` interrupt every `running`
-LLM record, followed by `step_workspaces.sweep` and `task_workspaces.sweep`.
+Only after this scan does `end_unfinished_records` interrupt every unkept
+`running` LLM record, followed by `step_workspaces.sweep` and `task_workspaces.sweep`.
 Thus worktree cleanup follows keeper cleanup. `reclaim_unused` preserves every
 read-only copy named by a running process's command line; a keeper's command
 line includes its child's arguments.

@@ -13,7 +13,7 @@ plan, its journal, its gates and its waits back with
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
 import asyncpg
@@ -60,6 +60,19 @@ SET step_index = EXCLUDED.step_index, step_key = EXCLUDED.step_key, instruction 
     started_at = CASE WHEN EXCLUDED.status = 'pending' THEN NULL
                       ELSE COALESCE(task_steps.started_at, EXCLUDED.started_at) END
 """
+
+
+async def run_holds(run_ids: Collection[str], *, pool: asyncpg.Pool | None = None) -> dict[str, Mapping]:
+    """The persisted steps still holding these Worker or Reviewer runs."""
+    if not run_ids:
+        return {}
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT id, task_id, status, worker_id, reviewer_id FROM task_steps "
+        "WHERE (status = 'dispatched' AND worker_id = ANY($1)) "
+        "OR (status = 'completed' AND reviewer_id = ANY($1))", list(run_ids))
+    return {row["worker_id"] if row["status"] == "dispatched" else row["reviewer_id"]: dict(row)
+            for row in rows}
 
 
 def _step_args(task_id: str, step: Mapping[str, Any]) -> tuple[Any, ...]:

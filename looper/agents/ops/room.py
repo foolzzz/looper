@@ -23,9 +23,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import secrets
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -165,6 +167,41 @@ def _bearer(header: str | None) -> str:
     return value.strip() if scheme.lower() == "bearer" else ""
 
 
+def validate_grant(record: Any, *, run_id: str, task_id: str) -> None:
+    """Reject damaged grants and grants belonging to another run before startup imports them."""
+    if not isinstance(record, dict) or type(record.get("format")) is not int or record["format"] != 1:
+        raise ValueError("unsupported run grant format")
+    digest = record.get("digest")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None:
+        raise ValueError("invalid run grant digest")
+    if not isinstance(record.get("task_id"), str) or not record["task_id"] or record["task_id"] != task_id:
+        raise ValueError("run grant task does not match")
+    seat = record.get("seat")
+    if not isinstance(seat, dict) or seat.keys() != Seat.__dataclass_fields__.keys():
+        raise ValueError("invalid run grant seat fields")
+    if any(not isinstance(seat[key], str) or not seat[key] for key in ("key", "role", "kind", "run")):
+        raise ValueError("invalid run grant seat")
+    if seat["run"] != run_id:
+        raise ValueError("run grant run does not match")
+    if any(seat[key] is not None and not isinstance(seat[key], str)
+           for key in ("step_id", "step_key", "work_dir")):
+        raise ValueError("invalid run grant seat details")
+    try:
+        MemberKind(seat["kind"])
+    except ValueError as exc:
+        raise ValueError("invalid run grant seat kind") from exc
+    if type(record.get("room")) is not bool:
+        raise ValueError("invalid run grant room flag")
+    for key in ("vault_tools", "mcp_files"):
+        if not isinstance(record.get(key), list) or any(not isinstance(value, str) for value in record[key]):
+            raise ValueError(f"invalid run grant {key}")
+
+
+class GrantState(StrEnum):
+    ACTIVE = "active"
+    PENDING_ADOPTION = "pending_adoption"
+
+
 @dataclass
 class _Grant:
     task_id: str
@@ -172,6 +209,7 @@ class _Grant:
     room: bool = True
     vault_tools: tuple[Tool, ...] = ()
     usage: VaultUsage = field(default_factory=VaultUsage)
+    state: GrantState = GrantState.ACTIVE
 
 
 class RoomOps:
@@ -197,6 +235,35 @@ class RoomOps:
         for path in self._files.pop(run, set()):
             Path(path).unlink(missing_ok=True)
 
+    def export_run(self, run: str) -> dict | None:
+        """Persist a run's grant without its bearer token, ready for a planned restart."""
+        for digest, grant in self._grants.items():
+            if grant.seat.run == run:
+                return {"format": 1, "digest": digest, "task_id": grant.task_id,
+                        "seat": asdict(grant.seat), "room": grant.room,
+                        "vault_tools": [tool.name for tool in grant.vault_tools],
+                        "mcp_files": sorted(self._files.get(run, ()))}
+        return None
+
+    def import_pending(self, record: dict) -> None:
+        """Restore a token before HTTP listens; adoption must activate it before tools run.
+
+        The vault's per-run written-byte counter restarts at zero on adoption.
+        """
+        run = record.get("seat", {}).get("run") if isinstance(record.get("seat"), dict) else None
+        validate_grant(record, run_id=run, task_id=record.get("task_id"))
+        seat = Seat(**{**record["seat"], "kind": MemberKind(record["seat"]["kind"])})
+        grant = _Grant(record["task_id"], seat, room=record["room"],
+                       vault_tools=tuple(tool for tool in vault_ops.TOOLS if tool.name in record["vault_tools"]),
+                       state=GrantState.PENDING_ADOPTION)
+        self._grants[record["digest"]] = grant
+        self._files[seat.run] = set(record["mcp_files"])
+
+    def activate_run(self, run: str) -> None:
+        for grant in self._grants.values():
+            if grant.seat.run == run and grant.state is GrantState.PENDING_ADOPTION:
+                grant.state = GrantState.ACTIVE
+
     @staticmethod
     def claims(header: str | None) -> bool:
         """Whether an ``Authorization`` header carries a run's token, working or not."""
@@ -208,6 +275,10 @@ class RoomOps:
 
     def authorized(self, header: str | None) -> bool:
         return self._grant(header) is not None
+
+    def grant_state(self, header: str | None) -> GrantState | None:
+        grant = self._grant(header)
+        return grant.state if grant is not None else None
 
     # --- The endpoint ---
 

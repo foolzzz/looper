@@ -117,7 +117,7 @@ def test_a_planned_stop_detaches_kept_runs():
         print("\n".join(line for line in log.splitlines() if "shutdown mode=" in line or "detach run=" in line))
 
 
-def test_without_adoption_the_next_start_ends_the_detached_run():
+def test_a_changed_contract_ends_the_detached_run_on_start():
     with _fixture() as (root, url, state, server):
         log_path = root / "before.log"
         with running_server(**server, log_path=log_path) as api:
@@ -129,6 +129,9 @@ def test_without_adoption_the_next_start_ends_the_detached_run():
         assert (directory / keeper.DETACH).is_file()
         assert _live(running["keeper_pid"]) and _live(running["child_pid"])
 
+        manifest = keeper.read_json(directory / keeper.MANIFEST)
+        manifest["adoption"] = {"run_manifest_version": 999, "keeper_protocols": []}
+        (directory / keeper.MANIFEST).write_text(json.dumps(manifest))
         with running_server(**server, log_path=root / "after.log") as api:
             assert not _live(running["keeper_pid"]) and not _live(running["child_pid"])
             assert _query(url, "SELECT status FROM llm_records WHERE id=$1", record_id)[0]["status"] == "interrupted"

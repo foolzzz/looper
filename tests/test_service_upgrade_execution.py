@@ -56,7 +56,7 @@ def system_responses(monkeypatch):
             "channel": "web", "healthy": True, "active_sse_streams": 0}),
         _drain=DrainState(), _checks_now=AsyncMock(return_value=[]),
         _can_sign_out=lambda headers: False, _managers=None, _manager_ops=None,
-        _started_at=datetime.now(timezone.utc), _scheduler=None)
+        _started_at=datetime.now(timezone.utc), _scheduler=None, _worker_pool=None)
     # Use the handlers' result shapes: only health identifies the serving process.
     dashboard = asyncio.run(AgentHTTPServer._status_result(server, {}))
     health = asyncio.run(status.run(server, SimpleNamespace(operation_id="system.health"), {}, None, {}))
