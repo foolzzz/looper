@@ -398,6 +398,41 @@ def test_client_command_confirmation_is_bound_to_the_project_directory(tmp_path,
     run_db(run, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("when", ["before-confirm", "before-lock"])
+def test_client_directory_edit_confirmation_binds_the_inherited_destination(tmp_path, monkeypatch, when):
+    async def run(pool):
+        pid, sid = await _seed(pool, kind="command", command="pwd", requirement="", work_dir=str(tmp_path))
+        await schedules.update_schedule(sid, {"enabled": True})
+        before = await db_schedules.get_schedule(sid)
+        body = {"schedule_id": sid, "fields": {"work_dir": ""}}
+        async with _api(tmp_path, pool) as call:
+            status, pending = await call("update", body, client=True)
+            assert status == 202, pending
+            assert "the project directory (/srv/reports)" in pending["impact"]
+            destination = "/srv/reports-after"
+            if when == "before-lock":
+                lock = db_schedules.lock_schedule
+
+                async def change_before_lock(conn, schedule_id):
+                    monkeypatch.setattr(db_schedules, "lock_schedule", lock)
+                    await projects.update_project(pid, work_dir=destination)
+                    return await lock(conn, schedule_id)
+
+                monkeypatch.setattr(db_schedules, "lock_schedule", change_before_lock)
+            else:
+                await projects.update_project(pid, work_dir=destination)
+            status, refused = await call("/api/v1/confirm", {"confirmation_id": pending["confirmation_id"]}, client=True)
+            assert status == 409 and refused["error"]["code"] == "conflict", refused
+            assert await db_schedules.get_schedule(sid) == before
+            status, fresh = await call("update", body, client=True)
+            assert status == 202, fresh
+            assert f"the project directory ({destination})" in fresh["impact"]
+            status, done = await call("/api/v1/confirm", {"confirmation_id": fresh["confirmation_id"]}, client=True)
+            assert status == 200, done
+            assert (await db_schedules.get_schedule(sid))["work_dir"] == ""
+    run_db(run, monkeypatch, timeout=30)
+
+
 @pytest.mark.parametrize("state", ["enabled", "queued", "disabled"])
 def test_client_command_edit_of_an_enabled_schedule_waits_for_confirmation(tmp_path, monkeypatch, state):
     async def run(pool):

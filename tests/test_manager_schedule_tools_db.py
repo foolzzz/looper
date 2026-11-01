@@ -628,6 +628,61 @@ def test_command_confirmation_is_bound_to_the_directory_it_runs_in(monkeypatch, 
     run_db(test, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("entry", ["manager", "client"])
+@pytest.mark.parametrize("when", ["before-confirm", "before-lock"])
+def test_command_directory_edit_confirmation_binds_the_inherited_destination(monkeypatch, tmp_path, entry, when):
+    async def test(pool):
+        from looper.agents.api_v1 import OPERATOR
+        from looper.agents.ops.clients import ClientOps
+        from looper.db import projects, schedules as db_schedules
+
+        project = await _project(pool, work_dir="/srv/project-before")
+        sid = (await _schedule(project, "pull", enabled=True, kind="command", command="pwd",
+                               requirement="", work_dir=str(tmp_path)))["schedule_id"]
+        before = await db_schedules.get_schedule(sid)
+        chat = _Chat(tmp_path)
+        client = ClientOps(chat.ops._platform)
+        arguments = {"action": "update", "schedule": sid, "fields": {"work_dir": ""}}
+
+        async def ask():
+            if entry == "client":
+                answer = await client.call(OPERATOR, "s1", TOOL, arguments)
+                return answer, answer.get("impact", "")
+            (answer,) = await chat.say("继承项目目录", (TOOL, arguments))
+            return answer, chat.turns[-1].blocks[0]
+
+        async def confirm(answer):
+            if entry == "client":
+                return await client.confirm(OPERATOR, "s1", answer["confirmation_id"])
+            return await _confirm(chat, answer)
+
+        asked, impact = await ask()
+        assert asked["status"] == "needs_confirmation", asked
+        assert "/srv/project-before" in impact
+        destination = "/srv/project-after"
+        if when == "before-lock":
+            lock = db_schedules.lock_schedule
+
+            async def change_before_lock(conn, schedule_id):
+                monkeypatch.setattr(db_schedules, "lock_schedule", lock)
+                await projects.update_project(project["id"], work_dir=destination)
+                return await lock(conn, schedule_id)
+
+            monkeypatch.setattr(db_schedules, "lock_schedule", change_before_lock)
+        else:
+            await projects.update_project(project["id"], work_dir=destination)
+        refused = await confirm(asked)
+        assert _error(refused) == "conflict", refused
+        assert await db_schedules.get_schedule(sid) == before
+        again, impact = await ask()
+        assert again["status"] == "needs_confirmation", again
+        assert destination in impact
+        done = await confirm(again)
+        assert done["status"] == "ok", done
+        assert (await db_schedules.get_schedule(sid))["work_dir"] == ""
+    run_db(test, monkeypatch, timeout=30)
+
+
 @pytest.mark.parametrize("state,stored,fields", [
     ("enabled", {}, {"command": "exit 7"}),
     ("queued", {}, {"command": "exit 7"}),

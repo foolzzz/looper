@@ -357,7 +357,7 @@ async def _confirming(call: Call) -> str | None:
         return "\n".join([f"要修改定时任务「{row['name']}」（项目 {row['project_name']}）吗？",
                           *changes.values(), "这会提高（或取消）它的花费上限。"])
     call.confirmation.update(schedule_id=row["id"], schedule_version=db_schedules.configuration_version(
-        row, project_work_dir=project["work_dir"]))
+        row, project_work_dir=project["work_dir"], changes=fields))
     if "work_dir" in changes:
         def d(view: Mapping[str, Any]) -> str:
             return view["work_dir"] or f"项目的默认目录（{project['work_dir']}）"

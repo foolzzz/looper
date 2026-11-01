@@ -61,22 +61,27 @@ class ConfigurationChanged(ValueError):
     """The configuration the user confirmed no longer matches the locked schedule."""
 
 
-def configuration_version(row: Mapping[str, Any], *, project_work_dir: str | None) -> str:
+def configuration_version(row: Mapping[str, Any], *, project_work_dir: str | None,
+                          changes: Mapping[str, Any] | None = None) -> str:
     """Version the settings, including environment values, and, for a command schedule, the directory it runs in:
-    its own, or its project's when it sets none, without runtime counters or fire times."""
+    its own, or its project's when it sets none, without runtime counters or fire times.
+    A directory edit also binds its destination, which may inherit a different project directory."""
     settings = {key: row.get(key) for key in (*FIELDS, "id", "project_id", "manager_id", "enabled",
                                             "profile_overrides", "task_limits")}
     if row.get("kind") == "command":
         settings["effective_work_dir"] = row.get("work_dir") or project_work_dir or ""
+        if changes is not None and "work_dir" in changes:
+            settings["updated_effective_work_dir"] = changes["work_dir"] or project_work_dir or ""
     return hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
 
 
-async def check_configuration_version(conn: asyncpg.Connection, row: Mapping[str, Any], expected: str | None) -> None:
+async def check_configuration_version(conn: asyncpg.Connection, row: Mapping[str, Any], expected: str | None, *,
+                                      changes: Mapping[str, Any] | None = None) -> None:
     """Call under the same row lock as enabling or creating the run."""
     if expected is None:
         return
     project_dir = await conn.fetchval("SELECT work_dir FROM projects WHERE id = $1 FOR SHARE", row["project_id"])
-    if configuration_version(row, project_work_dir=project_dir) != expected:
+    if configuration_version(row, project_work_dir=project_dir, changes=changes) != expected:
         raise ConfigurationChanged("the schedule configuration changed; run the tool again to ask for confirmation")
 
 

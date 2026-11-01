@@ -100,7 +100,7 @@ async def impact(server, operation, arguments, principal, headers):
     def directory(view) -> str:
         return view["work_dir"] or f"the project directory ({project_dir or 'none set'})"
 
-    if action in ("run", "update"):
+    if action == "run":
         # Bind the displayed read; the closed request cannot supply this server-owned version.
         arguments["_schedule_version"] = db_schedules.configuration_version(row, project_work_dir=project_dir)
     subject = f"schedule {row['name']!r} in project {row['project_name']!r}"
@@ -133,6 +133,8 @@ async def impact(server, operation, arguments, principal, headers):
                               removes_gate=not command and bool(row["gate_command"]) and not gated)
     except schedules.RequestError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
+    arguments["_schedule_version"] = db_schedules.configuration_version(
+        row, project_work_dir=project_dir, changes=fields)
     edit = await _command_edit(row, fields)
     if edit is not None:
         try:
