@@ -246,6 +246,12 @@ def test_lock_loss_during_pool_growth_refuses_writes(monkeypatch: pytest.MonkeyP
 
 
 async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root: Path, *, restart: bool) -> None:
+    # Identify the fixture's schema owner: it drops the schema afterwards and must survive the restart.
+    schema = await pool.fetchval("SELECT current_schema()")
+    driver_pids = {row["pid"] for row in await pool.fetch("""SELECT pid FROM pg_stat_activity
+        WHERE datname=current_database() AND pid<>pg_backend_pid() AND application_name=$1""",
+        f"looper test schema {schema}")}
+    assert len(driver_pids) == 1, "fresh_schema must have exactly one schema administrator"
     probe = await asyncpg.connect(DSN)
     agent = None
     child_pid = None
@@ -256,6 +262,7 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
         # Preserve existing connections, including the fixture's owner that drops the schema afterwards.
         before = {row["pid"] for row in await probe.fetch("""SELECT pid FROM pg_stat_activity
             WHERE datname=current_database() AND pid<>pg_backend_pid()""")}
+        assert driver_pids <= before, "the schema administrator must be preserved during the restart"
         async with _running(pool, monkeypatch, root, keeper=KeeperMode.ON) as system:
             assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1", control_plane.EPOCH_KEY) == "1"
             child_code = ("import os, signal, sys, time\n"
