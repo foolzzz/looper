@@ -2470,7 +2470,8 @@ class PlannerAgent:
             await self._fail_plan(plan)
         elif plan.is_complete:
             await self._complete_plan(plan)
-        else:
+        elif await self._within_budget(plan):
+            # The last adopted run may have ended with a review blocked at the cap and no ready steps.
             await self._dispatch_ready(plan)
 
     @classmethod

@@ -49,6 +49,65 @@ def test_resume_adopts_or_repeats_the_same_attempt(tmp_path, review, outcome):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('stage', [ReviewStage.BUILTIN, ReviewStage.ROLE])
+@pytest.mark.parametrize('review_first', [False, True])
+def test_parallel_adopted_results_enforce_the_task_cap_after_the_last_run(
+    tmp_path, monkeypatch, agent_db, stage, review_first,
+):
+    from looper.agents.project_execution import ProjectExecution
+    from looper.agents.tiers.planner_protocol import Decision, DecisionReply
+    from looper.db import llm_records
+
+    async def run():
+        planner = PlannerAgent(task_id='task-resume', runtime_root=tmp_path,
+                               adopter=AsyncMock(return_value=AdoptResult(AdoptOutcome.ADOPTED)))
+        planner._bus = SimpleNamespace(publish=AsyncMock(), request=AsyncMock(
+            return_value=SimpleNamespace(payload={'killed': False})))
+        planner._execution = ProjectExecution(task_budget_usd=1)
+        planner._ask = AsyncMock(return_value=DecisionReply(Decision.ACCEPT, '', '', (), 'accepted'))
+        reviewing = PlanStep(
+            step_id='step-review', index=0, instruction='review the change', status='completed',
+            worker_id='worker-review', reviewer_id='reviewer-original', review=True,
+            result={'status': 'completed'}, review_stage=stage,
+            review_position=0 if stage is ReviewStage.ROLE else None,
+            review_roles=[StepReviewRole('security'), StepReviewRole('style')])
+        working = PlanStep(step_id='step-work', index=1, instruction='finish independent work',
+                           status='dispatched', worker_id='worker-original')
+        plan = planner._plan = TaskPlan('plan-resume', 'goal-resume', 'check the change', str(tmp_path),
+                                        steps=[reviewing, working], status='executing')
+        monkeypatch.setattr(llm_records, 'task_costs', AsyncMock(return_value={'task-resume': {'cost_usd': 1}}))
+        await planner._handle(MessageEnvelope.create(
+            source=planner_address('old'), target=planner.agent_address,
+            message_type=MessageType.TASK_RESUME, payload={}))
+        assert planner._adopted_runs == {'reviewer-original', 'worker-original'}
+
+        review_result = MessageEnvelope.create(
+            source=worker_address('reviewer-original'), target=planner.agent_address,
+            message_type=MessageType.VERIFY_RESULT,
+            payload={'task_id': reviewing.step_id, 'passed': True, 'summary': 'checks passed'})
+        work_result = MessageEnvelope.create(
+            source=worker_address('worker-original'), target=planner.agent_address,
+            message_type=MessageType.WORK_RESULT,
+            payload={'task_id': working.step_id, 'status': 'completed', 'summary': 'work completed'})
+        first, last = (review_result, work_result) if review_first else (work_result, review_result)
+        await planner._handle(first)
+        assert plan.status == 'executing'  # The other adopted run must be allowed to finish.
+        await planner._handle(last)
+
+        assert working.status == 'verified'
+        verdict = reviewing.result['verify_passed'] if stage is ReviewStage.BUILTIN else \
+            reviewing.result['role_reviews'][0]['passed']
+        assert verdict is True
+        assert plan.status == 'failed'
+        assert agent_db.store.plans['task-resume']['status'] == 'failed'
+        assert agent_db.store.steps['task-resume'][working.step_id]['status'] == 'verified'
+        messages = [call.args[0] for call in planner._bus.publish.await_args_list]
+        assert not any(message.message_type is MessageType.VERIFY_REQUEST for message in messages)
+        assert messages[-1].payload['fail_kind'] == 'task_budget'
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('enabled', [False, True])
 def test_adoption_precedes_the_budget_gate_for_new_dispatches(tmp_path, enabled):
     async def run():
