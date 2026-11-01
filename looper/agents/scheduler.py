@@ -364,6 +364,7 @@ class _Launched:
     overlap_recovered: bool = False
     overlap_count: int = 0
     overlap_run: Mapping[str, Any] | None = None
+    resume_queued: bool = False  # a firing a drain deferred takes the free slot first (``_start_queued``)
 
 
 class _DrainBegan(Exception):
@@ -642,6 +643,8 @@ class Scheduler:
                                                     count=launched.overlap_count, running=launched.overlap_run))
         if launched.overlap_recovered:
             self._spawn(self._notifier.overlap_recovered(schedule["id"], launched.run_id))
+        if launched.resume_queued:
+            await self._start_queued(schedule["id"])
         return started
 
     async def _busy_task(self, conn: asyncpg.Connection, schedule_id: str) -> str | None:
@@ -667,11 +670,15 @@ class Scheduler:
         if schedule["overlap"] == "parallel":
             # Runs overlap in their tasks only: a gate never runs beside another, up to max_parallel_runs at once.
             running = sum(run["status"] == db_schedules.RUNNING for run in open_runs)
-            if gating is None and running < schedule["max_parallel_runs"]:
+            free = gating is None and running < schedule["max_parallel_runs"]
+            if free and not (queued is not None and queued["deferred_by_drain"]):
                 return await self._launch(conn, schedule, firing, now, common=common)
             reason = ("the previous run is still checking its gate" if gating
+                      else "an earlier firing that a drain deferred starts first" if free
                       else f"{running} runs are in progress, the most this schedule runs at once (max_parallel_runs)")
-            return await self._skip_overlap(conn, schedule, now, common, reason, open_runs)
+            launched = await self._skip_overlap(conn, schedule, now, common, reason, open_runs)
+            launched.resume_queued = free
+            return launched
         busy = (next((run["id"] for run in open_runs if run["status"] == db_schedules.RUNNING), None)
                 if command else await self._busy_task(conn, schedule["id"]))
         if busy or queued or gating:
