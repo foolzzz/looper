@@ -1246,8 +1246,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
 
     if not all(math.isfinite(value) and value > 0 for value in (timeout, drain_timeout, turns_timeout)):
         raise ServiceError("--timeout, --drain-timeout and --turns-timeout must be positive finite numbers")
-    if plan.kind == UpgradeKind.CONTROL_PLANE:
-        drain_timeout = turns_timeout
+    control_plane = plan.kind == UpgradeKind.CONTROL_PLANE
     token = operator_auth.read_token(root)
     if not token:
         raise ServiceError("the service operator token is missing")
@@ -1290,14 +1289,21 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 phase = status.get("phase")
                 if phase not in ("draining", "drained"):
                     raise ServiceError("drain was cancelled; deployment stopped")
-                passed = status.get("deadline_passed") or host.clock() - started >= drain_timeout
+                runs = status.get("waiting", {}).get("runs", [])
+                deadline = drain_timeout
+                if control_plane:
+                    report["kept_before"] = sum(row.get("keepable") is True for row in runs)
+                    if not any(row.get("keepable") is False for row in runs):
+                        deadline = turns_timeout
+                passed = host.clock() - started >= deadline or (not control_plane and status.get("deadline_passed"))
                 report["drain_seconds"] = round(host.clock() - started, 3)
                 if passed and phase != "drained":
                     if no_force:
                         raise ServiceError("drain deadline passed; --no-force cancelled deployment")
                     report["interrupted"] = [
-                        {"worker_id": row["worker_id"], "role": row["role"], "reason": "deadline"}
-                        for row in status.get("waiting", {}).get("runs", [])]
+                        {"worker_id": row["worker_id"], "role": row["role"],
+                         "reason": "not_keepable" if control_plane else "deadline"}
+                        for row in runs if not control_plane or row.get("keepable") is False]
                 if phase == "drained" or passed:
                     break
                 host.sleep(_POLL_SECONDS)
@@ -1313,6 +1319,18 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             _start_and_wait(mgr, port, log_path, timeout, root)
             restart_started = True
             report["gap_seconds"] = round(host.clock() - gap_started, 3)
+            if control_plane:
+                adoption_deadline = host.clock() + 330
+                while True:
+                    keepers = ((host.get_status(port, token) or {}).get("keepers") or {})
+                    if keepers.get("pending") == 0 or host.clock() >= adoption_deadline:
+                        break
+                    host.sleep(min(_POLL_SECONDS, adoption_deadline - host.clock()))
+                report["adopted"] = keepers.get("adopted_at_start", 0)
+                report["failed_after_start"] = keepers.get("failed_after_start", {})
+                if report["adopted"] < report["kept_before"] or any(report["failed_after_start"].values()):
+                    report["alerts"] = [{"level": "P1", "message":
+                        f"adopted {report['adopted']} of {report['kept_before']} kept runs"}]
         elif installer:
             expected = installer()
             report["installed_package_version"] = target.version
@@ -1424,6 +1442,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             + "\n".join("reason     " + reason for reason in plan.reasons)
             + f"\nrunning code fingerprint {report['running_code_fingerprint']}, "
               f"installed package version {report['installed_package_version']}\n"
+            + "".join(f"warning    {alert['level']}: {alert['message']}\n" for alert in report.get("alerts", []))
             + _deploy_report(report, log_path))
 
 
@@ -1487,7 +1506,7 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
             no_force: bool = False) -> str:
     """Compute a plan before mutating files; stop the old interpreter before a full install."""
     from .. import components
-    from ..upgrade import UpgradeKind, decide, scan_keepers
+    from ..upgrade import UpgradeKind, UpgradePlan, decide, scan_keepers
 
     try:
         # Python ignores empty import overrides (including an exported PYTHONPATH=""); git's empty overrides still act.
@@ -1541,7 +1560,15 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         if not token:
             raise ServiceError("the service operator token is missing")
         running = components.Manifest.from_dict(host.get_components(port, token))
-        plan = decide(target, running, scan_keepers(root), keeper_mode=False)
+        status = host.get_status(port, token) or {}
+        keeper_on = (status.get("keepers") or {}).get("mode") == "on"
+        preserves = not isinstance(mgr, Systemd) or mgr.kill_mode_ok()
+        keepers = scan_keepers(root)
+        plan = decide(target, running, keepers, keeper_mode=keeper_on and preserves)
+        if keeper_on and not preserves:
+            plan = UpgradePlan(plan.kind, (*plan.reasons,
+                "the systemd unit predates KillMode=process: reinstall the service so runs are kept across restarts"),
+                plan.changed_components)
         dependencies = plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE)
         sync_environment = _checkout_sync_environment(host) if not wheel and dependencies else None
         if wheel and plan.kind in (UpgradeKind.WEB_ONLY, UpgradeKind.NOOP):
@@ -1555,6 +1582,7 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
             return "\n".join((f"plan       {plan.kind.value}", f"target     {target.version}",
                 f"running    {running.version} (loaded {running.loaded_at})",
                 "changed    " + (", ".join(plan.changed_components) or "none"),
+                *((f"keepers    on ({len(keepers)} live)",) if keeper_on else ()),
                 *("reason     " + reason for reason in plan.reasons)))
         return _execute_plan(host, mgr, port=port, root=root, log_path=log_path, plan=plan,
             running=running, target=target,

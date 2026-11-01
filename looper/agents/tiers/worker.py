@@ -478,6 +478,7 @@ class WorkerPool:
         self._candidates_at_start = self._adopted_at_start = 0
         self._ending_candidates: set[str] = set()
         self._ended_at_start: Counter[kept_dirs.Reason] = Counter()
+        self._failed_after_start: Counter[AdoptFailure] = Counter()
         self._expiry_task: asyncio.Task | None = None
         self._drain = drain
         if drain is not None:
@@ -570,7 +571,12 @@ class WorkerPool:
                     and wp.handle.state is KeptRunState.ATTACHED for wp in self._active.values()),
                 "candidates_at_start": self._candidates_at_start, "adopted_at_start": self._adopted_at_start,
                 "pending": len(self._candidates),
-                "ended_at_start": {reason.value: n for reason, n in self._ended_at_start.items()}}
+                "ended_at_start": {reason.value: n for reason, n in self._ended_at_start.items()},
+                "failed_after_start": {reason.value: n for reason, n in self._failed_after_start.items()}}
+
+    def holds_keeper(self, run_id: str) -> bool:
+        wp = self._active.get(run_id)
+        return wp is not None and getattr(wp.handle, "state", None) == KeptRunState.ATTACHED
 
     async def adopt(self, run_id: str, expect: RunHold) -> AdoptResult:
         lock = self._candidate_locks.get(run_id)
@@ -598,8 +604,11 @@ class WorkerPool:
             self._adopted_at_start += 1
             if self.room_ops is not None:
                 self.room_ops.activate_run(run_id)
-        elif self.room_ops is not None:
-            self.room_ops.revoke_run(run_id)
+        else:
+            if result.outcome is AdoptOutcome.FAILED and result.failure is not None:
+                self._failed_after_start[result.failure] += 1
+            if self.room_ops is not None:
+                self.room_ops.revoke_run(run_id)
         return result
 
     def schedule_candidate_expiry(self) -> None:

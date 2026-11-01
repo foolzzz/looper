@@ -28,7 +28,7 @@ from .drain import DrainState
 from ..db import api_clients as db_api_clients
 from ..ops_config import OpsConfig
 from . import (
-    api_v1, config_imports, config_transfer, knowledge,
+    api_v1, config_imports, config_transfer, keeper, kept_dirs, knowledge,
     operator_auth, overview, projects, request_guard,
     self_check,
 )
@@ -198,6 +198,8 @@ class AgentHTTPServer:
         self._password_error: operator_auth.OperatorTokenError | None = None
         # The startup self-check (self_check.Check.to_dict), reported on /api/v1/system/status.
         self._self_checks = self_checks or []
+        self._keeper_check_at = 0.0
+        self._keeper_orphans = 0
         self._ops_config = ops_config
         self._channels = channels
         # The Claude Code the server runs: what a Claude Code runtime without an executable of its own probes.
@@ -990,7 +992,47 @@ class AgentHTTPServer:
         """The startup self-check, with the runtimes' own logins read now: a run may have found one forked since."""
         now = {check.get("id"): (await self_check.LOGIN_CHECKS[check["id"]]()).to_dict()
                for check in self._self_checks if check.get("id") in self_check.LOGIN_CHECKS}
-        return [now.get(check.get("id"), check) for check in self._self_checks]
+        checks = [now.get(check.get("id"), check) for check in self._self_checks]
+        pool = self._worker_pool
+        if pool is None or not (status := pool.keeper_status()):
+            return checks
+        failed = status["failed_after_start"]
+        if status["adopted_at_start"] < status["candidates_at_start"] or failed:
+            checks.append({"id": "kept_runs", "status": "warn", "label": "P1: Kept run adoption incomplete",
+                           "detail": f"Adopted {status['adopted_at_start']} of {status['candidates_at_start']} kept runs; "
+                                     f"pending: {status['pending']}; failed after start: {failed}",
+                           "fix": "Check the affected tasks and the service log for adoption failures."})
+        when = time.time()
+        if when - self._keeper_check_at >= 30:
+            self._keeper_check_at = when
+            try:
+                self._keeper_orphans = await asyncio.to_thread(self._orphaned_keepers, when)
+            except OSError:
+                logger.exception("cannot check kept run controller liveness")
+        if self._keeper_orphans:
+            checks.append({"id": "kept_runs", "status": "warn", "label": "P2: Kept runs without a controller",
+                           "detail": f"{self._keeper_orphans} live keepers have had no controller for over 10 minutes.",
+                           "fix": "Check the service log and affected tasks before restarting the service."})
+        return checks
+
+    def _orphaned_keepers(self, when: float) -> int:
+        if self._runtime_root is None:
+            return 0
+        records = {}
+        for path in (self._runtime_root / keeper.RUNS_DIR).glob(f"*/{keeper.STATE}"):
+            record = kept_dirs.KeeperRecord.read(path)
+            state = keeper.read_json(path) or {}
+            if (record is None or record.state is keeper.KeeperState.EXITED
+                    or self._worker_pool.holds_keeper(path.parent.name)):
+                continue
+            try:
+                at = datetime.fromisoformat(state.get("controller_disconnected_at", ""))
+                if at.tzinfo is None or when - at.timestamp() <= 600:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            records[path.parent.name] = record
+        return sum(kept_dirs.live(records).values()) if records else 0
 
     async def _status_result(self, headers: Mapping[str, str]) -> dict[str, Any]:
         agents = self._supervisor.agent_status()

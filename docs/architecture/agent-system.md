@@ -4462,8 +4462,35 @@ SPA uses `#page/sub` format for deep linking that survives browser refresh:
 running service's startup manifest with a Git tree (default `origin/main` of
 the current checkout) or a wheel, without installing files or restarting.
 It prints `NOOP`, `WEB_ONLY`, `CONTROL_PLANE` or `FULL`, the changed components
-and the reason. Keeper mode is off in S0, so every control-plane change plans
-`FULL`. The upgrade refuses unless it runs with the service's own `looper` and checkout.
+and the reason. With keeper mode on, the preview also prints the mode and the
+number of live keepers. A control-plane change plans `CONTROL_PLANE` only when
+the running service has keeper mode on, the service manager preserves keepers
+(launchd, or systemd with `KillMode=process`), every live keeper offers at least
+one protocol the target supports, and the adoption contract is unchanged.
+Otherwise it plans `FULL`; an older systemd unit needs reinstalling before it
+can keep runs across restarts. If keeper liveness cannot be checked, the
+upgrade refuses. With keeper mode off, previews and full-drain reports retain
+their existing behavior. The upgrade refuses unless it runs with the service's
+own `looper` and checkout.
+
+A `CONTROL_PLANE` upgrade begins a turns drain with `--drain-timeout` as the
+server deadline. While any run is not keepable, that deadline applies; once
+only turns block, the CLI enforces `--turns-timeout`, measured from the start
+of the drain. `--no-force` cancels deployment at the applicable deadline.
+The report counts keepable runs in the final drain status as `kept_before`;
+only non-keepable runs interrupted at the deadline are listed in `interrupted`,
+with reason `not_keepable`. Full drains continue to use reason `deadline`.
+After restart, the CLI waits up to 330 seconds for pending adoptions and reports
+`adopted` from `keepers.adopted_at_start`, plus `failed_after_start` reason counts.
+If fewer runs were adopted than kept, or an adoption failed after startup, it
+adds a P1 alert and prints a warning. A serving upgrade still exits successfully.
+
+With keeper mode on, `system.status.checks` exposes keeper warnings through the
+dashboard's existing checks list: P1 for incomplete or failed adoption, and P2
+for a live keeper outside this pool with no controller for over ten minutes.
+The orphan check scans run records lazily and caches the result for 30 seconds.
+Telegram and Lark need no changes; notifying the Manager about P1 warnings is
+a separate follow-up.
 
 If the service is stopped or killed during the drain, the upgrade starts it
 again, undoing even an explicit stop during the drain, unless the old process
