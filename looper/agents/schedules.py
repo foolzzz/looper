@@ -24,7 +24,7 @@ as a task's own choices (``projects.set_task_agents``).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
@@ -72,6 +72,13 @@ MAX_PARALLEL_RUNS_LIMIT = 10
 TIMEOUT_DEFAULT = "default"
 
 NO_WORK_DIR = "a work directory is required: set one on the schedule or on its project"
+RUNNING_COMMAND_DELETE = ("cannot delete a command schedule while a run is running; "
+                          "disable the schedule and wait for the run to end")
+
+
+def blocks_delete(row: Mapping[str, Any], runs: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether a command schedule has a running run, whose runner outlives the server: it is not deleted then."""
+    return row["kind"] == "command" and any(run["status"] == db_schedules.RUNNING for run in runs)
 
 
 class Overlap(str, Enum):
@@ -753,10 +760,8 @@ async def delete_schedule(schedule_id: str) -> dict[str, Any]:
         if row is None:
             raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
         # Share the firing lock so a command cannot start between this check and deletion.
-        if row["kind"] == "command" and any(
-                run["status"] == db_schedules.RUNNING for run in await db_schedules.open_runs(conn, schedule_id)):
-            raise RequestError(HTTP_409, "cannot delete a command schedule while a run is running; "
-                               "disable the schedule and wait for the run to end")
+        if blocks_delete(row, await db_schedules.open_runs(conn, schedule_id)):
+            raise RequestError(HTTP_409, RUNNING_COMMAND_DELETE)
         await db_schedules.delete_schedule(schedule_id, pool=conn)
     return {"deleted": schedule_id}
 
