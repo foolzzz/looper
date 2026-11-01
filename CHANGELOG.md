@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.71] - 2026-11-01
+
+### Fixed
+
+- **Kept-run validation fixes.** The `CONTROL_PLANE` upgrade report adds `ended_at_start` (a nonzero count raises the P1 alert) and `cut_turns` (Manager and Planner turns cut at the deadline, with `agent_id` and `role`); the `kept_runs` check also fires on runs ended at startup. On systemd, `KillMode` is read from `systemctl --user show`, so drop-ins count, and an incompatible unit gets a `FULL` plan with only the reinstall reason. Keeper mode stays `off` by default. ([#1066](https://github.com/foolzzz/looper/pull/1066))
+
 ## [2.14.70] - 2026-11-01
 
 ### Changed
