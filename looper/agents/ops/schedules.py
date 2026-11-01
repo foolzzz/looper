@@ -667,7 +667,7 @@ TOOLS: tuple[Tool, ...] = (
                     "its task, or its command; the user confirms first) or disable; run now (the user confirms first); delete "
                     "(the user confirms first; an agent schedule's tasks stay; a command schedule is not deleted while its "
                     "command runs: tell the user it can be deleted once the command finishes and that disabling it stops new "
-                    "fires but a queued run still starts after the running one, even when disabled; "
+                    "fires; if it has a queued run, that run still starts after the running one, even when disabled; "
                     "disable it only if the user asks (disabling it in the same turn after its delete was refused "
                     "asks the user first); otherwise the delete "
                     "removes "

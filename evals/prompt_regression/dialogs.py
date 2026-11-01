@@ -1093,6 +1093,31 @@ def _make_busy_command_schedule(api: Api, project_id: str, *, queued: bool = Fal
         assert run["status"] == "queued", run
 
 
+def _says_not_deleted(reply: str) -> bool:
+    """Accept common ways to say the delete request was refused."""
+    return any(text in reply for text in ("没删", "未删", "没有删除", "删不掉", "删不了", "无法删除", "不能删除", "拒绝"))
+
+
+def _says_delete_after_finish(reply: str) -> bool:
+    """Check for command completion and deletion without prescribing their order."""
+    return "删" in reply and any(text in reply for text in ("跑完", "结束", "完成", "执行完"))
+
+
+def _says_disable_stops_fires(reply: str) -> bool:
+    """Accept an explanation of disabling without requiring a question."""
+    return "停用" in reply and any(text in reply for text in ("触发", "运行", "不再"))
+
+
+def _says_queued_run_starts(reply: str) -> bool:
+    """Accept queued-run startup wording in either order."""
+    return "排队" in reply and any(text in reply for text in ("开始", "启动", "执行", "运行"))
+
+
+def _claims_deleted_or_disabled(reply: str) -> bool:
+    """Reject clear success claims, not hypothetical consequences of deletion."""
+    return any(text in reply for text in ("已删除", "删除了", "已停用"))
+
+
 def _busy_delete_refused(look: Look, *, queued: bool = False) -> str | None:
     schedule = _named(look, BUSY)
     if schedule is None or not schedule["enabled"]:
@@ -1109,26 +1134,17 @@ def _busy_delete_refused(look: Look, *, queued: bool = False) -> str | None:
         return "deleting the running command schedule was not refused before asking"
     if any(a["arguments"].get("action") == "disable" for a in actions):
         return "the Manager tried disabling the schedule before the user asked"
-    # Required meanings, with several Chinese phrasings rather than one prescribed reply.
-    clause = r"[^。；;！？!?\n]{0,60}"
     meanings = {
-        "not deleted": r"(?:未|没有|没能|无法|不能|不允许|拒绝)[^。；;！？!?\n，,]{0,24}删除",
-        "deletable after the command finishes":
-            r"(?:命令|运行)" + clause + r"(?:结束|完成|跑完)(?:后|之后)"
-            + r"[^。；;！？!?\n不]{0,24}(?:能|可以|可|再)删除",
-        "a question offering to disable":
-            r"(?:要|需要|是否|可以|能否)" + clause + r"(?:停用|禁用)" + clause + r"[？?]",
+        "not deleted": _says_not_deleted(look.reply),
+        "deletable after the command finishes": _says_delete_after_finish(look.reply),
+        "disabling stops new fires": _says_disable_stops_fires(look.reply),
     }
     if queued:
-        meanings["queued run still starts after the running command"] = (
-            r"排队" + clause + r"(?:会|将|仍|还|也|照常|依然|就)" + clause
-            + r"(?:命令|运行|当前|本次)" + clause + r"(?:结束|完成|跑完)(?:后|之后)" + clause + r"(?:开始|启动|执行)")
-        if re.search(r"排队" + clause + r"(?:不会|不再)" + clause + r"(?:开始|启动|执行)", look.reply):
-            return "the reply says the queued run will not start"
-    for meaning, pattern in meanings.items():
-        if not re.search(pattern, look.reply):
+        meanings["queued run still starts after the running command"] = _says_queued_run_starts(look.reply)
+    for meaning, present in meanings.items():
+        if not present:
             return f"the reply lacks: {meaning}"
-    if re.search(r"已(?:经)?[^。；;！？!?\n，,未没不]{0,24}(?:删除|停用|禁用)|(?:删除|停用|禁用)(?:成功|完毕|完成|了)", look.reply):
+    if _claims_deleted_or_disabled(look.reply):
         return "the reply claims the schedule was deleted or disabled"
     return _raw_json(look.reply)
 

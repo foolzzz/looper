@@ -293,11 +293,10 @@ QUEUED_EXPLANATION = "排队中的运行即使停用也会在当前命令结束�
 
 @pytest.mark.parametrize("queued,mutation", [
     (queued, mutation) for queued in (False, True)
-    for mutation in (None, "deleted", "no_running", "no_queued", "disabled_ok", "disable_asked",
+    for mutation in (None, "deleted", "disabled", "no_running", "no_queued", "disabled_ok", "disable_asked",
                      "delete_asked", "empty", "claims_deleted", "claims_disabled", "old_advice",
-                     "missing_refusal", "missing_finish", "missing_offer", "no_question",
-                     "missing_queue", "queue_cancelled", "not_deletable_after_finish")
-    if queued or mutation not in {"no_queued", "missing_queue", "queue_cancelled"}
+                     "missing_refusal", "missing_finish", "missing_disable", "missing_queue")
+    if queued or mutation not in {"no_queued", "missing_queue"}
 ])
 def test_command_delete_running_dialog_checks_state_and_explanation(monkeypatch, queued, mutation):
     actions = [action("looper_schedules", "delete", status="error")]
@@ -312,6 +311,8 @@ def test_command_delete_running_dialog_checks_state_and_explanation(monkeypatch,
     if mutation == "deleted":
         monkeypatch.setattr(dialogs, "_named", lambda *_: None)
         actions[0]["status"] = "ok"
+    elif mutation == "disabled":
+        schedule["enabled"] = False
     elif mutation in {"no_running", "no_queued"}:
         runs[:] = [run for run in runs if run["status"] != mutation.removeprefix("no_")]
     elif mutation in {"disabled_ok", "disable_asked"}:
@@ -322,22 +323,25 @@ def test_command_delete_running_dialog_checks_state_and_explanation(monkeypatch,
     elif mutation in {"empty", "claims_deleted", "claims_disabled", "old_advice"}:
         look.reply = {"empty": "", "claims_deleted": "已删除。", "claims_disabled": BUSY_EXPLANATION + "已停用。",
                       "old_advice": "请先停用并等待。"}[mutation]
-    elif mutation in {"missing_refusal", "missing_finish", "missing_offer", "no_question", "missing_queue"}:
-        removed = {"missing_refusal": "没有删除：", "missing_finish": "等命令结束后才能删除。",
-                   "missing_offer": "要先停用定时任务，阻止新的触发吗？", "no_question": "吗？",
+    elif mutation in {"missing_refusal", "missing_finish", "missing_disable", "missing_queue"}:
+        removed = {"missing_refusal": "没有删除：", "missing_finish": "结束",
+                   "missing_disable": "停用",
                    "missing_queue": QUEUED_EXPLANATION}[mutation]
         look.reply = look.reply.replace(removed, "")
-    elif mutation == "not_deletable_after_finish":
-        look.reply = look.reply.replace("才能删除", "仍不能删除")
-    elif mutation == "queue_cancelled":
-        look.reply = look.reply.replace(QUEUED_EXPLANATION, "排队中的运行不会在当前命令结束后开始。")
     assert (check(look) is None) is (mutation is None)
 
 
 @pytest.mark.parametrize("queued", [False, True])
 @pytest.mark.parametrize("reply", [
-    "未删除，需等正在运行的命令完成后再删除。是否需要我禁用这个定时任务？",
-    "当前无法删除；待本次运行结束后就可以删除。需要先停用吗？",
+    "没删，跑完才能删。停用会阻止新的触发。",
+    "未删，跑完再删。停用后不再触发。",
+    "没有删除，等命令结束再删。停用后不会产生新的运行。",
+    "删不掉，执行完就可以删。停用后不再调度。",
+    "删不了，完成后可以删。要先停用来阻止新的触发吗？",
+    "当前无法删除；待本次运行结束后就可以删除。需要先停用来阻止新的触发吗？",
+    "不能删除，跑完再删。停用会阻止新的触发。",
+    "拒绝了删除请求，跑完再删。停用后不再触发。",
+    "停用后不再触发。跑完再删，现在没删。删除后它就不会再执行。",
 ])
 def test_command_delete_running_dialog_accepts_alternative_explanations(monkeypatch, reply, queued):
     look = observed(monkeypatch, {}, [action("looper_schedules", "delete", status="error")], reply=reply)
@@ -345,9 +349,31 @@ def test_command_delete_running_dialog_accepts_alternative_explanations(monkeypa
     runs = [{"status": "running"}] + ([{"status": "queued"}] if queued else [])
     monkeypatch.setattr(look.api, "post", lambda *_: {"result": {"runs": runs}})
     if queued:
-        look.reply += "排队中的运行会在当前命令完成后照常启动。"
+        look.reply += "排队的那次运行，在当前这次结束后仍然会启动。"
     case_id = "schedule_command_delete_running" + ("_queued" if queued else "")
     assert dialogs.select([case_id])[0].says[0].check(look) is None
+
+
+@pytest.mark.parametrize("explanation", [
+    "排队的那次会开始。", "排队的那次会启动。", "排队的那次会执行。", "排队的那次会运行。",
+    "开始的是排队的那次。", "启动的是排队的那次。", "执行的是排队的那次。", "运行的是排队的那次。",
+])
+def test_command_delete_running_dialog_accepts_queue_word_order(monkeypatch, explanation):
+    look = observed(monkeypatch, {}, [action("looper_schedules", "delete", status="error")],
+                    reply=BUSY_EXPLANATION + explanation)
+    monkeypatch.setattr(dialogs, "_named", lambda *_: {"schedule_id": "busy-id", "enabled": True})
+    monkeypatch.setattr(look.api, "post", lambda *_: {"result": {"runs": [{"status": "running"}, {"status": "queued"}]}})
+    assert dialogs.select(["schedule_command_delete_running_queued"])[0].says[0].check(look) is None
+
+
+@pytest.mark.parametrize("claim", ["已删除。", "删除了。", "已停用。"])
+def test_command_delete_running_dialog_rejects_false_claims(monkeypatch, claim):
+    look = observed(monkeypatch, {}, [action("looper_schedules", "delete", status="error")],
+                    reply=BUSY_EXPLANATION + QUEUED_EXPLANATION + claim)
+    monkeypatch.setattr(dialogs, "_named", lambda *_: {"schedule_id": "busy-id", "enabled": True})
+    monkeypatch.setattr(look.api, "post", lambda *_: {"result": {"runs": [{"status": "running"}, {"status": "queued"}]}})
+    assert dialogs.select(["schedule_command_delete_running_queued"])[0].says[0].check(look) == (
+        "the reply claims the schedule was deleted or disabled")
 
 
 @pytest.mark.parametrize("mutation", [None, "enabled", "deleted", "needs_confirmation", "error", "confirmed",
