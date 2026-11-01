@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -180,13 +181,18 @@ def test_drain_during_an_agent_firing_rolls_it_back(monkeypatch: pytest.MonkeyPa
     run_scheduled(test, monkeypatch, tmp_path)
 
 
+@pytest.mark.parametrize("entry", ["manual", "queued"])
 def test_drain_as_an_agent_firing_commits_defers_its_task_start(monkeypatch: pytest.MonkeyPatch,
-                                                             tmp_path: Path) -> None:
+                                                             tmp_path: Path, caplog: pytest.LogCaptureFixture,
+                                                             entry: str) -> None:
     async def test(env: ScheduleEnv) -> None:
         drain = DrainState()
         env.scheduler = Scheduler(bus=env.bus, clock=env.clock, drain=drain)
         drain.add_source(env.scheduler.drain_waiting)
-        sid = (await env.schedule())["schedule_id"]
+        sid = (await env.schedule(run_timeout_seconds=60))["schedule_id"]
+        if entry == "queued":
+            await db_schedules.insert_run(env.pool, schedule_id=sid, scheduled_for=env.clock.now,
+                                          trigger="manual", status=db_schedules.QUEUED)
         transaction = db_connection.transaction
         armed = False
 
@@ -201,18 +207,88 @@ def test_drain_as_an_agent_firing_commits_defers_its_task_start(monkeypatch: pyt
 
         monkeypatch.setattr(db_connection, "transaction", draining_commit)
         armed = True
-        run_id = await env.scheduler.run_now(sid)
+        with caplog.at_level("INFO", logger="looper.agents.scheduler"):
+            if entry == "manual":
+                run_id = await env.scheduler.run_now(sid)
+            else:
+                await env.scheduler.tick()
+                run_id = (await env.runs(sid))[0]["run_id"]
         run, = await env.runs(sid)
         assert run_id == run["run_id"]
         assert run["status"] == db_schedules.RUNNING
         assert await env.pool.fetchval("SELECT status FROM tasks WHERE id = $1", run["task_id"]) == db_tasks.READY
         assert env.bus.of("task_start") == []
         assert drain.snapshot()["phase"] == "drained"
+        assert "starts now" not in caplog.text
+        assert "defer" in caplog.text
+
+        env.clock.now += timedelta(minutes=5)
+        await env.scheduler.tick()
+        waiting = await db_schedules.get_run(run_id)
+        assert waiting["status"] == db_schedules.RUNNING
+        assert waiting["run_timeout_seconds"] == 60 and waiting["started_at"] is None
+        assert await env.pool.fetchval("SELECT status FROM tasks WHERE id = $1", run["task_id"]) == db_tasks.READY
+        assert await env.pool.fetchval("SELECT consecutive_failures FROM schedules WHERE id = $1", sid) == 0
+        assert env.bus.of("task_stop") == []
+        assert env.bus.of("task_start") == []
+        drain.cancel()
+        await env.scheduler.tick()
+        assert env.bus.of("task_start") == [run["task_id"]]
+        assert (await db_schedules.get_run(run_id))["started_at"] == env.clock.now
+        # The TaskRouter claims TASK_START; time spent draining is outside the run's timeout.
+        await db_tasks.start_ready_task(run["task_id"])
+        env.clock.now += timedelta(seconds=59)
+        await env.scheduler.tick()
+        assert (await db_schedules.get_run(run_id))["status"] == db_schedules.RUNNING
+        assert env.bus.of("task_stop") == []
+        env.clock.now += timedelta(seconds=1)
+        await env.scheduler.tick()
+        assert (await db_schedules.get_run(run_id))["status"] == "timed_out"
+        assert await env.pool.fetchval("SELECT consecutive_failures FROM schedules WHERE id = $1", sid) == 1
+        assert env.bus.of("task_start") == env.bus.of("task_stop") == [run["task_id"]]
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("entry", ["manual", "queued"])
+def test_drain_during_task_lookup_defers_its_start(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                 caplog: pytest.LogCaptureFixture, entry: str) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        drain = DrainState()
+        env.scheduler = Scheduler(bus=env.bus, clock=env.clock, drain=drain)
+        drain.add_source(env.scheduler.drain_waiting)
+        sid = (await env.schedule())["schedule_id"]
+        if entry == "queued":
+            await db_schedules.insert_run(env.pool, schedule_id=sid, scheduled_for=env.clock.now,
+                                          trigger="manual", status=db_schedules.QUEUED)
+        get_task = db_tasks.get_task
+
+        async def draining_lookup(*args: Any, **kwargs: Any) -> Any:
+            task = await get_task(*args, **kwargs)
+            drain.begin(DrainScope.RUNS)
+            return task
+
+        with monkeypatch.context() as patch, caplog.at_level("INFO", logger="looper.agents.scheduler"):
+            patch.setattr(db_tasks, "get_task", draining_lookup)
+            if entry == "manual":
+                await env.scheduler.run_now(sid)
+            else:
+                await env.scheduler.tick()
+        run, = await env.runs(sid)
+        assert run["status"] == db_schedules.RUNNING
+        assert await env.pool.fetchval("SELECT status FROM tasks WHERE id = $1", run["task_id"]) == db_tasks.READY
+        assert env.bus.of("task_start") == []
+        assert drain.snapshot()["phase"] == "drained"
+        assert "starts now" not in caplog.text
+        assert "defer" in caplog.text
 
         env.clock.now += START_RETRY_AFTER
         await env.scheduler.tick()
         assert env.bus.of("task_start") == []
         drain.cancel()
+        await env.scheduler.tick()
+        assert env.bus.of("task_start") == [run["task_id"]]
+        await db_tasks.start_ready_task(run["task_id"])
         await env.scheduler.tick()
         assert env.bus.of("task_start") == [run["task_id"]]
 

@@ -426,7 +426,7 @@ class Scheduler:
         """The commit landed after drain.begin: the task stays ready, and _settle's start retry starts it once
         the service serves again. A gate was admitted with its run and still finishes during the drain."""
         if launched.task_id and self._agent_admission_closed(schedule["kind"]):
-            logger.info("schedule %s: a drain began as run %s committed; task %s starts after the drain",
+            logger.info("schedule %s: a drain began as run %s committed; task %s start deferred by the drain",
                         schedule["id"], launched.run_id, launched.task_id)
             launched.task_id = None
 
@@ -611,10 +611,11 @@ class Scheduler:
             await self._follow(schedule, launched)
             return launched.run_id
 
-    async def _follow(self, schedule: Mapping[str, Any], launched: _Launched) -> None:
+    async def _follow(self, schedule: Mapping[str, Any], launched: _Launched, *, admitted_gate: bool = False) -> bool:
         """After the firing's transaction: start its task, run its gate, report its end."""
+        started = False
         if launched.task_id:
-            await self._start_task(launched.task_id, schedule["project_id"])
+            started = await self._start_task(launched.task_id, schedule["project_id"], admitted_gate=admitted_gate)
         if launched.command is not None:
             await self._start_runner(schedule, launched.command)
         if launched.gate is not None:
@@ -627,6 +628,7 @@ class Scheduler:
                                                     count=launched.overlap_count, running=launched.overlap_run))
         if launched.overlap_recovered:
             self._spawn(self._notifier.overlap_recovered(schedule["id"], launched.run_id))
+        return started
 
     async def _busy_task(self, conn: asyncpg.Connection, schedule_id: str) -> str | None:
         """A task of the schedule still in progress (queued, running, or created and about to start), if any."""
@@ -969,7 +971,7 @@ class Scheduler:
                                                               fires_now=False, expected_fingerprint=expected)
                 logger.info("schedule %s: gate of run %s %s", schedule_id, run_id,
                             "started a task" if launched.task_id else "ended the run")
-                await self._follow(schedule, launched)
+                await self._follow(schedule, launched, admitted_gate=True)
                 if launched.task_id is None:
                     await self._start_queued(schedule_id)
         except asyncio.CancelledError:
@@ -977,20 +979,29 @@ class Scheduler:
         except Exception:
             logger.exception("could not finish the gate of schedule run %s", run_id)
 
-    async def _start_task(self, task_id: str, project_id: str) -> None:
+    async def _start_task(self, task_id: str, project_id: str, *, admitted_gate: bool = False) -> bool:
         """Publish through the deletion barrier, including recovery of tasks created before a server stop."""
         self._starting += 1
         try:
             with _project_firing(project_id) as allowed:
-                # TASK_START stays admitted during drain so Planners can persist results and decisions;
-                # their bus queues are lost at restart. Their dispatched runs wait at the Worker slot.
                 # A retry can carry a snapshot read before deletion finished and released the barrier.
                 if not allowed or await db_tasks.get_task(task_id) is None:
-                    return
+                    return False
+                # Recheck after the read, immediately before publication. A gate admitted before
+                # the drain still runs to completion, including starting its task.
+                if not admitted_gate and self._agent_admission_closed("agent"):
+                    logger.info("task %s: start deferred by the drain", task_id)
+                    return False
+                started_at = self._clock()
                 await self._bus.publish(MessageEnvelope.create(
                     source=SCHEDULER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=MessageType.TASK_START,
                     payload={"task_id": task_id},
                 ))
+                await db_connection.get_pool().execute(
+                    "UPDATE schedule_runs SET started_at = $2 "
+                    "WHERE task_id = $1 AND status = 'running' AND started_at IS NULL", task_id, started_at,
+                )
+                return True
         finally:
             self._starting -= 1
 
@@ -1020,8 +1031,9 @@ class Scheduler:
             except _DrainBegan:
                 return
             self._defer_start(schedule, launched)
-            logger.info("schedule %s: the queued run %s starts now", schedule_id, launched.run_id)
-            await self._follow(schedule, launched)
+            started = await self._follow(schedule, launched)
+            if started or launched.command is not None or launched.gate is not None:
+                logger.info("schedule %s: the queued run %s starts now", schedule_id, launched.run_id)
 
     # --- Ending ---
 
@@ -1137,7 +1149,9 @@ class Scheduler:
             await self._finish(run, task, task_status, now)
             return
         timeout = run["run_timeout_seconds"]
-        if timeout and run["fired_at"] and now - run["fired_at"] >= timedelta(seconds=timeout):
+        # A ready task may have waited through a drain. Older started runs have only fired_at.
+        started_at = run["started_at"] or run["fired_at"]
+        if task_status != db_tasks.READY and timeout and started_at and now - started_at >= timedelta(seconds=timeout):
             cost = (await db_llm_records.task_costs([run["task_id"]]))[run["task_id"]]["cost_usd"]
             async with db_connection.transaction() as conn:
                 finished = await db_schedules.finish_run(
