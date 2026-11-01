@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.60] - 2026-10-31
+
+### Fixed
+
+- **Command schedule confirmations are bound to the directory the command runs in, and an edit of a command schedule that will run again is confirmed.** Enabling or running a command schedule (Manager `looper_schedules`, the same tool through a client token, `/api/v1/schedule_admin/update` and `run`) now versions the effective directory (its own, or its project's) and shows it in the question; if it changed after the question the confirmation is refused with the existing `conflict` / 409. An edit of the command, env, env file or directory of an enabled command schedule, or of a disabled one with a queued run, now needs a confirmation that shows the before and after and the directory. Agent schedules, the dashboard, config import and a change to the project's own directory are unchanged. The Manager prompt and confirmation texts change. No migration. ([#1028](https://github.com/foolzzz/looper/pull/1028))
+
 ## [2.14.59] - 2026-10-31
 
 ### Fixed
