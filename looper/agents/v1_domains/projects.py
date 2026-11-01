@@ -3,7 +3,7 @@
 from .. import projects as core
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT
 from ..ops import Call, ErrorCode, OpError, Turn
-from ..ops.config import _deleting_project, answered
+from ..ops.config import _deleting_project, answered, directory_change_impact
 from ..project_execution import FIELDS, ROOM_LIMITS
 
 
@@ -58,7 +58,7 @@ def _op(action, request, result, risk):
         description = ("Delete a project with its tasks and schedules, stopping its running tasks first "
                        "(the user confirms first).")
     return Operation(f"project_admin.{action}", "POST", f"/api/v1/project_admin/{action}",
-                     description, description, request, result, risk=risk, confirms=risk == "high")
+                     description, description, request, result, risk=risk, confirms=risk == "high" or action == "update")
 
 
 OPERATIONS = (
@@ -70,6 +70,16 @@ OPERATIONS = (
 
 
 async def impact(server, operation, arguments, principal, headers):
+    if operation.operation_id == "project_admin.update":
+        if "work_dir" not in arguments["fields"]:
+            return None
+        project = await answered(core._existing_project(arguments["project_id"]))
+        change = await answered(core.directory_change(project, arguments["fields"]["work_dir"]))
+        if not change.schedules:
+            return None
+        # Bind the shown read; the closed request cannot supply this server-owned version.
+        arguments["_directory_version"] = change.version
+        return directory_change_impact(project, change, arguments["fields"])
     if operation.operation_id != "project_admin.delete":
         return None
     project = await answered(core.deletable_project(arguments["project_id"]))
@@ -108,6 +118,9 @@ async def run(server, operation, arguments, principal, headers):
     changes = {key: value for key, value in normalized.items() if key != "execution"}
     changes.update(normalized.get("execution", {}))
     before = core.project_view(await answered(core._existing_project(project_id)))
-    if not changes or all(before[key] == value for key, value in changes.items()):
+    # A confirmed directory update must reach the version check even if another writer set the same target.
+    if arguments.get("_directory_version") is None and (
+            not changes or all(before[key] == value for key, value in changes.items())):
         raise OpError(ErrorCode.INVALID, "give at least one changed project field")
-    return {"project": await answered(core.update_project(project_id, fields))}
+    return {"project": await answered(core.update_project(
+        project_id, fields, expected_directory_version=arguments.get("_directory_version")))}

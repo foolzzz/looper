@@ -156,6 +156,20 @@ async def list_schedules(project_id: str | None = None, *, pool: Db | None = Non
     return await _with_overrides(db, rows)
 
 
+async def directory_dependents(project_id: str, *, pool: Db | None = None) -> list[dict[str, Any]]:
+    """The project's command schedules that run in its directory (no ``work_dir`` of their own) and will run
+    again: enabled, or holding a queued run; by name, each with ``queued``."""
+    rows = [row for row in await list_schedules(project_id, pool=pool)
+            if row["kind"] == "command" and not row["work_dir"]]
+    if not rows:
+        return []
+    db = pool or get_pool()
+    queued = {row["schedule_id"] for row in await db.fetch(
+        "SELECT DISTINCT schedule_id FROM schedule_runs WHERE status = $1 AND schedule_id = ANY($2::text[])",
+        QUEUED, [row["id"] for row in rows])}
+    return [{**row, "queued": row["id"] in queued} for row in rows if row["enabled"] or row["id"] in queued]
+
+
 async def _set_overrides(conn: asyncpg.Connection, schedule_id: str, profiles: Mapping[str, str]) -> None:
     await conn.execute("DELETE FROM schedule_profile_overrides WHERE schedule_id = $1", schedule_id)
     await conn.executemany(

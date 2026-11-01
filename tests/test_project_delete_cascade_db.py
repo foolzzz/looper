@@ -967,6 +967,36 @@ def test_unknown_and_template_refusals_happen_before_any_stop_or_delete(monkeypa
     run_db(run, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("owner", ["own", "other"])
+def test_scoped_manager_refuses_a_directory_change_that_moves_another_managers_command_schedule(
+    monkeypatch, tmp_path, owner,
+):
+    from tests.test_scenario_manager_tools_db import REVIEW, _review
+
+    async def run(pool):
+        chat, _ = await _review(pool, tmp_path, tools="all", task_scope="own")
+        project = await db_projects.create_project(name="Example", work_dir="/srv/a", pool=pool)
+        await _task(pool, project, "task-own", manager_id=REVIEW)
+        made = await schedules.create_schedule(project["id"], {
+            "name": "pull", "cron": "0 * * * *", "timezone": "UTC", "kind": "command", "command": "git pull",
+            "requirement": "", "manager_id": REVIEW if owner == "own" else "manager"})
+        await schedules.update_schedule(made["schedule"]["schedule_id"], {"enabled": True})
+        (answer,) = await chat.say("改默认目录", ("looper_projects", {
+            "action": "update", "project": "Example", "work_dir": "/srv/b"}))
+        if owner == "own":
+            assert answer["status"] == "needs_confirmation", answer
+            assert "定时任务「pull」（已启用）：" in chat.turns[-1].blocks[0]
+        else:
+            assert answer["status"] == "error" and answer["error"]["code"] == "conflict", answer
+            assert answer["error"]["message"] == (
+                "project 'Example''s directory is also where command schedules outside this Manager run: "
+                "it cannot be changed from here")
+            assert chat.turns[-1].blocks == []
+        assert (await db_projects.get_project(project["id"], pool=pool))["work_dir"] == "/srv/a"
+
+    run_db(run, monkeypatch, timeout=30)
+
+
 @pytest.mark.parametrize("other", ["task", "schedule", None])
 def test_scoped_manager_refuses_other_owners_without_counts_and_deletes_its_own(monkeypatch, tmp_path, other):
     from tests.test_scenario_manager_tools_db import REVIEW, _review
