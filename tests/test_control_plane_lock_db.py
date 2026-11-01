@@ -259,9 +259,12 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
     inflight = []
     created, release = asyncio.Event(), asyncio.Event()
     try:
-        # Preserve existing connections, including the fixture's owner that drops the schema afterwards.
+        # The system's pool already holds a connection: a restart ends it, like every connection the system opens
+        # later. Preserve the rest, including the fixture's owner that drops the schema afterwards.
+        assert pool.get_size() == 1, "the system's pool must hold a single connection before startup"
+        system_pids = {await pool.fetchval("SELECT pg_backend_pid()")}
         before = {row["pid"] for row in await probe.fetch("""SELECT pid FROM pg_stat_activity
-            WHERE datname=current_database() AND pid<>pg_backend_pid()""")}
+            WHERE datname=current_database() AND pid<>pg_backend_pid()""")} - system_pids
         assert driver_pids <= before, "the schema administrator must be preserved during the restart"
         async with _running(pool, monkeypatch, root, keeper=KeeperMode.ON) as system:
             assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1", control_plane.EPOCH_KEY) == "1"
@@ -296,9 +299,10 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
                 WHERE datname=current_database() AND application_name LIKE 'looper serve %'""")
             assert pid is not None
             if restart:
-                await probe.fetch("""SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-                    WHERE datname=current_database() AND pid<>pg_backend_pid() AND NOT (pid=ANY($1::int[]))""",
-                                  list(before))
+                ended = {row["pid"] for row in await probe.fetch("""SELECT pid, pg_terminate_backend(pid) AS ended
+                    FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()
+                    AND NOT (pid=ANY($1::int[]))""", list(before)) if row["ended"]}
+                assert system_pids | {pid} <= ended, "a restart must end every connection of the system"
             else:
                 assert await probe.fetchval("SELECT pg_terminate_backend($1)", pid)
             await until(lambda: proc_tree._spawns_fenced, "the lost-lock spawn fence", timeout=5)
