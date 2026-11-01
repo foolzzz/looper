@@ -996,11 +996,11 @@ class AgentHTTPServer:
         pool = self._worker_pool
         if pool is None or not (status := pool.keeper_status()):
             return checks
-        failed = status["failed_after_start"]
-        if status["adopted_at_start"] < status["candidates_at_start"] or failed:
+        failed, ended = status["failed_after_start"], status["ended_at_start"]
+        if status["adopted_at_start"] < status["candidates_at_start"] or failed or ended:
             checks.append({"id": "kept_runs", "status": "warn", "label": "P1: Kept run adoption incomplete",
                            "detail": f"Adopted {status['adopted_at_start']} of {status['candidates_at_start']} kept runs; "
-                                     f"pending: {status['pending']}; failed after start: {failed}",
+                                     f"pending: {status['pending']}; ended at start: {ended}; failed after start: {failed}",
                            "fix": "Check the affected tasks and the service log for adoption failures."})
         when = time.time()
         if when - self._keeper_check_at >= 30:

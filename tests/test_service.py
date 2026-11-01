@@ -122,6 +122,7 @@ class FakeSystemd:
         self.calls: list[list[str]] = []
         self.probe_active = False
         self.probe_service_active = False
+        self.kill_mode = "process"
 
     @property
     def serving(self) -> bool:
@@ -132,6 +133,8 @@ class FakeSystemd:
         self.calls.append(argv)
         assert argv[:2] == ["systemctl", "--user"], argv
         args = argv[2:]
+        if args[0] == "show" and args[2:] == ["-p", "KillMode"]:
+            return subprocess.CompletedProcess(argv, 0, f"KillMode={self.kill_mode}\n", "")
         unit = args[1] if args[0] == "show" else args[-1]
         if unit in (f"{LABEL}-probe.timer", f"{LABEL}-probe.service"):
             attr = "probe_active" if unit.endswith(".timer") else "probe_service_active"
@@ -1218,6 +1221,7 @@ def test_systemd_status_and_doctor_warn_when_the_unit_cannot_preserve_command_sc
     warning = ("the unit predates KillMode=process: restarting it ends running command schedules; "
                "run `looper service install` again")
     compatible = kill_mode == "KillMode=process\n"
+    fake.kill_mode = "process" if compatible else "control-group"
 
     assert _looper(monkeypatch, host, "status", "--label", label) == 0
     assert (f"warning    {warning}" in capsys.readouterr().out) is not compatible
@@ -1243,6 +1247,19 @@ def test_systemd_missing_unit_does_not_need_a_kill_mode_upgrade(tmp_path: Path, 
     code, output = service.status(host, label=LABEL)
     assert code == 1 and "not installed" in output and "warning" not in output
     assert service.doctor_check(host, LABEL).status == service.SKIP
+
+
+@pytest.mark.parametrize("installed,effective", [("process", "control-group"), ("control-group", "process")])
+def test_systemd_kill_mode_uses_effective_value_including_drop_ins(tmp_path: Path, checkout: Path,
+                                                                installed: str, effective: str) -> None:
+    fake = FakeSystemd()
+    fake.kill_mode = effective
+    host = _host(tmp_path, checkout, fake, system="Linux")
+    mgr = service.Systemd(host, LABEL)
+    service.write_private(mgr.unit_path, f"[Service]\nKillMode={installed}\n".encode())
+
+    assert mgr.kill_mode_ok() is (effective == "process")
+    assert fake.commands() == [f"show {LABEL}.service -p KillMode"]
 
 
 def test_status_reports_a_refused_operator_token_as_answering(

@@ -1,0 +1,4 @@
+2026-11-01 05:50:39,948 looper.agents.runtimes.pi_runner INFO Pi runner pool enabled for every Pi role (32 sessions per member)
+2026-11-01 05:50:39,976 looper.agents.runtimes.dsh_runner INFO DSH runner pool enabled for every DSH role (32 sessions per member)
+2026-11-01 05:50:40,001 looper.agents.serve ERROR looper serve cannot start:
+another looper serve already runs on this database: backend_pid=33686, application_name=looper serve 70472@<host>, client_addr=<address>, backend_start=2026-11-01 13:49:51.980010+00:00. Stop it first: one database runs one control plane.

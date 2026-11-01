@@ -1127,7 +1127,8 @@ way.
 The systemd units already use `KillMode=process`, so stop and restart signal
 only serve. Leftover keepers remain in the unit's cgroup, and systemd may log
 "left-over process" at the next start; this is harmless. An old unit without
-that setting is warned about by service install and upgrade checks; such a
+that effective setting is warned about by service install and upgrade checks;
+the checks read `systemctl --user show <unit> -p KillMode`, including drop-ins. Such a
 unit requires a `FULL` upgrade rather than preserving running agents.
 
 Each agent process is started through `proc_tree.spawn`, which records it in
@@ -4472,8 +4473,9 @@ number of live keepers. A control-plane change plans `CONTROL_PLANE` only when
 the running service has keeper mode on, the service manager preserves keepers
 (launchd, or systemd with `KillMode=process`), every live keeper offers at least
 one protocol the target supports, and the adoption contract is unchanged.
-Otherwise it plans `FULL`; an older systemd unit needs reinstalling before it
-can keep runs across restarts. If keeper liveness cannot be checked, the
+Otherwise it plans `FULL`; a systemd unit whose effective `KillMode` is not
+`process` gets only the reinstall reason before it can keep runs across restarts.
+If keeper liveness cannot be checked, the
 upgrade refuses. With keeper mode off, previews and full-drain reports retain
 their existing behavior. The upgrade refuses unless it runs with the service's
 own `looper` and checkout.
@@ -4484,14 +4486,17 @@ only turns block, the CLI enforces `--turns-timeout`, measured from the start
 of the drain. `--no-force` cancels deployment at the applicable deadline.
 The report counts keepable runs in the final drain status as `kept_before`;
 only non-keepable runs interrupted at the deadline are listed in `interrupted`,
-with reason `not_keepable`. Full drains continue to use reason `deadline`.
+with reason `not_keepable`. `cut_turns` lists each Manager or Planner turn cut
+at that deadline, with its `agent_id` and `role`. Full drains continue to use reason `deadline`.
 After restart, the CLI waits up to 330 seconds for pending adoptions and reports
-`adopted` from `keepers.adopted_at_start`, plus `failed_after_start` reason counts.
-If fewer runs were adopted than kept, or an adoption failed after startup, it
+`adopted` from `keepers.adopted_at_start`, plus `ended_at_start` and
+`failed_after_start` reason counts. If fewer runs were adopted than kept,
+a run was ended at startup, or an adoption failed after startup, it
 adds a P1 alert and prints a warning. A serving upgrade still exits successfully.
 
 With keeper mode on, `system.status.checks` exposes keeper warnings through the
-dashboard's existing checks list: P1 for incomplete or failed adoption, and P2
+dashboard's existing checks list: P1 for incomplete or failed adoption or runs
+ended at startup (with reason counts), and P2
 for a live keeper outside this pool with no controller for over ten minutes.
 The orphan check scans run records lazily and caches the result for 30 seconds.
 Telegram and Lark need no changes; notifying the Manager about P1 warnings is

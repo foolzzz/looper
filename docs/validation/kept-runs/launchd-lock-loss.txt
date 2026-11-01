@@ -1,0 +1,6 @@
+	state = running
+	runs = 2
+	pid = 75637
+	last exit code = 75: EX_TEMPFAIL
+		state = active
+		state = active

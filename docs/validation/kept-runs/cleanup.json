@@ -1,0 +1,7 @@
+{
+  "launchd_job_absent": true,
+  "unit_file_absent": true,
+  "database_dropped": true,
+  "runtime_root_removed": true,
+  "owned_processes_remaining": 0
+}

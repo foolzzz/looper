@@ -1,0 +1,4 @@
+looper mcp-server INFO forwarding tool calls to http://127.0.0.1:57935
+looper mcp-server INFO tools/call looper_room_post: ok
+looper mcp-server INFO agent api retry attempts=5 waited=8.1 outcome=success
+looper mcp-server INFO tools/call looper_room_post: ok
