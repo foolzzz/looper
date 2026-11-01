@@ -4392,7 +4392,12 @@ The operation is also available through generated `loopercli` commands. Dashboar
 Telegram and Lark need no change for this read-only planning command.
 
 During a planned-upgrade drain, agent schedules keep their due times and queued
-runs for catch-up after restart or drain cancellation. Run now on an existing
+runs for catch-up after restart or drain cancellation. An agent firing that was
+already under way when the drain began creates nothing: its transaction rolls
+back, its schedule stays due and a queued run stays queued (Run now answers the
+same 409). If its commit completed just as the drain began, its task stays ready
+and starts after the restart or the cancelled drain. A gate admitted before the
+drain still finishes and starts its task. Run now on an existing
 agent schedule returns 409 with "the service is draining for an upgrade: run it
 after the restart"; an unknown schedule still returns 404. Command schedules
 continue firing, including queued runs and Run now: their runs survive service

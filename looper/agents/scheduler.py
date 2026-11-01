@@ -366,6 +366,10 @@ class _Launched:
     overlap_run: Mapping[str, Any] | None = None
 
 
+class _DrainBegan(Exception):
+    """A drain began while an agent firing's transaction was open: the firing rolls back and is done after the drain."""
+
+
 class Scheduler:
     """Fires due schedules every ``tick_seconds``; started and stopped with the server. ``sender`` sends the
     schedules' messages (None: they are recorded only), their links starting with ``dashboard_url`` (``links``);
@@ -409,6 +413,22 @@ class Scheduler:
             yield True
         finally:
             self._starting -= 1
+
+    def _agent_admission_closed(self, kind: str) -> bool:
+        return kind != "command" and self._drain is not None and self._drain.draining
+
+    def _check_still_admitted(self, schedule: Mapping[str, Any]) -> None:
+        """Call as the last statement inside an agent firing's transaction."""
+        if self._agent_admission_closed(schedule["kind"]):
+            raise _DrainBegan(schedule["id"])
+
+    def _defer_start(self, schedule: Mapping[str, Any], launched: _Launched) -> None:
+        """The commit landed after drain.begin: the task stays ready, and _settle's start retry starts it once
+        the service serves again. A gate was admitted with its run and still finishes during the drain."""
+        if launched.task_id and self._agent_admission_closed(schedule["kind"]):
+            logger.info("schedule %s: a drain began as run %s committed; task %s starts after the drain",
+                        schedule["id"], launched.run_id, launched.task_id)
+            launched.task_id = None
 
     async def start(self) -> None:
         if self._commands is not None:
@@ -522,6 +542,10 @@ class Scheduler:
                         if not firing_guard.enter_context(_project_firing(schedule["project_id"])):
                             continue
                         launched = await self._fire_schedule(conn, schedule, now)
+                        self._check_still_admitted(schedule)
+                except _DrainBegan:
+                    logger.info("schedule %s: a drain began while it fired; rolled back, it stays due", schedule["id"])
+                    continue
                 except Exception:
                     if schedule is None:
                         raise  # the database itself failed: the next pass tries again
@@ -529,6 +553,7 @@ class Scheduler:
                     logger.exception("could not fire schedule %s", schedule["id"])
                     continue
                 if launched is not None:
+                    self._defer_start(schedule, launched)
                     await self._follow(schedule, launched)
 
     async def _fire_schedule(self, conn: asyncpg.Connection, schedule: dict[str, Any],
@@ -570,14 +595,19 @@ class Scheduler:
         Its ``next_fire_at`` stays. A gate runs in the background: the run is ``gating`` until it ends."""
         now = self._clock()
         with ExitStack() as firing_guard:
-            async with db_connection.transaction() as conn:
-                schedule = await db_schedules.lock_schedule(conn, schedule_id)
-                if schedule is not None:
-                    db_schedules.check_configuration_version(schedule, expected_version)
-                if (schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
-                        or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
-                    return None
-                launched = await self._fire(conn, schedule, Firing(Trigger.MANUAL, now), now)
+            try:
+                async with db_connection.transaction() as conn:
+                    schedule = await db_schedules.lock_schedule(conn, schedule_id)
+                    if schedule is not None:
+                        db_schedules.check_configuration_version(schedule, expected_version)
+                    if (schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
+                            or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
+                        return None
+                    launched = await self._fire(conn, schedule, Firing(Trigger.MANUAL, now), now)
+                    self._check_still_admitted(schedule)
+            except _DrainBegan:
+                return None
+            self._defer_start(schedule, launched)
             await self._follow(schedule, launched)
             return launched.run_id
 
@@ -968,23 +998,28 @@ class Scheduler:
         """Start the schedule's queued run when none of its tasks or gates is in progress any more."""
         now = self._clock()
         with ExitStack() as firing_guard:
-            async with db_connection.transaction() as conn:
-                schedule = await db_schedules.lock_schedule(conn, schedule_id)
-                if (schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
-                        or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
-                    return
-                runs = await db_schedules.open_runs(conn, schedule_id)
-                queued = [run for run in runs if run["status"] == db_schedules.QUEUED]
-                if not queued or any(run["status"] == db_schedules.GATING for run in runs):
-                    return
-                busy = (any(run["status"] == db_schedules.RUNNING for run in runs)
-                        if schedule["kind"] == "command" else await self._busy_task(conn, schedule_id))
-                if busy:
-                    return
-                run = queued[0]
-                firing = Firing(Trigger(run["trigger"]), run["scheduled_for"], missed=run["missed"],
-                                missed_since=run["missed_since"])
-                launched = await self._launch(conn, schedule, firing, now, run_id=run["id"])
+            try:
+                async with db_connection.transaction() as conn:
+                    schedule = await db_schedules.lock_schedule(conn, schedule_id)
+                    if (schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
+                            or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
+                        return
+                    runs = await db_schedules.open_runs(conn, schedule_id)
+                    queued = [run for run in runs if run["status"] == db_schedules.QUEUED]
+                    if not queued or any(run["status"] == db_schedules.GATING for run in runs):
+                        return
+                    busy = (any(run["status"] == db_schedules.RUNNING for run in runs)
+                            if schedule["kind"] == "command" else await self._busy_task(conn, schedule_id))
+                    if busy:
+                        return
+                    run = queued[0]
+                    firing = Firing(Trigger(run["trigger"]), run["scheduled_for"], missed=run["missed"],
+                                    missed_since=run["missed_since"])
+                    launched = await self._launch(conn, schedule, firing, now, run_id=run["id"])
+                    self._check_still_admitted(schedule)
+            except _DrainBegan:
+                return
+            self._defer_start(schedule, launched)
             logger.info("schedule %s: the queued run %s starts now", schedule_id, launched.run_id)
             await self._follow(schedule, launched)
 
@@ -1118,7 +1153,8 @@ class Scheduler:
                 ))
                 self._spawn(self._notifier.run_ended(run["id"]))
             return
-        if task_status == db_tasks.READY and run["fired_at"] and now - run["fired_at"] >= START_RETRY_AFTER:
+        if (task_status == db_tasks.READY and run["fired_at"] and now - run["fired_at"] >= START_RETRY_AFTER
+                and not self._agent_admission_closed(run["kind"])):
             logger.info("schedule %s: task %s was created but never started; starting it", run["schedule_id"],
                         run["task_id"])
             await self._start_task(run["task_id"], run["project_id"])
