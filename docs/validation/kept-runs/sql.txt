@@ -1,0 +1,19 @@
+SELECT id, status, cost_usd FROM llm_records WHERE agent_id = 'worker-aa2b0e157d01';
+SELECT count(*), count(DISTINCT seq) FROM llm_record_events WHERE record_id = 5;
+SELECT step_key, worker_id, status FROM task_steps WHERE task_id = 'task-3badfe8717bf';
+
+ id |  status   | cost_usd
+----+-----------+----------
+  5 | completed |    0.001
+(1 row)
+
+ count | count
+-------+-------
+    35 |    35
+(1 row)
+
+ step_key |      worker_id      |  status
+----------+---------------------+----------
+ s1       | worker-aa2b0e157d01 | verified
+(1 row)
+

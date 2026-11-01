@@ -1,0 +1,223 @@
+{
+  "finished_while_down": {
+    "records": [
+      {
+        "id": 12,
+        "agent_id": "worker-172380917f3a",
+        "status": "completed",
+        "cost_usd": 0.001,
+        "event_counts": {
+          "count": 6,
+          "distinct_count": 6
+        }
+      }
+    ],
+    "steps": [
+      {
+        "step_key": "s1",
+        "worker_id": "worker-172380917f3a",
+        "status": "verified"
+      }
+    ]
+  },
+  "turns_restart": {
+    "records": [
+      {
+        "id": 15,
+        "agent_id": "worker-eda2c32c5c5e",
+        "status": "completed",
+        "cost_usd": 0.001,
+        "event_counts": {
+          "count": 14,
+          "distinct_count": 14
+        }
+      }
+    ],
+    "steps": [
+      {
+        "step_key": "s1",
+        "worker_id": "worker-eda2c32c5c5e",
+        "status": "verified"
+      }
+    ],
+    "keepers": {
+      "mode": "on",
+      "attached": 1,
+      "candidates_at_start": 1,
+      "adopted_at_start": 1,
+      "pending": 0,
+      "ended_at_start": {},
+      "failed_after_start": {}
+    },
+    "checks": []
+  },
+  "plain_restart": {
+    "records": [
+      {
+        "id": 18,
+        "agent_id": "worker-f5774108e32a",
+        "status": "interrupted",
+        "cost_usd": null,
+        "event_counts": {
+          "count": 2,
+          "distinct_count": 2
+        }
+      },
+      {
+        "id": 19,
+        "agent_id": "worker-56592514d867",
+        "status": "interrupted",
+        "cost_usd": null,
+        "event_counts": {
+          "count": 133,
+          "distinct_count": 133
+        }
+      }
+    ],
+    "steps": [
+      {
+        "step_key": "s1",
+        "worker_id": "worker-56592514d867",
+        "status": "dispatched"
+      }
+    ]
+  },
+  "keeper_failure": {
+    "records": [
+      {
+        "id": 21,
+        "agent_id": "worker-445d6a1da3e4",
+        "status": "failed",
+        "cost_usd": null,
+        "event_counts": {
+          "count": 128,
+          "distinct_count": 128
+        }
+      },
+      {
+        "id": 22,
+        "agent_id": "worker-99a759e88c28",
+        "status": "completed",
+        "cost_usd": 0.001,
+        "event_counts": {
+          "count": 135,
+          "distinct_count": 135
+        }
+      },
+      {
+        "id": 24,
+        "agent_id": "worker-567f2ba50fb7",
+        "status": "completed",
+        "cost_usd": 0.001,
+        "event_counts": {
+          "count": 4,
+          "distinct_count": 4
+        }
+      }
+    ],
+    "steps": [
+      {
+        "step_key": "s1",
+        "worker_id": "worker-567f2ba50fb7",
+        "status": "verified"
+      },
+      {
+        "step_key": "s2",
+        "worker_id": "worker-99a759e88c28",
+        "status": "verified"
+      }
+    ]
+  },
+  "lock_loss": {
+    "records": [
+      {
+        "id": 28,
+        "agent_id": "worker-319ce9be82b5",
+        "status": "interrupted",
+        "cost_usd": null,
+        "event_counts": {
+          "count": 2,
+          "distinct_count": 2
+        }
+      },
+      {
+        "id": 29,
+        "agent_id": "worker-ce86e1110de0",
+        "status": "running",
+        "cost_usd": null,
+        "event_counts": {
+          "count": 0,
+          "distinct_count": 0
+        }
+      }
+    ],
+    "steps": [
+      {
+        "step_key": "s1",
+        "worker_id": "worker-ce86e1110de0",
+        "status": "dispatched"
+      }
+    ],
+    "keepers": {
+      "mode": "on",
+      "attached": 0,
+      "candidates_at_start": 0,
+      "adopted_at_start": 0,
+      "pending": 0,
+      "ended_at_start": {
+        "no_detach": 1
+      },
+      "failed_after_start": {}
+    },
+    "checks": [
+      {
+        "id": "kept_runs",
+        "status": "warn",
+        "label": "P1: Kept run adoption incomplete",
+        "detail": "Adopted 0 of 0 kept runs; pending: 0; ended at start: {'no_detach': 1}; failed after start: {}",
+        "fix": "Check the affected tasks and the service log for adoption failures."
+      }
+    ]
+  },
+  "keeper_dead_in_gap": {
+    "records": [
+      {
+        "id": 32,
+        "agent_id": "worker-ee352b71dfae",
+        "status": "running",
+        "cost_usd": null,
+        "event_counts": {
+          "count": 0,
+          "distinct_count": 0
+        }
+      }
+    ],
+    "steps": [
+      {
+        "step_key": "s1",
+        "worker_id": "worker-ee352b71dfae",
+        "status": "dispatched"
+      }
+    ],
+    "keepers": {
+      "mode": "on",
+      "attached": 2,
+      "candidates_at_start": 0,
+      "adopted_at_start": 0,
+      "pending": 0,
+      "ended_at_start": {
+        "keeper_dead": 1
+      },
+      "failed_after_start": {}
+    },
+    "checks": [
+      {
+        "id": "kept_runs",
+        "status": "warn",
+        "label": "P1: Kept run adoption incomplete",
+        "detail": "Adopted 0 of 0 kept runs; pending: 0; ended at start: {'keeper_dead': 1}; failed after start: {}",
+        "fix": "Check the affected tasks and the service log for adoption failures."
+      }
+    ]
+  }
+}

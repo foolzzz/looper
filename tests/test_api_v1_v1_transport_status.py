@@ -369,10 +369,13 @@ def test_keeper_status_is_optional_and_reports_pending_adoptions(tmp_path, statu
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('adopted,pending,failed', [(1, 0, {}), (0, 1, {}),
-                                                    (0, 0, {'keeper_unreachable': 1}),
-                                                    (1, 0, {'keeper_unreachable': 1})])
-def test_keeper_adoption_checks_report_startup_gaps(tmp_path, status_data, adopted, pending, failed):
+@pytest.mark.parametrize('candidates,adopted,pending,failed,ended', [
+    (1, 1, 0, {}, {}), (1, 0, 1, {}, {}),
+    (1, 0, 0, {'keeper_unreachable': 1}, {}), (1, 1, 0, {'keeper_unreachable': 1}, {}),
+    (0, 0, 0, {}, {'keeper_dead': 1}), (1, 1, 0, {}, {'no_detach': 1}),
+])
+def test_keeper_adoption_checks_report_startup_gaps(tmp_path, status_data, candidates, adopted, pending, failed, ended):
+    from looper.agents import kept_dirs
     from looper.agents.kept_run import AdoptFailure, KeeperSettings
     from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 
@@ -381,18 +384,20 @@ def test_keeper_adoption_checks_report_startup_gaps(tmp_path, status_data, adopt
             prepare_status(server)
             pool = server._worker_pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path,
                                                     keeper=KeeperSettings(2))
-            pool._candidates_at_start, pool._adopted_at_start = 1, adopted
+            pool._candidates_at_start, pool._adopted_at_start = candidates, adopted
             pool._candidates = {'pending': None} if pending else {}
             pool._failed_after_start.update({AdoptFailure(reason): count for reason, count in failed.items()})
+            pool._ended_at_start.update({kept_dirs.Reason(reason): count for reason, count in ended.items()})
             code, _, answer = await _send(server, f'POST {STATUS}', _bearer(TOKEN), '{}')
             assert code == 200
             result = answer['result']
             assert result['keepers']['failed_after_start'] == failed
+            assert result['keepers']['ended_at_start'] == ended
             checks = [check for check in result['checks'] if check['id'] == 'kept_runs']
-            assert len(checks) == (0 if adopted and not failed else 1)
+            assert len(checks) == (0 if adopted == candidates and not failed and not ended else 1)
             if checks:
                 assert checks[0]['status'] == 'warn' and 'P1' in checks[0]['label']
-                for reason in failed:
+                for reason in failed.keys() | ended.keys():
                     assert reason in checks[0]['detail']
             api_v1.validate_arguments(api_v1.find('POST', STATUS).result, result)
 

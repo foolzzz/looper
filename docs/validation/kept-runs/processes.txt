@@ -1,0 +1,33 @@
+[upgrade before]
+pid ppid pgid sid start-time executable-name
+61357 unknown 61357 0 2026-11-01T05:48:20 python
+61360 unknown 61360 0 2026-11-01T05:48:20 python
+
+[upgrade after]
+pid ppid pgid sid start-time executable-name
+61357 unknown 61357 0 2026-11-01T05:48:20 python
+61360 unknown 61360 0 2026-11-01T05:48:20 python
+
+[turns drain restart before]
+pid ppid pgid sid start-time executable-name
+69096 unknown 69096 0 2026-11-01T05:49:44 python3
+69099 unknown 69099 0 2026-11-01T05:49:44 python
+
+[turns drain restart after]
+pid ppid pgid sid start-time executable-name
+69096 unknown 69096 0 2026-11-01T05:49:44 python3
+69099 unknown 69099 0 2026-11-01T05:49:44 python
+
+[two runs before keeper failure]
+pid ppid pgid sid start-time executable-name
+71424 unknown 71424 0 2026-11-01T05:49:54 python3
+71425 unknown 71425 0 2026-11-01T05:49:54 python3
+71430 unknown 71430 0 2026-11-01T05:49:54 python
+71432 unknown 71432 0 2026-11-01T05:49:54 python
+
+[peer and retry after keeper failure]
+pid ppid pgid sid start-time executable-name
+71425 unknown 71425 0 2026-11-01T05:49:54 python3
+71432 unknown 71432 0 2026-11-01T05:49:54 python
+75345 unknown 75345 0 2026-11-01T05:50:38 python3
+75369 unknown 75369 0 2026-11-01T05:50:38 python

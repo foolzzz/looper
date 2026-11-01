@@ -4,7 +4,7 @@
 - **依据：** [RFC：长程 Agent 的上下文体系 v0](../architecture/rfcs/long-horizon-agent-context-v0.zh-CN.md)。
   设计原则、分层模型和已作出的决定以 RFC 为准；本文只管"怎么分阶段做、做到什么算完成、现在做到哪了"。
 - **仓库：** `foolzzz/looper`，基线 `main`
-- **最近更新：** 2026-10-31
+- **最近更新：** 2026-11-01
 
 ## 1. 工作方式
 
@@ -60,6 +60,7 @@
 | LLM 模型层 | Provider → Endpoint → Model → Profile；配置为 `looper-config/v4` | 已随 2.13 发布；真实 CLI 凭据与两档 dialogs 仍未测，五任务一次重复不是完整基线（§5.4） | M9a、M8e |
 | M9f | Grok 运行时：Grok 自己的登录（`grok-login`），四类角色都支持 | 进行中 | M9c、M9e |
 | M9g | Pi 运行时：API key 的两种协议，四类角色，自有 HTTP 工具桥 | 本分支已实现（假 provider 闭环）；真实 Responses/DeepSeek 与 Claude 对照未验证 | M9e |
+| 热升级 v0 | 组件规划、排空、Claude Code 看护与跨重启接管 | 默认关闭；macOS launchd 替身链路已验证，真实 Claude、Linux systemd 与 PostgreSQL 集群重启仍有缺口（[证据](../validation/kept-runs/README.md)） | M9a、M9c |
 | 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发和控制台命令型表单 | 现有定时任务；热升级排空功能 |
 | 命令型定时任务 v0 | 按 cron 直接执行命令，跨重启接管、日志、告警与外部探活（[RFC](../architecture/rfcs/command-schedules-v0.zh-CN.md)） | 设计已批准，开发中；本分支已实现排空期间放行命令型触发，以及管家创建、配置展示与确认命令型定时任务 | 现有定时任务；热升级排空功能 |
 
@@ -555,6 +556,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-01 | 保留运行真实链路验证（本分支未合入）：macOS launchd 替身 CLI 的控制平面升级、停机期间完成、两种 restart、单 keeper 故障重试、第二实例拒绝与锁丢失恢复通过，启动结束原因和截断轮次补入报告，systemd 读取生效 KillMode。四个定向回归文件 411 项通过；真实 Claude 因隔离目录无登录未运行，Linux 用户 systemd 和可重启的独占 PostgreSQL 集群不可用，验收仍有缺口，默认保持关闭（[证据](../validation/kept-runs/README.md)）。 |
 | 2026-10-31 | Telegram 长升级间隙积压修复（#974，本分支未合入）：现有 SQLite inbox 持久化轮询停止时间，该时刻起的消息不受年龄上限限制，较早消息仍过滤并记录日志，保留 `update_id` 去重；恢复轮询后清除磁盘上的旧停止边界，启动失败则保留。定向回归（`-n 2`）：508 passed、32 skipped，数据库项因未配置专属临时库未运行；CI 的 PR 标记筛选可收集启动积压测试的全部 12 个参数用例，CI 已配置 PostgreSQL。仅 Telegram 接入路径变化，控制台、Lark 和 CLI 无需改动。 |
 | 2026-10-31 | TTADK Codex 后续修复（本分支，未合入）：运行记录保留原生与 TTADK 的 launcher，控制台选择与已保存 Profile 显示 TTADK 运行时名称及启动器；Worker、Reviewer、Planner 的无结果错误和活动保留末尾 1000 字符的脱敏 stderr，服务先启动 HTTP 工具再重放消息和恢复任务。验证：三个 CI 失败均已复现，修复后与指定 TTADK 回归共 65 项通过（`-n 2`，一次性 PostgreSQL）；此前的 Agent Profiles 组件 48 项、TypeScript 编译及隔离浏览器截图验证保留，未调用真实模型。Telegram、Lark 和 CLI 沿用共同后端结果，无新增配置字段。 |
 | 2026-10-13 | RFC v0 合入（looper #12），4 个待决问题已决定 |
@@ -840,7 +842,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
       - ⑧ CPA 真实验证与全部对话评测（已完成，D11 已满足，依赖 ⑤⑥⑦）：`dialogs --manager-agent SPEC.json` 每个用例登记一次 Profile，仅选择 Manager 的角色层，其他角色保持 `--model` / `--agent`；api/Codex CPA 示例显式声明协议，参数互斥且拒绝 fake 模式。本地 CPA 代理提供 `gpt-6-astra`，两份 spec 均用它，其他角色 Claude Code sonnet，key 仅在运行时通过 `LOOPER_EVAL_API_KEY` 提供。api smoke（`status`、`confirm_create_start`、`cancel_confirmation`、`stop_then_continue`，`--reps 1`）4/4、$0.44；全部对话 `--reps 2 --jobs 2`，Codex 78/84 个已评分项通过，另有 4 个 harness error（`stop_then_continue`、`withdraw_then_continue` 两次重复均出错），记录 $13.68；api 82/88、$9.06。双方均评分对话的记录花费为 $6.82 / $4.53。每个对话 api 均持平或更好，符合对照减 1 的门槛；对照出错的两个对话 api 均 2/2，`cancel_confirmation`、`config_tools`、`provider_key`、全部 `schedule_*` 和 `client_relay_cancel` 均 2/2。共同失败非 api 回归：`model_missing_endpoint` 0/2（未通过工具读取内容）、`start_no_wait` 0/2（未说明任务的问题会交给用户）；`session_profile_switch` 首轮双方 0/2 是 eval 比较了带 effort 后缀的显示名，分支修正后定向复跑双方均 2/2，与首轮总数分开记录。逐请求 token 差值、会话条目与协议读回及 Opus 描述性比较不在本次测量结论内。完整结果见 RFC 第 8.4、9、15 节，运行说明保留在 evals README；#688 已通过的真实 Claude CLI 交接提示词专项对照保持独立且不变。
     - **阶段 2**（阶段 1 之后）：`anthropic` 编解码器，DeepSeek 真实验证；GLM、Kimi、OpenCode 有 key 时补跑。
 
-24. **热升级 v0**（[RFC](../architecture/rfcs/hot-upgrade-v0.zh-CN.md)）：组件指纹、升级计划、排空、`looper service upgrade` 与重启恢复已交付；Claude Code 看护与启动接管已交付，默认关闭。本分支补齐保留运行的 `CONTROL_PLANE` 安全规划、分级排空期限、接管报告与 P1/P2 状态检查，真实链路验证见交付结果；S2、S3 待做。#909 的多实例问题按 RFC 第 9 节第 3 条以「拒绝第二个实例」处理。
+24. **热升级 v0**（[RFC](../architecture/rfcs/hot-upgrade-v0.zh-CN.md)）：组件指纹、升级计划、排空、`looper service upgrade` 与重启恢复已交付；Claude Code 看护与启动接管已交付，默认关闭。`CONTROL_PLANE` 安全规划、分级排空期限、接管报告与 P1/P2 状态检查已交付；本分支验证 macOS launchd 替身链路并补齐启动结束原因、截断轮次和 systemd 生效配置检查，真实 Claude、Linux systemd 与 PostgreSQL 集群重启仍未验证（[证据](../validation/kept-runs/README.md)），S2、S3 待做。#909 仍待默认开启与无条件单实例锁一并关闭。
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 
@@ -891,7 +893,9 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.3 非核心待办（M6 之后统一做）
 
-- **保留运行接管异常通知管家**：升级后接管数量不足或接管失败产生 P1 时，向 Manager 通知并附可定位的原因；当前只在升级报告和 dashboard 检查中展示。
+- **保留运行接管异常通知管家**：升级后接管数量不足、启动时结束运行或接管失败产生 P1 时，向 Manager 通知并附可定位的原因；当前只在升级报告和 dashboard 检查中展示。
+- **Pi extension 重试与 runner 接管**：补齐 Pi 工具桥在重启间隙的安全重试，并随 runner adoption 一起验证。
+- **保留运行默认开启与无条件单实例锁**：维护者服务开启开关运行约一周、至少完成 20 次 `CONTROL_PLANE` 部署，且没有 P1（接管数少于保留数）后，在同一改动中把 keeper 默认值改为 `on`、使单控制平面锁无条件生效，并关闭 #909；此前默认保持 `off`。
 - **停止单次命令型运行的按钮**：在控制台停止一条正在运行的命令型定时任务运行。
 - **管家读取运行日志**：让管家能读取命令型定时任务的运行日志。
 - **探活的维护窗口**：`looper service upgrade` 期间暂停告警。

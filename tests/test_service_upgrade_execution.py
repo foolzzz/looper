@@ -1211,12 +1211,14 @@ def test_upgrade_uses_scope_specific_drain_deadline(deployment, monkeypatch, kin
                          "timeout_seconds": 11}]
 
 
-@pytest.mark.parametrize("adopted,failures,pending", [
-    (1, {}, 0), (0, {"keeper_unreachable": 1}, 0), (0, {}, 1), (1, {"keeper_unreachable": 1}, 0),
+@pytest.mark.parametrize("adopted,failures,pending,ended", [
+    (1, {}, 0, {}), (0, {"keeper_unreachable": 1}, 0, {}), (0, {}, 1, {}),
+    (1, {"keeper_unreachable": 1}, 0, {}), (0, {}, 0, {"keeper_dead": 1}),
+    (1, {}, 0, {"no_detach": 1}),
 ])
-def test_control_plane_reports_kept_runs_and_adoption_outcome(deployment, adopted, failures, pending, capsys):
+def test_control_plane_reports_kept_runs_and_adoption_outcome(deployment, adopted, failures, pending, ended, capsys):
     deployment.responses.status["keepers"] = {"mode": "on", "pending": pending,
-        "adopted_at_start": adopted, "failed_after_start": failures}
+        "adopted_at_start": adopted, "failed_after_start": failures, "ended_at_start": ended}
     deployment.statuses[:] = [{"phase": "drained", "waiting": {"runs": [
         {"worker_id": "kept-worker", "role": "worker", "keepable": True}]}}]
     assert cli.main(["service", "upgrade"]) == 0
@@ -1224,9 +1226,11 @@ def test_control_plane_reports_kept_runs_and_adoption_outcome(deployment, adopte
     assert data["plan"] == "CONTROL_PLANE"
     assert data["kept_before"] == 1 and data["adopted"] == adopted
     assert data["failed_after_start"] == failures
+    assert data["ended_at_start"] == ended
+    assert data["cut_turns"] == []
     assert data["interrupted"] == []
     output = capsys.readouterr().out
-    if adopted and not failures:
+    if adopted and not failures and not ended:
         assert "alerts" not in data and "warning" not in output.lower()
     else:
         message = f"adopted {adopted} of 1 kept runs"
@@ -1259,7 +1263,8 @@ def test_control_plane_deadline_depends_on_non_keepable_runs(deployment, non_kee
     if non_keepable:
         runs.append({"worker_id": "plain-worker", "role": "reviewer", "keepable": False})
     deployment.statuses[:] = [{"phase": "draining", "deadline_passed": server_deadline,
-                              "waiting": {"runs": runs, "manager_turns": ["manager"]}}]
+                              "waiting": {"runs": runs, "manager_turns": ["manager"],
+                                          "planner_turns": ["planner-one", "planner-two"]}}]
     mgr = service.manager(deployment.host, "test")
     plan = UpgradePlan(UpgradeKind.CONTROL_PLANE, (), ("control_plane",))
     service._execute_plan(deployment.host, mgr, port=18841, root=deployment.root,
@@ -1267,6 +1272,9 @@ def test_control_plane_deadline_depends_on_non_keepable_runs(deployment, non_kee
         installer=None, timeout=120, drain_timeout=8, turns_timeout=2, no_force=False)
     data = report(deployment)
     assert data["drain_seconds"] == (8 if non_keepable else 2)
+    assert data["cut_turns"] == [{"agent_id": "manager", "role": "manager"},
+                                 {"agent_id": "planner-one", "role": "planner"},
+                                 {"agent_id": "planner-two", "role": "planner"}]
     assert data["kept_before"] == data["adopted"] == 1
     assert data["interrupted"] == ([{"worker_id": "plain-worker", "role": "reviewer", "reason": "not_keepable"}]
                                    if non_keepable else [])

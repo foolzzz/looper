@@ -577,10 +577,10 @@ class Systemd(_Manager):
         return _systemd_words(command)
 
     def kill_mode_ok(self) -> bool:
-        try:
-            return "KillMode=process" in self.unit_path.read_text().splitlines()
-        except FileNotFoundError:
+        if not self.unit_path.is_file():
             return True
+        shown = self._systemctl("show", self.unit, "-p", "KillMode", check=False)
+        return shown.returncode == 0 and "KillMode=process" in shown.stdout.splitlines()
 
     def unit_settings(self, *, explicit_port: bool = False) -> tuple[int | None, Path | None, Path | None]:
         try:
@@ -1271,6 +1271,8 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
               "gap_seconds": 0.0, "interrupted": [], "kept_before": 0, "adopted": 0,
               "running_code_fingerprint": running.components["control_plane"],
               "installed_package_version": running.version, "status": "failed"}
+    if control_plane:
+        report["cut_turns"] = []
     draining, stopped, stop_attempted, start_attempted, restart_started = False, False, False, False, False
     state = mgr.state()
     before = state.pid
@@ -1304,6 +1306,11 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                         {"worker_id": row["worker_id"], "role": row["role"],
                          "reason": "not_keepable" if control_plane else "deadline"}
                         for row in runs if not control_plane or row.get("keepable") is False]
+                    if control_plane:
+                        report["cut_turns"] = [
+                            {"agent_id": agent_id, "role": role}
+                            for role in ("manager", "planner")
+                            for agent_id in status.get("waiting", {}).get(f"{role}_turns", [])]
                 if phase == "drained" or passed:
                     break
                 host.sleep(_POLL_SECONDS)
@@ -1328,7 +1335,9 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                     host.sleep(min(_POLL_SECONDS, adoption_deadline - host.clock()))
                 report["adopted"] = keepers.get("adopted_at_start", 0)
                 report["failed_after_start"] = keepers.get("failed_after_start", {})
-                if report["adopted"] < report["kept_before"] or any(report["failed_after_start"].values()):
+                report["ended_at_start"] = keepers.get("ended_at_start", {})
+                if (report["adopted"] < report["kept_before"] or any(report["failed_after_start"].values())
+                        or any(report["ended_at_start"].values())):
                     report["alerts"] = [{"level": "P1", "message":
                         f"adopted {report['adopted']} of {report['kept_before']} kept runs"}]
         elif installer:
@@ -1564,10 +1573,10 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         keeper_on = (status.get("keepers") or {}).get("mode") == "on"
         preserves = not isinstance(mgr, Systemd) or mgr.kill_mode_ok()
         keepers = scan_keepers(root)
-        plan = decide(target, running, keepers, keeper_mode=keeper_on and preserves)
-        if keeper_on and not preserves:
-            plan = UpgradePlan(plan.kind, (*plan.reasons,
-                "the systemd unit predates KillMode=process: reinstall the service so runs are kept across restarts"),
+        plan = decide(target, running, keepers, keeper_mode=keeper_on)
+        if keeper_on and not preserves and plan.kind in (UpgradeKind.CONTROL_PLANE, UpgradeKind.FULL):
+            plan = UpgradePlan(UpgradeKind.FULL, (
+                "the systemd unit predates KillMode=process: reinstall the service so runs are kept across restarts",),
                 plan.changed_components)
         dependencies = plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE)
         sync_environment = _checkout_sync_environment(host) if not wheel and dependencies else None

@@ -1,0 +1,31 @@
+[upgrade]
+detach run=worker-aa2b0e157d01 offset=412
+adopt run=worker-aa2b0e157d01 offset=412
+adopt run=worker-aa2b0e157d01 replay_events=4 replay_ms=0
+
+[finished while down]
+detach run=worker-172380917f3a offset=196
+adopt run=worker-172380917f3a offset=196
+adopt run=worker-172380917f3a replay_events=2 replay_ms=0
+
+[turns drain restart]
+detach run=worker-eda2c32c5c5e offset=304
+adopt run=worker-eda2c32c5c5e offset=304
+adopt run=worker-eda2c32c5c5e replay_events=3 replay_ms=0
+
+[plain restart]
+shutdown mode=end_runs
+
+[lock loss]
+control plane lock lost reason=lock connection closed; exiting without touching runs
+kept runs at start ended={'no_detach': 1} released=0 unidentified=0 candidates=0
+last exit code = 75: EX_TEMPFAIL
+
+[keeper dies in gap]
+detach run=worker-ce86e1110de0 offset=304
+kept runs at start ended={'keeper_dead': 1} released=0 unidentified=0 candidates=0
+
+[bridge reconnect]
+detach run=worker-8aa3c02a9628 offset=301
+adopt run=worker-8aa3c02a9628 offset=301
+adopt run=worker-8aa3c02a9628 replay_events=3 replay_ms=0

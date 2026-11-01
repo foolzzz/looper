@@ -1,0 +1,71 @@
+{
+  "upgrade": {
+    "adopted": 1,
+    "drain_seconds": 0.003,
+    "event": "service_upgrade",
+    "failed_after_start": {},
+    "gap_seconds": 9.191,
+    "installed_package_version": "2.14.69",
+    "interrupted": [],
+    "kept_before": 1,
+    "plan": "CONTROL_PLANE",
+    "reasons": [
+      "Adoption contracts and live keeper protocols are compatible."
+    ],
+    "running_code_fingerprint": "09b6c0cbe2f96f55d614cff4155be6b5afc0560bc459a8e9cc91a6365bea6456",
+    "running_version": "2.14.69",
+    "serving": true,
+    "status": "ok",
+    "web_fingerprint": "ffe68a855cade9b91f50d65f11c396b3679720836d8bdeb277eddad7bddbc5ed"
+  },
+  "restart_gap_failure": {
+    "adopted": 0,
+    "alerts": [
+      {
+        "level": "P1",
+        "message": "adopted 0 of 1 kept runs"
+      }
+    ],
+    "cut_turns": [],
+    "drain_seconds": 0.516,
+    "ended_at_start": {
+      "keeper_dead": 1
+    },
+    "event": "service_upgrade",
+    "failed_after_start": {},
+    "gap_seconds": 2.685,
+    "installed_package_version": "2.14.69",
+    "interrupted": [],
+    "kept_before": 1,
+    "plan": "CONTROL_PLANE",
+    "reasons": [
+      "Controlled restart-gap failure injection; no package installation."
+    ],
+    "running_code_fingerprint": "09dacaffc34ef7d6aaf80f1f0f591c758561ddfe72d8a685c006334ac7c143fa",
+    "running_version": "2.14.69",
+    "serving": true,
+    "status": "ok",
+    "web_fingerprint": "ffe68a855cade9b91f50d65f11c396b3679720836d8bdeb277eddad7bddbc5ed"
+  },
+  "bridge_reconnect": {
+    "adopted": 1,
+    "cut_turns": [],
+    "drain_seconds": 0.004,
+    "ended_at_start": {},
+    "event": "service_upgrade",
+    "failed_after_start": {},
+    "gap_seconds": 7.786,
+    "installed_package_version": "2.14.69",
+    "interrupted": [],
+    "kept_before": 1,
+    "plan": "CONTROL_PLANE",
+    "reasons": [
+      "Controlled bridge reconnect gap; no package installation."
+    ],
+    "running_code_fingerprint": "09dacaffc34ef7d6aaf80f1f0f591c758561ddfe72d8a685c006334ac7c143fa",
+    "running_version": "2.14.69",
+    "serving": true,
+    "status": "ok",
+    "web_fingerprint": "ffe68a855cade9b91f50d65f11c396b3679720836d8bdeb277eddad7bddbc5ed"
+  }
+}

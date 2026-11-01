@@ -1,0 +1,6 @@
+plan       CONTROL_PLANE
+target     2.14.69
+running    2.14.68 (loaded 2026-11-01T13:48:18.451717+00:00)
+changed    control_plane
+keepers    on (1 live)
+reason     Adoption contracts and live keeper protocols are compatible.

@@ -1,0 +1,2 @@
+looper serve cannot start:
+another looper serve already runs on this database: backend_pid=33686, application_name=looper serve 70472@[redacted], client_addr=[redacted], backend_start=2026-11-01 13:49:51.980010+00:00. Stop it first: one database runs one control plane.

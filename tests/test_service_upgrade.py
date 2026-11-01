@@ -345,6 +345,9 @@ def test_upgrade_preview_uses_running_keeper_mode_and_unit(
     if keeper_on:
         assert "keepers    on (0 live)" in output
         assert ("reinstall the service" in output) is not preserves
+        if not preserves:
+            assert [line for line in output.splitlines() if line.startswith("reason")] == [
+                "reason     the systemd unit predates KillMode=process: reinstall the service so runs are kept across restarts"]
     else:
         assert output == "\n".join((
             "plan       FULL", "target     1.0.0", "running    1.0.0 (loaded 2026-10-30T00:00:00+00:00)",

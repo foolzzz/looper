@@ -1,0 +1,12 @@
+Curated dashboard lifecycle events (command and transcript rows omitted).
+Rendered timeline: 49 events.
+Worker: worker-aa2b0e157d01
+
+2026-11-01T05:48:20 Worker dispatched: finish s1
+2026-11-01T05:48:30 Worker worker-aa2b0e157d01 carried on across the restart
+2026-11-01T05:48:31 Worker finished (cost: $0.0010)
+
+Occurrences in the rendered DOM:
+Worker dispatched: 1
+carried on across the restart: 1
+Worker finished: 1
