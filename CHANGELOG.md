@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.66] - 2026-10-31
+
+### Changed
+
+- **A planned control-plane restart detaches kept runs.** With the keeper on, when SIGTERM arrives during an active turns drain (`looper service upgrade` for `CONTROL_PLANE`, or a turns drain followed by a restart), each attached kept run is detached at an event boundary: `detach.json` records the processed offset, the handle becomes `DETACHED` and the keeper, child and running record stay in place with no result published. Every other shutdown still ends runs. A turns drain no longer waits for keepable runs. The keeper's `stdout.log` limit (512 MiB) now only stops appending and marks `stdout_truncated` instead of ending the run, and `stdin/write` acknowledges once the bytes are in `stdin.log`. Adoption of detached runs at startup is not implemented yet, so the next start still ends them. No migration. ([#1052](https://github.com/foolzzz/looper/pull/1052))
+
 ## [2.14.65] - 2026-10-31
 
 ### Changed
