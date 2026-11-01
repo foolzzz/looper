@@ -108,7 +108,7 @@ async def impact(server, operation, arguments, principal, headers):
         if row["kind"] == "command":
             runs = await db_schedules.open_runs(db_connection.get_pool(), row["id"])
             if schedules.blocks_delete(row, runs):
-                raise OpError(ErrorCode.CONFLICT, schedules.RUNNING_COMMAND_DELETE)
+                raise OpError(ErrorCode.CONFLICT, schedules.running_command_delete(runs))
             queued = " The queued run will not execute." if any(run["status"] == db_schedules.QUEUED for run in runs) else ""
             return f"Delete {subject}, its runs and notifications.{queued} It has no tasks."
         return f"Delete {subject}, its runs and notifications. Its created tasks stay."

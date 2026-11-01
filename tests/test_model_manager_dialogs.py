@@ -287,6 +287,25 @@ def test_command_edit_dialog_rejects_incomplete_or_early_update(monkeypatch, mut
     assert check(look) is not None
 
 
+@pytest.mark.parametrize("mutation", ["deleted", "disabled_ok", "delete_asked"])
+def test_command_delete_running_dialog_rejects_a_delete_or_an_unasked_disable(monkeypatch, mutation):
+    actions = [action("looper_schedules", "delete", status="error")]
+    schedule = {"schedule_id": "busy-id", "enabled": True}
+    look = observed(monkeypatch, {}, actions)
+    monkeypatch.setattr(dialogs, "_named", lambda *_: schedule)
+    monkeypatch.setattr(look.api, "post", lambda *_: {"result": {"runs": [{"status": "running"}]}})
+    check = dialogs.select(["schedule_command_delete_running"])[0].says[0].check
+    assert check(look) is None
+    if mutation == "deleted":
+        monkeypatch.setattr(dialogs, "_named", lambda *_: None)
+        actions[0]["status"] = "ok"
+    elif mutation == "disabled_ok":
+        actions.append(action("looper_schedules", "disable"))
+    else:
+        actions[0]["status"] = "needs_confirmation"
+    assert check(look) is not None
+
+
 def provider_state():
     return {"providers": [{"provider_id": "prov-test", "name": "eval-deepseek", "api_key_set": False,
                            "vendor_type": "deepseek", "endpoints": [

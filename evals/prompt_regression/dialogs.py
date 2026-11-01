@@ -994,6 +994,7 @@ def _created_without_a_mode(look: Look) -> str | None:
 # The schedules dialogs that create, change and run them.
 DEPS = "eval-deps"
 PULL = "pull"
+BUSY = "eval-busy"
 LIGHT = "eval/light"  # a lower-effort profile for a repetitive schedule's Planner
 OPS = "eval-ops"
 
@@ -1076,6 +1077,37 @@ def _make_command_schedule(api: Api, project_id: str) -> None:
         "name": PULL, "kind": "command", "command": "exit 0", "cron": "0 0 1 1 *", "timezone": "UTC"}})["result"]
     api.post("/api/v1/schedule_admin/update", {"schedule_id": created["schedule"]["schedule_id"],
                                             "fields": {"enabled": True}})
+
+
+def _make_busy_command_schedule(api: Api, project_id: str) -> None:
+    created = api.post("/api/v1/schedule_admin/create", {"project_id": project_id, "fields": {
+        "name": BUSY, "kind": "command", "command": "sleep 240", "cron": "0 0 1 1 *", "timezone": "UTC",
+        "overlap": "skip", "run_timeout_seconds": 240}})["result"]
+    sid = created["schedule"]["schedule_id"]
+    api.post("/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"enabled": True}})
+    run = api.post("/api/v1/schedule_admin/run", {"schedule_id": sid})["result"]["run"]
+    assert run["status"] == "running", run
+
+
+def _busy_delete_refused(look: Look) -> str | None:
+    schedule = _named(look, BUSY)
+    if schedule is None or not schedule["enabled"]:
+        return "the running command schedule was deleted or disabled"
+    runs = look.api.post("/api/v1/schedule_admin/runs", {"schedule_id": schedule["schedule_id"]})["result"]["runs"]
+    if not any(run["status"] == "running" for run in runs):
+        return "the command schedule no longer has a running run"
+    actions = [a for a in look.turn_actions() if a["tool"] == "looper_schedules"]
+    deletes = [a for a in actions if a["arguments"].get("action") == "delete"]
+    if (not any(a["status"] == "error" for a in deletes)
+            or any(a["status"] in ("ok", "needs_confirmation") for a in deletes)):
+        return "deleting the running command schedule was not refused before asking"
+    disables = [a for a in actions if a["arguments"].get("action") == "disable"]
+    if any(a["status"] == "ok" for a in disables):
+        return "the Manager disabled a schedule without the user's confirmation"
+    if (any(a["status"] == "needs_confirmation" for a in disables)
+            and f"要停用定时任务「{BUSY}」" not in look.reply):
+        return "the reply lacks the pending disable confirmation"
+    return _raw_json(look.reply)
 
 
 def _planner_profile_names(look: Look, schedule: dict[str, Any]) -> dict[str, str]:
@@ -1756,6 +1788,10 @@ DIALOGS: tuple[Dialog, ...] = (
         Say("确认。", _command_edited_on_confirmation,
             (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     ), seed=_make_command_schedule, tags=("manager", "schedules")),
+    Dialog("schedule_command_delete_running", (
+        Say("把定时任务 eval-busy 删掉。", _busy_delete_refused,
+            (("looper_schedules", {"action": "delete", "schedule": BUSY}),)),
+    ), seed=_make_busy_command_schedule, tags=("manager", "schedules")),
     Dialog("schedule_template_create", (
         Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区），"
             "使用 pr_review 模板评审这个 PR：" + TEMPLATE_PR_URL + "。目录用项目默认的，先创建停用的定时任务。",

@@ -72,8 +72,16 @@ MAX_PARALLEL_RUNS_LIMIT = 10
 TIMEOUT_DEFAULT = "default"
 
 NO_WORK_DIR = "a work directory is required: set one on the schedule or on its project"
-RUNNING_COMMAND_DELETE = ("cannot delete a command schedule while a run is running; "
-                          "disable the schedule and wait for the run to end")
+
+
+def running_command_delete(runs: Sequence[Mapping[str, Any]]) -> str:
+    """Why a command schedule with a running run is not deleted (``blocks_delete``), as information for the user."""
+    text = ("a command schedule is not deleted while its command runs: it can be deleted once the command finishes; "
+            "disabling it first stops new fires")
+    if any(run["status"] == db_schedules.QUEUED for run in runs):
+        text += ("; its queued run still starts when the running one ends, even when the schedule is disabled, so "
+                 "deleting it waits for that run too")
+    return text
 
 
 def blocks_delete(row: Mapping[str, Any], runs: Sequence[Mapping[str, Any]]) -> bool:
@@ -760,8 +768,9 @@ async def delete_schedule(schedule_id: str) -> dict[str, Any]:
         if row is None:
             raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
         # Share the firing lock so a command cannot start between this check and deletion.
-        if blocks_delete(row, await db_schedules.open_runs(conn, schedule_id)):
-            raise RequestError(HTTP_409, RUNNING_COMMAND_DELETE)
+        runs = await db_schedules.open_runs(conn, schedule_id)
+        if blocks_delete(row, runs):
+            raise RequestError(HTTP_409, running_command_delete(runs))
         await db_schedules.delete_schedule(schedule_id, pool=conn)
     return {"deleted": schedule_id}
 

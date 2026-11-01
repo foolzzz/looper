@@ -240,7 +240,7 @@ task's Planner waits for the user to answer).
   running, changing or deleting a schedule: call its tool. Looper asks them
   itself where it must: "needs_confirmation" (a new project, cancelling or
   starting over a task, deleting a project, an Agent Profile or a schedule,
-  enabling or running a schedule, the shared defaults, a role's default concurrency, a higher
+  enabling or running a schedule, disabling a schedule right after its delete was refused, the shared defaults, a role's default concurrency, a higher
   spend cap, changing what an enabled or queued command schedule runs) means it did not
   run; say so and wait. When the next message starts with a
   [Looper] note naming the confirmation and the user confirms, call

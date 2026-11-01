@@ -327,16 +327,25 @@ def test_client_delete_impact_describes_schedule_kind(tmp_path, monkeypatch, kin
     run_db(run, monkeypatch, timeout=30)
 
 
-def test_client_delete_of_a_running_command_schedule_is_refused_before_asking(tmp_path, monkeypatch):
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("client", [True, False])
+def test_client_delete_of_a_running_command_schedule_is_refused_before_asking(tmp_path, monkeypatch, queued, client):
     async def run(pool):
         _, sid = await _seed(pool, kind="command", command="exit 0", requirement="")
         await db_schedules.insert_run(pool, schedule_id=sid, scheduled_for=datetime.now(timezone.utc),
                                       trigger="manual", status="running")
+        if queued:
+            await db_schedules.insert_run(pool, schedule_id=sid, scheduled_for=datetime.now(timezone.utc),
+                                          trigger="manual", status="queued")
         async with _api(tmp_path, pool) as call:
-            status, refused = await call("delete", {"schedule_id": sid}, client=True)
+            status, refused = await call("delete", {"schedule_id": sid}, client=client)
             assert status == 409, refused
             assert refused["error"]["code"] == "conflict"
-            assert "disable" in refused["error"]["message"] and "wait" in refused["error"]["message"]
+            assert refused["error"]["message"] == (
+                "a command schedule is not deleted while its command runs: it can be deleted once the command "
+                "finishes; disabling it first stops new fires" + (
+                    "; its queued run still starts when the running one ends, even when the schedule is disabled, so "
+                    "deleting it waits for that run too" if queued else ""))
             assert "confirmation_id" not in refused
             assert await db_schedules.get_schedule(sid) is not None
     run_db(run, monkeypatch, timeout=30)

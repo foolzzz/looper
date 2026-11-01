@@ -35,8 +35,10 @@ def test_schedule_tool_delete_description_distinguishes_command_and_agent_schedu
     tool = next(tool for tool in MANAGER_TOOLS if tool.name == TOOL)
     delete = tool.description.split("; delete ", 1)[1].split("; reset_planner_session", 1)[0]
     assert delete == (
-        "(the user confirms first; an agent schedule's tasks stay; deleting a command schedule is refused only "
-        "while its command is running: disable it and wait for the run to end; otherwise the delete removes "
+        "(the user confirms first; an agent schedule's tasks stay; a command schedule is not deleted while its "
+        "command runs: tell the user it can be deleted once the command finishes and that disabling it stops new "
+        "fires, and disable it only if the user asks (in that turn, disabling asks the user first); otherwise the delete "
+        "removes "
         "its runs and messages, and a queued run will not execute; a command schedule has no tasks)")
 
 
@@ -508,37 +510,100 @@ def test_deleting_a_schedule_asks_first_and_runs_only_on_the_next_messages_confi
     run_db(test, monkeypatch)
 
 
+@pytest.mark.parametrize("queued", [False, True])
 def test_deleting_a_command_schedule_with_a_running_run_is_refused_before_asking(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, queued: bool,
 ) -> None:
     async def test(pool: Any) -> None:
         sid = (await _schedule(await _project(pool), "pull", kind="command",
                                command="exit 0", requirement=""))["schedule_id"]
         await _run_of(pool, sid, "running")
+        if queued:
+            await _run_of(pool, sid, "queued")
         chat = _Chat(tmp_path)
 
         (refused,) = await chat.say("删掉 pull", (TOOL, {"action": "delete", "schedule": "pull"}))
         assert _error(refused) == "conflict", refused
-        assert "disable" in refused["error"]["message"] and "wait" in refused["error"]["message"]
+        assert refused["error"]["message"] == (
+            "schedule 'pull' in project calc: a command schedule is not deleted while its command runs: "
+            "it can be deleted once the command finishes; disabling it first stops new fires" + (
+                "; its queued run still starts when the running one ends, even when the schedule is disabled, so "
+                "deleting it waits for that run too" if queued else ""))
         assert not chat.turns[-1].blocks
         assert (await _call("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))[0] == 200
 
     run_db(test, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("target", ["same", "other"])
+def test_disabling_right_after_a_refused_delete_asks_first(monkeypatch, tmp_path, queued, target):
+    async def test(pool):
+        project = await _project(pool, work_dir=str(tmp_path))
+        sid = (await _schedule(project, "pull", enabled=True, kind="command", command="exit 0",
+                               requirement="", overlap="queue"))["schedule_id"]
+        await _run_of(pool, sid, "running")
+        if queued:
+            await _run_of(pool, sid, "queued")
+        other = (await _schedule(project, "push", enabled=True))["schedule_id"] if target == "other" else None
+        chat = _Chat(tmp_path)
+        refused, asked = await chat.say("删掉 pull", (TOOL, {"action": "delete", "schedule": "pull"}),
+                                       (TOOL, {"action": "disable", "schedule": "push" if other else "pull"}))
+        assert _error(refused) == "conflict"
+        if other:
+            assert asked["status"] == "ok", asked
+            assert not await pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", other)
+            return
+        assert asked["status"] == "needs_confirmation", asked
+        assert chat.turns[-1].blocks == [
+            "需要你确认：\n要停用定时任务「pull」（项目 calc）吗？\n"
+            "- 删除没有执行：它的命令正在运行，命令结束后才能删除。\n"
+            "- 停用后它不再按规则触发；正在运行的命令照常结束。" + (
+                "\n- 它有一次排队中的运行：停用不会取消它，正在运行的命令结束后它就开始；它也结束后才能删除。"
+                if queued else "") + "\n回复「确认」就执行；回复别的就不执行。"]
+        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", sid)
+        done = await _confirm(chat, asked)
+        assert done["status"] == "ok", done
+        assert not await pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", sid)
+        await pool.execute("UPDATE schedules SET enabled = true WHERE id = $1", sid)
+        (done,) = await chat.say("停用 pull", (TOOL, {"action": "disable", "schedule": "pull"}))
+        assert done["status"] == "ok", done
+        assert not chat.turns[-1].blocks
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_a_confirmed_delete_refused_after_its_command_started_asks_before_disabling(monkeypatch, tmp_path):
+    async def test(pool):
+        sid = (await _schedule(await _project(pool, work_dir=str(tmp_path)), "pull", enabled=True,
+                               kind="command", command="exit 0", requirement=""))["schedule_id"]
+        chat = _Chat(tmp_path)
+        (asked,) = await chat.say("删掉 pull", (TOOL, {"action": "delete", "schedule": "pull"}))
+        assert asked["status"] == "needs_confirmation", asked
+        await _run_of(pool, sid, "running")
+        refused, disable = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}),
+                                         (TOOL, {"action": "disable", "schedule": "pull"}))
+        assert _error(refused) == "conflict", refused
+        assert disable["status"] == "needs_confirmation", disable
+        assert await pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", sid)
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("queued", [False, True])
 def test_deleting_a_command_schedule_with_a_queued_run_says_it_will_not_execute(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, queued: bool,
 ) -> None:
     async def test(pool: Any) -> None:
         sid = (await _schedule(await _project(pool), "pull", kind="command",
                                command="exit 0", requirement=""))["schedule_id"]
-        await _run_of(pool, sid, "queued")
+        if queued:
+            await _run_of(pool, sid, "queued")
         chat = _Chat(tmp_path)
 
         (asked,) = await chat.say("删掉 pull", (TOOL, {"action": "delete", "schedule": "pull"}))
         assert asked["status"] == "needs_confirmation", asked
         (block,) = chat.turns[-1].blocks
-        assert "排队中的运行不会再执行" in block
+        assert ("排队中的运行不会再执行" in block) is queued
+        assert "它没有任务；它的运行记录和通知记录会一起删除，不能恢复。" in block
         assert "它建出的任务都保留" not in block
         done = await _confirm(chat, asked)
         assert done["status"] == "ok", done
