@@ -1457,7 +1457,10 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
     from ..upgrade import UpgradeKind, decide, scan_keepers
 
     try:
-        if overrides := [name for name in (*_PYTHON_IMPORT_OVERRIDES, *_GIT_REPOSITORY_OVERRIDES) if host.environ.get(name)]:
+        # Python ignores empty import overrides (including an exported PYTHONPATH=""); git's empty overrides still act.
+        overrides = [name for name in _PYTHON_IMPORT_OVERRIDES if host.environ.get(name)]
+        overrides += [name for name in _GIT_REPOSITORY_OVERRIDES if name in host.environ]
+        if overrides:
             raise ServiceError(f"{', '.join(overrides)} set in this shell can make the upgrade run other code or act on "
                                f"another repository than the service's; unset {'it' if len(overrides) == 1 else 'them'} "
                                "and run looper service upgrade again")

@@ -116,16 +116,33 @@ def report(deployment):
     return json.loads((deployment.root / "logs/serve.log").read_text().splitlines()[-1])
 
 
-@pytest.mark.parametrize("name", ["PYTHONPATH", "GIT_DIR"])
+@pytest.mark.parametrize("name,value", [
+    ("PYTHONPATH", "other"), ("GIT_DIR", "other"),
+    *((name, "") for name in service._GIT_REPOSITORY_OVERRIDES),
+])
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_upgrade_refuses_shell_import_or_repository_overrides_before_contacting_service(
-        deployment, tmp_path, monkeypatch, name, dry_run, capsys):
-    deployment.host.environ = {name: str(tmp_path / "other")}
+        deployment, monkeypatch, name, value, dry_run, capsys):
+    deployment.host.environ = {name: value}
+    deployment.host.run = lambda *args, **kwargs: pytest.fail("must refuse before running git or Python")
     deployment.host.get_components = lambda *args: pytest.fail("must refuse first")
     monkeypatch.setattr(service, "manager", lambda *args: pytest.fail("must refuse before reading the unit"))
     assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 1
     assert deployment.events == []
     assert name in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", service._PYTHON_IMPORT_OVERRIDES)
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_upgrade_allows_empty_shell_python_import_overrides(deployment, name, dry_run, capsys):
+    deployment.host.environ = {name: ""}
+    assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 0
+    if dry_run:
+        assert "FULL" in capsys.readouterr().out
+        assert deployment.events == []
+    else:
+        assert report(deployment)["status"] == "ok"
+        assert deployment.events[-3:] == ["stop", "install", "start"]
 
 
 @pytest.mark.parametrize("wheel", [False, True])
