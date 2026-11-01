@@ -573,7 +573,7 @@ class Scheduler:
             async with db_connection.transaction() as conn:
                 schedule = await db_schedules.lock_schedule(conn, schedule_id)
                 if schedule is not None:
-                    db_schedules.check_configuration_version(schedule, expected_version)
+                    await db_schedules.check_configuration_version(conn, schedule, expected_version)
                 if (schedule is None or not firing_guard.enter_context(self._admit_start(schedule["kind"]))
                         or not firing_guard.enter_context(_project_firing(schedule["project_id"]))):
                     return None

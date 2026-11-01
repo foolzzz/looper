@@ -8,7 +8,8 @@ and a refusal carries the dashboard's message. A schedule is named by its id or
 its name, ignoring case, within ``project`` when given; a name more than one
 project has is refused, naming each. Listing and reading are ``read``; the
 changes are ``write``, but for deleting, enabling, running now and a change that
-raises or removes a spend cap, and resetting a stored Planner session, which are ``high``: the user is shown what it does
+raises or removes a spend cap or changes what an enabled or queued command schedule runs, and resetting a stored
+Planner session, which are ``high``: the user is shown what it does
 and confirms in the next message.
 
 A new schedule is disabled. Looper adds its configuration (the rule in words,
@@ -25,6 +26,7 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 
 from ...db import connection as db_connection, profile_registry as db_profiles, projects as db_projects, schedules as db_schedules
@@ -61,11 +63,43 @@ _OVERLAP_WORDS = {"skip": "跳过这次触发", "queue": "排队等它结束（�
 _NOTIFY_WORDS = {"failures": "失败时", "alerts": "只发告警", "always": "每次运行", "never": "不发"}
 # The changes the user confirms first: a spend cap raised, or removed.
 CAPS = ("run_budget_usd", "daily_budget_usd")
+# What a command schedule's run executes, and where.
+COMMAND_RUN_FIELDS = ("command", "env", "env_file", "work_dir")
+
+
+class CommandEdit(str, Enum):
+    """Why a change to what a command schedule runs waits for the user's word."""
+
+    ENABLED = "enabled"  # its next fires run the change unattended
+    QUEUED = "queued"  # disabled, but its queued run runs the change when it starts
+
+
+EDIT_WORDS = {
+    CommandEdit.ENABLED: "它已启用：之后的运行都按修改后的设置无人值守地执行（不经过 agent，不花模型额度）。",
+    CommandEdit.QUEUED: "它是停用的，但有一次排队中的运行：那次运行开始时按修改后的设置执行（不经过 agent，不花模型额度）。",
+}
+
 # A setting's name in the tool's arguments, where it differs from the API's.
 _ARGUMENT = {"profile_overrides": "profiles"}
 # What a run shows of its task, blanked where the task is another Manager's (``_runs_in_scope``).
 _TASK_OF_RUN = {"task_id": None, "task_title": None, "task_status": None, "summary": None, "error": None,
                 "cost_usd": None}
+
+
+async def _command_edit(row: Mapping[str, Any],
+                        fields: Mapping[str, Any]) -> tuple[CommandEdit, tuple[str, ...]] | None:
+    if row.get("kind") != "command":
+        return None
+    changed = tuple(key for key in COMMAND_RUN_FIELDS
+                    if key in fields and (fields[key] or None) != (row[key] or None))
+    if not changed:
+        return None
+    if row["enabled"]:
+        return CommandEdit.ENABLED, changed
+    if any(run["status"] == db_schedules.QUEUED
+           for run in await db_schedules.open_runs(db_connection.get_pool(), row["id"])):
+        return CommandEdit.QUEUED, changed
+    return None
 
 
 def _run_listed(run: Mapping[str, Any]) -> dict[str, Any]:
@@ -146,13 +180,13 @@ async def _schedules(call: Call) -> dict[str, Any]:
         return {"schedules": [_listed(await _in_scope(call, v)) for v in views]}
     if action == "create":
         return await _create(call)
-    # Resolve a confirmed start by its immutable id, even if another schedule has since taken its name.
+    # Resolve a confirmed operation by its immutable id, even if another schedule has since taken its name.
     row = await _schedule({**arguments, "schedule": call.confirmation["schedule_id"], "project": None}
                           if call.confirmation else arguments)
     expected = {"expected_version": call.confirmation["schedule_version"]} if call.confirmation else {}
     _not_created_now(call, row)
     if action == "update":
-        return await _update(call, row)
+        return await _update(call, row, expected)
     if action == "reset_planner_session":
         result = await answered(schedules.reset_planner_session(row["id"]))
         return {"schedule": row["name"], "schedule_id": row["id"], "project": row["project_name"], **result,
@@ -236,11 +270,11 @@ def _refuse_other_owner_template(call: Call, row: Mapping[str, Any], data: Mappi
                                            "does not change its template or static inputs")
 
 
-async def _update(call: Call, row: Mapping[str, Any]) -> dict[str, Any]:
+async def _update(call: Call, row: Mapping[str, Any], expected: Mapping[str, str]) -> dict[str, Any]:
     data = _fields(call.arguments, "update")
     _refuse_other_owner_template(call, row, data)
     before = (await answered(schedules.get_schedule(row["id"])))["schedule"]
-    view = (await answered(schedules.update_schedule(row["id"], data)))["schedule"]
+    view = (await answered(schedules.update_schedule(row["id"], data, **expected)))["schedule"]
     changed = await _changes(before, view)
     call.turn.blocks.append("\n".join([f"已修改定时任务「{view['name']}」（项目 {view['project_name']}）：",
                                        *(changed.values() or ["- 没有变化"]), *_next_line(before, view),
@@ -268,8 +302,8 @@ def _raises_a_cap(row: Mapping[str, Any], data: Mapping[str, Any], project_cap: 
 
 
 async def _confirming(call: Call) -> str | None:
-    """What deleting, enabling or running a schedule, or a change raising or removing its spend cap, does, for the
-    user to confirm; None for any other call (its own tier, and enabling one already enabled)."""
+    """What deleting, enabling or running a schedule, raising its spend cap or editing its unattended command does,
+    for the user to confirm; None for any other call (its own tier, and enabling one already enabled)."""
     action = call.arguments["action"]
     if action == "delete":
         return await _deleting(call)
@@ -296,8 +330,14 @@ async def _confirming(call: Call) -> str | None:
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
     project = await db_projects.get_project(row["project_id"])
-    if not _raises_a_cap(row, data, project["task_budget_usd"] if project else None):
+    edit = await _command_edit(row, fields)
+    if edit is None and not _raises_a_cap(row, data, project["task_budget_usd"] if project else None):
         return None
+    if edit is not None:
+        try:
+            schedules._check_kind_fields("command", {**row, **fields})
+        except schedules.RequestError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
     try:
         fields.update(merge_selection(row, fields))
     except ValueError as exc:
@@ -312,17 +352,31 @@ async def _confirming(call: Call) -> str | None:
     selected["template_name"] = effective.template.name if effective.template else None
     before = (await answered(schedules.get_schedule(row["id"])))["schedule"]
     after = schedules.schedule_view(selected, default_timeout=await schedules.default_run_timeout())
+    changes = await _changes(before, after)
+    if edit is None:
+        return "\n".join([f"要修改定时任务「{row['name']}」（项目 {row['project_name']}）吗？",
+                          *changes.values(), "这会提高（或取消）它的花费上限。"])
+    call.confirmation.update(schedule_id=row["id"], schedule_version=db_schedules.configuration_version(
+        row, project_work_dir=project["work_dir"]))
+    if "work_dir" in changes:
+        def d(view: Mapping[str, Any]) -> str:
+            return view["work_dir"] or f"项目的默认目录（{project['work_dir']}）"
+        changes["work_dir"] = f"- 目录：{d(before)} → {d(after)}"
     return "\n".join([f"要修改定时任务「{row['name']}」（项目 {row['project_name']}）吗？",
-                      *(await _changes(before, after)).values(), "这会提高（或取消）它的花费上限。"])
+                      *changes.values(), EDIT_WORDS[edit[0]]])
 
 
 async def _starting(call: Call) -> str | None:
     """What enabling a schedule (it then fires unattended) or running it now does, for the user to confirm."""
     row = await _schedule(call.arguments)
     _not_created_now(call, row)
+    project = await db_projects.get_project(row["project_id"])
+    if project is None:
+        raise OpError(ErrorCode.NOT_FOUND, "the schedule's project no longer exists")
     action = call.arguments["action"]
     # Render and version the same read, so an edit during rendering cannot bind a different command.
-    call.confirmation.update(schedule_id=row["id"], schedule_version=db_schedules.configuration_version(row))
+    call.confirmation.update(schedule_id=row["id"], schedule_version=db_schedules.configuration_version(
+        row, project_work_dir=project["work_dir"]))
     if action == "enable" and row["enabled"]:
         return None
     view = await _in_scope(call, schedules.schedule_view(row, default_timeout=await schedules.default_run_timeout()))
@@ -333,7 +387,6 @@ async def _starting(call: Call) -> str | None:
                  f"- 时间规则：{_shown('cron', view, names)}，时区 {view['timezone']}"]
         if action == "enable":
             lines.append(f"- 接下来 {NEXT_SHOWN} 次：{_next_fires(view)}")
-        project = await db_projects.get_project(row["project_id"])
         directory = view["work_dir"] or f"项目的默认目录（{project['work_dir']}）"
         lines.append(f"- 目录：{directory}")
         keys = ["run_timeout_seconds", "env"]

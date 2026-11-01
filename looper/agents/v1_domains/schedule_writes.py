@@ -6,11 +6,19 @@ from ..agent_settings import BUDGET_MAX_USD, CONCURRENCY_MAX
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
-from ..ops.schedules import _raises_a_cap, _shown
+from ..ops.schedules import CommandEdit, _command_edit, _raises_a_cap, _shown
 from ..ops.service import _plain
+from ..schedule_templates import MissingDirectory, effective_schedule
 from .schedule_reads import SCHEDULE, RUN, LISTED_SCHEDULE, LISTED_RUN, _enum, _nullable
 
 ORDER = 12
+
+EDIT_EFFECT = {
+    CommandEdit.ENABLED: ("It is enabled: its later runs execute the changed command unattended, "
+                          "without an agent or model spend."),
+    CommandEdit.QUEUED: ("It is disabled but has a queued run, which executes the changed command when it starts, "
+                         "without an agent or model spend."),
+}
 
 _BUDGET = _nullable({"type": "number", "exclusiveMinimum": 0, "maximum": BUDGET_MAX_USD})
 _FIELDS = {
@@ -84,16 +92,24 @@ async def impact(server, operation, arguments, principal, headers):
     if action == "run" and server._scheduler is None:
         raise OpError(ErrorCode.CONFLICT, "the scheduler is not running in this server")
     row = await answered(schedules._existing(arguments["schedule_id"]))
+    project = await db_projects.get_project(row["project_id"])
+    if project is None:
+        raise OpError(ErrorCode.NOT_FOUND, "the schedule's project no longer exists")
+    project_dir = project["work_dir"]
+
+    def directory(view) -> str:
+        return view["work_dir"] or f"the project directory ({project_dir or 'none set'})"
+
     if action in ("run", "update"):
         # Bind the displayed read; the closed request cannot supply this server-owned version.
-        arguments["_schedule_version"] = db_schedules.configuration_version(row)
+        arguments["_schedule_version"] = db_schedules.configuration_version(row, project_work_dir=project_dir)
     subject = f"schedule {row['name']!r} in project {row['project_name']!r}"
     if action == "delete":
         return f"Delete {subject}, its runs and notifications. Its created tasks stay."
     if action == "run":
         if row["kind"] == "command":
             return (f"Run {subject}'s shell command once now, without an agent or model spend: "
-                    f"{_shown('command', row, {})} in {row['work_dir'] or 'the project directory'}. Its next fire stays.")
+                    f"{_shown('command', row, {})} in {directory(row)}. Its next fire stays.")
         return f"Run {subject} once now through its overlap check, spending within its caps. Its next fire stays."
     if action == "reset_planner_session":
         return (f"Reset the stored Planner session of {subject}. The next run starts a new session; "
@@ -117,13 +133,35 @@ async def impact(server, operation, arguments, principal, headers):
                               removes_gate=not command and bool(row["gate_command"]) and not gated)
     except schedules.RequestError as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
-    project = await db_projects.get_project(row["project_id"])
+    edit = await _command_edit(row, fields)
+    if edit is not None:
+        try:
+            await effective_schedule(None, {**row, **fields}, enabled=data.get("enabled", row["enabled"]))
+        except ValueError as exc:
+            raise OpError(ErrorCode.INVALID if isinstance(exc, MissingDirectory) else ErrorCode.CONFLICT, str(exc)) from None
     raises = _raises_a_cap(row, fields, project["task_budget_usd"] if project else None)
+    if edit is not None and not (data.get("enabled") and not row["enabled"]):
+        lines = []
+        for key in edit[1]:
+            if key == "command":
+                lines.append(f"command: {_shown('command', row, {})} → {_shown('command', {**row, **fields}, {})}")
+            elif key == "env":
+                old, new = row["env"] or {}, fields["env"] or {}
+                line = f"env keys: {', '.join(sorted(old)) or 'none'} → {', '.join(sorted(new)) or 'none'}"
+                changed = sorted(k for k in old.keys() & new.keys() if old[k] != new[k])
+                if changed:
+                    line += f" (values changed: {', '.join(changed)})"
+                lines.append(line)
+            elif key == "env_file":
+                lines.append(f"env_file: {row['env_file'] or 'none'} → {fields['env_file'] or 'none'}")
+            elif key == "work_dir":
+                lines.append(f"directory: {directory(row)} → {directory({**row, **fields})}")
+        return f"Update {subject}: {'; '.join(lines)}. {EDIT_EFFECT[edit[0]]}"
     if (data.get("enabled") and not row["enabled"]) or raises:
         changes = ", ".join(f"{key}: {row[key]!r} → {data[key]!r}" for key in
                             ("enabled", "run_budget_usd", "daily_budget_usd") if key in data)
-        effect = (f"Enabling runs its shell command {_shown('command', {**row, **fields}, {})} unattended "
-                  "at each fire, without an agent or model spend." if command else
+        effect = (f"Enabling runs its shell command {_shown('command', {**row, **fields}, {})} "
+                  f"in {directory({**row, **fields})} unattended at each fire, without an agent or model spend." if command else
                   "Enabling starts unattended scheduled tasks; raised or removed caps allow more spending.")
         return f"Update {subject}: {changes}. {effect}"
     return None
