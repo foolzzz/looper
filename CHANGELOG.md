@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.63] - 2026-10-31
+
+### Fixed
+
+- **Upgrade recovery after a failed drain poll decides after the wait, also when the old process still held the port.** `looper service upgrade` and `looper service restart --drain` share one recovery path. When a drain poll failed before the stop step, recovery probed the port once; if the old process was mid-exit and still held the listener, it skipped the wait for the exit, and nothing started once the PID was gone and the port free, so the service stayed down (a clean exit is not restarted by `KeepAlive`/`Restart=on-failure`). Recovery now waits up to 30 s for the old PID to exit unless the process answers status as that PID (it still serves; cancelling the drain is then the whole recovery). When the wait ends: old PID gone, unit not running, port free starts the service once; PID gone, unit not running, port held reports `port_conflict`; otherwise nothing starts. The decision no longer depends on the first port probe. An exiting process that still answers status is taken as serving, as before. No migration. ([#1044](https://github.com/foolzzz/looper/pull/1044))
+
 ## [2.14.62] - 2026-10-31
 
 ### Fixed
