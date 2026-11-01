@@ -1244,6 +1244,16 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
         except (ServiceError, OSError):
             pass  # The old process may already have closed its listener.
 
+    def port_conflict() -> ServiceError:
+        answer = host.get_status(port, token, "127.0.0.1") or {}
+        if "pid" not in answer:
+            try:
+                answer = host.system_operation(port, token, "health", {})
+            except (ServiceError, OSError):
+                pass
+        owner = f" (pid {answer['pid']})" if answer.get("pid") is not None else ""
+        return ServiceError(f"port {port} is served by another process{owner}; not starting a second server")
+
     report = {"plan": plan.kind.value, "reasons": list(plan.reasons), "drain_seconds": 0.0,
               "gap_seconds": 0.0, "interrupted": [], "kept_before": 0, "adopted": 0,
               "running_code_fingerprint": running.components["control_plane"],
@@ -1317,8 +1327,8 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                     while host.pid_alive(before):
                         renew()
                         if host.clock() >= deadline:
-                            report["recovery_error"] = ("the old service process is still running; "
-                                                        "run `looper service restart` once it exits")
+                            report["recovery_error"] = (f"the old service process {before} is still running; "
+                                                        "start it with `looper service restart` once it exits")
                             break
                         host.sleep(_POLL_SECONDS)
                     else:
@@ -1328,11 +1338,16 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                     deadline = host.clock() + _STOP_WAIT_SECONDS
                     while host.pid_alive(before):
                         if host.clock() >= deadline:
+                            report["recovery_error"] = (f"the old service process {before} is still running; "
+                                                        "start it with `looper service restart` once it exits")
                             break
                         host.sleep(_POLL_SECONDS)
                     else:
                         if not mgr.state().running and not host.port_in_use(port):
                             stopped = True
+                if (not stop_attempted and not stopped and before is not None and not host.pid_alive(before)
+                        and not mgr.state().running and host.port_in_use(port)):
+                    raise port_conflict()
                 # A timed-out start can leave a loaded unit or a partial process.
                 # Retry the current install from a stopped unit before cancelling.
                 if stopped:
@@ -1346,14 +1361,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                         # bootstrap needs a completed bootout even without a PID.
                         _stop_with_renewal(mgr, renew)
                     if host.port_in_use(port):
-                        answer = host.get_status(port, token, "127.0.0.1") or {}
-                        if "pid" not in answer:
-                            try:
-                                answer = host.system_operation(port, token, "health", {})
-                            except (ServiceError, OSError):
-                                pass
-                        raise ServiceError(f"port {port} is served by pid {answer.get('pid', 'unknown')}; "
-                                           "refusing to start another service")
+                        raise port_conflict()
                     _start_and_wait(mgr, port, log_path, timeout, root)
             except Exception as cancel_error:
                 report["recovery_error"] = str(cancel_error)
@@ -1363,6 +1371,14 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 report["recovery_error"] = "; ".join(filter(None, (report.get("recovery_error"), str(cancel_error))))
         try:
             answer = host.get_status(port, token, "127.0.0.1")
+            if answer is None and draining and not stop_attempted and before is not None:
+                state = mgr.state()
+                if state.running and ((state.pid is not None and state.pid != before) or not host.pid_alive(before)):
+                    # KeepAlive may have respawned the unit before it opens HTTP.
+                    deadline = host.clock() + timeout
+                    while answer is None and host.clock() < deadline:
+                        host.sleep(min(1.0, deadline - host.clock()))
+                        answer = host.get_status(port, token, "127.0.0.1")
             report["serving"] = answer is not None and answer.get("status") != "unauthorized"
         except Exception:
             report["serving"] = False

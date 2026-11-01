@@ -280,7 +280,7 @@ def test_checkout_must_be_its_package_root_but_wheel_allows_any_cwd(
         assert str(deployment.host.package_root) in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("case", ["exited", "restarted_by_manager", "port_taken", "pid_alive",
+@pytest.mark.parametrize("case", ["exited", "restarted_by_manager", "port_taken", "port_taken_known", "pid_alive",
                                  "shutting_down", "shutting_down_forever"])
 def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs(
         deployment, case, capsys):
@@ -299,6 +299,8 @@ def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs
                     deployment.state.pid = 123456790 if deployment.state.running else None
                 raise service.ServiceError("connection refused")
             return {"phase": "drained"}
+        if name == "health":
+            return {"pid": 123456791} if case == "port_taken_known" else {}
         assert name == "drain_cancel"
         return {"phase": "serving"}
 
@@ -312,7 +314,7 @@ def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs
 
     deployment.host.system_operation = operation
     deployment.host.pid_alive = alive
-    deployment.host.port_in_use = lambda *args: case == "port_taken"
+    deployment.host.port_in_use = lambda *args: case in ("port_taken", "port_taken_known")
     deployment.host.get_status = lambda *args: (
         {"status": "ok"} if deployment.state.running and (not shutting_down or "start" in deployment.events) else None)
 
@@ -339,6 +341,46 @@ def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs
         assert data["restart_hint"] == "looper service restart"
         assert "serving: no" in error
         assert "looper service restart" in error
+    if case in ("pid_alive", "shutting_down_forever"):
+        assert "old service process 123456789 is still running" in data["recovery_error"]
+    if case in ("port_taken", "port_taken_known"):
+        assert "port 18841 is served by another process" in data["recovery_error"]
+        assert "not starting a second server" in data["recovery_error"]
+        if case == "port_taken_known":
+            assert "pid 123456791" in data["recovery_error"]
+
+
+@pytest.mark.parametrize("pid, response_delay", [(123456790, 3), (None, 3), (123456790, 6)])
+def test_manager_restart_during_drain_waits_for_serving_without_starting(
+        deployment, pid, response_delay, capsys):
+    restart_time = []
+
+    def operation(port, token, name, args):
+        deployment.events.append(name)
+        if name == "drain":
+            return {"phase": "draining", "waiting": {"runs": []}}
+        if name == "drain_status":
+            deployment.state.pid = pid
+            restart_time.append(deployment.elapsed[0])
+            raise service.ServiceError("connection refused")
+        assert name == "drain_cancel"
+        return {"phase": "serving"}
+
+    deployment.host.system_operation = operation
+    deployment.host.get_status = lambda *args: (
+        {"status": "ok"} if deployment.elapsed[0] >= restart_time[0] + response_delay else None)
+    assert cli.main(["service", "upgrade", "--timeout", "5"]) == 1
+    assert "start" not in deployment.events
+    assert "stop" not in deployment.events
+    assert "install" not in deployment.events
+    assert deployment.elapsed[0] - restart_time[0] == min(response_delay, 5)
+    data = report(deployment)
+    serving = response_delay <= 5
+    assert data["serving"] is serving
+    assert data["running_code_fingerprint"] == (
+        deployment.scenario.current.components["control_plane"] if serving else None)
+    assert ("restart_hint" in data) is not serving
+    assert f"serving: {'yes' if serving else 'no'}" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("late_exit", [True, False])
@@ -380,7 +422,7 @@ def test_stop_timeout_recovers_a_late_exit_and_cancels_drain(
     assert data["status"] == "failed"
     assert ("recovery_error" in data) is not late_exit
     if not late_exit:
-        assert "old service process is still running" in data["recovery_error"]
+        assert "old service process 123456789 is still running" in data["recovery_error"]
     assert "serving: yes" in capsys.readouterr().err
 
 
