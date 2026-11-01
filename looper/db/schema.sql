@@ -1124,6 +1124,7 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
     run_timeout_seconds INTEGER CHECK (run_timeout_seconds > 0),
     carried_on BOOLEAN NOT NULL DEFAULT false,
     started_at TIMESTAMPTZ,
+    deferred_by_drain BOOLEAN NOT NULL DEFAULT false,
     exit_code INTEGER,
     exit_signal INTEGER,
     log_path TEXT,
