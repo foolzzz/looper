@@ -46,6 +46,7 @@ async def existing_baseline(conn):
     prefix, schedules_start, sql = connection.SCHEMA_PATH.read_text().partition("CREATE TABLE IF NOT EXISTS schedules (")
     sql, next_table, suffix = sql.partition("CREATE TABLE IF NOT EXISTS llm_records (")
     pieces = [*_SCHEDULE_COLUMNS.splitlines(keepends=True), *_RUN_COLUMNS.splitlines(keepends=True),
+              "    deferred_by_drain BOOLEAN NOT NULL DEFAULT false,\n",
               _KIND_CHECK, "                      'succeeded', 'interrupted')),\n",
               "                                              'deadline_alert', 'deadline_recovered', 'overlap_alert', 'overlap_recovered')),\n",
               "CREATE INDEX IF NOT EXISTS idx_schedule_runs_finished ON schedule_runs (finished_at) WHERE finished_at IS NOT NULL;\n"]
@@ -89,6 +90,7 @@ def test_existing_baseline_upgrades_once_preserves_data_and_matches_fresh():
             assert dict(await old.fetchrow("SELECT * FROM schedules")) == {**before["schedules"][0], **expected}
             run_defaults = {line.strip().split()[0]: None for line in _RUN_COLUMNS.splitlines()}
             run_defaults["log_truncated"] = False
+            run_defaults["deferred_by_drain"] = False
             assert dict(await old.fetchrow("SELECT * FROM schedule_runs")) == {**before["schedule_runs"][0], **run_defaults}
             assert [dict(row) for row in await old.fetch("SELECT * FROM schedule_notifications")] == before["schedule_notifications"]
             await connection.ensure_schema(fresh)
@@ -103,12 +105,13 @@ def test_existing_baseline_upgrades_once_preserves_data_and_matches_fresh():
     asyncio.run(asyncio.wait_for(test(), 30))
 
 
-def test_missed_since_upgrade_preserves_runs_and_matches_fresh():
+@pytest.mark.parametrize("column,default", [("missed_since", None), ("deferred_by_drain", False)])
+def test_additive_run_column_upgrade_preserves_runs_and_matches_fresh(column, default):
     async def test():
         async with fresh_connection() as old, fresh_connection() as fresh:
             await connection.ensure_schema(old)
-            await old.execute("ALTER TABLE schedule_runs DROP COLUMN IF EXISTS missed_since")
-            await old.execute("DELETE FROM schema_migrations WHERE name='schedule_missed_since'")
+            await old.execute(f"ALTER TABLE schedule_runs DROP COLUMN {column}")
+            await old.execute("DELETE FROM schema_migrations WHERE name=$1", f"schedule_{column}")
             await old.execute("INSERT INTO projects (id,name) VALUES ('p','Example')")
             await old.execute("INSERT INTO schedules (id,project_id,name,cron,timezone,requirement) "
                               "VALUES ('s','p','Reports','0 * * * *','UTC','Report')")
@@ -119,14 +122,14 @@ def test_missed_since_upgrade_preserves_runs_and_matches_fresh():
             assert await witness(old) == before and await structure(old) == shape
             await connection.ensure_schema(old)
             assert dict(await old.fetchrow("SELECT * FROM schedule_runs")) == {
-                **before["schedule_runs"][0], "missed_since": None}
+                **before["schedule_runs"][0], column: default}
             await connection.ensure_schema(fresh)
             assert await structure(old) == await structure(fresh)
             after, shape = await witness(old), await structure(old)
             assert not await connection.schema_change_pending(old)
             await connection.ensure_schema(old)
             assert await witness(old) == after and await structure(old) == shape
-            assert await old.fetchval("SELECT count(*) FROM schema_migrations WHERE name='schedule_missed_since'") == 1
+            assert await old.fetchval("SELECT count(*) FROM schema_migrations WHERE name=$1", f"schedule_{column}") == 1
     asyncio.run(asyncio.wait_for(test(), 30))
 
 

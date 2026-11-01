@@ -20,6 +20,7 @@ _COMMAND_RUN_DEFAULTS = {
     "started_at": None, "exit_code": None, "exit_signal": None, "log_path": None, "log_bytes": None,
     "log_truncated": False, "log_tail": None, "runner_pid": None, "runner_started": None,
     "missed_since": None,
+    "deferred_by_drain": False,
 }
 
 
