@@ -246,10 +246,6 @@ def test_lock_loss_during_pool_growth_refuses_writes(monkeypatch: pytest.MonkeyP
 
 
 async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root: Path, *, restart: bool) -> None:
-    # Keep the fixture's schema owner alive: it is part of the test driver and drops the schema afterwards.
-    driver_pids = {row["pid"] for row in await pool.fetch("""SELECT pid FROM pg_stat_activity
-        WHERE datname=current_database() AND pid<>pg_backend_pid()""")}
-    assert len(driver_pids) == 1, "only fresh_schema's administrator is exempt from the restart"
     probe = await asyncpg.connect(DSN)
     agent = None
     child_pid = None
@@ -257,6 +253,9 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
     inflight = []
     created, release = asyncio.Event(), asyncio.Event()
     try:
+        # Preserve existing connections, including the fixture's owner that drops the schema afterwards.
+        before = {row["pid"] for row in await probe.fetch("""SELECT pid FROM pg_stat_activity
+            WHERE datname=current_database() AND pid<>pg_backend_pid()""")}
         async with _running(pool, monkeypatch, root, keeper=KeeperMode.ON) as system:
             assert await pool.fetchval("SELECT value FROM system_settings WHERE key=$1", control_plane.EPOCH_KEY) == "1"
             child_code = ("import os, signal, sys, time\n"
@@ -292,7 +291,7 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
             if restart:
                 await probe.fetch("""SELECT pg_terminate_backend(pid) FROM pg_stat_activity
                     WHERE datname=current_database() AND pid<>pg_backend_pid() AND NOT (pid=ANY($1::int[]))""",
-                                  list(driver_pids))
+                                  list(before))
             else:
                 assert await probe.fetchval("SELECT pg_terminate_backend($1)", pid)
             await until(lambda: proc_tree._spawns_fenced, "the lost-lock spawn fence", timeout=5)
@@ -349,8 +348,18 @@ def test_losing_the_lock_fences_and_exits(monkeypatch: pytest.MonkeyPatch, tmp_p
     asyncio.run(asyncio.wait_for(test(), 30))
 
 
-def test_a_database_restart_is_a_lost_lock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("extra_idle_connection", [False, True])
+def test_a_database_restart_is_a_lost_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra_idle_connection: bool,
+) -> None:
     async def test() -> None:
         async with fresh_schema(max_size=3) as pool:
-            await _lose_running_system(pool, monkeypatch, tmp_path, restart=True)
+            extra = await asyncpg.connect(DSN) if extra_idle_connection else None
+            try:
+                await _lose_running_system(pool, monkeypatch, tmp_path, restart=True)
+                if extra is not None:
+                    assert await extra.fetchval("SELECT 1") == 1
+            finally:
+                if extra is not None:
+                    await extra.close()
     asyncio.run(asyncio.wait_for(test(), 30))
