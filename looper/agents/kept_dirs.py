@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from .. import components
 from ..db import plans
 from ..db.connection import get_pool
 from . import proc_tree
@@ -203,6 +202,7 @@ def _candidate_reason(path: Path, record: KeeperRecord, alive: bool, epoch: int,
             return Reason.LOG_SHORT
     except OSError:
         return Reason.LOG_SHORT
+    from .. import components
     if manifest.get("adoption") != components.loaded_manifest().adoption:
         return Reason.CONTRACT_CHANGED
     if type(manifest.get("record_id")) is not int or manifest["record_id"] not in running:
