@@ -248,6 +248,41 @@ def test_without_the_variable_a_refused_call_fails_at_once(monkeypatch, capsys, 
     assert "agent api retry" not in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("reconnect", [None, "3"], ids=["unset", "kept"])
+@pytest.mark.parametrize(("reason", "legacy_text"), [
+    (ConnectionResetError("connection reset"),
+     "Looper did not run the tool looper_room_inbox: no answer from http://127.0.0.1:1 (connection reset)"),
+    (TimeoutError(),
+     "Looper did not answer the call to looper_room_inbox: no answer from http://127.0.0.1:1 within 120 s. "
+     "It may still have run, so check its effect before calling it again."),
+], ids=["connection-lost", "timeout"])
+def test_inbox_failure_guidance_is_opt_in(monkeypatch, reconnect, reason, legacy_text) -> None:
+    # These exact legacy responses are the contract on main before reconnect support.
+    monkeypatch.setenv("LOOPER_AGENT_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("LOOPER_AGENT_TOKEN", "test-token")
+    if reconnect is None:
+        monkeypatch.delenv("LOOPER_AGENT_RECONNECT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("LOOPER_AGENT_RECONNECT_SECONDS", reconnect)
+    monkeypatch.setattr(mcp_server, "log_to_stderr", Mock())
+    opener = Mock(side_effect=urllib.error.URLError(reason))
+    monkeypatch.setattr(mcp_server.urllib.request.OpenerDirector, "open", opener)
+    request = {"id": 1, "method": "tools/call", "params": {"name": room_ops.INBOX}}
+    output = BytesIO()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=BytesIO(json.dumps(request).encode() + b"\n")))
+    monkeypatch.setattr(sys, "stdout", SimpleNamespace(buffer=output))
+
+    assert mcp_server.main() == 0
+    result = json.loads(output.getvalue())["result"]
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    if reconnect is None:
+        assert text == legacy_text
+    else:
+        assert "may have been marked read" in text and "peek=true" in text and room_ops.READ in text
+    assert opener.call_count == 1
+
+
 @pytest.mark.parametrize("retry_after", [None, "soon", "0.5"])
 def test_a_503_without_an_integer_retry_after_is_not_retried(retry_after) -> None:
     with _api(("503", retry_after)) as server:

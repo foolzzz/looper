@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -394,6 +395,28 @@ def test_adoption_seat_fingerprints_match_the_runtime_tool_listings():
         listing = [tool.listing() for tool in (*tools_for(member), *vault_tools)]
         expected = hashlib.sha256(json.dumps(listing, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         assert adoption["seat_tools"][role] == expected
+
+
+def test_previous_release_probe_reads_current_seat_tool_declarations():
+    import json
+
+    from looper.agents.ops.room import tools_for
+    from looper.agents.ops.vault import TOOLS as vault_tools
+    from looper.agents.room import MemberKind
+    from looper.components import SEAT_SOURCES
+
+    # Frozen from v2.14.69: updating the current probe must not mask an upgrade incompatibility.
+    probe = ROOT / "tests/fixtures/component_probe_v2_14_69.py"
+    result = subprocess.run(
+        [sys.executable, "-I", str(probe)],
+        input=json.dumps({path: (ROOT / path).read_text() for path in SEAT_SOURCES}),
+        text=True, capture_output=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        role: [tool.listing() for tool in (*tools_for(member), *vault_tools)]
+        for role, member in (("worker", MemberKind.WORK), ("reviewer", MemberKind.REVIEW))
+    }
 
 
 def test_packaged_runner_aliases_have_the_same_fingerprints(component_tree: Path, tmp_path: Path):

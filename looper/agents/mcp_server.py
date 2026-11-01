@@ -271,7 +271,8 @@ def _call_tool(message_id: Any, params: dict[str, Any], client: Client) -> dict[
         answer = client.call_tool(name, arguments, meta if isinstance(meta, dict) else None)
     except LooperUnavailable as exc:
         logger.warning("tools/call %s: %s", name, exc)
-        if name == WAITING_TOOL and arguments.get("peek") is not True:
+        if (isinstance(client, AgentClient) and client._reconnect_seconds > 0
+                and name == WAITING_TOOL and arguments.get("peek") is not True):
             return _tool_result(message_id, f"Looper did not answer the call to {name}: {exc}. Messages may have "
                                             "been marked read before the response was lost. Call looper_room_inbox "
                                             "with peek=true to check remaining unread messages, and looper_room_read "
