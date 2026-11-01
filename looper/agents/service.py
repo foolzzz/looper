@@ -89,6 +89,12 @@ CAPTURED_NAMES = (
 # What `install` copied before the ops file, by prefix: a variable of these it no longer copies is named in its report.
 FORMER_PREFIXES = ("LOOPER_", "LOOPX_", "ANTHROPIC_", "LARK_")
 
+# What makes a Python process import from elsewhere than its own install: refused in the unit and in the caller's shell.
+_PYTHON_IMPORT_OVERRIDES = ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE")
+# What makes git act on another repository than the one `-C` names.
+_GIT_REPOSITORY_OVERRIDES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                             "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _STOP_WAIT_SECONDS = 30.0  # launchd sends SIGKILL 20 s after SIGTERM by default
 _POLL_SECONDS = 0.5
@@ -1076,6 +1082,14 @@ def _dashboard_safe_wheel(source: str, directory: Path):
                     csv.writer(output).writerows(dashboard_rows)
 
 
+def _tool_environment(host: Host) -> dict[str, str]:
+    """The caller's environment for the upgrade's uv, npm and installers, without what makes a Python child import
+    from, or a tool target, another environment: every PYTHON* variable and an active virtual environment.
+    Package sources, proxies, certificates and caches stay."""
+    return {name: value for name, value in host.environ.items()
+            if not name.startswith("PYTHON") and name != "VIRTUAL_ENV"}
+
+
 def _wheel_install_environment(host: Host, package_root: Path) -> dict[str, str]:
     # Inspect the interpreter's prefix scheme, then use that same prefix for both
     # installers. An editable checkout or a user/target install is not this scheme.
@@ -1091,10 +1105,10 @@ def _wheel_install_environment(host: Host, package_root: Path) -> dict[str, str]
                            f"paths {purelib} and {platlib}; refusing to install a wheel")
     redirects = {"PIP_TARGET", "PIP_PREFIX", "PIP_ROOT", "PIP_USER", "PIP_PYTHON",
                  "UV_TARGET", "UV_PREFIX", "UV_PYTHON", "UV_PROJECT_ENVIRONMENT", "UV_SYSTEM_PYTHON",
-                 "UV_CONFIG_FILE", "PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE"}
+                 "UV_CONFIG_FILE"}
     # PIP_CONFIG_FILE=/dev/null disables global, user and venv-local pip config;
     # uv's no-config mode likewise prevents project/user config from retargeting.
-    return {**{name: value for name, value in host.environ.items() if name not in redirects},
+    return {**{name: value for name, value in _tool_environment(host).items() if name not in redirects},
             "PIP_CONFIG_FILE": os.devnull, "PIP_PREFIX": str(prefix), "UV_NO_CONFIG": "true"}
 
 
@@ -1153,15 +1167,15 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
         # Pin the preflight result even if the caller's environment changes while draining.
         _checked(host, ["uv", "sync", "--project", str(host.cwd), "--python", host.executable,
                         "--extra", "test", "--inexact"], installing=True,
-                 env={**host.environ, "UV_PROJECT_ENVIRONMENT": str(sync_environment)})
+                 env={**_tool_environment(host), "UV_PROJECT_ENVIRONMENT": str(sync_environment)})
     if not build_web:
         return None
     web = host.cwd / "web"
     staged = Path(tempfile.mkdtemp(prefix=".dist-upgrade-", dir=web))
     try:
-        _checked(host, ["npm", "ci", "--prefix", str(web)], installing=True)
+        _checked(host, ["npm", "ci", "--prefix", str(web)], installing=True, env=_tool_environment(host))
         _checked(host, ["env", f"PYTHON={host.executable}", "npm", "run", "build", "--prefix", str(web),
-                        "--", "--outDir", str(staged)], installing=True)
+                        "--", "--outDir", str(staged)], installing=True, env=_tool_environment(host))
         if not (staged / "index.html").is_file():
             raise ServiceError("the dashboard build did not produce index.html")
         record_web_source(host.cwd, staged)
@@ -1406,7 +1420,7 @@ def _unit_package_root(host: Host, mgr: _Manager) -> Path:
             environment = dict(word.split("=", 1)
                 for line in mgr.unit_path.read_text().splitlines() if line.startswith("Environment=")
                 for word in _systemd_words(line.removeprefix("Environment=").replace("$$", "$$$$")) if "=" in word)
-        overrides = [name for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE") if environment.get(name)]
+        overrides = [name for name in _PYTHON_IMPORT_OVERRIDES if environment.get(name)]
         if overrides:
             raise ServiceError("the service unit overrides Python imports with " + ", ".join(overrides)
                                + "; reinstall the unit without these overrides before upgrading")
@@ -1443,6 +1457,10 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
     from ..upgrade import UpgradeKind, decide, scan_keepers
 
     try:
+        if overrides := [name for name in (*_PYTHON_IMPORT_OVERRIDES, *_GIT_REPOSITORY_OVERRIDES) if host.environ.get(name)]:
+            raise ServiceError(f"{', '.join(overrides)} set in this shell can make the upgrade run other code or act on "
+                               f"another repository than the service's; unset {'it' if len(overrides) == 1 else 'them'} "
+                               "and run looper service upgrade again")
         wheel = bool(to and to.endswith(".whl"))
         source = str(Path(to).resolve()) if wheel else to or "origin/main"
         mgr = manager(host, label)
@@ -1460,6 +1478,9 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         package_root = _unit_package_root(host, mgr)
         if not wheel and host.cwd.resolve() != package_root:
             raise ServiceError(f"{host.cwd.resolve()} is not the service's checkout {package_root}")
+        if host.package_root.resolve() != package_root:
+            raise ServiceError(f"this looper runs the code in {host.package_root.resolve()}, not the service's "
+                               f"{package_root}; run looper service upgrade with the service's own looper")
         if not dry_run and not wheel:
             if _checked(host, ["git", "-C", str(host.cwd), "status", "--porcelain", "--untracked-files=no"]):
                 raise ServiceError("the installed checkout has tracked changes; refusing to upgrade")
