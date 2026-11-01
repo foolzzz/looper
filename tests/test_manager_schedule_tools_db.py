@@ -29,6 +29,17 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 TOOL = "looper_schedules"
 
 
+def test_schedule_tool_delete_description_distinguishes_command_and_agent_schedules():
+    from looper.agents.ops.service import MANAGER_TOOLS
+
+    tool = next(tool for tool in MANAGER_TOOLS if tool.name == TOOL)
+    delete = tool.description.split("; delete ", 1)[1].split("; reset_planner_session", 1)[0]
+    assert delete == (
+        "(the user confirms first; an agent schedule's tasks stay; deleting a command schedule is refused only "
+        "while its command is running: disable it and wait for the run to end; otherwise the delete removes "
+        "its runs and messages, and a queued run will not execute; a command schedule has no tasks)")
+
+
 @pytest.mark.parametrize("action", ["enable", "run"])
 @pytest.mark.parametrize("env_file", [False, True])
 def test_command_schedule_creation_and_start_show_the_command_before_confirmation(

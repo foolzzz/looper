@@ -2763,12 +2763,15 @@ evaluation is required before the original schedule requirement is complete.
 - **Deleting.** A project with schedules is not deleted (409) until they are.
   Deleting a schedule (the project's Schedules tab, the Schedules page, the
   schedule's page, `POST /api/v1/schedule_admin/delete` with `schedule_id`, the Manager's
-  `looper_schedules`) deletes its runs and messages; its tasks stay, without
-  it (`tasks.schedule_id` is `ON DELETE SET NULL`). A command schedule whose
-  run is running is not deleted (409: disable it and wait for the run to end;
+  `looper_schedules`) deletes its runs and messages. An agent schedule's tasks
+  stay, without it (`tasks.schedule_id` is `ON DELETE SET NULL`). A command
+  schedule has no tasks, and deletion is refused only while its command is
+  running (409: disable it and wait for the run to end;
   the Manager and the client API refuse before asking), because its runner
-  outlives the server. Otherwise a run in progress does not hold it up: a
-  running task goes on and ends as any task does, and its
+  outlives the server. Otherwise deleting a command schedule removes its runs
+  and messages, and a queued run will not execute. For an agent schedule, a
+  run in progress does not hold deletion up: a running task goes on and ends
+  as any task does, and its
   end is no schedule's any more (no run outcome, no message); a queued run is
   gone, and a gate still running finds the schedule gone and starts no task.
   Writing a run's end locks the schedule's row before the run's

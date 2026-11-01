@@ -583,8 +583,10 @@ TOOLS: tuple[Tool, ...] = (
                     "get (with latest runs); create (disabled; "
                     "Looper shows it and asks whether to enable it); update; enable (it then fires unattended: "
                     "its task, or its command; the user confirms first) or disable; run now (the user confirms first); delete "
-                    "(the user confirms first; its tasks stay; a command schedule with a run in progress is refused: "
-                    "disable it, then delete it after the run ends); reset_planner_session (the user confirms first; "
+                    "(the user confirms first; an agent schedule's tasks stay; deleting a command schedule is refused only "
+                    "while its command is running: disable it and wait for the run to end; otherwise the delete removes "
+                    "its runs and messages, and a queued run will not execute; a command schedule has no tasks); "
+                    "reset_planner_session (the user confirms first; "
                     "the next run starts fresh; a run in progress keeps its session and will not write it back).",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,

@@ -301,6 +301,32 @@ def test_client_delete_and_reset_wait_without_mutation_until_confirmed(tmp_path,
     run_db(run, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("kind,status,effect", [
+    ("command", "queued", " The queued run will not execute. It has no tasks."),
+    ("command", None, " It has no tasks."),
+    ("agent", None, " Its created tasks stay."),
+])
+def test_client_delete_impact_describes_schedule_kind(tmp_path, monkeypatch, kind, status, effect):
+    async def run(pool):
+        _, sid = await _seed(pool, kind=kind,
+                             **({"command": "exit 0", "requirement": ""} if kind == "command" else {}))
+        if status:
+            await db_schedules.insert_run(pool, schedule_id=sid, scheduled_for=datetime.now(timezone.utc),
+                                          trigger="manual", status=status)
+        async with _api(tmp_path, pool) as call:
+            code, pending = await call("delete", {"schedule_id": sid}, client=True)
+            assert code == 202, pending
+            assert pending["impact"] == (
+                "Delete schedule 'Hourly' in project 'Reports', its runs and notifications." + effect)
+            assert await db_schedules.get_schedule(sid) is not None
+            assert len(await db_schedules.open_runs(pool, sid)) == int(status is not None)
+            code, result = await call("/api/v1/confirm", {"confirmation_id": pending["confirmation_id"]}, client=True)
+            assert code == 200, result
+            assert await db_schedules.get_schedule(sid) is None
+            assert await db_schedules.open_runs(pool, sid) == []
+    run_db(run, monkeypatch, timeout=30)
+
+
 def test_client_delete_of_a_running_command_schedule_is_refused_before_asking(tmp_path, monkeypatch):
     async def run(pool):
         _, sid = await _seed(pool, kind="command", command="exit 0", requirement="")
