@@ -29,6 +29,7 @@ import signal
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +51,7 @@ from . import keeper, self_check
 from .kept_run import KeeperSettings
 from .gate_courier import GateCourier
 from .gate_service import GateReminders
-from .drain import DrainState
+from .drain import DrainPhase, DrainScope, DrainState
 from .wait_service import WaitService
 from .http_server import AgentHTTPServer
 from .log_redaction import log_to_stderr
@@ -419,6 +420,19 @@ async def carry_on_tasks(task_router: TaskRouter, left: LeftRunning) -> None:
 # How long a shutdown may take before the server exits without finishing it: under the 20 s launchd gives a service
 # between SIGTERM and SIGKILL. The next start ends what it leaves (the agents' processes, their runs' records).
 SHUTDOWN_DEADLINE_SEC = 15.0
+
+
+class ShutdownMode(StrEnum):
+    END_RUNS = "end_runs"
+    DETACH_KEPT = "detach_kept"
+
+
+def shutdown_mode(*, keeper_on: bool, drain: DrainState, sig: int) -> ShutdownMode:
+    """Only a planned turns-drain SIGTERM may leave kept agents running."""
+    if (sig == signal.SIGTERM and keeper_on and drain.status.phase is not DrainPhase.SERVING
+            and drain.status.scope is DrainScope.TURNS):
+        return ShutdownMode.DETACH_KEPT
+    return ShutdownMode.END_RUNS
 
 
 @dataclass
@@ -827,15 +841,25 @@ async def _run_agent_system_owned(
         # Wait for shutdown signal
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
+        mode = ShutdownMode.END_RUNS
+
+        def prepare_stop(sig: int) -> None:
+            nonlocal mode
+            mode = shutdown_mode(keeper_on=lease is not None, drain=drain, sig=sig)
+            logger.info("shutdown mode=%s", mode)
+            registry.prepare_stop_all()
+
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop_signal_handler(
-                stop_event, exit_now=fence.exit, prepare_stop=registry.prepare_stop_all))
+                stop_event, exit_now=fence.exit, prepare_stop=lambda sig=sig: prepare_stop(sig)))
 
         await stop_event.wait()
 
         # --- Shutdown ---
 
         async def shut_down() -> None:
+            if mode is ShutdownMode.DETACH_KEPT:
+                await worker_pool.detach_kept(epoch=lease.epoch)
             logger.info("shutting down agent system...")
             await consults.stop()
             await gate_reminders.stop()

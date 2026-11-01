@@ -966,10 +966,31 @@ Claude Code Worker or Reviewer process. The keeper owns the child's process
 record and captures stdout, stderr and stdin in the run directory. Hosted or
 steered runs, launchers without reliable exit codes, runs without a task and
 other runtimes use their existing process path. Consults also keep their own
-process path. Stop, kill, timeout and the spend cap all call the run handle's
+process path. A `stdin/write` reply acknowledges the offset committed to
+`stdin.log` and queued for the child. A keeper-owned writer drains that queue
+to the child separately, so a slow stdin reader does not delay the reply;
+the control plane retains each chunk until it receives that acknowledgement.
+Stop, kill, timeout and the spend cap all call the run handle's
 `end()`, which sends `child/end` to the keeper; the keeper then ends the
 child's tree through `looper/agents/proc_tree.py`. A normal server shutdown
-ends kept runs too.
+ends kept runs too, with one planned-restart exception: when keeper mode is
+on and SIGTERM arrives during an active turns drain (a `CONTROL_PLANE`
+upgrade), the control plane first detaches attached kept runs at a fully
+processed stdout line boundary. It records that offset in `detach.json`,
+leaves their keepers, children, running records and room MCP files in place,
+and publishes no result. The shutdown mode is captured at the first signal;
+a later drain lease expiry does not change it. A lease that expired before
+SIGTERM uses the normal shutdown. Every other shutdown, including
+`looper service restart`, `stop`, Ctrl-C and a runs drain followed by SIGTERM,
+ends runs as usual. Runs that cannot detach are ended too. Until startup
+adoption is implemented, the next start ends detached runs and interrupts
+their records so their steps can run again.
+
+The keeper bounds `stdout.log` at 512 MiB. At the limit it stops appending
+to that file, marks `stdout_truncated` and `stdout_truncated_at` in
+`keeper.json`, and continues sending live output without ending the child.
+A run with truncated stdout cannot be adopted because its replay log is
+incomplete.
 
 If a keeper connection closes without `child/exited`, only that run fails
 with `the run's keeper process ended unexpectedly`. The control plane ends
@@ -984,7 +1005,8 @@ Every way Looper ends an agent goes through `looper/agents/proc_tree.py`:
 - `timeout_seconds`;
 - the per-run spend cap;
 - a resident session stopped or replaced;
-- server shutdown: the worker pool stops first and ends every run at once,
+- server shutdown: after any planned detach above, the worker pool stops
+  first and ends every remaining run at once,
   then the TaskRouter stops its Planners together, each ending its Claude. A
   pool that has stopped still answers a Planner's `KILL_WORK` at once
   (`killed: false`), so a shutdown does not grow with the number of running

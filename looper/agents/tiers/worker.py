@@ -51,7 +51,7 @@ from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, budget_error, ended_by
 from .. import proc_tree, reported_files, vault
 from .. import keeper
-from ..kept_run import KeptRun, KeeperLost, KeeperSettings
+from ..kept_run import DetachKind, KeptRun, KeptRunState, KeeperLost, KeeperSettings
 from ..ops.vault import run_section
 from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
@@ -454,6 +454,7 @@ class WorkerPool:
         self._workers_dir.mkdir(parents=True, exist_ok=True)
         # The channel of each running worker, open until its result: more user turns go here.
         self._inputs: dict[str, RunChannel] = {}
+        self._recorders: dict[str, ClaudeRunRecorder] = {}
         # The Planner exposes a dispatched step before its run has an input channel.
         # Corrections in that window must wait for startup rather than look like a finished run.
         self._input_ready: dict[str, asyncio.Event] = {}
@@ -508,6 +509,44 @@ class WorkerPool:
         for wp in self._active.values():
             if isinstance(wp.handle, KeptRun):
                 wp.handle.fence()
+
+    async def detach_kept(self, *, epoch: int, timeout: float = 3.0) -> dict[DetachKind, list[str]]:
+        # A completed run can still be announcing its offline seat after its recorder has closed.
+        runs = [(wid, wp.handle, self._tasks[wid], self._recorders.get(wid)) for wid, wp in self._active.items()
+                if isinstance(wp.handle, KeptRun) and wp.handle.state is KeptRunState.ATTACHED
+                and wid in self._tasks]
+
+        async def detach(wid, handle, recorder):
+            outcome = await handle.detach(epoch=epoch, timeout=timeout)
+            if outcome.kind is DetachKind.DETACHED:
+                if recorder is not None:
+                    recorder.detach()
+                self._inputs.pop(wid, None)
+                self._reminders.pop(wid, None)
+            return outcome
+
+        outcomes = await asyncio.gather(*(detach(wid, handle, recorder) for wid, handle, _, recorder in runs),
+                                        return_exceptions=True)
+        grouped: dict[DetachKind, list[str]] = {}
+        finishing = []
+        for (wid, handle, task, recorder), outcome in zip(runs, outcomes):
+            if isinstance(outcome, BaseException):
+                logger.warning("could not detach run=%s: %s", wid, outcome)
+                continue
+            grouped.setdefault(outcome.kind, []).append(wid)
+            if outcome.kind is DetachKind.DETACHED:
+                if ready := self._input_ready.pop(wid, None):
+                    ready.set()
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                logger.info("detach run=%s offset=%d", wid, outcome.consumed)
+            elif outcome.kind is DetachKind.FINISHING:
+                finishing.append(task)
+        if finishing:
+            await asyncio.wait(finishing, timeout=timeout)
+        logger.info("detach outcomes=%s", grouped)
+        return grouped
 
     async def _listen_loop(self) -> None:
         """Listen for work items addressed to any worker-* queue.
@@ -833,6 +872,8 @@ class WorkerPool:
                 wp.status = "completed"
                 wp.result = result
             except asyncio.CancelledError:
+                if isinstance(wp.handle, KeptRun) and wp.handle.state is KeptRunState.DETACHED:
+                    raise
                 # A pool stop has no kill reply. Preserve dropped steers through the normal result path instead.
                 if self._running or wp.handle is None or not wp.handle.dropped_input():
                     raise
@@ -847,6 +888,8 @@ class WorkerPool:
                 wp.result = {"status": "failed", "error": str(exc)}
                 logger.exception("worker %s failed on task %s", worker_id, task_id)
             finally:
+                if isinstance(wp.handle, KeptRun) and wp.handle.state is KeptRunState.DETACHED:
+                    raise asyncio.CancelledError
                 self._reminders.pop(worker_id, None)
                 if seat is not None:
                     # Its token stops working, with the files that carry it, before anything else waits.
@@ -875,8 +918,17 @@ class WorkerPool:
             ))
         finally:
             # _execute has waited for or ended the run before its logs can be released.
-            if isinstance(wp.handle, KeptRun):
+            if isinstance(wp.handle, KeptRun) and wp.handle.state is not KeptRunState.DETACHED:
                 wp.handle.release()
+
+    @contextlib.asynccontextmanager
+    async def _record_run(self, worker_id: str, recorder: ClaudeRunRecorder) -> AsyncIterator[None]:
+        self._recorders[worker_id] = recorder
+        try:
+            async with recorder:
+                yield
+        finally:
+            self._recorders.pop(worker_id, None)
 
     async def _execute(
         self,
@@ -1081,6 +1133,7 @@ class WorkerPool:
                     })
                     if (wp := self._active.get(worker_id)) is not None:
                         wp.keepable = True
+                        wp.handle = handle  # register before activity and record writes can lose the lock
                 else:
                     handle = ProcessRun(runtime, command, launch=launch, cwd=work_dir, session_dir=session_dir,
                                         label=f"worker {worker_id}")
@@ -1117,13 +1170,11 @@ class WorkerPool:
             launch=launch,
             whole_process=True,
         )
-        async with recorder:  # whatever ends the run (a kill, its task or the server stopping) ends its record
+        async with self._record_run(worker_id, recorder):
             logger.info("worker %s starting run: %s (cwd=%s)", worker_id, command[0], work_dir)
             try:
                 if isinstance(handle, KeptRun):
                     handle.set_record(recorder.record_id)
-                    if (wp := self._active.get(worker_id)) is not None:
-                        wp.handle = handle  # fencing must also reach a keeper while it starts
                 await handle.launch()
                 logger.info("worker %s run started (pid=%s)", worker_id, handle.pid)
                 wp = self._active.get(worker_id)
@@ -1296,6 +1347,9 @@ class WorkerPool:
                 return_code = await handle.wait()
                 waited = True
             except BaseException as exc:
+                if isinstance(handle, KeptRun) and handle.state is KeptRunState.DETACHED:
+                    recorder.detach()
+                    raise
                 _end_input()
                 # Never leave Claude, or anything it started, running unsupervised once the worker gives up.
                 await _end_run()

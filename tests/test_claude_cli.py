@@ -935,3 +935,28 @@ class TestAutonomousTurns:
         assert own.result_event is None and own.usage.cost_usd is None
         assert [e["subtype"] for e in observed.events] == ["task_notification", "init"]
         assert observed.after == "hi"
+
+
+def test_detached_recorder_leaves_its_record_running(agent_db, monkeypatch):
+    from unittest.mock import AsyncMock
+    from looper.agents.claude_cli import ClaudeRunRecorder
+    from looper.agents.run_usage import Usage
+    from looper.db.llm_records import RecordStatus
+
+    recorder = ClaudeRunRecorder(agent_id='worker-detach', task_id=None, command=['claude'], cwd='/tmp',
+                                 input_text='work')
+    after_run = AsyncMock()
+    monkeypatch.setattr(recorder, '_after_run', after_run)
+
+    async def run():
+        async with recorder:
+            recorder.detach()
+            await recorder.finish(output_text=None, result_event=None)
+            await recorder.end_left_open(asyncio.CancelledError())
+            await recorder._close(RecordStatus.INTERRUPTED, output_text=None, session_id=None,
+                                  usage=Usage(), error='must stay open')
+
+    asyncio.run(run())
+    agent_db.start_record.assert_awaited_once()
+    agent_db.finish_record.assert_not_awaited()
+    after_run.assert_not_awaited()

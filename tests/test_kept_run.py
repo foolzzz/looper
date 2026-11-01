@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from looper.agents import keeper, proc_tree
-from looper.agents.kept_run import KeeperLost, KeptRun, KeptRunState, KeptStdin, KeptStream
+from looper.agents.kept_run import DetachKind, KeeperLost, KeptRun, KeptRunState, KeptStdin, KeptStream
 from looper.agents.keeper.client import KeeperClient, KeeperGone
 from looper.agents.keeper.protocol import ErrorCode, KeeperError
 from looper.agents.runtimes import CLAUDE_CODE
@@ -132,6 +132,103 @@ def test_a_kept_run_streams_the_same_events_as_a_process_run(tmp_path: Path) -> 
     exercise(run())
 
 
+def test_pool_detaches_a_peer_while_a_completed_run_is_leaving_its_seat(tmp_path, monkeypatch, agent_db):
+    from looper.agents.bus import MessageBus
+    from looper.agents.drain import DrainScope, DrainState
+    from looper.agents.kept_run import KeeperSettings
+    from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from looper.agents.ops.room import RoomOps
+    from looper.agents.tiers import worker
+
+    handles = []
+
+    class ShortKeptRun(KeptRun):
+        def __init__(self, *args, **kwargs):
+            kwargs['run_dir'] = short_directory()
+            super().__init__(*args, **kwargs)
+            handles.append(self)
+
+    body = """\
+import json, sys, time
+from pathlib import Path
+sys.stdin.readline()
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'seat-test'}), flush=True)
+while not Path('release').exists():
+    time.sleep(.02)
+print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,
+                  'result': json.dumps({'status': 'completed', 'summary': 'done', 'changed_files': {}})}), flush=True)
+"""
+    executable = fake_claude(tmp_path / 'claude', body)
+    monkeypatch.setattr(worker, 'KeptRun', ShortKeptRun)
+    monkeypatch.setattr(worker, 'load_task_limit', AsyncMock(return_value=2))
+    monkeypatch.setattr(worker, '_load_settings', AsyncMock(return_value=worker.WorkerSettings(0, 0, 'work')))
+
+    async def run():
+        bus = MessageBus(runtime_root=tmp_path)
+        drain = DrainState()
+        pool = worker.WorkerPool(config=worker.WorkerConfig(claude_bin=executable), runtime_root=tmp_path,
+                                 drain=drain, keeper=KeeperSettings(1))
+        leaving, release_seat = asyncio.Event(), asyncio.Event()
+        results = []
+
+        async def presence(task_id, seat, *, online):
+            if not online and seat.run == 'w1':
+                leaving.set()
+                await release_seat.wait()
+
+        room = Mock(presence_changed=presence, first_turn=AsyncMock(return_value='room'))
+        pool.room_ops = RoomOps(room, url='http://127.0.0.1:1')
+        bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
+        await pool.start(bus)
+        detaching = None
+        try:
+            for wid in ('w1', 'w2'):
+                directory = tmp_path / wid
+                directory.mkdir()
+                await pool._dispatch(MessageEnvelope.create(
+                    source=planner_address('t1'), target=worker_address(wid), message_type=MessageType.WORK_ITEM,
+                    payload={'task_id': wid, 'parent_task_id': 't1', 'instruction': 'do it',
+                             'context': {'work_dir': str(directory)}},
+                ))
+            await eventually(lambda: len(pool._inputs) == 2)
+            completed, held = (pool._active[wid].handle for wid in ('w1', 'w2'))
+            assert drain.begin(DrainScope.TURNS)['phase'] == 'drained'
+            (tmp_path / 'w1' / 'release').touch()
+            await leaving.wait()
+            assert completed.state is KeptRunState.ATTACHED and 'w1' not in pool._recorders
+            assert not pool._tasks['w1'].done() and not results
+
+            detaching = asyncio.create_task(pool.detach_kept(epoch=1, timeout=3))
+            await eventually(lambda: held.state is KeptRunState.DETACHED or detaching.done())
+            if detaching.done():
+                await detaching
+            assert held.state is KeptRunState.DETACHED
+            assert (held.run_dir / keeper.DETACH).is_file()
+            assert live(keeper.read_json(held.run_dir / keeper.STATE)['child_pid'])
+            assert not pool._tasks['w1'].done()  # Seat cleanup still owns result publication.
+            assert not detaching.done()
+            release_seat.set()
+            assert await detaching == {DetachKind.FINISHING: ['w1'], DetachKind.DETACHED: ['w2']}
+            assert len(results) == 1 and results[0].payload['task_id'] == 'w1'
+            assert results[0].payload['status'] == 'completed'
+            assert [call.kwargs['status'] for call in agent_db.finish_record.await_args_list] == ['completed']
+            await pool.stop()
+            assert not pool._active and not pool._tasks and not pool._recorders
+        finally:
+            release_seat.set()
+            if detaching is not None:
+                await asyncio.gather(detaching, return_exceptions=True)
+            await pool.stop()
+            await bus.shutdown()
+            for handle in handles:
+                if handle.state is KeptRunState.DETACHED:
+                    (Path(handle._cwd) / 'release').touch()
+                    await asyncio.wait_for(handle._keeper_process.wait(), 5)
+                await clean_directory(handle.run_dir)
+
+    exercise(run())
+
+
 def test_partial_lines_reach_the_parser_whole(tmp_path: Path) -> None:
     body = """\
 import json, os, time
@@ -207,6 +304,7 @@ def test_a_lost_keeper_fails_only_that_run(tmp_path: Path) -> None:
                 await asyncio.wait_for(handle.wait(), 2)
             await eventually(lambda: not live(child))
             assert handle.state is KeptRunState.LOST
+            assert not (tmp_path / 'runtime' / proc_tree.RECORDS_DIR / f'{child}.json').exists()
 
     exercise(run())
 
@@ -575,5 +673,274 @@ def test_normal_wait_finishes_callbacks_and_keeper_before_release(tmp_path: Path
             assert not handle.run_dir.exists()
             await asyncio.sleep(0)
             assert handle._client._dispatcher_task.exception() is None
+
+    exercise(run())
+
+
+def test_detach_stops_at_the_last_complete_line(tmp_path: Path) -> None:
+    body = """
+import sys, time
+from pathlib import Path
+sys.stdout.buffer.write(b'x' * 70000 + b'\\nsecond\\npartial')
+sys.stdout.flush()
+while not Path('release').exists():
+    time.sleep(.02)
+sys.stdout.buffer.write(b' completed\\nafter detach\\n')
+sys.stdout.flush()
+time.sleep(5)
+"""
+
+    async def run():
+        from looper.agents.claude_cli import iter_lines
+
+        async with opened(tmp_path, body) as handle:
+            stream = handle._process.stdout
+            processed = []
+
+            async def consume():
+                async for line in iter_lines(stream):
+                    processed.append(line)
+
+            consumer = asyncio.create_task(consume())
+            try:
+                await eventually(lambda: len(processed) == 2 and stream.idle.is_set())
+                await eventually(lambda: stream._pending == b'partial')
+                request = AsyncMock(wraps=handle._client._request)
+                handle._client._request = request
+                outcome = await handle.detach(epoch=7, timeout=.3)
+                assert outcome.kind is DetachKind.DETACHED
+                assert outcome.consumed == sum(map(len, processed)) == 70008
+                saved = keeper.read_json(handle.run_dir / keeper.DETACH)
+                assert saved['consumed'] == {'stdout': outcome.consumed}
+                assert saved['epoch'] == 7 and saved['stdin_offset'] == 0
+                (tmp_path / 'release').touch()
+                await eventually(lambda: (handle.run_dir / keeper.STDOUT).stat().st_size > stream.offset)
+                await handle.channel.send('after detach')
+                handle.channel.end_input()
+                await handle.end()
+                request.assert_not_awaited()
+                assert stream.delivered == outcome.consumed
+                assert len(processed) == 2
+                assert live(handle.pid)
+            finally:
+                consumer.cancel()
+                await asyncio.gather(consumer, return_exceptions=True)
+
+    exercise(run())
+
+
+def test_a_busy_consumer_is_not_detached(tmp_path: Path) -> None:
+    async def run():
+        async with opened(tmp_path) as handle:
+            handling, release = asyncio.Event(), asyncio.Event()
+            processed = []
+
+            async def consume():
+                async for event in handle.channel.events():
+                    handling.set()
+                    await release.wait()
+                    processed.append(event)
+
+            consumer = asyncio.create_task(consume())
+            try:
+                await handling.wait()
+                outcome = await handle.detach(epoch=1, timeout=.05)
+                assert outcome.kind is DetachKind.BUSY
+                assert handle.state is KeptRunState.ATTACHED
+                assert not (handle.run_dir / keeper.DETACH).exists()
+                release.set()
+                await handle.channel.start('resumed')
+                await eventually(lambda: len(processed) == 2)
+                assert processed[-1]['message']['content'] == 'resumed'
+                assert not handle._process.stdout._paused
+            finally:
+                release.set()
+                consumer.cancel()
+                await asyncio.gather(consumer, return_exceptions=True)
+
+    exercise(run())
+
+
+@pytest.mark.parametrize('state', [KeptRunState.STARTING, KeptRunState.LOST, KeptRunState.FENCED,
+                                  KeptRunState.ENDED, KeptRunState.DETACHED])
+def test_only_attached_runs_can_detach(tmp_path, state):
+    async def run():
+        handle = KeptRun(CLAUDE_CODE, ['unused'], launch=builtin_launch(), cwd=tmp_path,
+                         session_dir=None, label='detach state', run_dir=tmp_path / 'run',
+                         runtime_root=tmp_path, epoch=1, on_stale=lambda reason: None)
+        handle.state = state
+        outcome = await handle.detach(epoch=1, timeout=.01)
+        assert outcome.kind is (DetachKind.LOST if state is KeptRunState.LOST else DetachKind.NOT_ATTACHED)
+        assert not handle.run_dir.exists()
+
+    exercise(run())
+
+
+def test_detach_after_eof_leaves_result_publication_running(tmp_path):
+    async def run():
+        async with opened(tmp_path, "print('done', flush=True)") as handle:
+            stream = handle._process.stdout
+            while await stream.read():
+                pass
+            assert stream.eof_delivered
+            assert (await handle.detach(epoch=1, timeout=.1)).kind is DetachKind.FINISHING
+            assert handle.state is KeptRunState.ATTACHED
+            assert not (handle.run_dir / keeper.DETACH).exists()
+            assert await handle.wait() == 0
+
+    exercise(run())
+
+
+def test_a_failed_detach_write_resumes_feeding(tmp_path, monkeypatch):
+    async def run():
+        async with opened(tmp_path) as handle:
+            consumer = asyncio.create_task(_collect(handle))
+            try:
+                await eventually(lambda: handle._process.stdout.idle.is_set())
+                monkeypatch.setattr(keeper, 'write_json', Mock(side_effect=OSError('disk full')))
+                assert (await handle.detach(epoch=1, timeout=.1)).kind is DetachKind.BUSY
+                assert handle.state is KeptRunState.ATTACHED
+                assert not handle._process.stdout._paused
+            finally:
+                consumer.cancel()
+                await asyncio.gather(consumer, return_exceptions=True)
+
+    exercise(run())
+
+
+def test_stdin_timeout_keeps_the_chunk_until_acknowledged():
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def write(piece, *, expect_offset):
+            entered.set()
+            await release.wait()
+            return expect_offset + len(piece)
+
+        client = SimpleNamespace(stdin_write=AsyncMock(side_effect=write))
+        stdin = KeptStdin(client, lambda: True, Mock())
+        stdin.write(b'queued')
+        sending = asyncio.create_task(stdin.drain())
+        try:
+            await entered.wait()
+            inflight = stdin.inflight
+            sending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await sending
+            assert not inflight.cancelled() and not inflight.done()
+            assert stdin._buffer == b'queued' and stdin.offset == 0
+            release.set()
+            await asyncio.wait_for(asyncio.shield(inflight), 1)
+            assert stdin.offset == 6 and not stdin._buffer
+            await stdin.drain()
+            client.stdin_write.assert_awaited_once()
+        finally:
+            release.set()
+            if stdin.inflight is not None:
+                await stdin.inflight
+
+    exercise(run())
+
+
+def test_a_spawn_fence_refuses_to_launch_a_keeper(tmp_path, monkeypatch):
+    async def run():
+        handle = KeptRun(CLAUDE_CODE, ['unused'], launch=builtin_launch(), cwd=tmp_path,
+                         session_dir=None, label='spawn fence', run_dir=tmp_path / 'run',
+                         runtime_root=tmp_path, epoch=1, on_stale=lambda reason: None)
+        monkeypatch.setattr(proc_tree, '_spawns_fenced', True)
+        spawn = AsyncMock(side_effect=AssertionError('fenced keeper started'))
+        monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+        with pytest.raises(RunStartError, match='fenced'):
+            await handle.launch()
+        spawn.assert_not_awaited()
+        assert not handle.run_dir.exists()
+
+    exercise(run())
+
+
+@pytest.mark.parametrize('during', ['connect', 'initialize'])
+def test_fencing_during_connection_sends_no_later_requests(tmp_path, monkeypatch, during):
+    async def run():
+        handle = KeptRun(CLAUDE_CODE, ['unused'], launch=builtin_launch(), cwd=tmp_path,
+                         session_dir=None, label='connection fence', run_dir=tmp_path / 'run',
+                         runtime_root=tmp_path, epoch=1, on_stale=lambda reason: None)
+        process = SimpleNamespace(returncode=None)
+        monkeypatch.setattr(asyncio, 'create_subprocess_exec', AsyncMock(return_value=process))
+
+        async def fenced(*args, **kwargs):
+            handle.fence()
+            return {}
+
+        client = handle._client
+        monkeypatch.setattr(client, 'connect', AsyncMock(side_effect=fenced if during == 'connect' else None))
+        monkeypatch.setattr(client, 'initialize', AsyncMock(side_effect=fenced))
+        monkeypatch.setattr(client, 'subscribe', AsyncMock())
+        with pytest.raises(RunStartError, match='fenced'):
+            await handle.launch()
+        if during == 'connect':
+            client.initialize.assert_not_awaited()
+        client.subscribe.assert_not_awaited()
+        assert handle.state is KeptRunState.FENCED
+
+    exercise(run())
+
+
+def test_a_run_already_being_ended_cannot_detach(tmp_path):
+    async def run():
+        async with opened(tmp_path, 'import time; time.sleep(60)') as handle:
+            entered, release = asyncio.Event(), asyncio.Event()
+            original_end = handle._client.end
+
+            async def end(**kwargs):
+                entered.set()
+                await release.wait()
+                return await original_end(**kwargs)
+
+            handle._client.end = end
+            ending = asyncio.create_task(handle.end())
+            try:
+                await entered.wait()
+                handle._process.stdout.idle.set()
+                assert (await handle.detach(epoch=1, timeout=.1)).kind is DetachKind.BUSY
+                assert not (handle.run_dir / keeper.DETACH).exists()
+            finally:
+                release.set()
+                await ending
+            assert not live(handle.pid)
+
+    exercise(run())
+
+
+def test_detach_waits_for_stdin_without_cancelling_the_write(tmp_path):
+    async def run():
+        async with opened(tmp_path) as handle:
+            entered, release = asyncio.Event(), asyncio.Event()
+            write = handle._client.stdin_write
+
+            async def delayed(*args, **kwargs):
+                entered.set()
+                await release.wait()
+                return await write(*args, **kwargs)
+
+            handle._client.stdin_write = delayed
+            sending = asyncio.create_task(handle.channel.start('settle before detach'))
+            consumer = asyncio.create_task(_collect(handle))
+            try:
+                await entered.wait()
+                assert (await handle.detach(epoch=1, timeout=.03)).kind is DetachKind.BUSY
+                assert not handle._process.stdin.inflight.cancelled()
+                release.set()
+                await sending
+                await eventually(lambda: handle._process.stdout.idle.is_set())
+                assert (await handle.detach(epoch=1, timeout=.2)).kind is DetachKind.DETACHED
+                saved = keeper.read_json(handle.run_dir / keeper.DETACH)
+                assert saved['stdin_offset'] == (handle.run_dir / keeper.STDIN).stat().st_size > 0
+                with pytest.raises(BrokenPipeError):
+                    handle._process.stdin.write(b'cannot be accepted')
+            finally:
+                release.set()
+                await sending
+                consumer.cancel()
+                await asyncio.gather(consumer, return_exceptions=True)
 
     exercise(run())

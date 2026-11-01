@@ -27,6 +27,8 @@ class Keeper:
         self.child: asyncio.subprocess.Process | None = None
         self.ready, self.finished = asyncio.Event(), asyncio.Event()
         self.stdin_closed = False
+        self._stdin_ready = asyncio.Event()
+        self._stdin_task: asyncio.Task | None = None
         self.eof = set()
         self.server = KeeperServer(self)
         self.end_reason: EndReason | None = None
@@ -40,7 +42,7 @@ class Keeper:
             "keeper_pid": os.getpid(), "keeper_started": None, "child_pid": None, "child_started": None,
             "state": KeeperState.STARTING, "exit_code": None, "signal": None, "ended_at": None,
             "end_reason": None, "error": None, "controller_epoch": None, "socket": None,
-            "stderr_truncated": False,
+            "stderr_truncated": False, "stdout_truncated": False, "stdout_truncated_at": None,
         }
 
     def _write_state(self, **changes):
@@ -85,6 +87,24 @@ class Keeper:
             os.ftruncate(self.fds[STDIN], self.offsets[STDIN])
             raise
         self.offsets[STDIN] += len(data)
+        self._stdin_ready.set()
+
+    async def _write_stdin(self):
+        # The durable log is the queue: a slow child never delays the acknowledgement.
+        with (self.run_dir / STDIN).open("rb", buffering=0) as source:
+            while True:
+                await self._stdin_ready.wait()
+                self._stdin_ready.clear()
+                try:
+                    while data := source.read(CHUNK):
+                        self.child.stdin.write(data)
+                        await self.child.stdin.drain()
+                    if self.stdin_closed:
+                        self.child.stdin.close()
+                        return
+                except (BrokenPipeError, ConnectionResetError):
+                    self.stdin_closed = True
+                    return
 
     async def _mark_eof(self, name):
         async with self.conditions[name]:
@@ -95,15 +115,21 @@ class Keeper:
         while data := await stream.read(CHUNK):
             remaining = max(0, limit - self.offsets[name])
             if remaining:
-                written = data[:remaining]
-                _write_all(self.fds[name], written)
+                _write_all(self.fds[name], data[:remaining])
+            if name == STDOUT:
+                if len(data) > remaining:
+                    if not self.state["stdout_truncated"]:
+                        self._write_state(stdout_truncated=True, stdout_truncated_at=limit)
+                    await self.server.feed_stdout(self.offsets[name] + remaining, data[remaining:])
                 async with self.conditions[name]:
-                    self.offsets[name] += len(written)
+                    self.offsets[name] += len(data)
                     self.conditions[name].notify_all()
-            if name == STDOUT and len(data) > remaining:
-                self.request_end(EndReason.LOG_LIMIT)
-            elif name == STDERR and self.offsets[name] >= limit and not self.state["stderr_truncated"]:
-                self._write_state(stderr_truncated=True)
+            else:
+                async with self.conditions[name]:
+                    self.offsets[name] += min(len(data), remaining)
+                    self.conditions[name].notify_all()
+                if self.offsets[name] >= limit and not self.state["stderr_truncated"]:
+                    self._write_state(stderr_truncated=True)
         await self._mark_eof(name)
 
     def _close_pipes(self):
@@ -117,7 +143,7 @@ class Keeper:
     async def _finish(self, pumps):
         # Process.wait() can wait for pipe EOF even after the child has been reaped.
         while self.child.returncode is None:
-            for task in [*pumps, self._end_task]:
+            for task in [*pumps, self._stdin_task, self._end_task]:
                 if task is not None and task.done():
                     task.result()
             await asyncio.sleep(0.05)
@@ -179,6 +205,7 @@ class Keeper:
                               child_started=proc_tree._start_time(self.child.pid))
             pumps = [asyncio.create_task(self._pump(self.child.stdout, STDOUT, self.stdout_limit_bytes)),
                      asyncio.create_task(self._pump(self.child.stderr, STDERR, STDERR_LIMIT_BYTES))]
+            self._stdin_task = asyncio.create_task(self._write_stdin())
             self.ready.set()
             if self.server.controller is None:
                 self.controller_detached()
@@ -221,10 +248,11 @@ class Keeper:
             self.finished.set()
             await self.server.close()
             self.controller_attached()
-            for task in [*pumps, self._end_task]:
+            for task in [*pumps, self._stdin_task, self._end_task]:
                 if task is not None and not task.done():
                     task.cancel()
-            await asyncio.gather(*pumps, *([self._end_task] if self._end_task else []), return_exceptions=True)
+            await asyncio.gather(*[task for task in [*pumps, self._stdin_task, self._end_task] if task is not None],
+                                 return_exceptions=True)
             self._close_pipes()
             for fd in self.fds.values():
                 os.close(fd)

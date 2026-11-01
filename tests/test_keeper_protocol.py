@@ -604,14 +604,14 @@ time.sleep(60)
         payload = bytes(range(256)) * 4096
         client, _, _ = await connected(run)
         try:
-            with pytest.raises(KeeperError) as error:
-                await client.stdin_write(payload, 0, timeout=5)
-            assert error.value.code == ErrorCode.CHILD_EXITED
+            # Acknowledgement means logged and queued, not that the child read it.
+            assert await client.stdin_write(payload, 0, timeout=5) == len(payload)
             assert (run.directory / keeper.STDIN).read_bytes() == payload
             assert run.state()["state"] == "running"
             assert live(run.state()["child_pid"])
         finally:
             await client.close()
+        await asyncio.sleep(0.1)  # Let the independent writer observe the broken pipe.
         client, _, result = await connected(run)
         try:
             assert result["stdin_closed"] is True
@@ -634,18 +634,12 @@ def test_blocked_stdin_does_not_block_control_or_disconnect(launch, action) -> N
         run = launch(manifest={"orphan_timeout_s": 1})
         client, events, _ = await connected(run)
         payload = bytes(range(256)) * 4096
-        pending = []
         try:
-            pending.append(asyncio.create_task(client.stdin_write(payload, 0, timeout=15)))
-            await eventually(lambda: (run.directory / keeper.STDIN).stat().st_size == len(payload))
-            assert not pending[0].done(), "the child must keep stdin drain blocked"
+            assert await client.stdin_write(payload, 0, timeout=2) == len(payload)
             assert live(run.state()["child_pid"])
-            # Both stdin operations must stay serialized without blocking control or EOF.
-            pending.append(asyncio.create_task(client.stdin_write(b"queued", len(payload), timeout=15)))
-            pending.append(asyncio.create_task(client.stdin_close(timeout=15)))
-            await asyncio.sleep(0.1)
-            assert all(not task.done() for task in pending)
-            assert (run.directory / keeper.STDIN).read_bytes() == payload
+            assert await client.stdin_write(b"queued", len(payload), timeout=2) == len(payload) + 6
+            await client.stdin_close(timeout=2)
+            assert (run.directory / keeper.STDIN).read_bytes() == payload + b"queued"
 
             if action == "end":
                 assert await client.end(timeout=5) == (None, signal.SIGTERM)
@@ -660,25 +654,17 @@ def test_blocked_stdin_does_not_block_control_or_disconnect(launch, action) -> N
             assert state["signal"] == signal.SIGTERM
             assert not live(state["child_pid"])
             assert not run.socket.exists()
-            assert (run.directory / keeper.STDIN).read_bytes() == payload
+            assert (run.directory / keeper.STDIN).read_bytes() == payload + b"queued"
             await asyncio.wait_for(events.closed.wait(), 5)
-            results = await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), 5)
-            assert all(isinstance(result, (KeeperError, KeeperGone)) for result in results[:2])
-            if action == "disconnect":
-                assert all(isinstance(result, KeeperGone) for result in results)
-            else:
+            if action != "disconnect":
                 assert events.exited == [(None, signal.SIGTERM)]
         finally:
             await client.close()
-            for task in pending:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
 
     exercise(check())
 
 
-def test_replacing_a_controller_cancels_a_blocked_stdin_write(launch) -> None:
+def test_replacing_a_controller_preserves_queued_stdin(launch) -> None:
     async def check():
         run = launch()
         old, old_events, _ = await connected(run, 10)
@@ -687,15 +673,13 @@ def test_replacing_a_controller_cancels_a_blocked_stdin_write(launch) -> None:
         try:
             write_task = asyncio.create_task(old.stdin_write(payload, 0, timeout=10))
             await eventually(lambda: (run.directory / keeper.STDIN).stat().st_size == len(payload))
-            assert not write_task.done(), "the child must keep stdin drain blocked"
+            assert await asyncio.wait_for(write_task, 2) == len(payload)
             assert run.state()["state"] == "running"
             new, new_events, result = await connected(run, 11)
             assert result["offsets"]["stdin"] == len(payload)
             await asyncio.wait_for(old_events.closed.wait(), 5)
             assert old_events.replaced == [11]
-            with pytest.raises(KeeperGone):
-                await asyncio.wait_for(write_task, 5)
-            # A stale offset is checked under stdin_lock; returning proves the old handler released it.
+            # The queued write belongs to the keeper and survives controller replacement.
             with pytest.raises(KeeperError) as error:
                 await new.stdin_write(b"", 0, timeout=2)
             assert error.value.code == ErrorCode.OFFSET_MISMATCH
@@ -1524,5 +1508,90 @@ def test_the_client_fails_every_pending_request_when_the_keeper_disappears() -> 
                 await asyncio.wait_for(events.closed.wait(), 5)
             finally:
                 await client.close()
+
+    exercise(check())
+
+
+def test_a_slow_stdin_reader_does_not_delay_acknowledgement(launch) -> None:
+    async def check():
+        run = launch("""\
+import pathlib, sys, time
+while not pathlib.Path('read').exists():
+    time.sleep(0.01)
+size = 0
+while data := sys.stdin.buffer.read(4096):
+    size += len(data)
+    time.sleep(0.001)
+print(size, flush=True)
+""")
+        client, events, _ = await connected(run)
+        payload = bytes(range(256)) * 4096
+        try:
+            await client.subscribe(Stream.STDOUT, 0)
+            assert await client.stdin_write(payload, 0, timeout=2) == len(payload)
+            assert not (run.cwd / "read").exists()
+            assert (run.directory / keeper.STDIN).read_bytes() == payload
+            await client.stdin_close(timeout=2)
+            (run.cwd / "read").touch()
+            await asyncio.wait_for(events.closed.wait(), 10)
+            assert bytes(events.data[Stream.STDOUT]) == b"1048576\n"
+            assert (await run.wait())["exit_code"] == 0
+        finally:
+            await client.close()
+
+    exercise(check())
+
+
+@pytest.mark.parametrize("finish", [False, True])
+def test_truncated_stdout_keeps_streaming_to_the_attached_consumer(launch, finish) -> None:
+    async def check():
+        size, cap = 6 * 1024 * 1024, 1000
+        run = launch("""\
+import pathlib, sys, time
+while not pathlib.Path('write').exists():
+    time.sleep(0.01)
+sys.stdout.buffer.write(b'x' * (6 * 1024 * 1024))
+sys.stdout.buffer.flush()
+sys.stdin.buffer.read()
+""", manifest={"stdout_limit_bytes": cap})
+        client, events, _ = await connected(run)
+        entered, release = asyncio.Event(), asyncio.Event()
+        record_data = client.on_data
+        async def on_data(stream, offset, data):
+            if offset == 0:
+                entered.set()
+                await release.wait()
+            record_data(stream, offset, data)
+        client.on_data = on_data
+        try:
+            await client.subscribe(Stream.STDOUT, 0)
+            (run.cwd / "write").touch()
+            await asyncio.wait_for(entered.wait(), 5)
+            # Overflow beyond the disk cap must retain bytes rather than replaying the file.
+            await eventually(lambda: client._offsets.get(Stream.STDOUT) == size)
+            assert run.state()["state"] == "running"
+            assert run.state()["stdout_truncated"] is True
+            assert run.state()["stdout_truncated_at"] == cap
+            assert (run.directory / keeper.STDOUT).read_bytes() == b"x" * cap
+            release.set()
+            await eventually(lambda: len(events.data[Stream.STDOUT]) == size)
+            assert bytes(events.data[Stream.STDOUT]) == b"x" * size
+            if finish:
+                await client.stdin_close()
+                await asyncio.wait_for(events.closed.wait(), 10)
+                assert events.eof[Stream.STDOUT] == size
+                assert events.exited == [(0, None)]
+                assert (await run.wait())["end_reason"] == "exited"
+            else:
+                await client.close()
+                client, _, result = await connected(run)
+                assert result["offsets"]["stdout"] == size
+                with pytest.raises(KeeperError, match="truncated"):
+                    await client.subscribe(Stream.STDOUT, 0)
+                await client.end()
+                assert (await run.wait())["end_reason"] == "ended"
+        finally:
+            release.set()
+            await client.close()
 
     exercise(check())
