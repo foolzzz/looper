@@ -279,6 +279,157 @@ async def _run_of(pool: Any, schedule_id: str, status: str, *, task_id: str | No
     return run_id
 
 
+@pytest.mark.parametrize("state", ["enabled", "queued", "enabled_and_queued"])
+def test_changing_a_project_directory_asks_first_when_command_schedules_run_in_it(monkeypatch, tmp_path, state):
+    async def test(pool):
+        project = await _project(pool, work_dir="/srv/a")
+        sid = (await _schedule(project, "pull", kind="command", command="git pull", requirement="",
+                               enabled=state != "queued"))["schedule_id"]
+        if state != "enabled":
+            await _run_of(pool, sid, "queued")
+        chat = _Chat(tmp_path)
+        (asked,) = await chat.say("改默认目录", ("looper_projects", {
+            "action": "update", "project": "calc", "work_dir": "/srv/b"}))
+        assert asked["status"] == "needs_confirmation", asked
+        shown_state = "已停用，有一次排队中的运行" if state == "queued" else "已启用"
+        assert chat.turns[-1].blocks == [
+            "需要你确认：\n要修改项目「calc」的默认目录吗？\n- 默认目录：/srv/a → /srv/b\n"
+            "它的 1 个命令定时任务没有自己的目录，在项目的默认目录里运行；"
+            "修改后，它们之后的运行都在新目录里执行（不经过 agent，不花模型额度）：\n"
+            f"定时任务「pull」（{shown_state}）：\n- 命令：\n```\ngit pull\n```\n\n"
+            "- 目录：/srv/a → /srv/b\n回复「确认」就执行；回复别的就不执行。"]
+        assert await pool.fetchval("SELECT work_dir FROM projects WHERE id=$1", project["id"]) == "/srv/a"
+        assert (await _confirm(chat, asked))["status"] == "ok"
+        assert await pool.fetchval("SELECT work_dir FROM projects WHERE id=$1", project["id"]) == "/srv/b"
+        assert await _trail(pool) == [("looper_projects", "high", "needs_confirmation"),
+                                      ("looper_projects", "high", "ok")]
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("case", ["none", "own_work_dir", "agent_schedule", "disabled_command", "same_directory",
+                                  "name_only"])
+def test_a_project_directory_change_that_moves_no_command_schedule_runs_at_once(monkeypatch, tmp_path, case):
+    async def test(pool):
+        project = await _project(pool, work_dir="/srv/a")
+        if case != "none":
+            fields = {"kind": "command", "command": "git pull", "requirement": ""}
+            if case == "agent_schedule":
+                fields = {}
+            elif case == "own_work_dir":
+                fields["work_dir"] = "/srv/own"
+            await _schedule(project, "pull", enabled=case != "disabled_command", **fields)
+        fields = {"name": "renamed"} if case == "name_only" else {
+            "work_dir": "/srv/a" if case == "same_directory" else "/srv/b"}
+        chat = _Chat(tmp_path)
+        (answer,) = await chat.say("改项目", ("looper_projects", {"action": "update", "project": "calc", **fields}))
+        assert answer["status"] == "ok", answer
+        assert "confirmation_id" not in answer and chat.turns[-1].blocks == []
+        saved = await pool.fetchrow("SELECT name, work_dir FROM projects WHERE id=$1", project["id"])
+        assert saved["work_dir"] == fields.get("work_dir", "/srv/a")
+        assert saved["name"] == fields.get("name", "calc")
+        assert await _trail(pool) == [("looper_projects", "write", "ok")]
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_clearing_a_project_directory_says_its_command_schedules_will_fail(monkeypatch, tmp_path):
+    async def test(pool):
+        project = await _project(pool, work_dir="/srv/a")
+        await _schedule(project, "pull", kind="command", command="git pull", requirement="", enabled=True)
+        chat = _Chat(tmp_path)
+        (asked,) = await chat.say("清空目录", ("looper_projects", {
+            "action": "update", "project": "calc", "work_dir": ""}))
+        assert asked["status"] == "needs_confirmation", asked
+        block = chat.turns[-1].blocks[0]
+        assert "- 默认目录：/srv/a → 没有" in block
+        assert "修改后它们没有目录可用，之后的运行都会失败：" in block
+        assert await pool.fetchval("SELECT work_dir FROM projects WHERE id=$1", project["id"]) == "/srv/a"
+        assert (await _confirm(chat, asked))["status"] == "ok"
+        assert await pool.fetchval("SELECT work_dir FROM projects WHERE id=$1", project["id"]) == ""
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("change", ["command_edited", "env_edited", "env_file_edited", "schedule_enabled",
+                                    "schedule_disabled", "directory_changed", "queued_started"])
+def test_a_confirmed_directory_change_is_refused_when_what_it_showed_changed(monkeypatch, tmp_path, change):
+    async def test(pool):
+        from looper.agents import projects, schedules
+
+        project = await _project(pool, work_dir="/srv/a")
+        sid = (await _schedule(project, "pull", kind="command", command="git pull", requirement="",
+                               enabled=change != "queued_started"))["schedule_id"]
+        run_id = await _run_of(pool, sid, "queued") if change == "queued_started" else None
+        chat = _Chat(tmp_path)
+        arguments = {"action": "update", "project": "calc", "work_dir": "/srv/b"}
+        (asked,) = await chat.say("改目录", ("looper_projects", arguments))
+        assert asked["status"] == "needs_confirmation", asked
+        if change == "command_edited":
+            await schedules.update_schedule(sid, {"command": "git fetch"})
+        elif change == "env_edited":
+            await schedules.update_schedule(sid, {"env": {"MODE": "dry-run"}})
+        elif change == "env_file_edited":
+            env_file = tmp_path / "pull.env"
+            env_file.write_text("MODE=dry-run\n")
+            await schedules.update_schedule(sid, {"env_file": str(env_file)})
+        elif change == "schedule_enabled":
+            other = await _schedule(project, "other", kind="command", command="exit 0", requirement="")
+            await schedules.update_schedule(other["schedule_id"], {"enabled": True})
+        elif change == "schedule_disabled":
+            await schedules.update_schedule(sid, {"enabled": False})
+        elif change == "queued_started":
+            await pool.execute("UPDATE schedule_runs SET status='running' WHERE id=$1", run_id)
+        else:
+            await pool.execute("UPDATE projects SET work_dir='/srv/c' WHERE id=$1", project["id"])
+        refused = await _confirm(chat, asked)
+        assert _error(refused) == "conflict", refused
+        assert refused["error"]["message"] == projects.DIRECTORY_CHANGED
+        unchanged = "/srv/c" if change == "directory_changed" else "/srv/a"
+        assert await pool.fetchval("SELECT work_dir FROM projects WHERE id=$1", project["id"]) == unchanged
+        (again,) = await chat.say("再改目录", ("looper_projects", arguments))
+        assert again["status"] == ("ok" if change in ("schedule_disabled", "queued_started") else
+                                   "needs_confirmation"), again
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_a_directory_confirmation_still_targets_the_project_after_it_is_renamed(monkeypatch, tmp_path):
+    async def test(pool):
+        from looper.db import projects
+
+        project = await _project(pool, work_dir="/srv/a")
+        await _schedule(project, "pull", kind="command", command="git pull", requirement="", enabled=True)
+        chat = _Chat(tmp_path)
+        (asked,) = await chat.say("改目录和背景", ("looper_projects", {
+            "action": "update", "project": "calc", "work_dir": "/srv/b", "background": "Updated"}))
+        assert asked["status"] == "needs_confirmation", asked
+        assert "- 同时修改：背景" in chat.turns[-1].blocks[0]
+        await projects.update_project(project["id"], name="renamed", pool=pool)
+        replacement = await _project(pool, work_dir="/srv/other")
+        assert (await _confirm(chat, asked))["status"] == "ok"
+        saved = await projects.get_project(project["id"], pool=pool)
+        assert (saved["name"], saved["work_dir"], saved["background"]) == ("renamed", "/srv/b", "Updated")
+        assert (await projects.get_project(replacement["id"], pool=pool))["work_dir"] == "/srv/other"
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_an_invalid_project_directory_is_refused_before_confirmation(monkeypatch, tmp_path):
+    async def test(pool):
+        project = await _project(pool, work_dir="/srv/a")
+        await _schedule(project, "pull", kind="command", command="git pull", requirement="", enabled=True)
+        chat = _Chat(tmp_path)
+        (answer,) = await chat.say("改目录", ("looper_projects", {
+            "action": "update", "project": "calc", "work_dir": "relative/path"}))
+        assert _error(answer) == "invalid", answer
+        assert "absolute" in answer["error"]["message"]
+        assert chat.turns[-1].blocks == []
+        assert await pool.fetchval("SELECT work_dir FROM projects WHERE id=$1", project["id"]) == "/srv/a"
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_schedules_are_listed_and_read_as_the_schedules_page_reads_them(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

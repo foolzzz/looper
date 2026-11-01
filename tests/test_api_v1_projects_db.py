@@ -54,6 +54,60 @@ def test_real_crud_reads_back_changes_and_deletes_only_after_required_confirmati
     run_db(run, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("path", ["project_admin.update", "/api/v1/ops/projects/update"])
+@pytest.mark.parametrize("client", [True, False], ids=["client", "operator"])
+def test_a_client_directory_change_asks_first_when_command_schedules_run_in_it(tmp_path, monkeypatch, path, client):
+    async def run(pool):
+        project = await projects.create_project(name="Example", work_dir="/srv/a", pool=pool)
+        made = await schedules.create_schedule(project["id"], {
+            "name": "pull", "cron": "0 * * * *", "timezone": "UTC", "kind": "command", "command": "git pull",
+            "requirement": ""})
+        await schedules.update_schedule(made["schedule"]["schedule_id"], {"enabled": True})
+        body = {"project_id": project["id"], "fields": {"work_dir": "/srv/b"}} if path == "project_admin.update" else {
+            "project": "Example", "work_dir": "/srv/b"}
+        async with _api(tmp_path, pool) as call:
+            status, answer = await call(path, body, client=client)
+            if client:
+                assert status == 202 and answer["status"] == "needs_confirmation", answer
+                assert "定时任务「pull」（已启用）：" in answer["impact"]
+                assert "\n```\ngit pull\n```\n" in answer["impact"]
+                assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == "/srv/a"
+                status, answer = await call("confirm", {"confirmation_id": answer["confirmation_id"]}, client=True)
+            assert status == 200 and answer["status"] == "ok", answer
+            assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == "/srv/b"
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("path", ["project_admin.update", "/api/v1/ops/projects/update"])
+@pytest.mark.parametrize("change", ["command", "directory_already_changed"])
+def test_a_client_directory_confirmation_refuses_changed_command_configuration(tmp_path, monkeypatch, path, change):
+    from looper.agents.projects import DIRECTORY_CHANGED
+
+    async def run(pool):
+        project = await projects.create_project(name="Example", work_dir="/srv/a", pool=pool)
+        made = await schedules.create_schedule(project["id"], {
+            "name": "pull", "cron": "0 * * * *", "timezone": "UTC", "kind": "command", "command": "git pull",
+            "requirement": ""})
+        sid = made["schedule"]["schedule_id"]
+        await schedules.update_schedule(sid, {"enabled": True})
+        body = {"project_id": project["id"], "fields": {"work_dir": "/srv/b"}} if path == "project_admin.update" else {
+            "project": "Example", "work_dir": "/srv/b"}
+        async with _api(tmp_path, pool) as call:
+            status, answer = await call(path, body, client=True)
+            assert status == 202 and answer["status"] == "needs_confirmation", answer
+            if change == "command":
+                await schedules.update_schedule(sid, {"command": "git fetch"})
+            else:
+                # Another actor reaches the requested destination before this answer; it is still stale.
+                await projects.update_project(project["id"], work_dir="/srv/b", pool=pool)
+            status, refused = await call("confirm", {"confirmation_id": answer["confirmation_id"]}, client=True)
+            assert status == 409 and refused["error"]["code"] == "conflict", refused
+            assert refused["error"]["message"] == DIRECTORY_CHANGED
+            assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == (
+                "/srv/a" if change == "command" else "/srv/b")
+    run_db(run, monkeypatch, timeout=30)
+
+
 @pytest.mark.parametrize("field,value,expected", [
     *[(field, value, value) for field, value in EXECUTION.items()],
     *[(field, None, "off" if field == "distill_lessons" else None) for field in EXECUTION],

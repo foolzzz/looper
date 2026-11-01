@@ -113,13 +113,20 @@ async def _projects(call: Call) -> dict[str, Any]:
         fields = {"name": arguments["name"], **_given(arguments, ("work_dir", "background"))}
         return {"project": await answered(projects.create_project(fields))}
     _required(arguments, action, "project")
-    project = await project_named(arguments["project"], manager_id=call.manager_id if call.scoped else None)
+    if call.confirmation.get("project_id"):
+        project = await db_projects.get_project(call.confirmation["project_id"],
+                                                manager_id=call.manager_id if call.scoped else None)
+        if project is None:
+            raise OpError(ErrorCode.NOT_FOUND, "the project no longer exists")
+    else:
+        project = await project_named(arguments["project"], manager_id=call.manager_id if call.scoped else None)
     if action == "get":
         return {"project": projects.project_view(project)}
     if action == "update":
         fields = _given(arguments, ("name", "work_dir", "background"))
         return {"project": await answered(projects.update_project(
-            project["id"], fields, manager_id=call.manager_id if call.scoped else None))}
+            project["id"], fields, manager_id=call.manager_id if call.scoped else None,
+            expected_directory_version=call.confirmation.get("directory_version")))}
     await answered(projects.delete_project(
         project["id"], call.platform.bus, call.manager_address, call.platform.runtime_root,
         manager_id=call.manager_id if call.scoped else None, task_router=call.platform.task_router))
@@ -151,6 +158,50 @@ async def _deleting_project(call: Call) -> str | None:
     return (f"要删除项目「{project['name']}」（默认目录：{project['work_dir'] or '没有'}）吗？{effects}它的 "
             "Agent 设置、规划者可选的 Agent Profile 列表、技能和 MCP 的安装、项目知识和它自己写的技能会一起删除，不能恢复；"
             "目录里的文件不受影响。")
+
+
+_PROJECT_FIELD_WORDS = {"name": "名称", "description": "描述", "background": "背景"}
+
+
+def directory_change_impact(project: Mapping[str, Any], change: projects.DirectoryChange,
+                            given: Mapping[str, Any]) -> str:
+    """What changing a project's directory does to the command schedules that run in it, for the user to confirm
+    (the Manager's tool and ``project_admin.update`` alike)."""
+    from .schedules import _shown  # ops.schedules imports this module
+
+    old, new = change.old or "没有", change.new or "没有"
+    others = [_PROJECT_FIELD_WORDS.get(key, key) for key in sorted(given) if key not in ("action", "project", "work_dir")]
+    lines = [f"要修改项目「{project['name']}」的默认目录吗？", f"- 默认目录：{old} → {new}"]
+    if others:
+        lines.append(f"- 同时修改：{'、'.join(others)}")
+    lines.append(f"它的 {len(change.schedules)} 个命令定时任务没有自己的目录，在项目的默认目录里运行；"
+                 + ("修改后，它们之后的运行都在新目录里执行（不经过 agent，不花模型额度）：" if change.new
+                    else "修改后它们没有目录可用，之后的运行都会失败："))
+    for row in change.schedules:
+        state = "已启用" if row["enabled"] else "已停用，有一次排队中的运行"
+        lines += [f"定时任务「{row['name']}」（{state}）：", f"- 命令：{_shown('command', row, {})}",
+                  f"- 目录：{old} → {new}"]
+    return "\n".join(lines)
+
+
+async def _confirming_project(call: Call) -> str | None:
+    """What deleting a project does, or changing the directory that enabled or queued command schedules run in;
+    None for the other calls (their own tier)."""
+    action = call.arguments["action"]
+    if action == "delete":
+        return await _deleting_project(call)
+    if action != "update" or call.arguments.get("work_dir") is None:
+        return None
+    _required(call.arguments, "update", "project")
+    project = await project_named(call.arguments["project"], manager_id=call.manager_id if call.scoped else None)
+    change = await answered(projects.directory_change(project, call.arguments["work_dir"]))
+    if call.scoped and any(row["manager_id"] != call.manager_id for row in change.schedules):
+        raise OpError(ErrorCode.CONFLICT, f"project {project['name']!r}'s directory is also where command "
+                                          "schedules outside this Manager run: it cannot be changed from here")
+    if not change.schedules:
+        return None
+    call.confirmation.update(project_id=project["id"], directory_version=change.version)
+    return directory_change_impact(project, change, call.arguments)
 
 
 # --- looper_agent_profiles and looper_providers ---
@@ -543,7 +594,8 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_projects",
         description="Projects: list; get one; create (name, and the work_dir and background the user gave; never "
-                    "pick a directory); update its name, work_dir or background; delete one with its tasks and schedules, "
+                    "pick a directory); update its name, work_dir or background (a work_dir change asks the user first "
+                    "when enabled or queued command schedules run in its directory); delete one with its tasks and schedules, "
                     "stopping its running tasks first (the user confirms first).",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
@@ -555,7 +607,7 @@ TOOLS: tuple[Tool, ...] = (
                 "background": {"type": "string", "description": "What its agents should know."},
             },
         },
-        risk=Risk.WRITE, run=_projects, escalate=_deleting_project, read_actions=frozenset({"list", "get"}),
+        risk=Risk.WRITE, run=_projects, escalate=_confirming_project, read_actions=frozenset({"list", "get"}),
     ),
     Tool(
         name="looper_agent_profiles",

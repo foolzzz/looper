@@ -3,6 +3,7 @@
 import asyncio
 from copy import deepcopy
 from dataclasses import asdict
+import importlib
 import json
 import os
 import threading
@@ -50,6 +51,9 @@ class SeedApi(RegistryApi):
 def test_fake_api_manager_dialog_reads_back_each_completed_turn(
     monkeypatch, tmp_path, mutation, problem, cross_provider,
 ):
+    # Load the SDK's lazy Responses schemas before the per-reply I/O deadline.
+    # This test checks persisted turns, not Python import speed on a cold worker.
+    importlib.import_module("openai.resources.responses")
     from tests.api_manager_support import _manager, _message, _replies
     from tests.fake_model_api import ResponseScript, text_events
 
@@ -287,6 +291,26 @@ def test_command_edit_dialog_rejects_incomplete_or_early_update(monkeypatch, mut
     assert check(look) is not None
 
 
+@pytest.mark.parametrize("mutation", ["missing_command", "missing_directory", "already_changed", "no_wait"])
+def test_project_directory_dialog_rejects_incomplete_or_early_update(monkeypatch, mutation):
+    command = "\n```\nexit 0\n```\n"
+    directory = f"- 目录：/srv/eval → {dialogs.MOVED_DIR}"
+    heading = f"要修改项目「{dialogs.PROJECT}」的默认目录吗？\n定时任务「pull」（已启用）："
+    actions = [action("looper_projects", "update", status="needs_confirmation", work_dir=dialogs.MOVED_DIR)]
+    project = {"work_dir": "/srv/eval"}
+    look = observed(monkeypatch, {}, actions, reply=heading + command + directory)
+    monkeypatch.setattr(dialogs, "_project", lambda *_: project)
+    check = dialogs.select(["project_dir_command_schedule"])[0].says[0].check
+    assert check(look) is None
+    if mutation.startswith("missing_"):
+        look.reply = heading + (directory if mutation == "missing_command" else command)
+    elif mutation == "already_changed":
+        project["work_dir"] = dialogs.MOVED_DIR
+    else:
+        actions[0]["status"] = "ok"
+    assert check(look) is not None
+
+
 def provider_state():
     return {"providers": [{"provider_id": "prov-test", "name": "eval-deepseek", "api_key_set": False,
                            "vendor_type": "deepseek", "endpoints": [
@@ -481,6 +505,7 @@ def test_repricing_keeps_historical_spend_and_other_protocol_price(monkeypatch, 
 @pytest.mark.skipif(not os.environ.get("LOOPER_TEST_DATABASE_URL"), reason="disposable PostgreSQL unavailable")
 @pytest.mark.parametrize("dialog_id", ["provider_key", "config_tools", "task_cost", "schedule_planner_profile",
                                        "schedule_command_create", "schedule_command_edit", "schedule_create",
+                                       "project_dir_command_schedule", "project_dir_plain",
                                        "model_custom", "model_dual_protocol", "model_login_runtime",
                                        "model_missing_endpoint", "model_price_history", "template_review_task",
                                        "template_missing_input"])
