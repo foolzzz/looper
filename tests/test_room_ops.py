@@ -2,15 +2,35 @@
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from looper.agents.http_server import AGENT_API, AgentHTTPServer
+from looper.agents.library import AgentLibrary
 from looper.agents.ops import room as room_ops, vault as vault_ops
 from looper.agents.room import MemberKind, Seat
 from looper.agents.vault import VaultConfig
+
+
+@pytest.mark.parametrize("reconnect_seconds", [None, 120])
+def test_the_room_mcp_entry_sets_reconnect_only_when_requested(tmp_path, reconnect_seconds):
+    ops = room_ops.RoomOps(Mock(), url="http://localhost:1234")
+    token = ops.issue("task-1", Seat("worker@s1", "worker", MemberKind.WORK, run="worker-1"))
+    library = asyncio.run(ops.library_with_server(AgentLibrary(), tmp_path, token, "worker-1",
+                                                 reconnect_seconds=reconnect_seconds))
+    path = Path(library.mcp_config)
+    config = json.loads(path.read_text())["mcpServers"]["looper"]
+    assert config["env"]["LOOPER_AGENT_TOKEN"] == token
+    assert config["env"]["LOOPER_AGENT_URL"] == "http://localhost:1234"
+    if reconnect_seconds is None:
+        assert "LOOPER_AGENT_RECONNECT_SECONDS" not in config["env"]
+    else:
+        assert config["env"]["LOOPER_AGENT_RECONNECT_SECONDS"] == "120"
+    ops.revoke_run("worker-1")
+    assert not path.exists()
 
 
 @pytest.mark.parametrize("kind", [MemberKind.WORK, MemberKind.REVIEW])

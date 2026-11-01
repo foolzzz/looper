@@ -3272,6 +3272,15 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
   `POST /api/agent/v1/ops/<tool>` with the arguments as the body, and the
   answer is the tool result's text (an error result when its `status` is
   `error`). The endpoint refuses any other token with 401.
+  Kept runs' MCP entries also set `LOOPER_AGENT_RECONNECT_SECONDS=120`:
+  their bridge retries refused connections and HTTP 503 with an integer
+  `Retry-After`, since neither executed the call. Other connection failures
+  retry only `GET /tools` or tools in the kept grant's `read_only` sidecar,
+  derived from `Tool.risk`. Timeouts never retry. Backoff starts at 0.5 s
+  and doubles to 5 s; `Retry-After`, clamped to that range, overrides it.
+  The window starts at the first failure, is configurable up to 600 s,
+  and logs one `agent api retry` summary per retried call to stderr.
+  With the variable unset or empty, requests still make one attempt.
 - **The contract and `/profile`.** `TOOLS_CONTRACT` tells the Manager that
   the user switches the Agent Profile of the conversation with `/profile` and
   starts a new one with `/new`, that Looper answers both itself, that the

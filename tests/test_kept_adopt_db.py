@@ -27,7 +27,7 @@ from looper.agents.kept_run import AdoptFailure, AdoptOutcome, DetachKind, Keepe
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
 from looper.agents.ops.room import RoomOps
 from looper.agents.profile_registry import BUILTIN_RUNTIME, LegacyProviderSpec
-from looper.agents.room import RoomService
+from looper.agents.room import MemberKind, RoomService, Seat
 from looper.agents.runtimes import ApiProtocol, AuthKind
 from looper.agents.runtimes.channel import DeliveryResult
 from looper.agents.tiers import worker
@@ -296,7 +296,27 @@ def test_unadopted_candidates_expire(tmp_path, monkeypatch):
             await _detach(case)
             candidate = _candidate(case)
 
+            await db.execute("UPDATE tasks SET status = 'running' WHERE id = 'task-adopt'")
+            await db.execute("INSERT INTO task_steps (id, task_id, step_index, step_key, instruction, status, "
+                             "worker_id) VALUES ('step-adopt', 'task-adopt', 0, 'implement', 'held work', "
+                             "'dispatched', $1), ('step-observer', 'task-adopt', 1, 'observer', 'watch', "
+                             "'dispatched', 'worker-observer')", case.run_id)
+            room = case.b.room_ops.room
+            seat_data = candidate.grant['seat']
+            seat = Seat(**{**seat_data, 'kind': MemberKind(seat_data['kind'])})
+            observer = Seat('worker@observer', 'worker', MemberKind.WORK, run='worker-observer')
+            own_watch = await room.watch('task-adopt', seat, kind='announce', until='run_end')
+            offline_watch = await room.watch('task-adopt', observer, presence=seat.key, state='offline')
+
             await case.b.expire_candidates(window=.01)
+
+            for watch in (own_watch, offline_watch):
+                assert await db.fetchval('SELECT ended_at IS NOT NULL FROM room_watches WHERE id = $1',
+                                         watch['watch'])
+            notices = await db.fetch("SELECT body, audience FROM room_messages WHERE reason = 'watch'")
+            assert len(notices) == 1
+            assert notices[0]['audience'] == [observer.key]
+            assert f'{seat.key} is offline' in notices[0]['body']
 
             await asyncio.wait_for(case.original._keeper_process.wait(), 5)
             assert not _live(case.identity['child_pid'])

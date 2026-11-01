@@ -210,6 +210,7 @@ class _Grant:
     vault_tools: tuple[Tool, ...] = ()
     usage: VaultUsage = field(default_factory=VaultUsage)
     state: GrantState = GrantState.ACTIVE
+    kept: bool = False
 
 
 class RoomOps:
@@ -221,10 +222,11 @@ class RoomOps:
 
     # --- Tokens ---
 
-    def issue(self, task_id: str, seat: Seat, *, room: bool = True, vault: VaultConfig | None = None) -> str:
+    def issue(self, task_id: str, seat: Seat, *, room: bool = True, vault: VaultConfig | None = None,
+              kept: bool = False) -> str:
         """A new token for ``seat``'s run in ``task_id``."""
         token = TOKEN_PREFIX + secrets.token_urlsafe(32)
-        self._grants[_digest(token)] = _Grant(task_id, seat, room=room,
+        self._grants[_digest(token)] = _Grant(task_id, seat, room=room, kept=kept,
                                                vault_tools=vault_ops.tools_for(vault) if vault else ())
         return token
 
@@ -255,7 +257,7 @@ class RoomOps:
         seat = Seat(**{**record["seat"], "kind": MemberKind(record["seat"]["kind"])})
         grant = _Grant(record["task_id"], seat, room=record["room"],
                        vault_tools=tuple(tool for tool in vault_ops.TOOLS if tool.name in record["vault_tools"]),
-                       state=GrantState.PENDING_ADOPTION)
+                       state=GrantState.PENDING_ADOPTION, kept=True)
         self._grants[record["digest"]] = grant
         self._files[seat.run] = set(record["mcp_files"])
 
@@ -288,6 +290,13 @@ class RoomOps:
             return []
         room_tools = tools_for(grant.seat.kind) if grant.room else ()
         return [tool.listing() for tool in (*room_tools, *grant.vault_tools)]
+
+    def read_only(self, header: str | None) -> list[str] | None:
+        grant = self._grant(header)
+        if grant is None or not grant.kept:
+            return None
+        room_tools = tools_for(grant.seat.kind) if grant.room else ()
+        return [tool.name for tool in (*room_tools, *grant.vault_tools) if tool.risk is Risk.READ]
 
     async def call(self, header: str | None, name: str, raw: Any) -> dict[str, Any]:
         grant = self._grant(header)
@@ -339,11 +348,13 @@ class RoomOps:
 
     # --- A run's MCP entry ---
 
-    async def library_with_server(self, library: Any, runtime_root: Path, token: str, run: str) -> Any:
+    async def library_with_server(self, library: Any, runtime_root: Path, token: str, run: str, *,
+                                  reconnect_seconds: int | None = None) -> Any:
         """``library`` with Looper's MCP server for the run holding ``token``; its file goes when the run ends."""
         grant = self._grants.get(_digest(token))
         who = grant.seat.key if grant is not None else "a run"
-        with_server = await library_with_server(library, runtime_root, server_config(self._url, token), who=who)
+        config = server_config(self._url, token, reconnect_seconds=reconnect_seconds)
+        with_server = await library_with_server(library, runtime_root, config, who=who)
         if with_server.mcp_config:
             self._files.setdefault(run, set()).add(str(with_server.mcp_config))
         return with_server

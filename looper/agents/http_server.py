@@ -925,7 +925,10 @@ class AgentHTTPServer:
                 HTTP_503, {"error": "this run is being adopted after a restart; retry shortly"},
                 headers={"Retry-After": "2"}))
         elif path == f"{AGENT_API}tools" and method == "GET":
-            writer.write(_json_response(HTTP_200, {"tools": ops.listing(header)}))
+            answer = {"tools": ops.listing(header)}
+            if (read_only := ops.read_only(header)) is not None:
+                answer["read_only"] = read_only
+            writer.write(_json_response(HTTP_200, answer))
         elif (m := _RE_AGENT_OP.match(path)) and method == "POST":
             try:
                 arguments = json.loads(body.decode("utf-8")) if body.strip() else {}

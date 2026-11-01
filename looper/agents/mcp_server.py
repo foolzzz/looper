@@ -13,6 +13,8 @@ forwards: every validation, confirmation and execution happens in ``looper serve
 - **Failures.** Both requests send ``Authorization: Bearer <token>``; anything but a 200 with a JSON object,
   or no answer within 120 s, is a failure. A failed ``tools/list`` is a JSON-RPC error; a failed ``tools/call``
   is an error tool result that tells the model why, since it can read that and decide what to do.
+  With ``LOOPER_AGENT_RECONNECT_SECONDS`` set, retry refused connections and 503s with ``Retry-After``;
+  other connection failures retry only ``GET /tools`` or tools listed as read-only. Timeouts never retry.
 - **Trace.** With ``LOOPER_MCP_TRACE=<file>``, each ``tools/call`` appends the keys of its ``_meta`` to the file.
 """
 
@@ -23,6 +25,7 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -68,17 +71,23 @@ class AgentClient:
     """The two requests to ``looper serve``'s agent API."""
 
     def __init__(self, url: str, token: str, *, timeout: float = REQUEST_TIMEOUT_SECONDS,
-                 turn_file: str | None = None) -> None:
+                 turn_file: str | None = None, reconnect_seconds: float = 0.0) -> None:
         self.url = url.rstrip("/")
         self._token = token
         self._turn_file = turn_file
         self._timeout = timeout
+        self._reconnect_seconds = reconnect_seconds
+        self._read_only: frozenset[str] = frozenset()
         # The URL is the local server that started the Manager; a proxy from the environment must not carry it.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def list_tools(self) -> list[Any]:
         """The ``tools`` list of ``GET /api/agent/v1/tools``; raises LooperUnavailable."""
-        tools = self._request("/api/agent/v1/tools").get("tools")
+        answer = self._request("/api/agent/v1/tools")
+        names = answer.get("read_only")
+        self._read_only = frozenset(names) if isinstance(names, list) and all(isinstance(n, str) for n in names) \
+            else frozenset()
+        tools = answer.get("tools")
         if not isinstance(tools, list):
             raise LooperUnavailable("its answer has no tools list")
         return tools
@@ -125,11 +134,63 @@ class AgentClient:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(self.url + path, data=data, headers=headers,
                                          method="GET" if body is None else "POST")
+        read_only = (body is None and path == "/api/agent/v1/tools") or (
+            body is not None and path.removeprefix("/api/agent/v1/ops/") != path
+            and urllib.parse.unquote(path.removeprefix("/api/agent/v1/ops/")) in self._read_only)
+        started, attempts, backoff, outcome = None, 0, 0.5, "failed"
+        attempt_timeout = timeout
+        try:
+            while True:
+                attempts += 1
+                try:
+                    answer = self._send(request, attempt_timeout)
+                except LooperUnavailable as exc:
+                    if self._reconnect_seconds == 0 or isinstance(exc, LooperTimedOut):
+                        raise
+                    cause = exc.__cause__
+                    delay = backoff
+                    if isinstance(cause, urllib.error.HTTPError):
+                        if cause.code != 503:
+                            raise
+                        try:
+                            delay = max(0.5, min(5.0, int((cause.headers or {}).get("Retry-After", ""))))
+                        except ValueError:
+                            raise exc
+                    elif isinstance(cause, (OSError, http.client.HTTPException)):
+                        reason = cause.reason if isinstance(cause, urllib.error.URLError) else cause
+                        if not isinstance(reason, (ConnectionRefusedError, FileNotFoundError)) and not read_only:
+                            raise
+                    else:
+                        raise
+                    now = time.monotonic()
+                    if started is None:
+                        started = now
+                    remaining = self._reconnect_seconds - (now - started)
+                    if remaining <= 0:
+                        raise
+                    time.sleep(min(delay, remaining))
+                    remaining = self._reconnect_seconds - (time.monotonic() - started)
+                    if remaining <= 0:
+                        raise
+                    attempt_timeout = min(timeout, remaining)
+                    backoff = min(5.0, backoff * 2)
+                else:
+                    outcome = "success"
+                    return answer
+        finally:
+            if attempts > 1:
+                logger.info("agent api retry attempts=%d waited=%.1f outcome=%s",
+                            attempts, time.monotonic() - started, outcome)
+
+    def _send(self, request: urllib.request.Request, timeout: float) -> dict[str, Any]:
+        error = None
         try:
             with self._opener.open(request, timeout=timeout) as response:
                 status, raw = response.status, response.read()
         except urllib.error.HTTPError as exc:  # a non-2xx answer
-            status, raw = exc.code, exc.read()
+            error = exc
+            with exc:
+                status, raw = exc.code, exc.read()
         except (OSError, http.client.HTTPException) as exc:
             reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
             if isinstance(reason, TimeoutError):
@@ -140,8 +201,9 @@ class AgentClient:
         except ValueError:
             payload = None
         if status != 200:
-            error = payload.get("error") if isinstance(payload, dict) else None
-            raise LooperUnavailable(f"HTTP {status}" + (f": {error}" if isinstance(error, str) and error else ""))
+            detail = payload.get("error") if isinstance(payload, dict) else None
+            raise LooperUnavailable(f"HTTP {status}" + (f": {detail}" if isinstance(detail, str) and detail else "")) \
+                from error
         if not isinstance(payload, dict):
             raise LooperUnavailable("its answer is not a JSON object")
         return payload
@@ -249,7 +311,15 @@ def main() -> int:
     if urllib.parse.urlsplit(url).scheme not in ("http", "https"):
         print(f"error: LOOPER_AGENT_URL must be an http:// or https:// URL, not {url!r}", file=sys.stderr)
         return 2
-    client = AgentClient(url, token, turn_file=os.environ.get("LOOPER_AGENT_TURN_FILE", "").strip() or None)
+    try:
+        reconnect = float(os.environ.get("LOOPER_AGENT_RECONNECT_SECONDS", "").strip() or 0)
+        if not reconnect >= 0:
+            raise ValueError
+    except ValueError:
+        print("error: LOOPER_AGENT_RECONNECT_SECONDS must be a non-negative number", file=sys.stderr)
+        return 2
+    client = AgentClient(url, token, turn_file=os.environ.get("LOOPER_AGENT_TURN_FILE", "").strip() or None,
+                         reconnect_seconds=min(reconnect, 600))
     logger.info("forwarding tool calls to %s", client.url)
     return serve(client, sys.stdin.buffer, sys.stdout.buffer)
 
