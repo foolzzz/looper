@@ -11,9 +11,11 @@ backs the database up first and does not start without a way to
 Nothing here spends money: the Claude login is read with
 ``claude auth status``, which reads the local credentials and makes no model
 call. The Codex login (``codex_login``) is checked only when an Agent Profile
-uses it, with ``codex login status`` in a probe home; the Grok login
-(``grok_login``) likewise, by whether its login file is there. A forked login
-that a run recorded is a failure until the operator clears it.
+uses it, with ``codex login status`` in a probe home; the Grok login (``grok_login``)
+likewise, by whether its login file is there. A forked Codex or Grok login that a
+run recorded is a failure until the operator clears it. The Cursor login
+(``cursor_login``) is checked only when an Agent Profile uses it, with
+``cursor-agent status``.
 
 The git checks matter for projects whose parallel steps work in worktrees of
 their own (``step_workspaces``): git 2.40 or later (serve checks it too), and,
@@ -42,7 +44,7 @@ from ..ops_config import OpsConfig
 from . import db_backup
 
 if TYPE_CHECKING:
-    from .runtimes import grok_login
+    from .runtimes import cursor_login, grok_login
     from .runtimes.codex_login import LoginStatus
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,7 @@ DATABASE_FIX = (
 )
 LARK_CLI_FIX = "install lark-cli and sign in, or turn the Lark channel off on the Settings page"
 CODEX_LOGIN_FIX = "run `codex login` and sign in with ChatGPT, or give the Agent Profiles an API key provider"
+CURSOR_LOGIN_FIX = "run `cursor-agent login` on this machine"
 GROK_LOGIN_FIX = "run `grok login` on this machine, or give the Agent Profiles another runtime"
 GIT_FIX = "install git 2.40 or later: https://git-scm.com/downloads"
 STEP_WORKTREES_FIX = ("put the project's default directory on a branch of a git checkout with nothing in progress, "
@@ -247,6 +250,37 @@ async def grok_login_check() -> Check:
     return await asyncio.to_thread(check_grok_login, profiles, problem, grok_login.cached_probe)
 
 
+def check_cursor_login(profiles: int | None, probe: Callable[[], cursor_login.LoginStatus]) -> Check:
+    """Check Cursor's existing login only when an Agent Profile uses it."""
+    from .runtimes.cursor_login import LoginState
+
+    if profiles is None:
+        return Check("cursor_login", "Cursor login", SKIP,
+                     "not checked: the Agent Profiles are stored in PostgreSQL, which is unreachable")
+    if not profiles:
+        return Check("cursor_login", "Cursor login", SKIP, "not checked: no Agent Profile uses the Cursor login")
+    status = probe()
+    if status.state is LoginState.LOGGED_IN:
+        return Check("cursor_login", "Cursor login", OK, status.detail)
+    if status.state is LoginState.UNKNOWN:
+        return Check("cursor_login", "Cursor login", WARN, f"not checked: {status.detail}",
+                     "run `cursor-agent status` on this machine")
+    return Check("cursor_login", "Cursor login", FAIL, status.detail, CURSOR_LOGIN_FIX)
+
+
+async def cursor_login_check() -> Check:
+    """``check_cursor_login`` with the server's pool, read now (``/api/v1/system/status`` asks on every poll)."""
+    from ..db import profile_registry
+    from .runtimes import cursor_login
+
+    try:
+        profiles = await profile_registry.login_profile_count("cursor-agent")
+    except Exception:
+        logger.warning("cannot read whether an Agent Profile uses the Cursor login", exc_info=True)
+        profiles = None
+    return await asyncio.to_thread(check_cursor_login, profiles, cursor_login.cached_probe)
+
+
 async def _ttadk_runtime_rows(*, pool: Any = None) -> list[dict[str, Any]]:
     from ..db import profile_registry
 
@@ -292,7 +326,8 @@ async def ttadk_check() -> Check:
 
 
 # The checks of the runtimes' own logins, by id: what reads each now (``/api/v1/system/status`` reads them on every poll).
-LOGIN_CHECKS = {"codex_login": codex_login_check, "grok_login": grok_login_check, "ttadk": ttadk_check}
+LOGIN_CHECKS = {"codex_login": codex_login_check, "grok_login": grok_login_check,
+                "cursor_login": cursor_login_check, "ttadk": ttadk_check}
 
 
 def check_lark_cli(lark_enabled: bool | None) -> Check:
@@ -438,6 +473,7 @@ class _DatabaseFacts:
     codex_login_problem: dict[str, str] | None = None
     grok_login_profiles: int | None = None
     grok_login_problem: dict[str, str] | None = None
+    cursor_login_profiles: int | None = None
     ttadk_runtimes: list[dict[str, Any]] | None = None
     worktree_projects: list[dict[str, Any]] | None = None
 
@@ -470,8 +506,10 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
             problem = await recorded_problem(pool=conn)
             grok_profiles: int | None = await login_profile_count("grok", pool=conn)
             grok_problem = await grok_login.recorded_problem(pool=conn)
+            cursor_profiles: int | None = await login_profile_count("cursor-agent", pool=conn)
         except asyncpg.UndefinedTableError:  # a genuinely empty database
             profiles, problem, grok_profiles, grok_problem = 0, None, 0, None
+            cursor_profiles = 0
         try:
             ttadk_runtimes = await _ttadk_runtime_rows(pool=conn)
         except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):
@@ -489,6 +527,7 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
             codex_login_problem=problem,
             grok_login_profiles=grok_profiles,
             grok_login_problem=grok_problem,
+            cursor_login_profiles=cursor_profiles,
             ttadk_runtimes=ttadk_runtimes,
             worktree_projects=worktrees,
         )
@@ -503,16 +542,17 @@ async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Chec
     facts = await _database_facts(ops.database_url) if database.status == OK else _DatabaseFacts()
     if facts.schema_error:
         database = Check("database", "PostgreSQL", FAIL, facts.schema_error)
-    from .runtimes import grok_login
+    from .runtimes import cursor_login, grok_login
     from .runtimes.codex_login import probe_login
 
     claude = await asyncio.to_thread(check_claude, claude_bin)
     codex = await asyncio.to_thread(check_codex_login, facts.codex_login_profiles, facts.codex_login_problem,
                                     probe_login)
     grok = check_grok_login(facts.grok_login_profiles, facts.grok_login_problem, grok_login.probe_login)
+    cursor = await asyncio.to_thread(check_cursor_login, facts.cursor_login_profiles, cursor_login.probe_login)
     pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending, ops)
     git = await asyncio.to_thread(check_git)
-    return [database, *claude, codex, grok, await check_ttadk(facts.ttadk_runtimes),
+    return [database, *claude, codex, grok, cursor, await check_ttadk(facts.ttadk_runtimes),
             check_lark_cli(facts.lark_enabled), pg_dump, git, check_projects_root(ops.projects_root),
             await check_step_worktrees(facts.worktree_projects)]
 

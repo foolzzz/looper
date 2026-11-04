@@ -2838,9 +2838,9 @@ export interface ProviderEnvEntry {
 
 /** A runtime's own login as the server last read it: "chatgpt" (Codex's ChatGPT login, what its login provider
  * runs with), "logged_in" (Grok's login file is there), "other_method", "not_logged_in", "unknown", or
- * "unavailable" while a forked login a run found is not cleared. */
+ * "unavailable" while a forked login a run found is not cleared; "checking" while the first probe is pending. */
 export interface ProviderLogin {
-  state: "chatgpt" | "logged_in" | "other_method" | "not_logged_in" | "unknown" | "unavailable";
+  state: "chatgpt" | "logged_in" | "other_method" | "not_logged_in" | "checking" | "unknown" | "unavailable";
   detail: string;
 }
 
@@ -2886,7 +2886,7 @@ export interface RegistryLimits {
 
 export type ApiProtocol = "anthropic-messages" | "openai-chat" | "openai-responses";
 export type VendorKind = "glm-bigmodel" | "glm-zai" | "deepseek" | "kimi-moonshot-cn" | "kimi-moonshot"
-  | "cpa" | "opencode" | "sub2api" | "claude-subscription" | "codex-login" | "grok-login" | "custom";
+  | "cpa" | "opencode" | "sub2api" | "claude-subscription" | "codex-login" | "grok-login" | "cursor-login" | "custom";
 
 export interface ProviderEndpoint {
   provider_id?: string;

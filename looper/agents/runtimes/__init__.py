@@ -117,6 +117,7 @@ class VendorType(str, Enum):
     CLAUDE_SUBSCRIPTION = "claude-subscription"
     CODEX_LOGIN = "codex-login"
     GROK_LOGIN = "grok-login"
+    CURSOR_LOGIN = "cursor-login"
     CUSTOM = "custom"
 
     @property
@@ -136,6 +137,8 @@ _LOGIN_VENDORS = {
     VendorType.CLAUDE_SUBSCRIPTION: ("claude-code", ApiProtocol.ANTHROPIC_MESSAGES),
     VendorType.CODEX_LOGIN: ("codex", ApiProtocol.OPENAI_RESPONSES),
     VendorType.GROK_LOGIN: ("grok", ApiProtocol.OPENAI_RESPONSES),
+    # As for Grok login, this protocol is used only for pairing, not for requests.
+    VendorType.CURSOR_LOGIN: ("cursor-agent", ApiProtocol.OPENAI_RESPONSES),
 }
 
 

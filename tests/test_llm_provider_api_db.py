@@ -220,9 +220,13 @@ def test_login_ownership_and_problem_clear(monkeypatch, tmp_path):
     async def test(client, pool):
         modules = {kind: SimpleNamespace(clear_problem=AsyncMock(), login_view=AsyncMock(
             return_value={"state": "ready", "detail": f"synthetic {kind} login"})) for kind in ("codex", "grok")}
+        modules["cursor-agent"] = SimpleNamespace(login_view=AsyncMock(
+            return_value={"state": "not_logged_in", "detail": "not signed in"}))
         monkeypatch.setattr(service, "_login_modules", lambda: modules)
+        assert "cursor-agent" not in service.runtimes.ADAPTERS
         for vendor, runtime, protocol in (("claude-subscription", "claude-code", "anthropic-messages"),
                                            ("codex-login", "codex", "openai-responses"),
+                                           ("cursor-login", "cursor-agent", "openai-responses"),
                                            ("grok-login", "grok", "openai-responses")):
             account = (await client.ok("POST", "/api/v1/provider_accounts/create", {
                 "name": f"Test {vendor}", "vendor_type": vendor}, status=200))["provider"]
@@ -231,15 +235,21 @@ def test_login_ownership_and_problem_clear(monkeypatch, tmp_path):
             assert account["endpoints"][0]["protocol"] == protocol and account["endpoints"][0]["base_url"] == ""
             if runtime in modules:
                 assert account["login"] == modules[runtime].login_view.return_value
-                cleared = (await client.ok("POST", "/api/v1/provider_accounts/clear_login_problem", {"provider_id": account['provider_id']}))["provider"]
-                assert cleared["login"]["state"] == "ready"
-                modules[runtime].clear_problem.assert_awaited_once()
+                if runtime == "cursor-agent":
+                    status, answer = await client.call("POST", "/api/v1/provider_accounts/clear_login_problem",
+                                                       {"provider_id": account["provider_id"]})
+                    assert status == 400 and set(answer) == {"error"}
+                else:
+                    cleared = (await client.ok("POST", "/api/v1/provider_accounts/clear_login_problem",
+                                               {"provider_id": account["provider_id"]}))["provider"]
+                    assert cleared["login"]["state"] == "ready"
+                    modules[runtime].clear_problem.assert_awaited_once()
             for changes in ({"api_key": SECRET}, {"endpoints": [{"protocol": protocol, "base_url": URL}]},
                             {"oauth_runtime_type": "other-runtime"}):
                 status, answer = await client.call("POST", "/api/v1/provider_accounts/create", {
                     "name": "Invalid login", "vendor_type": vendor, **changes})
                 assert status == 400 and set(answer) == {"error"}
-        for pid in ("prov-claude-subscription", "prov-codex-login", "prov-grok-login"):
+        for pid in ("prov-claude-subscription", "prov-codex-login", "prov-cursor-login", "prov-grok-login"):
             for action, fields in (("update", {"name": "Changed"}), ("delete", None)):
                 body = {"provider_id": pid, **({"fields": fields} if fields is not None else {})}
                 status, answer = await client.call("POST", f"/api/v1/provider_accounts/{action}", body)

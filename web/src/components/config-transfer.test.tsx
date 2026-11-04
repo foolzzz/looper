@@ -45,7 +45,7 @@ describe("configuration import", () => {
     fetcher = vi.fn<typeof fetch>(async (input, init) => {
       const url = String(input);
       if (url === "/api/v1/registry/view") {
-        return Response.json({ status: "ok", result: { models: [{ name: imported ? "Imported model" : "Existing model" }] } });
+        return Response.json({ status: "ok", result: { providers: [], models: [{ name: imported ? "Imported model" : "Existing model" }] } });
       }
       if (url === "/api/v1/config/import_upload") {
         return Response.json({ status: "ok", result: {

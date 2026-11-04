@@ -1522,6 +1522,33 @@ Manager tools.
   the provider. The login's state is whether its file is there (`stat`,
   never read), in the provider's view and in the `grok_login` self-check,
   skipped while no Agent Profile uses the login.
+- **The Cursor login** (`looper/agents/runtimes/cursor_login.py`) is the
+  built-in provider `cursor-login` (`prov-cursor-login`, OAuth,
+  `oauth_runtime_type = cursor-agent`). Its `openai-responses` endpoint is
+  used only for pairing. It represents the operator's existing Cursor login
+  on this machine (the login keychain on macOS). Looper never reads the
+  keychain or a credential file. It checks `cursor-agent status --format json`
+  with the operator's `HOME`, throwaway `CURSOR_CONFIG_DIR` and
+  `CURSOR_DATA_DIR`, empty stdin, a 20-second timeout and `NO_OPEN_BROWSER=1`;
+  `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN`, `CURSOR_API_ENDPOINT` and
+  `AGENT_CLI_CREDENTIAL_STORE` are removed. Exit 0 with `status: authenticated`
+  and `isAuthenticated: true` means signed in; `unauthenticated` and
+  `partially-authenticated` mean not signed in; a failed command, timeout or
+  unreadable output means unknown. A launch refuses a missing login with
+  "Cursor is not signed in on this machine: run `cursor-agent login`" and
+  names a check failure. Results are cached for 30 seconds. Provider listings
+  return the last cached state immediately, even when stale, or show
+  "checking the Cursor login" before the first result; a missing or expired
+  result starts at most one background check. The login appears in Settings
+  → LLM Providers before a Cursor runtime exists. The `cursor_login`
+  self-check is skipped without a matching Agent Profile; otherwise it fails
+  for a missing login and warns for an unknown state. There is no file store,
+  API key or login link. The status JSON shape was verified on 2026-11-04;
+  `userInfo` contents are never retained or shown. Cursor runs will keep the
+  operator's `HOME` and load personal Cursor and Claude Code configuration;
+  the runtime using this login is delivered separately. The suggested models
+  are `auto`, `gpt-5.3-codex`, `gpt-5.6-sol-high`, `composer-2.5` and
+  `gemini-3.7-flash-high`, without built-in prices.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
   runs Manager, Planner, Worker and Reviewer. With the default `[runtimes] pi = "runner"`,

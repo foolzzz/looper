@@ -132,7 +132,7 @@ describe("schedule Planner session", () => {
         max_parallel_runs_limit: 10, concurrency_max: 100, notify_targets: [],
       } };
       else if (url === "/api/v1/managers/list") result = { managers: [{ id: "manager", enabled: true }], max_enabled: 8 };
-      else if (url === "/api/v1/registry/view") result = { profiles: [] };
+      else if (url === "/api/v1/registry/view") result = { providers: [], profiles: [] };
       else if (url === "/api/v1/schedule_admin/create" || url === "/api/v1/schedule_admin/update") {
         const { fields } = JSON.parse(String(init?.body));
         writes.push(fields);
@@ -217,7 +217,7 @@ describe("schedule form types", () => {
         max_parallel_runs_limit: 10, concurrency_max: 100, notify_targets: [],
       } };
       else if (url === "/api/v1/managers/list") result = { managers: [{ id: "manager", enabled: true }], max_enabled: 8 };
-      else if (url === "/api/v1/registry/view") result = { profiles: [] };
+      else if (url === "/api/v1/registry/view") result = { providers: [], profiles: [] };
       else if (url === "/api/v1/schedule_admin/create" || url === "/api/v1/schedule_admin/update") {
         const { fields } = JSON.parse(String(init?.body));
         writes.push(fields);
@@ -473,7 +473,7 @@ describe("command run history", () => {
         default_timezone: "UTC", roles: [], notify_targets: [], name_max_chars: 80, requirement_max_chars: 10000,
       } };
       if (path === "managers/list") return { managers: [] };
-      if (path === "registry/view") return { profiles: [] };
+      if (path === "registry/view") return { providers: [], profiles: [] };
     });
     await act(async () => root.render(<ProjectSchedulesSection project={{ project_id: "project" } as Project}
       linked="sched%2Fa/runs/srun-failed" onLink={() => {}} />));
@@ -484,7 +484,7 @@ describe("command run history", () => {
   it("reopens the schedule for a different linked run after collapse", async () => {
     stub((path) => path === "schedule_admin/project_list" ? { schedules: [storedSchedule("command")], limits: {
       default_timezone: "UTC", roles: [], notify_targets: [], name_max_chars: 80, requirement_max_chars: 10000,
-    } } : path === "managers/list" ? { managers: [] } : path === "registry/view" ? { profiles: [] }
+    } } : path === "managers/list" ? { managers: [] } : path === "registry/view" ? { providers: [], profiles: [] }
       : path === "schedule_admin/runs" ? respond([run(), run({ run_id: "run-b" })]) : undefined);
     const show = (runId: string) => root.render(<ProjectSchedulesSection project={{ project_id: "project" } as Project}
       linked={`sched%2Fa/runs/${runId}`} onLink={() => {}} />);

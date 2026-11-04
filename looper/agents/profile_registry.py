@@ -854,12 +854,12 @@ def provider_view(row: Mapping[str, Any], logins: Mapping[str, Mapping[str, str]
     """A provider; an OAuth one with the models its runtime suggests for the login (``suggested_models``) and the
     login's state when it is known (``login``, from ``logins`` by runtime type: ``{"state", "detail"}``)."""
     adapter = runtimes.ADAPTERS.get(row["oauth_runtime_type"] or "")
-    oauth = row["auth"] == AuthKind.OAUTH.value and adapter is not None
+    oauth = row["auth"] == AuthKind.OAUTH.value
     return {
         "provider_id": row["id"], "name": row["name"], "vendor_type": row["vendor_type"], "auth": row["auth"],
         "oauth_runtime_type": row["oauth_runtime_type"], "endpoints": [dict(e) for e in row["endpoints"]],
         "suggested_models": list(adapter.login_models) if oauth and adapter else [],
-        "login": dict(logins[adapter.type]) if oauth and adapter and adapter.type in (logins or {}) else None,
+        "login": dict(logins[row["oauth_runtime_type"]]) if oauth and row["oauth_runtime_type"] in (logins or {}) else None,
         "env": list(row.get("env") or []), "max_concurrency": row["max_concurrency"],
         "api_key": SECRET_MASK if row.get("api_key_set") else None, "builtin": row["builtin"],
         "endpoint_count": len(row["endpoints"]),
@@ -922,15 +922,19 @@ def vendor_types_view() -> list[dict[str, Any]]:
     return result
 
 
-def _login_modules() -> dict[str, Any]:
-    """The runtimes whose own login Looper links into its homes, by type, and the module of each."""
-    from .runtimes import codex_login, grok_login
+# Logins whose link can fork in a run and stay unavailable until the operator clears the problem.
+LINKED_LOGINS = frozenset({"codex", "grok"})
 
-    return {"codex": codex_login, "grok": grok_login}
+
+def _login_modules() -> dict[str, Any]:
+    """The runtimes whose own login the provider views report, by type (each module's ``login_view``)."""
+    from .runtimes import codex_login, cursor_login, grok_login
+
+    return {"codex": codex_login, "grok": grok_login, "cursor-agent": cursor_login}
 
 
 async def _logins(providers: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, str]]:
-    """The state of each runtime login a listed OAuth provider stands for, by runtime type (Codex's and Grok's:
+    """The state of each runtime login a listed OAuth provider stands for, by runtime type (Codex's, Grok's and Cursor's:
     their module's ``login_view``; Claude Code's comes from the startup self-check)."""
     types = {row["oauth_runtime_type"] for row in providers if row["auth"] == AuthKind.OAUTH.value}
     return {kind: await module.login_view() for kind, module in _login_modules().items() if kind in types}
@@ -1390,7 +1394,7 @@ async def clear_login_problem(provider_id: str) -> dict[str, Any]:
     operator has checked it on the machine (its module's ``clear_problem``). The provider is one of that login."""
     row = await _existing_provider(provider_id)
     module = _login_modules().get(row["oauth_runtime_type"] or "") if row["auth"] == AuthKind.OAUTH.value else None
-    if module is None:
+    if module is None or row["oauth_runtime_type"] not in LINKED_LOGINS:
         raise RegistryError(f"provider {row['name']!r} is not the Codex or Grok login")
     await module.clear_problem()
     return await _provider_answer(provider_id)

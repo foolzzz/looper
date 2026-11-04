@@ -301,14 +301,21 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
         (runtime,) = registry["runtimes"]
         assert (runtime["builtin"], runtime["executable"], runtime["version"]) == (True, "", None)
         assert set(runtime["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
-        # Claude Code's own login, Codex's (ChatGPT) and Grok's, with the models each offers as suggestions.
-        claude, codex, grok = registry["providers"]
+        # Each CLI's own login, with the models it offers as suggestions.
+        claude, codex, cursor, grok = registry["providers"]
         assert (claude["name"], claude["auth"], claude["oauth_runtime_type"], claude["api_key"]) == (
             "claude-subscription", "oauth", "claude-code", None)
         assert (codex["provider_id"], codex["name"], codex["builtin"], codex["auth"], codex["oauth_runtime_type"],
                 [e["protocol"] for e in codex["endpoints"]], codex["model_count"]) == (
             "prov-codex-login", "codex-login", True, "oauth", "codex", ["openai-responses"], 7)
         assert codex["suggested_models"][0] == "gpt-6.1-sol" and claude["suggested_models"] == []
+        assert (cursor["provider_id"], cursor["name"], cursor["builtin"], cursor["auth"], cursor["oauth_runtime_type"],
+                cursor["api_key"], cursor["endpoints"], cursor["model_count"], cursor["suggested_models"]) == (
+            "prov-cursor-login", "cursor-login", True, "oauth", "cursor-agent", None,
+            [{"provider_id": "prov-cursor-login", "protocol": "openai-responses", "base_url": "",
+              "use_runtime_default": False}], 5, [])  # Runtime suggestions need the future Cursor adapter.
+        assert [m["name"] for m in await db.list_models(provider_id="prov-cursor-login")] == [
+            "auto", "gpt-5.3-codex", "gpt-5.6-sol-high", "composer-2.5", "gemini-3.7-flash-high"]
         assert (grok["provider_id"], grok["name"], grok["builtin"], grok["auth"], grok["oauth_runtime_type"],
                 [e["protocol"] for e in grok["endpoints"]], grok["model_count"], grok["suggested_models"][0]) == (
             "prov-grok-login", "grok-login", True, "oauth", "grok", ["openai-responses"], 4, "grok-4.7")
