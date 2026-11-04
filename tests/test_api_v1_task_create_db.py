@@ -186,6 +186,61 @@ def test_new_project_waits_for_matching_client_and_session_and_creates_once(monk
     run_db(test, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("as_client", [False, True], ids=["operator", "client"])
+def test_new_project_task_uses_the_configured_root_after_confirmation(monkeypatch, tmp_path, as_client):
+    from looper.agents import projects as project_ops
+
+    root = tmp_path / "projects"
+    monkeypatch.setattr(project_ops, "projects_root", lambda: str(root))
+
+    async def test(pool):
+        _, token = await api_clients.create("Client", pool=pool)
+        async with _serving(tmp_path) as server:
+            server._client_ops = ClientOps(SimpleNamespace())
+            code, answer = await post(server, {"requirement": "Build", "project": {"name": "Example"}},
+                                      token=token if as_client else TOKEN)
+            if as_client:
+                assert code == 202, answer
+                assert str(root) in answer["impact"] and "自动分配" in answer["impact"]
+                assert await pool.fetchval("SELECT count(*) FROM projects") == 0
+                assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+                assert not root.exists()
+                code, answer = await post(server, {"confirmation_id": answer["confirmation_id"]}, token=token,
+                                          path="/api/v1/confirm")
+            assert code == 200, answer
+            row = await tasks.get_task(answer["result"]["task_id"], pool=pool)
+            project = await projects.get_project(answer["result"]["project_id"], pool=pool)
+            assert row["work_dir"] == row["workspace_dir"] == project["work_dir"] == str(root / "example")
+            assert (root / "example").is_dir()
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("root_set, work_dir", [(False, None), (True, "relative/path")])
+def test_new_project_directory_validation_still_refuses_invalid_requests(monkeypatch, tmp_path, root_set, work_dir):
+    from looper.agents import projects as project_ops
+
+    root = tmp_path / "projects"
+    monkeypatch.setattr(project_ops, "projects_root", lambda: str(root) if root_set else "")
+
+    async def test(pool):
+        _, token = await api_clients.create("Client", pool=pool)
+        body = {"requirement": "Build", "project": {"name": "Example"}}
+        if work_dir is not None:
+            body["work_dir"] = work_dir
+        async with _serving(tmp_path) as server:
+            server._client_ops = ClientOps(SimpleNamespace())
+            code, answer = await post(server, body, token=token)
+            assert code == 400 and answer["error"]["code"] == "invalid", answer
+            expected = "absolute" if root_set else "work directory is required"
+            assert expected in answer["error"]["message"]
+            assert await pool.fetchval("SELECT count(*) FROM projects") == 0
+            assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+            assert not root.exists()
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 @pytest.mark.parametrize("settings, disclosures", [
     ({"wait_commands": "on", "vault": "on", "task_budget_usd": 1.25, "task_budget_action": "wrap_up",
       "review_policy": "all", "step_workspaces": "worktree", "task_workspaces": "worktree",

@@ -236,7 +236,7 @@ function ProjectsSection({
   activeProjectId: string | null;
   onOpenProject: (projectId: string) => void;
 }) {
-  const { projects, error } = useProjects();
+  const { projects, projectsRoot, error } = useProjects();
   const [creating, setCreating] = useState(false);
 
   return (
@@ -300,6 +300,7 @@ function ProjectsSection({
 
       {creating && (
         <ProjectDialog
+          projectsRoot={projectsRoot}
           onClose={() => setCreating(false)}
           onCreated={(project) => {
             setCreating(false);

@@ -246,9 +246,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 ### TaskRouter (`looper/agents/tiers/task.py`)
 
 - Every task belongs to exactly one project (`project_id`) and runs in its
-  `work_dir`. There is no global default: the directory is the one given
+  `work_dir`. The directory is the one given
   (`resolve_work_dir` requires an absolute path or `~/...`), else the
-  project's default directory. Creating a task with neither, or starting a
+  project's default directory (new projects can receive one from the ops file's
+  `[projects] root`; see [Project directories](#project-directories)). Creating a task with neither, or starting a
   task without one, is refused, and the Manager asks for it when the
   conversation has not named it. The Worker creates the directory if it is
   missing and runs Claude there.
@@ -2364,6 +2365,37 @@ Verified with Claude Code 2.1.285 under the isolation flags and
 - no `~/.claude/plugins/data/project-inline/` directory was created for a
   plugin with only skills.
 
+### Project directories
+
+The ops file's optional `[projects] root = "/absolute/path/to/projects"`
+(file only, unset by default) gives each newly created project without a
+`work_dir` its own directory under that root. The directory name is the project
+name lower-cased, with characters outside `[A-Za-z0-9._-]` replaced by `-`,
+runs of `-` collapsed and leading or trailing `-` and `.` stripped. An empty
+result uses the project id. If another project already uses that directory,
+Looper appends `-2`, `-3`, and so on. An existing directory at `<root>/<name>`
+is used as is, including a symbolic link to a directory. Otherwise Looper creates
+the directory with mode 0755 before saving the project; an OS error refuses
+creation with the path and reason and leaves no project row. If creation fails,
+a directory made by that create is removed again only if it is still empty;
+pre-existing directories are kept. Tasks without their own directory then use
+the project's directory as usual.
+
+This applies to the dashboard, Manager tool, v1 API and configuration import.
+The full projects list response includes `projects_root` (an empty string when
+unset). When set, the dashboard's new-project task form lets both directory
+fields stay blank and Looper allocates the project's directory; the project
+dialog also explains this default. The built-in Manager role, tool descriptions
+and prompt preview follow the configured root; custom role text is preserved.
+An explicit `work_dir` wins; import preserves the directories named in its
+file. Existing projects keep their directories when the root is set or changed.
+Moving one requires an explicit `work_dir` update, including the existing
+confirmation for affected command schedules. With the root unset, creating a
+project without a directory still leaves its `work_dir` empty. At startup,
+`looper serve` logs `projects root=<path>` or `projects root unset`;
+`looper doctor` and system checks warn if the configured root does not exist
+or is not writable.
+
 ### Project execution settings
 
 A project can set how its task agents run (`looper/agents/project_execution.py`,
@@ -4332,7 +4364,9 @@ another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `public_url` and `log_level` (`debug`, `info`, `warning`, `error`), `[backup]`
 `pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
 in) and `verify_command` (an argv array that lists the dump read on stdin like
-`pg_restore --list`), `[operator_notes] root` (an absolute path), and
+`pg_restore --list`), `[operator_notes] root` (an absolute path),
+`[projects] root` (an absolute parent directory for new projects; file only,
+unset by default), and
 `[runtimes] pi` and `dsh` (`"runner"` by default, or explicit `"cli"` opt-outs; file only), and
 `[agent_host] keeper` (`"off"` by default, or `"on"`; file only). Nothing is expanded: no
 variable, no `~`, no include. An unknown key, a wrong type or a bad value

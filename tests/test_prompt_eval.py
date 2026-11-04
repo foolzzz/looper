@@ -1570,6 +1570,32 @@ def test_every_server_installs_gh_before_starting(tmp_path: Path, monkeypatch: p
         pytest.fail("no server may start")
 
 
+@pytest.mark.parametrize("rooted", [False, True])
+def test_eval_server_projects_root_preserves_default_ops(tmp_path, monkeypatch, rooted):
+    import tomllib
+    from looper import ops_config
+
+    runtime = tmp_path / "runtime"
+    root = tmp_path / "projects" if rooted else None
+    monkeypatch.setattr(runner, "free_port", lambda: 49152)
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_, **__: SimpleNamespace(
+        poll=lambda: 0, returncode=0))
+    with pytest.raises(runner.EvalError, match="server exited"), runner.running_server(
+        database_url="unused", runtime_root=runtime, bin_dir=tmp_path / "bin",
+        log_path=tmp_path / "serve.log", projects_root=root,
+    ):
+        pytest.fail("no server may start")
+    text = (runtime / ops_config.FILE).read_text()
+    if rooted:
+        assert tomllib.loads(text)["projects"]["root"] == str(root)
+    else:
+        assert "projects" not in tomllib.loads(text)
+        # The configuration written before projects_root was added, byte for byte.
+        assert text == ops_config.render(ops_config.OpsConfig(
+            runtime_root=runtime, path=runtime / ops_config.FILE, database_url="unused",
+            pi_runtime="cli", dsh_runtime="cli", keeper_mode=ops_config.KeeperMode.OFF))
+
+
 @pytest.mark.parametrize("task_id", ["wait_pr_rereview", "wait_not_needed"])
 def test_fake_wait_plans_parse_and_delivered_files_are_checked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, task_id: str,
@@ -2782,6 +2808,8 @@ def test_task_cost_dialog_seeds_without_starting_an_agent(
 
 # The calls of each turn (tool:status) that some dialogs' turns are checked for.
 _DIALOG_CALLS = {
+    "root_ask_project": [[]],
+    "root_new_project": [[], ["looper_task_create:needs_confirmation"], ["looper_task_create:ok"]],
     "cancel_confirmation": [["looper_task_control:needs_confirmation"], [], ["looper_task_control:needs_confirmation"],
                             ["looper_task_control:ok"]],
     "schedules": [["looper_schedules:ok"], ["looper_schedules:ok"], ["looper_schedules:needs_confirmation"],

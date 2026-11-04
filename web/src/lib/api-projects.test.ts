@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createProject, deleteProject, fetchProjects, PROJECTS_CHANGED_EVENT, updateProject } from "@/lib/api";
+import { createProject, deleteProject, fetchProjects, fetchProjectsList, PROJECTS_CHANGED_EVENT, updateProject } from "@/lib/api";
 import { installSessionGuard, resetSessionGuard, SessionEndedError } from "@/lib/session";
 
 beforeEach(() => resetSessionGuard());
@@ -35,6 +35,12 @@ it.each(calls)("project $action uses v1 and preserves its result and selector re
 it("preserves the empty project list", async () => {
   vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "ok", result: { projects: [] } })));
   expect(await fetchProjects()).toEqual([]);
+});
+
+it.each(["", "/tmp/looper-projects"])("preserves projects_root from the list response (%s)", async (projectsRoot) => {
+  const result = { projects: [project], projects_root: projectsRoot };
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "ok", result })));
+  expect(await fetchProjectsList()).toEqual(result);
 });
 
 it.each(calls)("project $action preserves typed errors without refreshing selectors", async ({ run }) => {

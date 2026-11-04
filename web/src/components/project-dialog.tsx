@@ -6,13 +6,14 @@ import { createProject, type Project } from "@/lib/api";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 
 interface ProjectDialogProps {
+  projectsRoot?: string;
   onClose: () => void;
   onCreated: (project: Project) => void;
 }
 
 /** Create a project: a name, an optional default directory, description and background. Its agent settings are
  * on its Agent Profiles tab. */
-export function ProjectDialog({ onClose, onCreated }: ProjectDialogProps) {
+export function ProjectDialog({ projectsRoot, onClose, onCreated }: ProjectDialogProps) {
   const id = useId();
   const [name, setName] = useState("");
   const [workDir, setWorkDir] = useState("");
@@ -81,7 +82,9 @@ export function ProjectDialog({ onClose, onCreated }: ProjectDialogProps) {
             className="font-mono"
           />
           <p className="text-xs text-muted-foreground">
-            Absolute path. New tasks run here unless they set their own directory.
+            {projectsRoot
+              ? `Leave empty: Looper creates the new project's directory under ${projectsRoot}.`
+              : "Absolute path. New tasks run here unless they set their own directory."}
           </p>
         </div>
         <div className="space-y-1">

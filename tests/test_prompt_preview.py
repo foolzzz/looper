@@ -119,6 +119,31 @@ def test_preview_manager_has_no_project_context(monkeypatch):
     assert result["prompt_layers"]["project"] is None
 
 
+@pytest.mark.parametrize("root,custom", [("", False), ("/srv/projects", False), ("/srv/projects", True)])
+def test_manager_preview_matches_live_directory_guidance(monkeypatch, tmp_path, root, custom):
+    from looper.agents import projects
+    from looper.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT, ManagerAgent, ManagerConfig
+
+    module, profile, _ = _dependencies(monkeypatch, role="manager")
+    monkeypatch.setattr(projects, "projects_root", lambda: root)
+    role = "Custom role\n" + DEFAULT_SYSTEM_PROMPT if custom else DEFAULT_SYSTEM_PROMPT
+    monkeypatch.setattr(module.db_roles, "get_config", AsyncMock(return_value={
+        "system_prompt": role, "default_prompt": DEFAULT_SYSTEM_PROMPT}))
+    result = asyncio.run(module.preview(profile.id, "manager"))
+    settings = replace(module.resolve("manager", module.index_layers(
+        asyncio.run(module.agent_setting_layers.list_layers(None)), None), None), profile=profile)
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+    asyncio.run(manager._load_db_config())
+    prompt = manager._composed_prompt(settings)
+    shown = "".join(block["text"] or "" for block in result["blocks"] if block["owner"] == "looper")
+    assert shown == prompt.text
+    assert result["prompt_layers"] == prompt.layers
+    if root:
+        assert "an existing directory there is used as is" in shown
+    if custom:
+        assert role in shown
+
+
 @pytest.mark.parametrize("runtime", ["claude-code", "codex"])
 @pytest.mark.parametrize("custom", [False, True])
 def test_planner_preview_matches_launch_inspection_guidance(monkeypatch, tmp_path, runtime, custom):

@@ -4,7 +4,8 @@ Every task belongs to exactly one project and can move to another at any
 time. A new task may choose the Agent Profile of its Planner, Workers or Reviewers
 (``profile_overrides``), which wins over every layer for that task only. A task is created in an existing project (``project_id``) or in a new
 one made by the same request (``project``). Its work directory is the one
-given, else its project's default; there is no global default. A project's
+given, else its project's default. The ops file's ``projects.root`` gives new
+projects a directory when none is named. A project's
 ``background`` goes into the system prompt of its task agents (Planner,
 Workers, Reviewers), read afresh when each prompt is built. Its execution
 settings (``project_execution``) are top-level fields of the project too,
@@ -22,9 +23,11 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -59,6 +62,7 @@ TASKS_PAGE = 50
 TASKS_PAGE_MAX = 200
 PROJECT_DELETE_STOP_WAIT_SECONDS = 60
 _project_delete_locks: dict[str, asyncio.Lock] = {}
+_root = ""
 # The roles a task may choose the Agent Profile of; the Manager spans every task.
 TASK_PROFILE_ROLES = ("planner", "worker", "reviewer")
 # Fields a project used to hold that are agent settings now (its layer and its roles' layers).
@@ -195,13 +199,80 @@ async def _existing_project(project_id: str, *, manager_id: str | None = None) -
 
 
 async def list_projects(*, manager_id: str | None = None) -> dict[str, Any]:
-    return {"projects": [project_view(row) for row in await db_projects.list_projects(manager_id=manager_id)]}
+    return {"projects": [project_view(row) for row in await db_projects.list_projects(manager_id=manager_id)],
+            "projects_root": projects_root()}
+
+
+def configure_root(root: str) -> None:
+    """Set the server's file-only ``projects.root``; an empty string keeps directories optional."""
+    global _root
+    _root = root
+
+
+def projects_root() -> str:
+    return _root
+
+
+@contextmanager
+def project_directories() -> Iterator[list[Path]]:
+    """Keep newly made directories only when the enclosing create transaction succeeds."""
+    created: list[Path] = []
+    try:
+        yield created
+    except BaseException:
+        for path in reversed(created):
+            # rmdir refuses nonempty directories and symlinks; preserve the original failure.
+            with suppress(OSError):
+                path.rmdir()
+        raise
+
+
+async def _create_project_row(fields: dict[str, Any], *, pool: Any = None,
+                              created_directories: list[Path] | None = None) -> dict[str, Any]:
+    """Create within the caller's transaction, allocating a directory only for a new project without one."""
+    root = projects_root()
+    if not root or fields.get("work_dir"):
+        return await db_projects.create_project(**fields, pool=pool)
+    # Also serialize against explicit creates/updates/imports, which may claim the same path.
+    await pool.execute("LOCK TABLE projects IN SHARE ROW EXCLUSIVE MODE")
+    project_id = f"proj-{uuid.uuid4().hex[:12]}"
+    name = re.sub(r"-+", "-", re.sub(r"[^A-Za-z0-9._-]", "-", fields["name"])).strip("-.").lower()
+    name = name or project_id
+    used = [Path(row["work_dir"]) for row in await pool.fetch("SELECT work_dir FROM projects WHERE work_dir <> ''")]
+    path = Path(root) / name
+    with project_directories() as created:
+        try:
+            resolved = {os.path.realpath(directory) for directory in used}
+            suffix = 2
+            while os.path.realpath(path) in resolved or (path.exists() and any(
+                    directory.exists() and path.samefile(directory) for directory in used)):
+                path = Path(root) / f"{name}-{suffix}"
+                suffix += 1
+            try:
+                path.mkdir(mode=0o755, parents=True)
+            except FileExistsError:
+                if not path.is_dir():
+                    raise
+            else:
+                created.append(path)
+                path.chmod(0o755)
+        except OSError as exc:
+            raise RequestError(HTTP_400, f"cannot create project directory {path}: {exc}") from None
+        row = await db_projects.create_project(**{**fields, "work_dir": str(path)}, project_id=project_id, pool=pool)
+        if created_directories is not None:
+            created_directories.extend(created)
+        return row
 
 
 async def create_project(data: dict[str, Any]) -> dict[str, Any]:
     fields = _project_fields(data, update=False)
     try:
-        row = await db_projects.create_project(**fields)
+        if projects_root() and not fields.get("work_dir"):
+            with project_directories() as created:
+                async with db_connection.transaction() as conn:
+                    row = await _create_project_row(fields, pool=conn, created_directories=created)
+        else:
+            row = await db_projects.create_project(**fields)
     except asyncpg.UniqueViolationError:
         raise _name_taken(fields["name"]) from None
     return project_view(row)
@@ -438,44 +509,44 @@ async def create_task_core(
         if not isinstance(project_id, str):
             raise RequestError(HTTP_400, "project_id must be a string")
         project = await _existing_project(project_id)
-        default_dir = project["work_dir"]
     else:
         if not isinstance(new_project, dict):
             raise RequestError(HTTP_400, "project must be an object with a name")
         new_fields = _project_fields(new_project, update=False)
-        default_dir = new_fields.get("work_dir", "")
 
     config = data.get("config")
     if config is not None and not isinstance(config, dict):
         raise RequestError(HTTP_400, "config must be a JSON object")
     profiles = await _profile_overrides(data.get("profile_overrides")) if profiles is None else profiles
-    work_dir = _task_work_dir(data.get("work_dir"), default_dir)
-    project_mode = ProjectExecution.from_row(project if project is not None else new_fields.get("execution")).task_mode
+    if new_project is not None and not projects_root():
+        _task_work_dir(data.get("work_dir"), new_fields.get("work_dir", ""))
     named = bool(str(data.get("work_dir") or "").strip()) if named is None else named
-    workspace = await task_workspace(data, work_dir=work_dir, named=named, project_dir=default_dir,
-                                     project_mode=project_mode, visible_to=visible_to)
-    task = {
-        "task_id": f"task-{uuid.uuid4().hex[:12]}",
-        "requirement": requirement,
-        "goal_id": data.get("goal_id") or "",
-        "work_dir": work_dir,
-        "config": config or {},
-        "status": "init",
-        "workspace_dir": work_dir,
-        "workspace_mode": workspace["mode"],
-        "workspace_base": workspace["base"],
-        "title": db_tasks.task_title(data.get("title")),
-        **(task_fields or {}),
-    }
 
-    async def persist(conn: Any = None) -> dict[str, Any]:
+    async def persist(conn: Any = None) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         nonlocal project
         if lock_manager:
             from ..db import managers as db_managers
-            if not await db_managers.lock_for_task(task.get("manager_id", "manager"), conn=conn):
+            if not await db_managers.lock_for_task((task_fields or {}).get("manager_id", "manager"), conn=conn):
                 raise RequestError(HTTP_409, "this Manager was turned off or deleted; the task was not created")
         if project is None:
-            project = await db_projects.create_project(**new_fields, pool=conn)
+            project = await _create_project_row(new_fields, pool=conn, created_directories=created_directories)
+        work_dir = _task_work_dir(data.get("work_dir"), project["work_dir"])
+        workspace = await task_workspace(data, work_dir=work_dir, named=named, project_dir=project["work_dir"],
+                                         project_mode=ProjectExecution.from_row(project).task_mode, visible_to=visible_to,
+                                         **({"pool": conn} if conn is not None else {}))
+        task = {
+            "task_id": f"task-{uuid.uuid4().hex[:12]}",
+            "requirement": requirement,
+            "goal_id": data.get("goal_id") or "",
+            "work_dir": work_dir,
+            "config": config or {},
+            "status": "init",
+            "workspace_dir": work_dir,
+            "workspace_mode": workspace["mode"],
+            "workspace_base": workspace["base"],
+            "title": db_tasks.task_title(data.get("title")),
+            **(task_fields or {}),
+        }
         created = await db_tasks.create_task(**task, project_id=project["id"], pool=conn)
         if profiles:
             await db_layers.set_profile_overrides(conn, task["task_id"], profiles)
@@ -488,19 +559,21 @@ async def create_task_core(
                     **role, "reason": f"from template {template_name}", "via": "template"},
                     {"step_id": "", "kind": JournalKind.ROLE_DEFINED.value,
                      "summary": clip(summary, SUMMARY_MAX_CHARS), "learnings": []})
-        return created
+        return created, task, workspace
 
     try:
         if project is not None and not profiles and not lock_manager and not roles:
-            created = await persist()
+            created, task, workspace = await persist()
         else:
-            async with db_connection.transaction() as conn:
-                created = await persist(conn)
+            with project_directories() as created_directories:
+                async with db_connection.transaction() as conn:
+                    created, task, workspace = await persist(conn)
     except asyncpg.UniqueViolationError:
         # The Manager adapter keeps its existing concurrent-create instruction.
         raise _name_taken(new_fields["name"]) from None
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "an Agent Profile the task chose was removed meanwhile; choose again") from None
+    work_dir = task["work_dir"]
     shown = task["title"] or task["goal_id"] or task["task_id"]
     block = (await configuration_block(task["task_id"], shown, project, work_dir, new_project is not None,
                                        workspace=workspace["check"], template=template_display)
@@ -521,7 +594,8 @@ async def create_task_core(
 
 
 async def task_workspace(data: dict[str, Any], *, work_dir: str, named: bool, project_dir: str,
-                         project_mode: TaskWorkspaces, visible_to: str | None = None) -> dict[str, Any]:
+                         project_mode: TaskWorkspaces, visible_to: str | None = None,
+                         pool: Any = None) -> dict[str, Any]:
     """A new task's ``workspace_mode`` (as ``data`` asks, else by ``task_workspaces.resolve_mode``) and ``base``,
     checked: the mode, the base and the workspace check, or a 400. ``visible_to``: the Manager the check's
     warnings name tasks to; another Manager's tasks stay anonymous."""
@@ -542,7 +616,7 @@ async def task_workspace(data: dict[str, Any], *, work_dir: str, named: bool, pr
         raise RequestError(HTTP_400, "base is where a task's worktree starts: give it with workspace_mode worktree")
     try:
         check = await task_workspaces.check(work_dir, mode=mode, base=base, asked=bool(requested),
-                                            visible_to=visible_to)
+                                            visible_to=visible_to, **({"pool": pool} if pool is not None else {}))
     except task_workspaces.TaskWorkspaceError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
     return {"mode": mode.value, "base": base, "check": check}

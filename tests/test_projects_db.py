@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -14,11 +15,11 @@ from tests.db_support import DSN, fresh_schema
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
-def _run(test: Callable[[Any], Awaitable[None]]) -> None:
+def _run(test: Callable[[Any], Awaitable[None]], *, max_size: int = 2) -> None:
     from looper.db.connection import ensure_schema
 
     async def _main() -> None:
-        async with fresh_schema(max_size=2) as pool:
+        async with fresh_schema(max_size=max_size) as pool:
             await ensure_schema(pool)
             await test(pool)
 
@@ -30,6 +31,264 @@ def test_a_new_database_starts_with_no_projects() -> None:
         assert await pool.fetchval("SELECT count(*) FROM projects") == 0
 
     _run(_test)
+
+
+@pytest.mark.parametrize(("name", "directory"), [
+    (" ..Hello / WORLD---v1.. ", "hello-world-v1"), ("中文项目", None),
+    ("Keep_This.v1", "keep_this.v1"),
+])
+def test_projects_root_creates_a_default_directory(monkeypatch, tmp_path, name, directory):
+    from looper.agents import projects as api
+    from looper.db import connection, projects, tasks
+
+    async def check(pool):
+        monkeypatch.setattr(connection, "_pool", pool)
+        monkeypatch.setattr(api, "_root", str(tmp_path / "projects"))
+        mask = os.umask(0o077)
+        try:
+            made = await api.create_project({"name": name, "work_dir": "  "})
+        finally:
+            os.umask(mask)
+        path = tmp_path / "projects" / (directory or made["project_id"])
+        assert made["work_dir"] == str(path)
+        assert path.is_dir() and path.stat().st_mode & 0o777 == 0o755
+        assert (await projects.get_project(made["project_id"]))["work_dir"] == str(path)
+        task = await api.create_task_core({"requirement": "Use this directory", "project_id": made["project_id"]})
+        assert task["work_dir"] == str(path)
+        assert task["workspace"]["workspace"] == str(path)
+        assert (await tasks.get_task(task["task_id"]))["work_dir"] == str(path)
+
+    _run(check)
+
+
+def test_projects_root_import_preserves_explicit_and_existing_directories(monkeypatch, tmp_path):
+    from looper.agents import config_transfer, projects as api
+    from looper.db import projects
+
+    async def check(pool):
+        monkeypatch.setattr(api, "_root", str(tmp_path / "root"))
+        old = await projects.create_project(name="Old", work_dir="/srv/original", pool=pool)
+        explicit = tmp_path / "explicit"
+        data = {"format": "looper-config/v4", "projects": [
+            {"name": "Imported"}, {"name": "Explicit", "work_dir": str(explicit)},
+            {"name": "Old", "work_dir": str(explicit)},
+        ]}
+        async with pool.acquire() as conn, conn.transaction():
+            await config_transfer.import_config(conn, data, apply=False)
+        assert not (tmp_path / "root").exists()
+        async with pool.acquire() as conn, conn.transaction():
+            await config_transfer.import_config(conn, data, apply=True)
+        assert (await projects.find_project_by_name("Imported", pool=pool))["work_dir"] == str(tmp_path / "root/imported")
+        assert (tmp_path / "root/imported").is_dir()
+        assert (await projects.find_project_by_name("Explicit", pool=pool))["work_dir"] == str(explicit)
+        assert not explicit.exists()
+        assert (await projects.get_project(old["id"], pool=pool))["work_dir"] == "/srv/original"
+
+    _run(check)
+
+
+def test_projects_root_collision_explicit_directory_and_existing_projects(monkeypatch, tmp_path):
+    from looper.agents import projects as api
+    from looper.db import connection, projects
+
+    async def check(pool):
+        monkeypatch.setattr(connection, "_pool", pool)
+        monkeypatch.setattr(api, "_root", "")
+        old = await api.create_project({"name": "Old"})
+        assert old["work_dir"] == ""
+        monkeypatch.setattr(api, "_root", str(tmp_path))
+        first = await api.create_project({"name": "A B"})
+        second = await api.create_project({"name": "A+B"})
+        third = await api.create_project({"name": "A/B"})
+        assert [p["work_dir"] for p in (first, second, third)] == [str(tmp_path / n) for n in ("a-b", "a-b-2", "a-b-3")]
+        explicit = tmp_path / "explicit"
+        made = await api.create_project({"name": "Custom", "work_dir": str(explicit)})
+        assert made["work_dir"] == str(explicit) and not explicit.exists()
+        await api.update_project(old["project_id"], {"name": "Old renamed"})
+        assert (await projects.get_project(old["project_id"]))["work_dir"] == ""
+        await api.update_project(first["project_id"], {"name": "New name"})
+        assert (await projects.get_project(first["project_id"]))["work_dir"] == first["work_dir"]
+
+    _run(check)
+
+
+def test_projects_root_serializes_concurrent_slug_collisions(monkeypatch, tmp_path):
+    from looper.agents import projects as api
+    from looper.db import connection
+
+    async def check(pool):
+        monkeypatch.setattr(connection, "_pool", pool)
+        monkeypatch.setattr(api, "_root", str(tmp_path))
+        made = await asyncio.gather(api.create_project({"name": "A B"}), api.create_project({"name": "A+B"}))
+        assert {p["work_dir"] for p in made} == {str(tmp_path / "a-b"), str(tmp_path / "a-b-2")}
+
+    _run(check)
+
+
+@pytest.mark.parametrize("existing", ["absent", "directory", "symlink", "populated"])
+def test_projects_root_duplicate_name_preserves_only_existing_or_populated_directories(monkeypatch, tmp_path, existing):
+    from looper.agents import projects as api
+    from looper.db import connection, projects
+
+    async def check(pool):
+        monkeypatch.setattr(connection, "_pool", pool)
+        monkeypatch.setattr(api, "_root", str(tmp_path))
+        original = await api.create_project({"name": "Duplicate"})
+        path = tmp_path / "duplicate-2"
+        if existing == "directory":
+            path.mkdir()
+        elif existing == "symlink":
+            target = tmp_path / "target"
+            target.mkdir()
+            path.symlink_to(target, target_is_directory=True)
+        elif existing == "populated":
+            create = projects.create_project
+
+            async def fail_after_write(**kwargs):
+                (path / "keep.txt").write_text("keep")
+                return await create(**kwargs)
+
+            monkeypatch.setattr(projects, "create_project", fail_after_write)
+        with pytest.raises(api.RequestError) as error:
+            await api.create_project({"name": "DUPLICATE"})
+        assert error.value.status == api.HTTP_409
+        assert path.exists() == (existing != "absent")
+        if existing == "symlink":
+            assert path.is_symlink() and target.is_dir()
+        if existing == "populated":
+            assert (path / "keep.txt").read_text() == "keep"
+        assert (tmp_path / "duplicate").is_dir()
+        assert (await projects.get_project(original["project_id"]))["work_dir"] == original["work_dir"]
+        assert await pool.fetchval("SELECT count(*) FROM projects") == 1
+
+    _run(check)
+
+
+@pytest.mark.parametrize("entry", ["project", "task", "import"])
+def test_projects_root_removes_its_directory_when_commit_fails(monkeypatch, tmp_path, entry):
+    import asyncpg
+    from looper.agents import config_transfer, projects as api
+    from looper.db import connection
+
+    async def check(pool):
+        monkeypatch.setattr(connection, "_pool", pool)
+        monkeypatch.setattr(api, "_root", str(tmp_path))
+        await pool.execute("""
+            CREATE FUNCTION refuse_project_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'commit refused' USING ERRCODE = '23514'; END $$;
+            CREATE CONSTRAINT TRIGGER refuse_project_commit AFTER INSERT ON projects
+            DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION refuse_project_commit();
+        """)
+        with pytest.raises(asyncpg.CheckViolationError, match="commit refused"):
+            if entry == "project":
+                await api.create_project({"name": "Rolled back"})
+            elif entry == "task":
+                await api.create_task_core({"requirement": "r", "project": {"name": "Rolled back"}})
+            else:
+                async with pool.acquire() as conn:
+                    await config_transfer.run_import(conn, {"format": "looper-config/v4", "projects": [
+                        {"name": "Rolled back"}, {"name": "Also rolled back"}]}, apply=True)
+        assert not (tmp_path / "rolled-back").exists()
+        assert not (tmp_path / "also-rolled-back").exists()
+        assert await pool.fetchval("SELECT count(*) FROM projects") == 0
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+
+    _run(check)
+
+
+def test_projects_root_task_creation_does_not_need_a_second_connection(monkeypatch, tmp_path):
+    from looper.agents import projects as api
+    from looper.db import connection
+
+    async def check(pool):
+        monkeypatch.setattr(connection, "_pool", pool)
+        monkeypatch.setattr(api, "_root", str(tmp_path))
+        made = await asyncio.wait_for(asyncio.gather(*(
+            api.create_task_core({"requirement": "Use defaults", "project": {"name": name}})
+            for name in ("A B", "A+B")
+        )), timeout=20)
+        assert {p["work_dir"] for p in made} == {str(tmp_path / "a-b"), str(tmp_path / "a-b-2")}
+
+    _run(check, max_size=1)
+
+
+def test_projects_root_respects_existing_directory_ownership_and_permissions(monkeypatch, tmp_path):
+    from looper.agents import projects as api
+    from looper.db import connection, projects
+
+    async def check(pool):
+        monkeypatch.setattr(connection, "_pool", pool)
+        monkeypatch.setattr(api, "_root", str(tmp_path))
+        owned = tmp_path / "Owned"
+        owned.mkdir()
+        await projects.create_project(name="Explicit owner", work_dir=str(owned), pool=pool)
+        insensitive = (tmp_path / "owned").exists()
+        made = await api.create_project({"name": "Owned"})
+        assert made["work_dir"] == str(tmp_path / ("owned-2" if insensitive else "owned"))
+        existing = tmp_path / "reuse"
+        existing.mkdir(mode=0o700)
+        made = await api.create_project({"name": "Reuse"})
+        assert made["work_dir"] == str(existing) and existing.stat().st_mode & 0o777 == 0o700
+        target = tmp_path / "unclaimed"
+        target.mkdir(mode=0o700)
+        link = tmp_path / "link"
+        link.symlink_to(target, target_is_directory=True)
+        made = await api.create_project({"name": "Link"})
+        assert made["work_dir"] == str(link) and link.is_symlink()
+        assert target.stat().st_mode & 0o777 == 0o700
+
+    _run(check)
+
+
+@pytest.mark.parametrize("problem", ["permissions", "file", "symlink-loop"])
+def test_projects_root_failure_is_a_400_without_a_row(monkeypatch, tmp_path, problem):
+    from looper.agents import projects as api
+    from looper.db import connection
+
+    async def check(pool):
+        monkeypatch.setattr(connection, "_pool", pool)
+        root = tmp_path / "root"
+        monkeypatch.setattr(api, "_root", str(root))
+        if problem == "permissions":
+            root.mkdir(mode=0o555)
+        elif problem == "file":
+            root.write_text("not a directory")
+        else:
+            root.symlink_to(root)
+        try:
+            with pytest.raises(api.RequestError) as error:
+                await api.create_project({"name": "Blocked"})
+            assert error.value.status == api.HTTP_400
+            assert str(root / "blocked") in str(error.value) and "[Errno" in str(error.value)
+            assert await pool.fetchval("SELECT count(*) FROM projects") == 0
+        finally:
+            if problem == "permissions":
+                root.chmod(0o755)
+
+    _run(check)
+
+
+def test_projects_root_applies_to_a_task_creating_its_project_atomically(monkeypatch, tmp_path):
+    from looper.agents import projects as api
+    from looper.db import connection, projects, tasks
+
+    async def check(pool):
+        monkeypatch.setattr(connection, "_pool", pool)
+        monkeypatch.setattr(api, "_root", str(tmp_path))
+        made = await api.create_task_core({"requirement": "Use defaults", "project": {"name": "New project"}})
+        assert made["work_dir"] == str(tmp_path / "new-project")
+        assert (await projects.get_project(made["project_id"]))["work_dir"] == made["work_dir"]
+
+        async def fail(**kwargs):
+            raise RuntimeError("task insert failed")
+
+        monkeypatch.setattr(tasks, "create_task", fail)
+        with pytest.raises(RuntimeError, match="task insert failed"):
+            await api.create_task_core({"requirement": "r", "project": {"name": "No row"}})
+        assert await pool.fetchval("SELECT count(*) FROM projects") == 1
+        assert not (tmp_path / "no-row").exists()
+
+    _run(check)
 
 
 def test_project_crud_and_counts() -> None:

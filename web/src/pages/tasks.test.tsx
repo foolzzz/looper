@@ -3,15 +3,13 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TasksPage } from "@/pages/tasks";
-import { fetchTasks, type TaskInfo, type TasksPage as TaskPage } from "@/lib/api";
+import { fetchTasks, fetchProjectsList, type TaskInfo, type TasksPage as TaskPage } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
-  fetchTasks: vi.fn(), fetchManagers: vi.fn(async () => []),
+  fetchTasks: vi.fn(), fetchProjectsList: vi.fn(), fetchManagers: vi.fn(async () => []),
 }));
-vi.mock("@/lib/use-projects", () => ({
-  useProjects: () => ({ projects: [], reload: vi.fn(async () => {}) }),
-}));
+vi.mock("@/components/agent-profiles", () => ({ AgentProfileSelect: () => null }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const task = (id: string, day: number): TaskInfo => ({
@@ -40,6 +38,7 @@ describe("task list polling and pagination", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     requests = [];
+    vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
     vi.mocked(fetchTasks).mockImplementation((filters) => new Promise((resolve, reject) => {
       requests.push({ filters, resolve, reject });
     }));
@@ -53,6 +52,7 @@ describe("task list polling and pagination", () => {
     expect(vi.getTimerCount()).toBe(0);
     vi.useRealTimers();
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
   });
 
   const show = async (query = "") => { await act(async () => root.render(<TasksPage query={query} />)); };
@@ -68,6 +68,51 @@ describe("task list polling and pagination", () => {
     await act(async () => el!.click());
   };
   const rows = () => [...container.querySelectorAll(".divide-y p.truncate")].map((el) => el.textContent);
+
+  const fill = async (selector: string, value: string) => {
+    const field = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!;
+    const prototype = field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(prototype, "value")!.set!.call(field, value);
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+
+  it.each(["", "/tmp/looper-projects"])("creates a new project with blank directories only when projects_root is set (%s)", async (projectsRoot) => {
+    vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: projectsRoot });
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ status: "ok", result: {
+      task_id: "new-task", status: "init", project_id: "new-project", created_at: "2026-10-25T00:00:00Z",
+    } }));
+    vi.stubGlobal("fetch", fetcher);
+    await show();
+    await finish(0, page([]));
+    await click("New Task");
+    expect(container.querySelector<HTMLSelectElement>("#new-task-project")!.selectedOptions[0].textContent)
+      .toContain("New project");
+    await fill("#new-task-project-name", "Example");
+    await fill('textarea[placeholder="Describe what this task should accomplish..."]', "Build an example");
+    const projectDir = container.querySelector<HTMLInputElement>("#new-task-project-dir")!;
+    const taskDir = container.querySelector<HTMLInputElement>('input[placeholder="~/projects/my-app"], input[placeholder^="Default: a new directory"]')!;
+    expect(projectDir.value).toBe("");
+    expect(taskDir.value).toBe("");
+    expect(button("Create")!.disabled).toBe(!projectsRoot);
+    if (projectsRoot) {
+      expect(taskDir.placeholder).toBe(`Default: a new directory under ${projectsRoot}`);
+      expect(container.textContent).toContain(`Leave empty: Looper creates the new project's directory under ${projectsRoot}.`);
+      await click("Create");
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(fetcher.mock.calls[0][0]).toBe("/api/v1/tasks/create");
+      const body = JSON.parse((fetcher.mock.calls[0][1] as RequestInit).body as string);
+      expect(body).toEqual({ requirement: "Build an example", project: { name: "Example" } });
+      expect(body).not.toHaveProperty("work_dir");
+      expect(body.project).not.toHaveProperty("work_dir");
+    } else {
+      expect(taskDir.placeholder).toBe("~/projects/my-app");
+      expect(container.textContent).toContain("Required: the new project has no default directory.");
+      await click("Create");
+      expect(fetcher).not.toHaveBeenCalled();
+    }
+  });
 
   it.each(["initial", "refresh"])("applies a slow %s response and waits until it settles before polling again", async (pending) => {
     await show();

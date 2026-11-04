@@ -59,10 +59,10 @@ from ...db import manager_actions as db_actions, managers as db_managers, tasks 
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from . import Call, ErrorCode, OpError, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
-from .config import TOOLS as CONFIG_TOOLS
+from .config import TOOLS as CONFIG_TOOLS, project_tool
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .settings import TOOLS as SETTINGS_TOOLS
-from .tasks import TOOLS as TASK_TOOLS, task_create_tool
+from .tasks import TOOLS as TASK_TOOLS, task_create_tool, task_directory_tool
 
 logger = logging.getLogger(__name__)
 
@@ -286,11 +286,11 @@ class ManagerOps:
         return current
 
     def listing(self) -> list[dict[str, Any]]:
-        return [tool.listing() for tool in self._scope.tools.values()]
+        return [task_directory_tool(project_tool(tool)).listing() for tool in self._scope.tools.values()]
 
     async def current_listing(self) -> list[dict[str, Any]]:
         """The tools the Manager has now (``current_scope``), as ``tools/list`` names them."""
-        return [tool.listing() for tool in (await self.current_scope()).tools.values()]
+        return [task_directory_tool(project_tool(tool)).listing() for tool in (await self.current_scope()).tools.values()]
 
     async def _authorize(self, scope: OpsScope, name: str, arguments: Mapping[str, Any]) -> Tool:
         """The one check of what ``scope`` allows: the tool is among its tools, a read-only tool is only read, and a
