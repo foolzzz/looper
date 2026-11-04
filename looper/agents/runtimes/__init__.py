@@ -360,6 +360,8 @@ class RuntimeAdapter(ABC):
     # Claude Code's does (``--max-budget-usd``); a runtime that reports its cost only when a run ends has no cap.
     runtime_cost_capped: ClassVar[bool] = True
     can_replace_system_prompt: ClassVar[bool] = False
+    # Its runs load the operator's personal configuration (they keep the operator's HOME), and nothing turns that off.
+    loads_operator_config: ClassVar[bool] = False
     # How its resident sessions run. A runtime with ACP falls back to a process per turn when it cannot serve one.
     resident_transport: ClassVar[ResidentTransport] = ResidentTransport.PER_TURN
     # Whether its resident session ends a turn on request (Claude Code's control interrupt, Grok's ACP cancel), so
@@ -456,9 +458,10 @@ class RuntimeAdapter(ABC):
         raise RuntimeUnsupported(f"a {self.label} run cannot be hosted in a runner session")
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
-                    session_dir: Path | None = None) -> RunChannel:
+                    session_dir: Path | None = None, prompt_file: Path | None = None) -> RunChannel:
         """How the Worker talks to ``process``, started from ``run_command`` (or ``steer_command`` when
-        ``launch.steers``)."""
+        ``launch.steers``). ``prompt_file`` is the immutable Looper instruction prompt for runtimes
+        that deliver instructions on stdin."""
         return StreamChannel(self, process, model=launch.model)
 
     def kept_session_dir(self, command: Sequence[str]) -> Path | None:
@@ -569,13 +572,14 @@ def _adapters() -> dict[str, RuntimeAdapter]:
     from .api import ApiRuntime
     from .claude_code import ClaudeCodeRuntime
     from .codex import CodexRuntime
+    from .cursor_agent import CursorAgentRuntime
     from .dsh import DshRuntime
     from .grok import GrokRuntime
     from .omp import OmpRuntime
     from .pi import PiRuntime
 
     return {adapter.type: adapter for adapter in (
-        ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(), DshRuntime(), PiRuntime(), ApiRuntime())}
+        ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(), CursorAgentRuntime(), DshRuntime(), PiRuntime(), ApiRuntime())}
 
 
 # The runtime types, by type id. Code owns this set: a registered runtime of a type missing here cannot run.

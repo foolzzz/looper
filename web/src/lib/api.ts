@@ -2829,6 +2829,7 @@ export interface RuntimeType {
   /** Accepted effort levels, or null when the runtime uses the registry-wide choices. */
   effort_levels?: string[] | null;
   can_replace_system_prompt: boolean;
+  loads_operator_config: boolean;
   replace_system_prompt_refusal: string | null;
   /** Whether its Manager or Planner session can interrupt a reply (a user's stop is offered). */
   can_interrupt: boolean;

@@ -40,6 +40,7 @@ const REGISTRY: Registry = {
     runtime_id: `rt-${type}`, protocols: type === "codex" ? ["openai-responses"] : type === "stand-in" ? ["anthropic-messages", "openai-chat"] : ["anthropic-messages"], capabilities: [], roles: ["worker"],
     auth_kinds: ["api_key", "oauth"], can_replace_system_prompt: type !== "stand-in", can_interrupt: type === "claude-code",
     supported_models: null,
+    loads_operator_config: false,
     replace_system_prompt_refusal: type === "stand-in" ? REFUSAL : null,
   })),
   runtimes: ["claude-code", "codex", "stand-in"].map<Registry["runtimes"][number]>((type) => ({
@@ -649,6 +650,7 @@ const PI_RUNTIME: Runtime = {
 const PI_TYPE: RuntimeType = {
   type: "pi", in_process: false, label: "pi", default_executable: "pi", runtime_id: "rt-pi",
   supported_models: null,
+  loads_operator_config: false,
   protocols: ["openai-chat", "openai-responses"], capabilities: ["run", "resident_session", "resume"],
   roles: [...PI_ROLES], auth_kinds: ["api_key"], can_replace_system_prompt: true, replace_system_prompt_refusal: null, can_interrupt: false,
 };

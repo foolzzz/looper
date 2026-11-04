@@ -219,10 +219,10 @@ env CODEX_HOME=<home> ttadk codex --skip-check --mode mixed --
   ```
 
   提示从 stdin 写入后关闭（`write_turn` 照 Codex 的写法，再写一轮抛 `RuntimeError`）；提示不进 argv。`HOME` 是操作者的；环境是 `child_env.inherited()` 加设置和 provider 的变量，不含 `AGENT_CLI_CREDENTIAL_STORE`、`CURSOR_API_KEY`、`CURSOR_AUTH_TOKEN`、`CURSOR_API_ENDPOINT`（设置或 provider 写了其中任何一个就拒绝启动），另设 `NO_OPEN_BROWSER=1`。
-- **运行目录：** `<runtime_root>/.local/cursor-agent/runs/<sha256>/`（0700，按插件内容命名，同 `grok.write_home`；一天没写过的目录被删掉），里面是 `config/`（`CURSOR_CONFIG_DIR`）、`data/`（`CURSOR_DATA_DIR`）和 `looper-plugin/`。这些都是 Looper 自己的状态，不落到操作者的 `~/.cursor/`。
+- **运行目录：** `<runtime_root>/.local/cursor-agent/runs/<sha256>/`（0700，按指令和插件内容命名，同 `grok.write_home`；一天没写过的目录被删掉），里面是 `config/`（`CURSOR_CONFIG_DIR`）、`data/`（`CURSOR_DATA_DIR`）和 `looper-plugin/`。这些都是 Looper 自己的状态，不落到操作者的 `~/.cursor/`。
 - **常驻会话（管家、规划者）：** 逐轮续接（`per_turn.PerTurnSession`），第二轮起加 `--resume <chatId>`，chatId 取自 `system/init` 的 `session_id`。会话在 `CURSOR_CONFIG_DIR/chats/<md5(cwd)>/<chatId>/`，所以续接要同一个 `CURSOR_CONFIG_DIR` 和同一个工作目录（常驻 owner 的工作目录本来固定）。每个常驻 owner 有自己的目录 `<runtime_root>/.local/cursor-agent/sessions/<label>/`，同样分 `config/`、`data/`、`looper-plugin/`；每轮前从这一轮的运行目录同步插件（同 `codex._sync_home` 的做法），运行目录过期删掉也不影响会话。
-- **system prompt：** 写进 Looper 插件的 `rules/looper.md`（`alwaysApply: true`），前面是适配器的运行时说明（只读你最后一条消息；平台工具在 MCP 服务器 `looper` 里），后面是 Looper 的 prompt。
-- **MCP：** 运行的 `mcp_config`（含 `looper` 服务器和令牌）写进 Looper 插件根目录的 `.mcp.json`（插件级不需要审批，2.4）。stdio 服务器的命令、参数和 `env` 照写（`HOME` 本来就是操作者的），HTTP 服务器照写；不支持的记进 `launch_record`。操作者 `~/.cursor/mcp.json` 的用户级服务器和启用的 Claude 插件带的 MCP 服务器也会加载（第 7 节）。
+- **system prompt：** Cursor CLI 2026.10.22 在 headless 模式不应用 `--plugin-dir` 的 rules，因此不生成规则文件，manifest 不声明 `rules`。stdin 先写 `<looper_instructions>`，其中依次为运行时说明和完整 Looper prompt，再写 `</looper_instructions>`、空行和本轮提示，随后关闭。提示预览展示同样的两部分；运行目录哈希仍覆盖指令。运行时说明要求只把最后一条消息作为报告，并按 Cursor 中可见的工具名（如 `looper_room_*`）使用平台工具。
+- **MCP：** 运行的 `mcp_config`（含 `looper` 服务器和令牌）写进 Looper 插件根目录的 `.mcp.json`（插件级不需要审批，2.4）。stdio 服务器的命令、参数和 `env` 照写（`HOME` 本来就是操作者的）；仅 Cursor 运行的 Looper 平台服务器增加 `LOOPER_MCP_MAX_WAIT_SECONDS=50`，桥接层在工具描述及 schema 中声明并实际限制 `looper_room_inbox.wait_seconds`（当前唯一长轮询）。安装包中 MCP 请求默认超时为 60 秒，预留 10 秒给往返和序列化，HTTP 服务器照写；不支持的记进 `launch_record`。操作者 `~/.cursor/mcp.json` 的用户级服务器和启用的 Claude 插件带的 MCP 服务器也会加载（第 7 节）。
 - **已装插件和 skill：** Looper 的已装插件本来是 Claude Code 格式（`.claude-plugin/plugin.json`），Cursor 的 `--plugin-dir` 认这个格式，直接逐个传。插件里 Cursor 不支持的部分照实记进 `runtime_catalog.skipped`（核实前先保守：只声明 skill 和 MCP 能用）。
 - **隔离（D8）：** 没有。Cursor 进程用操作者的 `HOME`，操作者的个人 Cursor 和 Claude Code 配置会加载（第 7 节）；Looper 只管住自己写的东西（上面的运行目录）。agent 的 shell 和 MCP 服务器拿到的也是操作者的 `HOME`（真实 HOME 实验）。`isolation_id = "cursor-operator-home/v1"`；运行时类型声明 `loads_operator_config = True`（运行时视图带出，Agent Runtimes 页据此写明）；`launch_record` 记 `personal_config: ["cursor", "claude-code"]`；prompt 视图多一块"操作者的 Cursor 与 Claude Code 配置（不显示）"。
 - **登录（D8）：** 内置 provider `prov-cursor-login`（vendor `cursor-login`，OAuth，`oauth_runtime_type = 'cursor-agent'`，端点协议沿用 `grok-login` 的写法记为 `openai-responses`，只用于配对），代表操作者本机的 Cursor 登录。登录检查是 `cursor-agent status --format json`：操作者的 `HOME`，一对用完即删的临时 `CURSOR_CONFIG_DIR`/`CURSOR_DATA_DIR`，去掉上面那 4 个变量，`NO_OPEN_BROWSER=1`，stdin 为空，20 秒超时。以 0 退出且 `status` 为 `authenticated`、`isAuthenticated` 为真才算已登录；`unauthenticated`、`partially-authenticated` 为未登录；退出码非 0、超时、读不懂为检查失败。结果缓存 30 秒；列 provider 时立即返回已有缓存（即使已过期），没有缓存时返回检查中，缺失或过期时最多启动一个后台检查。启动检查与 doctor 同步取得有效缓存或执行检查。未登录时运行不启动，原因写"Cursor is not signed in on this machine: run `cursor-agent login`"；检查失败时写明原因。状态显示在 Settings → LLM Providers 和 `cursor_login` 自检里（自检只在有 Agent Profile 用它时做）。Looper 不读钥匙串、不读凭据文件；没有链接，也没有要操作者清除的"分叉"记录。用 JSON 而不是匹配文本里的 `Logged in as`：文本只在取到邮箱时才这样写（2.4）。
@@ -243,6 +243,8 @@ env CODEX_HOME=<home> ttadk codex --skip-check --mode mixed --
 | 咨询 | ⚠️ 一次性副本 | 没有分叉会话的参数（`consult_command` 抛 `RuntimeUnsupported`，按现有规则转给规划者） |
 
 ### 6.6 不选的 Cursor 接法
+
+- **插件 rules 传指令：** Cursor CLI 2026.10.22 的 `--plugin-dir` 在 headless 模式加载 `.mcp.json`，但不应用 `alwaysApply` rules；Looper 指令必须随 stdin 提示传入（6.4），不能只写进插件规则。
 
 - **ACP（`agent acp`）：** 有 `session/new` 注入 MCP、`session/load`、`session/cancel`，能做可中断的常驻会话，但 `session/prompt` 不报用量（2.4 的调研），且要一个新的 JSON-RPC 客户端。v0 先用 headless 加 `--resume`，ACP 记为后续（同 Grok 先 headless 后 ACP 的顺序）。
 - **API key（`CURSOR_API_KEY`）：** 用 key 认证时 Cursor 会把换来的令牌写进凭据存储，默认是钥匙串，可能覆盖操作者的登录（2.4）；要配 `AGENT_CLI_CREDENTIAL_STORE=memory`，团队策略也可能不允许 key。维护者不用（D8）。
@@ -336,7 +338,7 @@ env CURSOR_CONFIG_DIR=<运行目录>/config CURSOR_DATA_DIR=<运行目录>/data 
 |---|---|---|
 | 1 | ✅ 钥匙串里的团队登录在 Looper 的布局下可用（真实 `HOME`，Looper 的 `CURSOR_CONFIG_DIR`/`CURSOR_DATA_DIR`，去掉 4 个变量）。原来的"文件存储加链接"随 D8 作废 | 已核实：真实 HOME 与双目录实验以 0 退出，`apiKeySource: "login"` |
 | 2 | ✅ 提示从 stdin 读（无位置参数） | 已核实：真实 HOME 与双目录实验|
-| 3 | `--plugin-dir` 的 `rules/looper.md`（`alwaysApply`）和 `.mcp.json` 生效 | 未核实（真实 HOME 与双目录实验没带插件目录）。真实路径验证的一次运行：规则要求回复以固定标记结尾，提示要求调用探针 MCP 的 `ping` 并原样回复；看回复和探针日志 |
+| 3 | `--plugin-dir` 的 rules 与 `.mcp.json` | 真实 headless 运行已确认 `.mcp.json` 加载，但 `alwaysApply` rules 未进入模型上下文；因此指令改由 stdin 传入（6.4、6.6） |
 | 4 | ✅ stream-json 的真实形状，`usage` 出现 | 已核实：真实 HOME 与双目录实验（2.4 的事件一行）；新看到 `connection/*`、`retry/*`，`result.result` 拼接各次尝试。真实 HOME 实验的输出去掉路径和 id 后是测试样本 |
 | 5 | ✅ Cursor 的 shell 拿到的 `HOME` | 已核实：真实 HOME 实验里是操作者的真实家目录 |
 | 6 | SIGTERM 后 shell 子进程和 `worker-server` 是否残留 | 未核实。让一次运行执行 `sleep 60` 时按 `proc_tree.end` 结束，再看进程表 |

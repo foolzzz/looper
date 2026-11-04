@@ -354,9 +354,10 @@ class ProcessRun:
     """One runtime process, with its channel and process-tree cleanup owned together."""
 
     def __init__(self, runtime: RuntimeAdapter, command: list[str], *, launch: Launch,
-                 cwd: str | Path, session_dir: Path | None, label: str) -> None:
+                 cwd: str | Path, session_dir: Path | None, label: str, prompt_file: Path | None = None) -> None:
         self._runtime, self._command, self._launch = runtime, command, launch
         self._cwd, self._session_dir, self._label = cwd, session_dir, label
+        self._prompt_file = prompt_file
         self.process: asyncio.subprocess.Process | None = None
         self._channel: RunChannel | None = None
         self._ended = False
@@ -383,7 +384,7 @@ class ProcessRun:
             raise RunStartError(str(exc)) from exc
         try:
             self._channel = self._runtime.run_channel(self.process, launch=self._launch, cwd=self._cwd,
-                                                       session_dir=self._session_dir)
+                                                       session_dir=self._session_dir, prompt_file=self._prompt_file)
         except BaseException:
             await self.end()
             raise
@@ -1474,6 +1475,7 @@ class WorkerPool:
                         wp.handle = handle  # register before activity and record writes can lose the lock
                 else:
                     handle = ProcessRun(runtime, command, launch=launch, cwd=work_dir, session_dir=session_dir,
+                                        prompt_file=prompt_file,
                                         label=f"worker {worker_id}")
         except (RuntimeUnsupported, OSError) as exc:
             problem = f"Cannot prepare {runtime.label}: {exc}"

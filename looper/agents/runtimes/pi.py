@@ -283,7 +283,7 @@ class PiRuntime(RuntimeAdapter):
         return [*command[:start], *args]
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
-                    session_dir: Path | None = None) -> RunChannel:
+                    session_dir: Path | None = None, prompt_file: Path | None = None) -> RunChannel:
         from .pi_steer import PiChannel
 
         if not launch.steers:

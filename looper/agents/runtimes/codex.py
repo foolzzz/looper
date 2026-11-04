@@ -299,7 +299,7 @@ class CodexRuntime(RuntimeAdapter):
         return ["env", f"CODEX_HOME={home}", *self._program(executable, launch), *args]
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
-                    session_dir: Path | None = None) -> RunChannel:
+                    session_dir: Path | None = None, prompt_file: Path | None = None) -> RunChannel:
         from .codex_steer import CodexChannel
 
         if not launch.steers:

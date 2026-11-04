@@ -76,13 +76,16 @@ def _runtime_prompt(runtime: str, cwd: Path, root: Path) -> str:
 
 @pytest.mark.parametrize("files, expected", [
     ({"CLAUDE.md": "c"},
-     {"claude-code": ["CLAUDE.md"], "codex": ["CLAUDE.md"], "omp": ["CLAUDE.md"], "grok": ["CLAUDE.md"]}),
+     {"claude-code": ["CLAUDE.md"], "codex": ["CLAUDE.md"], "omp": ["CLAUDE.md"], "grok": ["CLAUDE.md"],
+      "cursor-agent": ["CLAUDE.md"]}),
     ({"AGENTS.md": "a"},
-     {"claude-code": ["AGENTS.md"], "codex": ["AGENTS.md"], "omp": ["AGENTS.md"], "grok": ["AGENTS.md"]}),
-    # Grok reads every name it knows in a directory: both.
+     {"claude-code": ["AGENTS.md"], "codex": ["AGENTS.md"], "omp": ["AGENTS.md"], "grok": ["AGENTS.md"],
+      "cursor-agent": ["AGENTS.md"]}),
+    # Grok and Cursor read every name they know in a directory, in their own order.
     ({"CLAUDE.md": "c", "AGENTS.md": "a"},
-     {"claude-code": ["CLAUDE.md"], "codex": ["AGENTS.md"], "omp": ["AGENTS.md"], "grok": ["CLAUDE.md", "AGENTS.md"]}),
-    ({}, {"claude-code": [], "codex": [], "omp": [], "grok": []}),
+     {"claude-code": ["CLAUDE.md"], "codex": ["AGENTS.md"], "omp": ["AGENTS.md"], "grok": ["CLAUDE.md", "AGENTS.md"],
+      "cursor-agent": ["AGENTS.md", "CLAUDE.md"]}),
+    ({}, {"claude-code": [], "codex": [], "omp": [], "grok": [], "cursor-agent": []}),
 ], ids=["only CLAUDE.md", "only AGENTS.md", "both", "neither"])
 def test_each_runtime_is_given_one_file_of_the_repository_read_by_itself(
     tmp_path: Path, files: dict[str, str], expected: dict[str, list[str]],
@@ -107,6 +110,7 @@ def test_below_the_root_claude_code_reads_the_projects_claude_md_and_the_others_
                                     "codex": _native("../CLAUDE.md", "AGENTS.md"),
                                     "omp": _native("../CLAUDE.md", "AGENTS.md"),
                                     "grok": _native("../CLAUDE.md", "AGENTS.md"),
+                                    "cursor-agent": _native("../CLAUDE.md", "AGENTS.md"),
                                     "api": [],
                                     # DSH injects the same per-directory selection, from the repository root down.
                                     "dsh": [_injected("../CLAUDE.md", "root\n"), _injected("AGENTS.md", "pkg\n")],

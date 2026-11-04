@@ -1,0 +1,63 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/workspace/repo","session_id":"00000000-0000-4000-8000-000000000001","model":"Auto Balance","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Run the shell command `echo HOME=$HOME` once, then reply with exactly: pong <the line it printed>"}]},"session_id":"00000000-0000-4000-8000-000000000001"}
+{"type":"thinking","subtype":"delta","text":"The","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788018757}
+{"type":"thinking","subtype":"delta","text":" user wants me","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788019016}
+{"type":"thinking","subtype":"delta","text":" to","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788019044}
+{"type":"thinking","subtype":"delta","text":" run","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788019092}
+{"type":"thinking","subtype":"delta","text":" a","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788019148}
+{"type":"thinking","subtype":"delta","text":" shell","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788019186}
+{"type":"thinking","subtype":"delta","text":" command","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788019283}
+{"type":"thinking","subtype":"delta","text":" `echo","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788019428}
+{"type":"thinking","subtype":"delta","text":" HOME=$HO","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788019526}
+{"type":"thinking","subtype":"delta","text":"ME`","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788019676}
+{"type":"thinking","subtype":"delta","text":" once,","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788019725}
+{"type":"thinking","subtype":"delta","text":" then","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788019851}
+{"type":"thinking","subtype":"delta","text":" reply","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788019919}
+{"type":"thinking","subtype":"delta","text":" with","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788020011}
+{"type":"thinking","subtype":"delta","text":" exactly:","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788020094}
+{"type":"thinking","subtype":"delta","text":" pong","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788020239}
+{"type":"thinking","subtype":"delta","text":" <the","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788020323}
+{"type":"thinking","subtype":"delta","text":" line","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788020404}
+{"type":"thinking","subtype":"delta","text":" it","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788020506}
+{"type":"thinking","subtype":"delta","text":" printed>","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788020533}
+{"type":"thinking","subtype":"delta","text":"\n\nI considered invoking","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788021339}
+{"type":"thinking","subtype":"delta","text":" a superpowers skill","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788021446}
+{"type":"thinking","subtype":"delta","text":" first, but this is ","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788021527}
+{"type":"thinking","subtype":"delta","text":"a trivial one-shot shell","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788021620}
+{"type":"thinking","subtype":"delta","text":" command with an exact","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788021723}
+{"type":"thinking","subtype":"delta","text":" reply format. I will","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788021821}
+{"type":"thinking","subtype":"delta","text":" run the command directly.","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788022156}
+{"type":"thinking","subtype":"completed","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788022156}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"> Auto routed to Grok 4.7\n\n我先执行这一条命令，再按它的输出原样回复。"}]},"session_id":"00000000-0000-4000-8000-000000000001","model_call_id":"00000000-0000-4000-8000-000000000002-0-0000","timestamp_ms":1793788022158}
+{"type":"tool_call","subtype":"started","call_id":"call-00000000-0000-4000-8000-000000000003-0\nfc_00000000-0000-4000-8000-000000000004_0","tool_call":{"shellToolCall":{"args":{"command":"echo HOME=$HOME","workingDirectory":"","timeout":30000,"toolCallId":"call-00000000-0000-4000-8000-000000000003-0\nfc_00000000-0000-4000-8000-000000000004_0","simpleCommands":["echo"],"hasInputRedirect":false,"hasOutputRedirect":false,"parsingResult":{"parsingFailed":false,"executableCommands":[{"name":"echo","args":[{"type":"concatenation","value":"HOME=$HOME"}],"fullText":"echo HOME=$HOME"}],"hasRedirects":false,"hasCommandSubstitution":false,"redirects":[]},"fileOutputThresholdBytes":"40000","isBackground":false,"skipApproval":false,"timeoutBehavior":"TIMEOUT_BEHAVIOR_BACKGROUND","hardTimeout":86400000,"description":"Print HOME environment variable","closeStdin":true,"conversationId":"00000000-0000-4000-8000-000000000001","adminCommandDenylist":[],"requestId":"00000000-0000-4000-8000-000000000002"},"description":"Print HOME environment variable"},"hookAdditionalContexts":[],"toolCallId":"call-00000000-0000-4000-8000-000000000003-0\nfc_00000000-0000-4000-8000-000000000004_0","startedAtMs":"1793788022087"},"model_call_id":"00000000-0000-4000-8000-000000000002-0-0000","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788022158}
+{"type":"tool_call","subtype":"completed","call_id":"call-00000000-0000-4000-8000-000000000003-0\nfc_00000000-0000-4000-8000-000000000004_0","tool_call":{"shellToolCall":{"args":{"command":"echo HOME=$HOME","workingDirectory":"","timeout":30000,"toolCallId":"call-00000000-0000-4000-8000-000000000003-0\nfc_00000000-0000-4000-8000-000000000004_0","simpleCommands":["echo"],"hasInputRedirect":false,"hasOutputRedirect":false,"parsingResult":{"parsingFailed":false,"executableCommands":[{"name":"echo","args":[{"type":"concatenation","value":"HOME=$HOME"}],"fullText":"echo HOME=$HOME"}],"hasRedirects":false,"hasCommandSubstitution":false,"redirects":[]},"fileOutputThresholdBytes":"40000","isBackground":false,"skipApproval":false,"timeoutBehavior":"TIMEOUT_BEHAVIOR_BACKGROUND","hardTimeout":86400000,"description":"Print HOME environment variable","closeStdin":true,"conversationId":"00000000-0000-4000-8000-000000000001","adminCommandDenylist":[],"requestId":"00000000-0000-4000-8000-000000000002"},"result":{"success":{"command":"echo HOME=$HOME","workingDirectory":"","exitCode":0,"signal":"","stdout":"HOME=/home/user\n","stderr":"","executionTime":17911,"interleavedOutput":"HOME=/home/user\n","localExecutionTimeMs":985},"isBackground":false},"description":"Print HOME environment variable"},"hookAdditionalContexts":[],"toolCallId":"call-00000000-0000-4000-8000-000000000003-0\nfc_00000000-0000-4000-8000-000000000004_0","startedAtMs":"1793788022087","completedAtMs":"1793788056110"},"model_call_id":"00000000-0000-4000-8000-000000000002-0-0000","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788056172}
+{"type":"thinking","subtype":"delta","text":"The","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788056932}
+{"type":"thinking","subtype":"delta","text":" user","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788057022}
+{"type":"thinking","subtype":"delta","text":" asked","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788057073}
+{"type":"thinking","subtype":"delta","text":" me to reply","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788057326}
+{"type":"thinking","subtype":"delta","text":" with","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788057357}
+{"type":"thinking","subtype":"delta","text":" exactly:","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788057445}
+{"type":"thinking","subtype":"delta","text":" pong","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788057597}
+{"type":"thinking","subtype":"delta","text":" <the","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788057679}
+{"type":"thinking","subtype":"delta","text":" line","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788057758}
+{"type":"thinking","subtype":"delta","text":" it printed>\n\nThe command printed:","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788057887}
+{"type":"thinking","subtype":"delta","text":" HOME=/home/user","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788058396}
+{"type":"thinking","subtype":"completed","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788058396}
+{"type":"connection","subtype":"reconnecting","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788061398,"attempt":1,"endpoint_url":"https://cursor-endpoint.invalid"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong HOME=/home/user"}]},"session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788063471}
+{"type":"retry","subtype":"starting","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788063471,"attempt":1,"is_resume":true}
+{"type":"retry","subtype":"resuming","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788063472,"checkpoint_turn_count":1,"attempt":1}
+{"type":"connection","subtype":"reconnected","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788063922}
+{"type":"thinking","subtype":"delta","text":"The","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788065245}
+{"type":"thinking","subtype":"delta","text":" user","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788065312}
+{"type":"thinking","subtype":"delta","text":" wants","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788065368}
+{"type":"thinking","subtype":"delta","text":" me to reply","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788065631}
+{"type":"thinking","subtype":"delta","text":" with exactly \"pong HOME=/home/user\" which I did.","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788066067}
+{"type":"thinking","subtype":"completed","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788066067}
+{"type":"connection","subtype":"reconnecting","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788069069,"attempt":2,"endpoint_url":"https://cursor-endpoint.invalid"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong HOME=/home/user"}]},"session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788073192}
+{"type":"retry","subtype":"starting","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788073192,"attempt":2,"is_resume":true}
+{"type":"retry","subtype":"resuming","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788073192,"checkpoint_turn_count":1,"attempt":2}
+{"type":"connection","subtype":"reconnected","session_id":"00000000-0000-4000-8000-000000000001","timestamp_ms":1793788073575}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong HOME=/home/user"}]},"session_id":"00000000-0000-4000-8000-000000000001"}
+{"type":"result","subtype":"success","duration_ms":70585,"duration_api_ms":70585,"is_error":false,"result":"> Auto routed to Grok 4.7\n\n我先执行这一条命令，再按它的输出原样回复。pong HOME=/home/userpong HOME=/home/userpong HOME=/home/user","session_id":"00000000-0000-4000-8000-000000000001","request_id":"00000000-0000-4000-8000-000000000002","usage":{"inputTokens":95,"outputTokens":8,"cacheReadTokens":19584,"cacheWriteTokens":0}}
