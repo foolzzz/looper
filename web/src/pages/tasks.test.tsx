@@ -69,6 +69,23 @@ describe("task list polling and pagination", () => {
   };
   const rows = () => [...container.querySelectorAll(".divide-y p.truncate")].map((el) => el.textContent);
 
+  it("shows the Running filter count and requests it without changing an executing badge", async () => {
+    const executing: TaskInfo = { ...first, status: "executing", group: "in_progress" };
+    const result = { ...page([executing]), counts: { running: 3, waiting: 1 } };
+    await act(async () => root.render(<TasksPage onNavigate={(_sub, query) => {
+      root.render(<TasksPage query={query} />);
+    }} />));
+    await finish(0, result);
+    expect(button("Running3")).toBeDefined();
+    expect(button("All4")).toBeDefined();
+    await click("Running3");
+    expect(requests[1].filters?.status).toBe("running");
+    await finish(1, result);
+    expect(rows()).toEqual(["first"]);
+    expect(container.textContent).toContain("Executing");
+    expect(button("Running3")).toBeDefined();
+  });
+
   const fill = async (selector: string, value: string) => {
     const field = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector)!;
     const prototype = field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;

@@ -47,3 +47,38 @@ def test_console_and_manager_task_lists_keep_their_filters_and_compact_keys(
         assert {"cost", "manager_name", "requirement", "project_id"} <= set(page["tasks"][0])
 
     run_db(test, monkeypatch, timeout=30)
+
+
+def test_running_filter_lists_planner_work_and_counts_every_task_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents import projects
+    from looper.db import tasks
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        for status in ("executing", "planning", "running", "waiting"):
+            await _task(pool, f"task-{status}", status, project)
+
+        status, page = await _get(_server(), "/api/v1/tasks/page", {"status": "running"})
+        assert status == 200, page
+        assert {row["task_id"] for row in page["tasks"]} == {
+            "task-executing", "task-planning", "task-running",
+        }
+        assert {row["status"] for row in page["tasks"]} == {"executing", "planning", "running"}
+        assert page["counts"] == {"running": 3, "waiting": 1}
+        all_tasks = await projects.list_tasks_page()
+        assert sum(page["counts"].values()) == len(all_tasks["tasks"]) == 4
+        waiting = await projects.list_tasks_page(status="waiting")
+        assert [row["task_id"] for row in waiting["tasks"]] == ["task-waiting"]
+        compact = await projects.list_tasks_page(status="running", compact=True)
+        assert {row["task_id"] for row in compact["tasks"]} == {
+            "task-executing", "task-planning", "task-running",
+        }
+
+        # Unknown filter names retain exact matching and still contribute once to All.
+        await _task(pool, "task-archived", "archived", project)
+        exact = await tasks.list_tasks(status="archived", pool=pool)
+        assert [row["id"] for row in exact] == ["task-archived"]
+        assert await tasks.list_tasks(status="missing", pool=pool) == []
+        assert await tasks.count_by_status(pool=pool) == {"running": 3, "waiting": 1, "archived": 1}
+
+    run_db(test, monkeypatch, timeout=30)
