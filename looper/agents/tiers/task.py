@@ -346,7 +346,7 @@ class TaskRouter:
 
     async def _handle_start(self, envelope: MessageEnvelope) -> None:
         """Start a ready task, once."""
-        from ..scheduler import _project_firing
+        from ..scheduler import project_dispatch
 
         task_id = envelope.payload.get("task_id", "")
         try:
@@ -356,9 +356,9 @@ class TaskRouter:
             return
         if snapshot is None:
             return
-        # Publication only queues TASK_START. Keep deletion out until the Router has claimed
-        # the row and finished preparing its workspace and Planner; refuse starts during cleanup.
-        with _project_firing(snapshot["project_id"]) as allowed:
+        # Publication only queues TASK_START. Wait through cleanup, then keep the row claim,
+        # workspace preparation and Planner start admitted together.
+        async with project_dispatch(snapshot["project_id"], wait_for_delete=False) as allowed:
             if not allowed:
                 return
             try:
@@ -660,7 +660,7 @@ class TaskRouter:
     async def _handle_restart(self, envelope: MessageEnvelope) -> None:
         """Run a task again as its ``RestartMode`` says: continued from its saved plan (the default), planned anew,
         or continued at a raised spend cap."""
-        from ..scheduler import _project_firing
+        from ..scheduler import project_dispatch
 
         assert self._bus is not None
         task_id = envelope.payload.get("task_id", "")
@@ -692,8 +692,12 @@ class TaskRouter:
             return
 
         # Keep restart cleanup and Planner startup inside the same barrier as a ready start.
-        with _project_firing(db_row["project_id"]) as allowed:
+        async with project_dispatch(db_row["project_id"], wait_for_delete=False) as allowed:
             if not allowed:
+                return
+            # Cleanup may have removed the task or updated its checkout paths while we waited.
+            db_row = await db_tasks.get_task(task_id)
+            if db_row is None or db_row["status"] not in restartable:
                 return
             start_over = mode is RestartMode.START_OVER
             if start_over:

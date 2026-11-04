@@ -18,7 +18,12 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 @pytest.fixture(autouse=True)
 def isolated_notes_root(monkeypatch, tmp_path):
+    from looper import child_env
+
     monkeypatch.setattr(operator_notes, "_root", str(tmp_path / "operator-notes"))
+    # A basetemp inside the worktree must not inherit the repository's own notes key.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setattr(child_env, "_allowed", child_env._allowed | {"GIT_CEILING_DIRECTORIES"})
 
 
 async def _project(pool, old, *, name="Move example"):
@@ -704,7 +709,10 @@ def test_move_scans_before_transaction_and_rechecks_state(monkeypatch, tmp_path,
         in_transaction = False
 
         def scanned(kind, scan, directory):
+            from looper.agents.scheduler import _project_firings
+
             assert not in_transaction
+            assert project["id"] not in _project_firings or not _project_firings[project["id"]].deleting
             calls.append(kind)
             return scan(directory)
 
@@ -767,13 +775,20 @@ def test_move_without_destination_skips_existing_paths(monkeypatch, tmp_path):
     run_db(check, monkeypatch, timeout=30)
 
 
-@pytest.mark.parametrize("case", ["move", "occupied", "off", "failure", "same-key"])
+@pytest.mark.parametrize("case", ["move", "occupied", "off", "failure", "same-key", "repo-root", "subdirectory"])
 def test_move_operator_notes_after_commit(monkeypatch, tmp_path, case):
     old, new = tmp_path / "old", tmp_path / "new"
+    if case == "subdirectory":
+        repo = tmp_path / "repository"
+        repo.mkdir()
+        old = repo / "old"
     root = operator_notes.notes_root()
 
     async def check(pool):
         project = await _project(pool, old)
+        if case in ("repo-root", "subdirectory"):
+            repo = old if case == "repo-root" else old.parent
+            _git(repo, "init", "-q")
         if case == "off":
             await projects.update_project(project["id"], execution={"operator_notes": "off"}, pool=pool)
         if case == "same-key":
@@ -811,7 +826,7 @@ def test_move_operator_notes_after_commit(monkeypatch, tmp_path, case):
         notes = result["notes"]
         assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(new)
         summary = await pool.fetchval("SELECT summary FROM project_activity WHERE project_id=$1", project["id"])
-        if case == "move":
+        if case in ("move", "repo-root"):
             assert notes == {"moved": True, "from": old_notes.name, "to": new_notes.name}
             assert not old_notes.exists()
             assert "notes moved" in summary
@@ -827,6 +842,8 @@ def test_move_operator_notes_after_commit(monkeypatch, tmp_path, case):
                 assert list(root.iterdir()) == [old_notes]
             elif case == "failure":
                 assert "another filesystem" in notes["reason"]
+            elif case in ("same-key", "subdirectory"):
+                assert notes["reason"] == f"they belong to {old_key}, which does not move"
         assert (new / ("subdir/kept.txt" if case != "same-key" else ".git")).is_file()
 
     run_db(check, monkeypatch, timeout=30)
@@ -870,3 +887,151 @@ def test_move_does_not_repair_submodule_as_linked_worktree(monkeypatch, tmp_path
         assert _git(new / "child", "status", "--porcelain") == ""
 
     run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("link_old", [False, True])
+def test_move_refuses_submodule_checkout_preserving_files_and_rows(monkeypatch, tmp_path, link_old):
+    superproject, module = tmp_path / "superproject", tmp_path / "module"
+    old, new = superproject / "child", tmp_path / "new"
+    for repo in (superproject, module):
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        _git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+             "commit", "--allow-empty", "-qm", "Initial")
+    _git(superproject, "-c", "protocol.file.allow=always", "submodule", "add", str(module), "child")
+    (old / "kept.txt").write_text("Keep uncommitted files")
+    marker = (old / ".git").read_text()
+
+    async def check(pool):
+        project = await projects.create_project(name="Submodule", work_dir=str(old), pool=pool)
+        await _schedule(pool, project["id"], old)
+        before = await _rows(pool)
+        for operation in (lambda: api.preview_project_move(project, {"to": str(new)}, db=pool),
+                          lambda: api.move_project_dir(project["id"], {"to": str(new), "link_old": link_old})):
+            with pytest.raises(api.RequestError) as error:
+                await operation()
+            assert error.value.status == api.HTTP_400
+            assert str(error.value) == "the project's directory is a git submodule checkout; move the superproject instead"
+            assert await _rows(pool) == before
+            assert not new.exists() and not old.is_symlink()
+            assert (old / ".git").read_text() == marker
+            assert (old / "kept.txt").read_text() == "Keep uncommitted files"
+            assert _git(old, "rev-parse", "--show-toplevel") == str(old.resolve())
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("action", ["start", "restart"])
+def test_task_start_during_move_waits_and_runs_after_commit(monkeypatch, tmp_path, action):
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+
+    from looper.agents import scheduler
+    from looper.agents.bus import MessageBus
+    from looper.agents.message import MANAGER_ADDRESS, TASK_ROUTER_ADDRESS, MessageType, planner_address
+    from looper.agents.tiers.planner import PlannerAgent
+    from looper.agents.tiers.task import TaskRouter
+    from looper.db import connection
+
+    old, new = tmp_path / "old", tmp_path / "new"
+
+    async def check(pool):
+        project = await _project(pool, old)
+        await tasks.create_task(task_id="waiting-task", requirement="Run once", project_id=project["id"],
+                                work_dir=str(old), status=tasks.READY if action == "start" else "stopped", pool=pool)
+        router = TaskRouter(runtime_root=tmp_path / "runtime")
+        bus = MessageBus(runtime_root=tmp_path / "runtime")
+        router._bus = bus
+        monkeypatch.setattr(PlannerAgent, "start", AsyncMock())
+        monkeypatch.setattr(PlannerAgent, "stop", AsyncMock())
+        transaction = connection.transaction
+        pending = None
+
+        @asynccontextmanager
+        async def transaction_during_move():
+            nonlocal pending
+            assert scheduler._project_firings[project["id"]].deleting
+            if action == "start":
+                answer = await api.start_ready_task("waiting-task", bus, MANAGER_ADDRESS)
+                assert answer["started"] == "waiting-task"
+            else:
+                await api.control_task("waiting-task", "restart", bus, MANAGER_ADDRESS)
+            envelope = await bus.get_queue(TASK_ROUTER_ADDRESS.agent_id).get()
+            pending = asyncio.create_task((router._handle_start if action == "start" else router._handle_restart)(envelope))
+            # Drain the task snapshot read so the request has actually reached the barrier.
+            entered = asyncio.Event()
+            get_task = tasks.get_task
+
+            async def snapshot(*args, **kwargs):
+                row = await get_task(*args, **kwargs)
+                entered.set()
+                return row
+
+            monkeypatch.setattr(tasks, "get_task", snapshot)
+            await entered.wait()
+            await asyncio.sleep(0)
+            assert not pending.done(), "the Router dropped an acknowledged request"
+            PlannerAgent.start.assert_not_awaited()
+            async with transaction() as conn:
+                yield conn
+
+        async def check_repair(*args):
+            assert project["id"] not in scheduler._project_firings or not scheduler._project_firings[project["id"]].deleting
+            await pending
+            PlannerAgent.start.assert_awaited_once()
+            request = await bus.get_queue(planner_address("waiting-task").agent_id).get()
+            assert request.message_type is MessageType.TASK_REQUEST
+            assert request.payload["work_dir"] == str(old) and old.resolve() == new.resolve()
+            assert old.is_symlink() and (new / "subdir" / "kept.txt").exists()
+            assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(new)
+            assert (await tasks.get_task("waiting-task", pool=pool))["status"] in tasks.ACTIVE_STATUSES
+            return []
+
+        monkeypatch.setattr(connection, "transaction", transaction_during_move)
+        monkeypatch.setattr(project_move, "_repair", check_repair)
+        try:
+            await api.move_project_dir(project["id"], {"to": str(new)})
+        finally:
+            if pending is not None:
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+            await router.stop()
+            await bus.shutdown()
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+def test_schedule_gate_completing_during_barrier_waits_instead_of_failing(monkeypatch, tmp_path):
+    from looper.agents import scheduler
+    from looper.agents.schedule_gate import GateResult
+    from looper.db import schedules as db_schedules
+    from tests.schedule_support import run_scheduled
+
+    async def check(env):
+        started, finish, completing = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def run_gate(*args, **kwargs):
+            started.set()
+            await finish.wait()
+            completing.set()
+            return GateResult(0, "claimed input", "")
+
+        monkeypatch.setattr(scheduler, "run_gate", run_gate)
+        schedule = await env.enabled(gate_command="printf 'claimed input'")
+        run_id = await env.scheduler.run_now(schedule["schedule_id"])
+        await asyncio.wait_for(started.wait(), 5)
+        async with scheduler.quiesce_project(env.project_id, kind=scheduler.ProjectQuiescence.MOVE):
+            finish.set()
+            await asyncio.wait_for(completing.wait(), 5)
+            # Give completion a chance to acquire a connection and update the run on the old path.
+            await asyncio.sleep(0.05)
+            run = await db_schedules.get_run(run_id)
+            assert run["status"] == "gating", run
+            assert not env.bus.of("task_start")
+        await asyncio.wait_for(env.scheduler.idle(), 5)
+        run = await db_schedules.get_run(run_id)
+        assert run["status"] == "running" and run["error"] is None, run
+        assert run["task_id"] in env.bus.of("task_start")
+        assert "claimed input" in (await tasks.get_task(run["task_id"]))["requirement"]
+
+    run_scheduled(check, monkeypatch, tmp_path)

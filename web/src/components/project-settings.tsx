@@ -101,6 +101,7 @@ function ProjectDirectoryMove({ project, disabled, unsaved, onBusy, onMoved }: {
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
       {result && <div role="status" className="space-y-2 text-xs">
         <p className="break-all">目录已移动到 {result.new_dir}。</p>
+        <p className="break-words">{result.notes.moved ? "Notes moved" : `Notes not moved: ${result.notes.reason}`}</p>
         {result.repairs.filter((repair) => !repair.ok).map((repair) => (
           <p key={repair.repository} role="alert" className="whitespace-pre-wrap break-words text-destructive">
             Git worktree 修复失败：{repair.repository}{"\n"}{repair.output}

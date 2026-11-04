@@ -991,6 +991,7 @@ export interface ProjectMoveResult {
   new_dir: string;
   link_old: boolean;
   repairs: { repository: string; ok: boolean; output: string }[];
+  notes: { moved: true; from: string; to: string } | { moved: false; reason: string };
 }
 
 export async function previewProjectMove(projectId: string, fields: ProjectMoveFields): Promise<ProjectMovePreview> {

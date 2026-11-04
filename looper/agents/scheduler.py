@@ -101,13 +101,22 @@ _OUTCOMES = {"completed": "completed", "failed": "failed", "stopped": "stopped",
 _BUSY_STATUSES = (*db_tasks.ACTIVE_STATUSES, db_tasks.READY)
 
 
+class ProjectQuiescence(str, Enum):
+    DELETE = "delete"
+    MOVE = "move"
+
+
 @dataclass
 class _ProjectFirings:
     active: int = 0
-    deleting: bool = False
+    quiescence: ProjectQuiescence | None = None
     idle: asyncio.Event = field(default_factory=asyncio.Event)
     resumed: asyncio.Event = field(default_factory=asyncio.Event)
     owners: dict[asyncio.Task[Any], int] = field(default_factory=dict)
+
+    @property
+    def deleting(self) -> bool:
+        return self.quiescence is not None
 
 
 # Shared by the deletion entry points and every Scheduler in this server.
@@ -145,33 +154,36 @@ def _project_firing(project_id: str) -> Iterator[bool]:
 
 
 @asynccontextmanager
-async def project_dispatch(project_id: str) -> AsyncIterator[None]:
-    """Keep Planner filesystem preparation admitted, waiting through a project move."""
+async def project_dispatch(project_id: str, *, wait_for_delete: bool = True) -> AsyncIterator[bool]:
+    """Admit dispatch after a move; Router starts and gates can still refuse deletion."""
     while True:
         with _project_firing(project_id) as allowed:
             if allowed:
-                yield
+                yield True
+                return
+            if not wait_for_delete and _project_firings[project_id].quiescence is ProjectQuiescence.DELETE:
+                yield False
                 return
             resumed = _project_firings[project_id].resumed
         await resumed.wait()
 
 
 @asynccontextmanager
-async def quiesce_project(project_id: str) -> AsyncIterator[None]:
-    """Refuse new firings and Router starts, then drain admitted work before cleanup.
+async def quiesce_project(project_id: str, *, kind: ProjectQuiescence = ProjectQuiescence.DELETE) -> AsyncIterator[None]:
+    """Pause dispatch, then drain admitted work before cleanup.
 
     The caller serializes project deletions. Gates may keep running outside transactions; their completion
     must enter the barrier again before it can create a task. A failed or cancelled delete releases the barrier.
     """
     state = _project_firings.setdefault(project_id, _ProjectFirings())
-    state.deleting = True
+    state.quiescence = kind
     state.resumed.clear()
     try:
         if state.active:
             await state.idle.wait()
         yield
     finally:
-        state.deleting = False
+        state.quiescence = None
         state.resumed.set()
         if not state.active:
             _project_firings.pop(project_id, None)
@@ -976,13 +988,13 @@ class Scheduler:
                                         started and started["run_timeout_seconds"]))
             now = self._clock()
             launched: _Launched | None = None
-            with ExitStack() as firing_guard:
+            # Wait before taking any database locks: a move needs those locks to finish.
+            async with project_dispatch(schedule["project_id"], wait_for_delete=False) as allowed:
                 async with db_connection.transaction() as conn:
                     schedule = await db_schedules.lock_schedule(conn, schedule_id)
                     run = await db_schedules.get_run(run_id, pool=conn)
                     if schedule is None or run is None or run["status"] != db_schedules.GATING:
                         return
-                    allowed = firing_guard.enter_context(_project_firing(schedule["project_id"]))
                     output = result.stdout.strip()
                     await db_schedules.update_run(conn, run_id, gate_output=output or None)
                     if not allowed:

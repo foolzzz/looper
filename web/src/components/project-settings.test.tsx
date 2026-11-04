@@ -87,7 +87,10 @@ describe("project deletion", () => {
     expect(onDeleted).toHaveBeenCalledOnce();
   });
 
-  it("previews the root destination and only moves after confirmation, then refreshes and reports repair failures", async () => {
+  it.each([
+    { notes: { moved: true, from: "old", to: "new" }, line: "Notes moved" },
+    { notes: { moved: false, reason: "they belong to /srv, which does not move" }, line: "Notes not moved: they belong to /srv, which does not move" },
+  ])("previews, confirms, refreshes and reports repairs and notes: $line", async ({ notes, line }) => {
     const old = "/srv/example";
     const destination = "/srv/projects/Example";
     const moved = project({ work_dir: destination });
@@ -97,6 +100,7 @@ describe("project deletion", () => {
     } })).mockResolvedValueOnce(Response.json({ status: "ok", result: {
       project: moved, old_dir: old, new_dir: destination, link_old: true,
       repairs: [{ repository: destination, ok: false, output: "repair timed out" }],
+      notes,
     } }));
     vi.stubGlobal("fetch", fetcher);
     const changed = vi.fn();
@@ -117,6 +121,7 @@ describe("project deletion", () => {
       }));
       expect(changed).toHaveBeenCalledOnce();
       expect(container.textContent).toContain(`目录已移动到 ${destination}`);
+      expect(container.querySelector('[role="status"]')?.textContent).toContain(line);
       expect(container.querySelector('[role="alert"]')?.textContent).toContain("Git worktree 修复失败");
       expect(container.querySelector('[role="alert"]')?.textContent).toContain("repair timed out");
     } finally { window.removeEventListener(PROJECTS_CHANGED_EVENT, changed); }

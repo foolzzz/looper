@@ -81,6 +81,16 @@ def _destination(project: Mapping[str, Any], data: Mapping[str, Any]) -> tuple[P
     # Renaming a symlink would move the link rather than the directory and its files.
     if old.is_symlink():
         raise fail(projects.HTTP_400, "the project's directory is a symbolic link; use its actual directory first")
+    marker = old / ".git"
+    if marker.is_file():
+        with marker.open() as stream:
+            pointer = stream.readline(4096).strip()
+        if pointer.startswith("gitdir:"):
+            git_dir = (old / pointer.removeprefix("gitdir:").strip()).resolve()
+            linked = git_dir.parent.name == "worktrees" and git_dir.parent.parent.name == ".git"
+            if not git_dir.is_relative_to(old.resolve()) and not linked:
+                raise fail(projects.HTTP_400,
+                           "the project's directory is a git submodule checkout; move the superproject instead")
     return old, new
 
 
@@ -273,118 +283,122 @@ def _move_notes(root: Path, old_key: str, new: str) -> dict[str, Any]:
 
 async def move(project_id: str, data: Mapping[str, Any], *, expected_move_version: str | None = None,
                manager_id: str | None = None) -> dict[str, Any]:
-    from .scheduler import quiesce_project
+    from .scheduler import ProjectQuiescence, quiesce_project
 
     lock = projects._project_delete_locks.setdefault(project_id, asyncio.Lock())
     if lock.locked():
         raise projects.RequestError(projects.HTTP_409, "the project is already being moved or deleted")
-    async with lock, quiesce_project(project_id):
+    async with lock:
+        project = await db_projects.get_project(project_id)
+        if project is None:
+            raise projects.RequestError(projects.HTTP_404, "project not found")
+        try:
+            scanned = await preview(project, data)
+        except projects.RequestError as exc:
+            if expected_move_version is not None and exc.status == projects.HTTP_400:
+                raise projects.RequestError(projects.HTTP_409, CHANGED) from None
+            raise
+        if expected_move_version is not None and scanned.version != expected_move_version:
+            raise projects.RequestError(projects.HTTP_409, CHANGED)
+        try:
+            repositories = await asyncio.to_thread(_repositories, Path(scanned.old))
+        except OSError as exc:
+            repositories = exc
+        # Git key discovery can spawn a subprocess; keep it outside the table locks too.
+        old_key = None
+        notes = {"moved": False, "reason": "operator notes are off"}
+        if ProjectExecution.from_row(project).notes_on:
+            try:
+                root = operator_notes.notes_root()
+                notes = {"moved": False, "reason": "notes root does not exist"}
+                if root.is_dir():
+                    old_key = await asyncio.to_thread(operator_notes.notes_key, scanned.old)
+            except Exception as exc:
+                notes = {"moved": False, "reason": str(exc)}
+        if old_key is not None and _under(old_key, scanned.old) is None:
+            notes = {"moved": False, "reason": f"they belong to {old_key}, which does not move"}
+            old_key = None
         renamed = linked = False
         change = None
-        try:
-            project = await db_projects.get_project(project_id)
-            if project is None:
-                raise projects.RequestError(projects.HTTP_404, "project not found")
+        async with quiesce_project(project_id, kind=ProjectQuiescence.MOVE):
             try:
-                scanned = await preview(project, data)
-            except projects.RequestError as exc:
-                if expected_move_version is not None and exc.status == projects.HTTP_400:
-                    raise projects.RequestError(projects.HTTP_409, CHANGED) from None
+                async with connection.transaction() as conn:
+                    # Existing waiting Planners can wake without Router admission. Fence their database
+                    # writes as well as new starts, until paths and rows agree. Acquire before project
+                    # rows, since a task insert can hold its table lock while checking the project FK.
+                    await conn.execute("SET LOCAL lock_timeout = '5s'")
+                    await conn.execute("LOCK TABLE tasks, task_steps, llm_records, schedule_runs, task_user_gates, "
+                                       "projects, schedules, task_worktrees, step_workspaces, manager_task_templates "
+                                       "IN SHARE ROW EXCLUSIVE MODE")
+                    row = await conn.fetchrow("SELECT * FROM projects WHERE id = $1 FOR UPDATE", project_id)
+                    if row is None:
+                        raise projects.RequestError(projects.HTTP_404, "project not found")
+                    if manager_id is not None and await db_projects.used_outside_manager(project_id, manager_id, pool=conn):
+                        raise projects.RequestError(projects.HTTP_409, "the project is used outside this Manager")
+                    await conn.fetch("SELECT id FROM schedules WHERE project_id = $1 ORDER BY id FOR UPDATE", project_id)
+                    # Use the counted view here too so preview and execution hash the same fields.
+                    project = await db_projects.get_project(project_id, pool=conn)
+                    try:
+                        change = await preview(project, {**data, "to": scanned.new}, db=conn,
+                                               inventory=(scanned.files, scanned.bytes, scanned.truncated))
+                    except projects.RequestError as exc:
+                        if expected_move_version is not None and exc.status == projects.HTTP_400:
+                            raise projects.RequestError(projects.HTTP_409, CHANGED) from None
+                        raise
+                    if change.version != scanned.version:
+                        raise projects.RequestError(projects.HTTP_409, CHANGED)
+                    task_worktrees = await conn.fetch(
+                        "SELECT w.task_id, w.repo_dir, w.path FROM task_worktrees w JOIN tasks t ON t.id = w.task_id "
+                        "WHERE t.project_id = $1 AND w.state = 'active'", project_id)
+                    worktrees = await conn.fetch(
+                        "SELECT w.repo_dir, w.path FROM task_worktrees w JOIN tasks t ON t.id = w.task_id "
+                        "WHERE t.project_id = $1 AND w.state = 'active' UNION "
+                        "SELECT w.repo_dir, w.path FROM step_workspaces w JOIN tasks t ON t.id = w.task_id "
+                        "WHERE t.project_id = $1 AND w.state NOT IN ('merged', 'discarded')", project_id)
+                    # Capture canonical ancestry while the old directory and its symlinks still exist.
+                    # Resolving after rename loses aliases (e.g. /tmp versus /private/tmp).
+                    source = str(Path(change.old).resolve())
+
+                    def moved(path: str) -> str:
+                        relative = _under(path, source)
+                        return str(Path(change.new) / relative) if relative is not None else path
+
+                    task_worktrees = [{**dict(row), "repo_dir": moved(row["repo_dir"]), "path": moved(row["path"])}
+                                      for row in task_worktrees]
+                    worktrees = [{"repo_dir": moved(row["repo_dir"]), "path": moved(row["path"])} for row in worktrees]
+                    schedule_paths = {row["id"]: moved(row["work_dir"]) for row in change.schedules}
+                    # Database checks above yield; a destination may appear while they run.
+                    if os.path.lexists(change.new):
+                        raise projects.RequestError(projects.HTTP_409,
+                                                    "to already exists; choose a path that does not exist")
+                    os.rename(change.old, change.new)
+                    renamed = True
+                    if change.link_old:
+                        os.symlink(change.new, change.old, target_is_directory=True)
+                        linked = True
+                    if not await db_projects.update_project(project_id, work_dir=change.new, pool=conn):
+                        raise RuntimeError("the project directory could not be updated")
+                    # These are live cleanup paths, unlike the task's historical directories.
+                    # A stale repo_dir makes deletion skip committing the checkout's pending files.
+                    for worktree in task_worktrees:
+                        await conn.execute("UPDATE task_worktrees SET repo_dir = $2, path = $3 WHERE task_id = $1",
+                                           worktree["task_id"], worktree["repo_dir"], worktree["path"])
+                    for schedule_id, new_dir in schedule_paths.items():
+                        await conn.execute("UPDATE schedules SET work_dir = $2, updated_at = now() WHERE id = $1",
+                                           schedule_id, new_dir)
+                    activity_seq = await db_projects.record_directory_move(project_id, change.old, change.new, pool=conn)
+                    updated = projects.project_view(await db_projects.get_project(project_id, pool=conn))
+            except BaseException as exc:
+                # Include commit errors and cancellation: a rolled-back row must never point at moved files.
+                if renamed and change is not None:
+                    if linked:
+                        Path(change.old).unlink()
+                    os.rename(change.new, change.old)
+                if isinstance(exc, OSError):
+                    raise projects.RequestError(projects.HTTP_400, f"cannot move project directory: {exc}") from None
+                if isinstance(exc, (asyncpg.LockNotAvailableError, asyncpg.DeadlockDetectedError)):
+                    raise projects.RequestError(projects.HTTP_409, "project execution state is changing; retry the move") from None
                 raise
-            if expected_move_version is not None and scanned.version != expected_move_version:
-                raise projects.RequestError(projects.HTTP_409, CHANGED)
-            try:
-                repositories = await asyncio.to_thread(_repositories, Path(scanned.old))
-            except OSError as exc:
-                repositories = exc
-            # Git key discovery can spawn a subprocess; keep it outside the table locks too.
-            old_key = None
-            notes = {"moved": False, "reason": "operator notes are off"}
-            if ProjectExecution.from_row(project).notes_on:
-                try:
-                    root = operator_notes.notes_root()
-                    notes = {"moved": False, "reason": "notes root does not exist"}
-                    if root.is_dir():
-                        old_key = await asyncio.to_thread(operator_notes.notes_key, scanned.old)
-                except Exception as exc:
-                    notes = {"moved": False, "reason": str(exc)}
-            async with connection.transaction() as conn:
-                # Existing waiting Planners can wake without Router admission. Fence their database
-                # writes as well as new starts, until paths and rows agree. Acquire before project
-                # rows, since a task insert can hold its table lock while checking the project FK.
-                await conn.execute("SET LOCAL lock_timeout = '5s'")
-                await conn.execute("LOCK TABLE tasks, task_steps, llm_records, schedule_runs, task_user_gates, "
-                                   "projects, schedules, task_worktrees, step_workspaces, manager_task_templates "
-                                   "IN SHARE ROW EXCLUSIVE MODE")
-                row = await conn.fetchrow("SELECT * FROM projects WHERE id = $1 FOR UPDATE", project_id)
-                if row is None:
-                    raise projects.RequestError(projects.HTTP_404, "project not found")
-                if manager_id is not None and await db_projects.used_outside_manager(project_id, manager_id, pool=conn):
-                    raise projects.RequestError(projects.HTTP_409, "the project is used outside this Manager")
-                await conn.fetch("SELECT id FROM schedules WHERE project_id = $1 ORDER BY id FOR UPDATE", project_id)
-                # Use the counted view here too so preview and execution hash the same fields.
-                project = await db_projects.get_project(project_id, pool=conn)
-                try:
-                    change = await preview(project, {**data, "to": scanned.new}, db=conn,
-                                           inventory=(scanned.files, scanned.bytes, scanned.truncated))
-                except projects.RequestError as exc:
-                    if expected_move_version is not None and exc.status == projects.HTTP_400:
-                        raise projects.RequestError(projects.HTTP_409, CHANGED) from None
-                    raise
-                if change.version != scanned.version:
-                    raise projects.RequestError(projects.HTTP_409, CHANGED)
-                task_worktrees = await conn.fetch(
-                    "SELECT w.task_id, w.repo_dir, w.path FROM task_worktrees w JOIN tasks t ON t.id = w.task_id "
-                    "WHERE t.project_id = $1 AND w.state = 'active'", project_id)
-                worktrees = await conn.fetch(
-                    "SELECT w.repo_dir, w.path FROM task_worktrees w JOIN tasks t ON t.id = w.task_id "
-                    "WHERE t.project_id = $1 AND w.state = 'active' UNION "
-                    "SELECT w.repo_dir, w.path FROM step_workspaces w JOIN tasks t ON t.id = w.task_id "
-                    "WHERE t.project_id = $1 AND w.state NOT IN ('merged', 'discarded')", project_id)
-                # Capture canonical ancestry while the old directory and its symlinks still exist.
-                # Resolving after rename loses aliases (e.g. /tmp versus /private/tmp).
-                source = str(Path(change.old).resolve())
-
-                def moved(path: str) -> str:
-                    relative = _under(path, source)
-                    return str(Path(change.new) / relative) if relative is not None else path
-
-                task_worktrees = [{**dict(row), "repo_dir": moved(row["repo_dir"]), "path": moved(row["path"])}
-                                  for row in task_worktrees]
-                worktrees = [{"repo_dir": moved(row["repo_dir"]), "path": moved(row["path"])} for row in worktrees]
-                schedule_paths = {row["id"]: moved(row["work_dir"]) for row in change.schedules}
-                # Database checks above yield; a destination may appear while they run.
-                if os.path.lexists(change.new):
-                    raise projects.RequestError(projects.HTTP_409,
-                                                "to already exists; choose a path that does not exist")
-                os.rename(change.old, change.new)
-                renamed = True
-                if change.link_old:
-                    os.symlink(change.new, change.old, target_is_directory=True)
-                    linked = True
-                if not await db_projects.update_project(project_id, work_dir=change.new, pool=conn):
-                    raise RuntimeError("the project directory could not be updated")
-                # These are live cleanup paths, unlike the task's historical directories.
-                # A stale repo_dir makes deletion skip committing the checkout's pending files.
-                for worktree in task_worktrees:
-                    await conn.execute("UPDATE task_worktrees SET repo_dir = $2, path = $3 WHERE task_id = $1",
-                                       worktree["task_id"], worktree["repo_dir"], worktree["path"])
-                for schedule_id, new_dir in schedule_paths.items():
-                    await conn.execute("UPDATE schedules SET work_dir = $2, updated_at = now() WHERE id = $1",
-                                       schedule_id, new_dir)
-                activity_seq = await db_projects.record_directory_move(project_id, change.old, change.new, pool=conn)
-                updated = projects.project_view(await db_projects.get_project(project_id, pool=conn))
-        except BaseException as exc:
-            # Include commit errors and cancellation: a rolled-back row must never point at moved files.
-            if renamed and change is not None:
-                if linked:
-                    Path(change.old).unlink()
-                os.rename(change.new, change.old)
-            if isinstance(exc, OSError):
-                raise projects.RequestError(projects.HTTP_400, f"cannot move project directory: {exc}") from None
-            if isinstance(exc, (asyncpg.LockNotAvailableError, asyncpg.DeadlockDetectedError)):
-                raise projects.RequestError(projects.HTTP_409, "project execution state is changing; retry the move") from None
-            raise
         repairs = await _repair(change, worktrees, source, repositories)
         if old_key is not None:
             notes = await asyncio.to_thread(_move_notes, root, old_key, change.new)

@@ -2,11 +2,16 @@
 
 import pytest
 
-from looper.agents import api_v1, schedules
+from looper.agents import api_v1, operator_notes, schedules
 from looper.db import projects, tasks
 from tests.db_support import DSN, run_db, v1_api as _api
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+@pytest.fixture(autouse=True)
+def isolated_notes_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(operator_notes, "_root", str(tmp_path / "operator-notes"))
 
 
 async def _schedule(project_id, kind, directory):
