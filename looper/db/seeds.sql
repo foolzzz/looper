@@ -12,9 +12,26 @@ ON CONFLICT DO NOTHING;
 INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type, builtin)
 VALUES ('prov-claude-subscription', 'claude-subscription', 'claude-subscription', 'oauth', 'claude-code', true),
        ('prov-codex-login', 'codex-login', 'codex-login', 'oauth', 'codex', true),
-       ('prov-grok-login', 'grok-login', 'grok-login', 'oauth', 'grok', true),
-       ('prov-cursor-login', 'cursor-login', 'cursor-login', 'oauth', 'cursor-agent', true)
+       ('prov-grok-login', 'grok-login', 'grok-login', 'oauth', 'grok', true)
 ON CONFLICT DO NOTHING;
+
+-- Older releases allowed custom providers with this name. Under the schema
+-- lock, choose a free builtin name without changing saved providers or refs.
+DO $$
+DECLARE
+    provider_name TEXT := 'cursor-login';
+    suffix INTEGER := 0;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM llm_providers WHERE id = 'prov-cursor-login') THEN
+        WHILE EXISTS (SELECT 1 FROM llm_providers WHERE name = provider_name) LOOP
+            suffix := suffix + 1;
+            provider_name := 'cursor-login (' || suffix || ')';
+        END LOOP;
+        INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type, builtin)
+        VALUES ('prov-cursor-login', provider_name, 'cursor-login', 'oauth', 'cursor-agent', true);
+    END IF;
+END $$;
+
 INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url)
 VALUES ('prov-claude-subscription', 'anthropic-messages', ''),
        ('prov-codex-login', 'openai-responses', ''),

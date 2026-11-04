@@ -82,3 +82,48 @@ def test_released_registry_upgrades_cursor_checks_once(previous_login_schema):
             assert await old.fetchrow("SELECT * FROM schema_migrations WHERE name='cursor_login'") == marker
             assert await old.fetchval("SELECT min(context_window) FROM llm_models WHERE provider_id='prov-cursor-login'") == 12345
     asyncio.run(asyncio.wait_for(test(), 30))
+
+
+@pytest.mark.parametrize("occupied_names", [
+    ("cursor-login",),
+    ("cursor-login", "cursor-login (1)", "cursor-login (2)"),
+])
+def test_released_registry_preserves_custom_cursor_login_name(previous_login_schema, occupied_names):
+    async def test():
+        async with fresh_connection() as conn:
+            await conn.execute(previous_login_schema)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ('post_bridge_baseline')")
+            await conn.execute("INSERT INTO registry_schema_version (id, version) VALUES (TRUE, 4)")
+            await conn.executemany(
+                "INSERT INTO llm_providers (id, name, vendor_type, auth, max_concurrency) "
+                "VALUES ($1, $2, 'custom', 'api_key', 2)",
+                [(f"saved-{i}", name) for i, name in enumerate(occupied_names)])
+            await conn.execute("""
+                INSERT INTO llm_provider_secrets (provider_id, api_key) VALUES ('saved-0', 'synthetic-key');
+                INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url)
+                    VALUES ('saved-0', 'anthropic-messages', 'https://api.example.invalid/v1');
+                INSERT INTO llm_models (id, provider_id, name, protocol, context_window)
+                    VALUES ('model-saved', 'saved-0', 'auto', 'anthropic-messages', 12345);
+                INSERT INTO agent_runtimes (id, name, type) VALUES ('saved-runtime', 'saved-runtime', 'claude-code');
+                INSERT INTO agent_profiles (id, name, runtime_id, model_id)
+                    VALUES ('saved-profile', 'saved-profile', 'saved-runtime', 'model-saved');
+            """)
+            queries = ["SELECT * FROM llm_providers WHERE id LIKE 'saved-%' ORDER BY id",
+                       "SELECT * FROM llm_provider_secrets WHERE provider_id='saved-0'",
+                       "SELECT * FROM llm_provider_endpoints WHERE provider_id='saved-0'",
+                       "SELECT * FROM llm_models WHERE id='model-saved'",
+                       "SELECT * FROM agent_profiles WHERE id='saved-profile'"]
+            before = [await conn.fetch(query) for query in queries]
+            for _ in range(2):  # Upgrade, then restart through the same startup path.
+                await connection.ensure_schema(conn)
+                await _assert_cursor_provider(conn)
+                assert [await conn.fetch(query) for query in queries] == before
+                assert await conn.fetchval("SELECT name FROM llm_providers WHERE id='prov-cursor-login'") == (
+                    f"cursor-login ({len(occupied_names)})")
+                assert not await connection.schema_change_pending(conn)
+                snapshot = await conn.fetch("SELECT * FROM llm_providers WHERE id='prov-cursor-login'")
+                if _ == 0:
+                    seeded = snapshot
+                else:
+                    assert snapshot == seeded
+    asyncio.run(asyncio.wait_for(test(), 30))
