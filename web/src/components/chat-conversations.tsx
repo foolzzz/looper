@@ -34,11 +34,15 @@ export function ConversationList({
   onSelect: (session: ChatSession) => void;
   onRefresh: () => void;
 }) {
-  // By channel in CHAT_CHANNELS' order; a session of another channel goes last.
+  // Client conversations follow Dashboard chat; other conversations keep their channel's order.
   const known = new Set(CHAT_CHANNELS.map((c) => c.channel));
+  const channelSessions = (sessions ?? []).filter((s) => !s.client);
   const groups = [
-    ...CHAT_CHANNELS.map(({ channel, label }) => ({ label, items: (sessions ?? []).filter((s) => s.channel === channel) })),
-    { label: "Other", items: (sessions ?? []).filter((s) => !known.has(s.channel)) },
+    ...CHAT_CHANNELS.flatMap(({ channel, label }) => [
+      { label, items: channelSessions.filter((s) => s.channel === channel) },
+      ...(channel === "web" ? [{ label: "loopercli", items: (sessions ?? []).filter((s) => s.client) }] : []),
+    ]),
+    { label: "Other", items: channelSessions.filter((s) => !known.has(s.channel)) },
   ].filter((g) => g.items.length > 0);
   return (
     <nav aria-label="Conversations" className="flex h-full min-h-0 flex-col">
@@ -67,7 +71,7 @@ export function ConversationList({
         )}
         {sessions !== null && sessions.length === 0 && !error && (
           <p className="px-3 py-2 text-xs text-muted-foreground">
-            No conversations yet. Each chat with the Manager, here or in Lark or Telegram, is listed once it has a message.
+            No conversations yet. Each chat with the Manager, here, in Lark or Telegram, or through loopercli, is listed once it has a message.
           </p>
         )}
         {groups.map((group) => (
@@ -91,6 +95,11 @@ export function ConversationList({
                         <span className="text-muted-foreground">{s.last_role === "user" ? "User: " : "Manager: "}</span>
                         {s.last_content || "(empty)"}
                       </span>
+                      {s.client && (
+                        <span title={`via ${s.client.name}`} className="max-w-24 truncate text-[10px] text-muted-foreground">
+                          via {s.client.name}
+                        </span>
+                      )}
                       <time dateTime={s.last_message_at} className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
                         {shortTime(s.last_message_at)}
                       </time>
