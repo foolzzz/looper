@@ -49,8 +49,9 @@ else:
     child = subprocess.Popen(['/bin/sleep', '60'], **quiet)
 tree = {'agent': os.getpid(), 'command': command.pid, 'grandchild': int(_wait_for('grandchild.pid')),
         'child': child.pid}
-json.dump(tree, open('tree.tmp', 'w'))
-os.rename('tree.tmp', 'tree.json')
+with open('tree.tmp', 'w') as output:
+    json.dump(tree, output)
+os.replace('tree.tmp', 'tree.json')
 """
 
 
@@ -90,10 +91,14 @@ async def _started(root: Path, trees: list[dict[str, int]]) -> dict[str, int]:
     """The stand-in's tree once it all runs, checked to be running."""
     for _ in range(500):
         if (root / "tree.json").exists():
-            tree = json.loads((root / "tree.json").read_text())
-            trees.append(tree)
-            assert _running(list(tree.values()), settle=0) == list(tree.values())
-            return tree
+            try:
+                tree = json.loads((root / "tree.json").read_text())
+            except json.JSONDecodeError:
+                pass  # The stand-in has not finished publishing its tree yet.
+            else:
+                trees.append(tree)
+                assert _running(list(tree.values()), settle=0) == list(tree.values())
+                return tree
         await asyncio.sleep(0.01)
     raise AssertionError("the stand-in agent did not start its tree")
 
@@ -838,7 +843,9 @@ def test_orphan_end_kills_a_slow_child_after_its_parent_exits_on_sigterm(
         "import json, os, subprocess, sys, time\n"
         f"child = subprocess.Popen([sys.executable, '-c', {child!r}])\n"
         "while not os.path.exists('child.ready'):\n    time.sleep(0.01)\n"
-        "json.dump({'agent': os.getpid(), 'child': child.pid}, open('tree.json', 'w'))\n"
+        "with open('tree.tmp', 'w') as output:\n"
+        "    json.dump({'agent': os.getpid(), 'child': child.pid}, output)\n"
+        "os.replace('tree.tmp', 'tree.json')\n"
         "time.sleep(60)\n", encoding="utf-8")
 
     async def _run() -> None:
