@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.74] - 2026-11-04
+
+### Added
+
+- **A built-in provider for the operator's own Cursor login.** The new OAuth provider `cursor-login` (`prov-cursor-login`) stands for the Cursor login already on the server's machine, and a check says whether it can run: `cursor-agent status --format json` with the operator's `HOME`, throwaway Cursor configuration and data directories, no API key or token, a 20 s timeout and a 30 s cache. Looper never reads the keychain or a credential file. Settings → LLM Providers shows the login's state, `looper doctor` and `/api/v1/system/status` gain a `cursor_login` check (skipped while no Agent Profile uses it), and existing databases are widened once to admit the vendor. No runtime uses the provider yet; the Cursor Agent runtime comes later. ([#1072](https://github.com/foolzzz/looper/pull/1072))
+
 ## [2.14.73] - 2026-11-04
 
 ### Added
