@@ -73,6 +73,170 @@ def test_line_longer_than_any_reader_limit() -> None:
     assert _lines(big[:7_000_000], big[7_000_000:] + b"\nnext\n") == [big + b"\n", b"next\n"]
 
 
+@pytest.mark.parametrize(("kind", "subtype", "content"), [
+    ("system", "informational", "UserPromptSubmit operation blocked by hook: policy reason"),
+    ("system", "informational", "PreToolUse operation blocked by hook: policy reason"),
+    ("assistant", "informational", "UserPromptSubmit operation blocked by hook: policy reason"),
+    ("system", "init", "UserPromptSubmit operation blocked by hook: policy reason"),
+    ("system", "informational", "Hook completed successfully"),
+    ("system", "informational", None),
+])
+def test_only_a_prompt_hook_block_is_terminal(kind: str, subtype: str, content: str | None) -> None:
+    from looper.agents.claude_cli import prompt_block
+
+    blocked = prompt_block({"type": kind, "subtype": subtype, "content": content}, "/srv/project")
+    if kind == "system" and subtype == "informational" and (content or "").startswith("UserPromptSubmit"):
+        assert blocked is not None and blocked.reason == "policy reason"
+    else:
+        assert blocked is None
+
+
+@pytest.mark.parametrize(("content", "reason"), [
+    ("\npolicy reason\n\nOriginal prompt: private prompt\nmore context", "policy reason"),
+    (" policy reason", "policy reason"),
+    ("\nfirst line\nsecond line\n\nOriginal prompt: private prompt", "first line\nsecond line"),
+    (" " + "x" * 400 + "\n\nOriginal prompt: private prompt", "x" * 300),
+    (" " + "x" * 400, "x" * 300),
+    ("", "no reason given"),
+    ("\n \n\nOriginal prompt: private prompt", "no reason given"),
+])
+def test_prompt_block_keeps_only_the_bounded_hook_reason(content: str, reason: str) -> None:
+    from looper.agents.claude_cli import prompt_block
+
+    blocked = prompt_block({"type": "system", "subtype": "informational",
+                            "content": "UserPromptSubmit operation blocked by hook:" + content}, "/srv/project")
+    assert blocked is not None
+    assert blocked.reason == reason
+    assert "Original prompt:" not in str(blocked)
+    assert "private prompt" not in str(blocked)
+
+
+@pytest.mark.parametrize("is_verify", [False, True])
+def test_prompt_block_never_records_or_reports_the_original_prompt(
+    tmp_path: Path, agent_db: Any, is_verify: bool,
+) -> None:
+    from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+
+    sentinel = "PRIVATE_ORIGINAL_PROMPT_SENTINEL"
+    reason = "Request Blocked by Security Policy"
+    event = {"type": "system", "subtype": "informational", "content": (
+        f"UserPromptSubmit operation blocked by hook:\n{reason}\n\nOriginal prompt: "
+        + (f"{sentinel}\nRequirement and injected context\n" * 200)
+    )}
+
+    async def run() -> dict[str, Any]:
+        command = fake_claude(tmp_path / "blocked-claude", (
+            "import sys\n"
+            "sys.stdin.readline()\n"
+            f"print({json.dumps(event)!r}, flush=True)\n"
+            "sys.stdin.read()\n"
+        ))
+        pool = WorkerPool(config=WorkerConfig(claude_bin=command), runtime_root=tmp_path)
+        envelope = MessageEnvelope.create(
+            source=planner_address("task-1"), target=worker_address("worker-1"),
+            message_type=MessageType.WORK_ITEM,
+            payload={"task_id": "step-1", "parent_task_id": "task-1", "instruction": "add the parser",
+                     "context": {"work_dir": str(tmp_path)}},
+        )
+        return await asyncio.wait_for(pool._execute(envelope, is_verify=is_verify), timeout=5)
+
+    outcome = asyncio.run(run())
+    assert outcome["prompt_blocked"] == {"reason": reason, "work_dir": str(tmp_path)}
+    record = agent_db.finish_record.await_args.kwargs
+    assert record["status"] == "failed"
+    assert record["error"] == outcome["error"]
+    assert any(call.kwargs["summary"] == outcome["error"]
+               for call in agent_db.insert_activity.await_args_list)
+    assert agent_db.append_events.await_count > 0
+    for value in (outcome, agent_db.start_record.await_args_list, agent_db.append_events.await_args_list,
+                  agent_db.finish_record.await_args_list, agent_db.insert_activity.await_args_list):
+        assert sentinel not in str(value)
+        assert "Original prompt:" not in str(value)
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_prompt_block_ends_a_resident_turn_without_a_result(tmp_path: Path, queued: bool) -> None:
+    from looper.agents.claude_cli import ResidentClaude, TurnBlocked
+
+    sentinel = "PRIVATE_RESIDENT_PROMPT_SENTINEL"
+    event = {"type": "system", "subtype": "informational", "content": (
+        "UserPromptSubmit operation blocked by hook:\nRequest Blocked by Security Policy\n\nOriginal prompt: "
+        + (f"{sentinel}\nRequirement and injected context\n" * 200)
+    )}
+
+    async def run() -> None:
+        command = fake_claude(tmp_path / "blocked-claude", (
+            "import json, sys\n"
+            "message = json.loads(sys.stdin.readline())\n"
+            + ("print(json.dumps({'type': 'command_lifecycle', 'state': 'queued', "
+               "'command_uuid': message['uuid']}), flush=True)\n" if queued else "") +
+            f"print({json.dumps(event)!r}, flush=True)\n"
+            "sys.stdin.read()\n"
+        ))
+        claude = ResidentClaude(label="test")
+        seen = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        try:
+            await claude.start([command], cwd=str(tmp_path), signature=1)
+            with pytest.raises(TurnBlocked) as blocked:
+                await asyncio.wait_for(claude.run_turn("hello", on_event), timeout=3)
+            assert blocked.value.reason == "Request Blocked by Security Policy"
+            assert str(tmp_path) in str(blocked.value)
+            assert len(seen) == (2 if queued else 1) and seen[-1]["subtype"] == "informational"
+            assert sentinel not in str(blocked.value) + str(seen)
+            assert "Original prompt:" not in str(blocked.value) + str(seen)
+            assert not claude.started
+        finally:
+            await claude.stop(kill=True)
+
+    asyncio.run(run())
+
+
+def test_prompt_block_survives_cancellation_during_process_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.claude_cli import ResidentClaude, TurnBlocked
+
+    async def run() -> None:
+        command = fake_claude(tmp_path / "blocked-claude", (
+            "import json, sys\n"
+            "sys.stdin.readline()\n"
+            "print(json.dumps({'type': 'system', 'subtype': 'informational', 'content': "
+            "'UserPromptSubmit operation blocked by hook: policy reason'}), flush=True)\n"
+            "sys.stdin.read()\n"
+        ))
+        cleaning, release = asyncio.Event(), asyncio.Event()
+        original = ResidentClaude._stop_process
+
+        async def cleanup(self, *args, **kwargs):
+            await original(self, *args, **kwargs)
+            cleaning.set()
+            await release.wait()
+
+        monkeypatch.setattr(ResidentClaude, "_stop_process", cleanup)
+        claude = ResidentClaude(label="test")
+
+        async def on_event(event):
+            pass
+
+        await claude.start([command], cwd=str(tmp_path), signature=1)
+        task = asyncio.create_task(claude.run_turn("hello", on_event))
+        try:
+            await asyncio.wait_for(cleaning.wait(), timeout=10)
+            task.cancel()  # A turn deadline expires after its terminal outcome was already known.
+            release.set()
+            with pytest.raises(TurnBlocked, match="policy reason"):
+                await task
+            assert not claude.started
+        finally:
+            release.set()
+            await claude.stop(kill=True)
+
+    asyncio.run(run())
+
+
 class TestClaudeRunRecorder:
     def _recorder(self) -> Any:
         from looper.agents.claude_cli import ClaudeRunRecorder

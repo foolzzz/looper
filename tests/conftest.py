@@ -542,6 +542,11 @@ for line in sys.stdin:
     # Like Claude Code 2.1.285 run with --replay-user-messages: the message's lifecycle and its replay
     # carry its uuid, and so does the result that answers it.
     mid = message.get('uuid') or 'claude-named-%d' % n
+    if reply == '<blocked>':
+        emit({{'type': 'command_lifecycle', 'command_uuid': mid, 'state': 'queued'}})
+        emit({{'type': 'system', 'subtype': 'informational',
+              'content': 'UserPromptSubmit operation blocked by hook: Request Blocked by Security Policy'}})
+        continue
     for state in ('queued', 'started'):
         emit({{'type': 'command_lifecycle', 'command_uuid': mid, 'state': state, 'session_id': 'sess-p'}})
     emit({{'type': 'system', 'subtype': 'init', 'session_id': 'sess-p', 'model': 'fake'}})
