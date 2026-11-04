@@ -143,8 +143,13 @@ def test_project_directory_default_is_described_only_when_configured(monkeypatch
             assert "/srv/projects/<name>" in project["description"]
             assert "do not ask the user for a directory" in project["description"]
             assert "never pick a directory" not in project["description"]
+            description = project["inputSchema"]["properties"]["work_dir"]["description"]
+            assert "/srv/projects/<name>" in description and "'' for none" not in description
+            assert "create" in description and "update" in description
         else:
             assert project == tool.listing()
+            assert project["inputSchema"]["properties"]["work_dir"]["description"] == (
+                "Its default absolute directory; '' for none.")
             assert project["description"] == (
                 "Projects: list; get one; create (name, and the work_dir and background the user gave; never "
                 "pick a directory); update its name, work_dir or background (a work_dir change asks the user first "

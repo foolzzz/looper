@@ -1696,10 +1696,20 @@ class ManagerAgent:
 
     def _composed_prompt(self, agent_settings: AgentSettings) -> SystemPrompt:
         """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
+        from ..projects import projects_root
+
         contract_name, contract = "TOOLS_CONTRACT", TOOLS_CONTRACT
+        if root := projects_root():
+            contract = contract.replace(
+                "A new project, or one without a default, needs the user to name one:\n"
+                "  ask. Never pick a directory yourself.",
+                f"A new project created without a directory gets {Path(root) / '<name>'}\n"
+                "  (a safe name, with a suffix on collision); do not ask the user for a directory.\n"
+                "  An existing project without a default still needs the user to name one: ask.\n"
+                "  Never pick a directory yourself.")
         if self.agent_id != DEFAULT_MANAGER_ID:
             contract_name = "TOOLS_CONTRACT+SCOPE_CONTRACT"
-            contract = TOOLS_CONTRACT + "\n" + scope_contract(self._definition, has_templates=self._has_templates)
+            contract += "\n" + scope_contract(self._definition, has_templates=self._has_templates)
         return build_system_prompt(
             harness=agent_settings.harness,
             custom_prompt=agent_settings.profile.custom_prompt,

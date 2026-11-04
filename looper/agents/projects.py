@@ -26,7 +26,8 @@ import logging
 import os
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -211,7 +212,22 @@ def projects_root() -> str:
     return _root
 
 
-async def _create_project_row(fields: dict[str, Any], *, pool: Any = None) -> dict[str, Any]:
+@contextmanager
+def project_directories() -> Iterator[list[Path]]:
+    """Keep newly made directories only when the enclosing create transaction succeeds."""
+    created: list[Path] = []
+    try:
+        yield created
+    except BaseException:
+        for path in reversed(created):
+            # rmdir refuses nonempty directories and symlinks; preserve the original failure.
+            with suppress(OSError):
+                path.rmdir()
+        raise
+
+
+async def _create_project_row(fields: dict[str, Any], *, pool: Any = None,
+                              created_directories: list[Path] | None = None) -> dict[str, Any]:
     """Create within the caller's transaction, allocating a directory only for a new project without one."""
     root = projects_root()
     if not root or fields.get("work_dir"):
@@ -223,31 +239,37 @@ async def _create_project_row(fields: dict[str, Any], *, pool: Any = None) -> di
     name = name or project_id
     used = [Path(row["work_dir"]) for row in await pool.fetch("SELECT work_dir FROM projects WHERE work_dir <> ''")]
     path = Path(root) / name
-    try:
-        resolved = {os.path.realpath(directory) for directory in used}
-        suffix = 2
-        while os.path.realpath(path) in resolved or (path.exists() and any(
-                directory.exists() and path.samefile(directory) for directory in used)):
-            path = Path(root) / f"{name}-{suffix}"
-            suffix += 1
+    with project_directories() as created:
         try:
-            path.mkdir(mode=0o755, parents=True)
-        except FileExistsError:
-            if not path.is_dir():
-                raise
-        else:
-            path.chmod(0o755)
-    except OSError as exc:
-        raise RequestError(HTTP_400, f"cannot create project directory {path}: {exc}") from None
-    return await db_projects.create_project(**{**fields, "work_dir": str(path)}, project_id=project_id, pool=pool)
+            resolved = {os.path.realpath(directory) for directory in used}
+            suffix = 2
+            while os.path.realpath(path) in resolved or (path.exists() and any(
+                    directory.exists() and path.samefile(directory) for directory in used)):
+                path = Path(root) / f"{name}-{suffix}"
+                suffix += 1
+            try:
+                path.mkdir(mode=0o755, parents=True)
+            except FileExistsError:
+                if not path.is_dir():
+                    raise
+            else:
+                created.append(path)
+                path.chmod(0o755)
+        except OSError as exc:
+            raise RequestError(HTTP_400, f"cannot create project directory {path}: {exc}") from None
+        row = await db_projects.create_project(**{**fields, "work_dir": str(path)}, project_id=project_id, pool=pool)
+        if created_directories is not None:
+            created_directories.extend(created)
+        return row
 
 
 async def create_project(data: dict[str, Any]) -> dict[str, Any]:
     fields = _project_fields(data, update=False)
     try:
         if projects_root() and not fields.get("work_dir"):
-            async with db_connection.transaction() as conn:
-                row = await _create_project_row(fields, pool=conn)
+            with project_directories() as created:
+                async with db_connection.transaction() as conn:
+                    row = await _create_project_row(fields, pool=conn, created_directories=created)
         else:
             row = await db_projects.create_project(**fields)
     except asyncpg.UniqueViolationError:
@@ -506,7 +528,7 @@ async def create_task_core(
             if not await db_managers.lock_for_task((task_fields or {}).get("manager_id", "manager"), conn=conn):
                 raise RequestError(HTTP_409, "this Manager was turned off or deleted; the task was not created")
         if project is None:
-            project = await _create_project_row(new_fields, pool=conn)
+            project = await _create_project_row(new_fields, pool=conn, created_directories=created_directories)
         work_dir = _task_work_dir(data.get("work_dir"), project["work_dir"])
         workspace = await task_workspace(data, work_dir=work_dir, named=named, project_dir=project["work_dir"],
                                          project_mode=ProjectExecution.from_row(project).task_mode, visible_to=visible_to,
@@ -542,8 +564,9 @@ async def create_task_core(
         if project is not None and not profiles and not lock_manager and not roles:
             created, task, workspace = await persist()
         else:
-            async with db_connection.transaction() as conn:
-                created, task, workspace = await persist(conn)
+            with project_directories() as created_directories:
+                async with db_connection.transaction() as conn:
+                    created, task, workspace = await persist(conn)
     except asyncpg.UniqueViolationError:
         # The Manager adapter keeps its existing concurrent-create instruction.
         raise _name_taken(new_fields["name"]) from None

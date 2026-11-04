@@ -2373,9 +2373,12 @@ The ops file's optional `[projects] root = "/absolute/path/to/projects"`
 name lower-cased, with characters outside `[A-Za-z0-9._-]` replaced by `-`,
 runs of `-` collapsed and leading or trailing `-` and `.` stripped. An empty
 result uses the project id. If another project already uses that directory,
-Looper appends `-2`, `-3`, and so on. It creates the directory with mode 0755
-before saving the project; an OS error refuses creation with the path and
-reason and leaves no project row. Tasks without their own directory then use
+Looper appends `-2`, `-3`, and so on. An existing directory at `<root>/<name>`
+is used as is, including a symbolic link to a directory. Otherwise Looper creates
+the directory with mode 0755 before saving the project; an OS error refuses
+creation with the path and reason and leaves no project row. If creation fails,
+a directory made by that create is removed again only if it is still empty;
+pre-existing directories are kept. Tasks without their own directory then use
 the project's directory as usual.
 
 This applies to the dashboard, Manager tool, v1 API and configuration import.

@@ -125,6 +125,77 @@ def test_projects_root_serializes_concurrent_slug_collisions(monkeypatch, tmp_pa
     _run(check)
 
 
+@pytest.mark.parametrize("existing", ["absent", "directory", "symlink", "populated"])
+def test_projects_root_duplicate_name_preserves_only_existing_or_populated_directories(monkeypatch, tmp_path, existing):
+    from looper.agents import projects as api
+    from looper.db import connection, projects
+
+    async def check(pool):
+        monkeypatch.setattr(connection, "_pool", pool)
+        monkeypatch.setattr(api, "_root", str(tmp_path))
+        original = await api.create_project({"name": "Duplicate"})
+        path = tmp_path / "duplicate-2"
+        if existing == "directory":
+            path.mkdir()
+        elif existing == "symlink":
+            target = tmp_path / "target"
+            target.mkdir()
+            path.symlink_to(target, target_is_directory=True)
+        elif existing == "populated":
+            create = projects.create_project
+
+            async def fail_after_write(**kwargs):
+                (path / "keep.txt").write_text("keep")
+                return await create(**kwargs)
+
+            monkeypatch.setattr(projects, "create_project", fail_after_write)
+        with pytest.raises(api.RequestError) as error:
+            await api.create_project({"name": "DUPLICATE"})
+        assert error.value.status == api.HTTP_409
+        assert path.exists() == (existing != "absent")
+        if existing == "symlink":
+            assert path.is_symlink() and target.is_dir()
+        if existing == "populated":
+            assert (path / "keep.txt").read_text() == "keep"
+        assert (tmp_path / "duplicate").is_dir()
+        assert (await projects.get_project(original["project_id"]))["work_dir"] == original["work_dir"]
+        assert await pool.fetchval("SELECT count(*) FROM projects") == 1
+
+    _run(check)
+
+
+@pytest.mark.parametrize("entry", ["project", "task", "import"])
+def test_projects_root_removes_its_directory_when_commit_fails(monkeypatch, tmp_path, entry):
+    import asyncpg
+    from looper.agents import config_transfer, projects as api
+    from looper.db import connection
+
+    async def check(pool):
+        monkeypatch.setattr(connection, "_pool", pool)
+        monkeypatch.setattr(api, "_root", str(tmp_path))
+        await pool.execute("""
+            CREATE FUNCTION refuse_project_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'commit refused' USING ERRCODE = '23514'; END $$;
+            CREATE CONSTRAINT TRIGGER refuse_project_commit AFTER INSERT ON projects
+            DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION refuse_project_commit();
+        """)
+        with pytest.raises(asyncpg.CheckViolationError, match="commit refused"):
+            if entry == "project":
+                await api.create_project({"name": "Rolled back"})
+            elif entry == "task":
+                await api.create_task_core({"requirement": "r", "project": {"name": "Rolled back"}})
+            else:
+                async with pool.acquire() as conn:
+                    await config_transfer.run_import(conn, {"format": "looper-config/v4", "projects": [
+                        {"name": "Rolled back"}, {"name": "Also rolled back"}]}, apply=True)
+        assert not (tmp_path / "rolled-back").exists()
+        assert not (tmp_path / "also-rolled-back").exists()
+        assert await pool.fetchval("SELECT count(*) FROM projects") == 0
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+
+    _run(check)
+
+
 def test_projects_root_task_creation_does_not_need_a_second_connection(monkeypatch, tmp_path):
     from looper.agents import projects as api
     from looper.db import connection
@@ -158,6 +229,13 @@ def test_projects_root_respects_existing_directory_ownership_and_permissions(mon
         existing.mkdir(mode=0o700)
         made = await api.create_project({"name": "Reuse"})
         assert made["work_dir"] == str(existing) and existing.stat().st_mode & 0o777 == 0o700
+        target = tmp_path / "unclaimed"
+        target.mkdir(mode=0o700)
+        link = tmp_path / "link"
+        link.symlink_to(target, target_is_directory=True)
+        made = await api.create_project({"name": "Link"})
+        assert made["work_dir"] == str(link) and link.is_symlink()
+        assert target.stat().st_mode & 0o777 == 0o700
 
     _run(check)
 
@@ -208,6 +286,7 @@ def test_projects_root_applies_to_a_task_creating_its_project_atomically(monkeyp
         with pytest.raises(RuntimeError, match="task insert failed"):
             await api.create_task_core({"requirement": "r", "project": {"name": "No row"}})
         assert await pool.fetchval("SELECT count(*) FROM projects") == 1
+        assert not (tmp_path / "no-row").exists()
 
     _run(check)
 

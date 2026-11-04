@@ -102,7 +102,12 @@ def project_tool(tool: Tool) -> Tool:
     """Describe the configured default directory without changing the unconfigured tool."""
     if tool.name != "looper_projects" or not (root := projects.projects_root()):
         return tool
-    return replace(tool, description=tool.description.replace(
+    work_dir = {**tool.schema["properties"]["work_dir"], "description": (
+        f"Its default absolute directory; on create, omit it or use '' for {Path(root) / '<name>'} "
+        "(a safe name, with a suffix on collision); do not ask the user for a directory. "
+        "On update, '' clears the default.")}
+    return replace(tool, schema={**tool.schema, "properties": {**tool.schema["properties"], "work_dir": work_dir}},
+        description=tool.description.replace(
         "create (name, and the work_dir and background the user gave; never pick a directory)",
         f"create (name and optional work_dir and background; without work_dir, Looper creates {Path(root) / '<name>'} "
         "using a safe directory name, adding a suffix on a collision; do not ask the user for a directory)"))

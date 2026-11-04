@@ -97,6 +97,33 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+@pytest.mark.parametrize("root", ["", "/srv/projects"])
+@pytest.mark.parametrize("manager_id", ["manager", "scoped-manager"])
+def test_project_directory_contract_matches_the_configured_root(monkeypatch, tmp_path, root, manager_id):
+    from dataclasses import replace
+    from looper.agents import projects
+    from looper.agents.agent_settings import resolve
+    from looper.agents.tiers.manager import default_definition, scope_contract
+
+    monkeypatch.setattr(projects, "projects_root", lambda: root)
+    definition = replace(default_definition(), id=manager_id)
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path, definition=definition)
+    prompt = manager._composed_prompt(resolve("manager", {}))
+    contract = prompt.text.split("## Looper's tools (required)", 1)[1]
+    contract = "## Looper's tools (required)" + contract
+    if manager_id != "manager":
+        suffix = "\n" + scope_contract(definition, has_templates=False)
+        assert contract.endswith(suffix)
+        contract = contract[:-len(suffix)]
+    if root:
+        assert "/srv/projects/<name>" in contract
+        assert "do not ask the user for a directory" in contract
+        assert "A new project, or one without a default, needs the user" not in contract
+    else:
+        # The unconfigured contract remains byte-identical to main before projects.root.
+        assert _sha(contract) == "2e4c00e9ec58332739186a1ff03b82e9594be6155acd7efa5e93f68862d78eff"
+
+
 @pytest.mark.usefixtures("agent_db")
 class TestManagerReply:
     def test_reply_is_recorded(self, agent_db: Any) -> None:
