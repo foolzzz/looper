@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ... import child_env
-from ..run_usage import Usage, reported_totals
+from ..run_usage import Usage, reported_totals, run_usage
 from . import (
     ApiProtocol, AuthKind, Capability, CostSource, Probe, PromptBlock, ProviderBinding, ReadOnly,
     RunCost, RuntimeAdapter, RuntimeUnsupported, cursor_login, runtime_prompt_text,
@@ -32,6 +32,7 @@ from .grok import _local_dir, _remove_idle_homes, _write_private, every_named
 from .instructions import InstructionFile
 from .channel import StreamChannel
 from .pricing import usage_event
+from .per_turn import PerTurnSession, session_dir_name
 
 if TYPE_CHECKING:
     from ..agent_settings import Launch
@@ -44,6 +45,7 @@ HOME_LAYOUT_ID = "cursor-operator-home/v1"
 CONFIG_DIR = "config"
 DATA_DIR = "data"
 PLUGIN_DIR = "looper-plugin"
+INSTRUCTIONS_FILE = "looper-instructions.md"
 INSTRUCTION_NAMES = ("AGENTS.md", "CLAUDE.md", "CLAUDE.local.md")
 PERSONAL_CONFIG = ("cursor", "claude-code")
 _PROBE_TIMEOUT_SEC = 10.0
@@ -65,6 +67,7 @@ def write_run_dir(local: Path, files: Mapping[str, str], *, instructions: str = 
     target = runs / key
 
     def write(run: Path) -> None:
+        _write_private(run / INSTRUCTIONS_FILE, instructions)
         for path, text in files.items():
             _write_private(run / PLUGIN_DIR / path, text)
         for name in (CONFIG_DIR, DATA_DIR):
@@ -141,7 +144,8 @@ class CursorAgentRuntime(RuntimeAdapter):
     type = "cursor-agent"
     label = "Cursor Agent"
     default_executable = "cursor-agent"
-    capabilities = frozenset({Capability.RUN, Capability.MCP, Capability.ADD_DIRS})
+    capabilities = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capability.RESUME,
+                              Capability.MCP, Capability.ADD_DIRS})
     protocols = frozenset({ApiProtocol.OPENAI_RESPONSES})
     auth_kinds = frozenset({AuthKind.OAUTH})
     login_models = cursor_login.SUGGESTED_MODELS
@@ -223,13 +227,13 @@ class CursorAgentRuntime(RuntimeAdapter):
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
-        raise RuntimeUnsupported("the Cursor Agent runtime cannot run the Manager or a Planner yet")
+        return self._command(executable, prompt_file, launch)
 
     def resume_args(self, session_id: str) -> list[str]:
-        raise RuntimeUnsupported("the Cursor Agent runtime cannot run the Manager or a Planner yet")
+        return ["--resume", session_id]
 
     def resident_session(self, label: str) -> ResidentSession:
-        raise RuntimeUnsupported("the Cursor Agent runtime cannot run the Manager or a Planner yet")
+        return ResidentCursor(label=label)
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
                     session_dir: Path | None = None, prompt_file: Path | None = None) -> StreamChannel:
@@ -434,3 +438,97 @@ class CursorStream:
                 result["routed_model"] = self.routed_model
             return [usage_event(self.model, reported_totals(result), session_id=self.session_id), result]
         return [{"type": "system", "subtype": "cursor_event", "session_id": self.session_id, "event": dict(raw)}]
+
+
+def sync_dir(*, source: Path, home: Path) -> None:
+    """Copy Looper's generated input to the owner; an expired run leaves the last copy usable."""
+    for directory in (home, home / CONFIG_DIR, home / DATA_DIR):
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(directory, 0o700)
+    if not source.is_dir():
+        return
+    inputs = {Path(INSTRUCTIONS_FILE): (source / INSTRUCTIONS_FILE).read_text(encoding="utf-8")}
+    inputs.update({path.relative_to(source): path.read_text(encoding="utf-8")
+                   for path in (source / PLUGIN_DIR).rglob("*") if path.is_file()})
+    for relative, text in inputs.items():
+        target = home / relative
+        if not target.is_file() or target.read_text(encoding="utf-8") != text:
+            _write_private(target, text)
+    for path in (home / PLUGIN_DIR).rglob("*"):
+        if path.is_file() and path.relative_to(home) not in inputs:
+            path.unlink()
+
+
+class ResidentCursor(PerTurnSession):
+    """One Cursor process per turn, resuming the owner's chat in fixed config and data directories.
+
+    Instructions go on stdin only when starting a chat. The hash saved beside
+    its id binds that chat to its original instructions; changed or unknown
+    instructions start a new chat. The owner copy survives run-directory cleanup.
+
+    Usage assumes the result reports the turn's own tokens, including after
+    resume; whether Cursor reports a chat total remains unverified.
+    """
+
+    runtime_label = "Cursor Agent"
+
+    def _split(self, command: list[str]) -> tuple[list[str], str | None, str]:
+        message = "a resident Cursor Agent command starts with env CURSOR_CONFIG_DIR=<dir> CURSOR_DATA_DIR=<dir> <program>"
+        if len(command) < 4 or command[0] != "env" or not command[1].startswith("CURSOR_CONFIG_DIR=") \
+                or not command[2].startswith("CURSOR_DATA_DIR="):
+            raise ValueError(message)
+        index = 4 if command[3].startswith("PATH=") else 3
+        if len(command) <= index:
+            raise ValueError(message)
+        if command[-2] == "--resume":
+            return command[:-2], command[-1], command[index]
+        return command, None, command[index]
+
+    def _run_dir(self) -> Path:
+        return Path(self._base[1].partition("=")[2]).parent
+
+    def _home(self) -> Path:
+        return self._run_dir().parent.parent / "sessions" / session_dir_name(self._label)
+
+    def _turn_argv(self) -> list[str]:
+        source, home = self._run_dir(), self._home()
+        sync_dir(source=source, home=home)
+        self._instructions = (home / INSTRUCTIONS_FILE).read_text(encoding="utf-8")
+        self._instructions_sha256 = hashlib.sha256(self._instructions.encode("utf-8")).hexdigest()
+        if self._session:
+            try:
+                saved = json.loads((home / "session.json").read_text(encoding="utf-8"))
+            except (FileNotFoundError, ValueError):
+                saved = None
+            if saved != {"session_id": self._session, "instructions_sha256": self._instructions_sha256}:
+                self._session = None
+        rest = list(self._base[3:])
+        for index in range(1, len(rest)):
+            if rest[index - 1] == "--plugin-dir" and rest[index] == str(source / PLUGIN_DIR):
+                rest[index] = str(home / PLUGIN_DIR)
+        return ["env", f"CURSOR_CONFIG_DIR={home / CONFIG_DIR}", f"CURSOR_DATA_DIR={home / DATA_DIR}",
+                *rest, *(["--resume", self._session] if self._session else [])]
+
+    def _turn_input(self, text: str) -> str:
+        return text if self._session else instructions_block(self._instructions) + "\n\n" + text
+
+    def _stream(self) -> CursorStream:
+        return CursorStream(model=self._base[self._base.index("--model") + 1] if "--model" in self._base else None)
+
+    def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
+        own = run_usage(result_event, price=self._price)
+        if result_event is not None:
+            self._totals = self._totals.plus(own)
+        return own
+
+    def _turn_ended(self, *, new_session: bool) -> None:
+        if not new_session or not self._session:
+            return
+        home = self._home()
+        _write_private(home / "session.json", json.dumps({"session_id": self._session,
+                                                       "instructions_sha256": self._instructions_sha256}))
+        chats = home / CONFIG_DIR / "chats"
+        for group in chats.iterdir() if chats.is_dir() else []:
+            for path in group.iterdir() if group.is_dir() and not group.is_symlink() else []:
+                if path.is_dir() and not path.is_symlink() and path.name != self._session:
+                    shutil.rmtree(path, ignore_errors=True)

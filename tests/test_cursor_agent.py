@@ -7,6 +7,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import shutil
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -480,7 +481,7 @@ else:
         assert "exited with code 1" in result["error"]
 
 
-def test_runtime_metadata_prompt_inputs_and_unavailable_sessions(tmp_path: Path) -> None:
+def test_runtime_metadata_prompt_inputs_and_unavailable_consults(tmp_path: Path) -> None:
     assert CURSOR.loads_operator_config and not CURSOR.can_replace_system_prompt and not CURSOR.runtime_cost_capped
     assert CURSOR.login_models == cursor_login.SUGGESTED_MODELS and CURSOR.effort_levels == ()
     assert CURSOR.isolation_id == "cursor-operator-home/v1" and CURSOR.isolation_args(tmp_path) == []
@@ -500,13 +501,143 @@ def test_runtime_metadata_prompt_inputs_and_unavailable_sessions(tmp_path: Path)
     assert blocks[-2].note == "stdin (before the turn prompt)" and blocks[-1].text is None
     with pytest.raises(RuntimeUnsupported, match="needs Looper.*instruction prompt"):
         CURSOR.run_channel(None, launch=_launch(), cwd=tmp_path)
-    for call in (lambda: CURSOR.resident_command("cursor-agent", cwd=tmp_path, prompt_file=_prompt(tmp_path), launch=_launch()),
-                 lambda: CURSOR.resume_args("session"), lambda: CURSOR.resident_session("manager")):
-        with pytest.raises(RuntimeUnsupported, match="cannot run the Manager or a Planner yet"):
-            call()
     with pytest.raises(RuntimeUnsupported):
         CURSOR.consult_command("cursor-agent", cwd=tmp_path, prompt_file=_prompt(tmp_path), launch=_launch(),
                                session_id="session", session_dir=None, fork_dir=tmp_path / "fork")
+
+
+_RESIDENT_CURSOR = """
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+config = Path(os.environ['CURSOR_CONFIG_DIR'])
+owner = config.parent
+text = sys.stdin.read()
+with (owner / 'turns.jsonl').open('a') as log:
+    log.write(json.dumps({'argv': args, 'config': str(config), 'data': os.environ['CURSOR_DATA_DIR'],
+                          'home': os.environ.get('HOME'), 'text': text}) + '\\n')
+if '--resume' in args:
+    session = args[args.index('--resume') + 1]
+    if not (config / 'chats' / 'workspace' / session).is_dir():
+        sys.exit(1)
+else:
+    session = 'chat-' + str(len((owner / 'turns.jsonl').read_text().splitlines()))
+(config / 'chats' / 'workspace' / session).mkdir(parents=True, exist_ok=True)
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': session}))
+print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'pong'}]}}))
+print(json.dumps({'type': 'result', 'subtype': 'success', 'session_id': session,
+                  'usage': {'inputTokens': 60, 'outputTokens': 5, 'cacheReadTokens': 40, 'cacheWriteTokens': 0}}))
+"""
+
+
+def test_cursor_resident_command_accepts_a_launcher_path_and_rejects_wrong_prefixes() -> None:
+    session = CURSOR.resident_session("manager")
+    for program in (["cursor-agent"], ["PATH=/shim:/bin", "ttadk", "code", "-t", "cursor-cli", "--"]):
+        base = ["env", "CURSOR_CONFIG_DIR=/run/config", "CURSOR_DATA_DIR=/run/data", *program,
+                "--model", MODEL]
+        assert session._split(base) == (base, None, "ttadk" if len(program) > 1 else "cursor-agent")
+        assert session._split(base + CURSOR.resume_args(SESSION)) == (
+            base, SESSION, "ttadk" if len(program) > 1 else "cursor-agent")
+    for command in ([], ["cursor-agent"], ["env", "HOME=/home", "CURSOR_DATA_DIR=/data", "cursor-agent"],
+                    ["env", "CURSOR_CONFIG_DIR=/config", "HOME=/home", "cursor-agent"],
+                    ["env", "CURSOR_CONFIG_DIR=/config", "CURSOR_DATA_DIR=/data", "PATH=/bin"]):
+        with pytest.raises(ValueError) as failure:
+            session._split(command)
+        assert str(failure.value) == (
+            "a resident Cursor Agent command starts with env CURSOR_CONFIG_DIR=<dir> CURSOR_DATA_DIR=<dir> <program>")
+
+
+def test_cursor_resident_turns_resume_in_owner_directories_and_restart_for_changed_instructions(tmp_path: Path) -> None:
+    executable = fake_claude(tmp_path / "cursor-agent", _RESIDENT_CURSOR)
+    root = tmp_path / "runtime"
+    launch = _launch(executable=executable)
+    owner = root / ".local/cursor-agent/sessions/planner-task-1"
+
+    def command(prompt: str) -> list[str]:
+        return CURSOR.resident_command(executable, cwd=tmp_path, prompt_file=_prompt(root, prompt), launch=launch)
+
+    async def run() -> None:
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        first = command("prompt A")
+        session = CURSOR.resident_session("planner-task-1")
+        assert not session.can_interrupt
+        await session.start(first, cwd=str(tmp_path), signature="a", env=launch.environment())
+        try:
+            one = await session.run_turn("hello", on_event)
+            assert one.session_started and one.result_event["result"] == "pong"
+            manifest = owner / PLUGIN_DIR / ".cursor-plugin/plugin.json"
+            unchanged = manifest.stat().st_mtime_ns
+            obsolete = owner / PLUGIN_DIR / "obsolete.json"
+            obsolete.write_text("old plugin input")
+            cursor_agent.sync_dir(source=_run_dir(first), home=owner)
+            assert not obsolete.exists() and manifest.stat().st_mtime_ns == unchanged
+            shutil.rmtree(_run_dir(first))
+            two = await session.run_turn("again", on_event)
+            assert two.session_started and two.result_event["session_id"] == "chat-1"
+            assert session.totals == Usage(input_tokens=120, output_tokens=10, cache_read_tokens=80,
+                                          cache_creation_tokens=0)
+        finally:
+            await session.stop()
+
+        # A new resident object must recover the instruction hash saved beside its chat id.
+        for prompt, expected in (("prompt A", "chat-1"), ("prompt B", "chat-4")):
+            session = CURSOR.resident_session("planner-task-1")
+            await session.start(command(prompt) + CURSOR.resume_args("chat-1"), cwd=str(tmp_path), signature=prompt,
+                                env=launch.environment())
+            try:
+                turn = await session.run_turn("next", on_event)
+                assert turn.session_started and turn.result_event["session_id"] == expected
+            finally:
+                await session.stop()
+
+    asyncio.run(run())
+    turns = [json.loads(line) for line in (owner / "turns.jsonl").read_text().splitlines()]
+    assert ["--resume" in turn["argv"] for turn in turns] == [False, True, True, False]
+    assert all(turn["argv"][-2:] == ["--resume", "chat-1"] for turn in turns[1:3])
+    for turn in turns:
+        assert turn["config"] == str(owner / "config") and turn["data"] == str(owner / "data")
+        assert turn["home"] == launch.environment().get("HOME")
+        assert turn["argv"][turn["argv"].index("--plugin-dir") + 1] == str(owner / PLUGIN_DIR)
+    assert turns[0]["text"].startswith("<looper_instructions>\n") and turns[0]["text"].endswith("\n\nhello")
+    assert turns[1]["text"] == "again" and turns[2]["text"] == "next"
+    assert "prompt B\n</looper_instructions>\n\nnext" in turns[3]["text"]
+    assert json.loads((owner / PLUGIN_DIR / ".cursor-plugin/plugin.json").read_text())["name"] == "looper"
+    assert not (owner / PLUGIN_DIR / "rules").exists()
+    assert [path.name for path in (owner / "config/chats/workspace").iterdir()] == ["chat-4"]
+    assert all(stat.S_IMODE((owner / name).stat().st_mode) == 0o700 for name in (".", "config", "data"))
+
+
+def test_cursor_missing_chat_marks_session_stale_and_owner_starts_over(tmp_path: Path) -> None:
+    executable = fake_claude(tmp_path / "cursor-agent", _RESIDENT_CURSOR)
+    root = tmp_path / "runtime"
+    launch = _launch(executable=executable)
+    command = CURSOR.resident_command(executable, cwd=tmp_path, prompt_file=_prompt(root), launch=launch)
+
+    async def run() -> None:
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        session = CURSOR.resident_session("manager")
+        await session.start(command, cwd=str(tmp_path), signature="s", env=launch.environment())
+        try:
+            await session.run_turn("hello", on_event)
+            shutil.rmtree(root / ".local/cursor-agent/sessions/manager/config/chats")
+            failed = await session.run_turn("gone", on_event)
+            assert (failed.result_event, failed.session_started, failed.exit_code) == (None, False, 1)
+            assert session.stale("s")
+        finally:
+            await session.stop()
+        await session.start(command, cwd=str(tmp_path), signature="s", env=launch.environment())
+        try:
+            restarted = await session.run_turn("start over", on_event)
+            assert restarted.session_started and restarted.result_event["session_id"] == "chat-3"
+            assert not session.stale("s")
+        finally:
+            await session.stop()
+
+    asyncio.run(run())
 
 
 def test_cursor_mcp_config_carries_wait_cap_only_to_platform_server(tmp_path: Path) -> None:

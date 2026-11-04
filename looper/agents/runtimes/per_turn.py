@@ -179,6 +179,10 @@ class PerTurnSession(ABC):
     def _turn_ended(self, *, new_session: bool) -> None:
         """Called after a turn with a result; ``new_session`` when it started the session it named."""
 
+    def _turn_input(self, text: str) -> str:
+        """The stdin message, after the runtime prepared the turn's command and session."""
+        return text
+
     # --- The session ---
 
     async def start(
@@ -283,7 +287,7 @@ class PerTurnSession(ABC):
             assert process.stdin is not None and process.stdout is not None
             try:
                 if not cancel.requested:
-                    process.stdin.write(text.encode("utf-8"))
+                    process.stdin.write(self._turn_input(text).encode("utf-8"))
                     await process.stdin.drain()
                     process.stdin.close()
                     sent = True

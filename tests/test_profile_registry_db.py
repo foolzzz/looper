@@ -937,7 +937,7 @@ def test_grok_on_path_becomes_a_builtin_runtime_that_pairs_only_with_its_own_log
     run_db(_test, monkeypatch)
 
 
-def test_cursor_agent_on_path_pairs_only_with_cursor_login_and_runs_workers_and_reviewers(
+def test_cursor_agent_on_path_pairs_only_with_cursor_login_and_runs_every_role(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     from looper.agents.profile_registry import register_found_runtimes
@@ -959,11 +959,11 @@ def test_cursor_agent_on_path_pairs_only_with_cursor_login_and_runs_workers_and_
         assert (runtime["runtime_id"], runtime["builtin"], runtime["version"], runtime["type_label"],
                 runtime["protocols"], runtime["roles"]) == (
             "rt-cursor-agent", True, "2026.10.22", "Cursor Agent", ["openai-responses"],
-            ["worker", "reviewer"])
+            ["manager", "planner", "worker", "reviewer"])
         types = {entry["type"]: entry for entry in registry["runtime_types"]}
         assert types["cursor-agent"]["loads_operator_config"] is True
         assert types["claude-code"]["loads_operator_config"] is False
-        assert types["cursor-agent"]["roles"] == ["worker", "reviewer"]
+        assert types["cursor-agent"]["roles"] == ["manager", "planner", "worker", "reviewer"]
 
         async def profile(provider_id: str, runtime_id: str = "rt-cursor-agent") -> tuple[int, Any]:
             return await _call("POST", "/api/agent-profiles", {
@@ -973,7 +973,7 @@ def test_cursor_agent_on_path_pairs_only_with_cursor_login_and_runs_workers_and_
 
         status, payload = await profile("prov-cursor-login")
         assert status == 201, payload
-        assert payload["profile"]["roles"] == ["worker", "reviewer"]
+        assert payload["profile"]["roles"] == ["manager", "planner", "worker", "reviewer"]
         key = await _provider({
             "name": "responses-key", "vendor_type": "custom", "api_key": SECRET,
             "endpoints": [{"protocol": "openai-responses", "base_url": "https://example.invalid/v1"}],

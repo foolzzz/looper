@@ -179,7 +179,7 @@ async def current_copies(runtime_root: Path) -> list[str] | None:
 
 
 # The runtime types whose resident agents keep their sessions in a directory of their own (``per_turn``).
-SESSION_RUNTIMES = ("codex", "omp", "grok", "pi")
+SESSION_RUNTIMES = ("codex", "omp", "grok", "pi", "cursor-agent")
 
 
 def reclaim_sessions(runtime_root: Path, *, saved: Iterable[tuple[str, str | None]],
