@@ -93,6 +93,25 @@ def _registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, key: bool = Tr
 
 @pytest.mark.usefixtures("agent_db")
 class TestSwitchPath:
+    def test_hook_block_during_handoff_stops_before_the_new_session(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, tmp_path: Path,
+    ) -> None:
+        rows = _registry(monkeypatch, tmp_path)
+        body = _resident().replace(
+            "    text = json.loads(line)['message']['content'].rpartition('\\n\\n')[2]\n",
+            "    text = json.loads(line)['message']['content'].rpartition('\\n\\n')[2]\n"
+            "    if text.startswith('[HANDOFF]'):\n"
+            "        print(json.dumps({'type': 'system', 'subtype': 'informational', 'content': "
+            "'UserPromptSubmit operation blocked by hook: Request Blocked by Security Policy'}), flush=True)\n"
+            "        continue\n",
+        )
+        chat = _converse(monkeypatch, body, ["hello", "again"],
+                         layers=[[], [_session(rows["agent-codex"])]])
+        assert chat["replies"][0] == "turn 1: hello"
+        assert "Request Blocked by Security Policy" in chat["replies"][1]
+        assert len(chat["spawned"]) == 1
+        assert "Claude Code's hook blocked the prompt" in agent_db.finish_record.await_args.kwargs["error"]
+
     def test_claude_code_to_codex_and_back(
         self, monkeypatch: pytest.MonkeyPatch, agent_db: Any, tmp_path: Path,
     ) -> None:

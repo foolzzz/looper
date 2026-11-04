@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..agent_settings import AgentType, Launch, load_agent_settings, load_task_limit
 from ..bus import MessageBus
-from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, budget_error, ended_by
+from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
 from .. import proc_tree, reported_files, vault
 from .. import keeper, kept_dirs
 from ..keeper.client import KeeperGone
@@ -1586,6 +1586,8 @@ class WorkerPool:
                     # On adoption the replay's usage must stop the first live event before any writes.
                     if recorder.cap_stop is None:
                         await recorder.record(event)
+                if blocked := prompt_block(event, work_dir):
+                    raise blocked
                 if not replaying and (capped := recorder.cap_stop) is not None:
                     # Over its per-run cap at the provider's prices: stopped now, ending with the cap's result.
                     # That result is Looper's, not a line the process wrote, so the transcript has to keep it.
@@ -1743,6 +1745,15 @@ class WorkerPool:
             _end_input()
             # Never leave Claude, or anything it started, running unsupervised once the worker gives up.
             await _end_run()
+            if isinstance(exc, TurnBlocked):
+                error = str(exc)
+                await recorder.finish(output_text=None, result_event=result_event, error=error,
+                                      outcome=RunOutcome.RUN_FAILED.value)
+                if parent_task_id:
+                    await self._activity(parent_task_id, worker_id, "error", error)
+                failed = _verify_failed(error) if is_verify else _work_failed(error)
+                return {**failed, "error": error,
+                        "prompt_blocked": {"reason": exc.reason, "work_dir": exc.work_dir}}
             timed_out = isinstance(exc, asyncio.TimeoutError)
             error = (
                 f"Claude ran longer than the {run_timeout} s limit (timeout_seconds)" if timed_out

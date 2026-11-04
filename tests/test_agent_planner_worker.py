@@ -378,6 +378,34 @@ _THINKING_DELTA = {
 
 
 class TestWorkerSubprocess:
+    @pytest.mark.parametrize("is_verify", [False, True])
+    def test_hook_block_fails_the_run_and_record(self, tmp_path: Path, agent_db: Any, is_verify: bool) -> None:
+        async def run() -> dict[str, Any]:
+            claude = _fake_claude(tmp_path, (
+                "sys.stdin.readline()\n"
+                "print(json.dumps({'type': 'system', 'subtype': 'informational', 'content': "
+                "'UserPromptSubmit operation blocked by hook: Request Blocked by Security Policy'}), flush=True)\n"
+                "sys.stdin.read()\n"
+            ))
+            pool = WorkerPool(config=WorkerConfig(claude_bin=claude), runtime_root=tmp_path)
+            envelope = _work_item(tmp_path)
+            envelope.payload["parent_task_id"] = "task-1"
+            return await asyncio.wait_for(pool._execute(envelope, is_verify=is_verify), timeout=5)
+
+        result = asyncio.run(run())
+        error = (f"Claude Code's hook blocked the prompt in {tmp_path}: Request Blocked by Security Policy. "
+                 "This is your organization's policy, not a Looper error; "
+                 "run this project from a directory the policy allows.")
+        assert result["summary"] == result["error"] == error
+        if is_verify:
+            assert result["passed"] is False
+        else:
+            assert result["status"] == "failed"
+        assert result["prompt_blocked"] == {"reason": "Request Blocked by Security Policy", "work_dir": str(tmp_path)}
+        record = agent_db.finish_record.await_args.kwargs
+        assert record["error"] == error and record["status"] == "failed"
+        assert any(call.kwargs["summary"] == error for call in agent_db.insert_activity.await_args_list)
+
     def test_run_records_its_tokens_context_and_compactions(self, agent_db: Any) -> None:
         # Two model requests, an automatic compaction between them, and Claude's totals in the result.
         def request(input_tokens: int, cache_read: int, cache_creation: int) -> str:

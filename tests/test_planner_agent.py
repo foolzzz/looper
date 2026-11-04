@@ -424,6 +424,19 @@ def _in_order(text: str, *parts: str) -> None:
 
 @pytest.mark.usefixtures("agent_db")
 class TestPlanning:
+    def test_hook_block_fails_without_repair_or_closeout_turn(self, planner_claude: Any, agent_db: Any) -> None:
+        claude = planner_claude("<blocked>")
+        h = drive(claude, always(WORK_OK))
+        error = (f"Claude Code's hook blocked the prompt in {h.work_dir}: Request Blocked by Security Policy. "
+                 "This is your organization's policy, not a Looper error; "
+                 "run this project from a directory the policy allows.")
+        assert h.final().payload["status"] == "failed"
+        assert error in h.final().payload["summary"]
+        assert h.dispatched == []
+        assert len(claude.turns()) == 1
+        assert any(error in line for line in activity(agent_db))
+        assert agent_db.finish_record.await_args.kwargs["error"] == error
+
     def test_steps_run_in_dependency_order(self, planner_claude: Any, agent_db: Any) -> None:
         agent_db.get_task_project.return_value = {"id": "proj-1", "name": "calc", "description": "a tiny calculator",
                                                   "work_dir": "/srv/calc", "background": ""}
@@ -562,6 +575,30 @@ class TestPlanning:
 
 @pytest.mark.usefixtures("agent_db")
 class TestDecisions:
+    @pytest.mark.parametrize("is_verify", [False, True])
+    def test_blocked_step_fails_without_a_decision_or_retry(
+        self, planner_claude: Any, is_verify: bool,
+    ) -> None:
+        from looper.agents.claude_cli import TurnBlocked
+
+        blocked = TurnBlocked("Request Blocked by Security Policy", "/srv/project")
+        result = {"status": "failed", "passed": False, "error": str(blocked), "summary": str(blocked),
+                  "prompt_blocked": {"reason": blocked.reason, "work_dir": blocked.work_dir}}
+        claude = planner_claude(plan(step("s1", review=is_verify)), decide("review"))
+        h = drive(claude, always(WORK_OK if is_verify else result, result))
+        assert h.final().payload["status"] == "failed"
+        assert str(blocked) in h.final().payload["summary"]
+        assert len(claude.turns()) == (2 if is_verify else 1)
+        assert len(h.dispatched) == (2 if is_verify else 1)
+
+    def test_blocked_decision_does_not_fall_back_to_the_worker_verdict(self, planner_claude: Any) -> None:
+        claude = planner_claude(plan(step("s1")), "<blocked>")
+        h = drive(claude, always(WORK_OK))
+        assert h.final().payload["status"] == "failed"
+        assert "Request Blocked by Security Policy" in h.final().payload["summary"]
+        assert len(claude.turns()) == 2
+        assert len(h.dispatched) == 1
+
     def test_review_flagged_step_completes_only_after_the_review_passes(self, planner_claude: Any) -> None:
         claude = planner_claude(
             plan(step("s1", review=True)),
