@@ -15,6 +15,7 @@ from typing import Any
 import asyncpg
 
 from ..db import connection, projects as db_projects
+from ..db.tasks import ACTIVE_STATUSES
 from . import projects, step_workspaces
 
 logger = logging.getLogger(__name__)
@@ -97,21 +98,23 @@ def _inventory(old: Path) -> tuple[int, int, bool]:
     return files, size, False
 
 
-async def _check_other_projects(db: Any, project_id: str, old: Path) -> None:
+async def _check_directory_dependencies(db: Any, project_id: str, old: Path) -> None:
     # A project's default is not the only dependency: stopped tasks may own checkouts
-    # elsewhere while their cleanup still needs the repository being moved.
+    # elsewhere while their cleanup still needs the repository being moved. This
+    # project's task, step and template paths also stay unchanged by a move.
     rows = await db.fetch(
         "SELECT work_dir AS path FROM projects WHERE id <> $1 UNION "
-        "SELECT unnest(ARRAY[work_dir, workspace_dir]) FROM tasks WHERE project_id IS DISTINCT FROM $1 UNION "
+        "SELECT unnest(ARRAY[work_dir, workspace_dir]) FROM tasks UNION "
         "SELECT unnest(ARRAY[w.repo_dir, w.path]) FROM task_worktrees w JOIN tasks t ON t.id = w.task_id "
         "WHERE t.project_id IS DISTINCT FROM $1 AND w.state = 'active' UNION "
         "SELECT unnest(ARRAY[w.repo_dir, w.path]) FROM step_workspaces w JOIN tasks t ON t.id = w.task_id "
-        "WHERE t.project_id IS DISTINCT FROM $1 AND w.state NOT IN ('merged', 'discarded') UNION "
+        "WHERE t.project_id = $1 OR w.state NOT IN ('merged', 'discarded') UNION "
         "SELECT work_dir FROM schedules WHERE project_id IS DISTINCT FROM $1 UNION "
-        "SELECT work_dir FROM manager_task_templates WHERE project_id IS DISTINCT FROM $1", project_id)
+        "SELECT work_dir FROM manager_task_templates", project_id)
     if any(_under(row["path"], str(old)) is not None for row in rows):
         raise projects.RequestError(projects.HTTP_409,
-                                    "another project depends on this directory; keep the old path link or "
+                                    "a task, workspace, template or another project depends on this directory; "
+                                    "keep the old path link or "
                                     "relocate those dependencies before moving")
 
 
@@ -124,14 +127,16 @@ async def preview(project: Mapping[str, Any], data: Mapping[str, Any], *, db: An
         raise projects.RequestError(projects.HTTP_400, f"cannot move project directory: {exc}") from None
     db = db or connection.get_pool()
     busy = await db.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM tasks t JOIN task_steps s ON s.task_id = t.id "
+        "SELECT EXISTS (SELECT 1 FROM tasks WHERE project_id = $1 AND status = ANY($3::text[])) "
+        "OR EXISTS (SELECT 1 FROM tasks t JOIN task_steps s ON s.task_id = t.id "
         "WHERE t.project_id = $1 AND s.status = ANY($2::text[])) "
         "OR EXISTS (SELECT 1 FROM tasks t JOIN llm_records r ON r.task_id = t.id "
         "WHERE t.project_id = $1 AND r.status = 'running') "
         "OR EXISTS (SELECT 1 FROM schedules s JOIN schedule_runs r ON r.schedule_id = s.id "
         "WHERE s.project_id = $1 AND (r.status = 'gating' OR (s.kind = 'command' AND r.status = 'running'))) "
         "OR EXISTS (SELECT 1 FROM tasks t JOIN task_user_gates g ON g.task_id = t.id "
-        "WHERE t.project_id = $1 AND g.state IN ('open', 'discussing'))", project["id"], list(_IN_FLIGHT))
+        "WHERE t.project_id = $1 AND g.state IN ('open', 'discussing'))",
+        project["id"], list(_IN_FLIGHT), list(ACTIVE_STATUSES))
     if busy:
         raise projects.RequestError(projects.HTTP_409,
                                     "the project has a task, command schedule run or gate in progress; wait for it to finish")
@@ -139,7 +144,7 @@ async def preview(project: Mapping[str, Any], data: Mapping[str, Any], *, db: An
     if not isinstance(link_old, bool):
         raise projects.RequestError(projects.HTTP_400, "link_old must be a boolean")
     if not link_old:
-        await _check_other_projects(db, project["id"], old)
+        await _check_directory_dependencies(db, project["id"], old)
     rows = await db.fetch(
         "SELECT s.*, COALESCE(t.work_dir, '') AS template_work_dir FROM schedules s "
         "LEFT JOIN manager_task_templates t ON t.manager_id = s.manager_id AND t.key = s.template_key "

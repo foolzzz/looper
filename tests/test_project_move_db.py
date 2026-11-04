@@ -56,7 +56,7 @@ def test_move_preserves_files_rewrites_schedules_and_keeps_task_records(monkeypa
         await _schedule(pool, project["id"], "", schedule_id="inherited-command")
         other = await projects.create_project(name="Other", work_dir=str(old), pool=pool)
         await _schedule(pool, other["id"], old, schedule_id="other-project")
-        for task_id, status in (("queued", "pending"), ("waiting", "waiting"), ("finished", "completed")):
+        for task_id, status in (("ready", "init"), ("waiting", "stopped"), ("finished", "completed")):
             await tasks.create_task(task_id=task_id, requirement="Keep the recorded paths", project_id=project["id"],
                                     work_dir=str(old / "subdir"), workspace_dir=str(old), status=status, pool=pool)
         await pool.execute("INSERT INTO task_steps (id,task_id,step_index,instruction,status,kind) "
@@ -115,6 +115,79 @@ def test_move_can_omit_old_path_link(monkeypatch, tmp_path):
         assert not os.path.lexists(old)
         assert (new / "subdir" / "kept.txt").is_file()
         assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(new)
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("status", tasks.ACTIVE_STATUSES)
+@pytest.mark.parametrize("link_old", [False, True])
+def test_move_refuses_active_task_between_turns(monkeypatch, tmp_path, status, link_old):
+    old, new = tmp_path / "old", tmp_path / "new"
+
+    async def check(pool):
+        project = await _project(pool, old)
+        # An active task blocks the move even with no running call or step, and
+        # even when its own directory is outside the project directory.
+        await tasks.create_task(task_id="between-turns", requirement="Continue next turn",
+                                project_id=project["id"], work_dir=str(old) + "-other", status=status, pool=pool)
+        data = {"to": str(new), "link_old": link_old}
+        before = await _rows(pool)
+        for operation in (lambda: api.preview_project_move(project, data, db=pool),
+                          lambda: api.move_project_dir(project["id"], data)):
+            with pytest.raises(api.RequestError) as error:
+                await operation()
+            assert error.value.status == api.HTTP_409
+            assert await _rows(pool) == before
+            assert old.is_dir() and not old.is_symlink() and not new.exists()
+            assert (old / "subdir" / "kept.txt").read_text() == "keep these files\n"
+        await tasks.update_task_status("between-turns", "stopped", pool=pool)
+        assert (await api.move_project_dir(project["id"], data))["new_dir"] == str(new)
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize(("dependency", "state"), [
+    ("task-work-dir", "init"), ("task-work-dir", "stopped"), ("task-work-dir", "completed"),
+    ("task-workspace", "stopped"), ("step-repository", "active"), ("step-checkout", "active"),
+    ("step-repository", "merged"), ("step-checkout", "discarded"), ("template", ""),
+])
+def test_move_without_link_refuses_own_project_directory_dependencies(monkeypatch, tmp_path, dependency, state):
+    old, new = tmp_path / "old", tmp_path / "new"
+    (tmp_path / "alias").symlink_to(old, target_is_directory=True)
+
+    async def check(pool):
+        project = await _project(pool, old)
+        reference = str(tmp_path / "alias" / "subdir")
+        outside = str(old) + "-other"
+        await tasks.create_task(task_id="recorded-task", requirement="Keep recorded paths", project_id=project["id"],
+                                work_dir=reference if dependency == "task-work-dir" else outside,
+                                workspace_dir=reference if dependency == "task-workspace" else "",
+                                status=state if dependency.startswith("task-") else "stopped", pool=pool)
+        if dependency.startswith("step-"):
+            await pool.execute("INSERT INTO task_steps (id,task_id,step_index,instruction) "
+                               "VALUES ('recorded-step','recorded-task',0,'Keep work')")
+            await pool.execute("INSERT INTO step_workspaces "
+                               "(task_id,step_id,repo_dir,path,target_branch,branch,base_commit,state) "
+                               "VALUES ('recorded-task','recorded-step',$1,$2,'main','step-branch','base',$3)",
+                               reference if dependency == "step-repository" else outside,
+                               reference if dependency == "step-checkout" else outside, state)
+        elif dependency == "template":
+            await pool.execute("INSERT INTO manager_task_templates (manager_id,key,name,project_id,work_dir) "
+                               "VALUES ('manager','recorded','Recorded',$1,$2)", project["id"], reference)
+        data = {"to": str(new), "link_old": False}
+        before = await _rows(pool)
+        for operation in (lambda: api.preview_project_move(project, data, db=pool),
+                          lambda: api.move_project_dir(project["id"], data)):
+            with pytest.raises(api.RequestError) as error:
+                await operation()
+            assert error.value.status == api.HTTP_409
+            assert await _rows(pool) == before
+            assert old.is_dir() and not old.is_symlink() and not new.exists()
+            assert (old / "subdir" / "kept.txt").read_text() == "keep these files\n"
+        # The same inactive references remain usable when the old path is linked.
+        result = await api.move_project_dir(project["id"], {**data, "link_old": True})
+        assert result["new_dir"] == str(new)
+        assert old.is_symlink() and (Path(reference) / "kept.txt").read_text() == "keep these files\n"
 
     run_db(check, monkeypatch, timeout=30)
 
@@ -178,8 +251,9 @@ def test_move_refusals_preserve_files_and_rows(monkeypatch, tmp_path, case, mess
                                "VALUES ('schedule-run','command',now(),'manual',$1)",
                                "running" if case == "command-running" else "gating")
         else:
+            # Keep the task inactive so each child-state guard is tested on its own.
             await tasks.create_task(task_id="busy", requirement="Busy task", project_id=project["id"],
-                                    work_dir=str(old), status="running", pool=pool)
+                                    work_dir=str(old), status="stopped", pool=pool)
             if case == "run-open":
                 await pool.execute("INSERT INTO llm_records (agent_id,task_id,status) "
                                    "VALUES ('planner-busy','busy','running')")
@@ -238,11 +312,12 @@ def test_failed_database_commit_restores_directory_and_all_rows(monkeypatch, tmp
             new.mkdir()
         await _schedule(pool, project["id"], old)
         await _schedule(pool, project["id"], old / "subdir", schedule_id="agent", kind="agent")
+        checkout = old / "checkout" if link_old else tmp_path / "checkout"
         await tasks.create_task(task_id="stopped-task", requirement="Keep worktree paths on rollback",
-                                project_id=project["id"], work_dir=str(old / "checkout"), status="stopped", pool=pool)
+                                project_id=project["id"], work_dir=str(checkout), status="stopped", pool=pool)
         await pool.execute("INSERT INTO task_worktrees (task_id,repo_dir,path,branch,base_commit) "
                            "VALUES ('stopped-task',$1,$2,'looper/stopped-task/task','base')",
-                           str(old), str(old / "checkout"))
+                           str(old), str(checkout))
         await pool.execute("""
             CREATE FUNCTION refuse_directory_commit() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN RAISE EXCEPTION 'directory commit refused' USING ERRCODE = '23514'; END $$;
@@ -365,8 +440,10 @@ def test_move_repairs_external_linked_task_worktree(monkeypatch, tmp_path, neste
              "commit", "--allow-empty", "-qm", "Initial files")
         base = _git(repo, "rev-parse", "HEAD")
         _git(repo, "worktree", "add", "-qb", "looper/task-example/task", str(linked))
+        # Only the live task_worktrees row references the old repository here;
+        # it is rewritten by the move, so no historical path needs the link.
         await tasks.create_task(task_id="task-example", requirement="Keep its worktree", project_id=project["id"],
-                                work_dir=str(linked), workspace_dir=str(repo), status="stopped", pool=pool)
+                                work_dir=str(linked), status="stopped", pool=pool)
         await pool.execute("INSERT INTO task_worktrees (task_id,repo_dir,path,branch,base_commit) "
                            "VALUES ('task-example',$1,$2,'looper/task-example/task',$3)", str(repo), str(linked), base)
         # Positive control: this really is a working linked checkout before the move.
@@ -417,11 +494,11 @@ def test_deleting_stopped_task_after_move_preserves_uncommitted_files(monkeypatc
                            "VALUES ('stopped-task',$1,$2,$3,$4)",
                            _git(repo, "rev-parse", "--show-toplevel"), str(linked.resolve()), branch, base)
 
-        preview = await api.preview_project_move(project, {"to": str(new), "link_old": False}, db=pool)
+        preview = await api.preview_project_move(project, {"to": str(new), "link_old": True}, db=pool)
         assert [row["id"] for row in preview.schedules] == ["command"]
-        result = await api.move_project_dir(project["id"], {"to": str(new), "link_old": False})
+        result = await api.move_project_dir(project["id"], {"to": str(new), "link_old": True})
         assert result["repairs"] and all(row["ok"] for row in result["repairs"])
-        assert not old.exists()
+        assert old.is_symlink() and old.resolve() == new.resolve()
         assert await pool.fetchval("SELECT work_dir FROM schedules WHERE id='command'") == str(new)
         moved_repo = repo if layout == "linked-source" else new
         moved_linked = new if layout == "linked-source" else new / "checkout" if layout == "both-inside" else linked
@@ -560,17 +637,21 @@ def test_move_repairs_moved_linked_checkout(monkeypatch, tmp_path, layout, manag
                                     status="stopped", pool=pool)
             await pool.execute("INSERT INTO task_worktrees (task_id,repo_dir,path,branch,base_commit) "
                                "VALUES ('moving-task',$1,$2,'looper/moving-task/task',$3)", str(repo), str(linked), base)
-        result = await api.move_project_dir(project["id"], {"to": str(new), "link_old": False})
+        source = str(old.resolve())
+        result = await api.move_project_dir(project["id"], {"to": str(new), "link_old": managed})
         moved_linked = new if layout == "linked-source" else new / "linked"
         moved_main = repo if layout == "linked-source" else new / "repository"
-        assert not old.exists()
+        if managed:
+            assert old.is_symlink() and old.resolve() == new.resolve()
+        else:
+            assert not old.exists()
         assert result["repairs"] and all(row["ok"] for row in result["repairs"])
         assert _git(moved_linked, "status", "--porcelain") == ""
         assert _git(moved_linked, "rev-parse", "HEAD") == base
         assert _git(moved_main, "status", "--porcelain") == ""
         registered = _git(moved_main, "worktree", "list", "--porcelain")
         assert str(moved_linked.resolve()) in registered
-        assert str(old.resolve()) not in registered
+        assert source not in registered
         assert str(moved_main.resolve()) in (moved_linked / ".git").read_text()
         assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(new)
 
@@ -605,7 +686,7 @@ def test_existing_database_adds_project_activity_idempotently(monkeypatch, tmp_p
     run_db(check, monkeypatch, timeout=30)
 
 
-def test_waiting_planner_cannot_open_a_run_between_validation_and_move(monkeypatch, tmp_path):
+def test_task_cannot_open_a_run_between_validation_and_move(monkeypatch, tmp_path):
     from looper.agents import project_move
     from looper.db import llm_records
 
@@ -614,7 +695,7 @@ def test_waiting_planner_cannot_open_a_run_between_validation_and_move(monkeypat
     async def check(pool):
         project = await _project(pool, old)
         await tasks.create_task(task_id="waiting-planner", requirement="Wait before waking",
-                                project_id=project["id"], work_dir=str(old), status="waiting", pool=pool)
+                                project_id=project["id"], work_dir=str(old), status="stopped", pool=pool)
         entered, release = threading.Event(), threading.Event()
         inventory = project_move._inventory
 

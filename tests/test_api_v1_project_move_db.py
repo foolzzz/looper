@@ -3,7 +3,7 @@
 import pytest
 
 from looper.agents import api_v1, schedules
-from looper.db import projects
+from looper.db import projects, tasks
 from tests.db_support import DSN, run_db, v1_api as _api
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -166,4 +166,38 @@ def test_dashboard_move_rejects_configuration_changed_since_preview(tmp_path, mo
             assert status == 409 and answer["error"]["code"] == "conflict", answer
             assert old.is_dir() and not old.is_symlink() and not new.exists()
             assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(old)
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("client", [False, True], ids=["dashboard", "manager"])
+@pytest.mark.parametrize("change", ["active-task", "template-path"])
+def test_move_rechecks_task_and_path_dependencies_after_preview(tmp_path, monkeypatch, client, change):
+    old, new = tmp_path / "source", tmp_path / "destination"
+    old.mkdir()
+    (old / "notes").write_text("keep")
+
+    async def run(pool):
+        project = await projects.create_project(name="Example", work_dir=str(old), pool=pool)
+        async with _api(tmp_path, pool) as call:
+            body = {"project": project["id"], "to": str(new), "link_old": False}
+            action = "project_admin.move_dir" if client else "project_admin.preview_move_dir"
+            status, preview = await call(action, body, client=client)
+            assert status == (202 if client else 200), preview
+            if change == "active-task":
+                await tasks.create_task(task_id="between-turns", requirement="Continue next turn",
+                                        project_id=project["id"], work_dir=str(old) + "-other",
+                                        status="executing", pool=pool)
+            else:
+                await pool.execute("INSERT INTO manager_task_templates (manager_id,key,name,project_id,work_dir) "
+                                   "VALUES ('manager','recorded','Recorded',$1,$2)", project["id"], str(old))
+            if client:
+                status, answer = await call("confirm", {"confirmation_id": preview["confirmation_id"]}, client=True)
+            else:
+                status, answer = await call("project_admin.move_dir", {
+                    **body, "move_version": preview["result"]["move_version"]})
+            assert status == 409 and answer["error"]["code"] == "conflict", answer
+            assert old.is_dir() and not old.is_symlink() and not new.exists()
+            assert (old / "notes").read_text() == "keep"
+            assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(old)
+
     run_db(run, monkeypatch, timeout=30)
