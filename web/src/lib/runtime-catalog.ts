@@ -33,6 +33,7 @@ export interface RuntimeLoginHelp {
 export const LOGIN_HELP: Record<string, RuntimeLoginHelp> = {
   codex: { check: "codex login status", signIn: "codex login", how: "with ChatGPT" },
   grok: { signIn: "grok login" },
+  "cursor-agent": { check: "cursor-agent status", signIn: "cursor-agent login" },
 };
 
 /** Whether a runtime login the server reports can run: Codex's ChatGPT login, or Grok's signed-in login. */

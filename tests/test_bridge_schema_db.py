@@ -90,7 +90,11 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             shape = await structure(conn)
             assert await connection.schema_change_pending(conn)
             assert await witness(conn) == before and await structure(conn) == shape
-            await connection.ensure_schema(conn)
+            await connection.ensure_schema(fresh)
+            fresh_rows = await witness(fresh)
+            async with conn.transaction():
+                upgraded_at = await conn.fetchval("SELECT now()")
+                await connection.ensure_schema(conn)
             after = await witness(conn)
             for table in ("task_plans", "system_settings", "library_items", "library_files", "library_installs",
                           "chat_messages", "llm_model_migration_map", "agent_setting_layers", "agent_runtimes",
@@ -107,6 +111,16 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                     assert after[table] == sorted(
                         [*before[table], {"sequencename": "project_activity_seq_seq", "last_value": None}],
                         key=lambda row: row["sequencename"])
+                elif table in ("llm_providers", "llm_provider_endpoints", "llm_models"):
+                    # Only Cursor's new builtins may be added; every historical field stays intact.
+                    key = "id" if table == "llm_providers" else "provider_id"
+                    cursor_rows = [r for r in after[table] if r[key] == "prov-cursor-login"]
+                    expected = [r for r in fresh_rows[table] if r[key] == "prov-cursor-login"]
+                    assert len(expected) == (5 if table == "llm_models" else 1)
+                    expected = [{**r, "created_at": upgraded_at, "updated_at": upgraded_at}
+                                if "created_at" in r else r for r in expected]
+                    assert cursor_rows == expected, table
+                    assert [r for r in after[table] if r[key] != "prov-cursor-login"] == before[table], table
                 else:
                     assert after[table] == before[table], table
             assert json.loads(after["tasks"][0]["config"]) == {"worker": {"max_turns": 9}}
@@ -136,7 +150,6 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
             assert len(runs) == 1
             assert all(row.pop("execution_snapshot") is None for row in runs)
             assert runs == [{**row, **_COMMAND_RUN_DEFAULTS} for row in before["schedule_runs"]]
-            await connection.ensure_schema(fresh)
             assert await structure(conn) == await structure(fresh)
             await connection.ensure_schema(conn)
             assert await witness(conn) == after

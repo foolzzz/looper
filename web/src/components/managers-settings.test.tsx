@@ -18,7 +18,7 @@ vi.mock("@/lib/api", async (importOriginal) => ({
   deleteManagerTemplate: vi.fn(),
   fetchProjects: vi.fn(async () => []),
   fetchRoleTemplates: vi.fn(async () => ({ templates: [] })),
-  fetchRegistry: vi.fn(async () => ({ profiles: [] })),
+  fetchRegistry: vi.fn(async () => ({ providers: [], profiles: [] })),
 }));
 
 vi.mock("@/lib/chat-bindings-api", () => ({ fetchChatBindings: vi.fn(async () => []) }));

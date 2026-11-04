@@ -14,10 +14,29 @@ VALUES ('prov-claude-subscription', 'claude-subscription', 'claude-subscription'
        ('prov-codex-login', 'codex-login', 'codex-login', 'oauth', 'codex', true),
        ('prov-grok-login', 'grok-login', 'grok-login', 'oauth', 'grok', true)
 ON CONFLICT DO NOTHING;
+
+-- Older releases allowed custom providers with this name. Under the schema
+-- lock, choose a free builtin name without changing saved providers or refs.
+DO $$
+DECLARE
+    provider_name TEXT := 'cursor-login';
+    suffix INTEGER := 0;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM llm_providers WHERE id = 'prov-cursor-login') THEN
+        WHILE EXISTS (SELECT 1 FROM llm_providers WHERE name = provider_name) LOOP
+            suffix := suffix + 1;
+            provider_name := 'cursor-login (' || suffix || ')';
+        END LOOP;
+        INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type, builtin)
+        VALUES ('prov-cursor-login', provider_name, 'cursor-login', 'oauth', 'cursor-agent', true);
+    END IF;
+END $$;
+
 INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url)
 VALUES ('prov-claude-subscription', 'anthropic-messages', ''),
        ('prov-codex-login', 'openai-responses', ''),
-       ('prov-grok-login', 'openai-responses', '')
+       ('prov-grok-login', 'openai-responses', ''),
+       ('prov-cursor-login', 'openai-responses', '')
 ON CONFLICT (provider_id, protocol) DO NOTHING;
 
 -- Fixed UUIDv5 ids for the pinned login suggestions, matched by the complete
@@ -37,7 +56,12 @@ VALUES
     ('model-a34a618b-2cfd-5151-966b-6edcfb4e5992', 'prov-grok-login', 'grok-4.7', 'openai-responses', 0, true),
     ('model-96ad8acd-53da-59e2-859f-829db99b8422', 'prov-grok-login', 'grok-4.7-build-fast', 'openai-responses', 1, true),
     ('model-600929a8-fd29-521b-ad52-ee5cc69914d8', 'prov-grok-login', 'grok-4.6', 'openai-responses', 2, true),
-    ('model-e1d7d77c-276f-5e28-8a9b-2ecf480f0f91', 'prov-grok-login', 'grok-4.5', 'openai-responses', 3, true)
+    ('model-e1d7d77c-276f-5e28-8a9b-2ecf480f0f91', 'prov-grok-login', 'grok-4.5', 'openai-responses', 3, true),
+    ('model-ab6c503c-358a-5dce-98ef-aa13e40c67d4', 'prov-cursor-login', 'auto', 'openai-responses', 0, true),
+    ('model-e2ecc5e8-32c7-5019-b66a-71fe6ff243d6', 'prov-cursor-login', 'gpt-5.3-codex', 'openai-responses', 1, true),
+    ('model-808ddb80-2937-5334-acb1-d7995fe76a43', 'prov-cursor-login', 'gpt-5.6-sol-high', 'openai-responses', 2, true),
+    ('model-624c577e-0484-5d3a-98dc-262aea3b5bd3', 'prov-cursor-login', 'composer-2.5', 'openai-responses', 3, true),
+    ('model-8914386b-758a-55e5-a3b1-9d0b9ae97c04', 'prov-cursor-login', 'gemini-3.7-flash-high', 'openai-responses', 4, true)
 ON CONFLICT (provider_id, name, protocol) DO NOTHING;
 INSERT INTO agent_profiles (id, name, runtime_id, model_id, builtin, agent_teams)
 SELECT 'agent-claude-code-opus', 'claude-code/opus', 'rt-claude-code', id, true, true

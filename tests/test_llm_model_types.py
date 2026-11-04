@@ -15,6 +15,7 @@ LOGIN_VENDORS = {
     VendorType.CLAUDE_SUBSCRIPTION: ("claude-code", ApiProtocol.ANTHROPIC_MESSAGES),
     VendorType.CODEX_LOGIN: ("codex", ApiProtocol.OPENAI_RESPONSES),
     VendorType.GROK_LOGIN: ("grok", ApiProtocol.OPENAI_RESPONSES),
+    VendorType.CURSOR_LOGIN: ("cursor-agent", ApiProtocol.OPENAI_RESPONSES),
 }
 
 

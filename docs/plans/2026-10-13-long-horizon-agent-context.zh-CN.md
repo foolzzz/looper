@@ -748,6 +748,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 2026-10-31 | 命令调度运行时修复（本分支）：到期查找后按 kind 准入，命令启动不计入排空等待；保留期读取、运行清理、通知清理及每个日志轮转独立容错，保留尚未交接的前置检查输出，日志目录消失时重建并重试打开一次。运行中命令的删除返回 409，提示停用并等待结束，检查和删除持有触发使用的同一把行锁；agent 删除语义不变，RFC 删除规则同步修订，Dashboard、管家（含 Telegram/Lark）、CLI 和项目级联删除共用后端检查。定向 pytest 覆盖负向与并发分支；一次性 serve 验证排空期间触发、agent 409、运行中删除 409 及结束后删除成功，未调用真实模型或外部消息渠道。 |
 
+| 2026-11-03 | Cursor 登录基础（本分支）：`cursor-login` provider 代表操作者本机现有的 Cursor 登录（macOS 登录钥匙串），五个建议模型无内置价格；没有文件存储、API key 或登录链接。`cursor-agent status --format json` 保留操作者的 `HOME`，使用用完即删的 `CURSOR_CONFIG_DIR`/`CURSOR_DATA_DIR`，去掉 key、token、端点和凭据存储变量，设 `NO_OPEN_BROWSER=1`、空 stdin、20 秒超时。30 秒缓存；provider 列表立即返回已有状态或检查中，最多一个后台刷新，在运行时存在前就显示登录状态；启动检查和 doctor 同步检查。2026-11-04 已验证钥匙串登录的 headless 运行（RFC 2.4）和 `status` JSON 形状，不保存或输出 `userInfo` 内容；测试使用替身 `cursor-agent`。控制台、Telegram/Lark 与 CLI 沿用现有 provider/doctor 入口。 |
+
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。

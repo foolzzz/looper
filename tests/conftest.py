@@ -40,6 +40,22 @@ _STAGED_DASHBOARD_DIR = REPO_ROOT / "looper" / "web" / "dashboard"
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _no_real_cursor_agent(tmp_path_factory: pytest.TempPathFactory):
+    """Keep provider listings and probes away from the operator's Cursor login."""
+    directory = tmp_path_factory.mktemp("cursor-agent-guard")
+    executable = directory / "cursor-agent"
+    executable.write_text(
+        "#!/bin/sh\n"
+        "echo '{\"status\":\"error\",\"message\":\"cursor-agent is not available in tests\"}'\n"
+        "exit 2\n"
+    )
+    executable.chmod(0o755)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("PATH", str(directory) + os.pathsep + os.environ.get("PATH", ""))
+        yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _staged_dashboard_environment():
     # All serve subprocesses must inherit this, including independent installed smokes.
     with pytest.MonkeyPatch.context() as patch:

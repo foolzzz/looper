@@ -1522,6 +1522,33 @@ Manager tools.
   the provider. The login's state is whether its file is there (`stat`,
   never read), in the provider's view and in the `grok_login` self-check,
   skipped while no Agent Profile uses the login.
+- **The Cursor login** (`looper/agents/runtimes/cursor_login.py`) is the
+  built-in provider `cursor-login` (`prov-cursor-login`, OAuth,
+  `oauth_runtime_type = cursor-agent`). Its `openai-responses` endpoint is
+  used only for pairing. It represents the operator's existing Cursor login
+  on this machine (the login keychain on macOS). Looper never reads the
+  keychain or a credential file. It checks `cursor-agent status --format json`
+  with the operator's `HOME`, throwaway `CURSOR_CONFIG_DIR` and
+  `CURSOR_DATA_DIR`, empty stdin, a 20-second timeout and `NO_OPEN_BROWSER=1`;
+  `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN`, `CURSOR_API_ENDPOINT` and
+  `AGENT_CLI_CREDENTIAL_STORE` are removed. Exit 0 with `status: authenticated`
+  and `isAuthenticated: true` means signed in; `unauthenticated` and
+  `partially-authenticated` mean not signed in; a failed command, timeout or
+  unreadable output means unknown. A launch refuses a missing login with
+  "Cursor is not signed in on this machine: run `cursor-agent login`" and
+  names a check failure. Results are cached for 30 seconds. Provider listings
+  return the last cached state immediately, even when stale, or show
+  "checking the Cursor login" before the first result; a missing or expired
+  result starts at most one background check. The login appears in Settings
+  → LLM Providers before a Cursor runtime exists. The `cursor_login`
+  self-check is skipped without a matching Agent Profile; otherwise it fails
+  for a missing login and warns for an unknown state. There is no file store,
+  API key or login link. The status JSON shape was verified on 2026-11-04;
+  `userInfo` contents are never retained or shown. Cursor runs will keep the
+  operator's `HOME` and load personal Cursor and Claude Code configuration;
+  the runtime using this login is delivered separately. The suggested models
+  are `auto`, `gpt-5.3-codex`, `gpt-5.6-sol-high`, `composer-2.5` and
+  `gemini-3.7-flash-high`, without built-in prices.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
   runs Manager, Planner, Worker and Reviewer. With the default `[runtimes] pi = "runner"`,
@@ -2389,43 +2416,12 @@ dialog also explains this default. The built-in Manager role, tool descriptions
 and prompt preview follow the configured root; custom role text is preserved.
 An explicit `work_dir` wins; import preserves the directories named in its
 file. Existing projects keep their directories when the root is set or changed.
-Changing `work_dir` alone changes the stored default; it does not move files.
-With the root unset, creating a project without a directory still leaves its `work_dir` empty. At startup,
+Moving one requires an explicit `work_dir` update, including the existing
+confirmation for affected command schedules. With the root unset, creating a
+project without a directory still leaves its `work_dir` empty. At startup,
 `looper serve` logs `projects root=<path>` or `projects root unset`;
 `looper doctor` and system checks warn if the configured root does not exist
 or is not writable.
-
-The project's Settings tab, `POST /api/v1/project_admin/move_dir` and the
-Manager's `looper_projects` action `move` explicitly move its directory and
-files. The request takes `project` (id or name), optional absolute `to`
-(otherwise the first unused `<projects.root>/<safe name>`, `<safe name>-2`,
-`<safe name>-3`, and so on), and `link_old` (default `true`).
-The dashboard previews with the read-only `project_admin.preview_move_dir`
-operation and sends its `move_version` after inline confirmation; client tokens
-and the Manager receive a confirmation listing directories, bounded file count
-and size, affected command and agent schedules, and the old symbolic link.
-Missing directories, unchanged or nested targets, existing destinations (even empty directories),
-unwritable or missing parents, cross-filesystem moves, running steps or model
-runs, running command schedules, and gates in progress are refused before any
-move. A source symbolic link must first be replaced with its actual directory
-in the project's default. In-progress tasks, including `waiting`, block a move;
-only ready (`init`) and finished tasks can stay as they are.
-The operation renames on one filesystem, leaves the old path as a link unless
-disabled, and updates the project, schedule paths under its old directory and
-`project_activity` together. A failed database transaction restores the files;
-task records retain their paths. Git worktrees are repaired, including managed
-task worktrees outside the project. Inventory and repository discovery run before
-acquiring table locks; the transaction rechecks the project and schedule version,
-busy state, dependencies and unused destination before renaming.
-After commit, with `operator_notes` enabled and an existing notes root, the
-project's operator notes directory is renamed from its old main-checkout (or
-directory) key to the new one. An unchanged key or missing source needs no move;
-an existing new notes directory is never replaced or merged. Cross-filesystem
-or other notes failures leave the notes in place. Notes outcomes are returned
-and recorded in the move activity. Repair and notes failures do not undo the
-project move. The CLI exposes the same operation as
-`loopercli project-admin move-dir` (or `loopercli ops projects move`); chat
-channels use the shared Manager tool.
 
 ### Project execution settings
 
@@ -2641,8 +2637,7 @@ the design is the [task workspaces RFC](rfcs/task-workspaces-v0.zh-CN.md)):
   the directory itself outside git, links resolved, every character but a
   letter or digit a `-`, and past 200 characters the first 200, `-` and the
   key's djb2 hash in base 36 (`operator_notes.root` in the ops file stands in
-  for `<config>/projects`). Agents only read them; an explicit project directory
-  move can rename their enclosing notes directory as described above. An `autoMemoryDirectory`
+  for `<config>/projects`). Looper only reads them; an `autoMemoryDirectory`
   setting is not followed. The run records them in
   `prompt_layers.project.operator_notes` (hash, files, omitted) and the
   activity says which applied.
@@ -3438,7 +3433,7 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
 | `looper_task_gate_reply` | Add the user's message this turn answers to a user gate waiting for them (`task_id`, `gate`, `end` to end the discussion), as the task page does: Looper sends the message itself, or the `excerpt` of it the model names, which must be in it word for word; a turn that answers no message is refused. The channel message it is is kept, so the Planner's reply goes under it when it came from the gate's chat ([User gates](#user-gates)) | write |
 | `looper_task_update` | Change a task: its `title` in any task (one line, at most 60 characters; a label, so an ended task can be renamed; recorded in the task's history as a delivered supplement `via` `manager:<channel>`), its `requirement` while it has not ended (a new version, as on the task page), its `work_dir` (a task not started only), its `profiles` in any task but a completed one (a profile per role, `null` to drop the task's choice, checked and written as `PUT /api/tasks/:id/agents` does; a Worker or Reviewer uses it from its next step, the Planner at its next turn after a handoff; a stopped, failed or cancelled task's restart runs with it), and its `system_prompt_modes` (`append` or `replace` per role, `null` to drop the task's choice; the same write as `profiles`, in the same call) | write |
 | `looper_concurrency` | Change one task's (`task_id`) own `worker` and `reviewer` limits, `limits` per role (1–64, `null` clears one to the default), in any task but a completed one; `planner` is refused. There are no project limits: the description tells the Manager to say so, and a call naming `project` is refused (`invalid`, an unknown argument) and changes nothing. Then the WorkerPool checks again. The answer gives each role's limit before and after with its source, the task's own and the default, and says that lowering stops nothing that runs | write |
-| `looper_projects` | `list` (name, default directory, task, active task and schedule counts, background cut to 200 characters), `get` one (as `GET /api/projects` lists it), `create` (`name`, `work_dir`, `background`), `update` its `name`, `work_dir` or `background` (`projects.create_project`, `update_project`); a `work_dir` change that moves enabled or queued command schedules without their own `work_dir` asks first, listing each one's name, state, command and old → new directory, and is refused (`conflict`) when they or the directory changed before the answer, or, for a scoped Manager, when one belongs to another Manager; `move` its directory and files (optional `to`, defaulting to the configured root, and `link_old`, default true), after showing the project, old → new path, bounded file count and size, affected schedules and symbolic link for confirmation; `delete` one with its tasks and schedules, stopping its running tasks first (the user confirms first). Template use and another Manager's tasks or schedules are refused before confirmation. The confirmation lists schedule, running-task and task counts; settings, allowed list, installs, knowledge and own skills go with it, while result branches and the project directory's files stay | list and get read; write; move, delete, and such a `work_dir` change, are high |
+| `looper_projects` | `list` (name, default directory, task, active task and schedule counts, background cut to 200 characters), `get` one (as `GET /api/projects` lists it), `create` (`name`, `work_dir`, `background`), `update` its `name`, `work_dir` or `background` (`projects.create_project`, `update_project`); a `work_dir` change that moves enabled or queued command schedules without their own `work_dir` asks first, listing each one's name, state, command and old → new directory, and is refused (`conflict`) when they or the directory changed before the answer, or, for a scoped Manager, when one belongs to another Manager; `delete` one with its tasks and schedules, stopping its running tasks first (the user confirms first). Template use and another Manager's tasks or schedules are refused before confirmation. The confirmation lists schedule, running-task and task counts; settings, allowed list, installs, knowledge and own skills go with it, while result branches and the project directory's files stay | list and get read; write; delete, and such a `work_dir` change, are high |
 | `looper_agent_profiles` | `list`, `create`, `update`, `delete`; create selects `runtime` and `model` (model id or exact `{provider, name, protocol}`), plus `name`, `effort`, `agent_teams`, `custom_prompt`; no profile system-prompt mode. Returns derived account/model information; selected profiles cannot be deleted | list reads; write; delete is high |
 | `looper_providers` | `list` accounts and vendor suggestions; `register` an API-key account with `name`, `vendor_type`, `endpoints`, `env`, `max_concurrency`, without a key. The user enters the key in Settings | list reads; write |
 | `looper_models` | `list` (optional provider/runtime filter), `create` an exact provider/name/protocol entry, `update` its settings, `delete` an unused model; no key arguments | list reads; write; delete is high |

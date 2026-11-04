@@ -200,6 +200,7 @@ function LoginLine({ provider, label }: { provider: Provider; label: string }) {
   const action = useAction();
   const login = provider.login;
   if (!login) return null;
+  if (login.state === "checking") return <p role="status" className="text-xs text-muted-foreground">{login.detail}</p>;
   if (loginUsable(login.state)) return <p className="text-xs text-muted-foreground">Login: {login.detail}</p>;
   const help = LOGIN_HELP[provider.oauth_runtime_type ?? ""] ?? { signIn: "" };
   const reuse = () => {

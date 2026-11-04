@@ -111,7 +111,7 @@ describe("Manager-only API profiles", () => {
 
   beforeEach(() => {
     const cliProfile = { ...API_PROFILE, profile_id: "cli", roles: ["manager", "planner", "worker", "reviewer"] };
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "ok", result: { profiles: [API_PROFILE, cliProfile] } })));
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "ok", result: { providers: [], profiles: [API_PROFILE, cliProfile] } })));
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
