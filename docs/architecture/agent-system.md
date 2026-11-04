@@ -2382,6 +2382,11 @@ pre-existing directories are kept. Tasks without their own directory then use
 the project's directory as usual.
 
 This applies to the dashboard, Manager tool, v1 API and configuration import.
+The full projects list response includes `projects_root` (an empty string when
+unset). When set, the dashboard's new-project task form lets both directory
+fields stay blank and Looper allocates the project's directory; the project
+dialog also explains this default. The built-in Manager role, tool descriptions
+and prompt preview follow the configured root; custom role text is preserved.
 An explicit `work_dir` wins; import preserves the directories named in its
 file. Existing projects keep their directories when the root is set or changed.
 Moving one requires an explicit `work_dir` update, including the existing

@@ -3,11 +3,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GatesPage } from "@/pages/gates";
-import { fetchGates, fetchProjects, postGateMessage, type GateList, type GateListRow, type UserGate } from "@/lib/api";
+import { fetchGates, fetchProjectsList, postGateMessage, type GateList, type GateListRow, type UserGate } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
-  fetchGates: vi.fn(), fetchProjects: vi.fn(), postGateMessage: vi.fn(),
+  fetchGates: vi.fn(), fetchProjectsList: vi.fn(), postGateMessage: vi.fn(),
 }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -34,7 +34,7 @@ describe("GatesPage", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-20T10:12:00Z"));
     vi.resetAllMocks();
-    vi.mocked(fetchProjects).mockResolvedValue([]);
+    vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
     vi.mocked(fetchGates).mockResolvedValue(list([]));
     container = document.createElement("div");
     document.body.append(container);

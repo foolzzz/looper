@@ -104,13 +104,15 @@ def project_tool(tool: Tool) -> Tool:
         return tool
     work_dir = {**tool.schema["properties"]["work_dir"], "description": (
         f"Its default absolute directory; on create, omit it or use '' for {Path(root) / '<name>'} "
-        "(a safe name, with a suffix on collision); do not ask the user for a directory. "
+        "(a safe name, with a suffix on collision; an existing directory there is used as is); "
+        "do not ask the user for a directory. "
         "On update, '' clears the default.")}
     return replace(tool, schema={**tool.schema, "properties": {**tool.schema["properties"], "work_dir": work_dir}},
         description=tool.description.replace(
         "create (name, and the work_dir and background the user gave; never pick a directory)",
         f"create (name and optional work_dir and background; without work_dir, Looper creates {Path(root) / '<name>'} "
-        "using a safe directory name, adding a suffix on a collision; do not ask the user for a directory)"))
+        "using a safe directory name, adding a suffix on a collision; an existing directory there is used as is; "
+        "do not ask the user for a directory)"))
 
 
 def _project_listed(view: Mapping[str, Any]) -> dict[str, Any]:
@@ -123,7 +125,8 @@ async def _projects(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
     if action == "list":
         listed = await projects.list_projects(manager_id=call.manager_id if call.scoped else None)
-        return {"projects": [_project_listed(p) for p in listed["projects"]]}
+        return {"projects": [_project_listed(p) for p in listed["projects"]],
+                **({"projects_root": listed["projects_root"]} if listed["projects_root"] else {})}
     if action == "create":
         _required(arguments, action, "name")
         fields = {"name": arguments["name"], **_given(arguments, ("work_dir", "background"))}

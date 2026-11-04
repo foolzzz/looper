@@ -199,7 +199,8 @@ async def _existing_project(project_id: str, *, manager_id: str | None = None) -
 
 
 async def list_projects(*, manager_id: str | None = None) -> dict[str, Any]:
-    return {"projects": [project_view(row) for row in await db_projects.list_projects(manager_id=manager_id)]}
+    return {"projects": [project_view(row) for row in await db_projects.list_projects(manager_id=manager_id)],
+            "projects_root": projects_root()}
 
 
 def configure_root(root: str) -> None:

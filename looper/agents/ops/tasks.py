@@ -777,7 +777,8 @@ def task_directory_tool(tool: Tool) -> Tool:
     return dataclasses.replace(tool, schema={**tool.schema, "properties": {
         **properties, "work_dir": {**properties["work_dir"], "description":
             "The absolute directory the user named; leave it out for the project's default. "
-            f"A new project gets {Path(root) / '<name>'} automatically; do not ask the user for a directory."}}})
+            f"A new project gets {Path(root) / '<name>'} automatically; an existing directory there is used as is; "
+            "do not ask the user for a directory."}}})
 
 
 def task_create_tool(template_keys: Sequence[str]) -> Tool:

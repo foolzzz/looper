@@ -289,6 +289,33 @@ If the user says "不", "取消", "算了", "no", "cancel" or modifies the requi
 - Never create a task without the user's explicit confirmation
 """
 
+
+def root_adjusted(text: str) -> str:
+    """Adapt built-in directory guidance to the file-only projects root, when configured."""
+    from ..projects import projects_root
+
+    if not (root := projects_root()):
+        return text
+    directory = Path(root) / "<name>"
+    return text.replace(
+        "A new project, or one without a default, needs the user to name one:\n"
+        "  ask. Never pick a directory yourself.",
+        f"A new project created without a directory gets {directory}\n"
+        "  (a safe name, with a suffix on collision; an existing directory there is used as is, including a symbolic link);\n"
+        "  do not ask the user for a directory.\n"
+        "  An existing project without a default still needs the user to name one: ask.\n"
+        "  Never pick a directory yourself.",
+    ).replace(
+        "When the user has not named them, ask both as explicit questions: offer the existing project that matches, "
+        "or propose a short name for a new one, and ask for the directory. "
+        "Never state a project or a directory as decided before the user has answered.",
+        "When the user has not named them, ask which project: offer the existing project that matches, "
+        f"or propose a short name for a new one and say the directory will be {directory}; "
+        "ask for the directory of an existing project without a default. "
+        "Never state a project as decided before the user has answered.",
+    )
+
+
 # The ready tasks each user turn lists, newest first, so Claude can start one by its id.
 READY_TASKS_LISTED = 10
 # The most user gates waiting for the user listed before each message ("Open gates"), of the newest read.
@@ -1696,24 +1723,16 @@ class ManagerAgent:
 
     def _composed_prompt(self, agent_settings: AgentSettings) -> SystemPrompt:
         """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
-        from ..projects import projects_root
-
-        contract_name, contract = "TOOLS_CONTRACT", TOOLS_CONTRACT
-        if root := projects_root():
-            contract = contract.replace(
-                "A new project, or one without a default, needs the user to name one:\n"
-                "  ask. Never pick a directory yourself.",
-                f"A new project created without a directory gets {Path(root) / '<name>'}\n"
-                "  (a safe name, with a suffix on collision); do not ask the user for a directory.\n"
-                "  An existing project without a default still needs the user to name one: ask.\n"
-                "  Never pick a directory yourself.")
+        contract_name, contract = "TOOLS_CONTRACT", root_adjusted(TOOLS_CONTRACT)
         if self.agent_id != DEFAULT_MANAGER_ID:
             contract_name = "TOOLS_CONTRACT+SCOPE_CONTRACT"
             contract += "\n" + scope_contract(self._definition, has_templates=self._has_templates)
         return build_system_prompt(
             harness=agent_settings.harness,
             custom_prompt=agent_settings.profile.custom_prompt,
-            role_id=self.agent_id, role=self._system_prompt, recommended=self._prompt_recommended,
+            role_id=self.agent_id,
+            role=root_adjusted(self._system_prompt) if self._prompt_recommended else self._system_prompt,
+            recommended=self._prompt_recommended,
             contract_name=contract_name, contract=contract,
         )
 

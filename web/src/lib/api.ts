@@ -938,10 +938,19 @@ function notifyProjectsChanged() {
   window.dispatchEvent(new Event(PROJECTS_CHANGED_EVENT));
 }
 
-export async function fetchProjects(): Promise<Project[]> {
-  const result = await callV1<{ projects: Project[] }>("/api/v1/project_admin/list", {});
+export interface ProjectsList {
+  projects: Project[];
+  projects_root: string;
+}
+
+export async function fetchProjectsList(): Promise<ProjectsList> {
+  const result = await callV1<ProjectsList>("/api/v1/project_admin/list", {});
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
-  return result.projects;
+  return result;
+}
+
+export async function fetchProjects(): Promise<Project[]> {
+  return (await fetchProjectsList()).projects;
 }
 
 export async function createProject(fields: NewProjectFields): Promise<Project> {

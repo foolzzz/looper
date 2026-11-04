@@ -141,10 +141,12 @@ def test_project_directory_default_is_described_only_when_configured(monkeypatch
         (project,) = listing
         if root:
             assert "/srv/projects/<name>" in project["description"]
+            assert "an existing directory there is used as is" in project["description"]
             assert "do not ask the user for a directory" in project["description"]
             assert "never pick a directory" not in project["description"]
             description = project["inputSchema"]["properties"]["work_dir"]["description"]
             assert "/srv/projects/<name>" in description and "'' for none" not in description
+            assert "an existing directory there is used as is" in description
             assert "create" in description and "update" in description
         else:
             assert project == tool.listing()
@@ -171,11 +173,53 @@ def test_task_create_directory_description_matches_the_project_default(monkeypat
         description = created["inputSchema"]["properties"]["work_dir"]["description"]
         if root:
             assert "/srv/projects/<name>" in description
+            assert "an existing directory there is used as is" in description
             assert "A new project needs one" not in description
         else:
             assert created == tool.listing()
             assert description == ("The absolute directory the user named; leave it out "
                                    "for the project's default. A new project needs one.")
+
+
+@pytest.mark.parametrize("root", ["", "/srv/projects"])
+@pytest.mark.parametrize("custom", [False, True])
+def test_manager_directory_prompt_follows_root_only_for_the_default_role(monkeypatch, tmp_path, root, custom):
+    from looper.agents import projects
+    from looper.agents.agent_settings import resolve
+    from looper.agents.system_prompt import build_system_prompt
+    from looper.agents.tiers.manager import DEFAULT_SYSTEM_PROMPT, TOOLS_CONTRACT, ManagerAgent, ManagerConfig
+
+    monkeypatch.setattr(projects, "projects_root", lambda: root)
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+    role = "Custom role\n" + DEFAULT_SYSTEM_PROMPT if custom else DEFAULT_SYSTEM_PROMPT
+    manager._system_prompt, manager._prompt_recommended = role, not custom
+    settings = resolve("manager", {}, None)
+    prompt = manager._composed_prompt(settings)
+    if not root:
+        # The unconfigured launch keeps the original role and contract byte for byte.
+        expected = build_system_prompt(harness=settings.harness, custom_prompt=settings.profile.custom_prompt,
+            role_id="manager", role=role, recommended=not custom,
+            contract_name="TOOLS_CONTRACT", contract=TOOLS_CONTRACT)
+        assert prompt.text.encode() == expected.text.encode()
+        assert prompt.layers == expected.layers
+    else:
+        assert "A new project created without a directory gets /srv/projects/<name>" in prompt.text
+        assert "an existing directory there is used as is, including a symbolic link" in prompt.text
+        assert "An existing project without a default still needs the user to name one: ask." in prompt.text
+        if custom:
+            assert role in prompt.text
+        else:
+            assert "propose a short name for a new one, and ask for the directory" not in prompt.text
+            assert "the directory will be /srv/projects/<name>" in prompt.text
+            assert "ask for the directory of an existing project without a default" in prompt.text
+
+
+def test_root_adjustment_leaves_unrecognized_role_text_alone(monkeypatch):
+    from looper.agents import projects
+    from looper.agents.tiers.manager import root_adjusted
+
+    monkeypatch.setattr(projects, "projects_root", lambda: "/srv/projects")
+    assert root_adjusted("A different role sentence") == "A different role sentence"
 
 
 @pytest.mark.parametrize("turn", [None, _turn(None)], ids=["no-turn", "own-turn"])
