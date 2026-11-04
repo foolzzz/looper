@@ -36,7 +36,7 @@ async def _rows(pool):
     """Compare whole rows, so a refusal cannot silently update unrelated state."""
     return {
         table: [dict(row) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY 1")]
-        for table in ("projects", "schedules", "tasks", "task_steps", "llm_records", "schedule_runs",
+        for table in ("projects", "schedules", "tasks", "task_worktrees", "task_steps", "llm_records", "schedule_runs",
                       "task_user_gates", "project_activity")
     }
 
@@ -238,6 +238,11 @@ def test_failed_database_commit_restores_directory_and_all_rows(monkeypatch, tmp
             new.mkdir()
         await _schedule(pool, project["id"], old)
         await _schedule(pool, project["id"], old / "subdir", schedule_id="agent", kind="agent")
+        await tasks.create_task(task_id="stopped-task", requirement="Keep worktree paths on rollback",
+                                project_id=project["id"], work_dir=str(old / "checkout"), status="stopped", pool=pool)
+        await pool.execute("INSERT INTO task_worktrees (task_id,repo_dir,path,branch,base_commit) "
+                           "VALUES ('stopped-task',$1,$2,'looper/stopped-task/task','base')",
+                           str(old), str(old / "checkout"))
         await pool.execute("""
             CREATE FUNCTION refuse_directory_commit() RETURNS trigger LANGUAGE plpgsql AS $$
             BEGIN RAISE EXCEPTION 'directory commit refused' USING ERRCODE = '23514'; END $$;
@@ -374,6 +379,52 @@ def test_move_repairs_external_linked_task_worktree(monkeypatch, tmp_path, neste
         moved_repo = new / "repository" if nested else new
         assert str(linked.resolve()) in _git(moved_repo, "worktree", "list", "--porcelain")
         assert str(moved_repo.resolve()) in (linked / ".git").read_text()
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("layout", ["external-worktree", "both-inside", "linked-source"])
+def test_deleting_stopped_task_after_move_preserves_uncommitted_files(monkeypatch, tmp_path, layout):
+    old, new = tmp_path / "old", tmp_path / "new"
+    repo = tmp_path / "repository" if layout == "linked-source" else old
+    linked = (old if layout == "linked-source" else
+              old / "checkout" if layout == "both-inside" else tmp_path / "checkout")
+    branch = "looper/stopped-task/task"
+
+    async def check(pool):
+        repo.mkdir()
+        (repo / "tracked.txt").write_text("original\n")
+        _git(repo, "init", "-q")
+        _git(repo, "add", "tracked.txt")
+        _git(repo, "-c", "user.name=Directory move test", "-c", "user.email=move@example.invalid",
+             "commit", "-qm", "Initial files")
+        base = _git(repo, "rev-parse", "HEAD")
+        _git(repo, "worktree", "add", "-qb", branch, str(linked))
+        (linked / "tracked.txt").write_text("uncommitted edit\n")
+        (linked / "untracked.txt").write_text("uncommitted new file\n")
+        assert "tracked.txt" in _git(linked, "status", "--porcelain")
+        assert "?? untracked.txt" in _git(linked, "status", "--porcelain")
+        project = await projects.create_project(name="Preserve stopped work", work_dir=str(old), pool=pool)
+        await tasks.create_task(task_id="stopped-task", requirement="Keep unfinished work",
+                                project_id=project["id"], work_dir=str(linked), workspace_dir=str(repo),
+                                status="stopped", pool=pool)
+        await pool.execute("INSERT INTO task_worktrees (task_id,repo_dir,path,branch,base_commit) "
+                           "VALUES ('stopped-task',$1,$2,$3,$4)", str(repo), str(linked), branch, base)
+
+        result = await api.move_project_dir(project["id"], {"to": str(new), "link_old": False})
+        assert result["repairs"] and all(row["ok"] for row in result["repairs"])
+        assert not old.exists()
+        moved_repo = repo if layout == "linked-source" else new
+        moved_linked = new if layout == "linked-source" else new / "checkout" if layout == "both-inside" else linked
+        assert (moved_linked / "tracked.txt").read_text() == "uncommitted edit\n"
+        assert (moved_linked / "untracked.txt").read_text() == "uncommitted new file\n"
+
+        assert await api.delete_task("stopped-task", None) == {"deleted": "stopped-task"}
+        assert await tasks.get_task("stopped-task", pool=pool) is None
+        assert _git(moved_repo, "show", f"{branch}:tracked.txt") == "uncommitted edit"
+        assert _git(moved_repo, "show", f"{branch}:untracked.txt") == "uncommitted new file"
+        assert not moved_linked.exists()
+        assert str(moved_linked.resolve()) not in _git(moved_repo, "worktree", "list", "--porcelain")
 
     run_db(check, monkeypatch, timeout=30)
 

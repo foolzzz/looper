@@ -272,6 +272,18 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
                     linked = True
                 if not await db_projects.update_project(project_id, work_dir=change.new, pool=conn):
                     raise RuntimeError("the project directory could not be updated")
+                # These are live cleanup paths, unlike the task's historical directories.
+                # A stale repo_dir makes deletion skip committing the checkout's pending files.
+                task_worktrees = await conn.fetch(
+                    "SELECT w.task_id, w.repo_dir, w.path FROM task_worktrees w JOIN tasks t ON t.id = w.task_id "
+                    "WHERE t.project_id = $1 AND w.state = 'active'", project_id)
+                for worktree in task_worktrees:
+                    paths = {}
+                    for field in ("repo_dir", "path"):
+                        relative = _under(worktree[field], change.old)
+                        paths[field] = str(Path(change.new) / relative) if relative is not None else worktree[field]
+                    await conn.execute("UPDATE task_worktrees SET repo_dir = $2, path = $3 WHERE task_id = $1",
+                                       worktree["task_id"], paths["repo_dir"], paths["path"])
                 for schedule in change.schedules:
                     new_dir = str(Path(change.new) / _under(schedule["work_dir"], change.old))
                     await conn.execute("UPDATE schedules SET work_dir = $2, updated_at = now() WHERE id = $1",
