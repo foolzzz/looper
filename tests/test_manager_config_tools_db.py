@@ -70,6 +70,25 @@ async def _tool(chat, tool, **arguments):
 # --- looper_projects ---
 
 
+def test_creating_a_project_reports_its_configured_default_directory(monkeypatch, tmp_path: Path) -> None:
+    from looper.agents import projects
+
+    root = tmp_path / "projects"
+    monkeypatch.setattr(projects, "projects_root", lambda: str(root))
+
+    async def test(pool: Any) -> None:
+        (answer,) = await _Chat(tmp_path).say("新建项目 Tetris", ("looper_projects", {
+            "action": "create", "name": "Tetris"}))
+        assert answer["status"] == "ok", answer
+        project = answer["result"]["project"]
+        assert project["work_dir"] == str(root / "tetris")
+        assert Path(project["work_dir"]).is_dir()
+        assert await pool.fetchval("SELECT work_dir FROM projects WHERE id = $1", project["project_id"]) \
+            == project["work_dir"]
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_projects_are_created_changed_and_read_back_as_the_dashboard_reads_them(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

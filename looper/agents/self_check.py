@@ -308,6 +308,23 @@ def check_lark_cli(lark_enabled: bool | None) -> Check:
                  LARK_CLI_FIX)
 
 
+def check_projects_root(root: str) -> Check:
+    """Report whether the configured parent directory can hold new projects, without creating anything."""
+    if not root:
+        return Check("projects_root", "Projects root", SKIP, "projects root unset")
+    path = Path(root)
+    fix = "Create the directory and make it writable by the user running Looper, or change [projects] root."
+    try:
+        directory = path.is_dir()
+    except OSError as exc:
+        return Check("projects_root", "Projects root", WARN, f"{root}: {exc}", fix)
+    if not directory:
+        return Check("projects_root", "Projects root", WARN, f"{root}: directory does not exist or is not a directory", fix)
+    if not os.access(path, os.W_OK | os.X_OK):
+        return Check("projects_root", "Projects root", WARN, f"{root}: directory is not writable", fix)
+    return Check("projects_root", "Projects root", OK, root)
+
+
 def check_git() -> Check:
     """Is git there, and new enough for step worktrees? Without it, Looper still runs."""
     from .step_workspaces import GIT_MIN_VERSION
@@ -496,7 +513,7 @@ async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Chec
     pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending, ops)
     git = await asyncio.to_thread(check_git)
     return [database, *claude, codex, grok, await check_ttadk(facts.ttadk_runtimes),
-            check_lark_cli(facts.lark_enabled), pg_dump, git,
+            check_lark_cli(facts.lark_enabled), pg_dump, git, check_projects_root(ops.projects_root),
             await check_step_worktrees(facts.worktree_projects)]
 
 

@@ -28,6 +28,9 @@
     [operator_notes]
     root = "/home/me/.claude/projects"          # where the operator's Claude Code keeps its project notes
 
+    [projects]
+    root = "/home/me/looper-projects"            # default parent directory for newly created projects; file only
+
 ``looper serve``, ``doctor`` and ``service install`` read it with ``load`` before they
 connect to the database or start anything. Each setting comes from the first of: an explicit command-line flag;
 the file; then the environment (``LOOPER_X``, else ``LOOPX_X``); then the checkout's ``.env``; then the built-in
@@ -125,6 +128,7 @@ class OpsConfig:
     backup_command: tuple[str, ...] = ()
     backup_verify_command: tuple[str, ...] = ()
     operator_notes_root: str = ""
+    projects_root: str = ""
     pi_runtime: str = "runner"
     dsh_runtime: str = "runner"
     keeper_mode: KeeperMode = KeeperMode.OFF
@@ -267,6 +271,7 @@ SETTINGS = (
     _Setting("pi_runtime", "runtimes", "pi", _runtime_choice),
     _Setting("dsh_runtime", "runtimes", "dsh", _runtime_choice),
     _Setting("keeper_mode", "agent_host", "keeper", _keeper_mode),
+    _Setting("projects_root", "projects", "root", _absolute_path),
     _Setting("probe_notify_channel", "probe", "notify_channel", _probe_channel),
     _Setting("probe_notify_chat", "probe", "notify_chat", _probe_chat),
     _Setting("probe_after_minutes", "probe", "after_minutes", _probe_after_minutes),
@@ -488,6 +493,7 @@ def render(config: OpsConfig) -> str:
     lines = [
         "# Looper's deployment settings, read when `looper serve` starts: restart it after a change.",
         "# It holds the database password: keep it mode 0600, in a directory only you can enter.",
+        "# Optional [projects] root = \"/absolute/path/to/projects\" gives new projects their own directories (file only).",
         "",
         "[database]",
         f"url = {_toml_string(database_url)}",
@@ -518,6 +524,7 @@ def render(config: OpsConfig) -> str:
         "[operator_notes]",
         f"root = {_toml_string(config.operator_notes_root)}" if config.operator_notes_root
         else '# root = "/absolute/path/to/claude/projects"',
+        *(["", "[projects]", f"root = {_toml_string(config.projects_root)}"] if config.projects_root else []),
         "",
         "# Check the service every minute and alert through Lark after a sustained failure.",
         "[probe]" if probe_configured else "# [probe]",

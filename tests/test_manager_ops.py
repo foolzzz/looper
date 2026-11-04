@@ -128,6 +128,51 @@ def test_the_listing_is_the_catalog() -> None:
     assert _Ops().ops.listing()[0]["inputSchema"] == _SCHEMA
 
 
+@pytest.mark.parametrize("root", ["", "/srv/projects"])
+def test_project_directory_default_is_described_only_when_configured(monkeypatch, root: str) -> None:
+    from looper.agents import projects
+    from looper.agents.ops.config import TOOLS
+
+    monkeypatch.setattr(projects, "projects_root", lambda: root)
+    tool = next(tool for tool in TOOLS if tool.name == "looper_projects")
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", tools=(tool,))
+    listings = (ops.listing(), asyncio.run(ops.current_listing()))
+    for listing in listings:
+        (project,) = listing
+        if root:
+            assert "/srv/projects/<name>" in project["description"]
+            assert "do not ask the user for a directory" in project["description"]
+            assert "never pick a directory" not in project["description"]
+        else:
+            assert project == tool.listing()
+            assert project["description"] == (
+                "Projects: list; get one; create (name, and the work_dir and background the user gave; never "
+                "pick a directory); update its name, work_dir or background (a work_dir change asks the user first "
+                "when enabled or queued command schedules run in its directory); delete one with its tasks and schedules, "
+                "stopping its running tasks first (the user confirms first).")
+
+
+@pytest.mark.parametrize("root", ["", "/srv/projects"])
+@pytest.mark.parametrize("templates", [(), ("example",)])
+def test_task_create_directory_description_matches_the_project_default(monkeypatch, root, templates) -> None:
+    from looper.agents import projects
+    from looper.agents.ops.tasks import task_create_tool
+
+    monkeypatch.setattr(projects, "projects_root", lambda: root)
+    tool = task_create_tool(templates)
+    ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", tools=(tool,))
+    for listing in (ops.listing(), asyncio.run(ops.current_listing())):
+        (created,) = listing
+        description = created["inputSchema"]["properties"]["work_dir"]["description"]
+        if root:
+            assert "/srv/projects/<name>" in description
+            assert "A new project needs one" not in description
+        else:
+            assert created == tool.listing()
+            assert description == ("The absolute directory the user named; leave it out "
+                                   "for the project's default. A new project needs one.")
+
+
 @pytest.mark.parametrize("turn", [None, _turn(None)], ids=["no-turn", "own-turn"])
 def test_outside_a_turn_answering_the_user_only_reads(recorded: list[dict[str, Any]], turn: Turn | None) -> None:
     ops = _Ops()

@@ -157,6 +157,26 @@ def test_keeper_is_file_only(tmp_path, dotenv, monkeypatch):
     assert _load(tmp_path, dotenv).keeper_mode is ops.KeeperMode.OFF
 
 
+def test_projects_root_is_file_only_and_rendered_only_when_set(tmp_path, dotenv, monkeypatch):
+    setting = next(setting for setting in ops.SETTINGS if setting.name == "projects_root")
+    assert setting.variables == ()
+    monkeypatch.setenv("LOOPER_PROJECTS_ROOT", "/ignored")
+    monkeypatch.setenv("LOOPX_PROJECTS_ROOT", "/ignored")
+    dotenv.write_text("LOOPER_PROJECTS_ROOT=/ignored\nLOOPX_PROJECTS_ROOT=/ignored\n")
+    config = _load(tmp_path, dotenv)
+    assert config.projects_root == ""
+    assert "projects" not in tomllib.loads(ops.render(config))
+
+    root = str(tmp_path / "projects")
+    _file(tmp_path, f'[projects]\nroot = {json.dumps(root)}\n')
+    config = _load(tmp_path, dotenv)
+    assert config.projects_root == root
+    assert config.sources["projects_root"].origin is Origin.FILE
+    assert tomllib.loads(ops.render(config))["projects"] == {"root": root}
+    ops.write_private(config.path, ops.render(config))
+    assert _load(tmp_path, dotenv).projects_root == root
+
+
 @pytest.mark.parametrize("origin", ["environment", ".env"])
 @pytest.mark.parametrize(("name", "value"), [
     ("LOOPER_DATABASE_URL", f"mysql://{SECRET}@host/db"),
@@ -229,6 +249,8 @@ BAD_FILE_VALUES = [
     ('[server]\nlog_level = "verbose"', "server.log_level"),
     *[(f"[server]\npublic_url = {json.dumps(value)}", "server.public_url") for value in MALFORMED_URLS],
     ('[operator_notes]\nroot = "Sekr1t-pw/relative"', "operator_notes.root"),
+    ('[projects]\nroot = "Sekr1t-pw/relative"', "projects.root"),
+    ('[projects]\nroot = ""', "projects.root"),
     ('[database\nurl = "Sekr1t-pw"', "server.toml"),
     (b'\xffSekr1t-pw', "server.toml"),
 ]

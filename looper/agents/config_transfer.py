@@ -1716,7 +1716,7 @@ class _Importer:
         """Add or update a project's own fields; its id (``new:...`` in a preview), or None when skipped."""
         from ..db.projects import EXECUTION_COLUMNS
         from .project_execution import execution_fields
-        from .projects import project_background, project_name
+        from .projects import RequestError, _create_project_row, project_background, project_name, project_work_dir
 
         raw_name = entry.get("name") if isinstance(entry, Mapping) else None
         try:
@@ -1737,14 +1737,23 @@ class _Importer:
             self.record("projects", str(raw_name), Action.SKIPPED, reason=str(exc))
             return None
         row = self.target.projects.get(name.lower())
+        if row is None:
+            try:
+                values["work_dir"] = project_work_dir(entry.get("work_dir", ""))
+            except ValueError as exc:
+                self.record("projects", name, Action.SKIPPED, reason=str(exc))
+                return None
         current = {k: row[k] for k in values} if row else None
         action = self.outcome("projects", name, current, _differs(values, current, values))
         project_id = row["id"] if row else f"new:{name}"
         if self.apply and action is Action.ADDED:
-            from ..db.projects import create_project
-
-            project_id = (await create_project(name=name, description=values["description"], background=background,
-                                               execution=execution, pool=self.conn))["id"]
+            try:
+                created = await _create_project_row({"name": name, "description": values["description"],
+                    "background": background, "execution": execution, "work_dir": values["work_dir"]}, pool=self.conn)
+            except RequestError as exc:
+                raise ConfigFileError(str(exc)) from None
+            project_id = created["id"]
+            values["work_dir"] = created["work_dir"]
         elif self.apply and action is Action.CHANGED:
             from ..db.projects import update_project
 

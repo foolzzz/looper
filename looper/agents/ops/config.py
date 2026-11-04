@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Awaitable, Iterable, Mapping
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
@@ -95,6 +96,16 @@ def _given(arguments: Mapping[str, Any], names: Iterable[str], *, clears: Iterab
 
 
 # --- looper_projects ---
+
+
+def project_tool(tool: Tool) -> Tool:
+    """Describe the configured default directory without changing the unconfigured tool."""
+    if tool.name != "looper_projects" or not (root := projects.projects_root()):
+        return tool
+    return replace(tool, description=tool.description.replace(
+        "create (name, and the work_dir and background the user gave; never pick a directory)",
+        f"create (name and optional work_dir and background; without work_dir, Looper creates {Path(root) / '<name>'} "
+        "using a safe directory name, adding a suffix on a collision; do not ask the user for a directory)"))
 
 
 def _project_listed(view: Mapping[str, Any]) -> dict[str, Any]:
