@@ -54,9 +54,7 @@ function ProjectDirectoryMove({ project, projectsRoot, disabled, unsaved, onBusy
   const [result, setResult] = useState<ProjectMoveResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const directoryName = project.name.replace(/[^A-Za-z0-9._-]/g, "-").replace(/-+/g, "-").replace(/^[-.]+|[-.]+$/g, "").toLowerCase() || project.project_id;
-  // Only the server can tell whether an existing path requires a numeric suffix.
-  const placeholder = projectsRoot ? `Leave empty for ${projectsRoot.replace(/\/+$/, "")}/${directoryName}…` : "/absolute/path";
+  const placeholder = projectsRoot ? `Leave empty for a new directory under ${projectsRoot}` : "/absolute/path";
   const fields = { ...(to.trim() ? { to: to.trim() } : {}), link_old: linkOld };
   const run = async (confirmed: boolean) => {
     if (to.trim() && !to.trim().startsWith("/")) return setError("The target must be an absolute path.");
@@ -84,7 +82,7 @@ function ProjectDirectoryMove({ project, projectsRoot, disabled, unsaved, onBusy
   return (
     <section aria-labelledby={`${id}-move`} className="space-y-3 rounded-lg border border-border bg-card px-5 py-4">
       <h2 id={`${id}-move`} className="text-sm font-semibold">Move directory</h2>
-      <p className="text-xs text-muted-foreground">Moves the directory with all its files and updates the schedules that use it. An in-progress task, a running command or an open gate blocks the move.</p>
+      <p className="text-xs text-muted-foreground">Moves the directory with all its files and updates the schedules that use it. Anything in progress in the project (a task step, a schedule run or a gate) blocks the move; the preview says what.</p>
       <div className="space-y-1">
         <label htmlFor={`${id}-to`} className="text-xs font-medium text-muted-foreground">Target directory (absolute path)</label>
         <Input id={`${id}-to`} value={to} disabled={disabled || busy} className="font-mono"

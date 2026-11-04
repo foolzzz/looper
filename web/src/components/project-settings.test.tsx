@@ -88,19 +88,19 @@ describe("project deletion", () => {
   });
 
   it.each([
-    { name: "..My  Project--V2._-", projectsRoot: "/srv/projects/", safe: "/srv/projects/my-project-v2._" },
-    { name: "你好...---", projectsRoot: "/srv/projects", safe: "/srv/projects/project-example" },
-    { name: "İK_App.v1", projectsRoot: "/", safe: "/_app.v1" },
-  ])("names the server default for $name, including possible suffixes", async ({ name, projectsRoot, safe }) => {
+    { name: "..My  Project--V2._-", projectsRoot: "/srv/projects/" },
+    { name: "你好...---", projectsRoot: "/srv/projects" },
+    { name: "İK_App.v1", projectsRoot: "/" },
+  ])("offers a new directory under the configured root for $name", async ({ name, projectsRoot }) => {
     await act(async () => root.render(<ProjectSettingsForm projectsRoot={projectsRoot} project={project({ name, work_dir: "/srv/example" })} onDeleted={() => {}} />));
     const field = container.querySelector('input[placeholder^="Leave empty for"]') as HTMLInputElement;
-    expect(field.placeholder).toBe(`Leave empty for ${safe}…`);
+    expect(field.placeholder).toBe(`Leave empty for a new directory under ${projectsRoot}`);
     expect(button("Preview move").disabled).toBe(false);
   });
 
   it("explains the directory controls in English and requires a target without a root", async () => {
     await act(async () => root.render(<ProjectSettingsForm project={project({ work_dir: "/srv/example" })} onDeleted={() => {}} />));
-    expect(container.textContent).toContain("Moves the directory with all its files and updates the schedules that use it. An in-progress task, a running command or an open gate blocks the move.");
+    expect(container.textContent).toContain("Moves the directory with all its files and updates the schedules that use it. Anything in progress in the project (a task step, a schedule run or a gate) blocks the move; the preview says what.");
     expect(container.textContent).toContain("Target directory (absolute path)");
     expect(container.querySelector('h2[id$="-move"]')?.textContent).toBe("Move directory");
     expect(container.querySelector('input[placeholder="/absolute/path"]')).not.toBeNull();
