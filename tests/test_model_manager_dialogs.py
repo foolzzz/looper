@@ -243,6 +243,76 @@ def action(tool, verb, *, status="ok", **arguments):
             "arguments": {"action": verb, **arguments}, "result": {}, "error_code": None}
 
 
+def test_projects_root_dialogs_are_opt_in_and_do_not_supply_a_directory():
+    assert dialogs.Dialog("default", ()).projects_root is False
+    assert {d.id for d in dialogs.DIALOGS if d.projects_root} == {"root_new_project", "root_ask_project"}
+    for case in dialogs.select(["root_new_project", "root_ask_project"]):
+        for say in case.says:
+            for _, arguments in say.fake:
+                assert "work_dir" not in arguments
+
+
+@pytest.mark.parametrize("case_id", ["root_new_project", "root_ask_project"])
+@pytest.mark.parametrize("mutation", [None, "task", "write", "empty"])
+def test_projects_root_dialogs_wait_before_creating(monkeypatch, case_id, mutation):
+    look = dialogs.Look(None, None, "" if mutation == "empty" else "请确认项目。",
+                        "disposable", 0, frozenset(), True)
+    monkeypatch.setattr(dialogs.Look, "new_tasks", lambda _: [{}] if mutation == "task" else [])
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [action("looper_projects", "create")]
+                        if mutation == "write" else [])
+    check = dialogs.select([case_id])[0].says[0].check
+    assert (check(look) is None) is (mutation is None)
+
+
+@pytest.mark.parametrize("mutation,problem", [
+    (None, None),
+    ("missing_project", "no project eval-rooted"),
+    ("wrong_root", "directory is"),
+    ("unneeded_suffix", "directory is"),
+    ("no_task", "0 new task(s)"),
+    ("extra_task", "2 new task(s)"),
+    ("other_project", "not 1 in eval-rooted"),
+    ("no_title", "new task has no title"),
+    ("no_create_title", "looper_task_create ran without a title"),
+    ("failed_create", "looper_task_create did not create the task"),
+    ("raw_json", "reply shows raw JSON"),
+])
+def test_root_new_project_checks_observable_state(monkeypatch, tmp_path, mutation, problem):
+    root = tmp_path / "projects"
+    root.mkdir()
+    alias = tmp_path / "root-alias"
+    alias.symlink_to(root, target_is_directory=True)
+    project = {"project_id": "rooted", "name": "eval-rooted", "work_dir": str(alias / "eval-rooted")}
+    tasks = [{"task_id": "new", "project_id": "rooted"}]
+    detail = {"title": "hello 脚本"}
+    actions = [action("looper_task_create", "create", title="hello 脚本")]
+    if mutation == "wrong_root":
+        project["work_dir"] = str(tmp_path / "elsewhere" / "eval-rooted")
+    elif mutation == "unneeded_suffix":
+        project["work_dir"] = str(root / "eval-rooted-2")
+    elif mutation == "no_task":
+        tasks.clear()
+    elif mutation == "extra_task":
+        tasks.append({**tasks[0], "task_id": "extra"})
+    elif mutation == "other_project":
+        tasks[0]["project_id"] = "another"
+    elif mutation == "no_title":
+        detail["title"] = " "
+    elif mutation == "no_create_title":
+        actions[0]["arguments"].pop("title")
+    elif mutation == "failed_create":
+        actions[0]["status"] = "error"
+    monkeypatch.setattr(dialogs, "_project", lambda *_: None if mutation == "missing_project" else project)
+    monkeypatch.setattr(dialogs.Look, "new_tasks", lambda _: tasks)
+    monkeypatch.setattr(dialogs.Look, "detail", lambda *_: detail)
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: actions)
+    look = dialogs.Look(None, None, '{"action": "create"}' if mutation == "raw_json" else "任务已创建。",
+                        "disposable", 0, frozenset(), True, runtime_root=tmp_path / "runtime")
+    check = dialogs.select(["root_new_project"])[0].says[1].check
+    found = check(look)
+    assert found is None if problem is None else problem in found
+
+
 class ObservedApi:
     def __init__(self, registry):
         self.registry = registry

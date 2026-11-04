@@ -177,6 +177,7 @@ class Dialog:
     manager: str | None = None  # the key of the scenario Manager the dialog talks to (its seed creates it)
     client: bool = False  # the dialog talks to the default Manager as an API client (``/api/v1/chat/send``)
     tags: tuple[str, ...] = field(default=())
+    projects_root: bool = False  # the server has [projects] root set to a directory of the case
 
 
 # The gate the gate dialogs' running task waits at, and what it asks.
@@ -388,6 +389,31 @@ def _created_with_a_title(look: Look) -> str | None:
     created = _writes(look, status="ok", tool="looper_task_create")
     titled = [a for a in created if str(a["arguments"].get("title") or "").strip()]
     return None if titled else "looper_task_create ran without a title"
+
+
+def _created_under_projects_root(look: Look) -> str | None:
+    found = _raw_json(look.reply)
+    if found:
+        return found
+    project = _project(look, "eval-rooted")
+    if project is None:
+        return "no project eval-rooted"
+    if look.runtime_root is None:
+        return "the dialog's projects root is unavailable"
+    expected = os.path.realpath(look.runtime_root.parent / "projects" / "eval-rooted")
+    directory = project.get("work_dir")
+    if not directory or os.path.realpath(directory) != expected:
+        return f"project eval-rooted's directory is {directory!r}, not {expected} under the root"
+    tasks = look.new_tasks()
+    if len(tasks) != 1 or tasks[0].get("project_id") != project["project_id"]:
+        return f"{len(tasks)} new task(s), not 1 in eval-rooted"
+    if not str(look.detail(tasks[0]["task_id"]).get("title") or "").strip():
+        return "the new task has no title"
+    created = _writes(look, status="ok", tool="looper_task_create")
+    if not created:
+        return "looper_task_create did not create the task"
+    return None if any(str(a["arguments"].get("title") or "").strip() for a in created) else (
+        "looper_task_create ran without a title")
 
 
 def _started(look: Look) -> str | None:
@@ -1714,6 +1740,17 @@ DIALOGS: tuple[Dialog, ...] = (
     Dialog("ask_project", (
         Say("帮我写一个 Python 脚本 hello.py，打印 hello。", _asked_for_the_project),
     )),
+    Dialog("root_ask_project", (
+        Say("帮我写一个 Python 脚本 hello.py，打印 hello。", _asked_for_the_project),
+    ), projects_root=True),
+    Dialog("root_new_project", (
+        Say("新建一个项目 eval-rooted，在里面帮我写个小脚本 hello.py，运行时打印 hello。", _restated_and_asked),
+        Say("确认", _created_under_projects_root, (
+            ("looper_projects", {"action": "create", "name": "eval-rooted"}),
+            ("looper_task_create", {"requirement": "在工作目录里创建 hello.py，运行时打印 hello。",
+                                  "title": "hello 脚本", "project": "eval-rooted"}),
+        )),
+    ), projects_root=True),
     Dialog("confirm_create_start", (
         Say(f"帮我写个小脚本：在 {PROJECT} 项目里创建 hello.py，运行时打印 hello，目录用项目默认的。", _restated_and_asked),
         Say("确认", _created_with_a_title, (("looper_task_create", {
@@ -2728,9 +2765,13 @@ def run(
             home = case / "home" if mode == "fake" else None
             if home is not None:
                 home.mkdir()
+            projects_root = case / "projects" if dialog.projects_root else None
+            if projects_root is not None:
+                projects_root.mkdir()
             with fresh_database(admin_url) as (database_url, _), _clean_command_runners(case / "runtime"):
                 with running_server(database_url=database_url, runtime_root=case / "runtime", bin_dir=case / "bin",
                                     log_path=logs / f"{dialog.id}-{rep}.log", home=home,
+                                    projects_root=projects_root,
                                     pi_runtime=pi_runtime, dsh_runtime=dsh_runtime) as api:
                     named = register_agent(api, register)["name"] if register is not None else agent
                     picked = select_agent(api, agent=named, model=model)
