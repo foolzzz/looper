@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.73] - 2026-11-04
+
+### Added
+
+- **A configured projects root gives every new project its own directory.** The new file-only ops setting `[projects] root` (an absolute path) makes a project created without a directory get `<root>/<safe name>`, created on create (a collision gets a suffix, an existing directory there is used as is, and a directory the create made is removed if the create fails). The Manager no longer asks for a new project's directory, the dashboard's New project can leave the directory blank, config import assigns one, and `projects.list` carries `projects_root`. The service logs the root and a self check warns when it is not a writable directory. With the setting unset nothing changes. ([#1069](https://github.com/foolzzz/looper/pull/1069))
+
 ## [2.14.72] - 2026-11-03
 
 ### Fixed
