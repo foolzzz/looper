@@ -16,7 +16,8 @@ import asyncpg
 
 from ..db import connection, projects as db_projects
 from ..db.tasks import ACTIVE_STATUSES
-from . import projects, step_workspaces
+from . import operator_notes, projects, step_workspaces
+from .project_execution import ProjectExecution
 
 logger = logging.getLogger(__name__)
 FILE_LIMIT = 10_000
@@ -57,22 +58,25 @@ def _destination(project: Mapping[str, Any], data: Mapping[str, Any]) -> tuple[P
     if raw is None:
         if not projects.projects_root():
             raise fail(projects.HTTP_400, "give an absolute to directory or configure projects.root")
-        raw = str(Path(projects.projects_root()) / projects.project_directory_name(project["name"], project["id"]))
+        base = Path(projects.projects_root()) / projects.project_directory_name(project["name"], project["id"])
+        candidate, suffix = base, 2
+        while os.path.lexists(candidate):
+            candidate = base.with_name(f"{base.name}-{suffix}")
+            suffix += 1
+        raw = str(candidate)
     if not isinstance(raw, str) or not raw.strip():
         raise fail(projects.HTTP_400, "to must be an absolute directory")
     new = Path(raw)
-    if new.resolve() == old.resolve():
-        raise fail(projects.HTTP_400, "to equals the current directory")
     if not new.is_absolute():
         raise fail(projects.HTTP_400, "to must be an absolute directory")
     new = Path(os.path.abspath(new))
+    if os.path.lexists(new):
+        raise fail(projects.HTTP_409, "to already exists; choose a path that does not exist")
     if new.resolve().is_relative_to(old.resolve()):
         raise fail(projects.HTTP_400, "to must not be inside the current directory")
-    if os.path.lexists(new) and (new.is_symlink() or not new.is_dir() or any(new.iterdir())):
-        raise fail(projects.HTTP_409, "to already exists and is not an empty directory")
     if not new.parent.is_dir() or not os.access(new.parent, os.W_OK | os.X_OK):
         raise fail(projects.HTTP_400, "to's parent does not exist or is not writable")
-    if old.stat().st_dev != new.parent.stat().st_dev or (new.exists() and old.stat().st_dev != new.stat().st_dev):
+    if old.stat().st_dev != new.parent.stat().st_dev:
         raise fail(projects.HTTP_400, "to is on another filesystem; move the directory by hand (no cross-device copy)")
     # Renaming a symlink would move the link rather than the directory and its files.
     if old.is_symlink():
@@ -118,7 +122,8 @@ async def _check_directory_dependencies(db: Any, project_id: str, old: Path) -> 
                                     "relocate those dependencies before moving")
 
 
-async def preview(project: Mapping[str, Any], data: Mapping[str, Any], *, db: Any = None) -> ProjectMove:
+async def preview(project: Mapping[str, Any], data: Mapping[str, Any], *, db: Any = None,
+                  inventory: tuple[int, int, bool] | None = None) -> ProjectMove:
     from .tiers.planner import _IN_FLIGHT
 
     try:
@@ -158,7 +163,7 @@ async def preview(project: Mapping[str, Any], data: Mapping[str, Any], *, db: An
                     "source": (old.stat().st_dev, old.stat().st_ino), "schedules": [dict(row) for row in rows]}
     version = hashlib.sha256(json.dumps(version_data, sort_keys=True, default=str).encode()).hexdigest()
     try:
-        files, size, truncated = await asyncio.to_thread(_inventory, old)
+        files, size, truncated = inventory if inventory is not None else await asyncio.to_thread(_inventory, old)
     except OSError as exc:
         raise projects.RequestError(projects.HTTP_400, f"cannot inspect project directory: {exc}") from None
     return ProjectMove(str(old), str(new), schedules, version, files, size, truncated, link_old, inherited)
@@ -191,27 +196,35 @@ def _repositories(root: Path) -> list[Path]:
 
     found = []
     for directory, dirs, files in os.walk(root, onerror=failed):
-        if ".git" in dirs or ".git" in files:
+        if ".git" in dirs:
             found.append(Path(directory))
+        elif ".git" in files:
+            with (Path(directory) / ".git").open() as stream:
+                git_dir = Path(stream.readline(4096).strip().removeprefix("gitdir: "))
+            # A submodule's .git/modules/<name> is not a linked worktree.
+            # Running repair on it would also rewrite its relative .git pointer.
+            if git_dir.parent.name == "worktrees":
+                found.append(Path(directory))
         if ".git" in dirs:
             dirs.remove(".git")
     # Repair common repositories before linked checkouts whose .git files may still name the old path.
     return sorted(found, key=lambda path: (not (path / ".git").is_dir(), str(path)))
 
 
-async def _repair(move: ProjectMove, worktrees: list[Any], source: str) -> list[dict[str, Any]]:
+async def _repair(move: ProjectMove, worktrees: list[Any], source: str,
+                  repositories: list[Path] | OSError) -> list[dict[str, Any]]:
     repairs = []
-    try:
-        repositories = await asyncio.to_thread(_repositories, Path(move.new))
-    except OSError as exc:
-        logger.warning("cannot discover moved repositories in %s: %s", move.new, exc)
-        return [{"repository": move.new, "ok": False, "output": str(exc)}]
+    if isinstance(repositories, OSError):
+        logger.warning("cannot discover moved repositories in %s: %s", move.new, repositories)
+        return [{"repository": move.new, "ok": False, "output": str(repositories)}]
+    repositories = [Path(move.new) / repo.relative_to(move.old) for repo in repositories]
+    checkouts = [*repositories, *(Path(row["path"]) for row in worktrees)]
     for repo in repositories:
         paths = []
         # Both ends of a link may have moved together, including worktrees Looper did not create.
         # Git cannot discover a checkout at its new path from its old registration alone.
         if (repo / ".git").is_dir():
-            for checkout in repositories:
+            for checkout in checkouts:
                 marker = checkout / ".git"
                 if not marker.is_file():
                     continue
@@ -224,16 +237,10 @@ async def _repair(move: ProjectMove, worktrees: list[Any], source: str) -> list[
                     relative = _under(str(git_dir), source)
                     if relative is not None:
                         git_dir = Path(move.new) / relative
-                    if git_dir.parent.parent.resolve() == (repo / ".git").resolve():
+                    if git_dir.resolve().is_relative_to((repo / ".git" / "worktrees").resolve()):
                         paths.append(str(checkout))
                 except (OSError, UnicodeError) as exc:
                     logger.warning("cannot inspect moved worktree %s: %s", checkout, exc)
-        for row in worktrees:
-            if Path(row["repo_dir"]).resolve() != repo.resolve():
-                continue
-            path = Path(row["path"])
-            if path.is_dir():
-                paths.append(str(path))
         try:
             run = await step_workspaces._git(repo, "worktree", "repair", *sorted(set(paths)))
             output = (run.stdout + run.stderr).decode("utf-8", "replace").strip()
@@ -246,6 +253,24 @@ async def _repair(move: ProjectMove, worktrees: list[Any], source: str) -> list[
     return repairs
 
 
+def _move_notes(root: Path, old_key: str, new: str) -> dict[str, Any]:
+    try:
+        new_key = operator_notes.notes_key(new)
+        old_name, new_name = operator_notes.directory_name(old_key), operator_notes.directory_name(new_key)
+        result = {"moved": False, "from": old_name, "to": new_name}
+        if old_key == new_key:
+            return {**result, "reason": "notes key is unchanged"}
+        if not (root / old_name).is_dir():
+            return {**result, "reason": "source notes do not exist"}
+        if os.path.lexists(root / new_name):
+            return {**result, "reason": f"{new_name} already exists"}
+        os.rename(root / old_name, root / new_name)
+        return {**result, "moved": True}
+    except Exception as exc:
+        logger.warning("cannot move operator notes for %s: %s", new, exc)
+        return {"moved": False, "reason": str(exc)}
+
+
 async def move(project_id: str, data: Mapping[str, Any], *, expected_move_version: str | None = None,
                manager_id: str | None = None) -> dict[str, Any]:
     from .scheduler import quiesce_project
@@ -255,9 +280,34 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
         raise projects.RequestError(projects.HTTP_409, "the project is already being moved or deleted")
     async with lock, quiesce_project(project_id):
         renamed = linked = False
-        target_mode = None
         change = None
         try:
+            project = await db_projects.get_project(project_id)
+            if project is None:
+                raise projects.RequestError(projects.HTTP_404, "project not found")
+            try:
+                scanned = await preview(project, data)
+            except projects.RequestError as exc:
+                if expected_move_version is not None and exc.status == projects.HTTP_400:
+                    raise projects.RequestError(projects.HTTP_409, CHANGED) from None
+                raise
+            if expected_move_version is not None and scanned.version != expected_move_version:
+                raise projects.RequestError(projects.HTTP_409, CHANGED)
+            try:
+                repositories = await asyncio.to_thread(_repositories, Path(scanned.old))
+            except OSError as exc:
+                repositories = exc
+            # Git key discovery can spawn a subprocess; keep it outside the table locks too.
+            old_key = None
+            notes = {"moved": False, "reason": "operator notes are off"}
+            if ProjectExecution.from_row(project).notes_on:
+                try:
+                    root = operator_notes.notes_root()
+                    notes = {"moved": False, "reason": "notes root does not exist"}
+                    if root.is_dir():
+                        old_key = await asyncio.to_thread(operator_notes.notes_key, scanned.old)
+                except Exception as exc:
+                    notes = {"moved": False, "reason": str(exc)}
             async with connection.transaction() as conn:
                 # Existing waiting Planners can wake without Router admission. Fence their database
                 # writes as well as new starts, until paths and rows agree. Acquire before project
@@ -275,12 +325,13 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
                 # Use the counted view here too so preview and execution hash the same fields.
                 project = await db_projects.get_project(project_id, pool=conn)
                 try:
-                    change = await preview(project, data, db=conn)
+                    change = await preview(project, {**data, "to": scanned.new}, db=conn,
+                                           inventory=(scanned.files, scanned.bytes, scanned.truncated))
                 except projects.RequestError as exc:
                     if expected_move_version is not None and exc.status == projects.HTTP_400:
                         raise projects.RequestError(projects.HTTP_409, CHANGED) from None
                     raise
-                if expected_move_version is not None and change.version != expected_move_version:
+                if change.version != scanned.version:
                     raise projects.RequestError(projects.HTTP_409, CHANGED)
                 task_worktrees = await conn.fetch(
                     "SELECT w.task_id, w.repo_dir, w.path FROM task_worktrees w JOIN tasks t ON t.id = w.task_id "
@@ -302,7 +353,10 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
                                   for row in task_worktrees]
                 worktrees = [{"repo_dir": moved(row["repo_dir"]), "path": moved(row["path"])} for row in worktrees]
                 schedule_paths = {row["id"]: moved(row["work_dir"]) for row in change.schedules}
-                target_mode = Path(change.new).stat().st_mode & 0o7777 if Path(change.new).exists() else None
+                # Database checks above yield; a destination may appear while they run.
+                if os.path.lexists(change.new):
+                    raise projects.RequestError(projects.HTTP_409,
+                                                "to already exists; choose a path that does not exist")
                 os.rename(change.old, change.new)
                 renamed = True
                 if change.link_old:
@@ -318,7 +372,7 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
                 for schedule_id, new_dir in schedule_paths.items():
                     await conn.execute("UPDATE schedules SET work_dir = $2, updated_at = now() WHERE id = $1",
                                        schedule_id, new_dir)
-                await db_projects.record_directory_move(project_id, change.old, change.new, pool=conn)
+                activity_seq = await db_projects.record_directory_move(project_id, change.old, change.new, pool=conn)
                 updated = projects.project_view(await db_projects.get_project(project_id, pool=conn))
         except BaseException as exc:
             # Include commit errors and cancellation: a rolled-back row must never point at moved files.
@@ -326,16 +380,22 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
                 if linked:
                     Path(change.old).unlink()
                 os.rename(change.new, change.old)
-                if target_mode is not None:
-                    Path(change.new).mkdir(mode=target_mode)
-                    Path(change.new).chmod(target_mode)
             if isinstance(exc, OSError):
                 raise projects.RequestError(projects.HTTP_400, f"cannot move project directory: {exc}") from None
             if isinstance(exc, (asyncpg.LockNotAvailableError, asyncpg.DeadlockDetectedError)):
                 raise projects.RequestError(projects.HTTP_409, "project execution state is changing; retry the move") from None
             raise
-        repairs = await _repair(change, worktrees, source)
+        repairs = await _repair(change, worktrees, source, repositories)
+        if old_key is not None:
+            notes = await asyncio.to_thread(_move_notes, root, old_key, change.new)
+        note = (f"notes moved: {notes['from']} → {notes['to']}" if notes["moved"] else
+                f"notes not moved: {notes['reason']}")
+        try:
+            await connection.get_pool().execute("UPDATE project_activity SET summary = summary || $2 WHERE seq = $1",
+                                                activity_seq, f"; {note}")
+        except Exception:
+            logger.warning("cannot record notes outcome for project %s: %s", project_id, note, exc_info=True)
         logger.info("project %s directory moved from %s to %s (link_old=%s)",
                     project_id, change.old, change.new, change.link_old)
         return {"project": updated, "old_dir": change.old, "new_dir": change.new,
-                "link_old": change.link_old, "repairs": repairs}
+                "link_old": change.link_old, "repairs": repairs, "notes": notes}

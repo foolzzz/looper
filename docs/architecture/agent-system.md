@@ -2398,22 +2398,32 @@ or is not writable.
 The project's Settings tab, `POST /api/v1/project_admin/move_dir` and the
 Manager's `looper_projects` action `move` explicitly move its directory and
 files. The request takes `project` (id or name), optional absolute `to`
-(otherwise `<projects.root>/<safe name>`), and `link_old` (default `true`).
+(otherwise the first unused `<projects.root>/<safe name>`, `<safe name>-2`,
+`<safe name>-3`, and so on), and `link_old` (default `true`).
 The dashboard previews with the read-only `project_admin.preview_move_dir`
 operation and sends its `move_version` after inline confirmation; client tokens
 and the Manager receive a confirmation listing directories, bounded file count
 and size, affected command and agent schedules, and the old symbolic link.
-Missing directories, unchanged or nested targets, nonempty destinations,
+Missing directories, unchanged or nested targets, existing destinations (even empty directories),
 unwritable or missing parents, cross-filesystem moves, running steps or model
 runs, running command schedules, and gates in progress are refused before any
 move. A source symbolic link must first be replaced with its actual directory
-in the project's default. Queued and waiting tasks can stay as they are.
+in the project's default. In-progress tasks, including `waiting`, block a move;
+only ready (`init`) and finished tasks can stay as they are.
 The operation renames on one filesystem, leaves the old path as a link unless
 disabled, and updates the project, schedule paths under its old directory and
 `project_activity` together. A failed database transaction restores the files;
 task records retain their paths. Git worktrees are repaired, including managed
-task worktrees outside the project. Repair failures are logged and returned
-without undoing the move. The CLI exposes the same operation as
+task worktrees outside the project. Inventory and repository discovery run before
+acquiring table locks; the transaction rechecks the project and schedule version,
+busy state, dependencies and unused destination before renaming.
+After commit, with `operator_notes` enabled and an existing notes root, the
+project's operator notes directory is renamed from its old main-checkout (or
+directory) key to the new one. An unchanged key or missing source needs no move;
+an existing new notes directory is never replaced or merged. Cross-filesystem
+or other notes failures leave the notes in place. Notes outcomes are returned
+and recorded in the move activity. Repair and notes failures do not undo the
+project move. The CLI exposes the same operation as
 `loopercli project-admin move-dir` (or `loopercli ops projects move`); chat
 channels use the shared Manager tool.
 
@@ -2631,7 +2641,8 @@ the design is the [task workspaces RFC](rfcs/task-workspaces-v0.zh-CN.md)):
   the directory itself outside git, links resolved, every character but a
   letter or digit a `-`, and past 200 characters the first 200, `-` and the
   key's djb2 hash in base 36 (`operator_notes.root` in the ops file stands in
-  for `<config>/projects`). Looper only reads them; an `autoMemoryDirectory`
+  for `<config>/projects`). Agents only read them; an explicit project directory
+  move can rename their enclosing notes directory as described above. An `autoMemoryDirectory`
   setting is not followed. The run records them in
   `prompt_layers.project.operator_notes` (hash, files, omitted) and the
   activity says which applied.

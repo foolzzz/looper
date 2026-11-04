@@ -45,7 +45,8 @@ PATCH = {**_object(PATCH_FIELDS, [], closed=True), "minProperties": 1}
 PROJECT_RESULT = _object({"project": PROJECT})
 DELETED = _object({"deleted": _STR})
 MOVED = _object({"project": PROJECT, "old_dir": _STR, "new_dir": _STR, "link_old": _BOOL,
-    "repairs": _array(_object({"repository": _STR, "ok": _BOOL, "output": _STR}))})
+    "repairs": _array(_object({"repository": _STR, "ok": _BOOL, "output": _STR})),
+    "notes": _object({"moved": _BOOL, "from": _STR, "to": _STR, "reason": _STR}, required=("moved",))})
 MOVE_PREVIEW = _object({"old_dir": _STR, "new_dir": _STR, "impact": _STR, "move_version": _STR})
 MOVE_REQUEST = {"project": _STR, "to": _STR, "link_old": _BOOL}
 SCHEMAS = {"Project": PROJECT, "ProjectExecution": _object(EXECUTION), "ProjectPatch": PATCH}

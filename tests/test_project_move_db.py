@@ -5,16 +5,20 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
-import threading
 from pathlib import Path
 
 import pytest
 
-from looper.agents import projects as api
+from looper.agents import operator_notes, project_move, projects as api
 from looper.db import projects, tasks
 from tests.db_support import DSN, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+@pytest.fixture(autouse=True)
+def isolated_notes_root(monkeypatch, tmp_path):
+    monkeypatch.setattr(operator_notes, "_root", str(tmp_path / "operator-notes"))
 
 
 async def _project(pool, old, *, name="Move example"):
@@ -41,14 +45,11 @@ async def _rows(pool):
     }
 
 
-@pytest.mark.parametrize("existing_empty", [False, True], ids=["new-path", "empty-directory"])
-def test_move_preserves_files_rewrites_schedules_and_keeps_task_records(monkeypatch, tmp_path, existing_empty):
+def test_move_preserves_files_rewrites_schedules_and_keeps_task_records(monkeypatch, tmp_path):
     old, new = tmp_path / "old", tmp_path / "new"
 
     async def check(pool):
         project = await _project(pool, old)
-        if existing_empty:
-            new.mkdir()
         await _schedule(pool, project["id"], old)
         await _schedule(pool, project["id"], old / "subdir", schedule_id="agent", kind="agent")
         await _schedule(pool, project["id"], str(old) + "-other", schedule_id="outside")
@@ -81,7 +82,7 @@ def test_move_preserves_files_rewrites_schedules_and_keeps_task_records(monkeypa
         assert [dict(row) for row in await pool.fetch("SELECT * FROM tasks ORDER BY id")] == recorded_tasks
         activity = await pool.fetch("SELECT kind,summary FROM project_activity WHERE project_id=$1", project["id"])
         assert [dict(row) for row in activity] == [
-            {"kind": "directory_moved", "summary": f"directory moved from {old} to {new}"}]
+            {"kind": "directory_moved", "summary": f"directory moved from {old} to {new}; notes not moved: notes root does not exist"}]
 
     run_db(check, monkeypatch, timeout=30)
 
@@ -193,8 +194,9 @@ def test_move_without_link_refuses_own_project_directory_dependencies(monkeypatc
 
 
 @pytest.mark.parametrize(("case", "message"), [
-    ("no-directory", "directory"), ("same", "same|current|unchanged"),
+    ("no-directory", "directory"), ("same", "to already exists"),
     ("relative", "absolute"), ("inside", "inside|within"),
+    ("empty", "to already exists; choose a path that does not exist"),
     ("occupied", "empty|exists"), ("file", "empty|directory|exists"),
     ("parent-missing", "parent|exist"), ("parent-readonly", "writ"),
     ("cross-device", "filesystem|file system|device"),
@@ -221,6 +223,8 @@ def test_move_refusals_preserve_files_and_rows(monkeypatch, tmp_path, case, mess
             data["to"] = "relative-destination"
         elif case == "inside":
             data["to"] = str(old / "inside")
+        elif case == "empty":
+            new.mkdir()
         elif case == "occupied":
             new.mkdir()
             (new / "unrelated.txt").write_text("leave me alone")
@@ -266,7 +270,7 @@ def test_move_refusals_preserve_files_and_rows(monkeypatch, tmp_path, case, mess
                 if case.startswith("gate-"):
                     await pool.execute("INSERT INTO task_user_gates (step_id,task_id,topic,state) "
                                        "VALUES ('busy-step','busy','Choose',$1)", case.removeprefix("gate-"))
-        if case in ("no-directory", "same", "relative", "inside", "occupied", "file", "parent-missing",
+        if case in ("no-directory", "same", "relative", "inside", "empty", "occupied", "file", "parent-missing",
                     "parent-readonly", "cross-device"):
             # Path errors must be returned before the otherwise-blocking open run.
             await tasks.create_task(task_id="later-refusal", requirement="Open run", project_id=project["id"],
@@ -280,7 +284,10 @@ def test_move_refusals_preserve_files_and_rows(monkeypatch, tmp_path, case, mess
         assert await _rows(pool) == before
         assert old.is_dir() and not old.is_symlink()
         assert (old / "subdir" / "kept.txt").read_text() == "keep these files\n"
-        if case == "occupied":
+        if case == "empty":
+            assert error.value.status == api.HTTP_409
+            assert new.is_dir() and not list(new.iterdir())
+        elif case == "occupied":
             assert (new / "unrelated.txt").read_text() == "leave me alone"
         elif case == "file":
             assert new.read_text() == "leave me alone"
@@ -291,8 +298,7 @@ def test_move_refusals_preserve_files_and_rows(monkeypatch, tmp_path, case, mess
 
 
 @pytest.mark.parametrize("link_old", [True, False])
-@pytest.mark.parametrize("existing_empty", [False, True], ids=["new-path", "empty-directory"])
-def test_failed_database_commit_restores_directory_and_all_rows(monkeypatch, tmp_path, link_old, existing_empty):
+def test_failed_database_commit_restores_directory_and_all_rows(monkeypatch, tmp_path, link_old):
     import asyncpg
 
     old, new = tmp_path / "old", tmp_path / "new"
@@ -308,8 +314,6 @@ def test_failed_database_commit_restores_directory_and_all_rows(monkeypatch, tmp
 
     async def check(pool):
         project = await _project(pool, old)
-        if existing_empty:
-            new.mkdir()
         await _schedule(pool, project["id"], old)
         await _schedule(pool, project["id"], old / "subdir", schedule_id="agent", kind="agent")
         checkout = old / "checkout" if link_old else tmp_path / "checkout"
@@ -331,10 +335,7 @@ def test_failed_database_commit_restores_directory_and_all_rows(monkeypatch, tmp
         assert renamed == [(old, new), (new, old)]
         assert old.is_dir() and not old.is_symlink()
         assert (old / "subdir" / "kept.txt").read_text() == "keep these files\n"
-        if existing_empty:
-            assert new.is_dir() and not list(new.iterdir())
-        else:
-            assert not os.path.lexists(new)
+        assert not os.path.lexists(new)
 
     run_db(check, monkeypatch, timeout=30)
 
@@ -686,49 +687,186 @@ def test_existing_database_adds_project_activity_idempotently(monkeypatch, tmp_p
     run_db(check, monkeypatch, timeout=30)
 
 
-def test_task_cannot_open_a_run_between_validation_and_move(monkeypatch, tmp_path):
-    from looper.agents import project_move
-    from looper.db import llm_records
+@pytest.mark.parametrize("mutation", ["none", "active-run", "destination", "destination-after-check", "project"])
+def test_move_scans_before_transaction_and_rechecks_state(monkeypatch, tmp_path, mutation):
+    from contextlib import asynccontextmanager
+    from looper.db import connection, llm_records
 
     old, new = tmp_path / "old", tmp_path / "new"
 
     async def check(pool):
         project = await _project(pool, old)
-        await tasks.create_task(task_id="waiting-planner", requirement="Wait before waking",
-                                project_id=project["id"], work_dir=str(old), status="stopped", pool=pool)
-        entered, release = threading.Event(), threading.Event()
-        inventory = project_move._inventory
+        await tasks.create_task(task_id="stopped", requirement="Wait", project_id=project["id"],
+                                work_dir=str(old), status="stopped", pool=pool)
+        transaction = connection.transaction
+        inventory, repositories = project_move._inventory, project_move._repositories
+        calls = []
+        in_transaction = False
 
-        def paused_inventory(directory):
-            entered.set()
-            assert release.wait(10), "move inventory was not released"
-            return inventory(directory)
+        def scanned(kind, scan, directory):
+            assert not in_transaction
+            calls.append(kind)
+            return scan(directory)
 
-        monkeypatch.setattr(project_move, "_inventory", paused_inventory)
-        moving = opening = None
-        try:
-            async with pool.acquire() as writer:
-                pid = await writer.fetchval("SELECT pg_backend_pid()")
-                moving = asyncio.create_task(api.move_project_dir(project["id"], {"to": str(new)}))
-                assert await asyncio.to_thread(entered.wait, 5), "move did not reach inventory"
-                opening = asyncio.create_task(llm_records.start_record(
-                    agent_id="planner-waiting", task_id="waiting-planner", pool=writer))
-                with pytest.raises(asyncio.TimeoutError):
-                    await asyncio.wait_for(asyncio.shield(opening), timeout=0.1)
-                assert await pool.fetchval(
-                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid=$1 "
-                    "AND relation='llm_records'::regclass AND NOT granted)", pid)
-                assert not old.is_symlink() and not new.exists()
-                release.set()
-                result = await moving
-                record_id = await opening
-                assert result["project"]["work_dir"] == str(new)
-                assert await writer.fetchval("SELECT status FROM llm_records WHERE id=$1", record_id) == "running"
-                assert old.is_symlink() and (old / "subdir" / "kept.txt").read_text() == "keep these files\n"
-        finally:
-            release.set()
-            pending = [task for task in (moving, opening) if task is not None]
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+        @asynccontextmanager
+        async def tracked_transaction():
+            nonlocal in_transaction
+            assert calls == ["inventory", "repositories"]
+            if mutation == "active-run":
+                await llm_records.start_record(agent_id="planner-stopped", task_id="stopped", pool=pool)
+            elif mutation == "destination":
+                new.mkdir()
+            elif mutation == "project":
+                await projects.update_project(project["id"], name="Changed", pool=pool)
+            async with transaction() as conn:
+                in_transaction = True
+                try:
+                    yield conn
+                finally:
+                    in_transaction = False
+
+        monkeypatch.setattr(project_move, "_inventory", lambda directory: scanned("inventory", inventory, directory))
+        monkeypatch.setattr(project_move, "_repositories", lambda directory: scanned("repositories", repositories, directory))
+        monkeypatch.setattr(connection, "transaction", tracked_transaction)
+        preview = project_move.preview
+
+        async def preview_with_late_destination(*args, **kwargs):
+            result = await preview(*args, **kwargs)
+            if in_transaction and mutation == "destination-after-check":
+                new.mkdir()
+            return result
+
+        monkeypatch.setattr(project_move, "preview", preview_with_late_destination)
+        if mutation == "none":
+            result = await api.move_project_dir(project["id"], {"to": str(new)})
+            assert result["new_dir"] == str(new) and old.is_symlink()
+        else:
+            with pytest.raises(api.RequestError) as error:
+                await api.move_project_dir(project["id"], {"to": str(new)})
+            assert error.value.status == api.HTTP_409
+            assert not old.is_symlink() and (old / "subdir" / "kept.txt").is_file()
+            assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(old)
+        assert calls == ["inventory", "repositories"]
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+def test_move_without_destination_skips_existing_paths(monkeypatch, tmp_path):
+    old, root = tmp_path / "old", tmp_path / "root"
+    root.mkdir()
+    (root / "example").mkdir()
+    monkeypatch.setattr(api, "_root", str(root))
+
+    async def check(pool):
+        project = await _project(pool, old, name="Example")
+        result = await api.move_project_dir(project["id"], {})
+        assert result["new_dir"] == str(root / "example-2")
+        assert (root / "example").is_dir() and not list((root / "example").iterdir())
+        assert (root / "example-2" / "subdir" / "kept.txt").is_file()
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("case", ["move", "occupied", "off", "failure", "same-key"])
+def test_move_operator_notes_after_commit(monkeypatch, tmp_path, case):
+    old, new = tmp_path / "old", tmp_path / "new"
+    root = operator_notes.notes_root()
+
+    async def check(pool):
+        project = await _project(pool, old)
+        if case == "off":
+            await projects.update_project(project["id"], execution={"operator_notes": "off"}, pool=pool)
+        if case == "same-key":
+            main = tmp_path / "main"
+            main.mkdir()
+            _git(main, "init", "-q")
+            _git(main, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                 "commit", "--allow-empty", "-qm", "Initial")
+            _git(main, "worktree", "add", "-qb", "linked", str(old / "linked"))
+            await projects.update_project(project["id"], work_dir=str(old / "linked"), pool=pool)
+        source = Path((await projects.get_project(project["id"], pool=pool))["work_dir"])
+        old_key = operator_notes.notes_key(str(source))
+        old_notes = root / operator_notes.directory_name(old_key)
+        new_notes = root / operator_notes.directory_name(str(new.resolve()))
+        (old_notes / "memory").mkdir(parents=True)
+        (old_notes / "memory" / "MEMORY.md").write_text("Keep operator knowledge")
+        if case == "occupied":
+            new_notes.mkdir()
+            (new_notes / "keep.txt").write_text("Existing new notes")
+        rename = os.rename
+        loop = asyncio.get_running_loop()
+
+        def rename_after_commit(src, dst, *args, **kwargs):
+            if Path(src) == old_notes:
+                assert new.is_dir() and source.is_symlink()
+                saved = asyncio.run_coroutine_threadsafe(
+                    projects.get_project(project["id"], pool=pool), loop).result(timeout=5)
+                assert saved["work_dir"] == str(new), "notes moved before the database committed"
+                if case == "failure":
+                    raise OSError("notes on another filesystem")
+            return rename(src, dst, *args, **kwargs)
+
+        monkeypatch.setattr(project_move.os, "rename", rename_after_commit)
+        result = await api.move_project_dir(project["id"], {"to": str(new)})
+        notes = result["notes"]
+        assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(new)
+        summary = await pool.fetchval("SELECT summary FROM project_activity WHERE project_id=$1", project["id"])
+        if case == "move":
+            assert notes == {"moved": True, "from": old_notes.name, "to": new_notes.name}
+            assert not old_notes.exists()
+            assert "notes moved" in summary
+            assert operator_notes.read_notes(str(new)).text.endswith("Keep operator knowledge")
+        else:
+            assert notes["moved"] is False
+            assert (old_notes / "memory" / "MEMORY.md").read_text() == "Keep operator knowledge"
+            assert notes["reason"] in summary
+            if case == "occupied":
+                assert notes["reason"] == f"{new_notes.name} already exists"
+                assert (new_notes / "keep.txt").read_text() == "Existing new notes"
+            elif case == "off":
+                assert list(root.iterdir()) == [old_notes]
+            elif case == "failure":
+                assert "another filesystem" in notes["reason"]
+        assert (new / ("subdir/kept.txt" if case != "same-key" else ".git")).is_file()
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("registered", [False, True])
+def test_move_does_not_repair_submodule_as_linked_worktree(monkeypatch, tmp_path, registered):
+    from looper.agents import step_workspaces
+
+    old, new, module = tmp_path / "old", tmp_path / "new", tmp_path / "module"
+
+    async def check(pool):
+        project = await _project(pool, old)
+        module.mkdir()
+        _git(module, "init", "-q")
+        _git(module, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+             "commit", "--allow-empty", "-qm", "Module")
+        _git(old, "init", "-q")
+        _git(old, "-c", "protocol.file.allow=always", "submodule", "add", str(module), "child")
+        marker = (old / "child" / ".git").read_text()
+        assert marker.strip() == "gitdir: ../.git/modules/child"
+        assert _git(old / "child", "status", "--porcelain") == ""
+        if registered:
+            await tasks.create_task(task_id="module-task", requirement="Preserve checkout", project_id=project["id"],
+                                    work_dir=str(old / "child"), status="stopped", pool=pool)
+            await pool.execute("INSERT INTO task_worktrees (task_id,repo_dir,path,branch,base_commit) "
+                               "VALUES ('module-task',$1,$2,'module','base')", str(old), str(old / "child"))
+        git = step_workspaces._git
+        repairs = []
+
+        async def tracked_git(repo, *args, **kwargs):
+            repairs.append((Path(repo), args))
+            return await git(repo, *args, **kwargs)
+
+        monkeypatch.setattr(step_workspaces, "_git", tracked_git)
+        result = await api.move_project_dir(project["id"], {"to": str(new)})
+        assert result["repairs"] and all(row["ok"] for row in result["repairs"])
+        assert (new, ("worktree", "repair")) in repairs
+        assert all(str(new / "child") not in args[2:] for _, args in repairs)
+        assert (new / "child" / ".git").read_text() == marker
+        assert _git(new / "child", "status", "--porcelain") == ""
 
     run_db(check, monkeypatch, timeout=30)
