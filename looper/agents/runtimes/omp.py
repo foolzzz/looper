@@ -303,7 +303,7 @@ class OmpRuntime(RuntimeAdapter):
         return [*command, "--session-dir", str(session_dir)]
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
-                    session_dir: Path | None = None) -> RunChannel:
+                    session_dir: Path | None = None, prompt_file: Path | None = None) -> RunChannel:
         from .omp_steer import OmpChannel
 
         secrets = (launch.profile.provider.api_key or "",)

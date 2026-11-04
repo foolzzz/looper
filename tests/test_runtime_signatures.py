@@ -23,7 +23,7 @@ from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeAdapter, Vendor
 
 ADAPTER_TYPES = ("claude-code", "codex", "omp", "grok", "cursor-agent", "dsh", "pi")
 METHODS = [name for name, member in vars(RuntimeAdapter).items()
-           if getattr(member, "__isabstractmethod__", False) and name.endswith("_command")]
+           if getattr(member, "__isabstractmethod__", False) and name.endswith("_command")] + ["run_channel"]
 
 
 @pytest.mark.parametrize("runtime_type", ADAPTER_TYPES)

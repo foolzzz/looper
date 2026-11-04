@@ -471,7 +471,7 @@ class DshRuntime(RuntimeAdapter):
         return ResidentDsh(label=label)
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
-                    session_dir: Path | None = None) -> DshChannel:
+                    session_dir: Path | None = None, prompt_file: Path | None = None) -> DshChannel:
         channel = DshChannel(self, process, launch=launch)
         if session_dir is not None:
             channel.keep_session(session_dir)

@@ -731,3 +731,64 @@ def test_no_trace_without_the_variable(monkeypatch: pytest.MonkeyPatch, tmp_path
     monkeypatch.delenv("LOOPER_MCP_TRACE", raising=False)
     handle(_request("tools/call", {"name": "create_task", "arguments": {}}, 1), _StubClient())
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("cap", [None, 50])
+def test_per_run_wait_cap_clamps_requests_and_describes_only_capped_tools(cap, monkeypatch):
+    from copy import deepcopy
+    from looper.agents.ops.room import TOOLS as ROOM_TOOLS
+
+    tools = [tool.listing() for tool in ROOM_TOOLS]
+    original = deepcopy(tools)
+    client = AgentClient("http://127.0.0.1:1", TOKEN, max_wait_seconds=cap)
+    calls = []
+
+    def request(path, body=None, **kwargs):
+        calls.append((path, body))
+        return {"tools": tools} if body is None else ANSWER
+
+    monkeypatch.setattr(client, "_request", request)
+    listed = client.list_tools()
+    inbox = next(tool for tool in listed if tool["name"] == "looper_room_inbox")
+    assert inbox["inputSchema"]["properties"]["wait_seconds"]["maximum"] == (cap or 120)
+    assert ("50 seconds" in inbox["description"]) is (cap is not None)
+    assert tools == original
+    for wait in (0, 10, 50, 120):
+        arguments = {"wait_seconds": wait, "peek": True}
+        client.call_tool("looper_room_inbox", arguments)
+        assert calls[-1][1] == {"wait_seconds": min(wait, cap) if cap else wait, "peek": True}
+        assert arguments["wait_seconds"] == wait
+    client.call_tool("other_tool", {"wait_seconds": 120})
+    assert calls[-1][1] == {"wait_seconds": 120}
+
+
+def test_main_passes_per_run_wait_cap_to_client(monkeypatch):
+    import io
+
+    monkeypatch.setattr(mcp_server, "log_to_stderr", lambda *args: None)
+
+    monkeypatch.setenv("LOOPER_AGENT_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("LOOPER_AGENT_TOKEN", TOKEN)
+    monkeypatch.setenv("LOOPER_MCP_MAX_WAIT_SECONDS", "50")
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO()))
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(io.BytesIO()))
+    seen = []
+    monkeypatch.setattr(mcp_server, "serve", lambda client, *args: seen.append(client) or 0)
+    assert mcp_server.main() == 0
+    assert seen[0]._max_wait_seconds == 50
+
+
+def test_capped_wait_reaches_agent_api_over_http(agent_api: _AgentAPIServer) -> None:
+    client = AgentClient(_url(agent_api), TOKEN, max_wait_seconds=50)
+    assert client.call_tool("looper_room_inbox", {"wait_seconds": 120}) == ANSWER
+    assert agent_api.posts[-1]["body"] == {"wait_seconds": 50}
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "50.5", "nan", "invalid"])
+def test_main_refuses_invalid_wait_caps(value, monkeypatch, capsys):
+    monkeypatch.setattr(mcp_server, "log_to_stderr", lambda *args: None)
+    monkeypatch.setenv("LOOPER_AGENT_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("LOOPER_AGENT_TOKEN", TOKEN)
+    monkeypatch.setenv("LOOPER_MCP_MAX_WAIT_SECONDS", value)
+    assert mcp_server.main() == 2
+    assert "LOOPER_MCP_MAX_WAIT_SECONDS must be a positive integer" in capsys.readouterr().err

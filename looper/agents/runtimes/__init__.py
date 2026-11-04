@@ -458,9 +458,10 @@ class RuntimeAdapter(ABC):
         raise RuntimeUnsupported(f"a {self.label} run cannot be hosted in a runner session")
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
-                    session_dir: Path | None = None) -> RunChannel:
+                    session_dir: Path | None = None, prompt_file: Path | None = None) -> RunChannel:
         """How the Worker talks to ``process``, started from ``run_command`` (or ``steer_command`` when
-        ``launch.steers``)."""
+        ``launch.steers``). ``prompt_file`` is the immutable Looper instruction prompt for runtimes
+        that deliver instructions on stdin."""
         return StreamChannel(self, process, model=launch.model)
 
     def kept_session_dir(self, command: Sequence[str]) -> Path | None:

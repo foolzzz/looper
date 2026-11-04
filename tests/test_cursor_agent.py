@@ -25,7 +25,7 @@ from looper.agents.profile_registry import (
 from looper.agents.run_usage import Usage, run_usage
 from looper.agents.runtimes import ApiProtocol, AuthKind, CostSource, RuntimeUnsupported, VendorType, adapter, cursor_agent, cursor_login
 from looper.agents.runtimes.cursor_agent import (
-    HOME_LAYOUT_ID, INSTRUCTION_NAMES, PERSONAL_CONFIG, PLUGIN_DIR, RULES_FILE,
+    HOME_LAYOUT_ID, INSTRUCTION_NAMES, PERSONAL_CONFIG, PLUGIN_DIR,
     CursorAgentRuntime, CursorStream, mcp_servers, runtime_notes, write_run_dir,
 )
 from looper.agents.system_prompt import SystemPrompt
@@ -85,9 +85,10 @@ def test_cursor_stream_preserves_events_and_uses_only_the_final_attempt(stream: 
                       {"type": "assistant", "message": {"content": [{"type": "text", "text": routed}]}},
                       {"type": "result", "result": routed})
     else:
-        call = {"mcpToolCall": {"args": {"providerIdentifier": "looper", "toolName": "looper_tasks",
+        call = {"mcpToolCall": {"args": {"providerIdentifier": "plugin-looper-plugin-looper", "toolName": "looper_tasks",
                                          "args": {"action": "list"}},
-                                "result": {"success": {"content": [{"type": "text", "text": "tasks"}]}}}}
+                                "result": {"success": {"content": [{"type": "text", "text": "tasks"},
+                                                                       {"text": {"text": "more tasks"}}]}}}}
         data = _lines({"type": "tool_call", "subtype": "started", "call_id": "mcp-1", "tool_call": call},
                       {"type": "tool_call", "subtype": "completed", "call_id": "mcp-1", "tool_call": call})
 
@@ -100,9 +101,9 @@ def test_cursor_stream_preserves_events_and_uses_only_the_final_attempt(stream: 
     events = asyncio.run(parse())
     if stream == "mcp":
         (tool,) = _blocks(events, "tool_use")
-        assert (tool["name"], tool["input"]) == ("mcp__looper__looper_tasks", {"action": "list"})
+        assert (tool["name"], tool["input"]) == ("mcp__plugin-looper-plugin-looper__looper_tasks", {"action": "list"})
         (result,) = _blocks(events, "tool_result")
-        assert result["content"] == "tasks" and result["is_error"] is False
+        assert result["content"] == "tasks\nmore tasks" and result["is_error"] is False
         return
     result = events[-1]
     assert result["type"] == "result" and result["routed_model"] == "Grok 4.7"
@@ -113,6 +114,7 @@ def test_cursor_stream_preserves_events_and_uses_only_the_final_attempt(stream: 
         return
     init = [event for event in events if event.get("subtype") == "init"]
     assert len(init) == 1 and init[0]["runtime"] == "cursor-agent" and init[0]["session_id"] == SESSION
+    assert init[0]["model"] == MODEL and init[0]["model_display"] == "Auto Balance"
     assert all(event.get("session_id") == SESSION for event in events)
     assert len(_blocks(events, "thinking")) == 3
     (tool,) = _blocks(events, "tool_use")
@@ -189,18 +191,18 @@ def test_command_materializes_private_plugin_and_reuses_only_the_same_prompt(tmp
     plugin = run / PLUGIN_DIR
     files = {str(path.relative_to(plugin)): path.read_text() for path in plugin.rglob("*") if path.is_file()}
     assert json.loads(files[".cursor-plugin/plugin.json"]) == {
-        "name": "looper", "version": "1", "description": "Looper instructions and platform tools"}
-    assert files[RULES_FILE].startswith("---\ndescription: Looper instructions\nalwaysApply: true\n---\n\n")
-    assert runtime_notes(["looper"]) in files[RULES_FILE] and files[RULES_FILE].endswith("LOOPER PROMPT")
+        "name": "looper", "version": "1", "description": "Looper platform tools"}
+    assert not (plugin / "rules").exists()
+    assert "rules" not in json.loads(files[".cursor-plugin/plugin.json"])
     assert json.loads(files[".mcp.json"])["mcpServers"]["looper"]["command"] == "python"
-    key = hashlib.sha256((HOME_LAYOUT_ID + "\n" + "\0".join(
+    instructions = runtime_notes(["looper"]) + "\n\n---\n\nLOOPER PROMPT"
+    key = hashlib.sha256((HOME_LAYOUT_ID + "\n" + instructions + "\0" + "\0".join(
         f"{path}\0{text}" for path, text in sorted(files.items()))).encode()).hexdigest()
     assert run.name == key and run.parent == (tmp_path / "runtime/.local/cursor-agent/runs").absolute()
     for path in (run.parent.parent, run / "config", run / "data"):
         assert stat.S_IMODE(path.stat().st_mode) == 0o700
     assert all(stat.S_IMODE((plugin / name).stat().st_mode) == 0o600 for name in files)
-    # Cached runs restore generated instructions, including files the CLI removed.
-    (plugin / RULES_FILE).write_text("changed")
+    # Cached runs restore generated files the CLI removed.
     (plugin / ".mcp.json").unlink()
     (run / "config").rmdir()
     again = CURSOR.run_command("cursor-agent", cwd=tmp_path, prompt_file=prompt, launch=launch)
@@ -211,13 +213,13 @@ def test_command_materializes_private_plugin_and_reuses_only_the_same_prompt(tmp
 
 
 def test_run_directory_preserves_cli_state_when_restoring_generated_files(tmp_path: Path) -> None:
-    files = {RULES_FILE: "instructions", ".cursor-plugin/plugin.json": "{}"}
+    files = {".mcp.json": "{}", ".cursor-plugin/plugin.json": "{}"}
     run = write_run_dir(tmp_path, files)
     state = run / "data" / "chat.json"
     state.write_text("a finished chat")
-    (run / PLUGIN_DIR / RULES_FILE).unlink()
+    (run / PLUGIN_DIR / ".mcp.json").unlink()
     assert write_run_dir(tmp_path, dict(reversed(list(files.items())))) == run
-    assert state.read_text() == "a finished chat" and (run / PLUGIN_DIR / RULES_FILE).read_text() == "instructions"
+    assert state.read_text() == "a finished chat" and (run / PLUGIN_DIR / ".mcp.json").read_text() == "{}"
 
 
 def test_stream_recovers_missing_tool_starts_and_clears_retried_reports() -> None:
@@ -266,7 +268,8 @@ def test_mcp_transports_are_converted_without_injecting_home(tmp_path: Path) -> 
     record = CURSOR.launch_record(_launch(library=AgentLibrary(mcp_config=str(config))))
     assert record == {"personal_config": list(PERSONAL_CONFIG),
                       "runtime_catalog": {"runtime": "cursor-agent", "skipped": skipped}}
-    assert "MCP server `looper`" not in runtime_notes([])
+    assert "MCP server `looper`" not in runtime_notes(["looper"])
+    assert "`looper_room_inbox`" in runtime_notes(["looper"])
 
 
 @pytest.mark.parametrize("source", ["agent", "provider", "inherited"])
@@ -311,11 +314,16 @@ def test_turn_writes_utf8_and_closes_stdin_before_rejecting_another_turn(tmp_pat
     capture = tmp_path / "stdin.txt"
     executable = fake_claude(tmp_path / "cursor-agent", f"import sys, pathlib\npathlib.Path({str(capture)!r}).write_text(sys.stdin.read())")
 
+    launch = _launch(executable=executable)
+    prompt_file = _prompt(tmp_path, "运行说明")
+    command = CURSOR.run_command(executable, cwd=tmp_path, prompt_file=prompt_file, launch=launch)
+
     async def run() -> None:
-        process = await asyncio.create_subprocess_exec(executable, stdin=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE)
         try:
             assert process.stdin is not None
-            await CURSOR.write_turn(process.stdin, "一次 prompt")
+            channel = CURSOR.run_channel(process, launch=launch, cwd=tmp_path, prompt_file=prompt_file)
+            await channel.start("一次 prompt")
             with pytest.raises(RuntimeError, match="Cursor Agent reads one prompt per run: it takes no user turn while it runs"):
                 await CURSOR.write_turn(process.stdin, "second")
             assert await process.wait() == 0
@@ -325,7 +333,8 @@ def test_turn_writes_utf8_and_closes_stdin_before_rejecting_another_turn(tmp_pat
                 await process.wait()
 
     asyncio.run(asyncio.wait_for(run(), 10))
-    assert capture.read_text() == "一次 prompt"
+    blocks = CURSOR.prompt_blocks(launch, "运行说明")
+    assert capture.read_text() == blocks[-2].text + "\n\n一次 prompt"
 
 
 @pytest.mark.parametrize("mode", ["version", "empty", "error", "missing", "timeout"])
@@ -377,13 +386,14 @@ if {mode!r} == 'timeout':
     ("write", {"path": "a.py"}, "Editing: a.py"),
     ("grep", {"pattern": "x" * 100}, "grep: " + "x" * 60),
     ("glob", {"pattern": "*.py"}, "glob: *.py"),
+    ("glob", {"globPattern": "*.go", "pattern": "ignored"}, "glob: *.go"),
     ("mcp__looper__looper_tasks", {}, "Tool: mcp__looper__looper_tasks"),
 ])
 def test_tool_activity_summaries(name: str, arguments: dict[str, Any], summary: str) -> None:
     assert CURSOR.tool_summary(name, arguments) == summary
 
 
-@pytest.mark.parametrize("mode", ["recorded-report", "worker-json", "reviewer-json", "stderr-without-result"])
+@pytest.mark.parametrize("mode", ["recorded-report", "worker-json", "reviewer-json", "stderr-without-result", "init-without-result"])
 def test_worker_runs_native_cursor_with_stdin_and_records_configuration_and_routing(
     mode: str, agent_db: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -415,8 +425,11 @@ prompt = sys.stdin.read()
 pathlib.Path(os.environ['CURSOR_CONFIG_DIR'], 'cli-config.json').write_text('{{"stand_in":true}}')
 pathlib.Path({str(capture)!r}).write_text(json.dumps({{'HOME': os.environ['HOME'], 'prompt': prompt,
     'config': os.environ['CURSOR_CONFIG_DIR'], 'argv': sys.argv[1:]}}))
-if {mode != 'stderr-without-result'!r}: print({stream!r}, end='')
-else: print('boom', file=sys.stderr); raise SystemExit(1)
+if {mode not in ('stderr-without-result', 'init-without-result')!r}: print({stream!r}, end='')
+else:
+    if {mode == 'init-without-result'!r}: print({stream.splitlines()[0]!r})
+    print('boom', file=sys.stderr)
+    raise SystemExit(1)
 """
     executable = fake_claude(tmp_path / "cursor-agent", body)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
@@ -440,14 +453,20 @@ else: print('boom', file=sys.stderr); raise SystemExit(1)
     finally:
         cursor_login.forget_probe()
     seen = json.loads(capture.read_text())
-    assert seen["HOME"] == str(home) and seen["prompt"]
+    assert seen["HOME"] == str(home)
+    assert seen["prompt"].startswith("<looper_instructions>\n# Runtime notes (Cursor Agent)")
+    assert "## How you work" in seen["prompt"]
+    assert "</looper_instructions>\n\n" in seen["prompt"]
     config = Path(seen["config"])
     assert config.is_relative_to(tmp_path / "runtime/.local/cursor-agent/runs")
     assert json.loads((config / "cli-config.json").read_text()) == {"stand_in": True}
     assert not (home / ".cursor").exists() and list(home.iterdir()) == []
     assert agent_db.start_record.await_args.kwargs["metadata"]["personal_config"] == list(PERSONAL_CONFIG)
+    finish = agent_db.finish_record.await_args.kwargs
     if mode != "stderr-without-result":
-        finish = agent_db.finish_record.await_args.kwargs
+        assert finish["model"] == MODEL
+        assert finish["metadata"]["model_display"] == "Auto Balance"
+    if mode not in ("stderr-without-result", "init-without-result"):
         assert finish["output_text"] == final and finish["metadata"]["routed_model"] == "Grok 4.7"
         if mode == "recorded-report":
             # The transport keeps the recorded reply; the Worker's established JSON report contract still applies.
@@ -475,8 +494,12 @@ def test_runtime_metadata_prompt_inputs_and_unavailable_sessions(tmp_path: Path)
     assert [item.path.name for item in CURSOR.instruction_files(tmp_path)] == list(INSTRUCTION_NAMES)
     blocks = CURSOR.prompt_blocks(_launch(), "LOOPER")
     assert [(block.name, block.owner) for block in blocks] == [
-        ("Default prompt", "runtime"), ("Operator configuration", "runtime"), ("Looper instructions", "looper")]
-    assert blocks[-1].text == runtime_notes([]) + "\n\n---\n\nLOOPER" and blocks[-1].note == RULES_FILE
+        ("Default prompt", "runtime"), ("Operator configuration", "runtime"), ("Looper instructions", "looper"),
+        ("Turn prompt", "looper")]
+    assert blocks[-2].text == "<looper_instructions>\n" + runtime_notes([]) + "\n\n---\n\nLOOPER\n</looper_instructions>"
+    assert blocks[-2].note == "stdin (before the turn prompt)" and blocks[-1].text is None
+    with pytest.raises(RuntimeUnsupported, match="needs Looper.*instruction prompt"):
+        CURSOR.run_channel(None, launch=_launch(), cwd=tmp_path)
     for call in (lambda: CURSOR.resident_command("cursor-agent", cwd=tmp_path, prompt_file=_prompt(tmp_path), launch=_launch()),
                  lambda: CURSOR.resume_args("session"), lambda: CURSOR.resident_session("manager")):
         with pytest.raises(RuntimeUnsupported, match="cannot run the Manager or a Planner yet"):
@@ -484,3 +507,35 @@ def test_runtime_metadata_prompt_inputs_and_unavailable_sessions(tmp_path: Path)
     with pytest.raises(RuntimeUnsupported):
         CURSOR.consult_command("cursor-agent", cwd=tmp_path, prompt_file=_prompt(tmp_path), launch=_launch(),
                                session_id="session", session_dir=None, fork_dir=tmp_path / "fork")
+
+
+def test_cursor_mcp_config_carries_wait_cap_only_to_platform_server(tmp_path: Path) -> None:
+    from looper.agents.ops.service import server_config
+
+    config = tmp_path / "mcp.json"
+    source = {"looper": server_config("http://127.0.0.1:1", "test-token"),
+              "other": {"command": "other-server", "args": [], "env": {"CUSTOM": "kept"}}}
+    config.write_text(json.dumps({"mcpServers": source}))
+    launch = _launch(library=AgentLibrary(mcp_config=str(config)))
+    command = CURSOR.run_command("cursor-agent", cwd=tmp_path, prompt_file=_prompt(tmp_path), launch=launch)
+    servers = json.loads((_run_dir(command) / PLUGIN_DIR / ".mcp.json").read_text())["mcpServers"]
+    assert servers["looper"]["env"]["LOOPER_MCP_MAX_WAIT_SECONDS"] == "50"
+    assert servers["looper"]["env"]["LOOPER_AGENT_TOKEN"] == "test-token"
+    assert servers["other"] == source["other"]
+    assert json.loads(config.read_text())["mcpServers"] == source
+
+
+@pytest.mark.parametrize("server_field", ["providerIdentifier", "server"])
+@pytest.mark.parametrize("success", [True, False])
+def test_mcp_results_use_event_server_and_preserve_failure(server_field: str, success: bool) -> None:
+    events = CursorStream().translate({
+        "type": "tool_call", "subtype": "completed", "call_id": "mcp",
+        "tool_call": {"mcpToolCall": {
+            "args": {server_field: "plugin-looper-plugin-looper", "toolName": "looper_room_inbox"},
+            "result": {"success" if success else "failure": {"content": [
+                {"type": "text", "text": "first"}, {"text": {"text": "second"}},
+                {"type": "image", "data": "ignored"}]}}}},
+    })
+    assert _blocks(events, "tool_use")[0]["name"] == "mcp__plugin-looper-plugin-looper__looper_room_inbox"
+    result = _blocks(events, "tool_result")[0]
+    assert result["content"] == "first\nsecond" and result["is_error"] is not success

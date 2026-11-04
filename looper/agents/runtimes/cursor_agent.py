@@ -1,6 +1,6 @@
 """Cursor Agent runs with the operator's login and personal configuration.
 
-Looper owns the run's config, data and instruction plugin directories, but
+Looper owns the run's config, data and plugin directories, but
 keeps HOME: Cursor also loads the operator's Cursor and Claude Code content.
 A Worker or Reviewer sends one prompt on stdin and reads stream-json; only
 assistant text after the last tool call or retry is the run's report.
@@ -30,6 +30,7 @@ from . import (
 )
 from .grok import _local_dir, _remove_idle_homes, _write_private, every_named
 from .instructions import InstructionFile
+from .channel import StreamChannel
 from .pricing import usage_event
 
 if TYPE_CHECKING:
@@ -43,17 +44,19 @@ HOME_LAYOUT_ID = "cursor-operator-home/v1"
 CONFIG_DIR = "config"
 DATA_DIR = "data"
 PLUGIN_DIR = "looper-plugin"
-RULES_FILE = "rules/looper.md"
 INSTRUCTION_NAMES = ("AGENTS.md", "CLAUDE.md", "CLAUDE.local.md")
 PERSONAL_CONFIG = ("cursor", "claude-code")
 _PROBE_TIMEOUT_SEC = 10.0
-_FRONTMATTER = "---\ndescription: Looper instructions\nalwaysApply: true\n---\n\n"
+# Cursor CLI 2026.10.22: MCP request() defaults to 6e4 ms, RequestTimeout is -32001.
+# Leave ten seconds for the HTTP round trip and serialization.
+MCP_MAX_WAIT_SECONDS = 50
 _ROUTED_MODEL = re.compile(r"^> Auto routed to ([^\n]+)\n\n?")
 
 
-def write_run_dir(local: Path, files: Mapping[str, str]) -> Path:
+def write_run_dir(local: Path, files: Mapping[str, str], *, instructions: str = "") -> Path:
     """Restore a content-named plugin, leaving the CLI's own state alongside it."""
-    named = HOME_LAYOUT_ID + "\n" + "\0".join(f"{path}\0{text}" for path, text in sorted(files.items()))
+    # Instructions now travel on stdin, but still separate runs with different prompts.
+    named = HOME_LAYOUT_ID + "\n" + instructions + "\0" + "\0".join(f"{path}\0{text}" for path, text in sorted(files.items()))
     key = hashlib.sha256(named.encode("utf-8")).hexdigest()
     directory = local / "cursor-agent"
     directory.mkdir(parents=True, exist_ok=True)
@@ -79,7 +82,7 @@ def write_run_dir(local: Path, files: Mapping[str, str]) -> Path:
         try:
             os.rename(building, target)
         except OSError:
-            if not (target / PLUGIN_DIR / RULES_FILE).is_file():
+            if not (target / PLUGIN_DIR / ".cursor-plugin/plugin.json").is_file():
                 raise
         else:
             building = None
@@ -111,6 +114,8 @@ def mcp_servers(library: AgentLibrary) -> tuple[dict[str, dict[str, Any]], list[
         else:
             skipped.append(f"MCP server {name}: Cursor Agent has no {transport or 'unknown'} transport")
             continue
+        if name == "looper" and transport == "stdio":
+            entry["env"] = {**entry.get("env", {}), "LOOPER_MCP_MAX_WAIT_SECONDS": str(MCP_MAX_WAIT_SECONDS)}
         translated[name] = entry
     return translated, skipped
 
@@ -127,7 +132,8 @@ def runtime_notes(servers: list[str]) -> str:
         "Where they conflict with Looper's instructions, follow Looper's.",
     ]
     if "looper" in servers:
-        lines.append("- The Looper platform tools are the tools of the MCP server `looper`.")
+        lines.append("- Looper platform tools include `looper_room_inbox`, `looper_room_post` and other "
+                     "`looper_room_*` tools; use the tool names available in Cursor.")
     return "\n".join(lines)
 
 
@@ -200,13 +206,12 @@ class CursorAgentRuntime(RuntimeAdapter):
         servers, _ = mcp_servers(launch.library)
         files = {
             ".cursor-plugin/plugin.json": json.dumps({"name": "looper", "version": "1",
-                                                     "description": "Looper instructions and platform tools"}),
-            RULES_FILE: _FRONTMATTER + runtime_prompt_text(
-                launch, prompt_file.read_text(encoding="utf-8"), runtime_notes(list(servers))),
+                                                     "description": "Looper platform tools"}),
         }
         if servers:
             files[".mcp.json"] = json.dumps({"mcpServers": servers}, ensure_ascii=False)
-        run = write_run_dir(_local_dir(prompt_file), files)
+        run = write_run_dir(_local_dir(prompt_file), files, instructions=runtime_prompt_text(
+            launch, prompt_file.read_text(encoding="utf-8"), runtime_notes(list(servers))))
         return ["env", f"CURSOR_CONFIG_DIR={run / CONFIG_DIR}", f"CURSOR_DATA_DIR={run / DATA_DIR}", executable,
                 *args, "--plugin-dir", str(run / PLUGIN_DIR),
                 *(arg for directory in launch.library.plugin_dirs for arg in ("--plugin-dir", directory)),
@@ -226,10 +231,19 @@ class CursorAgentRuntime(RuntimeAdapter):
     def resident_session(self, label: str) -> ResidentSession:
         raise RuntimeUnsupported("the Cursor Agent runtime cannot run the Manager or a Planner yet")
 
-    async def write_turn(self, stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None) -> None:
+    def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
+                    session_dir: Path | None = None, prompt_file: Path | None = None) -> StreamChannel:
+        if prompt_file is None:
+            raise RuntimeUnsupported("Cursor Agent needs Looper's instruction prompt before starting a run")
+        servers, _ = mcp_servers(launch.library)
+        instructions = runtime_prompt_text(launch, prompt_file.read_text(encoding="utf-8"), runtime_notes(list(servers)))
+        return CursorChannel(self, process, model=launch.model, instructions=instructions)
+
+    async def write_turn(self, stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None,
+                         instructions: str = "") -> None:
         if stdin.is_closing():
             raise RuntimeError("Cursor Agent reads one prompt per run: it takes no user turn while it runs")
-        stdin.write(text.encode("utf-8"))
+        stdin.write((instructions_block(instructions) + "\n\n" + text).encode("utf-8"))
         await stdin.drain()
         stdin.close()
 
@@ -243,7 +257,9 @@ class CursorAgentRuntime(RuntimeAdapter):
             PromptBlock("Operator configuration", "runtime", None,
                         "the operator's own Cursor and Claude Code rules, skills, hooks and MCP servers (not shown)"),
             PromptBlock("Looper instructions", "looper",
-                        runtime_prompt_text(launch, looper_prompt, runtime_notes(list(servers))), RULES_FILE),
+                        instructions_block(runtime_prompt_text(launch, looper_prompt, runtime_notes(list(servers)))),
+                        "stdin (before the turn prompt)"),
+            PromptBlock("Turn prompt", "looper", None, "stdin (after Looper instructions)"),
         ]
 
     def instruction_files(self, cwd: str | Path) -> tuple[InstructionFile, ...]:
@@ -257,7 +273,8 @@ class CursorAgentRuntime(RuntimeAdapter):
         if tool_name in ("edit", "write"):
             return f"Editing: {tool_input.get('path') or ''}"
         if tool_name in ("grep", "glob"):
-            return f"{tool_name}: {str(tool_input.get('pattern') or '')[:60]}"
+            pattern = tool_input.get("globPattern") if tool_name == "glob" else None
+            return f"{tool_name}: {str(pattern or tool_input.get('pattern') or '')[:60]}"
         return f"Tool: {tool_name}"
 
     def cost(self, usage: Usage, provider: ProviderSpec) -> RunCost:
@@ -280,9 +297,27 @@ class CursorAgentRuntime(RuntimeAdapter):
         return record
 
 
+def instructions_block(instructions: str) -> str:
+    return f"<looper_instructions>\n{instructions}\n</looper_instructions>"
+
+
+class CursorChannel(StreamChannel):
+    """Bind instructions to this run, never to the shared runtime adapter."""
+
+    def __init__(self, runtime: CursorAgentRuntime, process: asyncio.subprocess.Process, *,
+                 model: str, instructions: str) -> None:
+        super().__init__(runtime, process, model=model)
+        self._cursor = runtime
+        self._instructions = instructions
+
+    async def start(self, prompt: str) -> None:
+        assert self._process.stdin is not None
+        await self._cursor.write_turn(self._process.stdin, prompt, instructions=self._instructions)
+
+
 def tool_name(key: str, args: Mapping[str, Any]) -> str:
     if key == "mcpToolCall":
-        return f"mcp__{args.get('providerIdentifier')}__{args.get('toolName') or args.get('name')}"
+        return f"mcp__{args.get('providerIdentifier') or args.get('server')}__{args.get('toolName') or args.get('name')}"
     return key.removesuffix("ToolCall") or "tool"
 
 
@@ -295,10 +330,21 @@ def _tool_result(key: str, result: Mapping[str, Any]) -> tuple[str, bool]:
         if text is None:
             text = "\n".join(str(output[name]) for name in ("stdout", "stderr") if output.get(name))
         return str(text), "success" not in result or output.get("exitCode") != 0
-    content = success.get("content") if isinstance(success, Mapping) else result.get("content")
+    output = success if isinstance(success, Mapping) else result.get("failure", result)
+    content = output.get("content") if isinstance(output, Mapping) else None
     if key == "mcpToolCall" and isinstance(content, list):
-        return "\n".join(str(item["text"]) for item in content
-                         if isinstance(item, Mapping) and item.get("type") == "text" and "text" in item), "success" not in result
+        texts = []
+        for item in content:
+            if not isinstance(item, Mapping):
+                continue
+            text = item.get("text")
+            if isinstance(text, Mapping):  # protobuf JSON's text oneof
+                text = text.get("text")
+            elif item.get("type") != "text":
+                continue
+            if isinstance(text, str):
+                texts.append(text)
+        return "\n".join(texts), "success" not in result or bool(output.get("isError"))
     return json.dumps(result, ensure_ascii=False), "success" not in result
 
 
@@ -327,7 +373,8 @@ class CursorStream:
         if raw.get("session_id"):
             self.session_id = str(raw["session_id"])
         if kind == "system" and phase == "init":
-            return [{**raw, "runtime": "cursor-agent"}]
+            return [{**raw, "runtime": "cursor-agent", "model": self.model or raw.get("model"),
+                     "model_display": raw.get("model")}]
         if kind == "user":
             return []
         if kind == "assistant":

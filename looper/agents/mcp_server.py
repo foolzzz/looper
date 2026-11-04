@@ -29,6 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from copy import deepcopy
 from typing import Any, BinaryIO, Protocol
 
 from looper import __version__
@@ -41,6 +42,7 @@ DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 REQUEST_TIMEOUT_SECONDS = 120.0
 # A call that waits on Looper's side (the agent room's inbox, ``wait_seconds``) gets that long more than the rest.
 WAITING_TOOL = "looper_room_inbox"
+MAX_WAIT_ENV = "LOOPER_MCP_MAX_WAIT_SECONDS"
 WAIT_MARGIN_SECONDS = 20.0
 RETRY_WAIT_MARGIN_SECONDS = 2.0
 
@@ -73,11 +75,13 @@ class AgentClient:
     """The two requests to ``looper serve``'s agent API."""
 
     def __init__(self, url: str, token: str, *, timeout: float = REQUEST_TIMEOUT_SECONDS,
-                 turn_file: str | None = None, reconnect_seconds: float = 0.0) -> None:
+                 turn_file: str | None = None, reconnect_seconds: float = 0.0,
+                 max_wait_seconds: int | None = None) -> None:
         self.url = url.rstrip("/")
         self._token = token
         self._turn_file = turn_file
         self._timeout = timeout
+        self._max_wait_seconds = max_wait_seconds
         self._reconnect_seconds = reconnect_seconds
         self._retry_safety: dict[str, RetrySafety] = {}
         # The URL is the local server that started the Manager; a proxy from the environment must not carry it.
@@ -96,6 +100,16 @@ class AgentClient:
         tools = answer.get("tools")
         if not isinstance(tools, list):
             raise LooperUnavailable("its answer has no tools list")
+        if self._max_wait_seconds is not None:
+            tools = deepcopy(tools)
+            for tool in tools:
+                if isinstance(tool, dict) and tool.get("name") == WAITING_TOOL:
+                    tool["description"] = (tool.get("description", "") +
+                                           f" This runtime caps wait_seconds at {self._max_wait_seconds} seconds.")
+                    wait_schema = tool.get("inputSchema", {}).get("properties", {}).get("wait_seconds")
+                    if isinstance(wait_schema, dict):
+                        wait_schema["maximum"] = min(wait_schema.get("maximum", self._max_wait_seconds),
+                                                     self._max_wait_seconds)
         return tools
 
     def call_tool(self, name: str, arguments: dict[str, Any], meta: dict[str, Any] | None = None
@@ -113,6 +127,12 @@ class AgentClient:
                 if isinstance(call_id, str) and call_id:
                     extra["X-Looper-Call"] = call_id
                     break
+        # The room inbox is currently the only platform tool with a long-poll argument.
+        # Clamp before forwarding (including retries), not just in the advertised schema.
+        if name == WAITING_TOOL and self._max_wait_seconds is not None:
+            wait = arguments.get("wait_seconds")
+            if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > self._max_wait_seconds:
+                arguments = {**arguments, "wait_seconds": self._max_wait_seconds}
         timeout = self._timeout
         wait = arguments.get("wait_seconds") if name == WAITING_TOOL else None
         if isinstance(wait, (int, float)) and not isinstance(wait, bool) and wait > 0:
@@ -337,7 +357,15 @@ def main() -> int:
     except ValueError:
         print("error: LOOPER_AGENT_RECONNECT_SECONDS must be a non-negative number", file=sys.stderr)
         return 2
-    client = AgentClient(url, token, turn_file=os.environ.get("LOOPER_AGENT_TURN_FILE", "").strip() or None,
+    try:
+        raw_wait = os.environ.get(MAX_WAIT_ENV, "").strip()
+        max_wait = int(raw_wait) if raw_wait else None
+        if max_wait is not None and max_wait <= 0:
+            raise ValueError
+    except ValueError:
+        print(f"error: {MAX_WAIT_ENV} must be a positive integer", file=sys.stderr)
+        return 2
+    client = AgentClient(url, token, max_wait_seconds=max_wait, turn_file=os.environ.get("LOOPER_AGENT_TURN_FILE", "").strip() or None,
                          reconnect_seconds=min(reconnect, 600))
     logger.info("forwarding tool calls to %s", client.url)
     return serve(client, sys.stdin.buffer, sys.stdout.buffer)

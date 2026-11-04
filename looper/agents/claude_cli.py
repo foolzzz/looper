@@ -1380,6 +1380,7 @@ class ClaudeRunRecorder:
         # seq of the row holding the current thinking phase's progress, if it is the latest row
         self._thinking_seq: int | None = None
         self._model: str | None = None
+        self._model_display: str | None = None
         self._context_tokens: int | None = None  # the prompt of the run's latest main-loop request
         self._compactions: list[dict[str, Any]] = []
         self._streamed = Usage()  # the tokens of the run's model requests so far, from its usage events
@@ -1484,6 +1485,7 @@ class ClaudeRunRecorder:
             self._result = event
         if event.get("type") == "system" and event.get("subtype") == "init":
             self._model = event.get("model") or self._model
+            self._model_display = event.get("model_display") or self._model_display
             self._session_id = event.get("session_id") or self._session_id
         if (context := request_context(event)) is not None:
             self._context_tokens = context
@@ -1676,6 +1678,8 @@ class ClaudeRunRecorder:
         try:
             cost = self._runtime().cost(usage, self._provider())
             usage = cost.usage
+            if self._model_display:
+                metadata = {"model_display": self._model_display, **(metadata or {})}
             fields = {
                 "status": status.value,
                 "output_text": output_text,

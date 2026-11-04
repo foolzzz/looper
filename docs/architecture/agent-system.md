@@ -1540,19 +1540,25 @@ Manager tools.
   The prompt view identifies this operator configuration as not shown.
 
   Looper writes its own state in
-  `<runtime_root>/.local/cursor-agent/runs/<sha256>/`, named by the plugin
-  contents: `config/` (`CURSOR_CONFIG_DIR`, including chats), `data/`
+  `<runtime_root>/.local/cursor-agent/runs/<sha256>/`, named by the instructions
+  and plugin contents: `config/` (`CURSOR_CONFIG_DIR`, including chats), `data/`
   (`CURSOR_DATA_DIR`, including project state), and `looper-plugin/`
   (`--plugin-dir`). Run, config and data directories are private (0700), files are 0600, and run
   directories idle for a day are removed. The plugin has its manifest at
-  `.cursor-plugin/plugin.json`, Looper's instructions at `rules/looper.md`
-  (`alwaysApply: true`), and `.mcp.json` when the run has MCP servers. The
-  rule starts with Cursor runtime notes: Looper reads only the final message,
-  Looper's instructions take precedence over conflicting personal rules,
-  and its platform tools belong to MCP server `looper` when present. The
-  launch also passes installed plugins and deduplicated knowledge directories.
-  Stdio, HTTP and SSE MCP servers are supported; skipped transports are
-  recorded in `runtime_catalog.skipped`.
+  `.cursor-plugin/plugin.json` and `.mcp.json` when the run has MCP servers;
+  it has no rules. Cursor CLI 2026.10.22 does not apply `--plugin-dir` rules
+  in headless mode, so stdin starts with `<looper_instructions>`, the runtime
+  notes and Looper's full prompt, then `</looper_instructions>`, a blank line
+  and the turn's prompt. The prompt preview shows the same two parts.
+  The notes say Looper reads only the final message, its instructions take
+  precedence over conflicting personal rules, and its platform tools have
+  names such as `looper_room_*`. The launch also passes installed plugins and
+  deduplicated knowledge directories. Stdio, HTTP and SSE MCP servers are
+  supported; skipped transports are recorded in `runtime_catalog.skipped`.
+  Cursor's MCP request timeout is 60 seconds; its per-run platform server
+  config sets `LOOPER_MCP_MAX_WAIT_SECONDS=50`. The MCP bridge advertises and
+  enforces that cap on `looper_room_inbox.wait_seconds`, currently the only
+  platform long poll. Other runtimes keep their existing waits.
 
   The stream's thinking, tool calls, connections and retries become internal
   events. The report is the assistant text after the final tool call or
@@ -1562,7 +1568,15 @@ Manager tools.
   as `usage` and `modelUsage`; Cursor reports no cost and the login's models
   have no prices, so cost is unknown (`provider_price`). A per-run spend cap
   cannot stop Cursor. A run that exits without a result fails and retains
-  its stderr.
+  its stderr. The run's model column keeps the profile's requested model id;
+  Cursor's `system/init` display name is retained as `model_display` in the
+  launch record.
+
+  Two known limits remain: after a network retry, Cursor's `result.usage`
+  appears to cover only the resumed part, so recorded tokens can be low.
+  Cursor's `worker-server` helper outlives a run by about a minute and is
+  shared by runs in the same working directory; ending one run can end the
+  helper another concurrent run in that directory uses.
 - **The Cursor login** (`looper/agents/runtimes/cursor_login.py`) is the
   built-in provider `cursor-login` (`prov-cursor-login`, OAuth,
   `oauth_runtime_type = cursor-agent`). Its `openai-responses` endpoint is
