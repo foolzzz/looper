@@ -1256,8 +1256,8 @@ Manager tools.
   process mechanics stay in `claude_cli.py`, and the catalog and knowledge
   are materialized in Claude Code's plugin format by
   `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`,
-  `OmpRuntime`, `GrokRuntime` and `PiRuntime` (`codex`, `omp`, `grok`, `pi`,
-  below) translate
+  `OmpRuntime`, `GrokRuntime`, `CursorAgentRuntime` and `PiRuntime` (`codex`,
+  `omp`, `grok`, `cursor-agent`, `pi`, below) translate
   them at launch; Codex, OMP and, by default, Pi keep the Manager's and a Planner's session
   with one process per turn (`runtimes/per_turn.py`), Grok with one process
   over ACP (`runtimes/grok_acp.py`, `RuntimeAdapter.resident_transport`).
@@ -1272,7 +1272,8 @@ Manager tools.
   `compaction_events` and `cost_report`; Pi has `run`, `resident_session`,
   `resume`, `steer`, `read_tools`, `compaction_events` and `mcp` when the
   probe accepts version 1.3.0 or newer and every required help flag, and none
-  otherwise. Pi's `mcp` is the Looper platform bridge only). Codex and OMP list `steer` when
+  otherwise. Pi's `mcp` is the Looper platform bridge only; Cursor Agent has
+  `run`, `mcp` and `add_dirs`). Codex and OMP list `steer` when
   their probe finds the steering protocol (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md));
   Claude Code and Grok do not. Pi's `steer` is in that probed set.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
@@ -1522,6 +1523,46 @@ Manager tools.
   the provider. The login's state is whether its file is there (`stat`,
   never read), in the provider's view and in the `grok_login` self-check,
   skipped while no Agent Profile uses the login.
+- **Cursor Agent** (`looper/agents/runtimes/cursor_agent.py`, the
+  `cursor-agent` CLI) runs Workers and Reviewers with the operator's existing
+  Cursor login only (`prov-cursor-login`). It does not yet run the Manager or
+  a Planner, resume a resident session or consult a completed run. It runs
+  `-p --output-format stream-json --force --trust --sandbox disabled
+  --disable-auto-update --model <model>` with the prompt written to stdin,
+  then stdin closed; there is no positional prompt or effort setting.
+
+  Cursor runs keep the operator's `HOME` and Cursor login. The operator's
+  personal Cursor and Claude Code configuration (hooks, MCP servers, skills,
+  rules and plugins) applies to these runs and cannot be turned off. This
+  differs from Claude Code's `--setting-sources project` and the homes of
+  Looper's own used by Codex and Grok. `loads_operator_config` is true for
+  this runtime; each run records `personal_config: ["cursor", "claude-code"]`.
+  The prompt view identifies this operator configuration as not shown.
+
+  Looper writes its own state in
+  `<runtime_root>/.local/cursor-agent/runs/<sha256>/`, named by the plugin
+  contents: `config/` (`CURSOR_CONFIG_DIR`, including chats), `data/`
+  (`CURSOR_DATA_DIR`, including project state), and `looper-plugin/`
+  (`--plugin-dir`). Run, config and data directories are private (0700), files are 0600, and run
+  directories idle for a day are removed. The plugin has its manifest at
+  `.cursor-plugin/plugin.json`, Looper's instructions at `rules/looper.md`
+  (`alwaysApply: true`), and `.mcp.json` when the run has MCP servers. The
+  rule starts with Cursor runtime notes: Looper reads only the final message,
+  Looper's instructions take precedence over conflicting personal rules,
+  and its platform tools belong to MCP server `looper` when present. The
+  launch also passes installed plugins and deduplicated knowledge directories.
+  Stdio, HTTP and SSE MCP servers are supported; skipped transports are
+  recorded in `runtime_catalog.skipped`.
+
+  The stream's thinking, tool calls, connections and retries become internal
+  events. The report is the assistant text after the final tool call or
+  resumed retry, with the leading `> Auto routed to <model>` line removed;
+  that model is recorded as `routed_model`. Cursor's raw `result.result`
+  concatenates attempts and is not used as the report. Tokens are retained
+  as `usage` and `modelUsage`; Cursor reports no cost and the login's models
+  have no prices, so cost is unknown (`provider_price`). A per-run spend cap
+  cannot stop Cursor. A run that exits without a result fails and retains
+  its stderr.
 - **The Cursor login** (`looper/agents/runtimes/cursor_login.py`) is the
   built-in provider `cursor-login` (`prov-cursor-login`, OAuth,
   `oauth_runtime_type = cursor-agent`). Its `openai-responses` endpoint is
@@ -1540,13 +1581,11 @@ Manager tools.
   return the last cached state immediately, even when stale, or show
   "checking the Cursor login" before the first result; a missing or expired
   result starts at most one background check. The login appears in Settings
-  → LLM Providers before a Cursor runtime exists. The `cursor_login`
+  → LLM Providers. The `cursor_login`
   self-check is skipped without a matching Agent Profile; otherwise it fails
   for a missing login and warns for an unknown state. There is no file store,
   API key or login link. The status JSON shape was verified on 2026-11-04;
-  `userInfo` contents are never retained or shown. Cursor runs will keep the
-  operator's `HOME` and load personal Cursor and Claude Code configuration;
-  the runtime using this login is delivered separately. The suggested models
+  `userInfo` contents are never retained or shown. The suggested models
   are `auto`, `gpt-5.3-codex`, `gpt-5.6-sol-high`, `composer-2.5` and
   `gemini-3.7-flash-high`, without built-in prices.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,

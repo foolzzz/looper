@@ -253,7 +253,8 @@ database, then run every role on it). The explicit spec is:
 
 Replace the example endpoint and model with the intended callable entry.
 Runtimes are built in: `runtime.name` selects one by name, else `runtime.type`
-selects the detected built-in runtime (`codex`, `omp`, `grok`, `pi`, `dsh` when on PATH).
+selects the detected built-in runtime (`codex`, `omp`, `grok`, `cursor-agent`,
+`pi`, `dsh` when on PATH).
 `provider.api_key_env` names an environment variable; literal `api_key` in the
 spec is rejected. Never put a credential in the JSON file. A saved provider
 can instead be selected with `{"provider_id": "prov-codex-login"}` (or
@@ -263,6 +264,22 @@ explicit `{name, protocol, settings...}`, a saved model-id string,
 reference belonging to that account. The `agent` layer holds only its name
 and runtime options; profile system-prompt mode is not an option. Role/task
 mode selection continues to apply.
+
+The planned Cursor Agent `--register-agent` spec is:
+
+```json
+{
+  "runtime": {"type": "cursor-agent"},
+  "provider": {"provider_id": "prov-cursor-login"},
+  "agent": {"name": "cursor-agent/gpt-5.3-codex", "model": "gpt-5.3-codex"}
+}
+```
+
+For the current model-layer schema, move `agent.model` to a top-level
+`"model": {"name": "gpt-5.3-codex", "protocol": "openai-responses"}`;
+registration rejects the old `agent.model` form. Cursor Agent currently runs Workers and Reviewers only. Real-mode
+Worker prompt comparisons for its runtime notes remain pending; development
+tests use stand-in scripts and make no real Cursor model calls.
 
 Older specs are rejected with `EvalError`: a missing top-level `model` reports
 `an eval spec needs a top-level model`; `agent.model` reports

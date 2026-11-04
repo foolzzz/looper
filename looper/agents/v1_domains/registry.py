@@ -34,10 +34,11 @@ RUNTIME_TYPE = _object({
     "auth_kinds": _array(PROVIDER_AUTH), "supported_models": _NULL_STRINGS,
     "effort_levels": _NULL_STRINGS, "in_process": _BOOL,
     "can_replace_system_prompt": _BOOL, "replace_system_prompt_refusal": _NULL_STR,
+    "loads_operator_config": _BOOL,
     "can_interrupt": _BOOL, "probe_error": _NULL_STR,
 }, ["type", "label", "default_executable", "runtime_id", "protocols", "capabilities", "roles",
     "auth_kinds", "supported_models", "in_process", "can_replace_system_prompt",
-    "replace_system_prompt_refusal", "can_interrupt"], closed=True)
+    "replace_system_prompt_refusal", "can_interrupt", "loads_operator_config"], closed=True)
 RUNTIME = _object({
     "runtime_id": _STR, "name": _STR, "type": _STR, "type_label": _STR, "launcher": _STR,
     "executable": _STR, "default_executable": _NULL_STR, "path": _NULL_STR,

@@ -223,7 +223,7 @@ def test_login_ownership_and_problem_clear(monkeypatch, tmp_path):
         modules["cursor-agent"] = SimpleNamespace(login_view=AsyncMock(
             return_value={"state": "not_logged_in", "detail": "not signed in"}))
         monkeypatch.setattr(service, "_login_modules", lambda: modules)
-        assert "cursor-agent" not in service.runtimes.ADAPTERS
+        assert "cursor-agent" in service.runtimes.ADAPTERS
         for vendor, runtime, protocol in (("claude-subscription", "claude-code", "anthropic-messages"),
                                            ("codex-login", "codex", "openai-responses"),
                                            ("cursor-login", "cursor-agent", "openai-responses"),
