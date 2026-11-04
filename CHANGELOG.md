@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.77] - 2026-11-04
+
+### Added
+
+- **The native `cursor-agent` runtime for Workers and Reviewers.** The runtime `Cursor Agent` (`rt-cursor-agent`, registered when `cursor-agent` is on PATH; capabilities `run`, `mcp`, `add_dirs`) runs each Worker and Reviewer as one headless Cursor CLI process with the operator's Cursor login (`cursor-login` provider) and a run directory of Looper's own. Looper's instructions travel on stdin in a `<looper_instructions>` block. Cursor runs keep the operator's `HOME`, so the operator's personal Cursor and Claude Code configuration applies and cannot be turned off; the runtime type reports it as `loads_operator_config` and the launch record as `personal_config`. `LOOPER_MCP_MAX_WAIT_SECONDS` caps `wait_seconds` of `looper_room_inbox` (50 for Cursor runs, with a note in the tool description). The Manager and Planners cannot run on it yet. ([#1078](https://github.com/foolzzz/looper/pull/1078))
+
 ## [2.14.76] - 2026-11-04
 
 ### Changed
