@@ -398,7 +398,7 @@ interface ProjectPageProps {
 export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
   const [projectId, tabPart, focus, ...rest] = sub.split("/");
   const tab: Tab = TABS.some((t) => t.id === tabPart) ? (tabPart as Tab) : "overview";
-  const { projects, error, reload } = useProjects();
+  const { projects, projectsRoot, error, reload } = useProjects();
   const project = projects?.find((p) => p.project_id === projectId) ?? null;
   // A project the list does not hold yet (just created) is reported missing only after a fresh load confirms it.
   const [confirmedMissing, setConfirmedMissing] = useState("");
@@ -514,6 +514,7 @@ export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
           <ProjectSettingsForm
             key={project.project_id}
             project={project}
+            projectsRoot={projectsRoot}
             onDeleted={() => (window.location.hash = "tasks")}
           />
         )}

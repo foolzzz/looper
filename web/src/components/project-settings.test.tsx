@@ -88,6 +88,50 @@ describe("project deletion", () => {
   });
 
   it.each([
+    { name: "..My  Project--V2._-", projectsRoot: "/srv/projects/", safe: "/srv/projects/my-project-v2._" },
+    { name: "你好...---", projectsRoot: "/srv/projects", safe: "/srv/projects/project-example" },
+    { name: "İK_App.v1", projectsRoot: "/", safe: "/_app.v1" },
+  ])("names the server default for $name, including possible suffixes", async ({ name, projectsRoot, safe }) => {
+    await act(async () => root.render(<ProjectSettingsForm projectsRoot={projectsRoot} project={project({ name, work_dir: "/srv/example" })} onDeleted={() => {}} />));
+    const field = container.querySelector('input[placeholder^="Leave empty for"]') as HTMLInputElement;
+    expect(field.placeholder).toBe(`Leave empty for ${safe}…`);
+    expect(button("Preview move").disabled).toBe(false);
+  });
+
+  it("explains the directory controls in English and requires a target without a root", async () => {
+    await act(async () => root.render(<ProjectSettingsForm project={project({ work_dir: "/srv/example" })} onDeleted={() => {}} />));
+    expect(container.textContent).toContain("Moves the directory with all its files and updates the schedules that use it. An in-progress task, a running command or an open gate blocks the move.");
+    expect(container.textContent).toContain("Target directory (absolute path)");
+    expect(container.querySelector('h2[id$="-move"]')?.textContent).toBe("Move directory");
+    expect(container.querySelector('input[placeholder="/absolute/path"]')).not.toBeNull();
+    expect(button("Preview move").disabled).toBe(true);
+    const label = [...container.querySelectorAll("label")].find((item) => item.textContent === "Default directory")!;
+    expect(label.parentElement?.querySelector("p")?.textContent).toBe("Changes the stored path only; files stay where they are. To move the files, use Move directory below.");
+    const field = container.querySelector('input[placeholder="/absolute/path"]') as HTMLInputElement;
+    const fill = async (value: string) => act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, value);
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await fill("   ");
+    expect(button("Preview move").disabled).toBe(true);
+    await fill("/srv/new");
+    expect(button("Preview move").disabled).toBe(false);
+  });
+
+  it("blocks moving with unsaved settings and allows it after discarding them", async () => {
+    await act(async () => root.render(<ProjectSettingsForm projectsRoot="/srv/projects" project={project({ work_dir: "/srv/example" })} onDeleted={() => {}} />));
+    const name = container.querySelector("input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, "Changed name");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("Save or discard your changes to the settings before moving the directory.");
+    expect(button("Preview move").disabled).toBe(true);
+    await act(async () => button("Discard changes").click());
+    expect(button("Preview move").disabled).toBe(false);
+  });
+
+  it.each([
     { notes: { moved: true, from: "old", to: "new" }, line: "Notes moved" },
     { notes: { moved: false, reason: "they belong to /srv, which does not move" }, line: "Notes not moved: they belong to /srv, which does not move" },
   ])("previews, confirms, refreshes and reports repairs and notes: $line", async ({ notes, line }) => {
@@ -95,34 +139,39 @@ describe("project deletion", () => {
     const destination = "/srv/projects/Example";
     const moved = project({ work_dir: destination });
     const impact = `${old} → ${destination}\n1 文件，8 字节；command-pull、agent-check 随目录移动。旧路径保留符号链接，不会中断任何运行。`;
-    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ status: "ok", result: {
-      old_dir: old, new_dir: destination, impact, move_version: "preview-version",
-    } })).mockResolvedValueOnce(Response.json({ status: "ok", result: {
+    let complete!: (response: Response) => void;
+    const fetcher = vi.fn().mockImplementationOnce(() => new Promise<Response>((resolve) => { complete = resolve; }))
+      .mockResolvedValueOnce(Response.json({ status: "ok", result: {
       project: moved, old_dir: old, new_dir: destination, link_old: true,
       repairs: [{ repository: destination, ok: false, output: "repair timed out" }],
       notes,
     } }));
+    const previewResponse = Response.json({ status: "ok", result: {
+      old_dir: old, new_dir: destination, impact, move_version: "preview-version",
+    } });
     vi.stubGlobal("fetch", fetcher);
     const changed = vi.fn();
     window.addEventListener(PROJECTS_CHANGED_EVENT, changed);
     try {
-      await act(async () => root.render(<ProjectSettingsForm project={project({ work_dir: old })} onDeleted={() => {}} />));
-      expect(container.querySelector('[role="switch"][aria-label="保留旧路径的符号链接"]')?.getAttribute("aria-checked")).toBe("true");
-      await act(async () => button("预览移动").click());
+      await act(async () => root.render(<ProjectSettingsForm projectsRoot="/srv/projects" project={project({ work_dir: old })} onDeleted={() => {}} />));
+      expect(container.querySelector('[role="switch"][aria-label="Keep a link at the old path"]')?.getAttribute("aria-checked")).toBe("true");
+      await act(async () => button("Preview move").click());
       expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/v1/project_admin/preview_move_dir", expect.objectContaining({
         body: JSON.stringify({ project: "project-example", link_old: true }),
       }));
+      expect(button("Working…").disabled).toBe(true);
+      await act(async () => complete(previewResponse));
       expect(container.textContent).toContain(`${old} → ${destination}`);
       expect(container.textContent).toContain(impact);
       expect(changed).not.toHaveBeenCalled();
-      await act(async () => button("确认移动目录").click());
+      await act(async () => button("Move directory").click());
       expect(fetcher).toHaveBeenLastCalledWith("/api/v1/project_admin/move_dir", expect.objectContaining({
         body: JSON.stringify({ project: "project-example", link_old: true, move_version: "preview-version" }),
       }));
       expect(changed).toHaveBeenCalledOnce();
-      expect(container.textContent).toContain(`目录已移动到 ${destination}`);
+      expect(container.textContent).toContain(`Moved to ${destination}.`);
       expect(container.querySelector('[role="status"]')?.textContent).toContain(line);
-      expect(container.querySelector('[role="alert"]')?.textContent).toContain("Git worktree 修复失败");
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain("Git worktree repair failed: ");
       expect(container.querySelector('[role="alert"]')?.textContent).toContain("repair timed out");
     } finally { window.removeEventListener(PROJECTS_CHANGED_EVENT, changed); }
   });
@@ -133,11 +182,12 @@ describe("project deletion", () => {
     } }));
     vi.stubGlobal("fetch", fetcher);
     await act(async () => root.render(<ProjectSettingsForm project={project()} onDeleted={() => {}} />));
-    expect(button("预览移动").disabled).toBe(true);
-    await act(async () => root.render(<ProjectSettingsForm key="configured" project={project({ work_dir: "/srv/example" })} onDeleted={() => {}} />));
-    await act(async () => button("预览移动").click());
-    await act(async () => button("取消移动").click());
-    expect(button("确认移动目录")).toBeUndefined();
+    expect(button("Preview move").disabled).toBe(true);
+    expect(container.textContent).toContain("Set the project's directory first.");
+    await act(async () => root.render(<ProjectSettingsForm projectsRoot="/srv/projects" key="configured" project={project({ work_dir: "/srv/example" })} onDeleted={() => {}} />));
+    await act(async () => button("Preview move").click());
+    await act(async () => button("Cancel").click());
+    expect(button("Move directory")).toBeUndefined();
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
@@ -147,22 +197,22 @@ describe("project deletion", () => {
     } }, { status: 409 }));
     vi.stubGlobal("fetch", fetcher);
     await act(async () => root.render(<ProjectSettingsForm project={project({ work_dir: "/srv/example" })} onDeleted={() => {}} />));
-    const field = container.querySelector('input[placeholder="留空使用已配置的 projects root"]') as HTMLInputElement;
+    const field = container.querySelector('input[placeholder="/absolute/path"]') as HTMLInputElement;
     const fill = async (value: string) => act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field, value);
       field.dispatchEvent(new Event("input", { bubbles: true }));
     });
     await fill("relative/path");
-    await act(async () => button("预览移动").click());
+    await act(async () => button("Preview move").click());
     expect(fetcher).not.toHaveBeenCalled();
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("绝对路径");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("The target must be an absolute path.");
     await fill("/srv/new");
-    await act(async () => (container.querySelector('[role="switch"][aria-label="保留旧路径的符号链接"]') as HTMLButtonElement).click());
-    await act(async () => button("预览移动").click());
+    await act(async () => (container.querySelector('[role="switch"][aria-label="Keep a link at the old path"]') as HTMLButtonElement).click());
+    await act(async () => button("Preview move").click());
     expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/v1/project_admin/preview_move_dir", expect.objectContaining({
       body: JSON.stringify({ project: "project-example", to: "/srv/new", link_old: false }),
     }));
     expect(container.querySelector('[role="alert"]')?.textContent).toBe("项目有运行中的任务，无法移动。");
-    expect(button("确认移动目录")).toBeUndefined();
+    expect(button("Move directory")).toBeUndefined();
   });
 });
