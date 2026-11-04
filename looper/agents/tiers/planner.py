@@ -144,7 +144,7 @@ from ..room import REF_MAX_CHARS, seat_key
 from ..runtimes import CLAUDE_CODE, InProcessTools, ReadOnly, RuntimeUnsupported
 from ..runtimes.runner.bridge import RpcFailure
 from ..runtimes.runner.protocol import ProtocolError as RunnerProtocolError
-from ..session_switch import SessionSwitch
+from ..session_switch import SessionSwitch, SwitchReason
 from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
 from ..task_roles import RoleKind, TaskRole
 from .. import waits
@@ -3442,7 +3442,17 @@ class PlannerAgent:
         signature = (tuple(base), system_prompt.sha256, launch.env_sha256, launch.library.sha256,
                      launch.knowledge.add_dirs, launch.binding_sha256)
         switch = session_switch.profile_switch(plan.session_id, plan.session_runtime, plan.session_profile, launch,
-                                               session_provider=plan.session_provider)
+                                               session_provider=plan.session_provider, command=base,
+                                               label=self._directory_label(plan))
+        if switch is not None and switch.reason is SwitchReason.INSTRUCTIONS_CHANGED and not self._claude.started:
+            # Restore the saved chat with its retained instructions for the handoff after a server restart.
+            await self._claude.stop()
+            self._claude = launch.runtime.resident_session(self._directory_label(plan))
+            self._claude_runtime = launch.runtime
+            command = base + launch.runtime.resume_args(plan.session_id)
+            await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment(),
+                                     totals=plan.session_totals, price=launch.price)
+            self._process = _Process(command, signature, system_prompt, launch)
         if switch is not None:
             # This agent cannot resume the session: a new one starts, after the old one hands over.
             if self._schedule_session_id:

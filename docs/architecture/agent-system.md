@@ -1556,9 +1556,13 @@ Manager tools.
   `looper-plugin`; each turn syncs the generated plugin and instructions from
   the run directory, retaining the last copy if that directory has expired.
   Only the first turn sends the instructions block; resumed turns send only
-  the turn prompt. `session.json` stores the instruction hash beside the chat
-  id, and different or unknown instructions start a new chat. Starting a chat
-  removes the owner's other chats under `config/chats/<workspace>/<id>`.
+  the turn prompt. At `system/init`, `session.json` stores the chat id,
+  instruction hash and working directory, so a restart before the result can
+  still resume it. Different or unknown instructions go through the session
+  switch: the old chat writes a handoff with its retained instructions, then
+  the new chat gets the new instructions and a resume brief. The owner's other
+  chats under `config/chats/<workspace>/<id>` are removed only after the new
+  chat completes a turn, including when it first has to resume an interrupted turn.
   Saved owner directories survive reclamation; unsaved, idle ones are removed.
   The Manager's stop is refused (`can_interrupt` is false), as for Codex.
   The notes say Looper reads only the final message, its instructions take

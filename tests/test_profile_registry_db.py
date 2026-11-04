@@ -987,6 +987,30 @@ def test_cursor_agent_on_path_pairs_only_with_cursor_login_and_runs_every_role(
     run_db(_test, monkeypatch, timeout=30)
 
 
+def test_startup_refreshes_existing_cursor_capabilities_without_probing_or_changing_operator_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.agents.profile_registry import register_found_runtimes, servable_roles
+    from looper.agents.runtimes import adapter
+    from looper.db import profile_registry as db
+
+    async def _test(pool: Any) -> None:
+        await _runtime("cursor-agent", name="My Cursor", executable="/custom/cursor-agent")
+        await pool.execute("UPDATE agent_runtimes SET capabilities = $1, version = 'old' WHERE id = 'rt-cursor-agent'",
+                           ["run", "mcp", "add_dirs"])
+        before = await db.get_runtime("rt-cursor-agent")
+        assert servable_roles(before["capabilities"], "cursor-agent") == ["worker", "reviewer"]
+        monkeypatch.setenv("PATH", str(tmp_path))  # Refresh must work even without a CLI on PATH.
+        await register_found_runtimes()
+        after = await db.get_runtime("rt-cursor-agent")
+        assert set(after["capabilities"]) == {c.value for c in adapter("cursor-agent").capabilities}
+        assert servable_roles(after["capabilities"], "cursor-agent") == ["manager", "planner", "worker", "reviewer"]
+        assert {k: v for k, v in after.items() if k != "capabilities"} == {
+            k: v for k, v in before.items() if k != "capabilities"}
+
+    run_db(_test, monkeypatch, timeout=30)
+
+
 def _version_pi(path: Path) -> str:
     """A stand-in pi 1.3.0 whose help lists the flags the probe requires."""
     from looper.agents.runtimes.pi import PROBE_HELP_TOKENS

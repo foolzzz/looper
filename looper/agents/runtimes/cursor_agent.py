@@ -235,6 +235,14 @@ class CursorAgentRuntime(RuntimeAdapter):
     def resident_session(self, label: str) -> ResidentSession:
         return ResidentCursor(label=label)
 
+    def instructions_changed(self, command: list[str], *, label: str, session_id: str) -> bool:
+        session = ResidentCursor(label=label)
+        session._base, _, _ = session._split(command)
+        saved = session._saved_session()
+        instructions = (session._run_dir() / INSTRUCTIONS_FILE).read_bytes()
+        return saved is None or saved.get("session_id") != session_id or \
+            saved.get("instructions_sha256") != hashlib.sha256(instructions).hexdigest()
+
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
                     session_dir: Path | None = None, prompt_file: Path | None = None) -> StreamChannel:
         if prompt_file is None:
@@ -464,7 +472,8 @@ class ResidentCursor(PerTurnSession):
 
     Instructions go on stdin only when starting a chat. The hash saved beside
     its id binds that chat to its original instructions; changed or unknown
-    instructions start a new chat. The owner copy survives run-directory cleanup.
+    instructions go through the owner's handoff and resume switch. The owner
+    copy survives run-directory cleanup and stays unchanged for the handoff.
 
     Usage assumes the result reports the turn's own tokens, including after
     resume; whether Cursor reports a chat total remains unverified.
@@ -490,18 +499,23 @@ class ResidentCursor(PerTurnSession):
     def _home(self) -> Path:
         return self._run_dir().parent.parent / "sessions" / session_dir_name(self._label)
 
+    def _saved_session(self) -> dict[str, Any] | None:
+        try:
+            saved = json.loads((self._home() / "session.json").read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            return None
+        return saved if isinstance(saved, dict) else None
+
     def _turn_argv(self) -> list[str]:
         source, home = self._run_dir(), self._home()
-        sync_dir(source=source, home=home)
+        saved = self._saved_session()
+        if not self._session:
+            sync_dir(source=source, home=home)
+        elif source.is_dir() and saved is not None and saved.get("instructions_sha256") == hashlib.sha256(
+                (source / INSTRUCTIONS_FILE).read_bytes()).hexdigest():
+            sync_dir(source=source, home=home)
         self._instructions = (home / INSTRUCTIONS_FILE).read_text(encoding="utf-8")
         self._instructions_sha256 = hashlib.sha256(self._instructions.encode("utf-8")).hexdigest()
-        if self._session:
-            try:
-                saved = json.loads((home / "session.json").read_text(encoding="utf-8"))
-            except (FileNotFoundError, ValueError):
-                saved = None
-            if saved != {"session_id": self._session, "instructions_sha256": self._instructions_sha256}:
-                self._session = None
         rest = list(self._base[3:])
         for index in range(1, len(rest)):
             if rest[index - 1] == "--plugin-dir" and rest[index] == str(source / PLUGIN_DIR):
@@ -521,12 +535,19 @@ class ResidentCursor(PerTurnSession):
             self._totals = self._totals.plus(own)
         return own
 
-    def _turn_ended(self, *, new_session: bool) -> None:
-        if not new_session or not self._session:
+    def _session_initialized(self) -> None:
+        if not self._session:
             return
         home = self._home()
         _write_private(home / "session.json", json.dumps({"session_id": self._session,
-                                                       "instructions_sha256": self._instructions_sha256}))
+                                                       "instructions_sha256": self._instructions_sha256,
+                                                       "cwd": self._cwd}))
+
+    def _turn_ended(self, *, new_session: bool) -> None:
+        if not self._session:
+            return
+        # A replacement that was interrupted after init may finish its first turn on resume.
+        home = self._home()
         chats = home / CONFIG_DIR / "chats"
         for group in chats.iterdir() if chats.is_dir() else []:
             for path in group.iterdir() if group.is_dir() and not group.is_symlink() else []:

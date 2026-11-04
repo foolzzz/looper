@@ -113,6 +113,14 @@ async def update_runtime(runtime_id: str, probe: Mapping[str, Any], *, pool: asy
     return result == "UPDATE 1"
 
 
+async def refresh_builtin_capabilities(runtime_id: str, capabilities: Sequence[str]) -> None:
+    """Refresh code-owned capabilities, preserving the operator's runtime fields and probe history."""
+    await get_pool().execute(
+        "UPDATE agent_runtimes SET capabilities = $2 WHERE id = $1 AND builtin AND capabilities IS DISTINCT FROM $2",
+        runtime_id, list(capabilities),
+    )
+
+
 # --- Providers ---
 
 
