@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.75] - 2026-11-04
+
+### Added
+
+- **Move a project's directory together with its files.** The new operation `project_admin.preview_move_dir` / `project_admin.move_dir` (also the Manager's `looper_projects` action `move`, and a directory move with preview and confirmation in Project → Settings) renames the directory on the same filesystem, leaves a symbolic link at the old path (unless `link_old` is false), repairs git worktrees, and rewrites the project's directory, the command and agent schedules under it and the recorded worktree paths in one transaction. It is high risk, so it asks for confirmation first, and it refuses before touching anything when the target exists, is relative, inside the old directory or on another filesystem, when the directory is a symbolic link or a submodule checkout, or when a task, command schedule run or gate is in progress. Operator notes move along when their checkout moves. Existing databases gain a `project_activity` table once. Changing a project's directory through `update` still changes only the stored path. ([#1075](https://github.com/foolzzz/looper/pull/1075))
+
 ## [2.14.74] - 2026-11-04
 
 ### Added
