@@ -133,6 +133,44 @@ def test_cursor_stream_preserves_events_and_uses_only_the_final_attempt(stream: 
     assert run_usage(result) == usage
 
 
+@pytest.mark.parametrize("resuming", [True, False], ids=["starting-and-resuming", "starting-only"])
+def test_stream_retry_start_discards_every_previous_attempt(resuming: bool) -> None:
+    stream = CursorStream()
+
+    def assistant(text: str) -> None:
+        stream.translate({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
+
+    assistant("discard text before the last tool")
+    stream.translate({"type": "tool_call", "subtype": "started", "call_id": "last-tool",
+                      "tool_call": {"readToolCall": {"args": {"path": "result.txt"}}}})
+    assert stream.translate({"type": "result"})[-1]["result"] == ""
+    for attempt in (1, 2):
+        assistant(f"discard attempt {attempt}")
+        stream.translate({"type": "retry", "subtype": "starting", "attempt": attempt})
+        assert stream.translate({"type": "result"})[-1]["result"] == ""
+        if resuming:
+            stream.translate({"type": "retry", "subtype": "resuming", "attempt": attempt})
+    assistant("> Auto routed to Grok 4.7\n\nlast attempt's ")
+    assistant("report")
+    result = stream.translate({"type": "result", "result": "all attempts concatenated"})[-1]
+    assert result["result"] == "last attempt's report"
+    assert result["routed_model"] == "Grok 4.7"
+
+
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_failed_shell_call_keeps_stdout_and_stderr(interleaved: bool) -> None:
+    output = {"stdout": "partial output", "stderr": "command failed", "exitCode": 1}
+    if interleaved:
+        output["interleavedOutput"] = "partial output\ncommand failed"
+    events = CursorStream().translate({
+        "type": "tool_call", "subtype": "completed", "call_id": "failed-shell",
+        "tool_call": {"shellToolCall": {"args": {"command": "false"}, "result": {"failure": output}}},
+    })
+    (result,) = _blocks(events, "tool_result")
+    assert result == {"type": "tool_result", "tool_use_id": "failed-shell",
+                      "content": "partial output\ncommand failed", "is_error": True}
+
+
 def test_command_materializes_private_plugin_and_reuses_only_the_same_prompt(tmp_path: Path) -> None:
     config = tmp_path / "mcp.json"
     config.write_text(json.dumps({"mcpServers": {"looper": {"command": "python", "args": ["-m", "looper"]}}}))
@@ -232,13 +270,13 @@ def test_mcp_transports_are_converted_without_injecting_home(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("source", ["agent", "provider", "inherited"])
+@pytest.mark.parametrize("name", ["HOME", *cursor_login.ENV_UNSET, *cursor_login.DIRECTORY_VARS])
 def test_environment_keeps_operator_home_and_rejects_login_overrides(
-    source: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    source: str, name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     inherited = {"HOME": str(tmp_path), **{name: "poison" for name in (*cursor_login.ENV_UNSET, *cursor_login.DIRECTORY_VARS)}}
     monkeypatch.setattr(child_env, "inherited", lambda: inherited)
-    name = "CURSOR_AUTH_TOKEN" if source == "agent" else "AGENT_CLI_CREDENTIAL_STORE"
     launch = _launch(env=((name, "poison"),) if source == "agent" else (),
                      provider_env=((name, "poison"),) if source == "provider" else ())
     if source != "inherited":

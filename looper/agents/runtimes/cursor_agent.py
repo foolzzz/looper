@@ -189,7 +189,7 @@ class CursorAgentRuntime(RuntimeAdapter):
 
     def environment(self, launch: Launch) -> dict[str, str]:
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
-        for name in (*cursor_login.ENV_UNSET, *cursor_login.DIRECTORY_VARS):
+        for name in ("HOME", *cursor_login.ENV_UNSET, *cursor_login.DIRECTORY_VARS):
             if name in dict(launch.env) or name in dict(binding.env):
                 raise RuntimeUnsupported(f"Cursor Agent runs with the operator's Cursor login: remove {name} "
                                          "from the Agent settings' or the provider's variables")
@@ -289,7 +289,8 @@ def tool_name(key: str, args: Mapping[str, Any]) -> str:
 def _tool_result(key: str, result: Mapping[str, Any]) -> tuple[str, bool]:
     success = result.get("success")
     if key == "shellToolCall":
-        output = success if isinstance(success, Mapping) else {}
+        output = success if isinstance(success, Mapping) else result.get("failure")
+        output = output if isinstance(output, Mapping) else {}
         text = output.get("interleavedOutput")
         if text is None:
             text = "\n".join(str(output[name]) for name in ("stdout", "stderr") if output.get(name))
@@ -368,7 +369,7 @@ class CursorStream:
                                     "content": content, "is_error": is_error}]}})
             return events
         if kind in ("connection", "retry"):
-            if kind == "retry" and phase == "resuming":
+            if kind == "retry" and phase in ("starting", "resuming"):
                 self._final.clear()
             return [{"type": "system", "subtype": f"cursor_{kind}", "phase": phase,
                      "attempt": raw.get("attempt"), "session_id": self.session_id}]
