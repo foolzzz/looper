@@ -302,7 +302,8 @@ def test_a_provider_is_registered_without_a_key_and_the_user_told_where_to_enter
         assert stored["env"] == [{"key": "API_TIMEOUT_MS", "value": "3000000"}]
         assert model["model"]["provider_id"] == stored["provider_id"]
         listed = await _tool(chat, "looper_providers", action="list")
-        assert [p["name"] for p in listed["providers"]] == ["claude-subscription", "codex-login", "grok-login", "deepseek"]
+        assert [p["name"] for p in listed["providers"]] == [
+            "claude-subscription", "codex-login", "cursor-login", "grok-login", "deepseek"]
         (refused,) = await chat.say("再登记一个", ("looper_providers", {
             "action": "register", "name": "other", "vendor_type": "deepseek",
             "env": [{"key": "OTHER_API_TOKEN", "value": "x"}]}))
