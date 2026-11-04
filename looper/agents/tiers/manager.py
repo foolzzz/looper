@@ -64,6 +64,7 @@ from ..claude_cli import (
     CapStop,
     ClaudeRunRecorder,
     ResidentTurn,
+    TurnBlocked,
     answer_text,
     ended_by,
     exit_note,
@@ -1922,10 +1923,17 @@ class ManagerAgent:
             except asyncio.CancelledError as cancelled:
                 await recorder.end_left_open(cancelled, output_text="".join(text_parts) or token.partial or None)
                 raise
+            error = (str(exc) if isinstance(exc, TurnBlocked) else
+                     f"Manager stopped reading Claude: {type(exc).__name__}: {exc}")
             await recorder.finish(
                 output_text="".join(text_parts) or None, result_event=None,
-                error=f"Manager stopped reading Claude: {type(exc).__name__}: {exc}", status=ended_by(exc),
+                error=error, status=ended_by(exc),
             )
+            if isinstance(exc, TurnBlocked) and task_id:
+                try:
+                    await db_activity.insert_activity(task_id=task_id, worker=self.agent_id, kind="error", summary=error)
+                except Exception:
+                    logger.debug("failed to record manager activity", exc_info=True)
             await self._link_turn_task(recorder, ops_turn)
             raise
 
@@ -2312,6 +2320,9 @@ class ManagerAgent:
                                       status=RecordStatus.INTERRUPTED, usage=Usage())
                 await self._annotate_handoff_stop(recorder, None)
                 raise TurnStopped() from exc
+            except TurnBlocked as exc:
+                await recorder.finish(output_text=None, result_event=None, error=str(exc))
+                raise
             except Exception as exc:  # the turn was given up, which stopped Claude
                 logger.warning("%s: its previous session wrote no handoff: %s", self._log, exc)
                 await recorder.finish(output_text=None, result_event=None,

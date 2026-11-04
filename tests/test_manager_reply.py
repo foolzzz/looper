@@ -423,6 +423,23 @@ async def _first_claude_exits(spawned: list[tuple[list[str], Any]]) -> None:
 
 @pytest.mark.usefixtures("agent_db")
 class TestManagerResidentClaude:
+    def test_hook_block_before_init_does_not_retry_a_saved_session(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    ) -> None:
+        chat = _converse(monkeypatch, (
+            "sys.stdin.readline()\n"
+            "print(json.dumps({'type': 'system', 'subtype': 'informational', 'content': "
+            "'UserPromptSubmit operation blocked by hook: Request Blocked by Security Policy'}), flush=True)\n"
+            "sys.stdin.read()\n"
+        ), ["hello"], saved_session="sess-1")
+        error = (f"Claude Code's hook blocked the prompt in {chat['root']}: Request Blocked by Security Policy. "
+                 "This is your organization's policy, not a Looper error; "
+                 "run this project from a directory the policy allows.")
+        assert len(chat["spawned"]) == 1
+        assert error in chat["replies"][0]
+        assert agent_db.finish_record.await_args.kwargs["error"] == error
+        assert all(process.returncode is not None for _, process in chat["spawned"])
+
     def test_one_process_serves_every_message(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
         chat = _converse(monkeypatch, _resident(), ["hello", "again"])
         assert chat["replies"] == ["turn 1: hello", "turn 2: again"]

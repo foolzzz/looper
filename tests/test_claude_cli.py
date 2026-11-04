@@ -73,6 +73,99 @@ def test_line_longer_than_any_reader_limit() -> None:
     assert _lines(big[:7_000_000], big[7_000_000:] + b"\nnext\n") == [big + b"\n", b"next\n"]
 
 
+@pytest.mark.parametrize(("kind", "subtype", "content"), [
+    ("system", "informational", "UserPromptSubmit operation blocked by hook: policy reason"),
+    ("system", "informational", "PreToolUse operation blocked by hook: policy reason"),
+    ("assistant", "informational", "UserPromptSubmit operation blocked by hook: policy reason"),
+    ("system", "init", "UserPromptSubmit operation blocked by hook: policy reason"),
+    ("system", "informational", "Hook completed successfully"),
+    ("system", "informational", None),
+])
+def test_only_a_prompt_hook_block_is_terminal(kind: str, subtype: str, content: str | None) -> None:
+    from looper.agents.claude_cli import prompt_block
+
+    blocked = prompt_block({"type": kind, "subtype": subtype, "content": content}, "/srv/project")
+    if kind == "system" and subtype == "informational" and (content or "").startswith("UserPromptSubmit"):
+        assert blocked is not None and blocked.reason == "policy reason"
+    else:
+        assert blocked is None
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_prompt_block_ends_a_resident_turn_without_a_result(tmp_path: Path, queued: bool) -> None:
+    from looper.agents.claude_cli import ResidentClaude, TurnBlocked
+
+    async def run() -> None:
+        command = fake_claude(tmp_path / "blocked-claude", (
+            "import json, sys\n"
+            "message = json.loads(sys.stdin.readline())\n"
+            + ("print(json.dumps({'type': 'command_lifecycle', 'state': 'queued', "
+               "'command_uuid': message['uuid']}), flush=True)\n" if queued else "") +
+            "print(json.dumps({'type': 'system', 'subtype': 'informational', 'content': "
+            "'UserPromptSubmit operation blocked by hook: Request Blocked by Security Policy'}), flush=True)\n"
+            "sys.stdin.read()\n"
+        ))
+        claude = ResidentClaude(label="test")
+        seen = []
+
+        async def on_event(event: dict[str, Any]) -> None:
+            seen.append(event)
+
+        try:
+            await claude.start([command], cwd=str(tmp_path), signature=1)
+            with pytest.raises(TurnBlocked) as blocked:
+                await asyncio.wait_for(claude.run_turn("hello", on_event), timeout=3)
+            assert blocked.value.reason == "Request Blocked by Security Policy"
+            assert str(tmp_path) in str(blocked.value)
+            assert len(seen) == (2 if queued else 1) and seen[-1]["subtype"] == "informational"
+            assert not claude.started
+        finally:
+            await claude.stop(kill=True)
+
+    asyncio.run(run())
+
+
+def test_prompt_block_survives_cancellation_during_process_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.claude_cli import ResidentClaude, TurnBlocked
+
+    async def run() -> None:
+        command = fake_claude(tmp_path / "blocked-claude", (
+            "import json, sys\n"
+            "sys.stdin.readline()\n"
+            "print(json.dumps({'type': 'system', 'subtype': 'informational', 'content': "
+            "'UserPromptSubmit operation blocked by hook: policy reason'}), flush=True)\n"
+            "sys.stdin.read()\n"
+        ))
+        cleaning, release = asyncio.Event(), asyncio.Event()
+        original = ResidentClaude._stop_process
+
+        async def cleanup(self, *args, **kwargs):
+            await original(self, *args, **kwargs)
+            cleaning.set()
+            await release.wait()
+
+        monkeypatch.setattr(ResidentClaude, "_stop_process", cleanup)
+        claude = ResidentClaude(label="test")
+
+        async def on_event(event):
+            pass
+
+        await claude.start([command], cwd=str(tmp_path), signature=1)
+        task = asyncio.create_task(claude.run_turn("hello", on_event))
+        try:
+            await asyncio.wait_for(cleaning.wait(), timeout=10)
+            task.cancel()  # A turn deadline expires after its terminal outcome was already known.
+            release.set()
+            with pytest.raises(TurnBlocked, match="policy reason"):
+                await task
+            assert not claude.started
+        finally:
+            release.set()
+            await claude.stop(kill=True)
+
+    asyncio.run(run())
+
+
 class TestClaudeRunRecorder:
     def _recorder(self) -> Any:
         from looper.agents.claude_cli import ClaudeRunRecorder

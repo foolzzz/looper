@@ -123,6 +123,7 @@ from ..claude_cli import (
     AutonomousRun,
     ClaudeRunRecorder,
     ResidentTurn,
+    TurnBlocked,
     exit_note,
 )
 from .. import knowledge as project_knowledge
@@ -1039,6 +1040,13 @@ class PlannerAgent:
             pass
 
     async def _handle(self, envelope: MessageEnvelope) -> None:
+        try:
+            await self._handle_event(envelope)
+        except TurnBlocked as exc:
+            assert self._plan is not None
+            await self._fail_plan(self._plan, reason=str(exc), model_closeout=False)
+
+    async def _handle_event(self, envelope: MessageEnvelope) -> None:
         # The running run is read again for this event, once, before its first wait check.
         self._run_deadline = None
         self._run_deadline_read = False
@@ -2144,6 +2152,10 @@ class PlannerAgent:
             return
 
         step.result = result
+        if blocked := result.get("prompt_blocked"):
+            step.status = "failed"
+            await self._save(plan, step)
+            raise TurnBlocked(**blocked)
         missed = result.get("missed_input")
         if isinstance(missed, list):
             step.missed_messages.extend(text for text in missed if isinstance(text, str))
@@ -2226,6 +2238,11 @@ class PlannerAgent:
 
         # This run ended; a following review must check the task cap without deferring to it.
         self._adopted_runs.discard(envelope.source.agent_id)
+        if blocked := result.get("prompt_blocked"):
+            step.result = {**(step.result or {}), "verify_passed": False, "verify_summary": result["error"]}
+            step.status = "failed"
+            await self._save(plan, step)
+            raise TurnBlocked(**blocked)
         passed = result.get("passed") is True
         summary = str(result.get("summary") or result.get("error") or "")
         findings = result.get("findings") or []
@@ -3563,6 +3580,9 @@ class PlannerAgent:
                                                  price=launch.price, limits=limits)
                 turn = await asyncio.wait_for(self._claude.run_turn(text, on_event, stop=lambda: recorder.cap_stop),
                                               limit if limit > 0 else None)
+            except TurnBlocked as exc:
+                await recorder.finish(output_text=None, result_event=None, error=str(exc))
+                raise
             except TimeoutError:
                 # The turn was cancelled, which killed Claude; the next turn resumes the session.
                 error = f"the turn ran longer than the {limit} s limit (timeout_seconds)"
@@ -4232,7 +4252,7 @@ class PlannerAgent:
         return cap if spent >= cap else None
 
     async def _vault_closeout(self, plan: TaskPlan, ended: str) -> None:
-        """Keep lasting notes once per Planner; any problem only adds a warning to its activity.
+        """Keep lasting notes once per Planner; failures warn, but a hook block fails the task.
 
         A task restarted later has a new Planner, whose own ending gets its own closeout.
         """
@@ -4262,6 +4282,8 @@ class PlannerAgent:
                 await self._activity("error", f"Warning: the Planner's vault closeout failed: {exc}"[:500])
                 return
             await self._activity("phase", f"Vault closeout: {line}"[:500])
+        except TurnBlocked:
+            raise
         except Exception as exc:
             logger.warning("planner %s cannot close out its task's vault", self.agent_id, exc_info=True)
             try:
@@ -4340,7 +4362,8 @@ class PlannerAgent:
             "```",
         ])
 
-    async def _fail_plan(self, plan: TaskPlan, *, reason: str = "", fail_kind: FailKind | None = None) -> None:
+    async def _fail_plan(self, plan: TaskPlan, *, reason: str = "", fail_kind: FailKind | None = None,
+                         model_closeout: bool = True) -> None:
         assert self._bus is not None
         plan.status = "failed"
         plan.fail_reason = reason or plan.fail_reason
@@ -4355,8 +4378,9 @@ class PlannerAgent:
         if kept:
             await self._activity("phase", f"Kept {len(kept)} step worktree(s) with work not merged, for a restart, "
                                           f"until the task is started over or deleted: {', '.join(kept)}"[:500])
-        await self._vault_closeout(
-            plan, f"failed: {_clip(plan.fail_reason or 'a step failed and the Planner could not go on', 300)}")
+        if model_closeout:
+            await self._vault_closeout(
+                plan, f"failed: {_clip(plan.fail_reason or 'a step failed and the Planner could not go on', 300)}")
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
