@@ -75,18 +75,28 @@ def test_ttadk_on_path_registers_a_separate_builtin_runtime(monkeypatch, tmp_pat
         monkeypatch.setenv("PATH", str(tmp_path / "missing"))
         await registry.register_found_runtimes()
         assert await db.get_runtime("rt-ttadk-codex") is None
+        assert await db.get_runtime("rt-ttadk-cursor-agent") is None
         monkeypatch.setenv("PATH", str(bin_dir))
-        assert await registry.register_found_runtimes() == ["codex", "ttadk-codex"]
+        assert await registry.register_found_runtimes() == ["codex", "ttadk-codex", "ttadk-cursoragent"]
         row = await db.get_runtime("rt-ttadk-codex")
         assert (row["name"], row["type"], row["launcher"], row["executable"]) == (
             "ttadk-codex", "codex", "ttadk", "")
         assert row["version"] == "ttadk 1.0.27 / codex-cli 0.162.0"
+        assert row["probe_error"] is None
+        # TTADK wrappers register independently of the native tool, retaining its probe diagnosis.
+        assert await db.get_runtime("rt-cursor-agent") is None
+        row = await db.get_runtime("rt-ttadk-cursor-agent")
+        assert (row["name"], row["type"], row["launcher"], row["executable"]) == (
+            "ttadk-cursoragent", "cursor-agent", "ttadk", "")
+        assert row["version"] == "ttadk 1.0.27 / cursor-agent unknown"
+        assert row["probe_error"] == "'cursor-agent' was not found"
         assert await registry.register_found_runtimes() == []
         # Re-detect also creates the wrapper row when it has never been registered.
-        await pool.execute("DELETE FROM agent_runtimes WHERE id = 'rt-ttadk-codex'")
-        answer = await registry.probe_runtime("rt-ttadk-codex")
-        assert answer["runtime"]["launcher"] == "ttadk"
-        assert answer["runtime"]["auth_kinds"] == ["oauth"]
+        for runtime_id in ("rt-ttadk-codex", "rt-ttadk-cursor-agent"):
+            await pool.execute("DELETE FROM agent_runtimes WHERE id = $1", runtime_id)
+            answer = await registry.probe_runtime(runtime_id)
+            assert answer["runtime"]["launcher"] == "ttadk"
+            assert answer["runtime"]["auth_kinds"] == ["oauth"]
 
     run_db(test, monkeypatch, timeout=30)
 
