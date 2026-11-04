@@ -234,7 +234,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const selectedManager = managers?.find((manager) => manager.id === managerFilter);
   const managerMissing = !!managerFilter && managers !== null && !selectedManager;
   const showManagerFilter = !!managerFilter || !!managers?.some((manager) => !manager.builtin);
-  const { projects, reload: reloadProjects } = useProjects();
+  const { projects, projectsRoot, reload: reloadProjects } = useProjects();
   const selectedProject = projects?.find((p) => p.project_id === projectFilter) ?? null;
   // A filter for a project the list does not hold yet (just created elsewhere) is
   // reported missing only after a fresh load confirms it.
@@ -437,10 +437,11 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const projectChosen = isNewProject ? !!newProjectName.trim() : !!chosenProject;
   /** The directory a task without its own work_dir would run in. */
   const defaultWorkDir = isNewProject ? newProjectDir.trim() : chosenProject?.work_dir || "";
+  const allocateProjectDir = isNewProject && projectChosen && !!projectsRoot;
   const canCreate =
     !!newReq.trim() &&
     projectChosen &&
-    (!!newWorkDir.trim() || !!defaultWorkDir) &&
+    (!!newWorkDir.trim() || !!defaultWorkDir || allocateProjectDir) &&
     !(isNewProject && backgroundTooLong(newProjectBackground));
 
   const resetCreate = () => {
@@ -973,21 +974,27 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
               </div>
               <div>
                 <label className="text-sm font-medium text-muted-foreground">
-                  Work Directory{defaultWorkDir ? "" : " *"}
+                  Work Directory{defaultWorkDir || allocateProjectDir ? "" : " *"}
                 </label>
                 <input
                   type="text"
                   value={newWorkDir}
                   onChange={(e) => setNewWorkDir(e.target.value)}
-                  placeholder={defaultWorkDir ? `Default: ${defaultWorkDir}` : "~/projects/my-app"}
+                  placeholder={defaultWorkDir
+                    ? `Default: ${defaultWorkDir}`
+                    : allocateProjectDir
+                      ? `Default: a new directory under ${projectsRoot}`
+                      : "~/projects/my-app"}
                   className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/50"
                 />
                 <p className="mt-1 text-xs text-muted-foreground">
                   {defaultWorkDir
                     ? "Leave empty to use the project's default directory. "
-                    : projectChosen
-                      ? `Required: ${isNewProject ? "the new project" : "this project"} has no default directory. `
-                      : ""}
+                    : allocateProjectDir
+                      ? `Leave empty: Looper creates the new project's directory under ${projectsRoot}. `
+                      : projectChosen
+                        ? `Required: ${isNewProject ? "the new project" : "this project"} has no default directory. `
+                        : ""}
                   The directory the task works on: an absolute path or one starting with ~/. Created if it does not
                   exist.
                 </p>

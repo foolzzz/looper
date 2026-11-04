@@ -197,6 +197,49 @@ def test_a_new_project_is_created_only_when_the_next_message_confirms_it(
     run_db(test, monkeypatch)
 
 
+def test_new_project_uses_the_root_directory_after_confirmation(monkeypatch, tmp_path: Path) -> None:
+    from looper.agents import projects as project_ops
+    from looper.db import projects, tasks
+
+    root = tmp_path / "projects"
+    monkeypatch.setattr(project_ops, "projects_root", lambda: str(root))
+
+    async def test(pool: Any) -> None:
+        chat = _Chat(tmp_path)
+        (asked,) = await chat.say("在新项目 Tetris 建俄罗斯方块任务", ("looper_task_create", {
+            "requirement": "build tetris", "title": "俄罗斯方块", "project": "Tetris"}))
+        assert asked["status"] == "needs_confirmation", asked
+        assert str(root) in chat.turns[0].blocks[0]
+        assert not root.exists()
+        assert await projects.find_project_by_name("Tetris", pool=pool) is None
+        (done,) = await chat.say("确认新建", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
+        assert done["status"] == "ok", done
+        assert done["result"]["project_created"] is True
+        directory = str(root / "tetris")
+        project = await projects.find_project_by_name("Tetris", pool=pool)
+        task = await tasks.get_task(done["result"]["task_id"], pool=pool)
+        assert project["work_dir"] == task["work_dir"] == done["result"]["work_dir"] == directory
+        assert Path(directory).is_dir()
+        assert directory in chat.turns[1].blocks[0]
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_root_does_not_assign_a_directory_to_an_existing_project(monkeypatch, tmp_path: Path) -> None:
+    from looper.agents import projects
+
+    monkeypatch.setattr(projects, "projects_root", lambda: str(tmp_path / "projects"))
+
+    async def test(pool: Any) -> None:
+        await _project(pool, "notes", "")
+        (answer,) = await _Chat(tmp_path).say("新建任务", ("looper_task_create", {
+            "requirement": "r", "title": "t", "project": "notes"}))
+        assert _error(answer) == "invalid" and "no default" in answer["error"]["message"]
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 @pytest.mark.parametrize(("arguments", "message"), [
     ({"project": "Tetris"}, "a new project"),  # a new project needs a directory
     ({"project": "notes"}, "no default"),  # so does a project without a default one

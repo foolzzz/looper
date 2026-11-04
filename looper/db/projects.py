@@ -114,12 +114,13 @@ async def create_project(
     work_dir: str = "",
     background: str = "",
     execution: Mapping[str, Any] | None = None,
+    project_id: str | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
     pool = pool or get_pool()
     settings = _execution(execution)
     columns = ["id", "name", "description", "work_dir", "background", *settings]
-    values = [f"proj-{uuid.uuid4().hex[:12]}", name, description, work_dir, background, *settings.values()]
+    values = [project_id or f"proj-{uuid.uuid4().hex[:12]}", name, description, work_dir, background, *settings.values()]
     row = await pool.fetchrow(
         f"INSERT INTO projects ({', '.join(columns)}) "
         f"VALUES ({', '.join(f'${i}' for i in range(1, len(values) + 1))}) RETURNING *",

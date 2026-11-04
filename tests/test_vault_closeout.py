@@ -68,6 +68,38 @@ def test_vault_closeout_asks_once_and_records_it(tmp_path: Path, monkeypatch: py
     agent._activity.assert_awaited_once_with("phase", "Vault closeout: kept the build quirk")
 
 
+@pytest.mark.usefixtures("agent_db")
+@pytest.mark.parametrize("ending", ["completed", "failed"])
+def test_hook_block_during_closeout_fails_the_task_without_another_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ending: str,
+) -> None:
+    from looper.agents.claude_cli import TurnBlocked
+    from looper.agents.message import MessageEnvelope, MessageType, TASK_ROUTER_ADDRESS
+
+    agent, plan, _ = _agent(tmp_path, monkeypatch)
+    blocked = TurnBlocked("Request Blocked by Security Policy", str(tmp_path))
+    agent._ask.side_effect = blocked
+    agent._plan = plan
+    agent._bus = SimpleNamespace(publish=AsyncMock())
+    agent._remove_workspaces = AsyncMock()
+
+    async def finish(_):
+        if ending == "completed":
+            await agent._complete_plan(plan)
+        else:
+            await agent._fail_plan(plan, reason="build broke")
+
+    agent._handle_event = finish
+    asyncio.run(agent._handle(MessageEnvelope.create(
+        source=TASK_ROUTER_ADDRESS, target=agent.agent_address,
+        message_type=MessageType.TASK_REQUEST, payload={},
+    )))
+    assert plan.status == "failed" and plan.fail_reason == str(blocked)
+    (final,) = [call.args[0] for call in agent._bus.publish.await_args_list]
+    assert final.payload["status"] == "failed" and str(blocked) in final.payload["summary"]
+    agent._ask.assert_awaited_once()
+
+
 @pytest.mark.parametrize("ending", ["closeout", "fail_plan"])
 @pytest.mark.parametrize("failed_turn", [False, True])
 def test_repeated_endings_ask_for_vault_closeout_only_once(

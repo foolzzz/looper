@@ -97,6 +97,33 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+@pytest.mark.parametrize("root", ["", "/srv/projects"])
+@pytest.mark.parametrize("manager_id", ["manager", "scoped-manager"])
+def test_project_directory_contract_matches_the_configured_root(monkeypatch, tmp_path, root, manager_id):
+    from dataclasses import replace
+    from looper.agents import projects
+    from looper.agents.agent_settings import resolve
+    from looper.agents.tiers.manager import default_definition, scope_contract
+
+    monkeypatch.setattr(projects, "projects_root", lambda: root)
+    definition = replace(default_definition(), id=manager_id)
+    manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path, definition=definition)
+    prompt = manager._composed_prompt(resolve("manager", {}))
+    contract = prompt.text.split("## Looper's tools (required)", 1)[1]
+    contract = "## Looper's tools (required)" + contract
+    if manager_id != "manager":
+        suffix = "\n" + scope_contract(definition, has_templates=False)
+        assert contract.endswith(suffix)
+        contract = contract[:-len(suffix)]
+    if root:
+        assert "/srv/projects/<name>" in contract
+        assert "do not ask the user for a directory" in contract
+        assert "A new project, or one without a default, needs the user" not in contract
+    else:
+        # The unconfigured contract remains byte-identical to main before projects.root.
+        assert _sha(contract) == "2e4c00e9ec58332739186a1ff03b82e9594be6155acd7efa5e93f68862d78eff"
+
+
 @pytest.mark.usefixtures("agent_db")
 class TestManagerReply:
     def test_reply_is_recorded(self, agent_db: Any) -> None:
@@ -423,6 +450,23 @@ async def _first_claude_exits(spawned: list[tuple[list[str], Any]]) -> None:
 
 @pytest.mark.usefixtures("agent_db")
 class TestManagerResidentClaude:
+    def test_hook_block_before_init_does_not_retry_a_saved_session(
+        self, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    ) -> None:
+        chat = _converse(monkeypatch, (
+            "sys.stdin.readline()\n"
+            "print(json.dumps({'type': 'system', 'subtype': 'informational', 'content': "
+            "'UserPromptSubmit operation blocked by hook: Request Blocked by Security Policy'}), flush=True)\n"
+            "sys.stdin.read()\n"
+        ), ["hello"], saved_session="sess-1")
+        error = (f"Claude Code's hook blocked the prompt in {chat['root']}: Request Blocked by Security Policy. "
+                 "This is your organization's policy, not a Looper error; "
+                 "run this project from a directory the policy allows.")
+        assert len(chat["spawned"]) == 1
+        assert error in chat["replies"][0]
+        assert agent_db.finish_record.await_args.kwargs["error"] == error
+        assert all(process.returncode is not None for _, process in chat["spawned"])
+
     def test_one_process_serves_every_message(self, monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
         chat = _converse(monkeypatch, _resident(), ["hello", "again"])
         assert chat["replies"] == ["turn 1: hello", "turn 2: again"]

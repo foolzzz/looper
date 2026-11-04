@@ -52,7 +52,7 @@ def test_fresh_registry_seeds_cursor_login(monkeypatch):
 
             monkeypatch.setattr(asyncpg, "connect", isolated_connect)
             facts = await self_check._database_facts(str(DSN))
-            assert facts.cursor_login_profiles == 1 and facts.cursor_login_problem is None
+            assert facts.cursor_login_profiles == 1
     asyncio.run(asyncio.wait_for(test(), 30))
 
 

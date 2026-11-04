@@ -433,6 +433,9 @@ async def stream_events(stream: asyncio.StreamReader) -> AsyncIterator[dict[str,
         except json.JSONDecodeError:
             continue
         if isinstance(event, dict):
+            if blocked := prompt_block(event, ""):
+                # Hooks can echo the full input; discard it before callbacks or run records see it.
+                event["content"] = f"UserPromptSubmit operation blocked by hook: {blocked.reason}"
             yield event
             if (usage := _request_usage(event, requests)) is not None:
                 yield usage
@@ -496,6 +499,30 @@ _BETWEEN_LIMIT = 2_000
 
 # The input recorded for a turn Claude ran on its own.
 AUTONOMOUS_INPUT = "(no user message: Claude Code ran this turn on its own after background work it had started ended)"
+
+
+class TurnBlocked(Exception):
+    """A prompt rejected by a Claude Code hook, before the model can answer."""
+
+    def __init__(self, reason: str, work_dir: str) -> None:
+        self.reason = reason
+        self.work_dir = work_dir
+        super().__init__(
+            f"Claude Code's hook blocked the prompt in {work_dir}: {reason}. "
+            "This is your organization's policy, not a Looper error; "
+            "run this project from a directory the policy allows."
+        )
+
+
+def prompt_block(event: dict[str, Any], work_dir: str) -> TurnBlocked | None:
+    """Recognize the prompt hook's informational event, never tool-hook failures or assistant prose."""
+    prefix = "UserPromptSubmit operation blocked by hook:"
+    content = event.get("content")
+    if (event.get("type") == "system" and event.get("subtype") == "informational"
+            and isinstance(content, str) and content.startswith(prefix)):
+        reason = re.split(r"(?m)^Original prompt:", content[len(prefix):].strip(), maxsplit=1)[0].strip()[:300]
+        return TurnBlocked(reason or "no reason given", work_dir)
+    return None
 
 
 @dataclass(frozen=True)
@@ -637,6 +664,10 @@ class _Output:
         if event.get("type") == "command_lifecycle" or _is_replay(event):
             self._marks_turns = True
         turn = self.turn
+        # Prompt submission can be rejected before Claude emits "started", init or a replay.
+        if turn is not None and not turn.stopping and (blocked := prompt_block(event, self._claude._cwd)):
+            await turn.on_event(event)
+            raise blocked
         if turn is not None and not turn.started:
             if turn.starts_with(event) or not self._marks_turns:
                 await self.close_own("Claude Code began the next message")
@@ -842,6 +873,7 @@ class ResidentClaude:
         self._ending: dict[asyncio.Task[None], asyncio.Event] = {}
         self._price: Price | None = None  # prices the totals at the provider's prices, if Looper prices them
         self._idle_stopping = False
+        self._cwd = ""
 
     @property
     def label(self) -> str:
@@ -906,6 +938,7 @@ class ResidentClaude:
         )
         assert process.stdout is not None
         self._process, self._command, self._signature = process, command, signature
+        self._cwd = cwd
         self._totals, self._price = totals or Usage(), price
         self._output = _Output(self, process.stdout, autonomous)
         self._tree = proc_tree.track(process, label=self._label)
@@ -979,12 +1012,17 @@ class ResidentClaude:
             while self._ending:
                 await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._ending)))
             method = await self._stopped_by_user()
-        except BaseException:
+        except BaseException as exc:
             self._user_turn, self._cancel, self._interrupting = None, None, None
             if output.turn is turn:
                 # Its unread events still belong to the abandoned user turn, even after stop drops it.
                 output.discard = True
-            await self.stop(kill=True)
+            try:
+                await self.stop(kill=True)
+            except asyncio.CancelledError:
+                # Cleanup still reaped the process. A deadline arriving meanwhile must not hide a known block.
+                if not isinstance(exc, TurnBlocked):
+                    raise
             raise
         finally:
             unregister()

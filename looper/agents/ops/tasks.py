@@ -15,11 +15,13 @@ import operator
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ...db import agent_setting_layers as db_layers, projects as db_projects
 from ...db import steps as db_steps, tasks as db_tasks
 from ...db import managers as db_managers, user_gates as db_user_gates
+from .. import projects as project_ops
 from .. import task_templates, task_workspaces
 from ..managers_api import DEFAULT_MANAGER_ID, TaskPolicy
 from ..task_templates import TaskTemplate, TemplateError
@@ -253,6 +255,8 @@ async def effective_placement(template: TaskTemplate | None, arguments: Mapping[
         work_dir, named = _resolved(explicit), True
     elif project is not None and project["work_dir"]:
         work_dir, named = project["work_dir"], False
+    elif project is None and project_ops.projects_root():
+        work_dir, named = "", False  # The shared creation path allocates the new project's directory.
     else:
         whose = "a new project" if project is None else f"project {project['name']!r}, which has no default"
         raise OpError(ErrorCode.INVALID, f"the task needs a directory ({whose}): ask the user for it, as an absolute "
@@ -303,6 +307,8 @@ async def _new_project(call: Call) -> str | None:
     if placement.project is not None:
         return None
     name, work_dir = placement.name, placement.work_dir
+    if not work_dir:
+        work_dir = f"由 {project_ops.projects_root()} 自动分配"
     lines = [f"项目「{name}」还不存在。要新建这个项目（默认目录 {work_dir}），并在里面创建任务"
              f"「{db_tasks.task_title(call.arguments.get('title')) or ''}」吗？"]
     try:
@@ -401,7 +407,7 @@ async def _create(call: Call) -> dict[str, Any]:
     turn.blocks.append(block)
     turn.created_task_blocks[task_id] = block
     return {"task_id": task_id, "name": shown, "status": "ready", "project": project["name"],
-            "project_created": created, "work_dir": work_dir, "workspace_mode": result["workspace"]["mode"],
+            "project_created": created, "work_dir": result["work_dir"], "workspace_mode": result["workspace"]["mode"],
             "shown_to_user": "Looper adds the task's configuration and the question whether to start it now after "
                              "your reply; do not repeat them."}
 
@@ -761,6 +767,18 @@ TOOLS: tuple[Tool, ...] = (
 
 
 _CREATE_TOOL = next(tool for tool in TOOLS if tool.name == "looper_task_create")
+
+
+def task_directory_tool(tool: Tool) -> Tool:
+    """Expose the configured default on both ordinary and template task-creation schemas."""
+    if tool.name != "looper_task_create" or not (root := project_ops.projects_root()):
+        return tool
+    properties = tool.schema["properties"]
+    return dataclasses.replace(tool, schema={**tool.schema, "properties": {
+        **properties, "work_dir": {**properties["work_dir"], "description":
+            "The absolute directory the user named; leave it out for the project's default. "
+            f"A new project gets {Path(root) / '<name>'} automatically; an existing directory there is used as is; "
+            "do not ask the user for a directory."}}})
 
 
 def task_create_tool(template_keys: Sequence[str]) -> Tool:

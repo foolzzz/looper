@@ -59,12 +59,70 @@ def test_serve_without_postgresql_stops_with_the_fix(tmp_path: Path) -> None:
     assert "s3cret-pw" not in proc.stdout + proc.stderr
 
 
+@pytest.mark.parametrize("configured", [False, True], ids=["root-unset", "root-set"])
+def test_serve_logs_projects_root_before_connecting(tmp_path, monkeypatch, caplog, configured):
+    import asyncio
+    import logging
+    from unittest.mock import AsyncMock
+
+    from looper.agents import operator_auth, projects, serve
+
+    root = str(tmp_path / "projects") if configured else ""
+    ops = ops_config.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops_config.FILE, projects_root=root)
+    configured_roots = []
+    monkeypatch.setattr(projects, "configure_root", configured_roots.append)
+    monkeypatch.setattr(operator_auth, "ensure_token", lambda *args: "test-token")
+    unavailable = self_check.Check("database", "PostgreSQL", self_check.FAIL, "test stand-in")
+    monkeypatch.setattr(self_check, "check_database", AsyncMock(return_value=unavailable))
+    with caplog.at_level(logging.INFO, logger=serve.__name__), pytest.raises(serve.StartupCheckFailed):
+        asyncio.run(serve._run_agent_system_owned(ops=ops, runtime_root=tmp_path, work_dir=tmp_path))
+    assert configured_roots == [root]
+    assert (f"projects root={root}" if configured else "projects root unset") in caplog.text
+
+
+@pytest.mark.parametrize("state", ["unset", "missing", "file", "writable", "unwritable"])
+def test_projects_root_check_warns_without_creating_directories(tmp_path, monkeypatch, state):
+    root = tmp_path / "projects"
+    if state in ("writable", "unwritable"):
+        root.mkdir()
+    elif state == "file":
+        root.write_text("not a directory")
+    if state == "unwritable":
+        monkeypatch.setattr(self_check.os, "access", lambda path, mode: False)
+    check = self_check.check_projects_root("" if state == "unset" else str(root))
+    expected = {"unset": self_check.SKIP, "writable": self_check.OK}.get(state, self_check.WARN)
+    assert check.id == "projects_root" and check.status == expected
+    if state != "unset":
+        assert str(root) in check.detail
+    if expected == self_check.WARN:
+        assert "[projects] root" in check.fix
+    if state in ("unset", "missing"):
+        assert not root.exists()
+
+
+def test_doctor_and_system_check_include_projects_root_without_database(tmp_path, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    unavailable = self_check.Check("database", "PostgreSQL", self_check.FAIL, "offline")
+    skipped = self_check.Check("unrelated", "Unrelated", self_check.SKIP, "test stand-in")
+    monkeypatch.setattr(self_check, "check_database", AsyncMock(return_value=unavailable))
+    monkeypatch.setattr(self_check, "check_claude", lambda *args: [])
+    for name in ("check_codex_login", "check_grok_login", "check_lark_cli", "check_git"):
+        monkeypatch.setattr(self_check, name, lambda *args: skipped)
+    for name in ("check_ttadk", "check_step_worktrees"):
+        monkeypatch.setattr(self_check, name, AsyncMock(return_value=skipped))
+    monkeypatch.setattr(self_check, "check_pg_dump", lambda *args: (skipped, None))
+    root = str(tmp_path / "missing-projects")
+    ops = ops_config.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops_config.FILE, projects_root=root)
+    checks = asyncio.run(self_check.run_checks(ops))
+    found = next(check for check in checks if check.id == "projects_root")
+    assert found.status == self_check.WARN and root in found.detail
+
+
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 def test_serve_without_claude_starts_and_reports_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", f"/usr/bin{os.pathsep}/bin")  # no claude, no lark-cli
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
     (tmp_path / "bin").mkdir()
     log = tmp_path / "serve.log"
 

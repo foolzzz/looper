@@ -76,9 +76,11 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
     else:
         notes.append("Injected project instruction files use the project directory; a task may use another directory.")
     if agent is AgentType.MANAGER:
-        from .tiers.manager import TOOLS_CONTRACT
+        from .tiers.manager import TOOLS_CONTRACT, root_adjusted
 
-        contract_name, contract = "TOOLS_CONTRACT", TOOLS_CONTRACT
+        contract_name, contract = "TOOLS_CONTRACT", root_adjusted(TOOLS_CONTRACT)
+        if recommended:
+            role_text = root_adjusted(role_text)
     elif agent is AgentType.PLANNER:
         from .tiers.planner_protocol import reply_contract
 

@@ -78,12 +78,17 @@ async def _impact(arguments):
     fields = projects._project_fields(arguments["project"], update=False)
     await answered(projects._profile_overrides(arguments.get("profile_overrides")))
     default_dir = fields.get("work_dir", "")
-    work_dir = projects._task_work_dir(arguments.get("work_dir"), default_dir)
+    root = projects.projects_root()
     execution = ProjectExecution.from_row(fields.get("execution"))
-    await answered(projects.task_workspace(
-        arguments, work_dir=work_dir, named=bool(arguments.get("work_dir", "").strip()), project_dir=default_dir,
-        project_mode=execution.task_mode))
-    effect = f"新建项目「{fields['name']}」（默认目录 {default_dir or '无'}），并在里面创建任务（工作目录 {work_dir}）。"
+    if not default_dir and root and not (arguments.get("work_dir") or "").strip():
+        work_dir = "项目默认目录"  # The core allocates and checks it only after confirmation.
+    else:
+        work_dir = projects._task_work_dir(arguments.get("work_dir"), default_dir)
+        await answered(projects.task_workspace(
+            arguments, work_dir=work_dir, named=bool(arguments.get("work_dir", "").strip()), project_dir=default_dir,
+            project_mode=execution.task_mode))
+    shown_default = default_dir or (f"由 {root} 自动分配" if root else "无")
+    effect = f"新建项目「{fields['name']}」（默认目录 {shown_default}），并在里面创建任务（工作目录 {work_dir}）。"
     return effect + "\n" + _execution_impact(execution, arguments["project"])
 
 

@@ -282,3 +282,13 @@ it("uses the normalized registry contract throughout", () => {
   expectTypeOf<ProfileFields>().not.toHaveProperty("provider_id");
   expectTypeOf<AgentProfile["model"]>().toHaveProperty("model_id");
 });
+
+it("shows the Cursor sign-in command without offering login-link recovery", async () => {
+  data.providers = [account({ vendor_type: "cursor-login", auth: "oauth", oauth_runtime_type: "cursor-agent",
+    api_key: null, endpoints: [endpoint("openai-responses", "")],
+    login: { state: "not_logged_in", detail: "not signed in" } })];
+  await render(false);
+  expect(container.textContent).toContain("Login not usable: not signed in");
+  expect(container.textContent).toContain("cursor-agent login");
+  expect([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Use the login again"))).toBe(false);
+});

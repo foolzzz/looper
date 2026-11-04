@@ -1026,8 +1026,10 @@ class _FileLayer:
 
 
 class _Importer:
-    def __init__(self, conn: Any, target: _Target, apply: bool) -> None:
+    def __init__(self, conn: Any, target: _Target, apply: bool,
+                 created_directories: list[Path] | None = None) -> None:
         self.conn = conn
+        self.created_directories = created_directories
         self.target = target
         self.apply = apply
         self.plan = Plan(applied=apply)
@@ -1716,7 +1718,7 @@ class _Importer:
         """Add or update a project's own fields; its id (``new:...`` in a preview), or None when skipped."""
         from ..db.projects import EXECUTION_COLUMNS
         from .project_execution import execution_fields
-        from .projects import project_background, project_name
+        from .projects import RequestError, _create_project_row, project_background, project_name, project_work_dir
 
         raw_name = entry.get("name") if isinstance(entry, Mapping) else None
         try:
@@ -1737,14 +1739,24 @@ class _Importer:
             self.record("projects", str(raw_name), Action.SKIPPED, reason=str(exc))
             return None
         row = self.target.projects.get(name.lower())
+        if row is None:
+            try:
+                values["work_dir"] = project_work_dir(entry.get("work_dir", ""))
+            except ValueError as exc:
+                self.record("projects", name, Action.SKIPPED, reason=str(exc))
+                return None
         current = {k: row[k] for k in values} if row else None
         action = self.outcome("projects", name, current, _differs(values, current, values))
         project_id = row["id"] if row else f"new:{name}"
         if self.apply and action is Action.ADDED:
-            from ..db.projects import create_project
-
-            project_id = (await create_project(name=name, description=values["description"], background=background,
-                                               execution=execution, pool=self.conn))["id"]
+            try:
+                created = await _create_project_row({"name": name, "description": values["description"],
+                    "background": background, "execution": execution, "work_dir": values["work_dir"]}, pool=self.conn,
+                    created_directories=self.created_directories)
+            except RequestError as exc:
+                raise ConfigFileError(str(exc)) from None
+            project_id = created["id"]
+            values["work_dir"] = created["work_dir"]
         elif self.apply and action is Action.CHANGED:
             from ..db.projects import update_project
 
@@ -2323,7 +2335,8 @@ class _Importer:
                 "its project's directory until you set one")
 
 
-async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> Plan:
+async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
+                        created_directories: list[Path] | None = None) -> Plan:
     """The import's plan for ``data`` (from ``read_file``); with ``apply`` also written, in the caller's
     transaction. Raises ``ConfigFileError`` when the result would break a catalog cap."""
     validate_document(data)
@@ -2377,7 +2390,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
         if data.get("managers") or data.get("channels"):
             # Resolve the projected dependencies and reject the complete graph before any import writes.
             await import_config(conn, data, apply=False)
-    importer = _Importer(conn, await _Target.read(conn), apply)
+    importer = _Importer(conn, await _Target.read(conn), apply, created_directories)
     importer.imported_managers = {entry.get("id") for entry in data.get("managers", [])
                                   if isinstance(entry, Mapping) and isinstance(entry.get("id"), str)}
     for entry in data.get("runtimes", []):
@@ -2436,8 +2449,11 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool) -> P
 async def run_import(conn: Any, data: Mapping[str, Any], *, apply: bool) -> Plan:
     """Preview ``data`` in a read-only transaction, or apply it in one transaction, on ``conn``: what both
     v1 and the dashboard's import run."""
-    async with conn.transaction(isolation="read_committed" if apply else "repeatable_read", readonly=not apply):
-        plan = await import_config(conn, data, apply=apply)
+    from .projects import project_directories
+
+    with project_directories() as created:
+        async with conn.transaction(isolation="read_committed" if apply else "repeatable_read", readonly=not apply):
+            plan = await import_config(conn, data, apply=apply, created_directories=created)
     if apply:
         from .managers_api import _on_change
 

@@ -294,6 +294,7 @@ sys.exit(1)
 @contextmanager
 def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_path: Path,
                    home: Path | None = None, notes_root: Path | None = None,
+                   projects_root: Path | None = None,
                    gh_diffs: dict[str, str] | None = None,
                    startup_timeout: float = 90.0, env: dict[str, str] | None = None,
                    pi_runtime: str = "cli", dsh_runtime: str = "cli",
@@ -307,6 +308,7 @@ def running_server(*, database_url: str, runtime_root: Path, bin_dir: Path, log_
     manager_dir.mkdir(parents=True, exist_ok=True)
     ops = ops_config.OpsConfig(runtime_root=runtime_root, path=runtime_root / ops_config.FILE,
                                database_url=database_url, operator_notes_root=str(notes_root) if notes_root else "",
+                               projects_root=str(projects_root) if projects_root is not None else "",
                                pi_runtime=pi_runtime, dsh_runtime=dsh_runtime,
                                keeper_mode=ops_config.KeeperMode(keeper_mode))
     ops_config.write_private(ops.path, ops_config.render(ops))

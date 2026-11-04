@@ -40,6 +40,22 @@ _STAGED_DASHBOARD_DIR = REPO_ROOT / "looper" / "web" / "dashboard"
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _no_real_cursor_agent(tmp_path_factory: pytest.TempPathFactory):
+    """Keep provider listings and probes away from the operator's Cursor login."""
+    directory = tmp_path_factory.mktemp("cursor-agent-guard")
+    executable = directory / "cursor-agent"
+    executable.write_text(
+        "#!/bin/sh\n"
+        "echo '{\"status\":\"error\",\"message\":\"cursor-agent is not available in tests\"}'\n"
+        "exit 2\n"
+    )
+    executable.chmod(0o755)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("PATH", str(directory) + os.pathsep + os.environ.get("PATH", ""))
+        yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _staged_dashboard_environment():
     # All serve subprocesses must inherit this, including independent installed smokes.
     with pytest.MonkeyPatch.context() as patch:
@@ -542,6 +558,11 @@ for line in sys.stdin:
     # Like Claude Code 2.1.285 run with --replay-user-messages: the message's lifecycle and its replay
     # carry its uuid, and so does the result that answers it.
     mid = message.get('uuid') or 'claude-named-%d' % n
+    if reply == '<blocked>':
+        emit({{'type': 'command_lifecycle', 'command_uuid': mid, 'state': 'queued'}})
+        emit({{'type': 'system', 'subtype': 'informational',
+              'content': 'UserPromptSubmit operation blocked by hook: Request Blocked by Security Policy'}})
+        continue
     for state in ('queued', 'started'):
         emit({{'type': 'command_lifecycle', 'command_uuid': mid, 'state': state, 'session_id': 'sess-p'}})
     emit({{'type': 'system', 'subtype': 'init', 'session_id': 'sess-p', 'model': 'fake'}})

@@ -3,11 +3,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "@/components/sidebar";
-import { fetchGates, fetchOverview, fetchProjects, type GateList } from "@/lib/api";
+import { fetchGates, fetchOverview, fetchProjectsList, type GateList } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
-  fetchGates: vi.fn(), fetchProjects: vi.fn(), fetchOverview: vi.fn(),
+  fetchGates: vi.fn(), fetchProjectsList: vi.fn(), fetchOverview: vi.fn(),
 }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
 vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => null }));
@@ -36,7 +36,7 @@ const gatesButton = () => [...host.querySelectorAll("nav button")].find((b) => b
 
 beforeEach(() => {
   vi.useFakeTimers();
-  vi.mocked(fetchProjects).mockResolvedValue([]);
+  vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
   vi.mocked(fetchGates).mockResolvedValue(gates(2));
   onNavigate.mockClear();
   vi.mocked(fetchOverview).mockResolvedValue({} as never);

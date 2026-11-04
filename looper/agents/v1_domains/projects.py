@@ -45,8 +45,10 @@ PROJECT_RESULT = _object({"project": PROJECT})
 DELETED = _object({"deleted": _STR})
 SCHEMAS = {"Project": PROJECT, "ProjectExecution": _object(EXECUTION), "ProjectPatch": PATCH}
 RESULTS = {
+    # The compact Manager list omits the root when unset to preserve its model-visible result.
     "projects.list": _object({"projects": _array(_object({"project": _STR, "work_dir": _NULL_STR,
-        "tasks": _INT, "active_tasks": _INT, "schedules": _INT, "background": _NULL_STR}))}),
+        "tasks": _INT, "active_tasks": _INT, "schedules": _INT, "background": _NULL_STR})),
+        "projects_root": _STR}, ["projects"]),
     **dict.fromkeys(("projects.get", "projects.create", "projects.update"), PROJECT_RESULT),
     "projects.delete": DELETED,
 }
@@ -62,7 +64,7 @@ def _op(action, request, result, risk):
 
 
 OPERATIONS = (
-    _op("list", _object({}, closed=True), _object({"projects": _array(PROJECT)}), "read"),
+    _op("list", _object({}, closed=True), _object({"projects": _array(PROJECT), "projects_root": _STR}), "read"),
     _op("create", _object(PATCH_FIELDS, ["name"], closed=True), PROJECT_RESULT, "write"),
     _op("update", _object({"project_id": _STR, "fields": PATCH}, closed=True), PROJECT_RESULT, "write"),
     _op("delete", _object({"project_id": _STR}, closed=True), DELETED, "high"),

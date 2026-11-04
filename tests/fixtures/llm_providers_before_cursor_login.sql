@@ -1,4 +1,4 @@
--- Provider table before Cursor file-store login support.
+-- The provider table as released before the Cursor login provider.
 CREATE TABLE IF NOT EXISTS llm_providers (
     id                  TEXT PRIMARY KEY,
     name                TEXT NOT NULL UNIQUE,

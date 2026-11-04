@@ -246,9 +246,10 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
 ### TaskRouter (`looper/agents/tiers/task.py`)
 
 - Every task belongs to exactly one project (`project_id`) and runs in its
-  `work_dir`. There is no global default: the directory is the one given
+  `work_dir`. The directory is the one given
   (`resolve_work_dir` requires an absolute path or `~/...`), else the
-  project's default directory. Creating a task with neither, or starting a
+  project's default directory (new projects can receive one from the ops file's
+  `[projects] root`; see [Project directories](#project-directories)). Creating a task with neither, or starting a
   task without one, is refused, and the Manager asks for it when the
   conversation has not named it. The Worker creates the directory if it is
   missing and runs Claude there.
@@ -1524,20 +1525,30 @@ Manager tools.
 - **The Cursor login** (`looper/agents/runtimes/cursor_login.py`) is the
   built-in provider `cursor-login` (`prov-cursor-login`, OAuth,
   `oauth_runtime_type = cursor-agent`). Its `openai-responses` endpoint is
-  used only for pairing. Each isolated home's `.cursor/auth.json` links to
-  the operator's file: `~/.cursor/auth.json` on macOS, otherwise
-  `$XDG_CONFIG_HOME/cursor/auth.json` or `~/.config/cursor/auth.json`.
-  Sign in with `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login` first;
-  the login probe uses only `stat`, never reads credentials, and the
-  `cursor_login` self-check is skipped without a matching Agent Profile.
-  `linked_login` inspects run and session homes at startup, repairs replaced
-  links and records `system_settings.cursor_login_fork`; a recorded problem
-  blocks launches until the operator checks the login and clears the warning
-  in Settings → LLM Providers. Cursor launches use the file store and disable
-  browser opening, with inherited Cursor authentication and directory
-  overrides removed. The suggested models are `auto`, `gpt-5.3-codex`,
-  `gpt-5.6-sol-high`, `composer-2.5` and `gemini-3.7-flash-high`, without
-  built-in prices. This provides the login foundation for the Cursor adapter.
+  used only for pairing. It represents the operator's existing Cursor login
+  on this machine (the login keychain on macOS). Looper never reads the
+  keychain or a credential file. It checks `cursor-agent status --format json`
+  with the operator's `HOME`, throwaway `CURSOR_CONFIG_DIR` and
+  `CURSOR_DATA_DIR`, empty stdin, a 20-second timeout and `NO_OPEN_BROWSER=1`;
+  `CURSOR_API_KEY`, `CURSOR_AUTH_TOKEN`, `CURSOR_API_ENDPOINT` and
+  `AGENT_CLI_CREDENTIAL_STORE` are removed. Exit 0 with `status: authenticated`
+  and `isAuthenticated: true` means signed in; `unauthenticated` and
+  `partially-authenticated` mean not signed in; a failed command, timeout or
+  unreadable output means unknown. A launch refuses a missing login with
+  "Cursor is not signed in on this machine: run `cursor-agent login`" and
+  names a check failure. Results are cached for 30 seconds. Provider listings
+  return the last cached state immediately, even when stale, or show
+  "checking the Cursor login" before the first result; a missing or expired
+  result starts at most one background check. The login appears in Settings
+  → LLM Providers before a Cursor runtime exists. The `cursor_login`
+  self-check is skipped without a matching Agent Profile; otherwise it fails
+  for a missing login and warns for an unknown state. There is no file store,
+  API key or login link. The status JSON shape was verified on 2026-11-04;
+  `userInfo` contents are never retained or shown. Cursor runs will keep the
+  operator's `HOME` and load personal Cursor and Claude Code configuration;
+  the runtime using this login is delivered separately. The suggested models
+  are `auto`, `gpt-5.3-codex`, `gpt-5.6-sol-high`, `composer-2.5` and
+  `gemini-3.7-flash-high`, without built-in prices.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
   runs Manager, Planner, Worker and Reviewer. With the default `[runtimes] pi = "runner"`,
@@ -2380,6 +2391,37 @@ Verified with Claude Code 2.1.285 under the isolation flags and
   under one prefix;
 - no `~/.claude/plugins/data/project-inline/` directory was created for a
   plugin with only skills.
+
+### Project directories
+
+The ops file's optional `[projects] root = "/absolute/path/to/projects"`
+(file only, unset by default) gives each newly created project without a
+`work_dir` its own directory under that root. The directory name is the project
+name lower-cased, with characters outside `[A-Za-z0-9._-]` replaced by `-`,
+runs of `-` collapsed and leading or trailing `-` and `.` stripped. An empty
+result uses the project id. If another project already uses that directory,
+Looper appends `-2`, `-3`, and so on. An existing directory at `<root>/<name>`
+is used as is, including a symbolic link to a directory. Otherwise Looper creates
+the directory with mode 0755 before saving the project; an OS error refuses
+creation with the path and reason and leaves no project row. If creation fails,
+a directory made by that create is removed again only if it is still empty;
+pre-existing directories are kept. Tasks without their own directory then use
+the project's directory as usual.
+
+This applies to the dashboard, Manager tool, v1 API and configuration import.
+The full projects list response includes `projects_root` (an empty string when
+unset). When set, the dashboard's new-project task form lets both directory
+fields stay blank and Looper allocates the project's directory; the project
+dialog also explains this default. The built-in Manager role, tool descriptions
+and prompt preview follow the configured root; custom role text is preserved.
+An explicit `work_dir` wins; import preserves the directories named in its
+file. Existing projects keep their directories when the root is set or changed.
+Moving one requires an explicit `work_dir` update, including the existing
+confirmation for affected command schedules. With the root unset, creating a
+project without a directory still leaves its `work_dir` empty. At startup,
+`looper serve` logs `projects root=<path>` or `projects root unset`;
+`looper doctor` and system checks warn if the configured root does not exist
+or is not writable.
 
 ### Project execution settings
 
@@ -4349,7 +4391,9 @@ another file. The keys are `[database] url`, `[server]` `host`, `port`,
 `public_url` and `log_level` (`debug`, `info`, `warning`, `error`), `[backup]`
 `pg_dump`, `command` (an argv array; `{dbname}` and `{user}` are filled
 in) and `verify_command` (an argv array that lists the dump read on stdin like
-`pg_restore --list`), `[operator_notes] root` (an absolute path), and
+`pg_restore --list`), `[operator_notes] root` (an absolute path),
+`[projects] root` (an absolute parent directory for new projects; file only,
+unset by default), and
 `[runtimes] pi` and `dsh` (`"runner"` by default, or explicit `"cli"` opt-outs; file only), and
 `[agent_host] keeper` (`"off"` by default, or `"on"`; file only). Nothing is expanded: no
 variable, no `~`, no include. An unknown key, a wrong type or a bad value

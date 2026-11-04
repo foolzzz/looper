@@ -566,10 +566,15 @@ async def _run_agent_system_owned(
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
 
-    from . import chat_settings, links, operator_notes, scheduler_settings, waits
+    from . import chat_settings, links, operator_notes, projects, scheduler_settings, waits
     host, port = ops.host, ops.port
     dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
     operator_notes.configure_root(ops.operator_notes_root)
+    projects.configure_root(ops.projects_root)
+    if ops.projects_root:
+        logger.info("projects root=%s", ops.projects_root)
+    else:
+        logger.info("projects root unset")
 
     from . import operator_auth
     try:
@@ -658,10 +663,10 @@ async def _run_agent_system_owned(
         except Exception:
             logger.exception("could not sweep the task worktrees")
 
-        # A Codex, Grok or Cursor login that forked in a run the previous server did not see end (before the session
+        # A Codex or Grok login that forked in a run the previous server did not see end (before the session
         # directories it may be in are reclaimed).
-        from .runtimes import codex_login, cursor_login, grok_login
-        for login, label in ((codex_login, "Codex"), (grok_login, "Grok"), (cursor_login, "Cursor")):
+        from .runtimes import codex_login, grok_login
+        for login, label in ((codex_login, "Codex"), (grok_login, "Grok")):
             try:
                 if problem := await login.inspect_at_start(runtime_root):
                     logger.warning("%s", problem)
@@ -763,6 +768,7 @@ async def _run_agent_system_owned(
             await self_check.ttadk_check(),
             self_check.check_lark_cli(lark_enabled),
             await asyncio.to_thread(self_check.check_git),
+            self_check.check_projects_root(ops.projects_root),
         ]
         self_check.log_problems(checks)
 

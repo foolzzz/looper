@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchProjects, PROJECTS_CHANGED_EVENT, type Project } from "@/lib/api";
+import { fetchProjectsList, PROJECTS_CHANGED_EVENT, type Project } from "@/lib/api";
 
 const REFRESH_MS = 10_000;
 
@@ -10,16 +10,18 @@ const REFRESH_MS = 10_000;
  */
 export function useProjects() {
   const [projects, setProjects] = useState<Project[] | null>(null);
+  const [projectsRoot, setProjectsRoot] = useState("");
   const [error, setError] = useState("");
   const latest = useRef(0);
 
   const reload = useCallback((): Promise<void> => {
     // A slow poll must not overwrite the answer to a newer request.
     const seq = ++latest.current;
-    return fetchProjects()
+    return fetchProjectsList()
       .then((list) => {
         if (seq !== latest.current) return;
-        setProjects(list);
+        setProjects(list.projects);
+        setProjectsRoot(list.projects_root);
         setError("");
       })
       .catch((err) => {
@@ -38,5 +40,5 @@ export function useProjects() {
     };
   }, [reload]);
 
-  return { projects, error, reload };
+  return { projects, projectsRoot, error, reload };
 }

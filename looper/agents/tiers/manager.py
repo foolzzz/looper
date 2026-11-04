@@ -64,6 +64,7 @@ from ..claude_cli import (
     CapStop,
     ClaudeRunRecorder,
     ResidentTurn,
+    TurnBlocked,
     answer_text,
     ended_by,
     exit_note,
@@ -288,6 +289,33 @@ If the user says "不", "取消", "算了", "no", "cancel" or modifies the requi
 - Never refuse a reasonable development task
 - Never create a task without the user's explicit confirmation
 """
+
+
+def root_adjusted(text: str) -> str:
+    """Adapt built-in directory guidance to the file-only projects root, when configured."""
+    from ..projects import projects_root
+
+    if not (root := projects_root()):
+        return text
+    directory = Path(root) / "<name>"
+    return text.replace(
+        "A new project, or one without a default, needs the user to name one:\n"
+        "  ask. Never pick a directory yourself.",
+        f"A new project created without a directory gets {directory}\n"
+        "  (a safe name, with a suffix on collision; an existing directory there is used as is, including a symbolic link);\n"
+        "  do not ask the user for a directory.\n"
+        "  An existing project without a default still needs the user to name one: ask.\n"
+        "  Never pick a directory yourself.",
+    ).replace(
+        "When the user has not named them, ask both as explicit questions: offer the existing project that matches, "
+        "or propose a short name for a new one, and ask for the directory. "
+        "Never state a project or a directory as decided before the user has answered.",
+        "When the user has not named them, ask which project: offer the existing project that matches, "
+        f"or propose a short name for a new one and say the directory will be {directory}; "
+        "ask for the directory of an existing project without a default. "
+        "Never state a project as decided before the user has answered.",
+    )
+
 
 # The ready tasks each user turn lists, newest first, so Claude can start one by its id.
 READY_TASKS_LISTED = 10
@@ -1696,14 +1724,16 @@ class ManagerAgent:
 
     def _composed_prompt(self, agent_settings: AgentSettings) -> SystemPrompt:
         """The Manager's harness, its role prompt, then how to use Looper's tools (no project, no task)."""
-        contract_name, contract = "TOOLS_CONTRACT", TOOLS_CONTRACT
+        contract_name, contract = "TOOLS_CONTRACT", root_adjusted(TOOLS_CONTRACT)
         if self.agent_id != DEFAULT_MANAGER_ID:
             contract_name = "TOOLS_CONTRACT+SCOPE_CONTRACT"
-            contract = TOOLS_CONTRACT + "\n" + scope_contract(self._definition, has_templates=self._has_templates)
+            contract += "\n" + scope_contract(self._definition, has_templates=self._has_templates)
         return build_system_prompt(
             harness=agent_settings.harness,
             custom_prompt=agent_settings.profile.custom_prompt,
-            role_id=self.agent_id, role=self._system_prompt, recommended=self._prompt_recommended,
+            role_id=self.agent_id,
+            role=root_adjusted(self._system_prompt) if self._prompt_recommended else self._system_prompt,
+            recommended=self._prompt_recommended,
             contract_name=contract_name, contract=contract,
         )
 
@@ -1922,10 +1952,17 @@ class ManagerAgent:
             except asyncio.CancelledError as cancelled:
                 await recorder.end_left_open(cancelled, output_text="".join(text_parts) or token.partial or None)
                 raise
+            error = (str(exc) if isinstance(exc, TurnBlocked) else
+                     f"Manager stopped reading Claude: {type(exc).__name__}: {exc}")
             await recorder.finish(
                 output_text="".join(text_parts) or None, result_event=None,
-                error=f"Manager stopped reading Claude: {type(exc).__name__}: {exc}", status=ended_by(exc),
+                error=error, status=ended_by(exc),
             )
+            if isinstance(exc, TurnBlocked) and task_id:
+                try:
+                    await db_activity.insert_activity(task_id=task_id, worker=self.agent_id, kind="error", summary=error)
+                except Exception:
+                    logger.debug("failed to record manager activity", exc_info=True)
             await self._link_turn_task(recorder, ops_turn)
             raise
 
@@ -2312,6 +2349,9 @@ class ManagerAgent:
                                       status=RecordStatus.INTERRUPTED, usage=Usage())
                 await self._annotate_handoff_stop(recorder, None)
                 raise TurnStopped() from exc
+            except TurnBlocked as exc:
+                await recorder.finish(output_text=None, result_event=None, error=str(exc))
+                raise
             except Exception as exc:  # the turn was given up, which stopped Claude
                 logger.warning("%s: its previous session wrote no handoff: %s", self._log, exc)
                 await recorder.finish(output_text=None, result_event=None,

@@ -266,6 +266,7 @@ def test_serve_refuses_unknown_liveness_before_interrupting_records(tmp_path, mo
     from looper import db
     from looper.agents import chat_settings, profile_registry, scheduler_settings, serve, waits
     from looper.db import llm_records
+    from looper.ops_config import OpsConfig
 
     for name in ("init_pool", "ensure_schema"):
         monkeypatch.setattr(db, name, AsyncMock())
@@ -279,8 +280,8 @@ def test_serve_refuses_unknown_liveness_before_interrupting_records(tmp_path, mo
     monkeypatch.setattr(proc_tree, "sweep", AsyncMock())
     interrupted = AsyncMock()
     monkeypatch.setattr(llm_records, "end_unfinished_records", interrupted)
-    ops = SimpleNamespace(host="127.0.0.1", port=18767, public_url=None,
-                          operator_notes_root=tmp_path, database_url="unused", keeper_mode=serve.KeeperMode.OFF)
+    ops = OpsConfig(runtime_root=tmp_path, path=tmp_path / "ops.toml", port=18767,
+                    operator_notes_root=str(tmp_path), database_url="unused", keeper_mode=serve.KeeperMode.OFF)
 
     async def run():
         async with running_keeper(tmp_path) as (directory, process, _state):

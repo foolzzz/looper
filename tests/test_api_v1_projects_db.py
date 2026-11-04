@@ -22,6 +22,48 @@ EXECUTION = {
 INTEGERS = [field for field, value in EXECUTION.items() if type(value) is int]
 
 
+@pytest.mark.parametrize("root", ["", "/srv/projects"])
+def test_project_list_reports_configured_root(tmp_path, monkeypatch, root):
+    from looper.agents import projects as core
+
+    async def run(pool):
+        monkeypatch.setattr(core, "_root", root)
+        project = await projects.create_project(name="Example", pool=pool)
+        async with _api(tmp_path, pool) as call:
+            for client in (False, True):
+                status, answer = await call("project_admin.list", client=client)
+                assert status == 200, answer
+                assert answer["result"]["projects_root"] == root
+                assert [p["project_id"] for p in answer["result"]["projects"]] == [project["id"]]
+                status, compact = await call("/api/v1/ops/projects/list", client=client)
+                assert status == 200, compact
+                api_v1.validate_arguments(api_v1.find("POST", "/api/v1/ops/projects/list").result, compact["result"])
+                assert [p["project"] for p in compact["result"]["projects"]] == ["Example"]
+                if root:
+                    assert compact["result"]["projects_root"] == root
+                else:
+                    assert "projects_root" not in compact["result"]
+
+    run_db(run, monkeypatch, timeout=30)
+
+
+def test_projects_root_applies_to_operator_and_client_creation(tmp_path, monkeypatch):
+    from looper.agents import projects as core
+
+    async def run(pool):
+        monkeypatch.setattr(core, "_root", str(tmp_path / "projects"))
+        async with _api(tmp_path, pool) as call:
+            for client in (False, True):
+                status, answer = await call("project_admin.create", {"name": f"Project {client}"}, client=client)
+                assert status == 200, answer
+                made = answer["result"]["project"]
+                directory = tmp_path / "projects" / f"project-{str(client).lower()}"
+                assert made["work_dir"] == str(directory) and directory.is_dir()
+                assert (await projects.get_project(made["project_id"], pool=pool))["work_dir"] == str(directory)
+
+    run_db(run, monkeypatch, timeout=30)
+
+
 @pytest.mark.parametrize("client", [False, True], ids=["operator", "client"])
 def test_real_crud_reads_back_changes_and_deletes_only_after_required_confirmation(tmp_path, monkeypatch, client):
     async def run(pool):

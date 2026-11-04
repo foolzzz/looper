@@ -211,14 +211,15 @@ def _files(paths: Sequence[str]) -> str:
 FOREIGN_TASK = "a task of another Manager"
 
 
-async def _shared(workspace: str, besides: str | None, visible_to: str | None = None) -> list[dict[str, Any]]:
+async def _shared(workspace: str, besides: str | None, visible_to: str | None = None,
+                  *, pool: Any = None) -> list[dict[str, Any]]:
     """The tasks in progress whose workspace is on the same repository (its main checkout) as ``workspace``. With
     ``visible_to``, a task of another Manager is anonymous: no id, name or status, and ``foreign`` is true."""
     from ..db import tasks as db_tasks
 
     key = await asyncio.to_thread(notes_key, workspace)
     shared = []
-    for task in await db_tasks.active_workspaces(besides=besides):
+    for task in await db_tasks.active_workspaces(besides=besides, **({"pool": pool} if pool is not None else {})):
         if task["workspace"] and await asyncio.to_thread(notes_key, task["workspace"]) == key:
             mode = task.get("workspace_mode") or TaskWorkspaces.IN_PLACE.value
             if visible_to is not None and task.get("manager_id") != visible_to:
@@ -246,7 +247,7 @@ def overwrites(mode: TaskWorkspaces | str, shared: Sequence[Mapping[str, Any]]) 
 
 
 async def check(workspace: str, *, mode: TaskWorkspaces, base: str = "", besides: str | None = None,
-                asked: bool = True, visible_to: str | None = None) -> dict[str, Any]:
+                asked: bool = True, visible_to: str | None = None, pool: Any = None) -> dict[str, Any]:
     """What a task in ``workspace`` would run in, and the warnings (the RFC's W5); outside git a worktree task runs
     in place, said only when the worktree was ``asked`` for (not when it is just the project's default). Raises
     ``TaskWorkspaceError`` for a base the repository does not have."""
@@ -282,7 +283,7 @@ async def check(workspace: str, *, mode: TaskWorkspaces, base: str = "", besides
                 warnings.append({"kind": WarningKind.LARGE_CHECKOUT.value, "bytes": size,
                                  "text": f"The checkout is {ws._size_text(size)}: the task's worktree is a copy of "
                                          "it."})
-    shared = await _shared(workspace, besides, visible_to)
+    shared = await _shared(workspace, besides, visible_to, **({"pool": pool} if pool is not None else {}))
     if shared:
         names = shared_names(shared)
         if overwrites(effective, shared):
