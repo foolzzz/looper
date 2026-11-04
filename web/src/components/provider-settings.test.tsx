@@ -74,7 +74,7 @@ beforeEach(() => {
   }));
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
-afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
+afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 const render = async (adding = true) => { await act(async () => root.render(<ProvidersSection adding={adding} />)); };
 function field(label: string): HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement {
   const item = [...container.querySelectorAll("label")].find((l) => l.textContent === label);
@@ -291,4 +291,33 @@ it("shows the Cursor sign-in command without offering login-link recovery", asyn
   expect(container.textContent).toContain("Login not usable: not signed in");
   expect(container.textContent).toContain("cursor-agent login");
   expect([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Use the login again"))).toBe(false);
+});
+
+it.each(["logged_in", "not_logged_in", "unknown"] as const)("refreshes a cold Cursor login to %s without user action, then stops", async (state) => {
+  vi.useFakeTimers();
+  data.providers = [account({ vendor_type: "cursor-login", auth: "oauth", oauth_runtime_type: "cursor-agent",
+    login: { state: "checking", detail: "checking the Cursor login" } })];
+  await render(false);
+  expect(container.textContent).toContain("checking the Cursor login");
+  expect(container.textContent).not.toContain("cursor-agent login");
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(registryReads).toBe(2);
+  data = { ...data, providers: [{ ...data.providers[0], login: { state, detail: `result: ${state}` } }] };
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(container.textContent).toContain(`result: ${state}`);
+  expect(container.textContent).not.toContain("checking the Cursor login");
+  expect(container.textContent?.includes("cursor-agent login")).toBe(state !== "logged_in");
+  const reads = registryReads;
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(registryReads).toBe(reads);
+});
+
+it("stops checking the Cursor login when the last registry consumer unmounts", async () => {
+  vi.useFakeTimers();
+  data.providers = [account({ login: { state: "checking", detail: "checking the Cursor login" } })];
+  await render(false);
+  await act(async () => { root.render(null); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(registryReads).toBe(1);
+  expect(vi.getTimerCount()).toBe(0);
 });

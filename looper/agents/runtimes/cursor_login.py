@@ -143,5 +143,5 @@ async def login_view() -> dict[str, str]:
             _probe_lock.release()
             raise
     if probed is None:
-        return {"state": "unknown", "detail": "checking the Cursor login"}
+        return {"state": "checking", "detail": "checking the Cursor login"}
     return {"state": probed[1].state.value, "detail": probed[1].detail}

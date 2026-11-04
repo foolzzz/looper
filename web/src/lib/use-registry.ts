@@ -6,6 +6,7 @@ const EMPTY: Snapshot = { registry: null, error: "" };
 let snapshot = EMPTY;
 let latest = 0;
 const listeners = new Set<() => void>();
+let loginRefresh: ReturnType<typeof setTimeout> | undefined;
 
 function publish(next: Snapshot) {
   snapshot = next;
@@ -13,6 +14,7 @@ function publish(next: Snapshot) {
 }
 
 async function reload(): Promise<void> {
+  clearTimeout(loginRefresh);
   // A slow answer must not overwrite a newer refresh or a new set of consumers.
   const seq = ++latest;
   try {
@@ -20,6 +22,11 @@ async function reload(): Promise<void> {
     if (seq === latest) publish({ registry, error: "" });
   } catch (err) {
     if (seq === latest) publish({ registry: snapshot.registry, error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    // A cold login probe finishes in the server's background, without a mutation event.
+    if (seq === latest && listeners.size && snapshot.registry?.providers.some((provider) => provider.login?.state === "checking")) {
+      loginRefresh = setTimeout(() => { void reload(); }, 1000);
+    }
   }
 }
 
@@ -32,6 +39,7 @@ function subscribe(listener: () => void) {
   return () => {
     listeners.delete(listener);
     if (listeners.size === 0) {
+      clearTimeout(loginRefresh);
       window.removeEventListener(REGISTRY_CHANGED_EVENT, reload);
       // Nothing remains to observe mutations. Start fresh on the next mount.
       ++latest;
