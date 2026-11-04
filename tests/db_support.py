@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
+import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -17,6 +19,18 @@ from typing import Any
 import pytest
 
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+
+
+@pytest.fixture
+def previous_login_schema() -> str:
+    """Current registry baseline with the released, pre-Cursor provider checks."""
+    from looper.db import connection
+
+    previous = (Path(__file__).parent / "fixtures" / "llm_providers_before_cursor_login.sql").read_text()
+    sql, count = re.subn(r"CREATE TABLE IF NOT EXISTS llm_providers \(.*?\n\);",
+                         lambda _: previous, connection.SCHEMA_PATH.read_text(), count=1, flags=re.S)
+    assert count == 1
+    return sql
 
 
 @asynccontextmanager

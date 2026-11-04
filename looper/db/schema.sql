@@ -45,16 +45,18 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     env JSONB NOT NULL DEFAULT '[]'::jsonb
     CHECK (jsonb_typeof(env) = 'array'),
     vendor_type TEXT NOT NULL
-    CHECK (vendor_type IN ('glm-bigmodel', 'glm-zai', 'deepseek', 'kimi-moonshot-cn', 'kimi-moonshot',
-                          'cpa', 'opencode', 'sub2api', 'claude-subscription', 'codex-login', 'grok-login', 'custom'))
-    CHECK (
+    CONSTRAINT llm_providers_vendor_type_check CHECK (vendor_type IN ('glm-bigmodel', 'glm-zai', 'deepseek', 'kimi-moonshot-cn', 'kimi-moonshot',
+                          'cpa', 'opencode', 'sub2api', 'claude-subscription', 'codex-login', 'grok-login', 'cursor-login', 'custom'))
+    CONSTRAINT llm_providers_check1 CHECK (
         (vendor_type = 'claude-subscription' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
             AND oauth_runtime_type = 'claude-code')
         OR (vendor_type = 'codex-login' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
             AND oauth_runtime_type = 'codex')
         OR (vendor_type = 'grok-login' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
             AND oauth_runtime_type = 'grok')
-        OR (vendor_type NOT IN ('claude-subscription', 'codex-login', 'grok-login')
+        OR (vendor_type = 'cursor-login' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
+            AND oauth_runtime_type = 'cursor-agent')
+        OR (vendor_type NOT IN ('claude-subscription', 'codex-login', 'grok-login', 'cursor-login')
             AND auth = 'api_key' AND oauth_runtime_type IS NULL)
     )
 );

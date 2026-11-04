@@ -62,6 +62,9 @@ def test_serve_without_postgresql_stops_with_the_fix(tmp_path: Path) -> None:
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 def test_serve_without_claude_starts_and_reports_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", f"/usr/bin{os.pathsep}/bin")  # no claude, no lark-cli
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
     (tmp_path / "bin").mkdir()
     log = tmp_path / "serve.log"
 
@@ -70,8 +73,8 @@ def test_serve_without_claude_starts_and_reports_it(tmp_path: Path, monkeypatch:
     ) as api:
         checks = {check["id"]: check for check in api.post("/api/v1/system/status", {})["result"]["checks"]}
 
-    assert [checks[name]["status"] for name in ("database", "claude_cli", "claude_login", "lark_cli")] == [
-        "ok", "fail", "skip", "skip"]
+    assert [checks[name]["status"] for name in ("database", "claude_cli", "claude_login", "cursor_login", "lark_cli")] == [
+        "ok", "fail", "skip", "skip", "skip"]
     assert "npm install -g @anthropic-ai/claude-code" in checks["claude_cli"]["fix"]
     assert "WARNING SELF-CHECK FAIL Claude Code CLI: `claude` is not on PATH." in log.read_text()
 

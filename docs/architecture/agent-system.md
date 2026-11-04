@@ -1521,6 +1521,23 @@ Manager tools.
   the provider. The login's state is whether its file is there (`stat`,
   never read), in the provider's view and in the `grok_login` self-check,
   skipped while no Agent Profile uses the login.
+- **The Cursor login** (`looper/agents/runtimes/cursor_login.py`) is the
+  built-in provider `cursor-login` (`prov-cursor-login`, OAuth,
+  `oauth_runtime_type = cursor-agent`). Its `openai-responses` endpoint is
+  used only for pairing. Each isolated home's `.cursor/auth.json` links to
+  the operator's file: `~/.cursor/auth.json` on macOS, otherwise
+  `$XDG_CONFIG_HOME/cursor/auth.json` or `~/.config/cursor/auth.json`.
+  Sign in with `AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login` first;
+  the login probe uses only `stat`, never reads credentials, and the
+  `cursor_login` self-check is skipped without a matching Agent Profile.
+  `linked_login` inspects run and session homes at startup, repairs replaced
+  links and records `system_settings.cursor_login_fork`; a recorded problem
+  blocks launches until the operator checks the login and clears the warning
+  in Settings → LLM Providers. Cursor launches use the file store and disable
+  browser opening, with inherited Cursor authentication and directory
+  overrides removed. The suggested models are `auto`, `gpt-5.3-codex`,
+  `gpt-5.6-sol-high`, `composer-2.5` and `gemini-3.7-flash-high`, without
+  built-in prices. This provides the login foundation for the Cursor adapter.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
   runs Manager, Planner, Worker and Reviewer. With the default `[runtimes] pi = "runner"`,

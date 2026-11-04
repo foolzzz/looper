@@ -924,9 +924,9 @@ def vendor_types_view() -> list[dict[str, Any]]:
 
 def _login_modules() -> dict[str, Any]:
     """The runtimes whose own login Looper links into its homes, by type, and the module of each."""
-    from .runtimes import codex_login, grok_login
+    from .runtimes import codex_login, cursor_login, grok_login
 
-    return {"codex": codex_login, "grok": grok_login}
+    return {"codex": codex_login, "grok": grok_login, "cursor-agent": cursor_login}
 
 
 async def _logins(providers: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, str]]:
