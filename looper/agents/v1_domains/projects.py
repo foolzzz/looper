@@ -2,7 +2,7 @@
 
 from ...db import projects as db_projects
 from .. import projects as core
-from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
+from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL, _summary
 from ..ops import Call, ErrorCode, OpError, Turn
 from ..ops.config import _deleting_project, answered, directory_change_impact, project_named
 from ..project_execution import FIELDS, ROOM_LIMITS
@@ -71,7 +71,7 @@ def _op(action, request, result, risk):
     if action == "preview_move_dir":
         description = "Preview a project's directory move and its confirmation impact without moving files."
     return Operation(f"project_admin.{action}", "POST", f"/api/v1/project_admin/{action}",
-                     description, description, request, result, risk=risk, confirms=risk == "high" or action == "update")
+                     _summary(description), description, request, result, risk=risk, confirms=risk == "high" or action == "update")
 
 
 OPERATIONS = (
