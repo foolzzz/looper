@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.72] - 2026-11-03
+
+### Fixed
+
+- **A prompt blocked by an organization's hook fails the turn at once.** When Claude Code answers a prompt with the system event `UserPromptSubmit operation blocked by hook: <reason>`, the Manager, Planner and Worker turn now fails immediately with that reason and a note that it is the organization's policy, instead of a repair turn and a misleading "no json fenced block" error. The echoed prompt is dropped from the event before callbacks and run records see it. A blocked Planner fails its plan without a model-written vault closeout. ([#1070](https://github.com/foolzzz/looper/pull/1070))
+
 ## [2.14.71] - 2026-11-01
 
 ### Fixed
