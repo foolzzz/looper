@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.76] - 2026-11-04
+
+### Changed
+
+- **Project → Settings: English copy and clearer directory controls for the move.** The "Move directory" section is in English like the rest of the page. With `[projects] root` set, the target field says `Leave empty for a new directory under <root>` (the server picks the first free `<root>/<name>`, `<root>/<name>-2`, …); without a root it says `/absolute/path` and Preview stays disabled while the field is empty. The description says that anything in progress blocks the move, and the "Default directory" field now says that it changes the stored path only and files stay where they are. Dashboard only; no backend change. ([#1081](https://github.com/foolzzz/looper/pull/1081))
+
 ## [2.14.75] - 2026-11-04
 
 ### Added
