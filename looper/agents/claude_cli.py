@@ -433,6 +433,9 @@ async def stream_events(stream: asyncio.StreamReader) -> AsyncIterator[dict[str,
         except json.JSONDecodeError:
             continue
         if isinstance(event, dict):
+            if blocked := prompt_block(event, ""):
+                # Hooks can echo the full input; discard it before callbacks or run records see it.
+                event["content"] = f"UserPromptSubmit operation blocked by hook: {blocked.reason}"
             yield event
             if (usage := _request_usage(event, requests)) is not None:
                 yield usage
@@ -517,7 +520,8 @@ def prompt_block(event: dict[str, Any], work_dir: str) -> TurnBlocked | None:
     content = event.get("content")
     if (event.get("type") == "system" and event.get("subtype") == "informational"
             and isinstance(content, str) and content.startswith(prefix)):
-        return TurnBlocked(content[len(prefix):].strip(), work_dir)
+        reason = re.split(r"(?m)^Original prompt:", content[len(prefix):].strip(), maxsplit=1)[0].strip()[:300]
+        return TurnBlocked(reason or "no reason given", work_dir)
     return None
 
 
