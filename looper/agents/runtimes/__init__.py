@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     from .instructions import InstructionFile
     from .api.loop import TurnTools
     from .runner.turn import TurnLimits
+    from .ttadk import TtadkProblem
 
 
 class ApiProtocol(str, Enum):
@@ -377,6 +378,10 @@ class RuntimeAdapter(ABC):
 
     def auth_kinds_for(self, launcher: Launcher) -> frozenset[AuthKind]:
         return self.auth_kinds
+
+    def ttadk_problem(self) -> TtadkProblem | None:
+        """A local TTADK configuration problem to reject before starting a process."""
+        return None
 
     def probe_for(self, executable: str, launcher: Launcher) -> Probe:
         if launcher is Launcher.NATIVE:

@@ -1560,6 +1560,22 @@ Manager tools.
   enforces that cap on `looper_room_inbox.wait_seconds`, currently the only
   platform long poll. Other runtimes keep their existing waits.
 
+  **Through TTADK.** The `ttadk-cursoragent` launcher uses
+  `ttadk code -t cursor-cli --skip-check --`, followed by the same native
+  arguments; the instructions and turn prompt still arrive on stdin.
+  Looper prepends its private `cursor-agent/ttadk-bin` directory to this
+  process's `PATH`. Its `agent` shim requires both Cursor directory variables,
+  removes TTADK's `TTADK_JWT_TOKEN` before Cursor or its shell can inherit it,
+  and executes the resolved `cursor-agent` binary. It keeps the operator's
+  `HOME` and login. A `cursor-cli` command configured as anything other than
+  `agent` is refused before any login check or launch. The run records the
+  launcher version, tool `cursor-cli` and null mode alongside `personal_config`.
+  TTADK adds preparation time to each process; Cursor start-up time through
+  TTADK has not been measured. TTADK supplies no model provider for this tool;
+  its only usage record is the launch event sent when the tool exits, which
+  is lost when the run is stopped. Dashboard, Telegram, Lark and CLI use the
+  existing Agent Profile runtime selection without new channel settings.
+
   The stream's thinking, tool calls, connections and retries become internal
   events. The report is the assistant text after the final tool call or
   resumed retry, with the leading `> Auto routed to <model>` line removed;
