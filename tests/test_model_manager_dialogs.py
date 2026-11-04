@@ -622,7 +622,7 @@ def test_project_move_dialog_requires_confirmation_before_files_move(monkeypatch
 
 
 @pytest.mark.parametrize("mutation", [None, "old_project", "missing_link", "wrong_file", "old_schedule",
-                                      "unconfirmed", "wrong_action", "missing_directory_report"])
+                                      "unconfirmed", "wrong_action", "short_directory_report", "missing_directory_report"])
 def test_project_move_dialog_reads_files_schedules_and_confirmed_action(monkeypatch, tmp_path, mutation):
     old = tmp_path / "work" / "calc"
     old.parent.mkdir()
@@ -653,9 +653,14 @@ def test_project_move_dialog_reads_files_schedules_and_confirmed_action(monkeypa
         actions[0]["confirmation_id"] = None
     elif mutation == "wrong_action":
         actions[0]["arguments"]["action"] = "update"
+    elif mutation == "short_directory_report":
+        look.reply = f"已移动到 …/x/{new.parent.name}/{new.name}。"
     elif mutation == "missing_directory_report":
         look.reply = "已移动。"
-    assert (check(look) is None) is (mutation is None)
+    problem = check(look)
+    assert (problem is None) is (mutation in (None, "short_directory_report"))
+    if mutation == "missing_directory_report":
+        assert problem == "the move result does not tell the user the new directory"
 
 
 def provider_state():

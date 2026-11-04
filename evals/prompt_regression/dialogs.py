@@ -1305,7 +1305,7 @@ def _project_moved_on_confirmation(look: Look) -> str | None:
     if (len(writes) != 1 or writes[0]["tool"] != "looper_projects" or writes[0]["status"] != "ok"
             or writes[0]["arguments"].get("action") != "move" or not writes[0].get("confirmation_id")):
         return "the move did not run through its confirmed operation"
-    if not look.fake and str(new) not in look.reply:
+    if not look.fake and str(new) not in look.reply and f"{new.parent.name}/{new.name}" not in look.reply:
         return "the move result does not tell the user the new directory"
     return _raw_json(look.reply)
 
