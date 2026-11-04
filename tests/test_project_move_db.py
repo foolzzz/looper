@@ -36,8 +36,8 @@ async def _rows(pool):
     """Compare whole rows, so a refusal cannot silently update unrelated state."""
     return {
         table: [dict(row) for row in await pool.fetch(f"SELECT * FROM {table} ORDER BY 1")]
-        for table in ("projects", "schedules", "tasks", "task_worktrees", "task_steps", "llm_records", "schedule_runs",
-                      "task_user_gates", "project_activity")
+        for table in ("projects", "schedules", "tasks", "task_worktrees", "task_steps", "step_workspaces",
+                      "manager_task_templates", "llm_records", "schedule_runs", "task_user_gates", "project_activity")
     }
 
 
@@ -383,9 +383,13 @@ def test_move_repairs_external_linked_task_worktree(monkeypatch, tmp_path, neste
     run_db(check, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("parent_symlink", [False, True], ids=["direct-parent", "symlink-parent"])
 @pytest.mark.parametrize("layout", ["external-worktree", "both-inside", "linked-source"])
-def test_deleting_stopped_task_after_move_preserves_uncommitted_files(monkeypatch, tmp_path, layout):
+def test_deleting_stopped_task_after_move_preserves_uncommitted_files(monkeypatch, tmp_path, layout, parent_symlink):
     old, new = tmp_path / "old", tmp_path / "new"
+    if parent_symlink:
+        (tmp_path / "alias").symlink_to(tmp_path, target_is_directory=True)
+        old = tmp_path / "alias" / "old"
     repo = tmp_path / "repository" if layout == "linked-source" else old
     linked = (old if layout == "linked-source" else
               old / "checkout" if layout == "both-inside" else tmp_path / "checkout")
@@ -405,15 +409,20 @@ def test_deleting_stopped_task_after_move_preserves_uncommitted_files(monkeypatc
         assert "tracked.txt" in _git(linked, "status", "--porcelain")
         assert "?? untracked.txt" in _git(linked, "status", "--porcelain")
         project = await projects.create_project(name="Preserve stopped work", work_dir=str(old), pool=pool)
+        await _schedule(pool, project["id"], old.resolve())
         await tasks.create_task(task_id="stopped-task", requirement="Keep unfinished work",
                                 project_id=project["id"], work_dir=str(linked), workspace_dir=str(repo),
                                 status="stopped", pool=pool)
         await pool.execute("INSERT INTO task_worktrees (task_id,repo_dir,path,branch,base_commit) "
-                           "VALUES ('stopped-task',$1,$2,$3,$4)", str(repo), str(linked), branch, base)
+                           "VALUES ('stopped-task',$1,$2,$3,$4)",
+                           _git(repo, "rev-parse", "--show-toplevel"), str(linked.resolve()), branch, base)
 
+        preview = await api.preview_project_move(project, {"to": str(new), "link_old": False}, db=pool)
+        assert [row["id"] for row in preview.schedules] == ["command"]
         result = await api.move_project_dir(project["id"], {"to": str(new), "link_old": False})
         assert result["repairs"] and all(row["ok"] for row in result["repairs"])
         assert not old.exists()
+        assert await pool.fetchval("SELECT work_dir FROM schedules WHERE id='command'") == str(new)
         moved_repo = repo if layout == "linked-source" else new
         moved_linked = new if layout == "linked-source" else new / "checkout" if layout == "both-inside" else linked
         assert (moved_linked / "tracked.txt").read_text() == "uncommitted edit\n"
@@ -425,6 +434,65 @@ def test_deleting_stopped_task_after_move_preserves_uncommitted_files(monkeypatc
         assert _git(moved_repo, "show", f"{branch}:untracked.txt") == "uncommitted new file"
         assert not moved_linked.exists()
         assert str(moved_linked.resolve()) not in _git(moved_repo, "worktree", "list", "--porcelain")
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("dependency", ["project", "task-work-dir", "task-workspace", "task-repository",
+                                        "task-checkout", "step-repository", "step-checkout", "schedule", "template"])
+def test_move_without_link_refuses_other_project_directory_dependencies(monkeypatch, tmp_path, dependency):
+    old, new, linked = tmp_path / "old", tmp_path / "new", tmp_path / "checkout"
+    (tmp_path / "alias").symlink_to(tmp_path, target_is_directory=True)
+
+    async def check(pool):
+        project = await _project(pool, old)
+        _git(old, "init", "-q")
+        _git(old, "add", ".")
+        _git(old, "-c", "user.name=Directory move test", "-c", "user.email=move@example.invalid",
+             "commit", "-qm", "Initial files")
+        base = _git(old, "rev-parse", "HEAD")
+        branch = "looper/other-task/task"
+        _git(old, "worktree", "add", "-qb", branch, str(linked))
+        (linked / "subdir" / "kept.txt").write_text("unfinished edit\n")
+        (linked / "untracked.txt").write_text("unfinished new file\n")
+        reference = str(tmp_path / "alias" / "old")
+        other = await projects.create_project(name="Other", work_dir=reference if dependency == "project" else "",
+                                               pool=pool)
+        await tasks.create_task(task_id="other-task", requirement="Keep unfinished work", project_id=other["id"],
+                                work_dir=reference if dependency == "task-work-dir" else str(linked),
+                                workspace_dir=reference if dependency == "task-workspace" else "",
+                                status="stopped", pool=pool)
+        if dependency.startswith("task-") and dependency not in ("task-work-dir", "task-workspace"):
+            await pool.execute("INSERT INTO task_worktrees (task_id,repo_dir,path,branch,base_commit) "
+                               "VALUES ('other-task',$1,$2,$3,$4)",
+                               reference if dependency == "task-repository" else str(linked),
+                               reference if dependency == "task-checkout" else str(linked), branch, base)
+        elif dependency.startswith("step-"):
+            await pool.execute("INSERT INTO task_steps (id,task_id,step_index,instruction) "
+                               "VALUES ('other-step','other-task',0,'Keep work')")
+            await pool.execute("INSERT INTO step_workspaces "
+                               "(task_id,step_id,repo_dir,path,target_branch,branch,base_commit) "
+                               "VALUES ('other-task','other-step',$1,$2,'main',$3,$4)",
+                               reference if dependency == "step-repository" else str(linked),
+                               reference if dependency == "step-checkout" else str(linked), branch, base)
+        elif dependency == "schedule":
+            await _schedule(pool, other["id"], reference)
+        elif dependency == "template":
+            await pool.execute("INSERT INTO manager_task_templates (manager_id,key,name,project_id,work_dir) "
+                               "VALUES ('manager','other','Other',$1,$2)", other["id"], reference)
+        before = await _rows(pool)
+        for operation in (lambda: api.preview_project_move(project, {"to": str(new), "link_old": False}, db=pool),
+                          lambda: api.move_project_dir(project["id"], {"to": str(new), "link_old": False})):
+            with pytest.raises(api.RequestError) as error:
+                await operation()
+            assert error.value.status == api.HTTP_409
+            assert await _rows(pool) == before
+            assert old.is_dir() and not old.is_symlink() and not new.exists()
+            assert "?? untracked.txt" in _git(linked, "status", "--porcelain")
+        if dependency == "task-repository":
+            assert await api.delete_task("other-task", None) == {"deleted": "other-task"}
+            assert _git(old, "show", f"{branch}:subdir/kept.txt") == "unfinished edit"
+            assert _git(old, "show", f"{branch}:untracked.txt") == "unfinished new file"
 
     run_db(check, monkeypatch, timeout=30)
 
@@ -458,11 +526,15 @@ def test_git_repair_failure_is_reported_after_successful_move(monkeypatch, tmp_p
     run_db(check, monkeypatch, timeout=30)
 
 
-@pytest.mark.parametrize(("layout", "managed"), [
-    ("linked-source", True), ("both-inside", True), ("both-inside", False),
+@pytest.mark.parametrize(("layout", "managed", "parent_symlink"), [
+    ("linked-source", True, False), ("both-inside", True, False), ("both-inside", False, False),
+    ("both-inside", False, True),
 ])
-def test_move_repairs_moved_linked_checkout(monkeypatch, tmp_path, layout, managed):
+def test_move_repairs_moved_linked_checkout(monkeypatch, tmp_path, layout, managed, parent_symlink):
     old, new = tmp_path / "old", tmp_path / "new"
+    if parent_symlink:
+        (tmp_path / "alias").symlink_to(tmp_path, target_is_directory=True)
+        old = tmp_path / "alias" / "old"
 
     async def check(pool):
         if layout == "linked-source":

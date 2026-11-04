@@ -40,7 +40,7 @@ def _under(path: str, root: str) -> Path | None:
     if not path:
         return None
     try:
-        return Path(os.path.abspath(path)).relative_to(root)
+        return Path(path).resolve().relative_to(Path(root).resolve())
     except ValueError:
         return None
 
@@ -97,6 +97,24 @@ def _inventory(old: Path) -> tuple[int, int, bool]:
     return files, size, False
 
 
+async def _check_other_projects(db: Any, project_id: str, old: Path) -> None:
+    # A project's default is not the only dependency: stopped tasks may own checkouts
+    # elsewhere while their cleanup still needs the repository being moved.
+    rows = await db.fetch(
+        "SELECT work_dir AS path FROM projects WHERE id <> $1 UNION "
+        "SELECT unnest(ARRAY[work_dir, workspace_dir]) FROM tasks WHERE project_id IS DISTINCT FROM $1 UNION "
+        "SELECT unnest(ARRAY[w.repo_dir, w.path]) FROM task_worktrees w JOIN tasks t ON t.id = w.task_id "
+        "WHERE t.project_id IS DISTINCT FROM $1 AND w.state = 'active' UNION "
+        "SELECT unnest(ARRAY[w.repo_dir, w.path]) FROM step_workspaces w JOIN tasks t ON t.id = w.task_id "
+        "WHERE t.project_id IS DISTINCT FROM $1 AND w.state NOT IN ('merged', 'discarded') UNION "
+        "SELECT work_dir FROM schedules WHERE project_id IS DISTINCT FROM $1 UNION "
+        "SELECT work_dir FROM manager_task_templates WHERE project_id IS DISTINCT FROM $1", project_id)
+    if any(_under(row["path"], str(old)) is not None for row in rows):
+        raise projects.RequestError(projects.HTTP_409,
+                                    "another project depends on this directory; keep the old path link or "
+                                    "relocate those dependencies before moving")
+
+
 async def preview(project: Mapping[str, Any], data: Mapping[str, Any], *, db: Any = None) -> ProjectMove:
     from .tiers.planner import _IN_FLIGHT
 
@@ -120,6 +138,8 @@ async def preview(project: Mapping[str, Any], data: Mapping[str, Any], *, db: An
     link_old = data.get("link_old", True)
     if not isinstance(link_old, bool):
         raise projects.RequestError(projects.HTTP_400, "link_old must be a boolean")
+    if not link_old:
+        await _check_other_projects(db, project["id"], old)
     rows = await db.fetch(
         "SELECT s.*, COALESCE(t.work_dir, '') AS template_work_dir FROM schedules s "
         "LEFT JOIN manager_task_templates t ON t.manager_id = s.manager_id AND t.key = s.template_key "
@@ -174,7 +194,7 @@ def _repositories(root: Path) -> list[Path]:
     return sorted(found, key=lambda path: (not (path / ".git").is_dir(), str(path)))
 
 
-async def _repair(move: ProjectMove, worktrees: list[Any]) -> list[dict[str, Any]]:
+async def _repair(move: ProjectMove, worktrees: list[Any], source: str) -> list[dict[str, Any]]:
     repairs = []
     try:
         repositories = await asyncio.to_thread(_repositories, Path(move.new))
@@ -196,7 +216,7 @@ async def _repair(move: ProjectMove, worktrees: list[Any]) -> list[dict[str, Any
                     git_dir = Path(pointer)
                     if not git_dir.is_absolute():
                         git_dir = checkout / git_dir
-                    relative = _under(str(git_dir), move.old)
+                    relative = _under(str(git_dir), source)
                     if relative is not None:
                         git_dir = Path(move.new) / relative
                     if git_dir.parent.parent.resolve() == (repo / ".git").resolve():
@@ -204,12 +224,9 @@ async def _repair(move: ProjectMove, worktrees: list[Any]) -> list[dict[str, Any
                 except (OSError, UnicodeError) as exc:
                     logger.warning("cannot inspect moved worktree %s: %s", checkout, exc)
         for row in worktrees:
-            relative = _under(row["repo_dir"], move.old)
-            moved_repo = Path(move.new) / relative if relative is not None else Path(row["repo_dir"])
-            if moved_repo.resolve() != repo.resolve():
+            if Path(row["repo_dir"]).resolve() != repo.resolve():
                 continue
-            relative = _under(row["path"], move.old)
-            path = Path(move.new) / relative if relative is not None else Path(row["path"])
+            path = Path(row["path"])
             if path.is_dir():
                 paths.append(str(path))
         try:
@@ -241,7 +258,8 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
                 # writes as well as new starts, until paths and rows agree. Acquire before project
                 # rows, since a task insert can hold its table lock while checking the project FK.
                 await conn.execute("SET LOCAL lock_timeout = '5s'")
-                await conn.execute("LOCK TABLE tasks, task_steps, llm_records, schedule_runs, task_user_gates "
+                await conn.execute("LOCK TABLE tasks, task_steps, llm_records, schedule_runs, task_user_gates, "
+                                   "projects, schedules, task_worktrees, step_workspaces, manager_task_templates "
                                    "IN SHARE ROW EXCLUSIVE MODE")
                 row = await conn.fetchrow("SELECT * FROM projects WHERE id = $1 FOR UPDATE", project_id)
                 if row is None:
@@ -259,11 +277,26 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
                     raise
                 if expected_move_version is not None and change.version != expected_move_version:
                     raise projects.RequestError(projects.HTTP_409, CHANGED)
+                task_worktrees = await conn.fetch(
+                    "SELECT w.task_id, w.repo_dir, w.path FROM task_worktrees w JOIN tasks t ON t.id = w.task_id "
+                    "WHERE t.project_id = $1 AND w.state = 'active'", project_id)
                 worktrees = await conn.fetch(
                     "SELECT w.repo_dir, w.path FROM task_worktrees w JOIN tasks t ON t.id = w.task_id "
                     "WHERE t.project_id = $1 AND w.state = 'active' UNION "
                     "SELECT w.repo_dir, w.path FROM step_workspaces w JOIN tasks t ON t.id = w.task_id "
                     "WHERE t.project_id = $1 AND w.state NOT IN ('merged', 'discarded')", project_id)
+                # Capture canonical ancestry while the old directory and its symlinks still exist.
+                # Resolving after rename loses aliases (e.g. /tmp versus /private/tmp).
+                source = str(Path(change.old).resolve())
+
+                def moved(path: str) -> str:
+                    relative = _under(path, source)
+                    return str(Path(change.new) / relative) if relative is not None else path
+
+                task_worktrees = [{**dict(row), "repo_dir": moved(row["repo_dir"]), "path": moved(row["path"])}
+                                  for row in task_worktrees]
+                worktrees = [{"repo_dir": moved(row["repo_dir"]), "path": moved(row["path"])} for row in worktrees]
+                schedule_paths = {row["id"]: moved(row["work_dir"]) for row in change.schedules}
                 target_mode = Path(change.new).stat().st_mode & 0o7777 if Path(change.new).exists() else None
                 os.rename(change.old, change.new)
                 renamed = True
@@ -274,20 +307,12 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
                     raise RuntimeError("the project directory could not be updated")
                 # These are live cleanup paths, unlike the task's historical directories.
                 # A stale repo_dir makes deletion skip committing the checkout's pending files.
-                task_worktrees = await conn.fetch(
-                    "SELECT w.task_id, w.repo_dir, w.path FROM task_worktrees w JOIN tasks t ON t.id = w.task_id "
-                    "WHERE t.project_id = $1 AND w.state = 'active'", project_id)
                 for worktree in task_worktrees:
-                    paths = {}
-                    for field in ("repo_dir", "path"):
-                        relative = _under(worktree[field], change.old)
-                        paths[field] = str(Path(change.new) / relative) if relative is not None else worktree[field]
                     await conn.execute("UPDATE task_worktrees SET repo_dir = $2, path = $3 WHERE task_id = $1",
-                                       worktree["task_id"], paths["repo_dir"], paths["path"])
-                for schedule in change.schedules:
-                    new_dir = str(Path(change.new) / _under(schedule["work_dir"], change.old))
+                                       worktree["task_id"], worktree["repo_dir"], worktree["path"])
+                for schedule_id, new_dir in schedule_paths.items():
                     await conn.execute("UPDATE schedules SET work_dir = $2, updated_at = now() WHERE id = $1",
-                                       schedule["id"], new_dir)
+                                       schedule_id, new_dir)
                 await db_projects.record_directory_move(project_id, change.old, change.new, pool=conn)
                 updated = projects.project_view(await db_projects.get_project(project_id, pool=conn))
         except BaseException as exc:
@@ -304,7 +329,7 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
             if isinstance(exc, (asyncpg.LockNotAvailableError, asyncpg.DeadlockDetectedError)):
                 raise projects.RequestError(projects.HTTP_409, "project execution state is changing; retry the move") from None
             raise
-        repairs = await _repair(change, worktrees)
+        repairs = await _repair(change, worktrees, source)
         logger.info("project %s directory moved from %s to %s (link_old=%s)",
                     project_id, change.old, change.new, change.link_old)
         return {"project": updated, "old_dir": change.old, "new_dir": change.new,
