@@ -1213,6 +1213,12 @@ class PlannerAgent:
         return ", ".join(parts)
 
     async def _dispatch_ready(self, plan: TaskPlan) -> None:
+        from ..scheduler import project_dispatch
+
+        async with project_dispatch(plan.project_id):
+            await self._dispatch_ready_impl(plan)
+
+    async def _dispatch_ready_impl(self, plan: TaskPlan) -> None:
         # Every ready gate and wait opens; every ready work step starts, and the worker pool runs the work
         # within its project's Worker limit. A wait takes no Worker and joins no workspace round. Progress is
         # reported once the work is in flight, so an open wait does not report the task as waiting first.

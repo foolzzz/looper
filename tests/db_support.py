@@ -141,3 +141,40 @@ async def call_v1(server, path, body):
     status, answer = await server._answer_v1("POST", path, api_v1.find("POST", path), {},
                                              json.dumps(body).encode(), api_v1.OPERATOR)
     return int(status.split()[0]), answer.get("result", {"error": answer.get("error", {}).get("message", "")})
+
+
+@asynccontextmanager
+async def v1_api(tmp_path, pool):
+    """Authenticated v1 HTTP calls on a disposable loopback server, with both caller identities."""
+    from types import SimpleNamespace
+
+    import httpx
+
+    from looper.agents.bus import MessageBus
+    from looper.agents.http_server import AgentHTTPServer
+    from looper.agents.message import channel_address
+    from looper.agents.ops.clients import ClientOps
+    from looper.agents.ops.service import Platform
+    from looper.agents.tiers.task import TaskRouter
+    from looper.db import api_clients
+
+    _, client_token = await api_clients.create("v1 validation", pool=pool)
+    operator_token = uuid.uuid4().hex
+    bus = MessageBus(runtime_root=tmp_path)
+    router = TaskRouter(runtime_root=tmp_path)
+    server = AgentHTTPServer(host="127.0.0.1", port=0, operator_token=operator_token,
+        static_dir=tmp_path, runtime_root=tmp_path, supervisor=SimpleNamespace(bus=bus),
+        web_adapter=SimpleNamespace(_address=channel_address("web")), task_router=router)
+    server._client_ops = ClientOps(Platform(bus=bus, task_router=router, runtime_root=tmp_path))
+    await server.start()
+    try:
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{server._port}", timeout=10) as transport:
+            async def call(action, body=None, *, client=False):
+                path = action if action.startswith("/") else "/api/v1/" + action.replace(".", "/")
+                response = await transport.post(path, json=body or {}, headers={
+                    "Authorization": f"Bearer {client_token if client else operator_token}",
+                    "X-Looper-Session": "v1-validation"})
+                return response.status_code, response.json()
+            yield call
+    finally:
+        await server.stop()

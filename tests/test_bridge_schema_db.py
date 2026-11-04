@@ -106,6 +106,11 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                     assert after[table] == expected
                 elif table == "agent_runtimes":
                     assert after[table] == [{**r, "launcher": "native"} for r in before[table]]
+                elif table == "sequence_state":
+                    # The new audit table adds one unused sequence; all historical values must survive.
+                    assert after[table] == sorted(
+                        [*before[table], {"sequencename": "project_activity_seq_seq", "last_value": None}],
+                        key=lambda row: row["sequencename"])
                 elif table in ("llm_providers", "llm_provider_endpoints", "llm_models"):
                     # Only Cursor's new builtins may be added; every historical field stays intact.
                     key = "id" if table == "llm_providers" else "provider_id"

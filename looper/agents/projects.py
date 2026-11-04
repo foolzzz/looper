@@ -213,6 +213,12 @@ def projects_root() -> str:
     return _root
 
 
+def project_directory_name(name: str, project_id: str) -> str:
+    """The same safe directory component for creation and an explicit move."""
+    safe = re.sub(r"-+", "-", re.sub(r"[^A-Za-z0-9._-]", "-", name)).strip("-.").lower()
+    return safe or project_id
+
+
 @contextmanager
 def project_directories() -> Iterator[list[Path]]:
     """Keep newly made directories only when the enclosing create transaction succeeds."""
@@ -236,8 +242,7 @@ async def _create_project_row(fields: dict[str, Any], *, pool: Any = None,
     # Also serialize against explicit creates/updates/imports, which may claim the same path.
     await pool.execute("LOCK TABLE projects IN SHARE ROW EXCLUSIVE MODE")
     project_id = f"proj-{uuid.uuid4().hex[:12]}"
-    name = re.sub(r"-+", "-", re.sub(r"[^A-Za-z0-9._-]", "-", fields["name"])).strip("-.").lower()
-    name = name or project_id
+    name = project_directory_name(fields["name"], project_id)
     used = [Path(row["work_dir"]) for row in await pool.fetch("SELECT work_dir FROM projects WHERE work_dir <> ''")]
     path = Path(root) / name
     with project_directories() as created:
@@ -329,6 +334,25 @@ async def update_project(project_id: str, data: dict[str, Any], *, manager_id: s
     if not updated:
         raise RequestError(HTTP_404, f"project {project_id!r} not found")
     return project_view(await _existing_project(project_id, manager_id=manager_id))
+
+
+async def preview_project_move(project: Mapping[str, Any], data: Mapping[str, Any], *, db: Any = None):
+    from .project_move import preview
+
+    return await preview(project, data, db=db)
+
+
+def project_move_impact(project: Mapping[str, Any], move) -> str:
+    from .project_move import impact
+
+    return impact(project, move)
+
+
+async def move_project_dir(project_id: str, data: Mapping[str, Any], *, expected_move_version: str | None = None,
+                           manager_id: str | None = None) -> dict[str, Any]:
+    from .project_move import move
+
+    return await move(project_id, data, expected_move_version=expected_move_version, manager_id=manager_id)
 
 
 async def deletable_project(project_id: str, *, manager_id: str | None = None) -> dict[str, Any]:
