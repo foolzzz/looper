@@ -77,7 +77,7 @@ def test_ttadk_on_path_registers_a_separate_builtin_runtime(monkeypatch, tmp_pat
         assert await db.get_runtime("rt-ttadk-codex") is None
         assert await db.get_runtime("rt-ttadk-cursor-agent") is None
         monkeypatch.setenv("PATH", str(bin_dir))
-        assert await registry.register_found_runtimes() == ["codex", "ttadk-codex", "ttadk-cursoragent"]
+        assert await registry.register_found_runtimes() == ["codex", "ttadk-codex", "ttadk-cursor-agent"]
         row = await db.get_runtime("rt-ttadk-codex")
         assert (row["name"], row["type"], row["launcher"], row["executable"]) == (
             "ttadk-codex", "codex", "ttadk", "")
@@ -86,8 +86,8 @@ def test_ttadk_on_path_registers_a_separate_builtin_runtime(monkeypatch, tmp_pat
         # TTADK wrappers register independently of the native tool, retaining its probe diagnosis.
         assert await db.get_runtime("rt-cursor-agent") is None
         row = await db.get_runtime("rt-ttadk-cursor-agent")
-        assert (row["name"], row["type"], row["launcher"], row["executable"]) == (
-            "ttadk-cursoragent", "cursor-agent", "ttadk", "")
+        assert (row["id"], row["name"], row["type"], row["launcher"], row["executable"]) == (
+            "rt-ttadk-cursor-agent", "ttadk-cursor-agent", "cursor-agent", "ttadk", "")
         assert row["version"] == "ttadk 1.0.27 / cursor-agent unknown"
         assert row["probe_error"] == "'cursor-agent' was not found"
         assert await registry.register_found_runtimes() == []

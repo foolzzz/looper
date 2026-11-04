@@ -265,19 +265,20 @@ reference belonging to that account. The `agent` layer holds only its name
 and runtime options; profile system-prompt mode is not an option. Role/task
 mode selection continues to apply.
 
-The planned Cursor Agent `--register-agent` spec is:
+The Cursor Agent `--register-agent` spec is:
 
 ```json
 {
   "runtime": {"type": "cursor-agent"},
   "provider": {"provider_id": "prov-cursor-login"},
-  "agent": {"name": "cursor-agent/gpt-5.3-codex", "model": "gpt-5.3-codex"}
+  "model": {"name": "gpt-5.3-codex", "protocol": "openai-responses"},
+  "agent": {"name": "cursor-agent/gpt-5.3-codex"}
 }
 ```
 
-For the current model-layer schema, move `agent.model` to a top-level
-`"model": {"name": "gpt-5.3-codex", "protocol": "openai-responses"}`;
-registration rejects the old `agent.model` form. Cursor Agent currently runs Workers and Reviewers only. Real-mode
+To select TTADK, use `"runtime": {"name": "ttadk-cursor-agent"}`; its built-in
+runtime id is `rt-ttadk-cursor-agent`, type `cursor-agent`, launcher `ttadk`.
+Cursor Agent currently runs Workers and Reviewers only. Real-mode
 Worker prompt comparisons for its runtime notes remain pending; development
 tests use stand-in scripts and make no real Cursor model calls.
 

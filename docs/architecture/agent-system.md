@@ -1560,11 +1560,12 @@ Manager tools.
   enforces that cap on `looper_room_inbox.wait_seconds`, currently the only
   platform long poll. Other runtimes keep their existing waits.
 
-  **Through TTADK.** The `ttadk-cursoragent` launcher uses
+  **Through TTADK.** The `ttadk-cursor-agent` launcher uses
   `ttadk code -t cursor-cli --skip-check --`, followed by the same native
   arguments; the instructions and turn prompt still arrive on stdin.
   Looper prepends its private `cursor-agent/ttadk-bin` directory to this
-  process's `PATH`. Its `agent` shim requires both Cursor directory variables,
+  run's resolved `PATH`, including Agent settings' variables. Its `agent` shim
+  requires both Cursor directory variables,
   removes TTADK's `TTADK_JWT_TOKEN` before Cursor or its shell can inherit it,
   and executes the resolved `cursor-agent` binary. It keeps the operator's
   `HOME` and login. A `cursor-cli` command configured as anything other than
@@ -1583,8 +1584,11 @@ Manager tools.
   concatenates attempts and is not used as the report. Tokens are retained
   as `usage` and `modelUsage`; Cursor reports no cost and the login's models
   have no prices, so cost is unknown (`provider_price`). A per-run spend cap
-  cannot stop Cursor. A run that exits without a result fails and retains
-  its stderr. The run's model column keeps the profile's requested model id;
+  cannot stop Cursor. A run that exits without a result fails, even when
+  TTADK exits zero, and retains its stderr tail. Non-JSON stdout lines,
+  including TTADK's login greeting before or between events, are discarded
+  before events, logs or failure details are recorded.
+  The run's model column keeps the profile's requested model id;
   Cursor's `system/init` display name is retained as `model_display` in the
   launch record.
 

@@ -176,7 +176,7 @@ class CursorAgentRuntime(RuntimeAdapter):
     auth_kinds = frozenset({AuthKind.OAUTH})
     launchers = frozenset({Launcher.NATIVE, Launcher.TTADK})
     ttadk_tool = "cursor-cli"
-    ttadk_runtime_name = "ttadk-cursoragent"
+    ttadk_runtime_name = "ttadk-cursor-agent"
     login_models = cursor_login.SUGGESTED_MODELS
     effort_levels = ()
     isolation_id = HOME_LAYOUT_ID
@@ -254,7 +254,7 @@ class CursorAgentRuntime(RuntimeAdapter):
         program = ["env", f"CURSOR_CONFIG_DIR={run / CONFIG_DIR}", f"CURSOR_DATA_DIR={run / DATA_DIR}"]
         if launch.profile.runtime.launcher is Launcher.TTADK:
             shim_dir = write_ttadk_shim(run.parent.parent.parent)
-            program += [f"PATH={shim_dir}{os.pathsep}{child_env.inherited().get('PATH', '')}",
+            program += [f"PATH={shim_dir}{os.pathsep}{self.environment(launch).get('PATH', '')}",
                         *ttadk.prefix(executable, "cursor-cli")]
         else:
             program.append(executable)

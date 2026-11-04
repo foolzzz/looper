@@ -30,14 +30,16 @@ class TtadkProblem(str, Enum):
     WRONG_TOOL = "wrong_tool"
 
     def message(self, runtime_type: str) -> str:
-        explanation = {
-            self.NOT_FOUND: "`ttadk` is not on the server's PATH: install TTADK or add it to PATH",
-            self.NOT_SIGNED_IN: "TTADK has no valid sign-in on this machine: run `ttadk auth login sso` in a terminal",
-            self.CHECK_FAILED: "TTADK's sign-in check timed out or returned unreadable output: "
-                               "run `ttadk models` in a terminal and check TTADK's sign-in",
-            self.WRONG_TOOL: "TTADK's configured tool command does not match this runtime: "
-                             "correct ai_tool_commands in ~/.ttadk/setting.json",
-        }[self]
+        if self is self.WRONG_TOOL:
+            explanation = (f"TTADK's settings make cursor-cli run `{tool_command('cursor-cli')}`, "
+                           "so Looper cannot confirm it is Cursor's CLI")
+        else:
+            explanation = {
+                self.NOT_FOUND: "`ttadk` is not on the server's PATH: install TTADK or add it to PATH",
+                self.NOT_SIGNED_IN: "TTADK has no valid sign-in on this machine: run `ttadk auth login sso` in a terminal",
+                self.CHECK_FAILED: "TTADK's sign-in check timed out or returned unreadable output: "
+                                   "run `ttadk models` in a terminal and check TTADK's sign-in",
+            }[self]
         return (f"{explanation}, or choose the native `{runtime_type}` runtime for this Agent Profile "
                 "(its runs do not count in TTADK's records)")
 

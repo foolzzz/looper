@@ -36,7 +36,7 @@ def _isolated_ttadk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def _launch() -> Launch:
     launch = _native_launch()
-    runtime = replace(launch.profile.runtime, id="rt-ttadk-cursoragent", name="ttadk-cursoragent",
+    runtime = replace(launch.profile.runtime, id="rt-ttadk-cursor-agent", name="ttadk-cursor-agent",
                       executable="ttadk", launcher=Launcher.TTADK, version="ttadk 1.0.37 / cursor-agent test")
     return replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, runtime=runtime)))
 
@@ -50,13 +50,17 @@ def _cursor_script(path: Path, body: str) -> str:
 
 
 @pytest.mark.parametrize("builder", ["run", "resident-turn"])
-def test_ttadk_cursor_command_preserves_native_arguments(builder: str, tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("launch_path", [None, "/opt/tools/bin"])
+def test_ttadk_cursor_command_preserves_native_arguments(builder: str, launch_path: str | None,
+                                                        tmp_path: Path, monkeypatch) -> None:
     if builder == "resident-turn" and not hasattr(cursor_agent, "ResidentCursor"):
         pytest.skip("The native Cursor resident-session implementation is not present in this checkout")
     prompt = _prompt(tmp_path / "runtime")
     inherited_path = os.environ["PATH"]
 
     def command(launch: Launch) -> list[str]:
+        if launch_path is not None:
+            launch = replace(launch, settings=replace(launch.settings, env=(("PATH", launch_path),)))
         launch = replace(launch, library=AgentLibrary(plugin_dirs=(str(tmp_path / "plugin"),)),
                          knowledge=AgentKnowledge(add_dirs=(str(tmp_path / "knowledge"),)))
         executable = launch.profile.runtime.executable
@@ -73,7 +77,7 @@ def test_ttadk_cursor_command_preserves_native_arguments(builder: str, tmp_path:
     assert native[:3] == wrapped[:3]
     assert native[1].startswith("CURSOR_CONFIG_DIR=") and native[2].startswith("CURSOR_DATA_DIR=")
     shim = tmp_path / "runtime/.local/cursor-agent/ttadk-bin"
-    assert wrapped[3:10] == [f"PATH={shim}{os.pathsep}{inherited_path}", "ttadk", "code", "-t",
+    assert wrapped[3:10] == [f"PATH={shim}{os.pathsep}{launch_path or inherited_path}", "ttadk", "code", "-t",
                              "cursor-cli", "--skip-check", "--"]
     assert wrapped[10:] == native[4:]
     assert not any(arg.startswith("HOME=") for arg in wrapped)
@@ -144,7 +148,7 @@ def test_ttadk_cursor_environment_and_record_keep_native_login() -> None:
     assert CURSOR.environment(wrapped)["HOME"] == os.environ["HOME"]
     assert all(name not in CURSOR.environment(wrapped) for name in removed)
     assert CURSOR.launchers == frozenset({Launcher.NATIVE, Launcher.TTADK})
-    assert CURSOR.ttadk_runtime_name == "ttadk-cursoragent" and CURSOR.ttadk_tool == "cursor-cli"
+    assert CURSOR.ttadk_runtime_name == "ttadk-cursor-agent" and CURSOR.ttadk_tool == "cursor-cli"
     assert CURSOR.auth_kinds_for(Launcher.TTADK) == frozenset({AuthKind.OAUTH})
     assert CURSOR.launch_record(wrapped) == {"personal_config": list(PERSONAL_CONFIG),
         "launcher": {"kind": "ttadk", "version": wrapped.profile.runtime.version, "tool": "cursor-cli", "mode": None}}
@@ -215,6 +219,46 @@ def test_wrong_ttadk_cursor_tool_refuses_worker_before_any_process(tmp_path: Pat
     launch = _launch()
     assert CURSOR.ttadk_problem() is ttadk.TtadkProblem.WRONG_TOOL
     problem = asyncio.run(profile_launch_problem(launch.profile, AgentType.WORKER))
+    assert "TTADK's settings make cursor-cli run `other`, so Looper cannot confirm it is Cursor's CLI" in problem
     assert ttadk.TtadkProblem.WRONG_TOOL.message("cursor-agent") in problem
     result = asyncio.run(asyncio.wait_for(_worker_run(tmp_path, monkeypatch, launch, gate=True), 5))
     assert result["status"] == "failed" and result["error"] == problem
+
+
+def test_ttadk_cursor_zero_exit_without_result_keeps_error_but_drops_preamble(
+    tmp_path: Path, monkeypatch, agent_db: Any, caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("DEBUG")
+    _cursor_script(tmp_path / "cursor-agent", "")
+    fake_claude(tmp_path / "ttadk", """
+import json, sys
+assert sys.argv[1:6] == ['code', '-t', 'cursor-cli', '--skip-check', '--']
+sys.stdin.read()
+print('Signed in as someone@example.com')
+print('Launching Cursor CLI...')
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': 'cursor-ttadk'}))
+print(json.dumps({'type': 'retry', 'subtype': 'starting', 'attempt': 1}))
+print('Reconnecting someone@example.com')
+print(json.dumps({'type': 'retry', 'subtype': 'resuming', 'attempt': 1}))
+print('RetriableError: WritableIterable is closed', file=sys.stderr)
+print('Error: command failed unexpectedly.', file=sys.stderr)
+sys.exit(0)
+""")
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    (tmp_path / "work").mkdir()
+    result = asyncio.run(asyncio.wait_for(_worker_run(tmp_path, monkeypatch, _launch()), 15))
+    assert result["status"] == "failed"
+    assert "Cursor Agent through TTADK ended without a result" in result["error"]
+    assert result["error"].endswith("Error: command failed unexpectedly.")
+    assert "RetriableError: WritableIterable is closed" in result["stderr"]
+    finish = agent_db.finish_record.await_args.kwargs
+    assert finish["error"] == result["error"] and finish["outcome"] == "run_failed"
+    events = str(agent_db.append_events.await_args_list)
+    assert "cursor-ttadk" in events and "cursor_retry" in events
+    # Check every captured database write, including events, records and activities,
+    # and every generated runtime file as well as Python logs and the returned failure.
+    writes = [str(value.mock_calls) for value in vars(agent_db).values() if hasattr(value, "mock_calls")]
+    files = [path.read_text() for path in (tmp_path / "runtime").rglob("*") if path.is_file()]
+    for text in [str(result), caplog.text, *writes, *files]:
+        assert "someone@example.com" not in text
+        assert "Launching Cursor CLI..." not in text

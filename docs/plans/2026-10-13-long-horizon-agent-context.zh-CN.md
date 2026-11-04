@@ -751,7 +751,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-11-03 | Cursor 登录基础（本分支）：`cursor-login` provider 代表操作者本机现有的 Cursor 登录（macOS 登录钥匙串），五个建议模型无内置价格；没有文件存储、API key 或登录链接。`cursor-agent status --format json` 保留操作者的 `HOME`，使用用完即删的 `CURSOR_CONFIG_DIR`/`CURSOR_DATA_DIR`，去掉 key、token、端点和凭据存储变量，设 `NO_OPEN_BROWSER=1`、空 stdin、20 秒超时。30 秒缓存；provider 列表立即返回已有状态或检查中，最多一个后台刷新，在运行时存在前就显示登录状态；启动检查和 doctor 同步检查。2026-11-04 已验证钥匙串登录的 headless 运行（RFC 2.4）和 `status` JSON 形状，不保存或输出 `userInfo` 内容；测试使用替身 `cursor-agent`。控制台、Telegram/Lark 与 CLI 沿用现有 provider/doctor 入口。 |
 
 | 2026-11-04 | 原生 Cursor Agent Worker/Reviewer 运行时（本分支）：沿用操作者的 `HOME` 和 Cursor 登录，个人 Cursor/Claude Code 配置不可关闭；Looper 插件、配置与数据放在内容寻址的私有运行目录，stdin 单轮输入，报告仅取最后一次工具调用或重试后的文本，并保留路由模型和 token。新增 `loads_operator_config` 类型契约，控制台、Telegram/Lark 与 CLI 沿用共享注册表入口；纯文本样本保留原输出，但步骤仍须符合既有 JSON 报告契约。定向 pytest 分批验证、TypeScript 编译和 59 项组件测试通过，脱敏流样本逐字节一致；仅用替身 Cursor，真实 Worker prompt 对照评测待后续验证，eval 示例需按现有顶层 model schema 转换。 |
-| 2026-11-04 | Cursor Agent 经 TTADK（本分支）：增加 `ttadk-cursoragent` 启动器、私有 `agent` shim、工具设置检查、版本探测和启动记录，复用原生目录与 stdin 指令并保留操作者的 `HOME`，shim 去掉 `TTADK_JWT_TOKEN`。定向替身回归 231 passed、1 skipped：Worker 可穿过 TTADK 横幅读取 Cursor 报告，工具设置错误时不启动任何进程；当前基线缺少原生 resident 会话，对应 argv 验证跳过，真实 TTADK/Cursor 与耗时未测。控制台、Telegram/Lark 与 CLI 沿用 Agent Profile 的运行时选择；启动事件在停止时丢失的统计缺口见 §5.4。 |
+| 2026-11-04 | Cursor Agent 经 TTADK（本分支）：增加 `ttadk-cursor-agent` 启动器、私有 `agent` shim、工具设置检查、版本探测和启动记录，复用原生目录与 stdin 指令并保留操作者的 `HOME`，shim 去掉 `TTADK_JWT_TOKEN`。定向替身回归 231 passed、1 skipped：Worker 可穿过 TTADK 横幅读取 Cursor 报告，工具设置错误时不启动任何进程；当前基线缺少原生 resident 会话，对应 argv 验证跳过，真实 TTADK/Cursor 与耗时未测。控制台、Telegram/Lark 与 CLI 沿用 Agent Profile 的运行时选择；启动事件在停止时丢失的统计缺口见 §5.4。 |
 
 ## 5. 不属于本 RFC 的待办
 
