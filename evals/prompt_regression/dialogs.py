@@ -391,7 +391,23 @@ def _created_with_a_title(look: Look) -> str | None:
     return None if titled else "looper_task_create ran without a title"
 
 
-def _created_under_projects_root(look: Look) -> str | None:
+def _new_project_asked_or_created(look: Look) -> str | None:
+    found = _raw_json(look.reply)
+    if found:
+        return found
+    if _project(look, "eval-rooted") is not None:
+        return _created_under_projects_root(look, titled=False)
+    tasks = look.new_tasks()
+    if tasks:
+        return f"no project eval-rooted, but {len(tasks)} new task(s) were created"
+    writes = _writes(replace(look, since=max(look.since, look.turn_since)))
+    if any(a["status"] == "needs_confirmation" and a["tool"] in ("looper_task_create", "looper_projects")
+           for a in writes):
+        return None
+    return f"no project eval-rooted or new task, and no new-project confirmation: {[(a['tool'], a['status']) for a in writes]}"
+
+
+def _created_under_projects_root(look: Look, *, titled: bool = True) -> str | None:
     found = _raw_json(look.reply)
     if found:
         return found
@@ -404,16 +420,13 @@ def _created_under_projects_root(look: Look) -> str | None:
     directory = project.get("work_dir")
     if not directory or os.path.realpath(directory) != expected:
         return f"project eval-rooted's directory is {directory!r}, not {expected} under the root"
-    tasks = look.new_tasks()
-    if len(tasks) != 1 or tasks[0].get("project_id") != project["project_id"]:
-        return f"{len(tasks)} new task(s), not 1 in eval-rooted"
-    if not str(look.detail(tasks[0]["task_id"]).get("title") or "").strip():
+    page = look.api.post("/api/v1/tasks/page", {"project_id": project["project_id"]})["result"]
+    count = sum(page["counts"].values())
+    if count != 1 or len(page["tasks"]) != 1:
+        return f"{count} task(s) in eval-rooted, not 1"
+    if titled and not str(look.detail(page["tasks"][0]["task_id"]).get("title") or "").strip():
         return "the new task has no title"
-    created = _writes(look, status="ok", tool="looper_task_create")
-    if not created:
-        return "looper_task_create did not create the task"
-    return None if any(str(a["arguments"].get("title") or "").strip() for a in created) else (
-        "looper_task_create ran without a title")
+    return None
 
 
 def _started(look: Look) -> str | None:
@@ -1745,11 +1758,11 @@ DIALOGS: tuple[Dialog, ...] = (
     ), projects_root=True),
     Dialog("root_new_project", (
         Say("新建一个项目 eval-rooted，在里面帮我写个小脚本 hello.py，运行时打印 hello。", _restated_and_asked),
-        Say("确认", _created_under_projects_root, (
-            ("looper_projects", {"action": "create", "name": "eval-rooted"}),
+        Say("确认", _new_project_asked_or_created, (
             ("looper_task_create", {"requirement": "在工作目录里创建 hello.py，运行时打印 hello。",
                                   "title": "hello 脚本", "project": "eval-rooted"}),
         )),
+        Say("确认", _created_under_projects_root, (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
     ), projects_root=True),
     Dialog("confirm_create_start", (
         Say(f"帮我写个小脚本：在 {PROJECT} 项目里创建 hello.py，运行时打印 hello，目录用项目默认的。", _restated_and_asked),

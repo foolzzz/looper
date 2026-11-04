@@ -269,15 +269,15 @@ def test_projects_root_dialogs_wait_before_creating(monkeypatch, case_id, mutati
     ("missing_project", "no project eval-rooted"),
     ("wrong_root", "directory is"),
     ("unneeded_suffix", "directory is"),
-    ("no_task", "0 new task(s)"),
-    ("extra_task", "2 new task(s)"),
-    ("other_project", "not 1 in eval-rooted"),
+    ("no_task", "0 task(s) in eval-rooted"),
+    ("extra_task", "2 task(s) in eval-rooted"),
+    ("paged_extra_task", "2 task(s) in eval-rooted"),
+    ("other_project", "0 task(s) in eval-rooted"),
     ("no_title", "new task has no title"),
-    ("no_create_title", "looper_task_create ran without a title"),
-    ("failed_create", "looper_task_create did not create the task"),
     ("raw_json", "reply shows raw JSON"),
 ])
-def test_root_new_project_checks_observable_state(monkeypatch, tmp_path, mutation, problem):
+@pytest.mark.parametrize("say_index", [1, 2])
+def test_root_new_project_checks_observable_state(monkeypatch, tmp_path, mutation, problem, say_index):
     root = tmp_path / "projects"
     root.mkdir()
     alias = tmp_path / "root-alias"
@@ -285,31 +285,70 @@ def test_root_new_project_checks_observable_state(monkeypatch, tmp_path, mutatio
     project = {"project_id": "rooted", "name": "eval-rooted", "work_dir": str(alias / "eval-rooted")}
     tasks = [{"task_id": "new", "project_id": "rooted"}]
     detail = {"title": "hello 脚本"}
-    actions = [action("looper_task_create", "create", title="hello 脚本")]
     if mutation == "wrong_root":
         project["work_dir"] = str(tmp_path / "elsewhere" / "eval-rooted")
     elif mutation == "unneeded_suffix":
         project["work_dir"] = str(root / "eval-rooted-2")
     elif mutation == "no_task":
         tasks.clear()
-    elif mutation == "extra_task":
+    elif mutation in {"extra_task", "paged_extra_task"}:
         tasks.append({**tasks[0], "task_id": "extra"})
     elif mutation == "other_project":
         tasks[0]["project_id"] = "another"
     elif mutation == "no_title":
         detail["title"] = " "
-    elif mutation == "no_create_title":
-        actions[0]["arguments"].pop("title")
-    elif mutation == "failed_create":
-        actions[0]["status"] = "error"
-    monkeypatch.setattr(dialogs, "_project", lambda *_: None if mutation == "missing_project" else project)
-    monkeypatch.setattr(dialogs.Look, "new_tasks", lambda _: tasks)
-    monkeypatch.setattr(dialogs.Look, "detail", lambda *_: detail)
-    monkeypatch.setattr(dialogs, "_trail", lambda *_: actions)
-    look = dialogs.Look(None, None, '{"action": "create"}' if mutation == "raw_json" else "任务已创建。",
-                        "disposable", 0, frozenset(), True, runtime_root=tmp_path / "runtime")
-    check = dialogs.select(["root_new_project"])[0].says[1].check
+
+    class Api:
+        def post(self, path, body):
+            if path == "/api/v1/project_admin/list":
+                return {"result": {"projects": [] if mutation == "missing_project" else [project]}}
+            if path == "/api/v1/tasks/page":
+                if mutation == "missing_project":
+                    assert body == {}
+                    return {"result": {"tasks": []}}
+                assert body == {"project_id": "rooted"}
+                found = [task for task in tasks if task["project_id"] == body["project_id"]]
+                return {"result": {"tasks": found[:1] if mutation == "paged_extra_task" else found,
+                                   "counts": {"ready": len(found)}}}
+            assert path == "/api/v1/tasks/detail" and body == {"task_id": "new"}
+            return {"result": detail}
+
+    # The task may already exist from Say 2. Say 3 must count it, even with no new task or create call.
+    look = dialogs.Look(Api(), None, '{"action": "create"}' if mutation == "raw_json" else "任务已创建。",
+                        "disposable", 0, frozenset({"new", "extra"}), True, runtime_root=tmp_path / "runtime")
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [])
+    check = dialogs.select(["root_new_project"])[0].says[say_index].check
+    if mutation == "no_title" and say_index == 1:
+        problem = None  # A title is required after the final confirmation, not while asking for it.
     found = check(look)
+    assert found is None if problem is None else problem in found
+
+
+@pytest.mark.parametrize("mutation,problem", [
+    (None, None),
+    ("projects_tool", None),
+    ("no_write", "no new-project confirmation: []"),
+    ("failed_write", "('looper_task_create', 'error')"),
+    ("wrong_tool", "('looper_settings', 'needs_confirmation')"),
+    ("read_only", "no new-project confirmation: []"),
+    ("stale_write", "no new-project confirmation: []"),
+    ("new_task", "no project eval-rooted, but 1 new task(s)"),
+    ("raw_json", "reply shows raw JSON"),
+])
+def test_root_new_project_requires_this_turns_confirmation(monkeypatch, mutation, problem):
+    tool = "looper_projects" if mutation == "projects_tool" else "looper_task_create"
+    if mutation == "wrong_tool":
+        tool = "looper_settings"
+    pending = action(tool, "create", status="error" if mutation == "failed_write" else "needs_confirmation")
+    if mutation == "read_only":
+        pending["risk"] = "read"
+    monkeypatch.setattr(dialogs, "_project", lambda *_: None)
+    monkeypatch.setattr(dialogs.Look, "new_tasks", lambda _: [{}] if mutation == "new_task" else [])
+    monkeypatch.setattr(dialogs, "_trail", lambda _db, since, _manager: [pending]
+                        if mutation != "no_write" and (mutation != "stale_write" or since < 10) else [])
+    look = dialogs.Look(None, None, '{"action": "create"}' if mutation == "raw_json" else "请确认新建项目。",
+                        "disposable", 5, frozenset(), True, turn_since=10)
+    found = dialogs.select(["root_new_project"])[0].says[1].check(look)
     assert found is None if problem is None else problem in found
 
 

@@ -2809,7 +2809,7 @@ def test_task_cost_dialog_seeds_without_starting_an_agent(
 # The calls of each turn (tool:status) that some dialogs' turns are checked for.
 _DIALOG_CALLS = {
     "root_ask_project": [[]],
-    "root_new_project": [[], ["looper_projects:ok", "looper_task_create:ok"]],
+    "root_new_project": [[], ["looper_task_create:needs_confirmation"], ["looper_task_create:ok"]],
     "cancel_confirmation": [["looper_task_control:needs_confirmation"], [], ["looper_task_control:needs_confirmation"],
                             ["looper_task_control:ok"]],
     "schedules": [["looper_schedules:ok"], ["looper_schedules:ok"], ["looper_schedules:needs_confirmation"],

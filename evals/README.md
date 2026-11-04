@@ -737,7 +737,7 @@ database, a disposable `looper serve`, and fake or real mode.
 | `template_missing_input` | the same Manager, asked to review a PR without a link: it asks for the link and creates nothing |
 | `ask_project` | a task without a project: the Manager asks, and creates and changes nothing |
 | `root_ask_project` | with the server's `[projects] root` set, a task without a project still asks for the project and creates and changes nothing |
-| `root_new_project` | with the server's `[projects] root` set, a new project and task wait for 「确认」; then `eval-rooted` uses its directory under the root and the task has a title, without the user giving a directory |
+| `root_new_project` | with the server's `[projects] root` set, Looper asks for confirmation of the new project (as `looper_task_create` does); after the user confirms, `eval-rooted` uses its directory under the root and holds exactly one task with a title, without the user giving a directory |
 | `confirm_create_start` | the whole flow: a small task is asked for, the Manager restates it and asks; 「确认」 creates it with a title (`looper_task_create`); 「开始」 starts it; no reply shows raw JSON |
 | `create_start_stop` | a confirmed task is created ready in the named project with its configuration in the reply; "start" starts it, "stop" stops it |
 | `change_running_task` | for a running task: a supplement (or a requirement edit) reaches its Planner in a turn; an edited requirement is a new version; the Reviewer's Agent Profile changes |
