@@ -106,6 +106,8 @@ class _ProjectFirings:
     active: int = 0
     deleting: bool = False
     idle: asyncio.Event = field(default_factory=asyncio.Event)
+    resumed: asyncio.Event = field(default_factory=asyncio.Event)
+    owners: dict[asyncio.Task[Any], int] = field(default_factory=dict)
 
 
 # Shared by the deletion entry points and every Scheduler in this server.
@@ -115,19 +117,43 @@ _project_firings: dict[str, _ProjectFirings] = {}
 @contextmanager
 def _project_firing(project_id: str) -> Iterator[bool]:
     state = _project_firings.setdefault(project_id, _ProjectFirings())
-    if state.deleting:
+    try:
+        owner = asyncio.current_task()
+    except RuntimeError:  # Synchronous callers need no running event loop.
+        owner = None
+    # Router startup can dispatch steps after quiescence starts draining it. Let that
+    # already admitted task finish, without extending admission to child tasks.
+    if state.deleting and owner not in state.owners:
         yield False
         return
     state.active += 1
+    if owner is not None:
+        state.owners[owner] = state.owners.get(owner, 0) + 1
     state.idle.clear()
     try:
         yield True
     finally:
         state.active -= 1
+        if owner is not None:
+            state.owners[owner] -= 1
+            if not state.owners[owner]:
+                del state.owners[owner]
         if not state.active:
             state.idle.set()
             if not state.deleting:
                 _project_firings.pop(project_id, None)
+
+
+@asynccontextmanager
+async def project_dispatch(project_id: str) -> AsyncIterator[None]:
+    """Keep Planner filesystem preparation admitted, waiting through a project move."""
+    while True:
+        with _project_firing(project_id) as allowed:
+            if allowed:
+                yield
+                return
+            resumed = _project_firings[project_id].resumed
+        await resumed.wait()
 
 
 @asynccontextmanager
@@ -139,12 +165,14 @@ async def quiesce_project(project_id: str) -> AsyncIterator[None]:
     """
     state = _project_firings.setdefault(project_id, _ProjectFirings())
     state.deleting = True
+    state.resumed.clear()
     try:
         if state.active:
             await state.idle.wait()
         yield
     finally:
         state.deleting = False
+        state.resumed.set()
         if not state.active:
             _project_firings.pop(project_id, None)
 

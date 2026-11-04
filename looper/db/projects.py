@@ -167,6 +167,12 @@ async def worktree_projects(*, pool: asyncpg.Pool | asyncpg.Connection | None = 
     return [dict(row) for row in rows]
 
 
+async def record_directory_move(project_id: str, old: str, new: str, *, pool: Any = None) -> None:
+    pool = pool or get_pool()
+    await pool.execute("INSERT INTO project_activity (project_id, kind, summary) VALUES ($1, 'directory_moved', $2)",
+                       project_id, f"directory moved from {old} to {new}")
+
+
 async def delete_project(project_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
     """Delete a project; one that still has tasks or schedules raises ``asyncpg.ForeignKeyViolationError``."""
     pool = pool or get_pool()

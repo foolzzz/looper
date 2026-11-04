@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createProject, deleteProject, fetchProjects, fetchProjectsList, PROJECTS_CHANGED_EVENT, updateProject } from "@/lib/api";
+import { createProject, deleteProject, fetchProjects, fetchProjectsList, moveProjectDirectory,
+  previewProjectMove, PROJECTS_CHANGED_EVENT, updateProject } from "@/lib/api";
 import { installSessionGuard, resetSessionGuard, SessionEndedError } from "@/lib/session";
 
 beforeEach(() => resetSessionGuard());
@@ -17,6 +18,14 @@ const calls = [
     result: { project }, value: project, changes: 1 },
   { action: "delete", run: () => deleteProject(project.project_id), body: { project_id: project.project_id },
     result: { deleted: project.project_id }, value: undefined, changes: 1 },
+  { action: "preview_move_dir", run: () => previewProjectMove(project.project_id, { link_old: true }),
+    body: { project: project.project_id, link_old: true },
+    result: { old_dir: "/srv/old", new_dir: "/srv/new", impact: "移动文件", move_version: "version" },
+    value: { old_dir: "/srv/old", new_dir: "/srv/new", impact: "移动文件", move_version: "version" }, changes: 0 },
+  { action: "move_dir", run: () => moveProjectDirectory(project.project_id, { to: "/srv/new", link_old: false }, "version"),
+    body: { project: project.project_id, to: "/srv/new", link_old: false, move_version: "version" },
+    result: { project, old_dir: "/srv/old", new_dir: "/srv/new", link_old: false, repairs: [] },
+    value: { project, old_dir: "/srv/old", new_dir: "/srv/new", link_old: false, repairs: [] }, changes: 1 },
 ];
 
 it.each(calls)("project $action uses v1 and preserves its result and selector refresh", async ({ action, run, body, result, value, changes }) => {

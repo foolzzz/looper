@@ -228,11 +228,11 @@ def test_light_and_manager_profiles_share_an_existing_model_without_copying_it()
 
 def test_model_dialog_fake_scripts_use_the_registered_tool_schemas():
     from looper.agents.ops import check_arguments
-    from looper.agents.ops.config import TOOLS
+    from looper.agents.ops.service import MANAGER_TOOLS
 
-    schemas = {tool.name: tool.schema for tool in TOOLS}
+    schemas = {tool.name: tool.schema for tool in MANAGER_TOOLS}
     for case in dialogs.select(["provider_key", "model_custom", "model_dual_protocol", "model_login_runtime",
-                                "model_missing_endpoint", "model_price_history"]):
+                                "model_missing_endpoint", "model_price_history", "project_move_dir"]):
         for say in case.says:
             for tool, arguments in say.fake:
                 assert check_arguments(schemas[tool], deepcopy(arguments)) == arguments
@@ -245,7 +245,8 @@ def action(tool, verb, *, status="ok", **arguments):
 
 def test_projects_root_dialogs_are_opt_in_and_do_not_supply_a_directory():
     assert dialogs.Dialog("default", ()).projects_root is False
-    assert {d.id for d in dialogs.DIALOGS if d.projects_root} == {"root_new_project", "root_ask_project"}
+    assert {d.id for d in dialogs.DIALOGS if d.projects_root} == {
+        "root_new_project", "root_ask_project", "project_move_dir"}
     for case in dialogs.select(["root_new_project", "root_ask_project"]):
         for say in case.says:
             for _, arguments in say.fake:
@@ -586,6 +587,77 @@ def test_project_directory_dialog_rejects_incomplete_or_early_update(monkeypatch
     assert check(look) is not None
 
 
+@pytest.mark.parametrize("mutation", [None, "early_move", "missing_file", "wrong_action", "no_wait",
+                                      "extra_write", "missing_schedule", "missing_link", "missing_size"])
+def test_project_move_dialog_requires_confirmation_before_files_move(monkeypatch, tmp_path, mutation):
+    old = tmp_path / "work" / "calc"
+    old.mkdir(parents=True)
+    (old / "move.txt").write_text("move me\n")
+    new = tmp_path / "projects" / dialogs.PROJECT
+    project = {"work_dir": str(old)}
+    actions = [action("looper_projects", "move", status="needs_confirmation", project=dialogs.PROJECT)]
+    reply = f"{dialogs.PROJECT}: {old} → {new}; {dialogs.PULL}; {dialogs.DEPS}; 符号链接；1 文件，8 字节，不会中断运行"
+    look = observed(monkeypatch, {}, actions, reply=reply)
+    look.runtime_root = tmp_path / "runtime"
+    monkeypatch.setattr(dialogs, "_project", lambda *_: project)
+    check = dialogs.select(["project_move_dir"])[0].says[0].check
+    assert check(look) is None
+    if mutation == "early_move":
+        project["work_dir"] = str(new)
+    elif mutation == "missing_file":
+        (old / "move.txt").unlink()
+    elif mutation == "wrong_action":
+        actions[0]["arguments"]["action"] = "update"
+    elif mutation == "no_wait":
+        actions[0]["status"] = "ok"
+    elif mutation == "extra_write":
+        actions.append(action("looper_schedules", "update"))
+    elif mutation == "missing_schedule":
+        look.reply = reply.replace(dialogs.DEPS, "")
+    elif mutation == "missing_link":
+        look.reply = reply.replace("符号链接", "")
+    elif mutation == "missing_size":
+        look.reply = reply.replace("字节", "")
+    assert (check(look) is None) is (mutation is None)
+
+
+@pytest.mark.parametrize("mutation", [None, "old_project", "missing_link", "wrong_file", "old_schedule",
+                                      "unconfirmed", "wrong_action", "missing_directory_report"])
+def test_project_move_dialog_reads_files_schedules_and_confirmed_action(monkeypatch, tmp_path, mutation):
+    old = tmp_path / "work" / "calc"
+    old.parent.mkdir()
+    new = tmp_path / "projects" / dialogs.PROJECT
+    new.mkdir(parents=True)
+    (new / "move.txt").write_text("move me\n")
+    old.symlink_to(new, target_is_directory=True)
+    project = {"work_dir": str(new)}
+    schedules = {dialogs.PULL: {"work_dir": str(new)}, dialogs.DEPS: {"work_dir": str(new / "sub")}}
+    actions = [action("looper_projects", "move", project=dialogs.PROJECT)]
+    actions[0]["confirmation_id"] = "c-move"
+    look = observed(monkeypatch, {}, actions, reply=f"已移动到 {new}。")
+    look.runtime_root = tmp_path / "runtime"
+    look.fake = False
+    monkeypatch.setattr(dialogs, "_project", lambda *_: project)
+    monkeypatch.setattr(dialogs, "_named", lambda _look, name, _project: schedules[name])
+    check = dialogs.select(["project_move_dir"])[0].says[1].check
+    assert check(look) is None
+    if mutation == "old_project":
+        project["work_dir"] = str(old)
+    elif mutation == "missing_link":
+        old.unlink()
+    elif mutation == "wrong_file":
+        (new / "move.txt").write_text("wrong\n")
+    elif mutation == "old_schedule":
+        schedules[dialogs.DEPS]["work_dir"] = str(old / "sub")
+    elif mutation == "unconfirmed":
+        actions[0]["confirmation_id"] = None
+    elif mutation == "wrong_action":
+        actions[0]["arguments"]["action"] = "update"
+    elif mutation == "missing_directory_report":
+        look.reply = "已移动。"
+    assert (check(look) is None) is (mutation is None)
+
+
 def provider_state():
     return {"providers": [{"provider_id": "prov-test", "name": "eval-deepseek", "api_key_set": False,
                            "vendor_type": "deepseek", "endpoints": [
@@ -781,7 +853,7 @@ def test_repricing_keeps_historical_spend_and_other_protocol_price(monkeypatch, 
 @pytest.mark.parametrize("dialog_id", ["provider_key", "config_tools", "task_cost", "schedule_planner_profile",
                                        "schedule_command_create", "schedule_command_edit", "schedule_create",
                                        "schedule_command_delete_running", "schedule_command_delete_running_queued",
-                                       "project_dir_command_schedule", "project_dir_plain",
+                                       "project_dir_command_schedule", "project_dir_plain", "project_move_dir",
                                        "model_custom", "model_dual_protocol", "model_login_runtime",
                                        "model_missing_endpoint", "model_price_history", "template_review_task",
                                        "template_missing_input"])

@@ -973,6 +973,41 @@ export async function updateProject(projectId: string, fields: ProjectUpdate): P
   return result.project;
 }
 
+export interface ProjectMoveFields {
+  to?: string;
+  link_old: boolean;
+}
+
+export interface ProjectMovePreview {
+  old_dir: string;
+  new_dir: string;
+  impact: string;
+  move_version: string;
+}
+
+export interface ProjectMoveResult {
+  project: Project;
+  old_dir: string;
+  new_dir: string;
+  link_old: boolean;
+  repairs: { repository: string; ok: boolean; output: string }[];
+}
+
+export async function previewProjectMove(projectId: string, fields: ProjectMoveFields): Promise<ProjectMovePreview> {
+  const result = await callV1<ProjectMovePreview>("/api/v1/project_admin/preview_move_dir", { project: projectId, ...fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function moveProjectDirectory(projectId: string, fields: ProjectMoveFields, moveVersion: string): Promise<ProjectMoveResult> {
+  const result = await callV1<ProjectMoveResult>("/api/v1/project_admin/move_dir", {
+    project: projectId, ...fields, move_version: moveVersion,
+  });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  notifyProjectsChanged();
+  return result;
+}
+
 /** Delete a project with its tasks and schedules, stopping running tasks first. */
 export async function deleteProject(projectId: string): Promise<void> {
   const result = await callV1<{ deleted: string }>("/api/v1/project_admin/delete", { project_id: projectId });

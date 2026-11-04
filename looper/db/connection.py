@@ -98,6 +98,18 @@ _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
 _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
+_PROJECT_ACTIVITY = "project_activity"
+
+_PROJECT_ACTIVITY_DDL = """
+CREATE TABLE IF NOT EXISTS project_activity (
+    seq BIGSERIAL PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_project_activity_project ON project_activity (project_id, seq);
+"""
 
 _COMMAND_SCHEDULES_DDL: tuple[str, ...] = (
     """ALTER TABLE schedules
@@ -163,6 +175,13 @@ async def _schedule_user_gates_pending(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('schedules') AND attname = 'user_gates' "
         "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _project_activity_pending(conn: asyncpg.Connection) -> bool:
+    """Only older databases need this additive table; fresh schemas already contain it."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROJECT_ACTIVITY):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('project_activity') IS NOT NULL")
 
 
 async def _command_schedules_pending(conn: asyncpg.Connection) -> bool:
@@ -326,6 +345,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _schedule_deferred_by_drain_pending(conn):
             await conn.execute("ALTER TABLE schedule_runs ADD COLUMN deferred_by_drain BOOLEAN NOT NULL DEFAULT false")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_DEFERRED_BY_DRAIN)
+        if await _project_activity_pending(conn):
+            await conn.execute(_PROJECT_ACTIVITY_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -359,4 +381,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         return state == "bridge" or (state == "current" and (
             await _schedule_user_gates_pending(conn) or await _runtime_launcher_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
-            or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)))
+            or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
+            or await _project_activity_pending(conn)))

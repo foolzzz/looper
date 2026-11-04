@@ -1249,6 +1249,67 @@ def _project_dir_changed_at_once(look: Look) -> str | None:
     return _raw_json(look.reply)
 
 
+def _seed_project_move(api: Api, project_id: str) -> None:
+    project = next(p for p in api.post("/api/v1/project_admin/list", {})["result"]["projects"]
+                   if p["project_id"] == project_id)
+    directory = Path(project["work_dir"])
+    (directory / "sub").mkdir()
+    (directory / "move.txt").write_text("move me\n", encoding="utf-8")
+    for name, kind, work_dir in ((PULL, "command", directory), (DEPS, "agent", directory / "sub")):
+        fields = {"name": name, "kind": kind, "work_dir": str(work_dir),
+                  "cron": "0 0 1 1 *", "timezone": "UTC"}
+        fields.update({"command": "exit 0"} if kind == "command" else {"requirement": "Read move.txt."})
+        api.post("/api/v1/schedule_admin/create", {"project_id": project_id, "fields": fields})
+
+
+def _project_move_paths(look: Look) -> tuple[Path, Path]:
+    assert look.runtime_root is not None, "the move dialog needs its isolated runtime root"
+    case = look.runtime_root.parent
+    return case / "work" / "calc", case / "projects" / PROJECT
+
+
+def _project_move_asked(look: Look) -> str | None:
+    old, new = _project_move_paths(look)
+    project = _project(look, PROJECT)
+    if project is None or project["work_dir"] != str(old) or old.is_symlink() or new.exists():
+        return "the project directory moved before the user confirmed"
+    if not (old / "move.txt").is_file():
+        return "the source file disappeared before confirmation"
+    writes = _writes(look)
+    if (len(writes) != 1 or writes[0]["tool"] != "looper_projects"
+            or writes[0]["arguments"].get("action") != "move"
+            or writes[0]["arguments"].get("project") != PROJECT
+            or writes[0]["status"] != "needs_confirmation"):
+        return "the directory move did not wait for confirmation without other writes"
+    if not all(text in look.reply for text in (PROJECT, str(old), str(new), PULL, DEPS)):
+        return "the move confirmation omits the project, directories or affected schedules"
+    if not any(text in look.reply for text in ("符号链接", "软链", "symbolic link", "symlink")):
+        return "the move confirmation omits the old path's symbolic link"
+    if not all(text in look.reply for text in ("文件", "字节", "不会中断")):
+        return "the move confirmation omits the file count, size or lack of interruption"
+    return _raw_json(look.reply)
+
+
+def _project_moved_on_confirmation(look: Look) -> str | None:
+    old, new = _project_move_paths(look)
+    project = _project(look, PROJECT)
+    if project is None or project["work_dir"] != str(new):
+        return "the confirmed move did not update the project's directory"
+    if not old.is_symlink() or old.resolve() != new or (new / "move.txt").read_text() != "move me\n":
+        return "the confirmed move did not preserve the file and old symbolic link"
+    for name, directory in ((PULL, new), (DEPS, new / "sub")):
+        schedule = _named(look, name, PROJECT)
+        if schedule is None or schedule["work_dir"] != str(directory):
+            return f"the confirmed move did not rewrite {name}'s directory"
+    writes = [a for a in look.turn_actions() if a["risk"] != "read"]
+    if (len(writes) != 1 or writes[0]["tool"] != "looper_projects" or writes[0]["status"] != "ok"
+            or writes[0]["arguments"].get("action") != "move" or not writes[0].get("confirmation_id")):
+        return "the move did not run through its confirmed operation"
+    if not look.fake and str(new) not in look.reply:
+        return "the move result does not tell the user the new directory"
+    return _raw_json(look.reply)
+
+
 def _planner_profile_names(look: Look, schedule: dict[str, Any]) -> dict[str, str]:
     names = {p["profile_id"]: p["name"] for p in look.api.post("/api/v1/registry/view", {})["result"]["profiles"]}
     return {role: names.get(profile, profile) for role, profile in schedule["profile_overrides"].items()}
@@ -1962,6 +2023,12 @@ DIALOGS: tuple[Dialog, ...] = (
         Say(f"把 {PROJECT} 项目的默认目录改成 {MOVED_DIR}。", _project_dir_changed_at_once,
             (("looper_projects", {"action": "update", "project": PROJECT, "work_dir": MOVED_DIR}),)),
     ), tags=("manager", "projects")),
+    Dialog("project_move_dir", (
+        Say(f"把 {PROJECT} 项目的整个目录和文件移动到已配置的 projects root 下，保留旧路径的符号链接。", _project_move_asked,
+            (("looper_projects", {"action": "move", "project": PROJECT}),)),
+        Say("确认。", _project_moved_on_confirmation,
+            (("looper_confirm", {"confirmation_id": "<confirmation>"}),)),
+    ), seed=_seed_project_move, projects_root=True, tags=("manager", "projects")),
     Dialog("schedule_template_create", (
         Say(f"在 {PROJECT} 项目里建一个定时任务 {DEPS}：每个工作日早上 9 点（Asia/Shanghai 时区），"
             "使用 pr_review 模板评审这个 PR：" + TEMPLATE_PR_URL + "。目录用项目默认的，先创建停用的定时任务。",

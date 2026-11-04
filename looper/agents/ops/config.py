@@ -146,6 +146,11 @@ async def _projects(call: Call) -> dict[str, Any]:
         return {"project": await answered(projects.update_project(
             project["id"], fields, manager_id=call.manager_id if call.scoped else None,
             expected_directory_version=call.confirmation.get("directory_version")))}
+    if action == "move":
+        return await answered(projects.move_project_dir(
+            project["id"], _given(arguments, ("to", "link_old")),
+            manager_id=call.manager_id if call.scoped else None,
+            expected_move_version=call.confirmation.get("move_version")))
     await answered(projects.delete_project(
         project["id"], call.platform.bus, call.manager_address, call.platform.runtime_root,
         manager_id=call.manager_id if call.scoped else None, task_router=call.platform.task_router))
@@ -209,6 +214,15 @@ async def _confirming_project(call: Call) -> str | None:
     action = call.arguments["action"]
     if action == "delete":
         return await _deleting_project(call)
+    if action == "move":
+        _required(call.arguments, "move", "project")
+        project = await project_named(call.arguments["project"], manager_id=call.manager_id if call.scoped else None)
+        if call.scoped and await db_projects.used_outside_manager(project["id"], call.manager_id):
+            raise OpError(ErrorCode.CONFLICT, f"project {project['name']!r} is also used outside this Manager: "
+                                              "its directory cannot be moved from here")
+        move = await answered(projects.preview_project_move(project, _given(call.arguments, ("to", "link_old"))))
+        call.confirmation.update(project_id=project["id"], move_version=move.version)
+        return projects.project_move_impact(project, move)
     if action != "update" or call.arguments.get("work_dir") is None:
         return None
     _required(call.arguments, "update", "project")
@@ -615,15 +629,20 @@ TOOLS: tuple[Tool, ...] = (
         description="Projects: list; get one; create (name, and the work_dir and background the user gave; never "
                     "pick a directory); update its name, work_dir or background (a work_dir change asks the user first "
                     "when enabled or queued command schedules run in its directory); delete one with its tasks and schedules, "
-                    "stopping its running tasks first (the user confirms first).",
+                    "stopping its running tasks first (the user confirms first); move its directory and files to an "
+                    "absolute to path (omit to to use the configured projects root). Move asks the user first, "
+                    "rewrites command and agent schedule directories, preserves the old path with a symbolic link "
+                    "unless link_old is false, and refuses running tasks, commands or gates without interrupting them.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
-                "action": {"type": "string", "enum": ["list", "get", "create", "update", "delete"]},
-                "project": {**_PROJECT, "description": "The project (get, update, delete)."},
+                "action": {"type": "string", "enum": ["list", "get", "create", "update", "delete", "move"]},
+                "project": {**_PROJECT, "description": "The project (get, update, delete, move)."},
                 "name": {"type": "string", "minLength": 1, "description": "create: its name; update: its new name."},
                 "work_dir": {"type": "string", "description": "Its default absolute directory; '' for none."},
                 "background": {"type": "string", "description": "What its agents should know."},
+                "to": {"type": "string", "description": "move: absolute destination; omit for projects root / safe project name."},
+                "link_old": {"type": "boolean", "description": "move: retain the old path as a symbolic link (default true)."},
             },
         },
         risk=Risk.WRITE, run=_projects, escalate=_confirming_project, read_actions=frozenset({"list", "get"}),
