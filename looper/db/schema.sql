@@ -185,6 +185,16 @@ CREATE TABLE IF NOT EXISTS projects (
         CHECK (distill_lessons IN ('off', 'draft', 'write'))
 );
 
+-- Project operations have their own history; task activities keep their task foreign key.
+CREATE TABLE IF NOT EXISTS project_activity (
+    seq BIGSERIAL PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_project_activity_project ON project_activity (project_id, seq);
+
 -- A Manager: the default one ('manager', the one every install had) or a scenario Manager the operator defined
 -- (manager-<key>). Its id is its agent id: its session (agent_sessions), its runs (llm_records.agent_id), its bus
 -- queue. The default Manager's prompt and profile stay in role_configs.manager and Settings → Roles, so its row

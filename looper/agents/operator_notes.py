@@ -16,9 +16,10 @@ W6):
 - ``MEMORY.md`` comes first, then the ``.md`` files of the memory directory
   it links to, in its order, within ``NOTES_MAX_BYTES``; a file past the
   limit is named, not included;
-- Looper only reads: it never creates, changes, moves or deletes anything
-  under the operator's Claude Code configuration, and the agents get the
-  text, not the path.
+- agents only read and get the text, not the path. An explicit project
+  directory move can rename the enclosing notes directory to its new key
+  after commit, when enabled, on the same filesystem and with no destination
+  present; it never merges or deletes notes (``project_move``).
 
 The ops file's ``operator_notes.root`` stands in for ``<config>/projects``
 (tests and evals).

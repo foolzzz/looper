@@ -1,9 +1,10 @@
 """Full project administration and typed results for the existing compact operations."""
 
+from ...db import projects as db_projects
 from .. import projects as core
-from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT
+from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL, _summary
 from ..ops import Call, ErrorCode, OpError, Turn
-from ..ops.config import _deleting_project, answered, directory_change_impact
+from ..ops.config import _deleting_project, answered, directory_change_impact, project_named
 from ..project_execution import FIELDS, ROOM_LIMITS
 
 
@@ -43,6 +44,11 @@ PATCH_FIELDS = {"name": _STR, "description": _STR, "work_dir": _STR, "background
 PATCH = {**_object(PATCH_FIELDS, [], closed=True), "minProperties": 1}
 PROJECT_RESULT = _object({"project": PROJECT})
 DELETED = _object({"deleted": _STR})
+MOVED = _object({"project": PROJECT, "old_dir": _STR, "new_dir": _STR, "link_old": _BOOL,
+    "repairs": _array(_object({"repository": _STR, "ok": _BOOL, "output": _STR})),
+    "notes": _object({"moved": _BOOL, "from": _STR, "to": _STR, "reason": _STR}, required=("moved",))})
+MOVE_PREVIEW = _object({"old_dir": _STR, "new_dir": _STR, "impact": _STR, "move_version": _STR})
+MOVE_REQUEST = {"project": _STR, "to": _STR, "link_old": _BOOL}
 SCHEMAS = {"Project": PROJECT, "ProjectExecution": _object(EXECUTION), "ProjectPatch": PATCH}
 RESULTS = {
     # The compact Manager list omits the root when unset to preserve its model-visible result.
@@ -51,6 +57,7 @@ RESULTS = {
         "projects_root": _STR}, ["projects"]),
     **dict.fromkeys(("projects.get", "projects.create", "projects.update"), PROJECT_RESULT),
     "projects.delete": DELETED,
+    "projects.move": MOVED,
 }
 
 
@@ -59,8 +66,13 @@ def _op(action, request, result, risk):
     if action == "delete":
         description = ("Delete a project with its tasks and schedules, stopping its running tasks first "
                        "(the user confirms first).")
+    if action == "move_dir":
+        description = ("Move a project's directory and files, rewriting schedule directories and preserving the old "
+                       "path as a symbolic link by default; refuses active work and asks clients to confirm first.")
+    if action == "preview_move_dir":
+        description = "Preview a project's directory move and its confirmation impact without moving files."
     return Operation(f"project_admin.{action}", "POST", f"/api/v1/project_admin/{action}",
-                     description, description, request, result, risk=risk, confirms=risk == "high" or action == "update")
+                     _summary(description), description, request, result, risk=risk, confirms=risk == "high" or action == "update")
 
 
 OPERATIONS = (
@@ -68,10 +80,26 @@ OPERATIONS = (
     _op("create", _object(PATCH_FIELDS, ["name"], closed=True), PROJECT_RESULT, "write"),
     _op("update", _object({"project_id": _STR, "fields": PATCH}, closed=True), PROJECT_RESULT, "write"),
     _op("delete", _object({"project_id": _STR}, closed=True), DELETED, "high"),
+    _op("preview_move_dir", _object(MOVE_REQUEST, ["project"], closed=True), MOVE_PREVIEW, "read"),
+    _op("move_dir", _object({**MOVE_REQUEST, "move_version": _STR}, ["project"], closed=True), MOVED, "high"),
 )
 
 
+async def _move_project(arguments):
+    if arguments.get("_move_project_id"):
+        return await answered(core._existing_project(arguments["_move_project_id"]))
+    project = await db_projects.get_project(arguments["project"])
+    return project if project is not None else await project_named(arguments["project"])
+
+
 async def impact(server, operation, arguments, principal, headers):
+    if operation.operation_id == "project_admin.move_dir":
+        project = await _move_project(arguments)
+        move = await core.preview_project_move(project, arguments)
+        arguments["_move_project_id"] = project["id"]
+        arguments["_move_version"] = (move.version if principal.kind == "client" else
+                                      arguments.get("move_version", move.version))
+        return core.project_move_impact(project, move)
     if operation.operation_id == "project_admin.update":
         if "work_dir" not in arguments["fields"]:
             return None
@@ -107,6 +135,15 @@ async def run(server, operation, arguments, principal, headers):
         return await core.list_projects()
     if action == "create":
         return {"project": await answered(core.create_project(_input_fields(arguments)))}
+    if action == "preview_move_dir":
+        project = await _move_project(arguments)
+        move = await core.preview_project_move(project, arguments)
+        return {"old_dir": move.old, "new_dir": move.new, "impact": core.project_move_impact(project, move),
+                "move_version": move.version}
+    if action == "move_dir":
+        project = await _move_project(arguments)
+        return await core.move_project_dir(project["id"], arguments,
+            expected_move_version=arguments.get("_move_version", arguments.get("move_version")))
     project_id = arguments["project_id"]
     if action == "delete":
         return await answered(core.delete_project(

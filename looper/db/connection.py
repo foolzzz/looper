@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -68,10 +68,13 @@ def get_pool() -> asyncpg.Pool:
 
 
 @asynccontextmanager
-async def transaction() -> AsyncIterator[asyncpg.Connection]:
-    """A pooled connection in a transaction: committed on exit, rolled back on error."""
-    async with get_pool().acquire() as conn, conn.transaction():
-        yield conn
+async def transaction(*, on_commit: Callable[[], None] | None = None) -> AsyncIterator[asyncpg.Connection]:
+    """Commit on exit; notify synchronously before releasing the pooled connection."""
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            yield conn
+        if on_commit is not None:
+            on_commit()
 
 
 # The schema.sql text last applied. Schema 3 uses this stable release marker
@@ -99,6 +102,18 @@ _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
 _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
+_PROJECT_ACTIVITY = "project_activity"
+
+_PROJECT_ACTIVITY_DDL = """
+CREATE TABLE IF NOT EXISTS project_activity (
+    seq BIGSERIAL PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_project_activity_project ON project_activity (project_id, seq);
+"""
 
 _COMMAND_SCHEDULES_DDL: tuple[str, ...] = (
     """ALTER TABLE schedules
@@ -195,6 +210,13 @@ async def _schedule_user_gates_pending(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('schedules') AND attname = 'user_gates' "
         "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _project_activity_pending(conn: asyncpg.Connection) -> bool:
+    """Only older databases need this additive table; fresh schemas already contain it."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROJECT_ACTIVITY):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('project_activity') IS NOT NULL")
 
 
 async def _command_schedules_pending(conn: asyncpg.Connection) -> bool:
@@ -361,6 +383,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _schedule_deferred_by_drain_pending(conn):
             await conn.execute("ALTER TABLE schedule_runs ADD COLUMN deferred_by_drain BOOLEAN NOT NULL DEFAULT false")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_DEFERRED_BY_DRAIN)
+        if await _project_activity_pending(conn):
+            await conn.execute(_PROJECT_ACTIVITY_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -395,4 +420,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             await _schedule_user_gates_pending(conn) or await _cursor_login_pending(conn)
             or await _runtime_launcher_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
-            or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)))
+            or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
+            or await _project_activity_pending(conn)))

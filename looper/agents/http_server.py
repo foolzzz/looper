@@ -568,7 +568,9 @@ class AgentHTTPServer:
                 raise OpError(ErrorCode.INVALID, "invalid credential request") from None
             except projects.RequestError as exc:
                 code = next((code for code, status in api_v1.STATUS.items() if status == exc.status), ErrorCode.INVALID)
-                raise OpError(code, "the operation was refused") from None
+                message = (str(exc) if operation.operation_id in
+                           ("project_admin.preview_move_dir", "project_admin.move_dir") else "the operation was refused")
+                raise OpError(code, message) from None
             except ValueError:
                 raise OpError(ErrorCode.INVALID, "invalid request") from None
             except Exception:

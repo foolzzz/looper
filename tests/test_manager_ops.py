@@ -156,7 +156,10 @@ def test_project_directory_default_is_described_only_when_configured(monkeypatch
                 "Projects: list; get one; create (name, and the work_dir and background the user gave; never "
                 "pick a directory); update its name, work_dir or background (a work_dir change asks the user first "
                 "when enabled or queued command schedules run in its directory); delete one with its tasks and schedules, "
-                "stopping its running tasks first (the user confirms first).")
+                "stopping its running tasks first (the user confirms first); move its directory and files to an "
+                "absolute to path (omit to to use the configured projects root). Move asks the user first, "
+                "rewrites command and agent schedule directories, preserves the old path with a symbolic link "
+                "unless link_old is false, and refuses running tasks, commands or gates without interrupting them.")
 
 
 @pytest.mark.parametrize("root", ["", "/srv/projects"])
