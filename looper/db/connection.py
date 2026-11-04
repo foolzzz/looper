@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -68,10 +68,13 @@ def get_pool() -> asyncpg.Pool:
 
 
 @asynccontextmanager
-async def transaction() -> AsyncIterator[asyncpg.Connection]:
-    """A pooled connection in a transaction: committed on exit, rolled back on error."""
-    async with get_pool().acquire() as conn, conn.transaction():
-        yield conn
+async def transaction(*, on_commit: Callable[[], None] | None = None) -> AsyncIterator[asyncpg.Connection]:
+    """Commit on exit; notify synchronously before releasing the pooled connection."""
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            yield conn
+        if on_commit is not None:
+            on_commit()
 
 
 # The schema.sql text last applied. Schema 3 uses this stable release marker

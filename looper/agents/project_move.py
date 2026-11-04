@@ -87,8 +87,11 @@ def _destination(project: Mapping[str, Any], data: Mapping[str, Any]) -> tuple[P
             pointer = stream.readline(4096).strip()
         if pointer.startswith("gitdir:"):
             git_dir = (old / pointer.removeprefix("gitdir:").strip()).resolve()
-            linked = git_dir.parent.name == "worktrees" and git_dir.parent.parent.name == ".git"
-            if not git_dir.is_relative_to(old.resolve()) and not linked:
+            # The common directory can have any name; modules named worktrees/<name> are still submodules.
+            linked = git_dir.parent.name == "worktrees" and (git_dir.parent.parent / "HEAD").is_file()
+            submodule = any(parent.name == "modules" and (parent.parent / "HEAD").is_file()
+                            for parent in git_dir.parents)
+            if submodule and not linked:
                 raise fail(projects.HTTP_400,
                            "the project's directory is a git submodule checkout; move the superproject instead")
     return old, new
@@ -318,11 +321,16 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
         if old_key is not None and _under(old_key, scanned.old) is None:
             notes = {"moved": False, "reason": f"they belong to {old_key}, which does not move"}
             old_key = None
-        renamed = linked = False
+        renamed = linked = committed = False
+
+        def mark_committed() -> None:
+            nonlocal committed
+            committed = True
+
         change = None
         async with quiesce_project(project_id, kind=ProjectQuiescence.MOVE):
             try:
-                async with connection.transaction() as conn:
+                async with connection.transaction(on_commit=mark_committed) as conn:
                     # Existing waiting Planners can wake without Router admission. Fence their database
                     # writes as well as new starts, until paths and rows agree. Acquire before project
                     # rows, since a task insert can hold its table lock while checking the project FK.
@@ -389,7 +397,17 @@ async def move(project_id: str, data: Mapping[str, Any], *, expected_move_versio
                     activity_seq = await db_projects.record_directory_move(project_id, change.old, change.new, pool=conn)
                     updated = projects.project_view(await db_projects.get_project(project_id, pool=conn))
             except BaseException as exc:
-                # Include commit errors and cancellation: a rolled-back row must never point at moved files.
+                if committed:
+                    # Pool release can be cancelled after COMMIT. Never undo durable paths.
+                    if change.link_old:
+                        try:
+                            if not Path(change.old).is_symlink():
+                                os.symlink(change.new, change.old, target_is_directory=True)
+                        except OSError:
+                            logger.error("project directory move committed from %s to %s but old-path link is missing",
+                                         change.old, change.new, exc_info=True)
+                    raise
+                # Include commit errors and cancellation before COMMIT: restore the rolled-back row's files.
                 if renamed and change is not None:
                     if linked:
                         Path(change.old).unlink()

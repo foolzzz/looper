@@ -95,7 +95,7 @@ async def _move_project(arguments):
 async def impact(server, operation, arguments, principal, headers):
     if operation.operation_id == "project_admin.move_dir":
         project = await _move_project(arguments)
-        move = await answered(core.preview_project_move(project, arguments))
+        move = await core.preview_project_move(project, arguments)
         arguments["_move_project_id"] = project["id"]
         arguments["_move_version"] = (move.version if principal.kind == "client" else
                                       arguments.get("move_version", move.version))
@@ -137,13 +137,13 @@ async def run(server, operation, arguments, principal, headers):
         return {"project": await answered(core.create_project(_input_fields(arguments)))}
     if action == "preview_move_dir":
         project = await _move_project(arguments)
-        move = await answered(core.preview_project_move(project, arguments))
+        move = await core.preview_project_move(project, arguments)
         return {"old_dir": move.old, "new_dir": move.new, "impact": core.project_move_impact(project, move),
                 "move_version": move.version}
     if action == "move_dir":
         project = await _move_project(arguments)
-        return await answered(core.move_project_dir(project["id"], arguments,
-            expected_move_version=arguments.get("_move_version", arguments.get("move_version"))))
+        return await core.move_project_dir(project["id"], arguments,
+            expected_move_version=arguments.get("_move_version", arguments.get("move_version")))
     project_id = arguments["project_id"]
     if action == "delete":
         return await answered(core.delete_project(

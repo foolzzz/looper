@@ -372,6 +372,72 @@ def test_failed_old_path_symlink_restores_files_and_rows(monkeypatch, tmp_path):
     run_db(check, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("interruption", [asyncio.CancelledError, KeyboardInterrupt])
+@pytest.mark.parametrize("link_state", ["kept", "missing", "unwritable", "inaccessible", "disabled"])
+def test_interruption_after_commit_keeps_moved_files_and_rows(monkeypatch, tmp_path, caplog,
+                                                             interruption, link_state):
+    old, new = tmp_path / "old", tmp_path / "new"
+    renames = []
+    rename = os.rename
+
+    def track_rename(source, destination, **kwargs):
+        renames.append((Path(source), Path(destination)))
+        return rename(source, destination, **kwargs)
+
+    monkeypatch.setattr(project_move.os, "rename", track_rename)
+
+    async def check(pool):
+        project = await _project(pool, old)
+        await _schedule(pool, project["id"], old)
+        release = type(pool).release
+        interrupted = False
+
+        async def release_after_commit(self, conn, *args, **kwargs):
+            nonlocal interrupted
+            if self is pool and not interrupted and new.is_dir() and not conn.is_in_transaction():
+                # Pool release awaits after COMMIT, before the transaction helper returns.
+                assert await conn.fetchval("SELECT work_dir FROM projects WHERE id = $1", project["id"]) == str(new)
+                interrupted = True
+                if link_state in ("missing", "unwritable"):
+                    old.unlink()
+                if link_state == "unwritable":
+                    def fail_link(*args, **kwargs):
+                        raise OSError("old path is not writable")
+                    monkeypatch.setattr(project_move.os, "symlink", fail_link)
+                elif link_state == "inaccessible":
+                    is_symlink = Path.is_symlink
+
+                    def inaccessible_link(path):
+                        if path == old:
+                            raise PermissionError("old path is not accessible")
+                        return is_symlink(path)
+
+                    monkeypatch.setattr(Path, "is_symlink", inaccessible_link)
+                await release(self, conn, *args, **kwargs)
+                raise interruption()
+            return await release(self, conn, *args, **kwargs)
+
+        monkeypatch.setattr(type(pool), "release", release_after_commit)
+        with pytest.raises(interruption):
+            await api.move_project_dir(project["id"], {"to": str(new), "link_old": link_state != "disabled"})
+        assert interrupted
+        assert renames == [(old, new)]
+        assert (new / "subdir" / "kept.txt").read_text() == "keep these files\n"
+        assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(new)
+        assert await pool.fetchval("SELECT work_dir FROM schedules WHERE id = 'command'") == str(new)
+        if link_state in ("unwritable", "inaccessible"):
+            assert os.path.lexists(old) == (link_state == "inaccessible")
+            assert any(record.levelname == "ERROR" and str(old) in record.message
+                       and str(new) in record.message and "link is missing" in record.message
+                       for record in caplog.records)
+        elif link_state == "disabled":
+            assert not os.path.lexists(old)
+        else:
+            assert old.is_symlink() and old.resolve() == new.resolve()
+
+    run_db(check, monkeypatch, timeout=30)
+
+
 def test_file_inventory_cap_is_explicit_in_confirmation(monkeypatch, tmp_path):
     from looper.agents import project_move
 
@@ -430,6 +496,35 @@ def test_inventory_bounds_directory_only_trees(monkeypatch, tmp_path):
 def _git(directory, *args):
     return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(directory), *args],
                           check=True, capture_output=True, text=True, timeout=10).stdout.strip()
+
+
+@pytest.mark.parametrize("common_name", ["repo.git", "modules"])
+def test_move_worktree_of_bare_repository(monkeypatch, tmp_path, common_name):
+    seed, bare = tmp_path / "seed", tmp_path / common_name
+    old, new = tmp_path / "old", tmp_path / "new"
+    seed.mkdir()
+    (seed / "tracked.txt").write_text("keep these files\n")
+    _git(seed, "init", "-q")
+    _git(seed, "add", ".")
+    _git(seed, "-c", "user.name=Directory move test", "-c", "user.email=move@example.invalid",
+         "commit", "-qm", "Initial files")
+    _git(tmp_path, "clone", "--bare", str(seed), str(bare))
+    _git(bare, "worktree", "add", "-qb", "moving", str(old))
+    base = _git(old, "rev-parse", "HEAD")
+    assert _git(old, "status", "--porcelain") == ""
+
+    async def check(pool):
+        project = await projects.create_project(name="Bare repository worktree", work_dir=str(old), pool=pool)
+        result = await api.move_project_dir(project["id"], {"to": str(new), "link_old": False})
+        assert result["repairs"] and all(repair["ok"] for repair in result["repairs"])
+        assert not old.exists() and (new / "tracked.txt").read_text() == "keep these files\n"
+        assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(new)
+        assert _git(new, "status", "--porcelain") == ""
+        assert _git(new, "rev-parse", "HEAD") == base
+        assert str(new.resolve()) in _git(bare, "worktree", "list", "--porcelain")
+        assert str(old.resolve()) not in _git(bare, "worktree", "list", "--porcelain")
+
+    run_db(check, monkeypatch, timeout=30)
 
 
 @pytest.mark.parametrize("nested", [False, True], ids=["project-repo", "nested-repo"])
@@ -717,7 +812,7 @@ def test_move_scans_before_transaction_and_rechecks_state(monkeypatch, tmp_path,
             return scan(directory)
 
         @asynccontextmanager
-        async def tracked_transaction():
+        async def tracked_transaction(**kwargs):
             nonlocal in_transaction
             assert calls == ["inventory", "repositories"]
             if mutation == "active-run":
@@ -726,7 +821,7 @@ def test_move_scans_before_transaction_and_rechecks_state(monkeypatch, tmp_path,
                 new.mkdir()
             elif mutation == "project":
                 await projects.update_project(project["id"], name="Changed", pool=pool)
-            async with transaction() as conn:
+            async with transaction(**kwargs) as conn:
                 in_transaction = True
                 try:
                     yield conn
@@ -890,15 +985,16 @@ def test_move_does_not_repair_submodule_as_linked_worktree(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("link_old", [False, True])
-def test_move_refuses_submodule_checkout_preserving_files_and_rows(monkeypatch, tmp_path, link_old):
+@pytest.mark.parametrize("module_name", ["child", "worktrees/child"])
+def test_move_refuses_submodule_checkout_preserving_files_and_rows(monkeypatch, tmp_path, link_old, module_name):
     superproject, module = tmp_path / "superproject", tmp_path / "module"
-    old, new = superproject / "child", tmp_path / "new"
+    old, new = superproject / module_name, tmp_path / "new"
     for repo in (superproject, module):
         repo.mkdir()
         _git(repo, "init", "-q")
         _git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
              "commit", "--allow-empty", "-qm", "Initial")
-    _git(superproject, "-c", "protocol.file.allow=always", "submodule", "add", str(module), "child")
+    _git(superproject, "-c", "protocol.file.allow=always", "submodule", "add", str(module), module_name)
     (old / "kept.txt").write_text("Keep uncommitted files")
     marker = (old / ".git").read_text()
 
@@ -948,7 +1044,7 @@ def test_task_start_during_move_waits_and_runs_after_commit(monkeypatch, tmp_pat
         pending = None
 
         @asynccontextmanager
-        async def transaction_during_move():
+        async def transaction_during_move(**kwargs):
             nonlocal pending
             assert scheduler._project_firings[project["id"]].deleting
             if action == "start":
@@ -972,7 +1068,7 @@ def test_task_start_during_move_waits_and_runs_after_commit(monkeypatch, tmp_pat
             await asyncio.sleep(0)
             assert not pending.done(), "the Router dropped an acknowledged request"
             PlannerAgent.start.assert_not_awaited()
-            async with transaction() as conn:
+            async with transaction(**kwargs) as conn:
                 yield conn
 
         async def check_repair(*args):

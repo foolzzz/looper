@@ -122,6 +122,40 @@ def test_invalid_move_requests_refused_before_confirmation(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("client", [False, True], ids=["operator", "client"])
+@pytest.mark.parametrize("action", ["preview_move_dir", "move_dir"])
+@pytest.mark.parametrize("refusal,expected_status,message", [
+    ("destination-exists", 409, "to already exists; choose a path that does not exist"),
+    ("busy", 409, "the project has a task, command schedule run or gate in progress; wait for it to finish"),
+    ("relative-destination", 400, "to must be an absolute directory"),
+])
+def test_admin_move_keeps_specific_refusal_message_and_status(
+        tmp_path, monkeypatch, client, action, refusal, expected_status, message):
+    old, new = tmp_path / "source", tmp_path / "destination"
+    old.mkdir()
+    (old / "notes").write_text("keep")
+    if refusal == "destination-exists":
+        new.mkdir()
+
+    async def run(pool):
+        project = await projects.create_project(name="Example", work_dir=str(old), pool=pool)
+        if refusal == "busy":
+            await tasks.create_task(task_id="active-move", requirement="Continue next turn",
+                                    project_id=project["id"], work_dir=str(old), status="executing", pool=pool)
+        destination = "relative" if refusal == "relative-destination" else str(new)
+        async with _api(tmp_path, pool) as call:
+            status, answer = await call(f"project_admin.{action}", {
+                "project": project["id"], "to": destination}, client=client)
+            assert status == expected_status and answer["status"] == "error", answer
+            assert answer["error"]["message"] == message, answer
+            assert answer["error"]["code"] == ("conflict" if expected_status == 409 else "invalid"), answer
+            assert old.is_dir() and not old.is_symlink()
+            assert (old / "notes").read_text() == "keep"
+            assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(old)
+
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("client", [False, True], ids=["operator", "client"])
 def test_move_preview_is_readonly_and_returns_versioned_confirmation_impact(tmp_path, monkeypatch, client):
     old, new = tmp_path / "source", tmp_path / "destination"
     old.mkdir()
@@ -169,6 +203,8 @@ def test_dashboard_move_rejects_configuration_changed_since_preview(tmp_path, mo
             status, answer = await call("project_admin.move_dir", {
                 **body, "move_version": answer["result"]["move_version"]})
             assert status == 409 and answer["error"]["code"] == "conflict", answer
+            assert answer["error"]["message"] == (
+                "the project or its schedules changed; run the move again to ask for confirmation"), answer
             assert old.is_dir() and not old.is_symlink() and not new.exists()
             assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(old)
     run_db(run, monkeypatch, timeout=30)
