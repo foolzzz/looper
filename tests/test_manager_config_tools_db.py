@@ -349,9 +349,13 @@ def test_registering_a_vendor_and_its_suggested_models_reads_back_defaults(monke
                         protocol=model.protocol.value, context_window=model.context_window,
                         background_model=model.background_model)
         stored = next(p for p in (await _ok("POST", "/api/v1/registry/view", {}))["providers"] if p["name"] == vendor.value)
-        expected = fields.get("endpoints", [{"protocol": e.protocol.value, "base_url": e.base_url}
-                                            for e in defaults.endpoints])
-        assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]} == {e["protocol"]: e["base_url"] for e in expected}
+        expected = {e.protocol.value: e.base_url for e in defaults.endpoints}
+        if "endpoints" in fields:
+            # Messages saves a root; OpenAI keeps the supplied versioned base.
+            expected = {e["protocol"]: "https://example.com" if e["protocol"] == "anthropic-messages"
+                        else "https://example.com/v1" for e in fields["endpoints"]}
+        assert {e["protocol"]: e["base_url"] for e in provider["endpoints"]} == expected
+        assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]} == expected
         models = (await _ok("POST", "/api/v1/ops/models/list", {}))["models"]
         assert {(m["name"], m["protocol"], m["context_window"], m["background_model"]) for m in models
                 if m["provider_id"] == provider["provider_id"]} == {
