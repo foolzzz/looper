@@ -265,7 +265,7 @@ def test_model_profile_counts_and_reference_deletion_conflicts(monkeypatch, tmp_
     async def test(client, pool):
         pid = (await client.ok("POST", "/api/v1/provider_accounts/create", _account(), status=200))["provider"]["provider_id"]
         saved_endpoints = (await db.get_provider(pid))["endpoints"]
-        assert saved_endpoints[0]["base_url"] == "https://api.example.invalid"
+        assert saved_endpoints[0]["base_url"] == URL
         await pool.execute("INSERT INTO llm_models (id, provider_id, name, protocol) VALUES "
                            "('model-http', $1, 'http-model', 'anthropic-messages')", pid)
         await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES "

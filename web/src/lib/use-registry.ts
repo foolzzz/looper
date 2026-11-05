@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { fetchRegistry, REGISTRY_CHANGED_EVENT, type AgentProfile, type Registry } from "@/lib/api";
+import { fetchRegistry, REGISTRY_CHANGED_EVENT, type AgentProfile, type Provider, type Registry } from "@/lib/api";
 
 type Snapshot = { registry: Registry | null; error: string };
 const EMPTY: Snapshot = { registry: null, error: "" };
@@ -30,17 +30,28 @@ async function reload(): Promise<void> {
   }
 }
 
+function changed(event: Event) {
+  const provider = (event as CustomEvent<{ provider?: Provider }>).detail?.provider;
+  // A reopened editor must use the saved account even while the full refresh is pending.
+  if (provider && snapshot.registry) {
+    publish({ ...snapshot, registry: { ...snapshot.registry,
+      providers: snapshot.registry.providers.map((current) => current.provider_id === provider.provider_id ? provider : current),
+    } });
+  }
+  void reload();
+}
+
 function subscribe(listener: () => void) {
   listeners.add(listener);
   if (listeners.size === 1) {
-    window.addEventListener(REGISTRY_CHANGED_EVENT, reload);
+    window.addEventListener(REGISTRY_CHANGED_EVENT, changed);
     void reload();
   }
   return () => {
     listeners.delete(listener);
     if (listeners.size === 0) {
       clearTimeout(loginRefresh);
-      window.removeEventListener(REGISTRY_CHANGED_EVENT, reload);
+      window.removeEventListener(REGISTRY_CHANGED_EVENT, changed);
       // Nothing remains to observe mutations. Start fresh on the next mount.
       ++latest;
       snapshot = EMPTY;

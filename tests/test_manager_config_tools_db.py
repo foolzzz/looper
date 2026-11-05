@@ -351,9 +351,7 @@ def test_registering_a_vendor_and_its_suggested_models_reads_back_defaults(monke
         stored = next(p for p in (await _ok("POST", "/api/v1/registry/view", {}))["providers"] if p["name"] == vendor.value)
         expected = {e.protocol.value: e.base_url for e in defaults.endpoints}
         if "endpoints" in fields:
-            # Messages saves a root; OpenAI keeps the supplied versioned base.
-            expected = {e["protocol"]: "https://example.com" if e["protocol"] == "anthropic-messages"
-                        else "https://example.com/v1" for e in fields["endpoints"]}
+            expected = {e["protocol"]: e["base_url"] for e in fields["endpoints"]}
         assert {e["protocol"]: e["base_url"] for e in provider["endpoints"]} == expected
         assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]} == expected
         models = (await _ok("POST", "/api/v1/ops/models/list", {}))["models"]

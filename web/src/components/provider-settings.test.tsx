@@ -368,6 +368,30 @@ it("reads saved vendor values after reload without reapplying defaults and keeps
   expect(container.querySelectorAll('input[id$="-url"]')).toHaveLength(1);
 });
 
+it("reopens the saved provider while the registry refresh is still pending", async () => {
+  data.providers = [account({ endpoints: [endpoint("anthropic-messages", "https://example.invalid/v1/")] })];
+  await render(false); await click("Edit provider Saved account");
+  const fetch = globalThis.fetch;
+  let finishRefresh!: () => void;
+  const refresh = new Promise<void>((resolve) => { finishRefresh = resolve; });
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input) === "/api/v1/registry/view") await refresh;
+    return fetch(input, init);
+  }));
+  try {
+    await fill("anthropic-messages URL", "https://api.example.com/v1/"); await submit();
+    expect(container.querySelector("form")).toBeNull();
+    await click("Edit provider Saved account");
+    expect(field("anthropic-messages URL").value).toBe("https://api.example.com/v1/");
+    // The eventual refresh must also leave an in-progress edit alone.
+    await fill("anthropic-messages URL", "https://next.example.com/v1/");
+    await act(async () => { finishRefresh(); await refresh; });
+    expect(field("anthropic-messages URL").value).toBe("https://next.example.com/v1/");
+  } finally {
+    await act(async () => { finishRefresh(); await refresh; });
+  }
+});
+
 it("shows login state and prevents editing a login account's endpoint or key", async () => {
   data.providers = [account({ vendor_type: "codex-login", auth: "oauth", oauth_runtime_type: "codex",
     api_key: null, endpoints: [endpoint("openai-responses", "")], login: { state: "chatgpt", detail: "ChatGPT login" } })];
