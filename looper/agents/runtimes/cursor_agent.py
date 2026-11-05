@@ -18,8 +18,9 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,10 +37,12 @@ from .pricing import usage_event
 from .per_turn import PerTurnSession, session_dir_name
 
 if TYPE_CHECKING:
+    from ..claude_cli import CapStop, ResidentTurn
     from ..agent_settings import Launch
     from ..library import AgentLibrary
     from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from . import ResidentSession
+    from .cancel import TurnCancel
 
 
 HOME_LAYOUT_ID = "cursor-operator-home/v1"
@@ -54,6 +57,30 @@ _PROBE_TIMEOUT_SEC = 10.0
 # Leave ten seconds for the HTTP round trip and serialization.
 MCP_MAX_WAIT_SECONDS = 50
 _ROUTED_MODEL = re.compile(r"^> Auto routed to ([^\n]+)\n\n?")
+RETRY_SUMMARY = "Cursor's CLI gave up after reconnecting; retried once"
+
+
+class CursorFailure(StrEnum):
+    TRANSIENT_BACKEND = "transient_backend"
+
+
+def cursor_failure(result: dict[str, Any] | None, stderr: str) -> CursorFailure | None:
+    # Observed after CLI reconnects: "RetriableError: WritableIterable is closed"
+    # and "Error: command failed unexpectedly.", with no result (TTADK may exit 0).
+    if result is None and "RetriableError" in stderr:
+        return CursorFailure.TRANSIENT_BACKEND
+    return None
+
+
+def retry_event(stderr: str) -> dict[str, Any]:
+    return {"type": "system", "subtype": "cursor_run_retry", "attempt": 1,
+            "reason": CursorFailure.TRANSIENT_BACKEND.value, "summary": RETRY_SUMMARY,
+            "stderr": ttadk.error_tail(stderr)[-400:]}
+
+
+def retry_stderr(first: str, second: str) -> str:
+    # Keep both attempts within the tiers' 1,000-character diagnostic limit.
+    return f"Attempt 1 (RetriableError):\n{ttadk.error_tail(first)[-400:]}\nAttempt 2:\n{ttadk.error_tail(second)[-400:]}"
 
 
 def write_ttadk_shim(local: Path) -> Path:
@@ -544,6 +571,28 @@ class ResidentCursor(PerTurnSession):
     """
 
     runtime_label = "Cursor Agent"
+
+    async def _run_turn(
+        self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *, tag: Any = None,
+        stop: Callable[[], CapStop | None] | None = None, cancel: TurnCancel,
+    ) -> ResidentTurn:
+        first = await super()._run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
+        if cancel.requested or first.stopped is not None or first.exit_code not in (0, 1) \
+                or cursor_failure(first.result_event, first.stderr) is None:
+            return first
+        # End the old process tree before starting another; keep the initialized chat
+        # so any tools already called remain in its history on --resume.
+        if self._tree is not None:
+            await self._end_tree(self._tree.process, self._tree)
+        self._tree, self._end_task = None, None
+        if cancel.requested:
+            return self._stopped_turn(session_started=first.session_started, usage=first.usage,
+                                      complete=first.usage_complete, sent=first.prompt_sent)
+        await on_event(retry_event(first.stderr))
+        self._ended = False
+        second = await super()._run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
+        return replace(second, session_started=first.session_started or second.session_started,
+                       stderr=retry_stderr(first.stderr, second.stderr) if second.result_event is None else "")
 
     def _split(self, command: list[str]) -> tuple[list[str], str | None, str]:
         message = "a resident Cursor Agent command starts with env CURSOR_CONFIG_DIR=<dir> CURSOR_DATA_DIR=<dir> <program>"

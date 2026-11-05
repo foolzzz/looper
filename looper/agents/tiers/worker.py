@@ -65,6 +65,7 @@ from ..project_execution import ProjectExecution
 from ..library import items_label, load_installed
 from ..runtimes import ADAPTERS, RunChannel, RuntimeAdapter, RuntimeUnsupported
 from ..runtimes.channel import DeliveryResult, RunHandle, RunStartError
+from ..runtimes.cursor_agent import cursor_failure, retry_event, retry_stderr, RETRY_SUMMARY
 from ..runtimes.api.tools import RoomTurnTools
 from ..task_roles import TaskRole, run_role
 from ..room import MemberKind, Seat, room_section, run_seat, run_session_dir
@@ -1551,6 +1552,8 @@ class WorkerPool:
         is_verify, launch, runtime, seat = ctx.is_verify, ctx.launch, ctx.runtime, ctx.seat
         run_timeout, started_at, command = ctx.run_timeout, ctx.started_at, ctx.command
         waited, ended = False, False
+        stderr: str | None = None
+        first_stderr: str | None = None
 
         async def _end_run() -> None:
             nonlocal ended
@@ -1717,29 +1720,58 @@ class WorkerPool:
                     logger.debug("failed to insert result activity", exc_info=True)
 
         try:
-            try:
-                if start is ConsumeStart.NEW:
-                    await channel.start(prompt)
-                self._inputs[worker_id] = channel
-                if ready := self._input_ready.get(worker_id):
-                    ready.set()
-                if seat is not None and runtime.run_input:
-                    self._reminders.setdefault(worker_id, _Reminders())
-            except (BrokenPipeError, ConnectionResetError):
-                # Claude exited before reading; its output decides the outcome.
-                logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
-            if (ready := self._input_ready.get(worker_id)) is not None:
-                ready.set()
-
             remaining = run_timeout
             if start is ConsumeStart.ADOPTED and run_timeout > 0:
                 remaining -= (datetime.now(timezone.utc) - started_at).total_seconds()
                 if remaining <= 0:
                     raise asyncio.TimeoutError
-            await asyncio.wait_for(_read_output(), timeout=remaining if run_timeout > 0 else None)
-            _end_input()
-            return_code = await handle.wait()
-            waited = True
+            deadline = time.monotonic() + remaining if run_timeout > 0 else None
+            while True:
+                try:
+                    if start is ConsumeStart.NEW:
+                        await channel.start(prompt)
+                    self._inputs[worker_id] = channel
+                    if ready := self._input_ready.get(worker_id):
+                        ready.set()
+                    if seat is not None and runtime.run_input:
+                        self._reminders.setdefault(worker_id, _Reminders())
+                except (BrokenPipeError, ConnectionResetError):
+                    # The process exited before reading; its output decides the outcome.
+                    logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
+                if (ready := self._input_ready.get(worker_id)) is not None:
+                    ready.set()
+
+                await asyncio.wait_for(_read_output(), timeout=max(0, deadline - time.monotonic())
+                                       if deadline is not None else None)
+                _end_input()
+                return_code = await handle.wait()
+                waited = True
+                if runtime.type != "cursor-agent" or result_event is not None:
+                    break
+                stderr = await handle.error_output()
+                if first_stderr is not None:
+                    stderr = retry_stderr(first_stderr, stderr)
+                    break
+                if ended or return_code not in (0, 1) or cursor_failure(result_event, stderr) is None \
+                        or not isinstance(handle, ProcessRun):
+                    break
+                first_stderr = stderr
+                await _end_run()
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise asyncio.TimeoutError
+                await recorder.record(retry_event(stderr))
+                if parent_task_id:
+                    await self._activity(parent_task_id, worker_id, "phase", RETRY_SUMMARY)
+                # Reuse the prepared inputs and their content-named directory. Only
+                # the process and its channel are fresh; this is still one run.
+                handle = ProcessRun(runtime, command, launch=launch, cwd=work_dir,
+                                    session_dir=handle._session_dir, prompt_file=handle._prompt_file,
+                                    label=f"worker {worker_id}")
+                waited, ended, input_ended = False, False, False
+                await handle.launch()
+                channel = handle.channel
+                if (wp := self._active.get(worker_id)) is not None:
+                    wp.handle, wp.process = handle, handle.process
         except BaseException as exc:
             if isinstance(handle, KeptRun) and handle.state is KeptRunState.DETACHED:
                 recorder.detach()
@@ -1789,9 +1821,9 @@ class WorkerPool:
         detail = (runtime.failure_detail(result_event, launch=launch, command=command, pid=handle.pid)
                   if not result_ok else None)
         # A run stopped at its spend cap exits non-zero too; its result says why.
-        if ((return_code != 0 or not launch.exit_code_reliable) and not result_ok
+        if ((return_code != 0 or not launch.exit_code_reliable or first_stderr is not None) and not result_ok
                 and runtime.budget_error(result_event) is None and not detail):
-            stderr = await handle.error_output()
+            stderr = stderr if stderr is not None else await handle.error_output()
             error = (f"{runtime.label} exited with code {return_code}" if launch.exit_code_reliable
                      else f"{runtime.label} through TTADK ended without a result")
             if not launch.exit_code_reliable:
@@ -1802,10 +1834,12 @@ class WorkerPool:
                     error += f": {stderr}"
                 if parent_task_id:
                     await self._activity(parent_task_id, worker_id, "error", error)
+            elif first_stderr is not None:
+                error += f": {stderr}"
             await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                                   outcome=RunOutcome.RUN_FAILED.value)
             return {"status": "failed", "error": error,
-                    "stderr": stderr[:500] if launch.exit_code_reliable else stderr}
+                    "stderr": stderr[:500] if launch.exit_code_reliable and first_stderr is None else stderr}
         if return_code != 0 and result_ok:
             logger.warning(
                 "worker %s: Claude exited %d but produced a successful result; judging the result",

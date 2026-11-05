@@ -142,6 +142,7 @@ from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction,
 from ..run_usage import Usage
 from ..room import REF_MAX_CHARS, seat_key
 from ..runtimes import CLAUDE_CODE, InProcessTools, ReadOnly, RuntimeUnsupported
+from ..runtimes.cursor_agent import cursor_failure
 from ..runtimes.runner.bridge import RpcFailure
 from ..runtimes.runner.protocol import ProtocolError as RunnerProtocolError
 from ..session_switch import SessionSwitch, SwitchReason
@@ -3563,6 +3564,8 @@ class PlannerAgent:
 
             async def on_event(event: dict[str, Any]) -> None:
                 await recorder.record(event)
+                if event.get("subtype") == "cursor_run_retry":
+                    await self._activity("phase", event["summary"])
                 session_id = event.get("session_id")
                 if (event.get("session_started") is not False and isinstance(session_id, str)
                         and session_id and session_id != plan.session_id):
@@ -3613,15 +3616,19 @@ class PlannerAgent:
                     self._ops.end_turn(self._token)
 
             ttadk_error: str | None = None
-            if turn.result_event is None and not process.launch.exit_code_reliable:
+            if turn.result_event is None and (not process.launch.exit_code_reliable
+                                              or process.launch.runtime.type == "cursor-agent"):
                 from ..runtimes.ttadk import error_tail
 
-                ttadk_error = f"{process.launch.runtime.label} through TTADK ended without a result"
+                via = " through TTADK" if not process.launch.exit_code_reliable else ""
+                ttadk_error = f"{process.launch.runtime.label}{via} ended without a result"
                 if stderr := error_tail(turn.stderr):
                     ttadk_error += f": {stderr}"
                 await self._activity("error", ttadk_error)
 
-            if resuming and not turn.session_started:
+            transient_cursor = (process.launch.runtime.type == "cursor-agent"
+                                and cursor_failure(turn.result_event, turn.stderr) is not None)
+            if resuming and not turn.session_started and not transient_cursor:
                 error = f"session {resuming} could not be resumed{exit_note(turn.exit_code)}; retried in a new session"
                 if ttadk_error:
                     error += f": {ttadk_error}"
