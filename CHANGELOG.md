@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.79] - 2026-11-04
+
+### Added
+
+- **Cursor Agent for the Manager and Planners.** The `cursor-agent` runtime gains the `resident_session` and `resume` capabilities, so a Cursor Agent Profile can be chosen for the Manager and Planners as well as Workers and Reviewers. Each Manager or Planner session keeps one Cursor chat under `<runtime_root>/.local/cursor-agent/sessions/<owner>/` (own `config/` and `data/`), and each turn runs `cursor-agent -p … --resume <chatId>` in the same working directory. Looper's instructions travel on stdin: the first turn sends the `<looper_instructions>` block, a resumed turn only the prompt. The session records the instructions' hash, chat id and working directory as soon as Cursor reports the chat id, so a turn interrupted by a restart still resumes that chat. When the instructions change, the session goes through the session switch (a handoff turn on the old chat, then a new chat with the new instructions and a resume brief); the old chat is removed only after the new session's first turn completed. An existing built-in `rt-cursor-agent` row gets the new capabilities at startup. ([#1086](https://github.com/foolzzz/looper/pull/1086))
+
 ## [2.14.78] - 2026-11-04
 
 ### Fixed
