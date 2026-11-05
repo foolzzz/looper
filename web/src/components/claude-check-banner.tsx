@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
 import { AlertTriangle } from "lucide-react";
-import { fetchStatus, type SelfCheck } from "@/lib/api";
+import { type SelfCheck } from "@/lib/api";
+import { useStartupChecks } from "@/lib/use-startup-checks";
 
 /** The checks of the runtimes' own logins Agent Profiles may use. */
 const LOGIN_CHECKS = ["codex_login", "grok_login", "cursor_login", "ttadk"];
@@ -10,13 +10,7 @@ const shown = (c: SelfCheck) => (c.id.startsWith("claude_") || LOGIN_CHECKS.incl
 /** Says, on every page, when the server started without the Claude Code CLI or its login, or when a runtime
  * login or launcher an Agent Profile uses cannot run. */
 export function ClaudeCheckBanner() {
-  const [problems, setProblems] = useState<SelfCheck[]>([]);
-
-  useEffect(() => {
-    fetchStatus()
-      .then((s) => setProblems((s.checks ?? []).filter(shown)))
-      .catch(() => setProblems([]));
-  }, []);
+  const problems = (useStartupChecks() ?? []).filter(shown);
 
   if (problems.length === 0) return null;
   return (

@@ -38,7 +38,7 @@ import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from .. import child_env
 from ..ops_config import OpsConfig
@@ -50,7 +50,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-OK, WARN, FAIL, SKIP = "ok", "warn", "fail", "skip"
+OK, WARN, FAIL, SKIP, PENDING = "ok", "warn", "fail", "skip", "pending"
+CheckStatus = Literal["ok", "warn", "fail", "skip", "pending"]
 
 # The install command and documentation the Claude Code package's own README names.
 CLAUDE_INSTALL_FIX = (
@@ -82,7 +83,7 @@ _DATABASE_TIMEOUT_SECONDS = 5.0
 class Check:
     id: str
     label: str
-    status: str  # OK, WARN, FAIL or SKIP (not checked, with the reason in detail)
+    status: CheckStatus
     detail: str
     fix: str = ""
 

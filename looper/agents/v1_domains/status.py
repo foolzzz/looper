@@ -28,7 +28,7 @@ _STATUS = _object({
     "channels": _object({"web": _object({"channel": {"const": "web"}, "healthy": _BOOL,
                                          "active_sse_streams": _INT})}),
     "checks": _array(_object({"id": _STR, "label": _STR, "detail": _STR, "fix": _STR,
-                               "status": {"type": "string", "enum": ["ok", "warn", "fail", "skip"]}})),
+                               "status": {"type": "string", "enum": ["ok", "warn", "fail", "skip", "pending"]}})),
     "can_sign_out": _BOOL, "turn_binding": _BINDING,
     "managers": _array(_object({"id": _STR, "name": _STR, "running": _BOOL, "busy": _BOOL,
                                  "healthy": _BOOL, "sync": {"type": "string", "enum": ["pending", "ok"]},
