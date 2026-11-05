@@ -213,7 +213,8 @@ def test_manager_provider_registration_keeps_registry_warnings(monkeypatch: pyte
     fields = {"name": "test", "vendor_type": "custom", "endpoints": [
         {"protocol": "openai-chat", "base_url": "https://example.invalid"}]}
     provider = {"provider_id": "prov-test", **fields, "auth": "api_key", "model_count": 0,
-                "profile_count": 0, "builtin": False, "api_key": None, "login": None, "max_concurrency": None}
+                "profile_count": 0, "builtin": False, "enabled": True, "api_key": None, "login": None,
+                "max_concurrency": None}
     # Forward registry warnings independently of how the registry derives them.
     warnings = ["glm-5.3[1m]: a Claude Code convention; other runtimes send it verbatim"]
     create = AsyncMock(return_value={"provider": provider, "warnings": warnings})
