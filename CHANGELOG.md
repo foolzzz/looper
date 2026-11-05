@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.81] - 2026-11-04
+
+### Added
+
+- **Cursor Agent through TTADK.** The runtime `ttadk-cursor-agent` (`rt-ttadk-cursor-agent`, launcher TTADK, type `cursor-agent`) runs Cursor's CLI as `ttadk code -t cursor-cli --skip-check -- …`, so TTADK counts the work like the Codex runs; capabilities, roles and the stdin instructions are the native runtime's. It is registered when `ttadk` and `cursor-agent` are on PATH and used only when an Agent Profile selects it. TTADK runs `agent` for `cursor-cli`, so Looper puts a shim named `agent` first on the run's own `PATH`: it runs the resolved `cursor-agent`, refuses to run without Looper's Cursor directories and unsets `TTADK_JWT_TOKEN`. A launch is refused (`WRONG_TOOL`) when TTADK's settings make `cursor-cli` run another command. The sign-in check for `cursor-cli` runs with the shim and throwaway Cursor directories and a 45 s timeout; launches wait for it, status views read the cached result and refresh in the background (new state `checking`, a warning). A run without a `result` event fails whatever `ttadk` exits with, and TTADK's non-JSON stdout preamble is dropped. ([#1085](https://github.com/foolzzz/looper/pull/1085))
+
 ## [2.14.80] - 2026-11-04
 
 ### Changed
