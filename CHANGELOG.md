@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.80] - 2026-11-04
+
+### Changed
+
+- **The Chat page lists loopercli conversations as their own group.** Conversations opened through the client API (`loopercli chat`) are stored like dashboard chats (channel `web`) and used to show under "Dashboard chat" with nothing marking them. `chat.list_sessions` now returns, per conversation, the API client that opened it (from `chat_threads.client_id`, its name from `api_clients`, the id when the client row is gone; null otherwise), and `operator_chat.sessions` carries it as `client`. The conversation list shows such conversations in a group `loopercli` right after "Dashboard chat", each with `via <client name>`. Stored messages, their channel, the client API and Lark/Telegram are unchanged. ([#1087](https://github.com/foolzzz/looper/pull/1087))
+
 ## [2.14.79] - 2026-11-04
 
 ### Added
