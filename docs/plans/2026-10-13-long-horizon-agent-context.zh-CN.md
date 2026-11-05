@@ -556,6 +556,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-05 | Custom Provider 新建表单按 API format 共用 URL，OpenAI 默认登记 Responses 与 Chat Completions；手动 Add model 复用 `models.add_many` 的内置价格或 0 默认值，编辑与 Manager 的 `models.create` 语义不变。 |
 | 2026-11-04 | Provider 保存后与按需获取模型列表，以已存密钥按格式和 URL 去重请求；控制台逐项确认后原子批量添加，未设置且无内置价格的字段默认 0，仅作用于 `models.add_many`。 |
 | 2026-11-04 | 聊天绑定可配置最多 100 个额外发送者，仅在精确 bot/chat 对中准入，与路由共用已提交快照；同 Manager 省略名单保留，移动时省略则清空，支持 Settings → Managers 与生成式 CLI。 |
 | 2026-11-04 | 场景管家增加 `projects` 任务范围（本分支未合入）：仅 Tasks 工具，按所选项目读取和操作任意创建者的任务；模板须固定在范围内，删除项目收缩范围，空范围保留并提示重新选择；控制台和配置转移使用项目选择与名称引用。 |

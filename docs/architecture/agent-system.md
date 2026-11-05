@@ -1832,8 +1832,9 @@ Manager tools.
   Price views expose each field's `override`, `effective` and `source`
   (`override`, `builtin`, `unknown`). `null` falls back to the built-in price
   table; zero is an explicit free price. `models.add_many`, used by the
-  checklist, defaults each omitted price to `null` when the built-in table
-  prices that field for the model name, and to `0.0` otherwise. Explicit prices
+  checklist and the dashboard's Add model form, defaults each omitted price to
+  `null` when the built-in table prices that field for the model name, and to
+  `0.0` otherwise. Explicit prices
   are preserved. `models.create` keeps omitted prices `null`, with a built-in
   fallback or an unknown price when there is none. Zero-priced
   runs cost $0.00, add $0 to task and project totals, and never trigger spend

@@ -3,7 +3,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { EDIT_BOX, EditDelete, FormFooter, LABEL, RegistryList, Row, RowName, SELECT } from "@/components/registry-ui";
 import {
-  createModel, deleteModel, updateModel,
+  addModels, deleteModel, protocolLabel, updateModel,
   type ApiProtocol, type ModelFields, type Model, type PriceField, type Provider, type Registry,
 } from "@/lib/api";
 import { settingsHref } from "@/lib/settings-pages";
@@ -62,6 +62,11 @@ function modelSettings(draft: ModelDraft): ModelFields {
   };
 }
 
+// Omitted fields use the server's create defaults; edits still send null to clear overrides.
+function unsetLeftOut(fields: ModelFields): ModelFields {
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== null));
+}
+
 function ModelForm({ model, provider, registry, onDone }: {
   model: Model | null; provider: Provider; registry: Registry; onDone: () => void;
 }) {
@@ -81,7 +86,10 @@ function ModelForm({ model, provider, registry, onDone }: {
     let savedWarnings: string[] = [];
     const done = await action.run(async () => {
       const answer = model ? await updateModel(model.model_id, fields)
-        : await createModel({ provider_id: provider.provider_id, name: draft.name, protocol, ...fields });
+        : await addModels(provider.provider_id, [{ name: draft.name, protocol, ...unsetLeftOut(fields) }]);
+      if ("skipped" in answer && answer.skipped.length) {
+        throw new Error(`Model ${draft.name} (${protocol}) is already registered on ${provider.name}.`);
+      }
       savedWarnings = answer.warnings;
     });
     if (!done) return;
@@ -92,7 +100,7 @@ function ModelForm({ model, provider, registry, onDone }: {
     <label htmlFor={`${id}-${key}`} className={LABEL}>{label}</label>
     <Input id={`${id}-${key}`} inputMode={key === "context_window" ? "numeric" : "decimal"} value={draft.numbers[key]}
       onChange={(event) => set({ numbers: { ...draft.numbers, [key]: event.target.value } })}
-      placeholder={key === "context_window" ? "Unknown" : "Use built-in price, if known"} />
+      placeholder={key === "context_window" ? "Unknown" : model ? "Use built-in price, if known" : "Built-in price, else 0"} />
   </div>;
   return <form onSubmit={save} aria-label={model ? `Edit model ${model.name} (${model.protocol})` : `Add model to ${provider.name}`} className="space-y-3">
     <p className="text-xs text-muted-foreground">Provider: {provider.name}. {model && "Provider, protocol and exact name cannot be changed; create a new model to change its identity."}</p>
@@ -102,7 +110,7 @@ function ModelForm({ model, provider, registry, onDone }: {
         <select id={`${id}-protocol`} className={SELECT} required disabled={!!model} value={draft.protocol}
           onChange={(event) => setDraft(modelDraft({}, event.target.value as ApiProtocol))}>
           <option value="">Choose a protocol</option>
-          {provider.endpoints.map(({ protocol }) => <option key={protocol} value={protocol}>{protocol}</option>)}
+          {provider.endpoints.map(({ protocol }) => <option key={protocol} value={protocol}>{protocolLabel(registry, protocol)} ({protocol})</option>)}
         </select>
       </div>
       <div className="space-y-1">
@@ -146,9 +154,11 @@ function ModelForm({ model, provider, registry, onDone }: {
     </div>
     <p className="text-[11px] text-muted-foreground">Background uses the same provider and protocol, only in runtimes that support it. Empty uses this model.</p>
     <fieldset className="space-y-2">
-      <legend className={LABEL}>Price overrides · USD per million tokens</legend>
+      <legend className={LABEL}>{model ? "Price overrides · USD per million tokens" : "Prices · USD per million tokens (optional)"}</legend>
       <div className="grid gap-3 sm:grid-cols-2">{PRICES.map(({ key, label }) => numberInput(key, `${label} price`))}</div>
-      <p className="text-[11px] text-muted-foreground">Empty clears the override and uses a built-in price if known. 0 means explicitly free.</p>
+      <p className="text-[11px] text-muted-foreground">{model
+        ? "Empty clears the override and uses a built-in price if known. 0 means explicitly free."
+        : "Empty: Looper's built-in price when it knows this model, otherwise 0, so its runs count as free. Enter prices to count real spend and let spend caps stop its runs."}</p>
     </fieldset>
     {model && <div className="space-y-1 text-xs text-muted-foreground">
       <p>Changes affect {model.profile_count} Agent Profiles. Changes to efforts apply to subsequent runs; existing runs keep their launch settings.</p>
@@ -182,7 +192,7 @@ function ModelRow({ model, provider, registry }: { model: Model; provider: Provi
     </p>
     <p className="break-words text-xs text-muted-foreground">USD per million tokens · {PRICES.map(({ key, label }) => {
       const price = model.prices[key];
-      return `${label}: ${price.effective === null ? "unknown" : `${price.effective} (${price.source})`}`;
+      return `${label}: ${price.effective === null ? "unknown" : price.effective === 0 ? "0 (free)" : `${price.effective} (${price.source})`}`;
     }).join(" · ")}</p>
     {model.warnings.map((warning) => <p key={warning} className="text-xs text-warning">{warning}</p>)}
   </Row>;

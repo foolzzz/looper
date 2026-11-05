@@ -114,6 +114,9 @@ it("offers custom and built-in vendors together and starts a blank custom accoun
   expect(select.querySelector("optgroup")).toBeNull();
   expect(field("Name *").value).toBe("");
   expect(field("Extra environment").value).toBe("");
+  expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(2);
+  expect(container.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
+  await click("Set a URL per protocol instead");
   await toggle("openai-chat");
   await fill("openai-chat URL", "https://custom.invalid/api");
   await fill("Name *", "Custom account");
@@ -156,6 +159,76 @@ it("prefills all vendor endpoints once, saves their own URLs and never submits s
   expect(container.querySelector("table")).toBeNull();
 });
 
+it.each([
+  ["OpenAI", "both", ["openai-responses", "openai-chat"]],
+  ["OpenAI", "openai-chat", ["openai-chat"]],
+  ["OpenAI", "openai-responses", ["openai-responses"]],
+  ["Anthropic", "both", ["anthropic-messages"]],
+])("saves %s with %s at one URL and opens the model picker", async (format, apis, protocols) => {
+  await render(); await toggle(format);
+  if (format === "OpenAI") {
+    expect(field("OpenAI APIs it serves").value).toBe("both");
+    await fill("OpenAI APIs it serves", apis);
+  }
+  await fill("Name *", "Custom account");
+  await fill("Base URL *", "  https://custom.invalid/api/  ");
+  expect(container.textContent).not.toContain("api//");
+  await submit();
+  expect(bodies[0].endpoints).toEqual(protocols.map((protocol) => endpoint(protocol as Provider["endpoints"][number]["protocol"], "https://custom.invalid/api/")));
+  expect(requests[1].path).toBe("/api/v1/provider_accounts/fetch_models");
+  expect(container.textContent).toContain("Saved. Tick the models Custom account offers to add them:");
+});
+
+it.each([
+  ["", "https://custom.invalid/v1", "Choose the API format."],
+  ["OpenAI", "  ", "Enter the base URL."],
+])("validates format %s and URL before sending", async (format, url, error) => {
+  await render(); if (format) await toggle(format);
+  await fill("Base URL *", url); await submit();
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(error);
+  expect(requests).toHaveLength(0);
+});
+
+it("describes format URLs and compatible runtime labels using registry data", async () => {
+  const runtime = (label: string, protocols: string[]) => ({ label, protocols }) as Registry["runtime_types"][number];
+  data.runtime_types = [runtime("Codex", ["openai-responses"]), runtime("Pi", ["openai-chat", "openai-responses"]),
+    runtime("Claude Code", ["anthropic-messages"])];
+  await render();
+  expect(container.textContent).toContain("Spoken by Codex, Pi");
+  expect(container.textContent).toContain("Spoken by Claude Code");
+  expect(field("Base URL *").getAttribute("placeholder")).toBe("https://api.example.com/v1");
+  expect(container.textContent).toContain("<base URL>/models");
+  await toggle("Anthropic");
+  expect(field("Base URL *").getAttribute("placeholder")).toBe("https://api.example.com/anthropic");
+  await fill("Base URL *", "https://custom.invalid/anthropic/");
+  expect(container.textContent).toContain("Runs call https://custom.invalid/anthropic/v1/messages; the model list is https://custom.invalid/anthropic/v1/models.");
+});
+
+it.each(["both", "openai-chat", "openai-responses"])("preserves simple URL and %s through the protocol editor", async (apis) => {
+  await render(); await toggle("OpenAI"); await fill("OpenAI APIs it serves", apis);
+  await fill("Base URL *", "https://custom.invalid/v1/");
+  await click("Set a URL per protocol instead");
+  const protocols = apis === "both" ? ["openai-responses", "openai-chat"] : [apis];
+  for (const protocol of protocols) expect(field(`${protocol} URL`).value).toBe("https://custom.invalid/v1/");
+  await fill(`${protocols[0]} URL`, "https://changed.invalid/v1");
+  await click("Describe it by API format instead");
+  expect(field("Base URL *").value).toBe("https://changed.invalid/v1");
+  expect(field("OpenAI APIs it serves").value).toBe(apis);
+  await submit();
+  expect(bodies[0].endpoints).toEqual(protocols.map((protocol) => endpoint(protocol as Provider["endpoints"][number]["protocol"], "https://changed.invalid/v1")));
+});
+
+it("keeps the protocol editor for edits of custom providers and preset vendors", async () => {
+  data.providers = [account({ vendor_type: "custom" })];
+  await render(false); await click("Edit provider Saved account");
+  expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(0);
+  expect(container.querySelectorAll('input[type="checkbox"]')).toHaveLength(4);
+  expect(field("openai-chat URL").value).toBe("https://saved.invalid/v2");
+  await click("Cancel"); await click("Add provider"); await fill("Vendor", "deepseek");
+  expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(0);
+  for (const entry of VENDORS[0].endpoints) expect(field(`${entry.protocol} URL`).value).toBe(entry.base_url);
+});
+
 it("keeps migrated runtime defaults until an explicit endpoint URL replaces them", async () => {
   data.providers = [account({ vendor_type: "custom", endpoints: [{ ...endpoint("openai-chat", ""), use_runtime_default: true }] })];
   await render(false); expect(container.textContent).toContain("runtime default");
@@ -166,9 +239,13 @@ it("keeps migrated runtime defaults until an explicit endpoint URL replaces them
 });
 
 it("switching back to custom clears vendor endpoints and environment", async () => {
-  await render(); await fill("Vendor", "deepseek"); await fill("Vendor", "custom");
+  await render(); await toggle("OpenAI"); await fill("Base URL *", "https://old.invalid/v1");
+  await fill("OpenAI APIs it serves", "openai-chat"); await click("Set a URL per protocol instead");
+  await fill("Vendor", "deepseek"); await fill("Vendor", "custom");
   expect(field("Name *").value).toBe(""); expect(field("Extra environment").value).toBe("");
-  expect(container.querySelector('input[id$="-url"]')).toBeNull();
+  expect(field("Base URL *").value).toBe("");
+  expect(container.querySelector('input[type="radio"]:checked')).toBeNull();
+  await toggle("OpenAI"); expect(field("OpenAI APIs it serves").value).toBe("both");
 });
 
 it.each(["keep", "replace", "remove"])("%s a masked key without putting its mask in the password input", async (mode) => {
@@ -273,6 +350,7 @@ it("deletes through v1 after the existing confirmation and refreshes the registr
 
 it("keeps a pending v1 write visible as an error without refreshing or confirming it", async () => {
   await render();
+  await toggle("OpenAI"); await fill("Base URL *", "https://pending.invalid/v1");
   vi.mocked(fetch).mockResolvedValueOnce(Response.json({ status: "needs_confirmation", confirmation_id: "pending",
     expires_in_seconds: 60, impact: "This account has active references." }, { status: 202 }));
   await fill("Name *", "Pending account"); await submit();

@@ -13,10 +13,10 @@ from looper.agents.runtimes import ApiFamily, AuthKind, VendorType
 from looper.agents.runtimes.pricing import BUILTIN_PRICES, PRICE_FIELDS, model_price
 
 
-def _list(handler, *, family=ApiFamily.OPENAI, key="test-key"):
+def _list(handler, *, family=ApiFamily.OPENAI, key="test-key", base_url="https://example.invalid/v1/"):
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            return await listing.list_models_at(family, "https://example.invalid/v1/", key, client=client)
+            return await listing.list_models_at(family, base_url, key, client=client)
     return asyncio.run(run())
 
 
@@ -38,9 +38,10 @@ def test_no_key_sends_no_authentication():
     assert _list(answer, key=None).models == ()
 
 
-def test_anthropic_pages_use_own_path_headers_and_cursor():
+@pytest.mark.parametrize("base_url", ["https://example.invalid", "https://example.invalid/v1/"])
+def test_anthropic_pages_use_own_path_headers_and_cursor(base_url):
     def answer(request):
-        assert request.url.path == "/v1/v1/models"
+        assert request.url.path == "/v1/models"
         assert request.headers["x-api-key"] == "test-key"
         assert request.headers["anthropic-version"] == listing.ANTHROPIC_VERSION
         assert request.url.params["limit"] == "1000"
@@ -48,7 +49,7 @@ def test_anthropic_pages_use_own_path_headers_and_cursor():
             return httpx.Response(200, json={"data": [{"id": "a"}], "has_more": True, "last_id": "a"})
         assert request.url.params["after_id"] == "a"
         return httpx.Response(200, json={"data": [{"id": "b"}], "has_more": False})
-    assert [model.name for model in _list(answer, family=ApiFamily.ANTHROPIC).models] == ["a", "b"]
+    assert [model.name for model in _list(answer, family=ApiFamily.ANTHROPIC, base_url=base_url).models] == ["a", "b"]
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -91,6 +92,13 @@ def test_transport_failure(error, problem):
     assert _list(answer).problem is problem
 
 
+@pytest.mark.parametrize("error", [httpx.DecodingError, httpx.InvalidURL])
+def test_other_http_and_url_failures_are_bad_responses(error):
+    def answer(request):
+        raise error("private endpoint diagnostic")
+    assert _list(answer).problem is listing.ListingProblem.BAD_RESPONSE
+
+
 @pytest.mark.parametrize("body", [b"not json", b"[]", b'{}', b'{"data":[null]}', b'{"data":[{"id":1}]}',
                                    b" " * (listing.MAX_BYTES + 1)])
 def test_malformed_or_oversized_response(body):
@@ -108,6 +116,14 @@ def test_page_budget_truncates_openai_cursor():
         return httpx.Response(200, json={"data": [{"id": str(page)}], "has_more": True, "last_id": str(page)})
     result = _list(answer)
     assert len(pages) == listing.MAX_PAGES and len(result.models) == listing.MAX_PAGES and result.truncated
+
+
+@pytest.mark.parametrize("cursor", [None, 12])
+def test_has_more_without_string_cursor_is_truncated(cursor):
+    result = _list(lambda _: httpx.Response(200, json={
+        "data": [{"id": "a"}], "has_more": True, "last_id": cursor}))
+    assert result.models == (listing.ListedModel("a"),)
+    assert result.truncated and result.problem is None
 
 
 def test_model_budget_counts_distinct_names():
@@ -206,6 +222,42 @@ def test_fetch_timeout_does_not_hide_another_endpoint(monkeypatch):
     result = asyncio.run(run())
     assert [entry["state"] for entry in result["listings"]] == ["failed", "listed"]
     assert result["listings"][0]["problem"] == "no answer within 15 seconds"
+
+
+@pytest.mark.parametrize("failure", ["corrupt-gzip", "invalid-url", "unexpected"])
+def test_endpoint_failure_does_not_hide_another_endpoint(monkeypatch, failure):
+    row = {"id": "p", "name": "Provider", "vendor_type": "custom", "auth": "api_key", "endpoints": [
+        {"protocol": "anthropic-messages", "base_url": "https://bad.invalid"},
+        {"protocol": "openai-chat", "base_url": "https://ok.invalid/v1"}]}
+    if failure == "invalid-url":
+        row["endpoints"][0]["base_url"] = "https://[invalid"
+    _provider(monkeypatch, row=row)
+    if failure == "unexpected":
+        original = listing.list_models_at
+
+        async def fail_one(family, *args, **kwargs):
+            if family is ApiFamily.ANTHROPIC:
+                raise RuntimeError("private endpoint diagnostic")
+            return await original(family, *args, **kwargs)
+        monkeypatch.setattr(listing, "list_models_at", fail_one)
+
+    def answer(request):
+        if request.url.host == "bad.invalid":
+            return httpx.Response(200, stream=httpx.ByteStream(b"corrupt gzip"),
+                                  headers={"Content-Encoding": "gzip"})
+        return httpx.Response(200, json={"data": [{"id": "valid-model"}]})
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+            return await listing.fetch_provider_models("p", client=client)
+    result = asyncio.run(run())
+    failed, valid = result["listings"]
+    assert failed["state"] == "failed"
+    assert failed["problem"] == listing.ListingProblem.BAD_RESPONSE.text()
+    assert failed["models"] == []
+    assert valid["state"] == "listed"
+    assert [model["name"] for model in valid["models"]] == ["valid-model"]
+    assert "private endpoint diagnostic" not in json.dumps(result)
 
 
 def test_login_skipped_without_reading_key_or_models(monkeypatch):
