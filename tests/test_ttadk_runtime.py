@@ -156,6 +156,7 @@ def _wrapper(tmp_path: Path, *, mode: str = "success") -> tuple[str, Path]:
         f"    mode = {mode!r}\n"
         "    if mode == 'not-signed-in': sys.exit(1)\n"
         "    if mode == 'timeout': time.sleep(3)\n"
+        "    if mode == 'unreadable': print('not json'); sys.exit(0)\n"
         "    print(json.dumps({'models': []})); sys.exit(0)\n"
         "assert sys.argv[1:7] == ['codex', '--skip-check', '--mode', 'mixed', '--', 'exec'], sys.argv\n"
         "for i in range(19): print(f'TTADK banner {i}', flush=True)\n"
@@ -180,10 +181,11 @@ async def _worker_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch: L
 
 @pytest.mark.parametrize(("mode", "problem"), [
     ("not-signed-in", ttadk.TtadkProblem.NOT_SIGNED_IN), ("success", None),
-    ("timeout", ttadk.TtadkProblem.CHECK_FAILED), ("missing", ttadk.TtadkProblem.NOT_FOUND),
+    ("timeout", None), ("unreadable", None), ("missing", ttadk.TtadkProblem.NOT_FOUND),
 ])
-def test_ttadk_launch_gate_stops_the_worker_before_codex(
+def test_ttadk_launch_gate_refuses_only_definite_failures(
     mode: str, problem: ttadk.TtadkProblem | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     executable, calls = _wrapper(tmp_path, mode=mode)
     if mode == "missing":
@@ -198,6 +200,13 @@ def test_ttadk_launch_gate_stops_the_worker_before_codex(
     if problem is None:
         assert result["status"] == "completed"
         assert [argv[0] for argv in invocations] == ["models", "codex"]
+        metadata = agent_db.start_record.await_args.kwargs["metadata"]
+        if mode in ("timeout", "unreadable"):
+            assert metadata["ttadk_check"] == "could not finish (check_failed)"
+            warnings = [record for record in caplog.records if "could not finish" in record.message]
+            assert len(warnings) == 1 and "check_failed" in warnings[0].message
+        else:
+            assert "ttadk_check" not in metadata
     else:
         assert result["status"] == "failed" and problem.message("codex") in result["error"]
         assert all(argv[0] == "models" for argv in invocations)

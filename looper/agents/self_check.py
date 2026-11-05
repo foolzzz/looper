@@ -292,7 +292,7 @@ async def _ttadk_runtime_rows(*, pool: Any = None) -> list[dict[str, Any]]:
             if row["launcher"] == "ttadk" and row["profile_count"]]
 
 
-async def check_ttadk(runtimes: list[dict[str, Any]] | None) -> Check:
+async def check_ttadk(runtimes: list[dict[str, Any]] | None, *, wait: bool = True) -> Check:
     """Check the TTADK tools used by saved Agent Profiles, without launching a model."""
     from .runtimes import adapter, ttadk
 
@@ -305,7 +305,7 @@ async def check_ttadk(runtimes: list[dict[str, Any]] | None) -> Check:
     status = OK
     for runtime in runtimes:
         tool = adapter(runtime["type"]).ttadk_tool
-        problem = await ttadk.sign_in_problem(runtime["executable"] or "ttadk", tool, wait=False)
+        problem = await ttadk.sign_in_problem(runtime["executable"] or "ttadk", tool, wait=wait)
         if problem is not None:
             problems.append(problem.message(runtime["type"]))
             if problem not in (ttadk.TtadkProblem.CHECK_FAILED, ttadk.TtadkProblem.CHECKING):
@@ -324,7 +324,7 @@ async def ttadk_check() -> Check:
     except Exception:
         logger.warning("cannot read whether an Agent Profile uses TTADK", exc_info=True)
         runtimes = None
-    return await check_ttadk(runtimes)
+    return await check_ttadk(runtimes, wait=False)
 
 
 # The checks of the runtimes' own logins, by id: what reads each now (``/api/v1/system/status`` reads them on every poll).
