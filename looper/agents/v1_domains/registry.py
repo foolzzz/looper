@@ -8,7 +8,7 @@ The compact client discovery tools keep their existing projections.
 from .. import profile_registry
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops.config import answered
-from ..runtimes import ApiProtocol, AuthKind, VendorType as VendorKind, ROLE_CAPABILITIES
+from ..runtimes import ApiFamily, ApiProtocol, AuthKind, VendorType as VendorKind, ROLE_CAPABILITIES
 from .global_settings import ROLE, SETTING_LAYER
 
 _NULL_NUMBER = {"type": ["number", "null"]}
@@ -17,6 +17,7 @@ _STRINGS = _array(_STR)
 _NULL_STRINGS = {**_STRINGS, "type": ["array", "null"]}
 PROVIDER_AUTH = {"type": "string", "enum": [auth.value for auth in AuthKind]}
 API_PROTOCOL = {"type": "string", "enum": [protocol.value for protocol in ApiProtocol]}
+API_FAMILY = {"type": "string", "enum": [family.value for family in ApiFamily]}
 VENDOR_KIND = {"type": "string", "enum": [vendor.value for vendor in VendorKind]}
 PRICE_FIELD = {"type": "string", "enum": list(profile_registry.PRICE_FIELDS)}
 PRICE = _object(dict.fromkeys(profile_registry.PRICE_FIELDS, _NULL_NUMBER), closed=True)
@@ -102,6 +103,8 @@ AGENT_PROFILE = _object({
 REGISTRY_LIMITS = _object({
     "name_max_chars": _INT, "models_max": _INT, "model_fields": _STRINGS,
     "price_fields": _array(PRICE_FIELD), "protocols": _STRINGS,
+    "api_formats": _array(_object({"family": API_FAMILY, "label": _STR,
+        "protocols": _array(_object({"protocol": API_PROTOCOL, "label": _STR}, closed=True))}, closed=True)),
     "auth_kinds": _array(PROVIDER_AUTH), "effort_levels": _STRINGS,
     "role_capabilities": _object(dict.fromkeys(ROLE_CAPABILITIES, _STRINGS), closed=True),
     "secret_mask": _STR, "provider_env_owned": _STRINGS,

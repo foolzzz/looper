@@ -1799,7 +1799,7 @@ Manager tools.
   `auth`, `oauth_runtime_type`, `env`, `max_concurrency` (`null` = no limit,
   stored and checked only), and a separate API key in `llm_provider_secrets`.
   The API returns the key as `***` or `null`; sending `***` keeps it and
-  `null` removes it. Only the launch path loads it. Login accounts use their
+  `null` removes it. The launch path and a model listing load it. Login accounts use their
   runtime's own login and never copy OAuth tokens. Vendor templates suggest
   defaults at creation; they do not overwrite saved configuration.
 - **Endpoints** (`llm_provider_endpoints`) have the key `(provider_id, protocol)`:
@@ -1819,9 +1819,25 @@ Manager tools.
   A provider may have no models, but a profile must select a saved model:
   an empty catalog no longer accepts arbitrary names. The same name over two
   protocols is two entries; the protocol is never guessed from the name.
+  After saving an API-key provider, or on demand with Fetch models, the
+  dashboard asks its endpoints for their model lists with the stored key.
+  OpenAI endpoints sharing a base URL are listed once for both protocols;
+  Anthropic uses its own model-list format. Login providers skip fetching
+  because their models ship with Looper. The operator confirms an initially
+  unchecked checklist; fetching never adds models. Each selected name is added
+  for every listed protocol where that exact name is not already registered.
+  A failed listing leaves the saved provider intact and allows retry or manual
+  model entry. Listing honours the server's proxy environment, never follows
+  redirects, and reads at most 2 MB.
   Price views expose each field's `override`, `effective` and `source`
   (`override`, `builtin`, `unknown`). `null` falls back to the built-in price
-  table; zero is an explicit free price. Unknown prices remain unknown.
+  table; zero is an explicit free price. `models.add_many`, used by the
+  checklist, defaults each omitted price to `null` when the built-in table
+  prices that field for the model name, and to `0.0` otherwise. Explicit prices
+  are preserved. `models.create` keeps omitted prices `null`, with a built-in
+  fallback or an unknown price when there is none. Zero-priced
+  runs cost $0.00, add $0 to task and project totals, and never trigger spend
+  caps; operators must set prices when they want those caps to apply.
   If actually used tokens lack a price, `cost_usd` is null, tokens are kept,
   and a provider-priced soft cap cannot be relied on; this is not a zero-cost
   run. Pricing resolves within the selected provider/protocol. New run metadata
@@ -4862,7 +4878,7 @@ The OpenAPI document is authoritative for fields, authentication and errors. Pro
 | `/api/v1/clients/{list,create,revoke}` | POST | `clients.{list,create,revoke}` |
 | `/api/v1/roles/{list,get,update,reset_prompt}` | POST | `roles.{list,get,update,reset_prompt}` |
 | `/api/v1/agent_settings/{get,update_system,update_role}` | POST | `agent_settings.{get,update_system,update_role}` |
-| `/api/v1/models/get` | POST | `models.get` |
+| `/api/v1/models/{get,add_many}` | POST | `models.{get,add_many}` |
 | `/api/v1/profiles/{create,update,delete,prompt_preview}` | POST | `profiles.{create,update,delete,prompt_preview}` |
 | `/api/v1/project_knowledge/{list,add,get,update,delete,drafts,confirm_draft,discard_draft}` | POST | `project_knowledge.{list,add,get,update,delete,drafts,confirm_draft,discard_draft}` |
 | `/api/v1/project_roles/stats` | POST | `project_roles.stats` |
@@ -4870,7 +4886,7 @@ The OpenAPI document is authoritative for fields, authentication and errors. Pro
 | `/api/v1/project_agent_settings/{get,update,update_role}` | POST | `project_agent_settings.{get,update,update_role}` |
 | `/api/v1/allowed_profiles/{get,replace}` | POST | `allowed_profiles.{get,replace}` |
 | `/api/v1/project_admin/{list,create,update,delete}` | POST | `project_admin.{list,create,update,delete}`; delete removes schedules and their run history first, stops running tasks (waits up to 60 s), then deletes all tasks and the project with single-task workspace/session cleanup; result branches stay. The user confirms first; conflicts allow retry after partial cleanup. An update whose `work_dir` change moves enabled or queued command schedules answers `needs_confirmation` for a client token, with the same list; the dashboard's own update runs at once. |
-| `/api/v1/provider_accounts/{list,create,update,delete,clear_login_problem}` | POST | `provider_accounts.{list,create,update,delete,clear_login_problem}` |
+| `/api/v1/provider_accounts/{list,create,update,delete,clear_login_problem,fetch_models}` | POST | `provider_accounts.{list,create,update,delete,clear_login_problem,fetch_models}` |
 | `/api/v1/registry/view` | POST | `registry.view` |
 | `/api/v1/runtimes/probe` | POST | `runtimes.probe` |
 | `/api/v1/runs/{for_task,list,get,events,usage}` | POST | `runs.{for_task,list,get,events,usage}` |

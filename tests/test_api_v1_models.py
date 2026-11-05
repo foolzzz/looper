@@ -47,8 +47,39 @@ def test_existing_operations_keep_authoritative_model_settings_and_protocols():
         assert operation.result["additionalProperties"] is False
 
 
+@pytest.mark.parametrize("entries", [[], [{"name": "model", "protocol": "openai-chat"}] * 201,
+    [{"name": "model", "protocol": "openai-chat", "extra": True}]])
+def test_add_many_rejects_out_of_bounds_or_unknown_entry_fields(entries):
+    operation = api_v1.find("POST", "/api/v1/models/add_many")
+    with pytest.raises(OpError):
+        api_v1.validate_arguments(operation.request, {"provider_id": "prov-example", "models": entries})
+
+
+def test_add_many_accepts_optional_model_settings_and_is_operator_only():
+    operation = api_v1.find("POST", "/api/v1/models/add_many")
+    api_v1.validate_arguments(operation.request, {"provider_id": "prov-example", "models": [{
+        "name": "model", "protocol": "openai-chat", "context_window": 32000,
+        "input_usd_per_mtok": 0, "output_usd_per_mtok": None, "efforts": ["high"],
+        "background_model": None}]})
+    assert operation.operator_only and operation.risk == "write" and operation.tool is None
+
+
+def test_add_many_preserves_service_refusal(monkeypatch):
+    from looper.agents.v1_domains import models
+
+    async def add(provider_id, entries):
+        raise profile_registry.RegistryError("protocol needs an endpoint")
+    monkeypatch.setattr(profile_registry, "add_models", add)
+
+    with pytest.raises(OpError, match="protocol needs an endpoint"):
+        asyncio.run(models.run(None, api_v1.find("POST", "/api/v1/models/add_many"),
+            {"provider_id": "prov-example", "models": [{"name": "model", "protocol": "openai-chat"}]}, None, {}))
+
+
 @pytest.mark.parametrize("family,action,flags,body,path", [
     ("models", "get", ["--model", "model-example"], {"model": "model-example"}, "/api/v1/models/get"),
+    ("models", "add-many", ["--provider-id", "prov-example", "--models", '[{"name":"model","protocol":"openai-chat"}]'],
+     {"provider_id": "prov-example", "models": [{"name": "model", "protocol": "openai-chat"}]}, "/api/v1/models/add_many"),
     ("models", "create", ["--provider", "Example", "--name", "Exact[1m]", "--protocol", "openai-chat",
                            "--context-window", "200000", "--input-usd-per-mtok", "2.5"],
      {"provider": "Example", "name": "Exact[1m]", "protocol": "openai-chat", "context_window": 200000,
@@ -59,7 +90,7 @@ def test_generated_cli_builds_model_requests_without_server_dependencies(tmp_pat
     args = loopercli.build_parser(document).parse_args([family, action, *flags])
     calls = []
     api = SimpleNamespace(call=lambda *parts: (calls.append(parts) or (200, {"status": "ok", "result": {}})))
-    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="models")) == 0
+    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="models", operator=True)) == 0
     assert calls == [("POST", path, body)]
     operation = api_v1.find("POST", path)
     assert not operation.hand

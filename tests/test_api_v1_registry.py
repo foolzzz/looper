@@ -103,3 +103,19 @@ def test_registry_operations_preserve_discovery_tool_boundary():
     schemas = api_v1.document()["components"]["schemas"]
     for name in ("Registry", "Runtime", "RuntimeType", "Provider", "Model", "AgentProfile", "VendorType", "RegistryLimits"):
         assert schemas[name] == registry.SCHEMAS[name]
+
+
+def test_limits_publish_protocol_families_and_labels():
+    from looper.agents.runtimes import ApiFamily, ApiProtocol
+    from looper.agents.v1_domains.registry import REGISTRY_LIMITS
+
+    limits = profile_registry._limits()
+    api_v1.validate_arguments(REGISTRY_LIMITS, limits)
+    assert limits["api_formats"] == [
+        {"family": "anthropic", "label": "Anthropic", "protocols": [
+            {"protocol": "anthropic-messages", "label": "Anthropic Messages"}]},
+        {"family": "openai", "label": "OpenAI", "protocols": [
+            {"protocol": "openai-responses", "label": "OpenAI Responses"},
+            {"protocol": "openai-chat", "label": "OpenAI Chat Completions"}]},
+    ]
+    assert {p for f in ApiFamily for p in ApiProtocol if p.family is f} == set(ApiProtocol)

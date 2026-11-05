@@ -14,7 +14,7 @@ from looper.agents.ops import OpError
 from tests.test_api_v1_auth import CLIENT_TOKEN, _bearer, _send, _serving, clients as clients
 from tests.test_operator_auth import TOKEN
 
-ACTIONS = ("list", "create", "update", "delete", "clear_login_problem")
+ACTIONS = ("list", "create", "update", "delete", "clear_login_problem", "fetch_models")
 
 
 @pytest.mark.parametrize("action", ACTIONS)
@@ -43,6 +43,7 @@ def test_client_refused_before_validation_service_or_audit(tmp_path, monkeypatch
     ("update", {"provider_id": "prov-example", "fields": {}}),
     ("update", {"provider_id": "prov-example", "fields": {"extra": True}}),
     ("delete", {"provider_id": None}), ("clear_login_problem", {"provider_id": 3}),
+    ("fetch_models", {"provider_id": None}),
 ])
 def test_requests_reject_missing_identifiers_unknown_fields_and_empty_patch(action, body):
     operation = api_v1.find("POST", f"/api/v1/provider_accounts/{action}")
@@ -57,6 +58,7 @@ def test_requests_reject_missing_identifiers_unknown_fields_and_empty_patch(acti
      {"provider_id": "prov-example", "fields": {"api_key": None}}),
     ("delete", ["--provider-id", "prov-example"], {"provider_id": "prov-example"}),
     ("clear_login_problem", ["--provider-id", "prov-example"], {"provider_id": "prov-example"}),
+    ("fetch_models", ["--provider-id", "prov-example"], {"provider_id": "prov-example"}),
 ])
 def test_generated_cli_preserves_request_shape_without_server_imports(action, options, body, tmp_path):
     document = api_v1.document()
