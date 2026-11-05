@@ -1756,7 +1756,8 @@ class WorkerPool:
                         or not isinstance(handle, ProcessRun):
                     break
                 first_stderr = stderr
-                await _end_run()
+                # The CLI exited; leave its potentially shared worker-server helper alone.
+                ended = True
                 if deadline is not None and time.monotonic() >= deadline:
                     raise asyncio.TimeoutError
                 await recorder.record(retry_event(stderr))

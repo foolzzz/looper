@@ -58,6 +58,8 @@ _PROBE_TIMEOUT_SEC = 10.0
 MCP_MAX_WAIT_SECONDS = 50
 _ROUTED_MODEL = re.compile(r"^> Auto routed to ([^\n]+)\n\n?")
 RETRY_SUMMARY = "Cursor's CLI gave up after reconnecting; retried once"
+# Observed when Cursor's CLI gives up after its reconnects, without a result.
+_TRANSIENT_ERRORS = ("RetriableError: WritableIterable is closed",)
 
 
 class CursorFailure(StrEnum):
@@ -65,9 +67,7 @@ class CursorFailure(StrEnum):
 
 
 def cursor_failure(result: dict[str, Any] | None, stderr: str) -> CursorFailure | None:
-    # Observed after CLI reconnects: "RetriableError: WritableIterable is closed"
-    # and "Error: command failed unexpectedly.", with no result (TTADK may exit 0).
-    if result is None and "RetriableError" in stderr:
+    if result is None and any(message in stderr for message in _TRANSIENT_ERRORS):
         return CursorFailure.TRANSIENT_BACKEND
     return None
 
@@ -580,10 +580,8 @@ class ResidentCursor(PerTurnSession):
         if cancel.requested or first.stopped is not None or first.exit_code not in (0, 1) \
                 or cursor_failure(first.result_event, first.stderr) is None:
             return first
-        # End the old process tree before starting another; keep the initialized chat
-        # so any tools already called remain in its history on --resume.
-        if self._tree is not None:
-            await self._end_tree(self._tree.process, self._tree)
+        # The CLI exited; its worker-server helper may be shared by other runs.
+        # Leave it alone, as on normal exit, and keep the chat for --resume.
         self._tree, self._end_task = None, None
         if cancel.requested:
             return self._stopped_turn(session_started=first.session_started, usage=first.usage,
@@ -591,8 +589,8 @@ class ResidentCursor(PerTurnSession):
         await on_event(retry_event(first.stderr))
         self._ended = False
         second = await super()._run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
-        return replace(second, session_started=first.session_started or second.session_started,
-                       stderr=retry_stderr(first.stderr, second.stderr) if second.result_event is None else "")
+        return replace(second, stderr_detail=retry_stderr(first.stderr, second.stderr)
+                       if second.result_event is None else "")
 
     def _split(self, command: list[str]) -> tuple[list[str], str | None, str]:
         message = "a resident Cursor Agent command starts with env CURSOR_CONFIG_DIR=<dir> CURSOR_DATA_DIR=<dir> <program>"

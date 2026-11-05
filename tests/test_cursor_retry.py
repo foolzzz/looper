@@ -7,10 +7,12 @@ import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from fake_claude import fake_claude
+from looper.agents import proc_tree
 from looper.agents.runtimes import Launcher, cursor_login, ttadk
 from looper.agents.tiers import worker
 from test_agent_planner_worker import _step_envelope, _worker_row
@@ -38,14 +40,23 @@ with log.open('a') as out:
                           'config': os.environ['CURSOR_CONFIG_DIR']}}) + '\\n')
 attempt = len(log.read_text().splitlines())
 mode = {mode!r}
+if mode == 'retry-lost-session' and attempt == 3:
+    print('session not found; attempt-3', file=sys.stderr, flush=True)
+    sys.exit(1)
+if mode == 'retry-lost-session' and attempt == 2: mode = 'twice'
 if mode == 'lost-init' and attempt <= 2: mode = 'once'
 if mode not in ('no-chat', 'lost-init'):
     print(json.dumps({{'type': 'system', 'subtype': 'init', 'session_id': 'chat-retry'}}), flush=True)
 if mode == 'result':
     print(json.dumps({{'type': 'result', 'subtype': 'error', 'is_error': True}}))
-if attempt == 1 or mode in ('twice', 'other', 'result', 'timeout', 'signal', 'lost-init', 'exit2'):
+if mode == 'held-stderr' and attempt == 1:
+    import subprocess
+    subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+if (attempt == 1 and mode != 'retry-lost-session') or mode in ('twice', 'other', 'other-retriable', 'result', 'timeout', 'signal', 'lost-init', 'exit2'):
     print(json.dumps({{'type': 'connection', 'subtype': 'reconnecting'}}), flush=True)
-    print({SIGNATURE!r} if mode != 'other' else 'unrelated failure', file=sys.stderr, flush=True)
+    error = {{'other': 'unrelated failure', 'other-retriable': 'RetriableError: authentication failed'}}.get(mode, {SIGNATURE!r})
+    print(error, file=sys.stderr, flush=True)
     if mode == 'lost-init': print('x' * 1200, file=sys.stderr, flush=True)
     print('attempt-' + str(attempt), file=sys.stderr, flush=True)
     if mode == 'timeout': time.sleep(10)
@@ -71,13 +82,25 @@ sys.exit(0)
     return launch, calls
 
 
+@pytest.fixture
+def no_tree_end(monkeypatch):
+    end = AsyncMock(wraps=proc_tree.end)
+    tree_end = AsyncMock()
+    monkeypatch.setattr(proc_tree, "end", end)
+    monkeypatch.setattr(proc_tree.TurnTree, "end", tree_end)
+    yield
+    end.assert_not_awaited()
+    tree_end.assert_not_awaited()
+
+
 @pytest.mark.parametrize(("mode", "wrapped", "verify", "attempts"), [
     ("once", False, False, 2), ("once", False, True, 2),
     ("twice", False, False, 2), ("other", False, False, 1),
+    ("other-retriable", False, False, 1),
     ("result", False, False, 1), ("signal", False, False, 1), ("exit2", False, False, 1),
     ("once", True, False, 2), ("twice", True, False, 2), ("other", True, False, 1),
 ])
-def test_worker_cursor_retry(mode, wrapped, verify, attempts, tmp_path, monkeypatch, agent_db: Any):
+def test_worker_cursor_retry(mode, wrapped, verify, attempts, tmp_path, monkeypatch, agent_db: Any, no_tree_end):
     launch, calls = _stand_in(tmp_path, monkeypatch, mode, wrapped=wrapped, verify=verify)
     _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 5, "max_turns": 0})
 
@@ -120,13 +143,24 @@ def test_worker_cursor_retry(mode, wrapped, verify, attempts, tmp_path, monkeypa
 @pytest.mark.parametrize(("mode", "wrapped", "attempts"), [
     ("once", False, 2), ("no-chat", False, 2), ("twice", False, 2),
     ("other", False, 1), ("result", False, 1), ("signal", False, 1),
+    ("other-retriable", False, 1),
+    ("held-stderr", False, 2),
     ("once", True, 2), ("twice", True, 2), ("other", True, 1),
 ])
-def test_session_cursor_retry(mode, wrapped, attempts, tmp_path, monkeypatch):
+def test_session_cursor_retry(mode, wrapped, attempts, tmp_path, monkeypatch, no_tree_end):
     launch, calls = _stand_in(tmp_path, monkeypatch, mode, wrapped=wrapped)
     command = CURSOR.resident_command(launch.profile.runtime.executable, cwd=tmp_path,
                                      prompt_file=_prompt(tmp_path / "runtime"), launch=launch)
     events = []
+    processes = []
+    spawn = proc_tree.spawn
+
+    async def capture_process(*args, **kwargs):
+        process = await spawn(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(proc_tree, "spawn", capture_process)
 
     async def run():
         session = CURSOR.resident_session("manager")
@@ -135,10 +169,12 @@ def test_session_cursor_retry(mode, wrapped, attempts, tmp_path, monkeypatch):
         await session.start(command, cwd=str(tmp_path), signature="same", env=launch.environment())
         try:
             result = await session.run_turn("same turn", on_event)
-            assert session.stale("same") is (mode not in ("once", "no-chat", "result"))
+            assert session.stale("same") is (mode not in ("once", "no-chat", "held-stderr", "result"))
             return result
         finally:
             await session.stop()
+            # Wait for the stand-in's three-second child to close stderr before closing the event loop.
+            await asyncio.wait_for(asyncio.gather(*(process.stderr.read() for process in processes)), 5)
 
     result = asyncio.run(asyncio.wait_for(run(), 15))
     invocations = [json.loads(line) for line in calls.read_text().splitlines()]
@@ -153,11 +189,12 @@ def test_session_cursor_retry(mode, wrapped, attempts, tmp_path, monkeypatch):
         else:
             assert invocations[1]["argv"][-2:] == ["--resume", "chat-retry"]
             assert invocations[1]["stdin"] == "same turn"
-    if mode in ("once", "no-chat"):
+    if mode in ("once", "no-chat", "held-stderr"):
         assert result.result_event["subtype"] == "success"
     elif mode == "twice":
         assert result.result_event is None
-        assert "attempt-1" in result.stderr and "attempt-2" in result.stderr
+        assert "attempt-1" not in result.stderr and "attempt-2" in result.stderr
+        assert "attempt-1" in result.stderr_detail and "attempt-2" in result.stderr_detail
 
 
 @pytest.fixture(autouse=True)
@@ -225,11 +262,33 @@ def test_worker_timeout_does_not_retry(tmp_path, monkeypatch, agent_db: Any):
     assert not any(event.get("subtype") == "cursor_run_retry" for event in events)
 
 
-@pytest.mark.parametrize("role", ["manager", "planner"])
-@pytest.mark.parametrize("mode", ["once", "twice", "lost-init"])
-def test_tier_turn_records_cursor_retry(role, mode, tmp_path, monkeypatch, agent_db: Any):
-    from unittest.mock import AsyncMock
+def test_worker_cancel_before_retry_leaves_exited_tree_alone(tmp_path, monkeypatch, agent_db: Any, no_tree_end):
+    launch, calls = _stand_in(tmp_path, monkeypatch, "once")
+    _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 5, "max_turns": 0})
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=launch.settings))
+    record = worker.ClaudeRunRecorder.record
 
+    async def cancel_retry(self, event):
+        if event.get("subtype") == "cursor_run_retry":
+            raise asyncio.CancelledError
+        await record(self, event)
+
+    monkeypatch.setattr(worker.ClaudeRunRecorder, "record", cancel_retry)
+    work = tmp_path / "work"
+    work.mkdir()
+
+    async def run():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+        with pytest.raises(asyncio.CancelledError):
+            await pool._execute(_step_envelope(work, verify=False))
+
+    asyncio.run(asyncio.wait_for(run(), 10))
+    assert len(calls.read_text().splitlines()) == 1
+
+
+@pytest.mark.parametrize("role", ["manager", "planner"])
+@pytest.mark.parametrize("mode", ["once", "twice", "lost-init", "retry-lost-session"])
+def test_tier_turn_records_cursor_retry(role, mode, tmp_path, monkeypatch, agent_db: Any):
     from looper.agents.bus import MessageBus
     from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType
     from looper.agents.system_prompt import SystemPrompt
@@ -251,12 +310,15 @@ def test_tier_turn_records_cursor_retry(role, mode, tmp_path, monkeypatch, agent
             monkeypatch.setattr(agent, "_system_prompt", lambda *args, **kwargs: SystemPrompt("PROMPT"))
         agent._load_agent_settings = AsyncMock(return_value=launch.settings)
         try:
-            if mode == "lost-init":
+            if mode in ("lost-init", "retry-lost-session"):
                 if role == "manager":
                     await agent._handle(MessageEnvelope.create(source=WEB, target=MANAGER_ADDRESS,
                         message_type=MessageType.USER_MESSAGE, payload={"text": "first"}))
                 else:
                     assert "recovered" in await agent._turn("first")
+                if mode == "retry-lost-session":
+                    # Restart the runtime so the next turn resumes the stored session.
+                    await agent._claude.stop()
             if role == "manager":
                 await agent._handle(MessageEnvelope.create(source=WEB, target=MANAGER_ADDRESS,
                     message_type=MessageType.USER_MESSAGE, payload={"text": "hello"}))
@@ -271,13 +333,28 @@ def test_tier_turn_records_cursor_retry(role, mode, tmp_path, monkeypatch, agent
 
     asyncio.run(asyncio.wait_for(run(), 15))
     invocations = [json.loads(line) for line in calls.read_text().splitlines()]
-    assert len(invocations) == (4 if mode == "lost-init" else 2)
-    assert invocations[-1]["argv"][-2:] == ["--resume", "chat-retry"]
+    assert len(invocations) == (4 if mode in ("lost-init", "retry-lost-session") else 2)
+    if mode == "retry-lost-session":
+        assert "--resume" not in invocations[0]["argv"]
+        assert invocations[1]["argv"][-2:] == ["--resume", "chat-retry"]
+        assert invocations[2]["argv"][-2:] == ["--resume", "chat-retry"]
+        assert "--resume" not in invocations[3]["argv"]
+        assert invocations[1]["pid"] != invocations[2]["pid"]
+    else:
+        assert invocations[-1]["argv"][-2:] == ["--resume", "chat-retry"]
     events = [event for call in agent_db.append_events.await_args_list for _, event in call.args[1]]
     retry_count = 2 if mode == "lost-init" else 1
     assert len([event for event in events if event.get("subtype") == "cursor_run_retry"]) == retry_count
     finish = agent_db.finish_record.await_args.kwargs
-    if mode != "once":
+    if mode == "retry-lost-session":
+        failures = [call.kwargs["error"] for call in agent_db.finish_record.await_args_list
+                    if call.kwargs["error"]]
+        assert len(failures) == 1
+        assert "attempt-2" in failures[0] and "session not found; attempt-3" in failures[0]
+        assert "retried in a new session" in failures[0]
+        assert finish["error"] is None
+        assert "recovered" in finish["output_text"]
+    elif mode != "once":
         first, second = (3, 4) if mode == "lost-init" else (1, 2)
         assert f"attempt-{first}" in finish["error"] and f"attempt-{second}" in finish["error"]
     else:

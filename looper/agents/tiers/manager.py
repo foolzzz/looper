@@ -1997,7 +1997,7 @@ class ManagerAgent:
         if turn.result_event is None and (not launch.exit_code_reliable or launch.runtime.type == "cursor-agent"):
             from ..runtimes.ttadk import error_tail
 
-            if stderr := error_tail(turn.stderr):
+            if stderr := error_tail(turn.stderr_detail or turn.stderr):
                 stderr_note = f": {stderr}"
 
         if resume_lost:

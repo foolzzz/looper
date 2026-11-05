@@ -3622,7 +3622,7 @@ class PlannerAgent:
 
                 via = " through TTADK" if not process.launch.exit_code_reliable else ""
                 ttadk_error = f"{process.launch.runtime.label}{via} ended without a result"
-                if stderr := error_tail(turn.stderr):
+                if stderr := error_tail(turn.stderr_detail or turn.stderr):
                     ttadk_error += f": {stderr}"
                 await self._activity("error", ttadk_error)
 
