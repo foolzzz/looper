@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.89] - 2026-11-05
+
+### Added
+
+- **Disable and re-enable an LLM provider.** `provider_accounts.set_enabled` (built-in login providers too) switches a provider off without deleting anything: its endpoints, key, models, Agent Profiles and every selection stay, and a run that resolves to one of its profiles is refused at launch, through the check that refuses a missing API key, with a message naming the provider and how to enable it again. Creating an Agent Profile with a disabled provider's model, or switching a profile to one, is refused; disabling is never refused and warns where the provider's profiles are selected. One additive upgrade (`provider_enabled`) adds `llm_providers.enabled` (default true). The dashboard gets a switch and a Disabled badge on Settings → LLM Providers and a warning on affected Agent Profiles; `loopercli provider-accounts set-enabled` is generated; config transfer exports `enabled: false` only for a disabled provider. Model-visible: the Manager's `looper_providers` lists `enabled` and its `update` takes it. ([#1113](https://github.com/foolzzz/looper/pull/1113))
+
 ## [2.14.88] - 2026-11-05
 
 ### Added
