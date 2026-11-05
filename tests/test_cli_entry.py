@@ -356,7 +356,7 @@ def test_doctor_never_runs_a_claude_without_auth_status(tmp_path: Path) -> None:
 
     result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
 
-    assert _check_lines(output)["Claude login"].startswith("skip  Claude login     not checked:"), output
+    assert _check_lines(output)["Claude login"].startswith("skip  Claude login             not checked:"), output
     assert (tmp_path / "calls").read_text().splitlines() == ["--version", "auth --help"]
 
 
@@ -517,7 +517,7 @@ def test_doctor_checks_git_and_the_directories_of_projects_with_step_worktrees(t
     assert result["code"] == 0, output + stderr
     lines = {line[6:].split("  ")[0].strip(): line for line in output.splitlines() if line[:5].strip()}
     assert lines["git"].startswith("ok") and "git version 2." in lines["git"], output
-    assert lines["Step worktrees"] == ("warn  Step worktrees   alarm: main, 9 B checkout, nothing to link at .env"), output
+    assert lines["Step worktrees"] == ("warn  Step worktrees           alarm: main, 9 B checkout, nothing to link at .env"), output
 
 
 @pytest.mark.parametrize("format", ["json", "markdown"])
