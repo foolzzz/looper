@@ -228,8 +228,8 @@ def test_per_turn_stop_after_the_process_exited_before_the_turn_returned(
     real_tail = per_turn.stderr_tail
     holding, release = asyncio.Event(), asyncio.Event()
 
-    async def held_tail(stream: Any, *args: Any) -> str:
-        text = await real_tail(stream, *args)
+    async def held_tail(stream: Any, *args: Any, **kwargs: Any) -> str:
+        text = await real_tail(stream, *args, **kwargs)
         holding.set()
         await release.wait()
         return text
