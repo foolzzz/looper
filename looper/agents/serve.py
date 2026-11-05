@@ -588,6 +588,7 @@ async def _run_agent_system_owned(
         raise StartupCheckFailed(self_check.format_checks([database_check]))
     fence = Fence(exit_now=exit_now)
     lease = None
+    advisory_checks: asyncio.Task[None] | None = None
     if ops.keeper_mode is KeeperMode.ON:
         try:
             lease = await ControlPlaneLease.acquire(dsn, on_lost=fence.lost)
@@ -757,20 +758,9 @@ async def _run_agent_system_owned(
         await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("telegram",), stop_chat=fleet.stop_chat)
         await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("lark", "lark_bot"), stop_chat=fleet.stop_chat)
 
-        # Receive and persist backlog before the advisory checks. Managers wait for
-        # HTTP readiness before consuming it. Problems only warn here and on system/status.
-        checks = [
-            database_check,
-            *await asyncio.to_thread(self_check.check_claude, claude_bin),
-            await self_check.codex_login_check(),
-            await self_check.grok_login_check(),
-            await self_check.cursor_login_check(),
-            await self_check.ttadk_check(),
-            self_check.check_lark_cli(lark_enabled),
-            await asyncio.to_thread(self_check.check_git),
-            self_check.check_projects_root(ops.projects_root),
-        ]
-        self_check.log_problems(checks)
+        # Receive and persist backlog before listening. Managers wait for HTTP readiness;
+        # advisory checks run afterwards and only warn here and on system/status.
+        checks = [database_check.to_dict()]
 
         manager = fleet.default
         manager_ops = fleet.ops("manager")
@@ -813,7 +803,7 @@ async def _run_agent_system_owned(
             runtime_root=runtime_root,
             operator_token=operator_token,
             dashboard_url=dashboard_url,
-            self_checks=[check.to_dict() for check in checks],
+            self_checks=checks,
             claude_bin=claude_bin,
             scheduler=scheduler,
             manager_ops=manager_ops,
@@ -826,6 +816,9 @@ async def _run_agent_system_owned(
         )
         fence.http_server = http_server
         await http_server.start()
+        advisory_checks = asyncio.create_task(_advisory_startup_checks(
+            checks, database_check, claude_bin=claude_bin, lark_enabled=lark_enabled,
+            projects_root=ops.projects_root), name="advisory-startup-checks")
         manager_config.http_ready.set()
         tools_ready.set()
 
@@ -875,6 +868,9 @@ async def _run_agent_system_owned(
         # --- Shutdown ---
 
         async def shut_down() -> None:
+            advisory_checks.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await advisory_checks
             if mode is ShutdownMode.DETACH_KEPT:
                 await worker_pool.detach_kept(epoch=lease.epoch)
             logger.info("shutting down agent system...")
@@ -899,11 +895,42 @@ async def _run_agent_system_owned(
         await shut_down_within(shut_down(), exit_now=fence.exit)
 
     finally:
+        if advisory_checks is not None:
+            advisory_checks.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await advisory_checks
         try:
             await close_pool()
         finally:
             if lease is not None:
                 await lease.release()
+
+
+async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: self_check.Check, *,
+                                   claude_bin: str, lark_enabled: bool, projects_root: str) -> None:
+    """Check concurrently after listening, then publish and log in the original order. Never stop serving."""
+    try:
+        results = await asyncio.gather(
+            asyncio.to_thread(self_check.check_claude, claude_bin),
+            self_check.codex_login_check(),
+            self_check.grok_login_check(),
+            self_check.cursor_login_check(),
+            self_check.ttadk_check(),
+            asyncio.to_thread(self_check.check_lark_cli, lark_enabled),
+            asyncio.to_thread(self_check.check_git),
+            asyncio.to_thread(self_check.check_projects_root, projects_root),
+            return_exceptions=True,
+        )
+        checks = [database]
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.error("advisory startup check failed", exc_info=(type(result), result, result.__traceback__))
+            else:
+                checks.extend(result if isinstance(result, list) else [result])
+        snapshot[:] = [check.to_dict() for check in checks]
+        self_check.log_problems(checks)
+    except Exception:
+        logger.exception("advisory startup checks failed")
 
 
 def _configure_logging(level: str) -> None:

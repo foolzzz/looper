@@ -231,7 +231,9 @@ class AgentHTTPServer:
         )
         if self._port == 0:
             self._port = self._server.sockets[0].getsockname()[1]
-        logger.info("HTTP server listening on %s:%d", self._host, self._port)
+        from .. import _PROCESS_STARTED_AT
+        logger.info("HTTP server listening on %s:%d (%.3f s since process start)",
+                    self._host, self._port, time.monotonic() - _PROCESS_STARTED_AT)
 
     def close_listener(self) -> None:
         """Stop accepting connections immediately, without shutting down services."""

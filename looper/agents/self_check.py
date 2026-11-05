@@ -1,8 +1,9 @@
 """What a machine still needs before Looper can run, and how to fix it.
 
 ``looper doctor`` prints these checks and exits 1 when one failed. ``looper
-serve`` runs the same checks first: an unreachable PostgreSQL stops it; a
-missing Claude Code CLI or login is logged as a warning, the dashboard still
+serve`` checks PostgreSQL first, then runs advisory checks after HTTP listens.
+An unreachable PostgreSQL stops it; a missing Claude Code CLI or login is
+logged as a warning, the dashboard still
 starts, and ``POST /api/v1/system/status`` reports every result under ``checks``. The
 ``pg_dump`` check matters only when the schema is about to change: serve then
 backs the database up first and does not start without a way to

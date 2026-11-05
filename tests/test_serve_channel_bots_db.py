@@ -575,17 +575,29 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             adapters.append(adapter)
             await receive(adapter)
 
+        check_messages = asyncio.Lock()
+
         async def message_during_check() -> None:
-            if adapters:
-                await receive(adapters[0])
-            else:
-                # Telegram retains these until polling receives them.
-                text = f"backlog {len(incoming)}"
-                incoming.append(text)
-                pending.append(text)
+            # Checks overlap, but the simulated incoming stream still delivers messages in order.
+            async with check_messages:
+                if adapters:
+                    await receive(adapters[0])
+                else:
+                    # Telegram retains these until polling receives them.
+                    text = f"backlog {len(incoming)}"
+                    incoming.append(text)
+                    pending.append(text)
 
         check = serve.self_check.Check("test", "Test", serve.self_check.WARN, "unavailable")
         loop = asyncio.get_running_loop()
+        checks_logged = asyncio.Event()
+        log_problems = serve.self_check.log_problems
+
+        def logged(checks: Any) -> None:
+            log_problems(checks)
+            checks_logged.set()
+
+        monkeypatch.setattr(serve.self_check, "log_problems", logged)
 
         def sync_check(*args: Any) -> Any:
             asyncio.run_coroutine_threadsafe(message_during_check(), loop).result(timeout=2)
@@ -619,6 +631,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
         async def ready(supervisor: Any, agent_id: str) -> None:
             # The real start_all has replayed the journal; inspect before any agent consumes its queue.
             assert len(servers) == 1 and servers[0]._server.is_serving()
+            await asyncio.wait_for(checks_logged.wait(), 3)
             raise Started
 
         identity = SimpleNamespace(profile="", app_id="cli_x", bot_name="B", bot_open_id="ou_bot00000001")
@@ -647,7 +660,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
         try:
             with pytest.raises(Started):
                 await asyncio.wait_for(serve._run_agent_system(ops=ops, runtime_root=tmp_path, work_dir=tmp_path,
-                                                               skip_backup=True), 10)
+                                                               skip_backup=True), 30)
             assert adapters and incoming
             if first_fails:
                 assert all(registry.get(f"channel-{channel_type}") is None for registry in registries)

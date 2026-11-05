@@ -4417,6 +4417,15 @@ URL: without one, `looper serve` and `looper doctor` do not start, and say to ru
 database that already exists keeps the name it had (often `loopx`, from before
 the rename), because it holds the user's data.
 
+At startup, runtime detection and version probes run concurrently, each bounded
+by 15 seconds; their registry rows are written in a stable order once probes
+return. PostgreSQL and required initialization complete before HTTP listens.
+Advisory checks (Claude, Codex/Grok/Cursor login, TTADK, lark-cli, git and the
+projects root) run concurrently in a background task after the server listens;
+problems are logged in the same stable order and never stop serving.
+`POST /api/v1/system/status` continues to report checks with login state read
+on demand. The listening log reports elapsed seconds since process start.
+
 ### Renamed from LoopX
 
 The product was LoopX up to v2.5.0. The `loopx` command, the automatic move
