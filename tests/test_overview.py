@@ -6,7 +6,18 @@ from __future__ import annotations
 import pytest
 
 from looper.agents.overview import group_counts
-from looper.db.tasks import TaskGroup, task_group
+from looper.db.tasks import STATUS_FILTERS, TaskGroup, task_group
+
+
+def test_running_filter_covers_planner_phases_and_other_filters_cover_themselves() -> None:
+    assert set(STATUS_FILTERS["running"]) == {
+        "assigned", "running", "planning", "executing", "verifying", "stopping",
+    }
+    assert {name: statuses for name, statuses in STATUS_FILTERS.items() if name != "running"} == {
+        name: (name,) for name in (
+            "init", "waiting", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
+        )
+    }
 
 
 @pytest.mark.parametrize(("status", "group"), [

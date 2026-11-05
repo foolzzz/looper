@@ -361,7 +361,7 @@ export interface TasksPage {
   tasks: TaskInfo[];
   /** Pass as `before` for the next page; null at the end. */
   next_before: string | null;
-  /** How many tasks each status holds under the list filters (not status or cursor). */
+  /** Counts by status filter under the other list filters (not status or cursor); each task counted once. */
   counts: Record<string, number>;
 }
 

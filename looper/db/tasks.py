@@ -54,6 +54,16 @@ STATUS_GROUPS: Mapping[str, TaskGroup] = MappingProxyType({
 })
 
 
+# The Planner stores its own phase as the task's status, so Running covers those phases too.
+STATUS_FILTERS: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "running": tuple(status for status, group in STATUS_GROUPS.items()
+                     if group is TaskGroup.IN_PROGRESS and status not in ("waiting", "pending")),
+    **{status: (status,) for status in (
+        READY, "waiting", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
+    )},
+})
+
+
 # The statuses a Planner ends its task with (its final GOAL_STATUS); a user's stop or cancel ends it otherwise.
 PLANNER_END_STATUSES = frozenset({"completed", "failed"})
 
@@ -559,7 +569,7 @@ async def set_task_project(
 
 # The filters a task list takes ($1 project, $2 status, $3 and $4 a group's statuses, $5 schedule).
 _FILTERS = """
-    ($1::text IS NULL OR t.project_id = $1) AND ($2::text IS NULL OR t.status = $2)
+    ($1::text IS NULL OR t.project_id = $1) AND ($2::text[] IS NULL OR t.status = ANY($2::text[]))
     AND ($3::text[] IS NULL OR (t.status = ANY($3::text[])) = $4) AND ($5::text IS NULL OR t.schedule_id = $5)
 """
 # A literal substring, so '%' and '_' in a search never become SQL wildcards.
@@ -590,7 +600,8 @@ async def list_tasks(
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """The newest tasks (by creation, then id), each with its ``project_name`` and ``schedule_name``; only one
-    project's when ``project_id`` is given, one schedule's when ``schedule_id`` is, only those in ``status``, or in
+    project's when ``project_id`` is given, one schedule's when ``schedule_id`` is, only those covered by the
+    ``status`` filter (unknown filters match exactly), or in
     ``group``, when it is, only those older than the task ``before`` when it is, and only ``manager_id``'s when given.
     ``query`` searches the id, title, requirement, project name and goal before paging."""
     pool = pool or get_pool()
@@ -604,7 +615,8 @@ async def list_tasks(
           AND ($10 = '' OR {_SEARCH.format(parameter='$10')})
         ORDER BY t.created_at DESC, t.id DESC LIMIT $7 OFFSET $8
         """,
-        project_id, status, statuses, inside, schedule_id, before, limit, offset, manager_id, query,
+        project_id, STATUS_FILTERS.get(status, (status,)) if status is not None else None,
+        statuses, inside, schedule_id, before, limit, offset, manager_id, query,
     )
     return [_task(r) for r in rows]
 
@@ -618,7 +630,8 @@ async def count_by_status(
     query: str = "",
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, int]:
-    """How many tasks ``list_tasks`` with these filters holds in all, by status."""
+    """How many tasks ``list_tasks`` with these filters holds, by status filter; unknown statuses keep their keys.
+    Each task counts once, so summing the values gives the total."""
     pool = pool or get_pool()
     statuses, inside = _group_filter(group)
     rows = await pool.fetch(
@@ -627,7 +640,11 @@ async def count_by_status(
         "AND ($7::text IS NULL OR t.manager_id = $7) GROUP BY t.status",
         project_id, None, statuses, inside, schedule_id, query, manager_id,
     )
-    return {row["status"]: int(row["n"]) for row in rows}
+    counts: dict[str, int] = {}
+    for row in rows:
+        name = next((name for name, statuses in STATUS_FILTERS.items() if row["status"] in statuses), row["status"])
+        counts[name] = counts.get(name, 0) + int(row["n"])
+    return counts
 
 
 async def task_exists(task_id: str, *, pool: asyncpg.Pool | None = None) -> bool:

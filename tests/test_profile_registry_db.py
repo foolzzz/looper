@@ -937,7 +937,7 @@ def test_grok_on_path_becomes_a_builtin_runtime_that_pairs_only_with_its_own_log
     run_db(_test, monkeypatch)
 
 
-def test_cursor_agent_on_path_pairs_only_with_cursor_login_and_runs_workers_and_reviewers(
+def test_cursor_agent_on_path_pairs_only_with_cursor_login_and_runs_every_role(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     from looper.agents.profile_registry import register_found_runtimes
@@ -959,11 +959,11 @@ def test_cursor_agent_on_path_pairs_only_with_cursor_login_and_runs_workers_and_
         assert (runtime["runtime_id"], runtime["builtin"], runtime["version"], runtime["type_label"],
                 runtime["protocols"], runtime["roles"]) == (
             "rt-cursor-agent", True, "2026.10.22", "Cursor Agent", ["openai-responses"],
-            ["worker", "reviewer"])
+            ["manager", "planner", "worker", "reviewer"])
         types = {entry["type"]: entry for entry in registry["runtime_types"]}
         assert types["cursor-agent"]["loads_operator_config"] is True
         assert types["claude-code"]["loads_operator_config"] is False
-        assert types["cursor-agent"]["roles"] == ["worker", "reviewer"]
+        assert types["cursor-agent"]["roles"] == ["manager", "planner", "worker", "reviewer"]
 
         async def profile(provider_id: str, runtime_id: str = "rt-cursor-agent") -> tuple[int, Any]:
             return await _call("POST", "/api/agent-profiles", {
@@ -973,7 +973,7 @@ def test_cursor_agent_on_path_pairs_only_with_cursor_login_and_runs_workers_and_
 
         status, payload = await profile("prov-cursor-login")
         assert status == 201, payload
-        assert payload["profile"]["roles"] == ["worker", "reviewer"]
+        assert payload["profile"]["roles"] == ["manager", "planner", "worker", "reviewer"]
         key = await _provider({
             "name": "responses-key", "vendor_type": "custom", "api_key": SECRET,
             "endpoints": [{"protocol": "openai-responses", "base_url": "https://example.invalid/v1"}],
@@ -983,6 +983,30 @@ def test_cursor_agent_on_path_pairs_only_with_cursor_login_and_runs_workers_and_
             assert status == 400, payload
         status, payload = await profile("prov-cursor-login", "rt-codex")
         assert status == 400 and "only use its own runtime" in payload["error"]
+
+    run_db(_test, monkeypatch, timeout=30)
+
+
+def test_startup_refreshes_existing_cursor_capabilities_without_probing_or_changing_operator_fields(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.agents.profile_registry import register_found_runtimes, servable_roles
+    from looper.agents.runtimes import adapter
+    from looper.db import profile_registry as db
+
+    async def _test(pool: Any) -> None:
+        await _runtime("cursor-agent", name="My Cursor", executable="/custom/cursor-agent")
+        await pool.execute("UPDATE agent_runtimes SET capabilities = $1, version = 'old' WHERE id = 'rt-cursor-agent'",
+                           ["run", "mcp", "add_dirs"])
+        before = await db.get_runtime("rt-cursor-agent")
+        assert servable_roles(before["capabilities"], "cursor-agent") == ["worker", "reviewer"]
+        monkeypatch.setenv("PATH", str(tmp_path))  # Refresh must work even without a CLI on PATH.
+        await register_found_runtimes()
+        after = await db.get_runtime("rt-cursor-agent")
+        assert set(after["capabilities"]) == {c.value for c in adapter("cursor-agent").capabilities}
+        assert servable_roles(after["capabilities"], "cursor-agent") == ["manager", "planner", "worker", "reviewer"]
+        assert {k: v for k, v in after.items() if k != "capabilities"} == {
+            k: v for k, v in before.items() if k != "capabilities"}
 
     run_db(_test, monkeypatch, timeout=30)
 

@@ -1353,7 +1353,18 @@ class ManagerAgent:
             listing = json.dumps(self.ops.listing(), sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
         switch = session_switch.profile_switch(self._session_id, self._session_runtime, self._session_profile,
-                                               launch, session_provider=self._session_provider)
+                                               launch, session_provider=self._session_provider,
+                                               command=list(signature[0]), label=self.agent_id)
+        if switch is not None and switch.reason is SwitchReason.INSTRUCTIONS_CHANGED and not self._claude.started:
+            # A server restart left no resident object; reopen the old chat for its handoff. Cursor keeps
+            # its old instruction copy until a replacement starts, even though this command names the new one.
+            await token.keep("claude_stop", self._claude.stop(), 10)
+            self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
+            command = self._claude_command(prompt_file, launch)
+            await token.keep("claude_start", self._claude.start(
+                command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
+                totals=self._session_totals, price=launch.price), 10, undo=lambda: self._claude.stop(kill=True))
+            self._process = _Process(command, signature, system_prompt, launch)
         if switch is None and self._session_id and self._session_runtime == "api" \
                 and (self._claude_runtime is not launch.runtime or not self._claude.started):
             # Restore the API session's saved context before deciding whether it needs a handoff.
