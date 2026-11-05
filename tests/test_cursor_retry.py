@@ -16,7 +16,7 @@ from looper.agents import proc_tree
 from looper.agents.runtimes import Launcher, cursor_login, ttadk
 from looper.agents.tiers import worker
 from test_agent_planner_worker import _step_envelope, _worker_row
-from test_cursor_agent import CURSOR, _launch, _prompt
+from test_cursor_agent import CURSOR, _launch, _prompt, cursor_tmpdirs  # noqa: F401
 from test_ttadk_cursor_agent import _cursor_script
 
 RETRY_LINE = "Cursor's CLI gave up after reconnecting; retried once"
@@ -35,9 +35,10 @@ if sys.argv[1:] == ['status', '--format', 'json']:
     print('{{"status":"authenticated","isAuthenticated":true}}'); sys.exit(0)
 log = Path({str(calls)!r})
 text = sys.stdin.read()
+assert Path(os.environ['TMPDIR']).is_dir()
 with log.open('a') as out:
     out.write(json.dumps({{'pid': os.getpid(), 'argv': sys.argv[1:], 'stdin': text,
-                          'config': os.environ['CURSOR_CONFIG_DIR']}}) + '\\n')
+                          'config': os.environ['CURSOR_CONFIG_DIR'], 'tmpdir': os.environ['TMPDIR']}}) + '\\n')
 attempt = len(log.read_text().splitlines())
 mode = {mode!r}
 if mode == 'retry-lost-session' and attempt == 3:
@@ -54,6 +55,7 @@ if mode == 'held-stderr' and attempt == 1:
     subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
 if (attempt == 1 and mode != 'retry-lost-session') or mode in ('twice', 'other', 'other-retriable', 'result', 'timeout', 'signal', 'lost-init', 'exit2'):
+    print(json.dumps({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': 'abandoned draft'}}]}}}}), flush=True)
     print(json.dumps({{'type': 'connection', 'subtype': 'reconnecting'}}), flush=True)
     error = {{'other': 'unrelated failure', 'other-retriable': 'RetriableError: authentication failed'}}.get(mode, {SIGNATURE!r})
     print(error, file=sys.stderr, flush=True)
@@ -118,10 +120,12 @@ def test_worker_cursor_retry(mode, wrapped, verify, attempts, tmp_path, monkeypa
     result = asyncio.run(asyncio.wait_for(run(), 15))
     invocations = [json.loads(line) for line in calls.read_text().splitlines()]
     assert len(invocations) == attempts
+    assert all(not Path(call["tmpdir"]).exists() for call in invocations)
     if attempts == 2:
         assert invocations[0]["pid"] != invocations[1]["pid"]
         assert invocations[0]["stdin"] == invocations[1]["stdin"]
         assert invocations[0]["config"] == invocations[1]["config"]
+        assert invocations[0]["tmpdir"] == invocations[1]["tmpdir"]
         assert invocations[0]["argv"] == invocations[1]["argv"]
     events = [event for call in agent_db.append_events.await_args_list for _, event in call.args[1]]
     retries = [event for event in events if event.get("subtype") == "cursor_run_retry"]
@@ -129,6 +133,7 @@ def test_worker_cursor_retry(mode, wrapped, verify, attempts, tmp_path, monkeypa
     if retries:
         assert retries[0]["reason"] == "transient_backend" and "RetriableError" in retries[0]["stderr"]
     activities = [call.kwargs["summary"] for call in agent_db.insert_activity.await_args_list]
+    assert "abandoned draft" not in activities
     assert activities.count(RETRY_LINE) == attempts - 1
     if mode == "once":
         assert result.get("passed") is True if verify else result["status"] == "completed"
@@ -246,7 +251,8 @@ def test_session_stop_and_timeout_do_not_retry(ending, tmp_path, monkeypatch):
 
 def test_worker_timeout_does_not_retry(tmp_path, monkeypatch, agent_db: Any):
     launch, calls = _stand_in(tmp_path, monkeypatch, "timeout")
-    _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 1, "max_turns": 0})
+    # Leave room for macOS process startup on a shared machine; the stand-in sleeps for ten seconds.
+    _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 5, "max_turns": 0})
     async def settings(*args, **kwargs):
         return launch.settings
     monkeypatch.setattr(worker, "load_agent_settings", settings)
@@ -256,8 +262,10 @@ def test_worker_timeout_does_not_retry(tmp_path, monkeypatch, agent_db: Any):
         pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
         with pytest.raises(asyncio.TimeoutError):
             await pool._execute(_step_envelope(work, verify=False))
-    asyncio.run(asyncio.wait_for(run(), 10))
-    assert len(calls.read_text().splitlines()) == 1
+    asyncio.run(asyncio.wait_for(run(), 15))
+    invocations = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert len(invocations) == 1
+    assert not Path(invocations[0]["tmpdir"]).exists()
     events = [event for call in agent_db.append_events.await_args_list for _, event in call.args[1]]
     assert not any(event.get("subtype") == "cursor_run_retry" for event in events)
 
