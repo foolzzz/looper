@@ -1228,7 +1228,8 @@ belongs to a **Provider** account and selects exactly one protocol and its
 **Endpoint**. See the [model-layer RFC](rfcs/llm-models-v0.zh-CN.md).
 Roles select profiles ([Harness, profile and environment](#harness-profile-and-environment));
 “agent” names a running instance. Settings → LLM Providers manages accounts,
-endpoints and models; Settings → Agent Profiles selects the runtime and model.
+endpoints and models; Settings → Agent Profiles chooses a model and protocol,
+then a provider that offers it, then a runtime.
 `looper/agents/profile_registry.py` validates the same contracts for HTTP and
 Manager tools.
 
