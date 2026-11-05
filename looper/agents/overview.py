@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime, time, timezone
 from typing import Any
 
@@ -83,13 +84,15 @@ async def build_overview(
     manager: ManagerAgent | None,
     supervisor: AgentSupervisor,
     manager_id: str | None = None,
+    project_ids: Sequence[str] | None = None,
     managers: Any = None,
 ) -> dict[str, Any]:
     """The overview, read now; raises when the database cannot be read. With ``manager_id``, the same keys for that
     Manager's tasks, its and its tasks' spend, and its own component only (no schedules)."""
-    rows = await db_tasks.status_counts(manager_id=manager_id)
+    rows = await db_tasks.status_counts(manager_id=None if project_ids is not None else manager_id,
+                                       project_ids=project_ids)
     since = local_midnight()
-    spend = await db_llm_records.spend_since(since, manager_id=manager_id)
+    spend = await db_llm_records.spend_since(since, manager_id=manager_id, project_ids=project_ids)
 
     names = {row["project_id"]: row["project_name"] for row in rows if row["project_id"] is not None}
     by_project: dict[str, dict[TaskGroup, int]] = {}
@@ -106,7 +109,10 @@ async def build_overview(
         for p in task_router.running_planners()
     ]
     runs = sorted(worker_pool.runs() if worker_pool else [], key=lambda r: (r["state"] != "running", r["since"]))
-    if manager_id is not None:
+    if project_ids is not None:
+        planners = [p for p in planners if p["project_id"] in project_ids]
+        runs = [r for r in runs if r["project_id"] in project_ids]
+    elif manager_id is not None:
         owners = await db_tasks.manager_of({p["task_id"] for p in planners} | {r["task_id"] for r in runs})
         own = {task_id for task_id, owner in owners.items() if owner == manager_id}
         planners = [p for p in planners if p["task_id"] in own]

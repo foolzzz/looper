@@ -1152,3 +1152,85 @@ def test_scoped_delete_keeps_another_managers_work_added_after_preflight(monkeyp
             assert await pool.fetchval("SELECT count(*) FROM schedule_runs WHERE schedule_id = $1", foreign_schedule) == 1
 
     run_db(run, monkeypatch, timeout=15)
+
+
+@pytest.mark.parametrize("last_project", [False, True])
+def test_deleting_scope_project_shrinks_scope_bumps_revision_and_notifies(monkeypatch, tmp_path, last_project):
+    from looper.agents import managers_api
+    from looper.db import managers
+    from tests.test_managers_schema_db import _manager
+
+    async def run(pool):
+        project = await db_projects.create_project(name="Example", pool=pool)
+        retained = [] if last_project else [(await db_projects.create_project(name="Retained", pool=pool))["id"]]
+        made = await _manager(pool, "review", task_scope="projects", scope_project_ids=[project["id"], *retained])
+        changed = AsyncMock()
+        monkeypatch.setattr(managers_api, "_listener", changed)
+        async with _api(tmp_path, pool) as call:
+            status, asked = await call("project_admin.delete", {"project_id": project["id"]}, client=True)
+            assert status == 202, asked
+            assert '它在管家「Review」的项目范围里' in asked["impact"]
+            assert '范围变空的管家看不到也建不了任务' in asked["impact"]
+            status, done = await call("confirm", {"confirmation_id": asked["confirmation_id"]}, client=True)
+            assert status == 200, done
+        row = await managers.get_manager(made["id"], pool=pool)
+        assert row["task_scope"] == "projects" and row["scope_project_ids"] == retained
+        assert row["revision"] == made["revision"] + 1
+        changed.assert_awaited_once_with(made["id"])
+        assert not await db_projects.delete_project(project["id"], pool=pool)
+        assert (await managers.get_manager(made["id"], pool=pool))["revision"] == row["revision"]
+    run_db(run, monkeypatch, timeout=30)
+
+
+def test_scope_cleanup_shares_the_callers_transaction(monkeypatch):
+    from looper.db import managers
+    from tests.test_managers_schema_db import _manager
+
+    async def run(pool):
+        project = await db_projects.create_project(name="Example", pool=pool)
+        made = await _manager(pool, "review", task_scope="projects", scope_project_ids=[project["id"]])
+        async with pool.acquire() as conn:
+            transaction = conn.transaction()
+            await transaction.start()
+            assert await db_projects.delete_project(project["id"], pool=conn)
+            assert (await managers.get_manager(made["id"], pool=conn))["scope_project_ids"] == []
+            await transaction.rollback()
+        assert await db_projects.get_project(project["id"], pool=pool) is not None
+        assert (await managers.get_manager(made["id"], pool=pool))["scope_project_ids"] == [project["id"]]
+    run_db(run, monkeypatch, timeout=20)
+
+
+def test_scope_writer_locks_project_before_delete_and_cleanup_sees_its_commit(monkeypatch):
+    from looper.db import managers
+    from tests.test_managers_schema_db import _manager
+
+    async def run(pool):
+        project = await db_projects.create_project(name="Example", pool=pool)
+        made = await _manager(pool, "review")
+        deleting = None
+        async with pool.acquire() as conn:
+            transaction = conn.transaction()
+            await transaction.start()
+            try:
+                assert await managers.lock_scope_projects([project["id"]], conn=conn) == {project["id"]}
+                await managers.update_manager(made["id"], {"task_scope": "projects", "scope_project_ids": [project["id"]]},
+                                               conn=conn)
+                deleting = asyncio.create_task(db_projects.delete_project(project["id"], pool=pool))
+                # The project's KEY SHARE lock must block the DELETE, before it can lock a Manager row.
+                await asyncio.sleep(0.05)
+                assert not deleting.done()
+                await transaction.commit()
+                assert await asyncio.wait_for(deleting, 5)
+            except BaseException:
+                if deleting is not None and not deleting.done():
+                    deleting.cancel()
+                    await asyncio.gather(deleting, return_exceptions=True)
+                if conn.is_in_transaction():
+                    await transaction.rollback()
+                raise
+        row = await managers.get_manager(made["id"], pool=pool)
+        assert row["task_scope"] == "projects" and row["scope_project_ids"] == []
+        assert row["revision"] == made["revision"] + 2
+        async with pool.acquire() as conn, conn.transaction():
+            assert await managers.lock_scope_projects([project["id"]], conn=conn) == set()
+    run_db(run, monkeypatch, timeout=20)

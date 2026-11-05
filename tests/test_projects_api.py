@@ -245,6 +245,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
     monkeypatch.setattr(db_managers, "list_managers", AsyncMock(return_value=[default]))
     monkeypatch.setattr(db_managers, "get_manager", AsyncMock(return_value=default))
     monkeypatch.setattr(db_managers, "template_using_project", AsyncMock(return_value=None))
+    monkeypatch.setattr(db_managers, "managers_scoped_to", AsyncMock(return_value=[]))
     from looper.agents import step_workspaces, task_workspaces
     from looper.db import schedules as db_schedules
 

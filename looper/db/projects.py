@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import asyncpg
 
-from .connection import get_pool
+from .connection import _connection, get_pool
 from .tasks import ACTIVE_STATUSES
 
 # How the project's task agents run; NULL inherits (looper/agents/project_execution.py).
@@ -49,11 +49,13 @@ _WITH_COUNTS = """
 """
 
 
-async def list_projects(*, manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+async def list_projects(*, manager_id: str | None = None, project_ids: Sequence[str] | None = None,
+                        pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """Every project with its ``task_count``, ``active_count`` and ``schedule_count``, ordered by name ignoring
     case; with ``manager_id``, the counts are of that Manager's tasks and its schedules are 0."""
     pool = pool or get_pool()
-    rows = await pool.fetch(_WITH_COUNTS + "GROUP BY p.id ORDER BY lower(p.name)", list(ACTIVE_STATUSES), manager_id)
+    rows = await pool.fetch(_WITH_COUNTS + "WHERE ($3::text[] IS NULL OR p.id = ANY($3)) "
+                            "GROUP BY p.id ORDER BY lower(p.name)", list(ACTIVE_STATUSES), manager_id, project_ids)
     return [dict(r) for r in rows]
 
 
@@ -174,11 +176,17 @@ async def record_directory_move(project_id: str, old: str, new: str, *, pool: An
                                project_id, f"directory moved from {old} to {new}")
 
 
-async def delete_project(project_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
+async def delete_project(project_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> bool:
     """Delete a project; one that still has tasks or schedules raises ``asyncpg.ForeignKeyViolationError``."""
     pool = pool or get_pool()
-    result = await pool.execute("DELETE FROM projects WHERE id = $1", project_id)
-    return result == "DELETE 1"
+    async with _connection(pool) as conn, conn.transaction():
+        deleted = await conn.execute("DELETE FROM projects WHERE id = $1", project_id) == "DELETE 1"
+        if deleted:
+            await conn.fetch(
+                "UPDATE managers SET scope_project_ids = array_remove(scope_project_ids, $1), "
+                "revision = revision + 1, updated_at = now() WHERE $1 = ANY(scope_project_ids) RETURNING id",
+                project_id)
+        return deleted
 
 
 def profile_allowed_sql(project_col: str, profile_col: str) -> str:

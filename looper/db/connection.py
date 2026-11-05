@@ -101,9 +101,20 @@ _CURSOR_LOGIN = "cursor_login"
 _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
 _CHAT_BINDING_SENDERS = "chat_binding_senders"
+_MANAGER_SCOPE_PROJECTS = "manager_scope_projects"
 _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
 _PROJECT_ACTIVITY = "project_activity"
+
+
+_MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
+    "ALTER TABLE managers DROP CONSTRAINT managers_task_scope_check, "
+    "ADD CONSTRAINT managers_task_scope_check CHECK (task_scope IN ('all', 'own', 'projects'))",
+    "ALTER TABLE managers ADD COLUMN scope_project_ids TEXT[] NOT NULL DEFAULT '{}'",
+    "ALTER TABLE managers ADD CONSTRAINT managers_scope_projects_check CHECK (cardinality(scope_project_ids) <= 20 "
+    "AND (task_scope = 'projects' OR cardinality(scope_project_ids) = 0))",
+    "ALTER TABLE managers ADD CONSTRAINT managers_scope_tools_check CHECK (task_scope <> 'projects' OR tools = 'tasks')",
+)
 
 _PROJECT_ACTIVITY_DDL = """
 CREATE TABLE IF NOT EXISTS project_activity (
@@ -251,6 +262,16 @@ async def _chat_binding_senders_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _manager_scope_projects_pending(conn: asyncpg.Connection) -> bool:
+    """Recorded upgrades never repair DDL; fresh schemas already contain the column."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _MANAGER_SCOPE_PROJECTS):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('managers') AND attname = 'scope_project_ids' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
 async def _schedule_missed_since_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
                            _SCHEDULE_MISSED_SINCE):
@@ -388,6 +409,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE tasks ADD COLUMN origin_reply_route JSONB "
                                "CHECK (jsonb_typeof(origin_reply_route) = 'object')")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _TASK_REPLY_ROUTE)
+        if await _manager_scope_projects_pending(conn):
+            for ddl in _MANAGER_SCOPE_PROJECTS_DDL:
+                await conn.execute(ddl)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MANAGER_SCOPE_PROJECTS)
         if await _schedule_missed_since_pending(conn):
             await conn.execute("ALTER TABLE schedule_runs ADD COLUMN missed_since TIMESTAMPTZ")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_MISSED_SINCE)
@@ -437,4 +462,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _runtime_launcher_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
-            or await _project_activity_pending(conn) or await _chat_binding_senders_pending(conn)))
+            or await _project_activity_pending(conn) or await _chat_binding_senders_pending(conn)
+            or await _manager_scope_projects_pending(conn)))

@@ -101,10 +101,12 @@ async def _overview(call: Call) -> dict[str, Any]:
     from ..overview import build_overview
 
     platform = call.platform
-    manager_id = call.manager_id if call.scoped else None
+    f = call.scope.tasks
+    manager_id = call.manager_id if f.bounded else None
     view = await build_overview(task_router=platform.task_router, worker_pool=platform.worker_pool,
                                 manager=platform.manager, supervisor=platform.supervisor, manager_id=manager_id,
-                                managers=getattr(platform, "managers", None) if manager_id is None else None)
+                                project_ids=f.project_ids,
+                                managers=getattr(platform, "managers", None) if not f.bounded else None)
     agents = view["agents"]
     own = await db_layers.task_concurrency([p["task_id"] for p in agents["planners"]])
     return {
@@ -120,7 +122,8 @@ async def _overview(call: Call) -> dict[str, Any]:
                       for r in agents["workers"] + agents["reviewers"]],
         "projects": view["projects"],
         # The user gates waiting for the user's answer in the running tasks ("Open gates" lists them).
-        "waiting_gates": len(await db_user_gates.open_gates(TASKS_SEARCHED, manager_id=manager_id)),
+        "waiting_gates": len(await db_user_gates.open_gates(
+            TASKS_SEARCHED, manager_id=f.manager_id, project_ids=f.project_ids)),
         "spend_today": view["spend_today"],
         "unhealthy": view["health"]["unhealthy"],
     }
@@ -131,6 +134,7 @@ async def _overview(call: Call) -> dict[str, Any]:
 
 async def _tasks(call: Call) -> dict[str, Any]:
     arguments = call.arguments
+    f = call.scope.tasks
     if arguments["action"] in ("get", "room"):
         task_id = arguments.get("task_id")
         if not task_id:
@@ -142,13 +146,15 @@ async def _tasks(call: Call) -> dict[str, Any]:
         if project is None:
             raise OpError(ErrorCode.NOT_FOUND, f"no project named {arguments['project']!r}")
         project_id = project["id"]
+        if f.project_ids is not None and project_id not in f.project_ids:
+            raise OpError(ErrorCode.FORBIDDEN, f"project {arguments['project']!r} is not one of this Manager's projects")
     group = db_tasks.TaskGroup(arguments["group"]) if arguments.get("group") else None
     limit = int(arguments.get("limit") or TASKS_LISTED)
     from ..projects import list_tasks_page
 
     return await list_tasks_page(
         limit=limit, project_id=project_id, group=group,
-        manager_id=call.manager_id if call.scoped else None,
+        manager_id=f.manager_id, project_ids=f.project_ids,
         query=str(arguments.get("query") or ""), compact=True, search_limit=TASKS_SEARCHED)
 
 
@@ -299,10 +305,25 @@ async def _template_of(call: Call) -> tuple[TaskTemplate | None, dict[str, str]]
     return found
 
 
+def _placement_in_scope(call: Call, placement: Placement) -> None:
+    f = call.scope.tasks
+    if f.project_ids is None:
+        return
+    if not f.project_ids:
+        raise OpError(ErrorCode.FORBIDDEN, "this Manager has no projects left (they were deleted): it creates "
+                                           "no task; tell the user to ask the operator to choose its projects "
+                                           "in Settings → Managers")
+    if placement.project is None or placement.project["id"] not in f.project_ids:
+        raise OpError(ErrorCode.FORBIDDEN, f"project {placement.name!r} is not one of this Manager's projects: "
+                                           "use one the Projects line lists, or tell the user to use the general "
+                                           "Manager")
+
+
 async def _new_project(call: Call) -> str | None:
     """None when the task's project exists; else the question whether to create it (the call is ``high``)."""
     template, _ = await _template_of(call)
     placement = await effective_placement(template, call.arguments)
+    _placement_in_scope(call, placement)
     await _profile_choices(call.arguments.get("profiles"), clearing=False)
     if placement.project is not None:
         return None
@@ -348,6 +369,7 @@ async def _create(call: Call) -> dict[str, Any]:
     arguments, turn = call.arguments, call.turn
     template, values = await _template_of(call)
     placement = await effective_placement(template, arguments)
+    _placement_in_scope(call, placement)
     name, project, work_dir = placement.name, placement.project, placement.work_dir
     profiles = await _merged_profiles(template, arguments)
     fallbacks: list[str] = []
@@ -392,7 +414,7 @@ async def _create(call: Call) -> dict[str, Any]:
         result = await create_task_core(
             data, task_fields=row, profiles=profiles, roles=roles,
             template_name=template.name if template is not None else None,
-            lock_manager=True, named=placement.named, visible_to=call.manager_id if call.scoped else None,
+            lock_manager=True, named=placement.named, visible_to=call.manager_id if call.scope.tasks.bounded else None,
             show_configuration=True, template_display=used)
     except ProjectNameTaken:
         raise OpError(ErrorCode.CONFLICT, f"a project named {name!r} was created meanwhile: call again to use "

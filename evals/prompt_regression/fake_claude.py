@@ -305,8 +305,10 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
             raise RuntimeError("the simulated PR does not contain the commit this review needs")
     files = dict(attempt.get("files") or {})
     wait = (script.get("wait_for_input") or {}).get(label)
-    if wait and attempt_no == 1 and stdin.readline(timeout=float(wait.get("seconds", 10))) is not None:
-        files = dict(wait.get("files") or {})
+    if wait and attempt_no == 1:
+        _emit({"type": "system", "subtype": "init", "session_id": "fake-worker", "model": "fake"})
+        if stdin.readline(timeout=float(wait.get("seconds", 10))) is not None:
+            files = dict(wait.get("files") or {})
     if attempt.get("answer_file"):
         messages = inbox or []
         answer = next((m["body"] for m in reversed(messages) if m.get("via") == "consult"), None)

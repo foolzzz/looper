@@ -10,7 +10,7 @@ row (``lock_for_task``, ``put_template``) and the delete locks it too, so whiche
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Literal
 
 import asyncpg
@@ -23,7 +23,7 @@ DEFAULT_MANAGER_ID = "manager"
 
 # The columns update_manager and insert_manager write.
 _FIELDS = ("name", "description", "system_prompt", "profile_id", "tools", "task_scope", "task_policy", "enabled",
-           "idle_timeout_seconds")
+           "idle_timeout_seconds", "scope_project_ids")
 _TEMPLATE_FIELDS = ("name", "description", "project_id", "work_dir", "workspace_mode", "requirement",
                     "planner_instructions", "planner_profile_id", "worker_profile_id", "reviewer_profile_id",
                     "role_templates", "inputs")
@@ -42,6 +42,27 @@ def _template(row: Mapping[str, Any]) -> dict[str, Any]:
     template["inputs"] = json.loads(inputs) if isinstance(inputs, str) else list(inputs or [])
     template["role_templates"] = list(template.get("role_templates") or [])
     return template
+
+
+def _scope_values(values: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(values)
+    if "scope_project_ids" in result:
+        result["scope_project_ids"] = sorted(set(result["scope_project_ids"]))
+    return result
+
+
+async def lock_scope_projects(ids: Sequence[str], *, conn: asyncpg.Connection) -> set[str]:
+    """Lock scope projects before any Manager row, excluding a concurrent project deletion."""
+    return {row["id"] for row in await conn.fetch(
+        "SELECT id FROM projects WHERE id = ANY($1::text[]) FOR KEY SHARE", ids)}
+
+
+async def managers_scoped_to(project_id: str, *,
+                             pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, Any]]:
+    pool = pool or get_pool()
+    return [dict(row) for row in await pool.fetch(
+        "SELECT id, name FROM managers WHERE deleted_at IS NULL AND $1 = ANY(scope_project_ids) "
+        "ORDER BY lower(name), id", project_id)]
 
 
 async def list_managers(*, include_deleted: bool = False,
@@ -71,6 +92,7 @@ async def key_used(manager_id: str, *, pool: asyncpg.Pool | asyncpg.Connection |
 
 async def insert_manager(values: Mapping[str, Any], *, conn: asyncpg.Connection) -> dict[str, Any]:
     """Insert a Manager: ``id`` and the ``_FIELDS`` given (the rest take the column defaults)."""
+    values = _scope_values(values)
     columns = ["id"] + [name for name in _FIELDS if name in values]
     placeholders = ", ".join(f"${i}" for i in range(1, len(columns) + 1))
     await conn.execute(f"INSERT INTO managers ({', '.join(columns)}) VALUES ({placeholders})",
@@ -84,6 +106,7 @@ async def update_manager(manager_id: str, values: Mapping[str, Any], *,
                          conn: asyncpg.Connection, only_if_changed: bool = False) -> dict[str, Any] | None:
     """Set the keys given in ``values`` on a Manager not deleted and bump its ``revision``; None when there is
     none. ``only_if_changed`` locks and leaves identical configuration, including its revision, alone."""
+    values = _scope_values(values)
     names = [name for name in _FIELDS if name in values]
     if only_if_changed:
         current = await lock_for_update(manager_id, conn=conn)

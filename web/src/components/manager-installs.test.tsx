@@ -20,7 +20,7 @@ vi.mock("@/lib/manager-installs-api", () => ({
 const m = vi.mocked(api);
 const installs = vi.mocked(installsApi);
 const manager = (id: string, profileId: string | null = "profile"): api.ManagerInfo => ({
-  id, name: id, description: "", builtin: false, enabled: true, tools: "tasks", task_scope: "own",
+  id, name: id, description: "", builtin: false, enabled: true, tools: "tasks", task_scope: "own", scope_project_ids: [],
   task_policy: "free", idle_timeout_seconds: 1800, system_prompt: "", profile_id: profileId, profile_name: null,
   templates: [], revision: 0, created_at: "", updated_at: "",
   state: { running: false, busy: false, healthy: true, sync: "ok" },

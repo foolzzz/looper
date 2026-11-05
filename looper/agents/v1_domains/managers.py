@@ -25,7 +25,9 @@ _TEMPLATE_FIELDS = {
 TASK_TEMPLATE = _object({"key": _STR, **_TEMPLATE_FIELDS, "updated_at": _STR})
 _MANAGER_FIELDS = {
     "name": _STR, "description": _STR, "system_prompt": _NULL_STR, "profile_id": _NULL_STR,
-    "tools": _enum("all", "tasks"), "task_scope": _enum("all", "own"),
+    "tools": _enum("all", "tasks"), "task_scope": _enum("all", "own", "projects"),
+    "scope_project_ids": {"type": "array", "items": _ID, "maxItems": 20,
+                          "description": "With task_scope projects: the ids of the projects this Manager works in."},
     "task_policy": _enum("free", "templates_only"), "enabled": _BOOL,
     "idle_timeout_seconds": {"type": "integer", "anyOf": [{"const": 0}, {"minimum": 60, "maximum": 86400}]},
 }
@@ -74,12 +76,14 @@ async def impact(server, operation, arguments, principal, headers):
     if name == "managers.create":
         return (f"Create Manager manager-{arguments['key']} with the supplied definition? "
                 f"enabled={arguments.get('enabled', True)}, tools={arguments.get('tools', 'tasks')}, "
-                f"task_scope={arguments.get('task_scope', 'own')}, task_policy={arguments.get('task_policy', 'free')}. "
+                f"task_scope={arguments.get('task_scope', 'own')}, "
+                + (f"scope_project_ids={arguments['scope_project_ids']}, " if "scope_project_ids" in arguments else "")
+                + f"task_policy={arguments.get('task_policy', 'free')}. "
                 "When enabled it can receive messages using the supplied prompt and profile.")
     manager_id = arguments["manager_id"]
     if name == "managers.update":
         fields = arguments["fields"]
-        changes = ", ".join(f"{key}={fields[key]}" if key in ("tools", "task_scope", "task_policy", "enabled", "profile_id")
+        changes = ", ".join(f"{key}={fields[key]}" if key in ("tools", "task_scope", "task_policy", "enabled", "profile_id", "scope_project_ids")
                             else key for key in sorted(fields))
         return (f"Change Manager {manager_id} fields: {changes}? "
                 "The supplied definition, tool/task permissions and enabled state apply to its runtime; "

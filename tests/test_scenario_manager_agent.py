@@ -96,6 +96,9 @@ async def test_default_prompt_is_unchanged(tmp_path: Path) -> None:
 
 @pytest.mark.usefixtures("agent_db")
 @pytest.mark.parametrize(("tools", "scope", "tool_text", "scope_texts"), [
+    (ManagerTools.TASKS, TaskScope.PROJECTS, "task tools only",
+     ['only the tasks of the projects listed under "Projects"', "whoever created them",
+      "create tasks only in those projects"]),
     (ManagerTools.TASKS, TaskScope.OWN, "task tools only", ["only the tasks you created"]),
     (ManagerTools.ALL, TaskScope.OWN, "every platform tool", ["only the tasks you created"]),
     (ManagerTools.TASKS, TaskScope.ALL, "task tools only", ["every task", "list only the tasks you created"]),

@@ -141,17 +141,22 @@ _MANAGER_TOOL_NAMES = {tool.name: tool for tool in MANAGER_TOOLS}
 @dataclass(frozen=True)
 class OpsScope:
     """What a Manager's calls may do, from its definition (RFC §7): the tools it has, those among them it may only
-    read, whether it sees its own tasks only, and its task policy. ``revision`` is the definition's
+    read, which tasks it may act on and list, and its task policy. ``revision`` is the definition's
     ``managers.revision`` it was computed from (-1: never compared with the database). The two settings are
-    independent: ``tools`` picks the tools, ``task_scope`` alone sets ``scoped``."""
+    independent: ``tools`` picks the tools, ``task_scope`` sets the task filters."""
 
     manager_id: str
     revision: int
     tools: Mapping[str, Tool]
     read_only: frozenset[str]
-    scoped: bool
+    tasks: db_tasks.TaskFilter
+    listed: db_tasks.TaskFilter
     task_policy: TaskPolicy
     template_keys: tuple[str, ...] = ()
+
+    @property
+    def scoped(self) -> bool:
+        return self.tasks.manager_id is not None
 
 
 def _tool_map(tools: Sequence[Tool]) -> Mapping[str, Tool]:
@@ -168,7 +173,7 @@ def scope_for(definition: ManagerDefinition, template_keys: Sequence[str] = ()) 
         manager_id=definition.id, revision=definition.revision,
         tools=_tool_map(tools),
         read_only=frozenset() if all_tools else READ_ONLY_TASKS,
-        scoped=definition.task_scope is TaskScope.OWN, task_policy=definition.task_policy,
+        tasks=definition.tool_tasks(), listed=definition.listed_tasks(), task_policy=definition.task_policy,
         template_keys=tuple(template_keys),
     )
 
@@ -293,8 +298,8 @@ class ManagerOps:
         return [task_directory_tool(project_tool(tool)).listing() for tool in (await self.current_scope()).tools.values()]
 
     async def _authorize(self, scope: OpsScope, name: str, arguments: Mapping[str, Any]) -> Tool:
-        """The one check of what ``scope`` allows: the tool is among its tools, a read-only tool is only read, and a
-        scoped Manager acts only on a task of its own. Returns the tool to run."""
+        """The one check of what ``scope`` allows: the tool is among its tools, a read-only tool is only read, and
+        a bounded Manager acts only on a task its filter admits. Returns the tool to run."""
         tool = scope.tools.get(name)
         if tool is None:
             if name in _MANAGER_TOOL_NAMES:
@@ -304,9 +309,13 @@ class ManagerOps:
             raise OpError(ErrorCode.FORBIDDEN, "this Manager can only read projects; ask the user to use the "
                                                "general Manager or the dashboard for that")
         task_id = tool.task_id(arguments)
-        if scope.scoped and isinstance(task_id, str) and task_id:
+        if scope.tasks.bounded and isinstance(task_id, str) and task_id:
             task = await db_tasks.get_task(task_id)
-            if task is not None and task.get("manager_id") != scope.manager_id:
+            if task is not None and not scope.tasks.admits(task):
+                if scope.tasks.project_ids is not None:
+                    raise OpError(ErrorCode.FORBIDDEN, f"task {task_id} is in a project outside this Manager's "
+                                                       "projects; it acts only on the tasks of the projects the "
+                                                       "Projects line lists")
                 raise OpError(ErrorCode.FORBIDDEN, f"task {task_id} belongs to another Manager; this Manager acts "
                                                    "only on the tasks it created")
         return tool

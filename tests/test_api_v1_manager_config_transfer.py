@@ -53,6 +53,19 @@ def test_manager_full_identity_schema_keeps_manager_suffix_distinct():
     assert api_v1.RESULTS["config.export"]["properties"]["document"]["properties"] == CONFIG_DOCUMENT["properties"]
 
 
+def test_project_scope_document_schema_uses_portable_project_names():
+    document = {"format": "looper-config/v4", "managers": [
+        {"id": "manager-example", "name": "Example", "tools": "tasks", "task_scope": "projects",
+         "scope_projects": ["Example"]}]}
+    for schema in (CONFIG_DOCUMENT, api_v1.CONFIG_IMPORT_DOCUMENT):
+        assert api_v1.validate_arguments(schema, document) == document
+        entry = document["managers"][0]
+        entry["scope_project_ids"] = ["proj-local"]
+        with pytest.raises(OpError):
+            api_v1.validate_arguments(schema, document)
+        del entry["scope_project_ids"]
+
+
 def test_template_import_schema_allows_omitted_name_but_export_still_requires_it():
     document = {"format": "looper-config/v4", "managers": [
         {"id": "manager-example", "name": "Example", "templates": [

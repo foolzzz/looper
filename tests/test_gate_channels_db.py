@@ -10,6 +10,7 @@ points at a disposable database.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -624,18 +625,19 @@ def test_a_gate_closed_during_a_pass_posts_no_reminder(monkeypatch: pytest.Monke
     run_db(test, monkeypatch)
 
 
-def test_the_manager_sees_the_open_gates_of_the_chat_it_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_manager_sees_the_open_gates_of_the_chat_it_answers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(pool: Any) -> None:
-        from looper.agents.tiers.manager import ManagerAgent
+        from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 
         await _task_with_gate(pool, origin="channel-lark", chat=LARK_GROUP, kind="chat", mention=LARK_USER)
         # Another user's task, from their direct chat with the bot.
         await _task_with_gate(pool, "task-b", origin="channel-lark", chat="ou_other", kind="user", step_id="step-b1",
                               project_name="notes")
 
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+
         async def section(envelope: MessageEnvelope | None) -> list[str]:
-            return await ManagerAgent._open_gates_section(  # type: ignore[arg-type]
-                __import__("types").SimpleNamespace(agent_id="manager", _log="manager"), envelope)
+            return await manager._open_gates_section(envelope)
 
         web = await section(_tool_turn("hi", channel="web").envelope)
         assert web[0] == "Open gates (waiting for the user's answer; newest first):"

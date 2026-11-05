@@ -198,8 +198,8 @@ async def _existing_project(project_id: str, *, manager_id: str | None = None) -
     return project
 
 
-async def list_projects(*, manager_id: str | None = None) -> dict[str, Any]:
-    return {"projects": [project_view(row) for row in await db_projects.list_projects(manager_id=manager_id)],
+async def list_projects(*, manager_id: str | None = None, project_ids: Sequence[str] | None = None) -> dict[str, Any]:
+    return {"projects": [project_view(row) for row in await db_projects.list_projects(manager_id=manager_id, project_ids=project_ids)],
             "projects_root": projects_root()}
 
 
@@ -444,13 +444,19 @@ async def delete_project(project_id: str, bus: MessageBus, source: AgentAddress,
                                                      "delete the project again") from None
                 else:
                     break
+            affected = await db_managers.managers_scoped_to(project_id)
             try:
-                await db_projects.delete_project(project_id)
+                deleted = await db_projects.delete_project(project_id)
             except asyncpg.ForeignKeyViolationError:
                 if used := await db_managers.template_using_project(project_id):
                     raise _used_by_template(project_id, used) from None
                 raise RequestError(HTTP_409, f"a task or schedule was added to project {project['name']!r} while it "
                                              "was being deleted: delete it again") from None
+            if deleted:
+                from . import managers_api
+
+                for manager in affected:
+                    await managers_api._on_change(manager["id"])
     finally:
         lock.release()
         _project_delete_locks.pop(project_id, None)
@@ -685,7 +691,8 @@ def task_listed(task: Mapping[str, Any]) -> dict[str, Any]:
 async def list_tasks_page(
     *, limit: int = TASKS_PAGE, project_id: str | None = None, status: str | None = None,
     group: db_tasks.TaskGroup | None = None, schedule_id: str | None = None, before: str | None = None,
-    manager_id: str | None = None, query: str = "", compact: bool = False, search_limit: int = 200,
+    manager_id: str | None = None, project_ids: Sequence[str] | None = None,
+    query: str = "", compact: bool = False, search_limit: int = 200,
 ) -> dict[str, Any]:
     """A console page or the Manager's compact list; keyword searches retain its bounded recent-task search."""
     from ..db import managers as db_managers
@@ -696,7 +703,8 @@ async def list_tasks_page(
         raise RequestError(HTTP_400, f"before must be a task id; {before!r} is not one")
     if manager_id is not None and await db_managers.get_manager(manager_id) is None:
         return {"tasks": [], "more": False} if compact else {"tasks": [], "counts": {}, "next_before": None}
-    filters = {"project_id": project_id, "group": group, "schedule_id": schedule_id, "manager_id": manager_id}
+    filters = {"project_id": project_id, "group": group, "schedule_id": schedule_id, "manager_id": manager_id,
+               "project_ids": project_ids}
     fetch_limit = (search_limit if query else limit) if compact else limit + 1
     search = {"query": query} if query and not compact else {}
     page = await db_tasks.list_tasks(limit=fetch_limit, status=status, before=before, **filters, **search)

@@ -373,6 +373,8 @@ def manager_entry(row: Mapping[str, Any], templates: Sequence[Mapping[str, Any]]
         entry["installs"] = extras
     if row["id"] != "manager":
         entry.update({name: row[name] for name in ("system_prompt", "tools", "task_scope", "task_policy", "enabled")})
+        if row["task_scope"] == "projects":
+            entry["scope_projects"] = [projects[pid] for pid in row.get("scope_project_ids") or ()]
         entry["profile"] = profiles[row["profile_id"]] if row["profile_id"] else None
         entry["templates"] = [manager_template_entry(t, profiles, projects) for t in templates
                               if t["manager_id"] == row["id"]]
@@ -1913,7 +1915,7 @@ class _Importer:
             try:
                 entry = _mapping(raw, "a Manager")
                 allowed = {"id", "name", "description", "system_prompt", "profile", "tools", "task_scope",
-                           "task_policy", "enabled", "templates", "idle_timeout_seconds", "installs"}
+                           "task_policy", "enabled", "templates", "idle_timeout_seconds", "installs", "scope_projects"}
                 unknown = set(entry) - allowed
                 if unknown:
                     raise ConfigFileError(f"managers: unknown field {sorted(unknown)[0]!r}")
@@ -1930,7 +1932,7 @@ class _Importer:
                     raise ConfigFileError(f"Manager {identity}: name is required")
                 if identity == "manager" and set(entry) - {"id", "name", "description", "idle_timeout_seconds", "installs"}:
                     raise ConfigFileError("the default Manager entry may only set id, name, description, installs and idle_timeout_seconds: 0")
-                values = {k: v for k, v in entry.items() if k not in ("id", "profile", "templates", "installs")}
+                values = {k: v for k, v in entry.items() if k not in ("id", "profile", "templates", "installs", "scope_projects")}
                 for name in ("name", "description", "system_prompt"):
                     if name in values:
                         _string(values[name], f"{identity}.{name}")
@@ -1942,8 +1944,24 @@ class _Importer:
                             raise ConfigFileError(f"Manager {identity}: system_prompt is required for a new definition")
                     if "profile" in entry:
                         values["profile_id"] = self.manager_profile(entry["profile"], "manager")
+                if "scope_projects" in entry:
+                    scope_names = entry["scope_projects"]
+                    if not isinstance(scope_names, list):
+                        raise ConfigFileError(f"Manager {identity}: scope_projects must be a list")
+                    scope_ids = []
+                    for project_name in scope_names:
+                        project_id = self.project_ids.get(project_name.strip().lower()) if isinstance(project_name, str) else None
+                        if project_id is None:
+                            raise ConfigFileError(f"Manager {identity}: no project {project_name!r} in scope_projects; "
+                                                  "include projects or create it first")
+                        scope_ids.append(project_id)
+                    # Preserve the scope-specific error for an exported emptied Manager.
+                    if not scope_ids:
+                        managers_api.final_scope(row, {**values, "scope_project_ids": []})
+                    values["scope_project_ids"] = scope_ids
                 values = await managers_api.checked_values(values, own_id=identity, conn=self.conn if self.apply else None,
                                                             check_references=self.apply)
+                managers_api.final_scope(row, values)
                 name_key = values["name"].casefold()
                 if name_key in names:
                     raise ConfigFileError(f"managers: duplicate name {values['name']!r}")
@@ -2031,6 +2049,18 @@ class _Importer:
                     templates.append((identity, key, values_template, repoint))
             except (RequestError, _Skip) as exc:
                 raise ConfigFileError(f"managers: {exc}") from None
+        final_templates = {**self.target.manager_templates,
+                           **{(identity, key): {"project_id": values["project_id"]}
+                              for identity, key, values, _ in templates}}
+        for identity, values in checked.items():
+            final = {**(self.target.managers.get(identity) or {}), **values}
+            ids = final.get("scope_project_ids") or ()
+            if final.get("task_scope") == "projects":
+                for (owner, key), template in final_templates.items():
+                    if owner == identity and template["project_id"] not in ids:
+                        project = project_names.get(template["project_id"], "no project")
+                        raise ConfigFileError(f"Manager {identity}: template {key!r} targets {project}, outside "
+                                              "this Manager's projects: change the template first")
         for identity, row in self.target.managers.items():
             owner = names.get(" ".join(row["name"].split()).casefold())
             if row["deleted_at"] is None and owner is not None and owner != identity:
@@ -2379,6 +2409,18 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
         if data.get("managers"):
             from ..db import managers as db_managers
 
+            # Project deletion takes projects before Managers. Resolve and lock existing
+            # scope references before the global Manager lock; new projects are ours.
+            scope_names = [name.strip().lower() for entry in data["managers"]
+                           if isinstance(entry, Mapping) and isinstance(entry.get("scope_projects"), list)
+                           for name in entry["scope_projects"] if isinstance(name, str)]
+            identities = [entry["id"] for entry in data["managers"]
+                          if isinstance(entry, Mapping) and isinstance(entry.get("id"), str)]
+            scope_rows = await conn.fetch(
+                "SELECT p.id FROM projects p WHERE lower(p.name) = ANY($1::text[]) "
+                "OR p.id IN (SELECT unnest(scope_project_ids) FROM managers WHERE id = ANY($2::text[])) "
+                "ORDER BY p.id FOR KEY SHARE", scope_names, identities)
+            await db_managers.lock_scope_projects([row["id"] for row in scope_rows], conn=conn)
             await db_managers.lock_managers(conn)
             # Every Manager writer takes the global limit lock before these target row locks.
             for identity in sorted(entry["id"] for entry in data["managers"]

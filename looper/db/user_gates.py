@@ -386,7 +386,8 @@ async def find_reference(channel: str, chat: str, external_ids: Sequence[str], *
 
 
 async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboard: bool = False,
-                     manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+                     manager_id: str | None = None, project_ids: Sequence[str] | None = None,
+                     pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """The gates that wait for the user in the tasks not completed or cancelled (a stopped task's gate can still be
     answered: ``gate_service.post_message`` keeps the answer), the latest opened first, at most ``limit``, each with
     its step's label, its task's project, the chat its task came from (``origin_channel_id``, ``chat_id``,
@@ -400,6 +401,9 @@ async def open_gates(limit: int, *, chat: tuple[str, str] | None = None, dashboa
     if manager_id is not None:
         args.append(manager_id)
         where = f" AND t.manager_id = ${len(args)}"
+    if project_ids is not None:
+        args.append(project_ids)
+        where += f" AND t.project_id = ANY(${len(args)}::text[])"
     if chat is not None:
         from ..agents.message import CHANNEL_ID_PATTERN
         from ..agents.task_notice import TargetKind

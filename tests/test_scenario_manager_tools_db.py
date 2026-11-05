@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from looper.agents.managers_api import ManagerDefinition, ManagerTools
+from looper.agents.message import MessageType
 from looper.agents.ops.service import MANAGER_TOOLS, ManagerOps, Platform, scope_for
 from tests.db_support import DSN, run_db
 from tests.test_gate_channels_db import _gate, _gate_step
@@ -652,5 +653,133 @@ def test_schedule_runs_show_a_scoped_manager_none_of_another_managers_tasks(monk
         got = _ok((await chat.say("get", ("looper_schedules", {"action": "get", "schedule": "nightly"})))[0])
         session = got["schedule"]["planner_session"]
         assert (session["last_task_id"], session["last_task_title"]) == ("task-own", "title of task-own")
+
+    run_db(test, monkeypatch)
+
+
+async def _project_scope(pool: Any, tmp: Path) -> tuple[_Chat, dict[str, Any], dict[str, Any]]:
+    a, b = await _project(pool, "scope-a"), await _project(pool, "scope-b")
+    chat, _ = await _review(pool, tmp, tools="tasks", task_scope="projects", scope_project_ids=[a["id"]])
+    await _task(pool, "task-a", "manager", a)
+    await _task(pool, "task-b", REVIEW, b)
+    return chat, a, b
+
+
+def test_project_scope_task_tools_include_other_creators(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import tasks
+
+        chat, a, _ = await _project_scope(pool, tmp_path)
+        assert _listed((await chat.say("list", ("looper_tasks", {"action": "list"})))[0]) == ["task-a"]
+        _ok((await chat.say("read", ("looper_tasks", {"action": "get", "task_id": "task-a"})))[0])
+        _ok((await chat.say("add", ("looper_task_instruct", {"task_id": "task-a", "text": "new request"})))[0])
+        assert _ok((await chat.say("overview", ("looper_overview", {})))[0])["tasks"]["total"] == 1
+        projects = _ok((await chat.say("projects", ("looper_projects", {"action": "list"})))[0])["projects"]
+        assert [p["project"] for p in projects] == ["scope-a"]
+        _ok((await chat.say("project", ("looper_projects", {"action": "get", "project": "scope-a"})))[0])
+        arguments = {"requirement": "r", "title": "t", "project": "scope-a"}
+        made = _ok((await chat.say("create", ("looper_task_create", arguments)))[0])
+        assert (await tasks.get_task(made["task_id"], pool=pool))["project_id"] == a["id"]
+        (asked,) = await chat.say("cancel", ("looper_task_control", {"task_id": "task-a", "action": "cancel"}))
+        assert asked["status"] == "needs_confirmation"
+        _ok((await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]})))[0])
+        sent = chat.sent()
+        assert [(e.message_type, e.payload) for e in sent] == [(MessageType.TASK_CANCEL, {"task_id": "task-a"})]
+        assert (await tasks.get_task("task-b", pool=pool))["status"] == "running"
+
+    run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("name,arguments", [
+    ("looper_tasks", {"action": "get"}),
+    ("looper_tasks", {"action": "room"}),
+    ("looper_task_control", {"action": "cancel"}),
+    ("looper_task_control", {"action": "start_over"}),
+    ("looper_task_instruct", {"text": "change it"}),
+    ("looper_task_gate_reply", {"gate": "g1"}),
+    ("looper_task_update", {"title": "changed"}),
+])
+def test_project_scope_refuses_other_project_task_ids(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                     name: str, arguments: dict[str, Any]) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import tasks
+
+        chat, _, _ = await _project_scope(pool, tmp_path)
+        (answer,) = await chat.say("change", (name, {**arguments, "task_id": "task-b"}))
+        assert _error(answer) == "forbidden" and "outside this Manager's projects" in answer["error"]["message"]
+        assert not chat.sent()
+        assert (await tasks.get_task("task-b", pool=pool))["status"] == "running"
+        assert await pool.fetchval("SELECT count(*) FROM manager_actions WHERE manager_id = $1 "
+                                   "AND tool = $2 AND status = 'error' AND error_code = 'forbidden'", REVIEW, name) == 1
+
+    run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("tool", ["looper_tasks", "looper_projects"])
+def test_project_scope_explicit_project_read_refuses_another_project(monkeypatch: pytest.MonkeyPatch,
+                                                                    tmp_path: Path, tool: str) -> None:
+    async def test(pool: Any) -> None:
+        chat, _, _ = await _project_scope(pool, tmp_path)
+        (answer,) = await chat.say("read", (tool, {"action": "list" if tool == "looper_tasks" else "get",
+                                                  "project": "scope-b"}))
+        assert _error(answer) == ("forbidden" if tool == "looper_tasks" else "not_found")
+
+    run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("placement", ["another", "new", "empty"])
+def test_project_scope_refuses_task_creation_outside_scope(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                          placement: str) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import tasks
+
+        chat, _, _ = await _project_scope(pool, tmp_path)
+        if placement == "empty":
+            await pool.execute("UPDATE managers SET scope_project_ids = '{}', revision = revision + 1 WHERE id = $1",
+                               REVIEW)
+        project = "scope-a" if placement == "empty" else "new-project" if placement == "new" else "scope-b"
+        (answer,) = await chat.say("create", ("looper_task_create", {"project": project, "work_dir": "/w",
+                                                                   "title": "new", "requirement": "r"}))
+        assert _error(answer) == "forbidden"
+        assert ("no projects left" if placement == "empty" else "not one of this Manager's projects") in answer["error"]["message"]
+        assert len(await tasks.list_tasks(pool=pool)) == 2 and not chat.ops._pending
+
+    run_db(test, monkeypatch)
+
+
+def test_project_scope_rechecks_pending_cancel_after_project_removed(monkeypatch: pytest.MonkeyPatch,
+                                                                    tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import tasks
+
+        chat, _, b = await _project_scope(pool, tmp_path)
+        (asked,) = await chat.say("cancel", ("looper_task_control", {"task_id": "task-a", "action": "cancel"}))
+        assert asked["status"] == "needs_confirmation"
+        await pool.execute("UPDATE managers SET scope_project_ids = $2, revision = revision + 1 WHERE id = $1",
+                           REVIEW, [b["id"]])
+        (answer,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
+        assert _error(answer) == "forbidden" and "no longer do it" in answer["error"]["message"]
+        assert (await tasks.get_task("task-a", pool=pool))["status"] == "running"
+        assert not chat.sent()
+
+    run_db(test, monkeypatch)
+
+
+def test_project_scope_rechecks_pending_new_project_creation(monkeypatch: pytest.MonkeyPatch,
+                                                            tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import projects, tasks
+
+        chat, _ = await _review(pool, tmp_path, task_scope="all")
+        a = await _project(pool, "scope-a")
+        (asked,) = await chat.say("create", ("looper_task_create", {"project": "new-project", "title": "new",
+                                                                   "work_dir": "/w", "requirement": "r"}))
+        assert asked["status"] == "needs_confirmation"
+        await pool.execute("UPDATE managers SET task_scope = 'projects', scope_project_ids = $2, "
+                           "revision = revision + 1 WHERE id = $1", REVIEW, [a["id"]])
+        (answer,) = await chat.say("确认", ("looper_confirm", {"confirmation_id": asked["confirmation_id"]}))
+        assert _error(answer) == "forbidden"
+        assert await tasks.list_tasks(pool=pool) == []
+        assert await projects.find_project_by_name("new-project", pool=pool) is None
 
     run_db(test, monkeypatch)

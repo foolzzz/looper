@@ -3498,15 +3498,25 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
 - **What a Manager may use and see.** Two independent settings of a row in
   `managers`. `tools` (`all` / `tasks`) says which tools it has: `all` is the
   whole catalog, `tasks` the task tools, `looper_confirm` and the read-only
-  `looper_projects` list / get. `task_scope` (`all` / `own`) says which tasks
-  it sees and may act on: `all` every task, `own` only the tasks it created.
-  Any combination is valid. The default Manager is fixed to `all` / `all`; a
-  scenario Manager defaults to `tasks` / `own`. `ManagerOps` enforces both in
+  `looper_projects` list / get. `task_scope` says which tasks it sees and may
+  act on: `all` every task, `own` only the tasks it created, and `projects`
+  only tasks in `scope_project_ids`, whoever created them (including API
+  clients and schedules). A `projects` scope works only with `tools = tasks`:
+  broader tools reach projects and settings with no defined project boundary.
+  Its templates must name one of its projects, and it creates tasks only there.
+  The default Manager is fixed to `all` / `all`; a scenario Manager defaults
+  to `tasks` / `own`. `ManagerOps` enforces these settings in
   code (a call outside them is `forbidden`) from one immutable scope value
   that changing either setting replaces at once. Each Manager's per-turn
-  `Ready tasks` and `Open gates` sections and the `/gates` list name only the
-  tasks that Manager created, whatever its `task_scope`. Every change to what
-  a Manager may do (`tools`, `task_scope`, `task_policy`, `enabled`, a
+  `Ready tasks` and `Open gates` sections and the `/gates` list follow the
+  project boundary for `projects`; for `all` and `own` they keep listing only
+  tasks that Manager created. The `Projects` section lists only its chosen
+  projects for `projects`. Deleting a project removes it from every Manager's
+  scope and bumps `revision`; the confirmation names the affected Managers.
+  A scope emptied by deletion stays `projects` with `[]`: readable, with no
+  visible tasks and no task creation until the operator chooses projects in
+  Settings → Managers. Renaming it remains allowed. Every change to what
+  a Manager may do (`tools`, `task_scope`, `scope_project_ids`, `task_policy`, `enabled`, a
   template saved or removed) bumps `managers.revision`; `ManagerOps` compares
   it at each call and, when it differs, rebuilds its scope from the database
   on the spot. If that fails the call is `unavailable`; the old scope is
@@ -4388,7 +4398,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice`, `concurrency_change`, `role_defined`, `gate_opened`, `gate_updated`, `gate_cancelled` and `gate_closed` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via` and `delivered_at`; `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
-| `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
+| `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `scope_project_ids`, `task_policy` (`free` / `templates_only`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |
 | `manager_task_templates` | A Manager's task templates ([Task templates](#task-templates)), keyed by `manager_id` and `key`: `name`, `description`, `project_id`, `work_dir`, `workspace_mode`, `requirement`, `planner_instructions`, the three role Profile ids, `role_templates` and `inputs` (JSON) |
 | `chat_threads` | The permanent Manager owner of a web or native channel thread (`session_id`); rebinding creates/reuses the destination's thread without changing prior owners; a legacy thread without a row is the default Manager's |
 | `manager_actions` | The Manager's tool calls (`looper/agents/ops`), one row each: `manager_id`, `channel`, `chat` and `message_id` of the turn (empty for a turn Claude ran on its own), `tool`, `arguments` (secret values masked), `risk` (`read`, `write`, `high`), `status` (`ok`, `needs_confirmation`, `error` with `error_code`), `result` (of a change; a read's is not kept), `confirmation_id` (the call that asked, on a confirmed one) and `task_id` (the task it acted on, no foreign key) |
