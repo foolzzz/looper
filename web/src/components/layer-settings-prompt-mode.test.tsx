@@ -28,7 +28,7 @@ const EFFECTIVE: EffectiveSettings = {
 const REGISTERED_PROFILE = {
   profile_id: "p", name: "p", effort: null, runtime_id: "rt", runtime_name: "Runtime", runtime_type: "r",
   model_id: "m", model: { model_id: "m", name: "Exact model", provider_id: "v", protocol: "openai-responses" },
-  provider: { provider_id: "v", name: "Account", vendor_type: "custom", auth: "api_key" },
+  provider: { provider_id: "v", name: "Account", vendor_type: "custom", auth: "api_key", enabled: true },
   roles: ["manager", "planner", "worker", "reviewer"],
 };
 const SUMMARY_REGISTRY = { profiles: [REGISTERED_PROFILE], runtime_types: [], runtimes: [], providers: [], models: [] };

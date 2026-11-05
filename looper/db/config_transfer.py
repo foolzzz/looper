@@ -51,7 +51,7 @@ async def read_providers(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     """Every provider with its API key (``api_key``, None without one)."""
     rows = await conn.fetch(
         "SELECT p.id, p.name, p.vendor_type, p.auth, p.oauth_runtime_type, p.env, "
-        "p.max_concurrency, p.builtin, s.api_key, "
+        "p.max_concurrency, p.builtin, p.enabled, s.api_key, "
         "COALESCE((SELECT jsonb_agg(to_jsonb(e) ORDER BY e.protocol) FROM llm_provider_endpoints e "
         "WHERE e.provider_id = p.id), '[]'::jsonb) AS endpoints "
         "FROM llm_providers p LEFT JOIN llm_provider_secrets s ON s.provider_id = p.id ORDER BY p.name COLLATE \"C\""
@@ -302,7 +302,7 @@ async def write_provider(conn: asyncpg.Connection, provider_id: str | None, valu
     from .profile_registry import insert_provider, update_provider
 
     fields = {k: values[k] for k in ("name", "vendor_type", "auth", "oauth_runtime_type", "endpoints", "env",
-                                     "max_concurrency")}
+                                     "max_concurrency", "enabled")}
     if provider_id is None:
         return await insert_provider(conn, fields, api_key)
     await update_provider(conn, provider_id, fields, api_key=api_key, keep_key=False)

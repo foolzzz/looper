@@ -157,7 +157,7 @@ describe("Settings → Scheduler", () => {
       const url = String(input);
       if (url === "/api/v1/registry/view") return Response.json({ status: "ok", result: { providers: [], profiles: [{
         profile_id: "p", name: "Schedule profile", effort: "high", runtime_name: "Runtime",
-        provider: { provider_id: "v", name: "Schedule account", auth: "api_key", vendor_type: "custom" },
+        provider: { provider_id: "v", name: "Schedule account", auth: "api_key", vendor_type: "custom", enabled: true },
         model: { model_id: "m", provider_id: "v", name: "Exact model", protocol: "openai-responses" },
       }] } });
       if (url === "/api/v1/schedule_admin/get") return Response.json({ status: "ok", result: { schedule } });

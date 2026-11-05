@@ -240,7 +240,8 @@ def provider_entry(row: Mapping[str, Any], include_secrets: bool) -> dict[str, A
         for endpoint in row["endpoints"]
     }
     return {**{name: row[name] for name in ("name", "vendor_type", "auth", "oauth_runtime_type", "env",
-                                          "max_concurrency")}, "endpoints": endpoints,
+                                          "max_concurrency")},
+            **({"enabled": False} if row.get("enabled") is False else {}), "endpoints": endpoints,
             "api_key": None if row["api_key"] is None else _secret(row["api_key"], include_secrets)}
 
 
@@ -1196,9 +1197,11 @@ class _Importer:
         try:
             entry = _mapping(entry, "a provider")
             unknown = set(entry) - {"name", "vendor_type", "auth", "oauth_runtime_type", "endpoints", "env",
-                                    "max_concurrency", "api_key"}
+                                    "max_concurrency", "api_key", "enabled"}
             if unknown:
                 raise _Skip(f"unknown field {sorted(unknown)[0]!r}")
+            if "enabled" in entry and not isinstance(entry["enabled"], bool):
+                raise _Skip("enabled must be true or false")
             from .profile_registry import entry_name
 
             label = entry_name(entry.get("name"), "provider")
@@ -1212,6 +1215,7 @@ class _Importer:
             if is_placeholder(key):
                 key = (row or {}).get("api_key")
             fields = {k: v for k, v in entry.items() if k not in ("endpoints", "api_key")}
+            fields["enabled"] = entry.get("enabled", (row or {}).get("enabled", True))
             spec = ProviderSpec.from_entry({**fields, "id": provider_id, "api_key": key})
             label = spec.name
             if row and row["vendor_type"] != spec.vendor_type.value:
@@ -1244,9 +1248,11 @@ class _Importer:
                       "oauth_runtime_type": spec.oauth_runtime_type,
                       "env": [{"key": k, "value": v} for k, v in spec.env],
                       "max_concurrency": spec.max_concurrency,
+                      "enabled": spec.enabled,
                       "endpoints": [{"protocol": e.protocol.value, "base_url": e.base_url,
                                      "use_runtime_default": e.use_runtime_default} for e in combined.values()]}
-            current = None if row is None else {**{k: row[k] for k in values if k != "endpoints"},
+            current = None if row is None else {**{k: row[k] for k in values if k not in ("endpoints", "enabled")},
+                        "enabled": row.get("enabled", True),
                         "endpoints": [{k: e.get(k, False) for k in ("protocol", "base_url", "use_runtime_default")}
                                       for e in row["endpoints"]], "api_key": row["api_key"]}
             values["endpoints"].sort(key=lambda e: e["protocol"])

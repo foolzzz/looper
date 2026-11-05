@@ -1,10 +1,12 @@
 import { useId, useState } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { EDIT_BOX, EditDelete, FormFooter, LABEL, RegistryList, Row, RowName, SELECT } from "@/components/registry-ui";
 import {
-  clearLoginProblem, createProvider, deleteProvider, updateProvider,
+  clearLoginProblem, createProvider, deleteProvider, updateProvider, setProviderEnabled,
   type ProviderEndpoint, type CreateProviderFields, type Provider, type Registry,
   type VendorKind, type VendorType,
 } from "@/lib/api";
@@ -248,6 +250,17 @@ function LoginLine({ provider, label }: { provider: Provider; label: string }) {
 function ProviderRow({ provider, registry }: { provider: Provider; registry: Registry }) {
   const [editing, setEditing] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [warnings, setWarnings] = useState<string[]>([]);
+  const toggle = useAction();
+  const setEnabled = (enabled: boolean) => {
+    if (!enabled && provider.profile_count > 0 && !confirm(
+      `Disable provider "${provider.name}"? ${provider.profile_count} Agent Profile(s) use it. They keep their selections, but their runs will not start until you enable it again.`,
+    )) return;
+    toggle.run(async () => {
+      const result = await setProviderEnabled(provider.provider_id, enabled);
+      setWarnings(result.warnings);
+    });
+  };
   const [fetching, setFetching] = useState(false);
   // An import's "secrets to fill in" links here (#settings/providers/<id>) to open the form.
   const ref = useSettingsTarget<HTMLLIElement>("provider", provider.provider_id, () => setEditing(!provider.builtin));
@@ -257,6 +270,7 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
   };
   const oauthLabel = registry.runtime_types.find((t) => t.type === provider.oauth_runtime_type)?.label ?? provider.oauth_runtime_type;
   const details = [
+    !provider.enabled ? "Disabled: its Agent Profiles do not run" : "",
     provider.auth === "oauth" ? `OAuth: the login of ${oauthLabel} runtimes` : `API key: ${provider.api_key ?? "not set"}`,
     provider.vendor_type,
     ...provider.endpoints.map((endpoint) => `${endpoint.protocol}: ${endpoint.base_url || (endpoint.use_runtime_default ? "runtime default" : "runtime login")}`),
@@ -268,9 +282,11 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
   return (
     <Row
       ref={ref}
-      title={<RowName name={provider.name} builtin={provider.builtin} />}
+      title={<><RowName name={provider.name} builtin={provider.builtin} />
+        {!provider.enabled && <Badge variant="warning">Disabled</Badge>}</>}
       actions={
         <>
+          <Switch checked={provider.enabled} label={`Enable provider ${provider.name}`} disabled={toggle.busy} onChange={setEnabled} />
           {provider.auth === "api_key" && <Button type="button" size="sm" variant="ghost"
             aria-label={`Fetch the models of provider ${provider.name}`} aria-expanded={fetching}
             onClick={() => setFetching(!fetching)}>Fetch models</Button>}
@@ -284,6 +300,14 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
       below={
         <>
           {action.error && <p role="alert" className="text-xs text-destructive">{action.error}</p>}
+          {toggle.error && <p role="alert" className="text-xs text-destructive">{toggle.error}</p>}
+          {warnings.length > 0 && (
+            <div role="status" className="space-y-2 rounded-md border border-warning/40 bg-warning/5 p-3 text-xs text-warning">
+              <p>Disabled, with these effects:</p>
+              <ul className="list-disc space-y-1 pl-4">{warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+              <Button type="button" size="sm" variant="outline" onClick={() => setWarnings([])}>OK</Button>
+            </div>
+          )}
           {editing && (
             <div className={EDIT_BOX}>
               <ProviderForm provider={provider} registry={registry} onDone={() => setEditing(false)} />

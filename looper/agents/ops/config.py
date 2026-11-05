@@ -262,7 +262,7 @@ def _profile_listed(view: Mapping[str, Any]) -> dict[str, Any]:
 
 def _provider_listed(view: Mapping[str, Any]) -> dict[str, Any]:
     listed = {key: view[key] for key in ("provider_id", "name", "vendor_type", "auth", "endpoints",
-                                       "model_count", "profile_count", "builtin", "login")}
+                                       "model_count", "profile_count", "builtin", "enabled", "login")}
     listed["max_concurrency"] = view.get("max_concurrency")
     if view["auth"] == "api_key":
         listed["api_key"] = "set" if view["api_key"] else "missing: the user enters it on the dashboard"
@@ -357,6 +357,8 @@ async def _providers(call: Call) -> dict[str, Any]:
         accounts = await answered(profile_registry.list_providers())
         return {"providers": [_provider_listed(p) for p in accounts["providers"]],
                 "vendors": profile_registry.vendor_types_view()}
+    if action == "register" and "enabled" in arguments:
+        raise OpError(ErrorCode.INVALID, "a new account is enabled; use update to disable it")
     if "endpoints" in arguments:
         if not isinstance(arguments["endpoints"], list):
             raise OpError(ErrorCode.INVALID, "endpoints must be a list")
@@ -365,8 +367,12 @@ async def _providers(call: Call) -> dict[str, Any]:
     if action == "update":
         _required(arguments, action, "provider")
         provider_id = await _model_provider(arguments["provider"])
-        answer = await answered(profile_registry.update_provider(
-            provider_id, {key: value for key, value in arguments.items() if key not in {"action", "provider"}}))
+        fields = {key: value for key, value in arguments.items() if key not in {"action", "provider", "enabled"}}
+        answer = await answered(profile_registry.update_provider(provider_id, fields)) \
+            if fields or "enabled" not in arguments else {}
+        if "enabled" in arguments:
+            changed = await answered(profile_registry.set_provider_enabled(provider_id, arguments["enabled"]))
+            answer = {**changed, "warnings": [*answer.get("warnings", []), *changed.get("warnings", [])]}
     else:
         _required(arguments, action, "name", "vendor_type")
         try:
@@ -682,7 +688,7 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_providers",
         description="LLM accounts: list vendors and accounts; register an API-key account without its key; "
-                    "update an account's name, endpoints, env or max_concurrency. "
+                    "update an account's name, endpoints, env, max_concurrency or enabled. "
                     "Never take or pass a key; the user enters it on the dashboard.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
@@ -697,6 +703,9 @@ TOOLS: tuple[Tool, ...] = (
                     "type": "object", "required": ["key", "value"], "additionalProperties": False,
                     "properties": {"key": {"type": "string"}, "value": {"type": "string"}}}}]},
                 "max_concurrency": {"type": ["integer", "null"]},
+                "enabled": {"type": "boolean", "description": "update: false disables the account: its Agent "
+                            "Profiles keep their selections but do not run until it is enabled again. "
+                            "Built-in login accounts take only this."},
             },
         },
         risk=Risk.WRITE, run=_providers, read_actions=frozenset({"list"}),
