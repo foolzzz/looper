@@ -50,11 +50,12 @@ STDERR_DRAIN_SEC = 1.0  # how long a turn waits for stderr to close after its pr
 _STDERR_TAIL = 4_000
 
 
-async def stderr_tail(stream: asyncio.StreamReader | None, timeout: float | None = None) -> str:
-    """The last ``_STDERR_TAIL`` bytes ``stream`` gives before it ends, or before ``timeout`` seconds are up."""
+async def stderr_tail(stream: asyncio.StreamReader | None, timeout: float | None = None, *,
+                      kept: bytearray | None = None) -> str:
+    """The last ``_STDERR_TAIL`` bytes before EOF or timeout; ``kept`` retains bytes even on cancellation."""
     if stream is None:
         return ""
-    kept = b""
+    kept = kept if kept is not None else bytearray()
     loop = asyncio.get_running_loop()
     deadline = None if timeout is None else loop.time() + timeout
     while True:
@@ -64,7 +65,8 @@ async def stderr_tail(stream: asyncio.StreamReader | None, timeout: float | None
             break
         if not chunk:
             break
-        kept = (kept + chunk)[-_STDERR_TAIL:]
+        kept.extend(chunk)
+        del kept[:-_STDERR_TAIL]
     return kept.decode("utf-8", errors="replace")
 
 
@@ -277,7 +279,8 @@ class PerTurnSession(ABC):
             tree.start_ticker()
         logger.info("%s started a %s turn (pid=%s, %s)", self._label, self.runtime_label, process.pid,
                     f"resuming {resuming}" if resuming else "new session")
-        stderr = asyncio.create_task(stderr_tail(process.stderr))
+        stderr_bytes = bytearray()
+        stderr = asyncio.create_task(stderr_tail(process.stderr, kept=stderr_bytes))
         stream = self._stream()
         if callable(getattr(stream, "cancel", None)):
             cancel.on_request(stream.cancel)
@@ -331,7 +334,10 @@ class PerTurnSession(ABC):
             done, _ = await asyncio.wait({stderr}, timeout=STDERR_DRAIN_SEC)  # a grandchild may hold it open
             if done and not stderr.cancelled():
                 errors = stderr.result()
+            else:
+                errors = stderr_bytes.decode("utf-8", errors="replace")
         stderr.cancel()
+        await asyncio.gather(stderr, return_exceptions=True)
         if self._end_task is not None:  # the turn returns only once the stop has cleaned its process tree up
             await self._end_tree(process, tree)
         self._process = None

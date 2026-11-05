@@ -1599,8 +1599,13 @@ Manager tools.
   concatenates attempts and is not used as the report. Tokens are retained
   as `usage` and `modelUsage`; Cursor reports no cost and the login's models
   have no prices, so cost is unknown (`provider_price`). A per-run spend cap
-  cannot stop Cursor. A run that exits without a result fails, even when
-  TTADK exits zero, and retains its stderr tail. Non-JSON stdout lines,
+  cannot stop Cursor. When a process exits without a result and stderr names
+  `RetriableError`, Looper retries once in a fresh process, even when TTADK
+  exits zero. Worker and Reviewer runs reuse the same prompt and input directories;
+  Manager and Planner turns resume the recorded chat, if any, with the same turn.
+  The run records the retry and its reason; a second failure retains both stderr
+  tails. Other failures, stops, cancellations, timeouts and missing logins are
+  not retried. Non-JSON stdout lines,
   including TTADK's login greeting before or between events, are discarded
   before events, logs or failure details are recorded.
   The run's model column keeps the profile's requested model id;

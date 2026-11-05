@@ -81,6 +81,7 @@ from ..runtimes import CLAUDE_CODE, InProcessTools, ReportsContext
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
 from ..runtimes.api.tools import ManagerTurnTools
 from ..runtimes.cancel import TurnCancel, TurnCancelled, abandon
+from ..runtimes.cursor_agent import cursor_failure
 from ..session_switch import SessionSwitch, SwitchReason
 from ..system_prompt import SystemPrompt, build_system_prompt, is_recommended
 from .turn_token import StopRequest, TurnKind, TurnPhase, TurnRegistry, TurnStopped, TurnToken  # noqa: F401  (StopRequest re-exported)
@@ -1984,7 +1985,10 @@ class ManagerAgent:
             raise
 
         context_overflow = isinstance(self._claude, ReportsContext) and self._claude.context_full
-        resume_lost = (bool(resuming) or context_overflow) and not turn.session_started and not retried
+        transient_cursor = (launch.runtime.type == "cursor-agent"
+                            and cursor_failure(turn.result_event, turn.stderr) is not None)
+        resume_lost = ((bool(resuming) or context_overflow) and not turn.session_started
+                       and not retried and not transient_cursor)
         # Decided here, in one place and with nothing awaited since the events were handled: a stop asked until now
         # ends the turn stopped, even when the runtime came back with an answer; from the settle on, a stop is too
         # late (the token has ended).
@@ -1996,10 +2000,10 @@ class ManagerAgent:
             await self._end_stopped(token, prepared, turn, text_parts)
 
         stderr_note = ""
-        if turn.result_event is None and not launch.exit_code_reliable:
+        if turn.result_event is None and (not launch.exit_code_reliable or launch.runtime.type == "cursor-agent"):
             from ..runtimes.ttadk import error_tail
 
-            if stderr := error_tail(turn.stderr):
+            if stderr := error_tail(turn.stderr_detail or turn.stderr):
                 stderr_note = f": {stderr}"
 
         if resume_lost:

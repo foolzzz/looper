@@ -546,7 +546,8 @@ class ResidentTurn:
     stopped: StopMethod | None = None  # how the user's stop ended the turn, if it did
     usage_complete: bool = True  # False: the runtime reports no usage before a turn's end, so a stopped turn's is unknown
     prompt_sent: bool = False  # the turn's message reached the runtime (a stopped turn that never sent it can be replayed)
-    stderr: str = ""  # bounded diagnostics when a per-turn process ends without a result
+    stderr: str = ""  # the final attempt's bounded stderr, used to classify a failure
+    stderr_detail: str = ""  # diagnostics across attempts, when a runtime retried the turn
 
 
 def exit_note(exit_code: int | None) -> str:
