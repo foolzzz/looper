@@ -17,6 +17,7 @@ RESULTS = {
 }
 OPERATIONS = (
     Operation("models.add_many", "POST", "/api/v1/models/add_many", "Add several models to one provider.",
+              "Add several models to one provider. "
               "Add confirmed models atomically. Omitted price fields stay null when Looper's built-in table prices "
               "that field for the name, otherwise default to 0.0; explicit prices including null are kept. Existing "
               "exact name/protocol pairs and repeated entries are skipped. An invalid entry refuses the entire request.",
