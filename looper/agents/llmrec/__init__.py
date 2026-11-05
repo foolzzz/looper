@@ -1,0 +1,136 @@
+"""Shared, versioned contract for the independent model recording proxy."""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from enum import StrEnum
+from datetime import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import tempfile
+
+ROUTE_FORMAT = 1
+STATE_DIR = Path('.local') / 'llmrec'
+ROUTES_DIR = STATE_DIR / 'routes'
+STATE_FILE = STATE_DIR / 'proxy.json'
+LOCK_FILE = STATE_DIR / 'proxy.lock'
+LOG_FILE = Path('logs') / 'llmrec-proxy.log'
+ROUTE_ID = re.compile(r'^[A-Za-z0-9_-]{22}$')
+BOOT = 'import sys; sys.path.insert(0, sys.argv[1]); from looper.agents.llmrec.__main__ import main; sys.exit(main(sys.argv[2:]))'
+
+
+def boot_argv(executable, package_root, runtime_root, port) -> list[str]:
+    return [executable, '-I', '-c', BOOT, str(package_root), '--runtime-root', str(runtime_root), '--port', str(port)]
+
+
+class SkipReason(StrEnum):
+    NOT_COVERED = 'not_covered'
+    PROXY_UNAVAILABLE = 'proxy_unavailable'
+    PROXY_OUTDATED = 'proxy_outdated'
+    CREDENTIALS_IN_URL = 'credentials_in_url'
+
+
+@dataclass(frozen=True)
+class LlmrecRoute:
+    id: str
+    url: str
+    upstream: str
+
+
+@dataclass(frozen=True)
+class LlmrecSkip:
+    reason: SkipReason
+    detail: str = ''
+
+
+@dataclass(frozen=True)
+class RouteFile:
+    format: int = ROUTE_FORMAT
+    id: str = ''
+    upstream: str = ''
+    protocol: str | None = None
+    runtime_type: str = 'claude-code'
+    provider_id: str | None = None
+    model: str | None = None
+    agent_id: str = ''
+    task_id: str | None = None
+    step_id: str | None = None
+    role: str | None = None
+    created_at: str = ''
+    record_id: int | None = None
+    last_record_id: int | None = None
+    ended_at: str | None = None
+
+    @classmethod
+    def read(cls, path) -> RouteFile | None:
+        try:
+            data = json.loads(Path(path).read_text())
+            if not isinstance(data, dict) or data.get('format') != ROUTE_FORMAT:
+                return None
+            route = cls(**data)
+            if not isinstance(route.id, str) or not ROUTE_ID.fullmatch(route.id):
+                return None
+            from urllib.parse import urlsplit
+            url = urlsplit(route.upstream)
+            if url.scheme not in {'http', 'https'} or not url.hostname or url.username is not None or url.password is not None:
+                return None
+            if not isinstance(route.agent_id, str) or not route.agent_id:
+                return None
+            for value in (route.record_id, route.last_record_id):
+                if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
+                    return None
+            for value in (route.created_at, route.ended_at):
+                if value is not None and (not isinstance(value, str) or not value or datetime.fromisoformat(value).tzinfo is None):
+                    return None
+            for name in ('runtime_type', 'upstream', 'agent_id'):
+                if not isinstance(getattr(route, name), str):
+                    return None
+            for name in ('protocol', 'provider_id', 'model', 'task_id', 'step_id', 'role'):
+                if getattr(route, name) is not None and not isinstance(getattr(route, name), str):
+                    return None
+            return route
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def write(self, path):
+        path = Path(path)
+        missing = []
+        directory = path.parent
+        while not directory.exists():
+            missing.append(directory)
+            directory = directory.parent
+        for directory in reversed(missing):
+            directory.mkdir(mode=0o700, exist_ok=True)
+            os.chmod(directory, 0o700)
+        os.chmod(path.parent, 0o700)
+        fd, temporary = tempfile.mkstemp(prefix=f'.{path.name}.', dir=path.parent)
+        try:
+            with os.fdopen(fd, 'w') as file:
+                json.dump(asdict(self), file, ensure_ascii=True)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, path)
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+def code_sha256() -> str:
+    root = Path(__file__).resolve().parents[2]
+    files = list((root / 'agents' / 'llmrec').glob('*.py')) + [root / 'db' / 'llm_requests.py']
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda p: str(p.relative_to(root))):
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(b'\0')
+        digest.update(path.read_bytes())
+        digest.update(b'\0')
+    return digest.hexdigest()

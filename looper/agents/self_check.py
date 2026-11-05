@@ -326,9 +326,39 @@ async def ttadk_check() -> Check:
     return await check_ttadk(runtimes)
 
 
+async def llmrec_check(*, runtime_root: Path | None = None) -> Check:
+    """Request recording is advisory; forwarding and writer counters expose missing captures."""
+    from .llmrec.control import controller
+    from ..db import system_settings
+
+    control = controller()
+    try:
+        if control is None:
+            values = await system_settings.get_settings(["llmrec.enabled"])
+            enabled = values.get("llmrec.enabled") == "true"
+            proxy = {"state": "unavailable"}
+            if enabled and runtime_root is not None:
+                from .llmrec.control import ProxyControl
+
+                proxy = (await ProxyControl(runtime_root, "", enabled=True).status())["proxy"]
+        else:
+            status = await control.status()
+            enabled, proxy = status["enabled"], status["proxy"]
+        if not enabled:
+            return Check("llmrec", "Model request recording", SKIP, "off")
+        if proxy["state"] in ("unavailable", "stopped"):
+            return Check("llmrec", "Model request recording", FAIL, "recording proxy unavailable")
+        if proxy["state"] == "outdated" or proxy.get("dropped", 0) or proxy.get("write_errors", 0):
+            return Check("llmrec", "Model request recording", WARN,
+                         f"{proxy['state']}; dropped={proxy.get('dropped', 0)}, write_errors={proxy.get('write_errors', 0)}")
+        return Check("llmrec", "Model request recording", OK, "proxy running")
+    except Exception:
+        return Check("llmrec", "Model request recording", WARN, "recording status unavailable")
+
+
 # The checks of the runtimes' own logins, by id: what reads each now (``/api/v1/system/status`` reads them on every poll).
 LOGIN_CHECKS = {"codex_login": codex_login_check, "grok_login": grok_login_check,
-                "cursor_login": cursor_login_check, "ttadk": ttadk_check}
+                "cursor_login": cursor_login_check, "ttadk": ttadk_check, "llmrec": llmrec_check}
 
 
 def check_lark_cli(lark_enabled: bool | None) -> Check:
@@ -554,7 +584,8 @@ async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Chec
     pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending, ops)
     git = await asyncio.to_thread(check_git)
     return [database, *claude, codex, grok, cursor, await check_ttadk(facts.ttadk_runtimes),
-            check_lark_cli(facts.lark_enabled), pg_dump, git, check_projects_root(ops.projects_root),
+            await llmrec_check(runtime_root=ops.runtime_root), check_lark_cli(facts.lark_enabled),
+            pg_dump, git, check_projects_root(ops.projects_root),
             await check_step_worktrees(facts.worktree_projects)]
 
 

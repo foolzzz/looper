@@ -106,6 +106,78 @@ _MANAGER_SCOPE_PROJECTS = "manager_scope_projects"
 _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
 _PROJECT_ACTIVITY = "project_activity"
+_LLM_REQUESTS = "llm_requests"
+
+_LLM_REQUESTS_DDL = """
+CREATE TABLE IF NOT EXISTS llm_request_routes (
+    id              TEXT PRIMARY KEY,
+    agent_id        TEXT NOT NULL,
+    task_id         TEXT,
+    step_id         TEXT,
+    role            TEXT,
+    runtime_type    TEXT NOT NULL,
+    provider_id     TEXT,
+    protocol        TEXT,
+    model           TEXT,
+    upstream_host   TEXT NOT NULL,
+    upstream_path   TEXT NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ NOT NULL,
+    last_request_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_request_routes_agent ON llm_request_routes (agent_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS llm_request_parts (
+    route_id TEXT NOT NULL REFERENCES llm_request_routes(id) ON DELETE CASCADE,
+    sha256   TEXT NOT NULL,
+    body     JSONB NOT NULL,
+    bytes    INTEGER NOT NULL,
+    PRIMARY KEY (route_id, sha256)
+);
+
+CREATE TABLE IF NOT EXISTS llm_requests (
+    id                BIGSERIAL PRIMARY KEY,
+    route_id          TEXT NOT NULL REFERENCES llm_request_routes(id) ON DELETE CASCADE,
+    proxy_instance    TEXT NOT NULL,
+    proxy_seq         BIGINT NOT NULL,
+    record_id         BIGINT REFERENCES llm_records(id) ON DELETE CASCADE,
+    after_record_id   BIGINT,
+    agent_id          TEXT NOT NULL,
+    task_id           TEXT,
+    started_at        TIMESTAMPTZ NOT NULL,
+    method            TEXT NOT NULL,
+    path              TEXT NOT NULL,
+    kind              TEXT NOT NULL CHECK (kind IN ('model', 'count_tokens', 'other')),
+    model             TEXT,
+    stream            BOOLEAN,
+    status            INTEGER,
+    outcome           TEXT NOT NULL CHECK (outcome IN ('completed', 'upstream_error', 'client_closed', 'proxy_error')),
+    error             TEXT,
+    ttfb_ms           INTEGER,
+    duration_ms       INTEGER,
+    request_headers   JSONB NOT NULL,
+    response_headers  JSONB,
+    request_body      JSONB,
+    request_bytes     INTEGER NOT NULL,
+    request_sha256    TEXT NOT NULL,
+    response_body     JSONB,
+    response_raw      TEXT,
+    response_bytes    BIGINT,
+    input_tokens      BIGINT,
+    output_tokens     BIGINT,
+    cache_read_tokens BIGINT,
+    cache_write_tokens BIGINT,
+    usage             JSONB,
+    record_gap        TEXT CHECK (record_gap IN ('request_too_large', 'response_too_large', 'undecodable_encoding', 'body_encoding_unparsed',
+                                                 'unparsable_request', 'unparsable_stream')),
+    UNIQUE (proxy_instance, proxy_seq)
+);
+CREATE INDEX IF NOT EXISTS idx_llm_requests_record ON llm_requests (record_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_llm_requests_after ON llm_requests (after_record_id) WHERE record_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_llm_requests_route ON llm_requests (route_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_llm_requests_agent ON llm_requests (agent_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_llm_requests_task ON llm_requests (task_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_llm_requests_started ON llm_requests (started_at);
+"""
 
 
 _MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
@@ -223,6 +295,13 @@ async def _schedule_user_gates_pending(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('schedules') AND attname = 'user_gates' "
         "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _llm_requests_pending(conn: asyncpg.Connection) -> bool:
+    """Apply this additive upgrade once; fresh schemas already contain the tables."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LLM_REQUESTS):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('llm_requests') IS NOT NULL")
 
 
 async def _project_activity_pending(conn: asyncpg.Connection) -> bool:
@@ -430,6 +509,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _schedule_deferred_by_drain_pending(conn):
             await conn.execute("ALTER TABLE schedule_runs ADD COLUMN deferred_by_drain BOOLEAN NOT NULL DEFAULT false")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_DEFERRED_BY_DRAIN)
+        if await _llm_requests_pending(conn):
+            await conn.execute(_LLM_REQUESTS_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS)
         if await _project_activity_pending(conn):
             await conn.execute(_PROJECT_ACTIVITY_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
@@ -476,5 +558,6 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _runtime_launcher_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
-            or await _project_activity_pending(conn) or await _chat_binding_senders_pending(conn)
+            or await _project_activity_pending(conn) or await _llm_requests_pending(conn)
+            or await _chat_binding_senders_pending(conn)
             or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)))

@@ -62,6 +62,7 @@ environment, the settings' or the provider's variables say.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -231,7 +232,24 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         added = {k: v for k, v in (*launch.env, *binding.env) if k != AGENT_TEAMS}
         if launch.agent_teams:
             added[AGENT_TEAMS] = "1"
-        return {**{k: v for k, v in child_env.inherited().items() if k not in binding.unset and k != AGENT_TEAMS}, **added}
+        env = {**{k: v for k, v in child_env.inherited().items() if k not in binding.unset and k != AGENT_TEAMS}, **added}
+        from ..llmrec import LlmrecRoute
+
+        if isinstance(launch.llmrec, LlmrecRoute):
+            env[BASE_URL] = launch.llmrec.url
+            for name in ("NO_PROXY", "no_proxy"):
+                values = [value.strip() for value in env.get(name, "").split(",") if value.strip()]
+                if "127.0.0.1" not in values:
+                    values.append("127.0.0.1")
+                env[name] = ",".join(values)
+        return env
+
+    def llmrec_upstream(self, launch: Launch) -> str | None:
+        from . import Launcher
+
+        if launch.profile.runtime.launcher is Launcher.TTADK:
+            return None
+        return self.environment(replace(launch, llmrec=None)).get(BASE_URL) or "https://api.anthropic.com"
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         return _prompt_input(launch, looper_prompt=looper_prompt)[1]

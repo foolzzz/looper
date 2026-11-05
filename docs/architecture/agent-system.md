@@ -1979,7 +1979,7 @@ provider's prices: a teammate's spend lands in its agent's run total, not in a
 record of its own. Known gaps: a teammate's model requests are not in the
 stream (its assistant messages are, with a `parent_tool_use_id`), so the soft
 per-run cap below does not see its tokens before a result reports them, and
-nothing records its requests one by one; a teammate does not get the agent's
+individual requests can be recorded through the [recording proxy](#recording-model-requests); a teammate does not get the agent's
 `--append-system-prompt-file` (the harness, role, project, task and contract
 layers).
 
@@ -2008,6 +2008,73 @@ The `llm_profiles` table and the role configs' `runtime` and `llm_profile_id`
 were never on a launch path; the one-time migration `llm_profiles_removed`
 drops them (with `/api/llm-profiles`), and a role config update naming them
 is a 400.
+
+#### Recording model requests
+
+Settings → Request recording exposes **Record model requests**, off by default
+(`llmrec.enabled`). It stores each model request and response of Claude Code
+Workers and Reviewers using API-key providers, including Anthropic's own API
+and third-party Anthropic endpoints. Runtime OAuth logins continue to connect
+directly unless **Also record Claude subscription (OAuth) runs** is enabled
+(`llmrec.include_oauth`, also off by default); that exception covers Claude Code
+subscription runs only. Other roles and runtimes are not yet covered.
+
+Each runtime root has an independent loopback HTTP recording proxy, rather
+than a proxy inside the control plane or a keeper. It survives planned control
+plane restarts without cutting kept runs' streams, and is available to runs
+without keepers. It has a private state file and lock under `.local/llmrec/`,
+rotating metadata-only logs under `logs/`, and receives its database URL over
+stdin, never in a state file. Startup reuses a healthy compatible process;
+without kept runs it replaces an outdated process on the same port. With kept
+runs it retains that process; an incompatible route format skips new recordings.
+Shutdown leaves the proxy running. A later startup with recording off and no
+kept runs stops it. The proxy exits if its identity file disappears or changes,
+or after 24 hours without requests.
+
+A random route identifies one launched process. The route replaces the whole
+`ANTHROPIC_BASE_URL`; its private file contains the real upstream and current
+run record binding. Provider authentication, endpoint classification, pricing
+and binding hashes are computed before that final override. Both `NO_PROXY`
+and `no_proxy` include loopback. The recorder binds the route before launching
+and releases it when the record closes; detaching a kept run retains the binding.
+Each request is stamped when it starts, so an in-flight request keeps its
+original record across rebinding and planned restarts.
+
+The proxy forwards request headers and bodies and raw response chunks unchanged,
+except for HTTP hop-by-hop framing and the upstream Host header. Compressed
+streams are decoded incrementally on the recording side; gzip and deflate
+need no optional dependencies. `h11>=0.16,<1` is an explicit HTTP dependency.
+`llm_request_routes` stores attribution and upstream host/path without userinfo
+or query; `llm_request_parts` deduplicates system prompts, tools and messages
+within a route; `llm_requests` stores exchange metadata, assembled responses,
+usage and redacted headers. Reconstructed request JSON is equivalent to the
+original; its serialization need not be byte-identical. Header values are
+allowlisted with a secret-name deny backstop, credential-like query values are
+redacted, and URLs containing credentials are not recorded. Bodies can contain
+private prompts, code and secrets printed by tools: operators must account for
+that before enabling recording. These diagnostic settings are not exported.
+
+Recording failures do not fail a launch: after one bounded attempt to start
+an unavailable proxy, the run connects directly and records
+`llmrec: {state: "bypassed", reason: "proxy_unavailable"}` in its metadata.
+Already running processes cannot be redirected; every five seconds the control
+plane checks health and restarts a dead proxy on its previous port. Active
+streams interrupted by a crash rely on runtime retries. Database outages retry
+writes with backoff independently of forwarding; a 256 MiB pending cap drops
+new captures. Oversized or undecodable bodies carry an explicit `record_gap`,
+including `body_encoding_unparsed` for unsupported compression. Request bodies
+are capped at 256 MiB for forwarding and 16 MiB for capture; response capture
+is capped at 16 MiB raw and 4 MiB assembled, with a 1 MiB text fallback.
+
+The operator-only v1 operations are `llmrec_settings.get`,
+`llmrec_settings.update`, `llm_requests.list` (metadata only) and
+`llm_requests.get` (reconstructed request and response). The schema-generated
+CLI exposes them as `loopercli llmrec-settings` and `loopercli llm-requests`.
+API-client tokens, agent tools, Telegram and Lark cannot read these bodies or
+change the switch; the chat channels need no change. Proxy health exposes
+requests, recorded captures, pending captures, dropped captures and write
+errors. The `llmrec` self-check skips when disabled, fails when unavailable,
+and warns for outdated processes or nonzero drop/write-error counters.
 
 ### New sessions: handoff and resume brief
 
