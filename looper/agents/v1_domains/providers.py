@@ -1,9 +1,9 @@
 """Operator account management and the existing credential-free provider tools."""
 
-from .. import profile_registry
-from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR
+from .. import model_listing, profile_registry
+from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL
 from ..ops import ErrorCode, PublicOpError
-from .registry import PROVIDER, PROVIDER_ENDPOINT, PROVIDER_ENV_ENTRY, VENDOR_KIND, VENDOR_TYPE
+from .registry import API_FAMILY, API_PROTOCOL, PROVIDER, PROVIDER_ENDPOINT, PROVIDER_ENV_ENTRY, VENDOR_KIND, VENDOR_TYPE
 
 # Input endpoints may omit the runtime-default marker; read-modify-write bodies
 # retain the complete endpoint, including its provider id.
@@ -23,8 +23,14 @@ COMPACT_PROVIDER = _object({name: PROVIDER["properties"][name] for name in (
 COMPACT_PROVIDER["properties"]["api_key"] = _STR
 _WARNINGS = {"warnings": _array(_STR)}
 _PROVIDER_RESULT = _object({"provider": PROVIDER, **_WARNINGS}, closed=True)
+LISTED_MODEL = _object({"name": _STR, "context_window": {"type": ["integer", "null"]},
+    "registered": _array(API_PROTOCOL), "builtin_price": _BOOL, "addable": _BOOL, "problem": _NULL_STR}, closed=True)
+MODEL_LISTING = _object({"family": API_FAMILY, "base_url": _STR, "protocols": _array(API_PROTOCOL),
+    "state": {"type": "string", "enum": ["listed", "failed", "skipped"]}, "problem": _NULL_STR,
+    "truncated": _BOOL, "models": _array(LISTED_MODEL)}, closed=True)
+FETCH_RESULT = _object({"provider_id": _STR, "listings": _array(MODEL_LISTING)}, closed=True)
 SCHEMAS = {"ProviderCreate": PROVIDER_CREATE, "ProviderPatch": PROVIDER_PATCH,
-           "CompactProvider": COMPACT_PROVIDER}
+           "CompactProvider": COMPACT_PROVIDER, "ListedModel": LISTED_MODEL, "ModelListing": MODEL_LISTING}
 RESULTS = {
     "providers.list": _object({"providers": _array(COMPACT_PROVIDER), "vendors": _array(VENDOR_TYPE)}, closed=True),
     "providers.register": _object({"provider": COMPACT_PROVIDER, **_WARNINGS, "note": _STR}, closed=True),
@@ -39,6 +45,8 @@ def _op(action, summary, request, result, risk="write"):
 
 
 OPERATIONS = (
+    _op("fetch_models", "Ask a provider's endpoints which models they serve, with its stored key; operator only.",
+        _object({"provider_id": _STR}, closed=True), FETCH_RESULT, "read"),
     _op("list", "List complete provider accounts; operator only.", _object({}, closed=True),
         _object({"providers": _array(PROVIDER)}, closed=True), "read"),
     _op("create", "Create a provider account with an optional API key; operator only.",
@@ -62,6 +70,8 @@ async def run(server, operation, arguments, principal, headers):
     try:
         if action == "list":
             return await profile_registry.list_providers()
+        if action == "fetch_models":
+            return await model_listing.fetch_provider_models(arguments["provider_id"])
         if action == "create":
             return await profile_registry.create_provider(arguments)
         if action == "update":

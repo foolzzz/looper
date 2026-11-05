@@ -15,10 +15,12 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -334,6 +336,11 @@ def _finish_form(form, submit):
     with form.page.expect_response(lambda r: "/api/" in r.url and r.request.method in ("POST", "PUT")) as response:
         form.get_by_role("button", name=submit, exact=True).click()
     assert response.value.status in (200, 201), response.value.text()
+    if submit == "Add provider" and response.value.json()["result"]["provider"]["auth"] == "api_key":
+        expect(form.get_by_text("could not list models:", exact=False).first).to_be_visible()
+        form.get_by_role("button", name="Done", exact=True).click()
+        expect(form).not_to_be_visible()
+        return
     # Warning acknowledgements are part of the save flow, not evidence of failure.
     ok = form.get_by_role("button", name="OK", exact=True)
     answer = response.value.json()
@@ -341,6 +348,97 @@ def _finish_form(form, submit):
         expect(ok).to_be_visible()
         ok.click()
     expect(form).not_to_be_visible()
+
+
+@pytest.fixture
+def listing_gateway():
+    names = ("gateway-alpha", "gateway-beta", "gateway-gamma")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            status = 200 if self.path == "/v1/models" and self.headers.get("Authorization") == "Bearer test-key" else 401
+            body = json.dumps({"data": [{"id": name} for name in names]}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/v1", names
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("width", [1280, 768])
+def test_provider_model_checklist_and_stored_key_failure(dashboard_page, dashboard_server, listing_gateway, width):
+    expect = pytest.importorskip("playwright.sync_api").expect
+    page, server = dashboard_page, dashboard_server
+    url, names = listing_gateway
+    page.set_viewport_size({"width": width, "height": 900})
+    _settings(page, server, "providers/new")
+    form = page.get_by_role("form", name="Add a provider", exact=True)
+    form.get_by_label("Name *", exact=True).fill("Gateway account")
+    form.get_by_role("checkbox", name="openai-chat", exact=True).check()
+    form.get_by_label("openai-chat URL", exact=True).fill(url)
+    form.get_by_label("API key", exact=True).fill("test-key")
+    with page.expect_response(lambda response: response.url.endswith("/api/v1/provider_accounts/fetch_models")) as listing:
+        form.get_by_role("button", name="Add provider", exact=True).click()
+    assert listing.value.status == 200
+    for name in names:
+        expect(form.get_by_role("checkbox", name=name, exact=True)).not_to_be_checked()
+    assert "test-key" not in page.content()
+    provider = next(provider for provider in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"]
+                    if provider["name"] == "Gateway account")
+    assert provider["model_count"] == 0
+    for name in names[:2]:
+        form.get_by_role("checkbox", name=name, exact=True).check()
+    screenshot = os.environ.get("LOOPER_DASHBOARD_SMOKE_SCREENSHOT")
+    if screenshot:
+        destination = Path(screenshot).resolve()
+        assert destination.is_relative_to(REPO_ROOT / ".local")
+        form.screenshot(path=str(destination.with_stem(f"{destination.stem}-picker-{width}")))
+    with page.expect_response(lambda response: response.url.endswith("/api/v1/models/add_many")) as added:
+        form.get_by_role("button", name="Add 2 models", exact=True).click()
+    assert added.value.status == 200
+    expect(form.get_by_text("Added 2 models.", exact=True)).to_be_visible()
+    for name in names[:2]:
+        expect(form.get_by_role("checkbox", name=name, exact=True)).to_be_checked()
+        expect(form.get_by_role("checkbox", name=name, exact=True)).to_be_disabled()
+    form.get_by_role("button", name="Done", exact=True).click()
+    account = _row(page, "Gateway account")
+    account.get_by_role("button", name="Models for provider Gateway account", exact=True).click()
+    for name in names[:2]:
+        model_row = account.get_by_role("listitem").filter(has=page.get_by_text(name, exact=True))
+        for field in ("Input", "Output", "Cache read", "Cache write"):
+            expect(model_row).to_contain_text(f"{field}: 0 (override)")
+    before = server.api.post("/api/v1/ops/models/list", {"provider": provider["provider_id"]})["result"]["models"]
+    assert {model["name"] for model in before} == set(names[:2])
+    account.get_by_role("button", name="Edit provider Gateway account", exact=True).click()
+    edit = page.get_by_role("form", name="Edit provider Gateway account", exact=True)
+    edit.get_by_label("API key", exact=True).fill("wrong-key")
+    _finish_form(edit, "Save")
+    with page.expect_response(lambda response: response.url.endswith("/api/v1/provider_accounts/fetch_models")) as failed:
+        account.get_by_role("button", name="Fetch the models of provider Gateway account", exact=True).click()
+    assert failed.value.status == 200
+    expect(account.get_by_role("alert")).to_contain_text("HTTP 401")
+    expect(account.get_by_role("alert")).to_contain_text("check the provider's API key")
+    assert server.api.post("/api/v1/ops/models/list", {"provider": provider["provider_id"]})["result"]["models"] == before
+    assert "test-key" not in page.content() and "wrong-key" not in page.content()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    if screenshot:
+        account.screenshot(path=str(destination.with_stem(f"{destination.stem}-failure-{width}")))
+    account.get_by_role("button", name="Done", exact=True).click()
 
 
 @pytest.mark.installed
@@ -642,6 +740,8 @@ def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboa
     vendor = next(v for v in server.api.post("/api/v1/registry/view", {})["result"]["vendor_types"] if v["vendor_type"] == "deepseek")
     for endpoint in vendor["endpoints"]:
         expect(form.get_by_label(f'{endpoint["protocol"]} URL', exact=True)).to_have_value(endpoint["base_url"])
+        # Saving now lists models; keep this suggestion smoke away from real providers.
+        form.get_by_label(f'{endpoint["protocol"]} URL', exact=True).fill("https://example.invalid/v1")
     _finish_form(form, "Add provider")
     provider = next(p for p in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"] if p["name"] == "Smoke vendor account")
     assert provider["model_count"] == 0

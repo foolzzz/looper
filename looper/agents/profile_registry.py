@@ -57,7 +57,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from . import runtimes
 from .model_names import parse_model_name
-from .runtimes import ApiProtocol, AuthKind, Capability, Launcher, RuntimeUnsupported, VendorType
+from .runtimes import ApiFamily, ApiProtocol, AuthKind, Capability, Launcher, RuntimeUnsupported, VendorType
 
 NAME_MAX_CHARS = 240
 EXECUTABLE_MAX_CHARS = 1_000
@@ -942,6 +942,15 @@ async def _logins(providers: Iterable[Mapping[str, Any]]) -> dict[str, dict[str,
     return {kind: await module.login_view() for kind, module in _login_modules().items() if kind in types}
 
 
+def unset_price_defaults(provider: ProviderSpec, name: str) -> dict[str, float | None]:
+    """A new model's prices the dashboard left unset: None where Looper's built-in table prices ``name``
+    (that price applies), else 0.0 (its runs count as free)."""
+    from .runtimes.pricing import model_price
+
+    price = model_price(provider, name)
+    return {field: None if getattr(price, field) is not None else 0.0 for field in PRICE_FIELDS}
+
+
 def cost_basis(profile: LegacyAgentProfile) -> dict[str, Any]:
     """How a profile's runs are priced: by its runtime (``runtime``), or by Looper at its provider's prices
     (``provider_price``), with the models of its runs that have no full price (``unpriced``: those runs record
@@ -1081,6 +1090,9 @@ def _limits() -> dict[str, Any]:
         "model_fields": list(MODEL_FIELDS),
         "provider_env_owned": sorted(set().union(*(a.provider_env_owned for a in runtimes.ADAPTERS.values()))),
         "protocols": [p.value for p in ApiProtocol], "auth_kinds": [a.value for a in AuthKind],
+        "api_formats": [{"family": f.value, "label": f.label,
+                         "protocols": [{"protocol": p.value, "label": p.label}
+                                       for p in ApiProtocol if p.family is f]} for f in ApiFamily],
         "effort_levels": list(EFFORT_LEVELS),
         "role_capabilities": {role: sorted(c.value for c in needs) for role, needs in runtimes.ROLE_CAPABILITIES.items()},
         "secret_mask": SECRET_MASK,
@@ -1515,6 +1527,55 @@ async def create_model(data: Any) -> dict[str, Any]:
     except asyncpg.UniqueViolationError:
         raise RegistryConflict("a model with this provider, exact name and protocol already exists") from None
     return {"model": answer, "warnings": answer["warnings"]}
+
+
+ADD_MODELS_MAX = 200
+
+
+async def add_models(provider_id: str, entries: Any) -> dict[str, Any]:
+    """Add a confirmed checklist atomically, skipping existing exact name/protocol pairs.
+
+    Only this bulk action defaults omitted price fields: built-in-priced fields stay null so that table applies,
+    other fields become 0.0. Explicit prices (including null) are preserved; ``create_model`` is unchanged.
+    """
+    from .agent_settings import SettingsError, model_name
+    from ..db import profile_registry as db
+    from ..db.connection import transaction
+
+    if not isinstance(entries, list) or not 1 <= len(entries) <= ADD_MODELS_MAX:
+        raise RegistryError(f"models must list 1 to {ADD_MODELS_MAX} models")
+    added, skipped = [], []
+    async with transaction() as conn:
+        if not await db.lock_provider(conn, provider_id):
+            raise RegistryNotFound(f"no provider {provider_id!r}")
+        provider = await _existing_provider(provider_id, conn)
+        spec = provider_spec(provider)
+        existing = {(row["name"], row["protocol"]) for row in await db.list_models(provider_id=provider_id, pool=conn)}
+        for entry in entries:
+            entry = _fields(entry, ("name", "protocol", *_MODEL_SETTINGS))
+            try:
+                name = model_name(entry.get("name"))
+            except SettingsError as exc:
+                raise RegistryError(str(exc)) from None
+            if not name:
+                raise RegistryError("a model needs a name")
+            values = {**unset_price_defaults(spec, name), **entry, "name": name}
+            model = ModelSpec.from_entry({"id": "draft", "provider_id": provider_id, **values})
+            pair = (model.name, model.protocol.value)
+            if pair in existing:
+                skipped.append({"name": model.name, "protocol": model.protocol.value, "reason": "already registered"})
+                continue
+            endpoint = next((e for e in provider["endpoints"] if e["protocol"] == model.protocol.value), None)
+            if endpoint is None:
+                available = _listed(e["protocol"] for e in provider["endpoints"])
+                raise RegistryError(f"protocol {model.protocol.value!r} needs an endpoint on this provider; "
+                                    f"available protocols: {available}")
+            ResolvedModel(model, spec, Endpoint.from_entry(endpoint))
+            model_id = await db.insert_model(conn, {field: getattr(model, field) for field in _MODEL_FIELDS})
+            added.append(model_view(await _existing_model(model_id, conn)))
+            existing.add(pair)
+    return {"models": added, "skipped": skipped,
+            "warnings": sorted({warning for model in added for warning in model["warnings"]})}
 
 
 async def update_model(model_id: str, data: Any) -> dict[str, Any]:
