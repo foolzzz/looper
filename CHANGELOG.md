@@ -18,6 +18,24 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.93] - 2026-11-05
+
+### Fixed
+
+- **A TTADK sign-in check that could not finish no longer refuses runs, and the doctor waits for it.** A TTADK sign-in check that timed out read as `check_failed` and a launch refused it, so a slow network refused runs although the operator was signed in. A launch now refuses only when TTADK is not found, not signed in, or the wrong tool; an unfinished check lets the run start, is logged as a warning and is noted as `ttadk_check` in the launch record (if TTADK cannot sign in, the run itself fails). `looper doctor` read the cached non-waiting value and could print a warning and exit 0 while TTADK was signed out; it now waits for the check, while the server's startup check and the HTTP status poll keep the non-waiting read. No schema or API change, nothing model-visible. ([#1126](https://github.com/foolzzz/looper/pull/1126), closes #1095)
+
+## [2.14.92] - 2026-11-05
+
+### Fixed
+
+- **Dashboard startup warnings appear without a reload, and TTADK runtime cards give TTADK hints.** The advisory startup checks finish after the server listens, but the dashboard read them once, so a page opened right after a restart missed Claude and login warnings until reloaded. `system/status` now lists every advisory check from the start with the new status `pending` ("Startup check in progress") and replaces each as its probe finishes, and the banner and the Agent Profiles page re-read every 3 seconds while any check is pending. The login re-read on each status request skips checks that are still pending. On Settings → Agent Runtimes, an undetected TTADK row shows TTADK's own hint ("Install TTADK and sign in (`ttadk auth login sso`), then Re-detect.") instead of the native CLI install command, and `ttadk-codex` and `ttadk-cursor-agent` are listed as Not detected with Re-detect when TTADK was missing at the first start. Dashboard plus one additive value (`pending`) in the status `checks[].status` enum; no change to how checks run. ([#1123](https://github.com/foolzzz/looper/pull/1123), closes #1099 and #1108)
+
+## [2.14.91] - 2026-11-05
+
+### Fixed
+
+- **Cursor runs show each message once, and each run has a private helper.** After Cursor's network retries, the discarded attempts' assistant text no longer reaches the task activity: text is held until a tool call or the result commits it, and `retry/starting` drops what was held. Native and TTADK Cursor runs now set a short private `TMPDIR` (`/tmp/looper-cur-<12 hex>`, 0700), created before launch and removed when the run ends, so Cursor's `worker-server` socket is no longer shared by concurrent runs in one working directory; Worker and Reviewer launches also copy the cached inputs into a fresh per-run directory. Manager and Planner turns keep a private `TMPDIR` for the session until its directory is reclaimed. Other runtimes are unchanged. The agent's shell commands inherit the new `TMPDIR`. ([#1119](https://github.com/foolzzz/looper/pull/1119), closes #1083)
+
 ## [2.14.90] - 2026-11-05
 
 ### Changed

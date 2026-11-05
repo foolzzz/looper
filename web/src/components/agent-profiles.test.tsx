@@ -89,6 +89,7 @@ describe("Agent Profiles", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -109,6 +110,65 @@ describe("Agent Profiles", () => {
   };
 
   const CODEX: AgentProfile = { ...PROFILE, model_id: "model-responses", model: { ...PROFILE.model, model_id: "model-responses", protocol: "openai-responses" }, runtime_id: "rt-codex", runtime_type: "codex", agent_teams: false };
+
+  it("re-reads pending startup checks and shows failures without a reload, then stops", async () => {
+    vi.useFakeTimers();
+    let checks = [{ id: "claude_cli", label: "Claude Code CLI", status: "pending", detail: "Checking…", fix: "Install Claude Code" }];
+    const fetcher = vi.fn(async () => Response.json({ status: "ok", result: { checks } }));
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => root.render(<ClaudeCheckBanner />));
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => vi.advanceTimersByTimeAsync(2999));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    checks = [{ ...checks[0], status: "fail", detail: "CLI missing" },
+      { id: "git", label: "git", status: "pending", detail: "Checking…", fix: "" }];
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("CLI missing");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    checks = [checks[0], { ...checks[1], status: "ok" }];
+    await act(async () => vi.advanceTimersByTimeAsync(3000));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await act(async () => vi.advanceTimersByTimeAsync(9000));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps polling pending checks after a transient read error and cancels on unmount", async () => {
+    vi.useFakeTimers();
+    const pending = () => Response.json({ status: "ok", result: { checks: [
+      { id: "git", label: "git", status: "pending", detail: "Checking…", fix: "" },
+    ] } });
+    const fetcher = vi.fn().mockResolvedValueOnce(pending()).mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(pending());
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => root.render(<ClaudeCheckBanner />));
+    await act(async () => vi.advanceTimersByTimeAsync(6000));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await act(async () => root.render(null));
+    await act(async () => vi.advanceTimersByTimeAsync(6000));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("refreshes the Agent Profile login while any startup check is pending", async () => {
+    vi.useFakeTimers();
+    registry.providers.push(provider("subscription", { auth: "oauth", oauth_runtime_type: "claude-code" }));
+    const loginModel = model("subscription-model", "anthropic-messages", "subscription");
+    registry.models.push(loginModel);
+    const profile = { ...PROFILE, model_id: loginModel.model_id, model: { ...PROFILE.model, model_id: loginModel.model_id },
+      provider: { ...PROFILE.provider, provider_id: "subscription", name: "subscription", auth: "oauth" as const } };
+    let checks = [{ id: "claude_login", label: "Claude login", status: "pending", detail: "Checking…", fix: "" }];
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => Response.json({ status: "ok", result:
+      String(input) === "/api/v1/system/status" ? { checks } : registry }));
+    vi.stubGlobal("fetch", fetcher);
+    await show(profile);
+    expect(container.textContent).toContain("checking the login");
+    checks = [{ ...checks[0], status: "fail", detail: "Login missing" }];
+    await act(async () => vi.advanceTimersByTimeAsync(3000));
+    expect(container.textContent).toContain("not logged in: run claude auth login");
+    const reads = () => fetcher.mock.calls.filter(([input]) => String(input) === "/api/v1/system/status").length;
+    expect(reads()).toBe(2);
+    await act(async () => vi.advanceTimersByTimeAsync(9000));
+    expect(reads()).toBe(2);
+  });
 
   it("distinguishes TTADK from native Codex in the runtime dropdown and saved profile", async () => {
     const native = registry.runtimes.find((runtime) => runtime.runtime_id === "rt-codex")!;
@@ -562,6 +622,7 @@ describe("Agent Profiles", () => {
     let registry = REGISTRY;
     vi.stubGlobal("fetch", vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
       if (String(request) === "/api/v1/registry/view") return Response.json({ status: "ok", result: registry });
+      if (String(request) === "/api/v1/system/status") return Response.json({ status: "ok", result: { checks: [] } });
       if (init?.method === "POST") {
         requests.push({ url: String(request), body: (JSON.parse(String(init.body)).fields ?? JSON.parse(String(init.body))) });
         registry = { ...REGISTRY, profiles: [...REGISTRY.profiles, saved] };
@@ -784,6 +845,7 @@ describe("pi Agent Profiles", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/v1/registry/view") return Response.json({ status: "ok", result: PI_REGISTRY });
+      if (url === "/api/v1/system/status") return Response.json({ status: "ok", result: { checks: [] } });
       if (init?.body) requests.push({ url, body: (JSON.parse(String(init.body)).fields ?? JSON.parse(String(init.body))) });
       const answer = { profile: PI_PROFILE, warnings: [] };
       return new Response(JSON.stringify({ status: "ok", result: answer }), { status: 200 });

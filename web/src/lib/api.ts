@@ -39,7 +39,7 @@ export interface TurnBindingStatus {
 export interface SelfCheck {
   id: string;
   label: string;
-  status: "ok" | "warn" | "fail" | "skip";
+  status: "ok" | "warn" | "fail" | "skip" | "pending";
   detail: string;
   fix: string;
 }

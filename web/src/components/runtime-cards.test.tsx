@@ -12,6 +12,7 @@ const INSTALL = "npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 const ROLES = ["manager", "planner", "worker", "reviewer"] as const;
 const OLD_VERSION = "1.2.0 from pi --version is older than 1.3.0, the oldest pi Looper supports; upgrade pi and probe again";
 const MISSING_FLAGS = "pi --help does not show --mode; upgrade pi to 1.3.0 or newer and probe again";
+const TTADK_HINT = "Install TTADK and sign in (ttadk auth login sso), then Re-detect.";
 
 function runtime(fields: Partial<Runtime>): Runtime {
   return {
@@ -50,10 +51,12 @@ describe("Agent Runtimes", () => {
   let body: Registry;
   let calls: { url: string; method: string }[];
   let probeError: string;
+  let probedIds: string[];
 
   beforeEach(() => {
     calls = [];
     probeError = "";
+    probedIds = [];
     body = registry(runtime({}));
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -61,8 +64,16 @@ describe("Agent Runtimes", () => {
       calls.push({ url, method });
       if (url === "/api/v1/registry/view" && method === "POST") return Response.json({ status: "ok", result: body });
       if (url === "/api/v1/runtimes/probe" && method === "POST") {
-        expect(JSON.parse(String(init?.body))).toEqual({ runtime_id: body.runtime_types[0].runtime_id });
+        const { runtime_id } = JSON.parse(String(init?.body));
+        probedIds.push(runtime_id);
         if (probeError) return Response.json({ status: "error", error: { code: "unavailable", message: probeError } }, { status: 503 });
+        if (runtime_id.startsWith("rt-ttadk-")) {
+          const detected = runtime({ runtime_id, name: runtime_id.slice(3), type: runtime_id.slice(9),
+            launcher: "ttadk", default_executable: "ttadk", path: "/usr/local/bin/ttadk" });
+          body.runtimes = [...body.runtimes.filter((row) => row.runtime_id !== runtime_id), detected];
+          return Response.json({ status: "ok", result: { runtime: detected } });
+        }
+        expect(runtime_id).toBe(body.runtime_types[0].runtime_id);
         body = registry(runtime({}));
         return Response.json({ status: "ok", result: { runtime: body.runtimes[0] } });
       }
@@ -114,6 +125,56 @@ describe("Agent Runtimes", () => {
     expect(fact(node!, "Version")).toContain("ttadk 1.0.37 / codex-cli 0.162.0");
     const native = [...container.querySelectorAll("h3")].find((h) => h.textContent === "Codex CLI")!.closest("li")!;
     expect(native.textContent).not.toContain("TTADK");
+    expect([...container.querySelectorAll("h3")].filter((h) => h.textContent === "ttadk-codex")).toHaveLength(1);
+  });
+
+  it.each([
+    { type: "codex", version: null, probe_error: "TTADK was not found" },
+    { type: "cursor-agent", version: null, probe_error: "TTADK was not found" },
+    { type: "codex", version: "ttadk 1.0.37", probe_error: null },
+    { type: "cursor-agent", version: "ttadk 1.0.37", probe_error: null },
+  ])("gives TTADK recovery guidance when $type's launcher is absent (version: $version)", async ({ type, version, probe_error }) => {
+    body.runtimes.push(runtime({ type, runtime_id: `rt-ttadk-${type}`, name: `ttadk-${type}`,
+      launcher: "ttadk", default_executable: "ttadk", path: null, version, probe_error }));
+    await show();
+    const node = [...container.querySelectorAll("h3")].find((h) => h.textContent === `ttadk-${type}`)!.closest("li")!;
+    expect(node.textContent).toContain("Not detected");
+    expect(node.textContent).toContain(TTADK_HINT);
+    expect(fact(node, "Path")).toBe("ttadk is not on the server's PATH");
+    expect(node.textContent).not.toContain(RUNTIME_TYPES[type].install);
+  });
+
+  it.each(["codex", "cursor-agent"])("keeps the %s tool install hint when TTADK is present", async (type) => {
+    body.runtimes.push(runtime({ type, runtime_id: `rt-ttadk-${type}`, name: `ttadk-${type}`,
+      launcher: "ttadk", path: "/usr/local/bin/ttadk", version: null, probe_error: `${type} was not found` }));
+    await show();
+    const node = [...container.querySelectorAll("h3")].find((h) => h.textContent === `ttadk-${type}`)!.closest("li")!;
+    expect(node.textContent).toContain("Not detected");
+    expect(node.textContent).toContain(RUNTIME_TYPES[type].install);
+    expect(node.textContent).not.toContain(TTADK_HINT);
+  });
+
+  it("shows both absent TTADK launchers and re-detects them with the existing action", async () => {
+    body.runtime_types.push(...["codex", "cursor-agent"].map((type) => ({
+      ...body.runtime_types[0], type, runtime_id: `rt-${type}`, default_executable: type,
+    })));
+    await show();
+    for (const name of ["ttadk-codex", "ttadk-cursor-agent"]) {
+      const node = [...container.querySelectorAll("h3")].find((h) => h.textContent === name)!.closest("li")!;
+      expect(node.textContent).toContain("Not detected");
+      expect(node.textContent).toContain(TTADK_HINT);
+      expect(fact(node, "Capabilities")).toBe("none");
+      const button = node.querySelector("button")!;
+      expect(button.getAttribute("aria-label")).toBe(`Re-detect ${name}`);
+      await act(async () => button.click());
+      expect(probedIds).toContain(`rt-${name}`);
+      const updated = [...container.querySelectorAll("h3")].filter((h) => h.textContent === name);
+      expect(updated).toHaveLength(1);
+      expect(updated[0].closest("li")!.textContent).toContain("Detected");
+      expect(updated[0].closest("li")!.textContent).not.toContain(TTADK_HINT);
+    }
+    expect(calls.filter(({ url }) => url === "/api/v1/runtimes/probe")).toHaveLength(2);
+    expect(calls.filter(({ url }) => url === "/api/v1/registry/view")).toHaveLength(3);
   });
 
   it("warns about personal configuration only for runtime types that load it", async () => {
@@ -170,7 +231,7 @@ describe("Agent Runtimes", () => {
     api();
     await show();
     const titles = [...container.querySelectorAll("h3")].map((node) => node.textContent);
-    expect(titles).toEqual(["Model API (SDK)", "Claude Code SDK", "OpenAI Agents SDK"]);
+    expect(titles).toEqual(["Model API (SDK)", "ttadk-codex", "ttadk-cursor-agent", "Claude Code SDK", "OpenAI Agents SDK"]);
     expect(RUNTIME_TYPES.api).toEqual({ kind: "SDK", title: "Model API (SDK)" });
   });
 

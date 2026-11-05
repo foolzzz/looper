@@ -16,7 +16,6 @@ import {
 import {
   createAgentProfile,
   deleteAgentProfile,
-  fetchStatus,
   fetchPromptPreview,
   protocolLabel,
   updateAgentProfile,
@@ -36,6 +35,7 @@ import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { useSettingsTarget } from "@/lib/settings-target";
 import { useAction } from "@/lib/use-action";
 import { profileLabel, useRegistry } from "@/lib/use-registry";
+import { useStartupChecks } from "@/lib/use-startup-checks";
 
 // --- What a runtime can be paired with ---
 
@@ -77,25 +77,14 @@ function runtimeTitle(runtime: Runtime): string {
 
 // --- The Claude Code login, as the startup self-check found it ---
 
-let statusChecks: Promise<SelfCheck[]> | null = null;
-
-/** The startup self-check's Claude login result (`claude auth status`), fetched once per page load: undefined
- * while it loads, null when the server has none. */
+/** The startup self-check's Claude login result, refreshed until all startup checks finish. */
 function useClaudeLogin(): SelfCheck | null | undefined {
-  const [check, setCheck] = useState<SelfCheck | null | undefined>(undefined);
-  useEffect(() => {
-    statusChecks ??= fetchStatus().then((s) => s.checks ?? []).catch(() => []);
-    let alive = true;
-    statusChecks.then((checks) => alive && setCheck(checks.find((c) => c.id === "claude_login") ?? null));
-    return () => {
-      alive = false;
-    };
-  }, []);
-  return check;
+  const checks = useStartupChecks();
+  return checks === undefined ? undefined : checks.find((c) => c.id === "claude_login") ?? null;
 }
 
 function loginText(check: SelfCheck | null | undefined): string {
-  if (check === undefined) return "checking the login…";
+  if (check === undefined || check?.status === "pending") return "checking the login…";
   if (!check) return "login not checked";
   if (check.status === "ok") return check.detail;
   if (check.status === "fail") return "not logged in: run claude auth login";

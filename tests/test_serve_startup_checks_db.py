@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from looper import db, ops_config
-from looper.agents import operator_notes, profile_registry, serve
+from looper.agents import api_v1, operator_notes, profile_registry, serve
 from tests.db_support import DSN, run_db, until
 
 
@@ -46,7 +46,14 @@ def test_http_answers_before_slow_advisory_check_finishes(monkeypatch, tmp_path,
             port = server._server.sockets[0].getsockname()[1]
             client.base_url = f"http://127.0.0.1:{port}"
             client.headers["Authorization"] = f"Bearer {server._operator_token}"
-            assert (await client.post("/api/v1/system/status", json={})).status_code == 200
+            response = await client.post("/api/v1/system/status", json={})
+            assert response.status_code == 200
+            result = response.json()["result"]
+            assert {c["id"] for c in result["checks"] if c["status"] == "pending"} == {
+                "claude_cli", "claude_login", "codex_login", "grok_login", "cursor_login", "ttadk",
+                "lark_cli", "git", "projects_root",
+            }
+            api_v1.validate_arguments(api_v1.find("POST", "/api/v1/system/status").result, result)
 
         async def check_readiness(_):
             await asyncio.wait_for(started.wait(), 1)
@@ -54,6 +61,8 @@ def test_http_answers_before_slow_advisory_check_finishes(monkeypatch, tmp_path,
             response = await client.post("/api/v1/system/status", json={})
             assert response.status_code == 200
             assert not finished.is_set()
+            assert next(c for c in response.json()["result"]["checks"] if c["id"] == "claude_cli")["status"] == "pending"
+            assert any(c["id"] == "test" and c["status"] == "ok" for c in response.json()["result"]["checks"])
             assert "slow probe problem" not in caplog.text
             await asyncio.wait_for(finished.wait(), 4)
             message = "advisory probe crashed" if check_fails else "slow probe problem"
@@ -61,6 +70,7 @@ def test_http_answers_before_slow_advisory_check_finishes(monkeypatch, tmp_path,
             response = await client.post("/api/v1/system/status", json={})
             assert response.status_code == 200  # A failed check never stops the listener.
             checks = response.json()["result"]["checks"]
+            assert not any(c["status"] == "pending" for c in checks)
             if not check_fails:
                 assert any(c["id"] == "claude_cli" and c["detail"] == message for c in checks)
             raise Checked
