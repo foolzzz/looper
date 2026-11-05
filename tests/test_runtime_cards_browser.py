@@ -10,13 +10,16 @@ from looper.agents import profile_registry as registry, runtimes
 
 
 @pytest.mark.installed
-def test_agent_runtimes_launcher_and_operator_configuration(tmp_path, monkeypatch, staged_dashboard_dir):
+@pytest.mark.parametrize("ttadk_detected", [True, False], ids=["ttadk-detected", "ttadk-not-detected"])
+def test_agent_runtimes_launcher_and_operator_configuration(tmp_path, monkeypatch, staged_dashboard_dir, ttadk_detected):
     from playwright.sync_api import expect, sync_playwright
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for name, version in [("ttadk", "1.0.37"), ("codex", "codex-cli 0.162.0"),
                           ("cursor-agent", "2026.10.22-27dcf5f")]:
+        if name == "ttadk" and not ttadk_detected:
+            continue
         fake_claude(bin_dir / name, "import sys\n"
                     "assert sys.argv[1:] == ['--version'], 'Only version probes are allowed'\n"
                     f"print({version!r})\n")
@@ -26,6 +29,8 @@ def test_agent_runtimes_launcher_and_operator_configuration(tmp_path, monkeypatc
         rows = []
         for kind, launcher in [("codex", runtimes.Launcher.NATIVE), ("cursor-agent", runtimes.Launcher.NATIVE),
                                ("codex", runtimes.Launcher.TTADK)]:
+            if launcher is runtimes.Launcher.TTADK and not ttadk_detected:
+                continue
             adapter = runtimes.adapter(kind)
             probe = await registry._probe(kind, "", "claude", launcher)
             assert probe["probe_error"] is None, probe
@@ -66,7 +71,14 @@ def test_agent_runtimes_launcher_and_operator_configuration(tmp_path, monkeypatc
             page.goto("http://runtimes.example/#settings/runtimes", wait_until="networkidle", timeout=15000)
             ttadk = page.get_by_role("listitem").filter(has=page.get_by_role("heading", name="ttadk-codex", exact=True))
             expect(ttadk.get_by_text("TTADK", exact=True)).to_be_visible()
-            expect(ttadk).to_contain_text("ttadk 1.0.37 / codex-cli 0.162.0")
+            if ttadk_detected:
+                expect(ttadk).to_contain_text("ttadk 1.0.37 / codex-cli 0.162.0")
+            else:
+                for name in ("ttadk-codex", "ttadk-cursor-agent"):
+                    card = page.get_by_role("listitem").filter(has=page.get_by_role("heading", name=name, exact=True))
+                    expect(card).to_contain_text("Not detected")
+                    expect(card).to_contain_text("Install TTADK and sign in (ttadk auth login sso), then Re-detect.")
+                    expect(card.get_by_role("button", name=f"Re-detect {name}", exact=True)).to_be_enabled()
             cursor = page.get_by_role("listitem").filter(has=page.get_by_role("heading", name="Cursor CLI", exact=True))
             expect(cursor).to_contain_text("your personal Cursor and Claude Code configuration")
             expect(cursor).to_contain_text("cannot be turned off")

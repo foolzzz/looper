@@ -9,6 +9,11 @@ import { useRegistry } from "@/lib/use-registry";
 import { cn } from "@/lib/utils";
 
 const ROLES: AgentRole[] = ["manager", "planner", "worker", "reviewer"];
+const TTADK_RUNTIMES = [
+  { type: "codex", runtime_id: "rt-ttadk-codex", name: "ttadk-codex" },
+  { type: "cursor-agent", runtime_id: "rt-ttadk-cursor-agent", name: "ttadk-cursor-agent" },
+] as const;
+type TtadkRuntime = (typeof TTADK_RUNTIMES)[number];
 
 type Detection = "detected" | "missing" | "unchecked";
 
@@ -43,19 +48,20 @@ function CardHead({ title, kind, badges }: { title: string; kind: RuntimeKind; b
 }
 
 /** One runtime: a type's built-in one (`runtime` absent until it is found) or one registered by hand before. */
-function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime: Runtime | undefined }) {
+function RuntimeCard({ type, runtime, launcher }: { type: RuntimeType | undefined; runtime: Runtime | undefined; launcher?: TtadkRuntime }) {
   const action = useAction();
-  const info = RUNTIME_TYPES[runtime?.type ?? type?.type ?? ""];
+  const info = RUNTIME_TYPES[runtime?.type ?? launcher?.type ?? type?.type ?? ""];
+  const ttadk = runtime?.launcher === "ttadk" || !!launcher;
   const custom = runtime ? !runtime.builtin : false;
-  const inProcess = runtime ? runtime.in_process : type!.in_process;
+  const inProcess = runtime ? runtime.in_process : type?.in_process ?? false;
   const probeError = runtime?.probe_error ?? type?.probe_error;
-  const state = detection(runtime);
+  const state = ttadk && !runtime?.path ? "missing" : detection(runtime);
   const { label, variant, icon: Icon } = DETECTION[state];
-  const capabilities = runtime ? runtime.capabilities : type?.capabilities ?? [];
-  const roles = runtime ? runtime.roles : type?.roles ?? [];
-  const command = runtime?.executable || runtime?.default_executable || type?.default_executable || "";
-  const title = custom || runtime?.launcher === "ttadk" ? runtime!.name : info?.title ?? type?.label ?? runtime?.type ?? "";
-  const redetect = () => action.run(() => probeRuntime(runtime?.runtime_id ?? type!.runtime_id));
+  const capabilities = runtime ? runtime.capabilities : launcher ? [] : type?.capabilities ?? [];
+  const roles = runtime ? runtime.roles : launcher ? [] : type?.roles ?? [];
+  const command = runtime?.executable || (ttadk ? "ttadk" : runtime?.default_executable || type?.default_executable || "");
+  const title = launcher?.name ?? (custom || ttadk ? runtime!.name : info?.title ?? type?.label ?? runtime?.type ?? "");
+  const redetect = () => action.run(() => probeRuntime(runtime?.runtime_id ?? launcher?.runtime_id ?? type!.runtime_id));
 
   return (
     <li className={cn("space-y-3 rounded-lg border bg-card px-5 py-4", state === "detected" ? "border-border" : "border-dashed border-border")}>
@@ -65,7 +71,7 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
         badges={
           <>
             {custom && <Badge variant="outline">custom</Badge>}
-            {runtime?.launcher === "ttadk" && <Badge variant="outline">TTADK</Badge>}
+            {ttadk && <Badge variant="outline">TTADK</Badge>}
             <Badge variant={variant}>
               <Icon className="mr-1 h-3 w-3" aria-hidden="true" />
               {label}
@@ -132,6 +138,8 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
             ? state === "detected"
               ? "Comes with Looper; Re-detect checks its Python package."
               : probeError ?? "Re-detect checks its Python package."
+            : ttadk && !runtime?.path
+            ? "Install TTADK and sign in (ttadk auth login sso), then Re-detect."
             : custom
             ? "Registered by hand before runtimes were built in; read-only, and kept while an Agent Profile uses it."
             : state === "detected"
@@ -173,6 +181,9 @@ export function RuntimesSection() {
       ))}
       {additional.map((runtime) => (
         <RuntimeCard key={runtime.runtime_id} type={registry.runtime_types.find((t) => t.type === runtime.type)} runtime={runtime} />
+      ))}
+      {TTADK_RUNTIMES.filter((launcher) => !registry.runtimes.some((runtime) => runtime.runtime_id === launcher.runtime_id)).map((launcher) => (
+        <RuntimeCard key={launcher.runtime_id} type={registry.runtime_types.find((type) => type.type === launcher.type)} runtime={undefined} launcher={launcher} />
       ))}
       {PLANNED_RUNTIMES.map((planned) => (
         <li key={planned.title} className="space-y-2 rounded-lg border border-dashed border-border px-5 py-4 opacity-80">
