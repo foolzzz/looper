@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.92] - 2026-11-05
+
+### Fixed
+
+- **Dashboard startup warnings appear without a reload, and TTADK runtime cards give TTADK hints.** The advisory startup checks finish after the server listens, but the dashboard read them once, so a page opened right after a restart missed Claude and login warnings until reloaded. `system/status` now lists every advisory check from the start with the new status `pending` ("Startup check in progress") and replaces each as its probe finishes, and the banner and the Agent Profiles page re-read every 3 seconds while any check is pending. The login re-read on each status request skips checks that are still pending. On Settings → Agent Runtimes, an undetected TTADK row shows TTADK's own hint ("Install TTADK and sign in (`ttadk auth login sso`), then Re-detect.") instead of the native CLI install command, and `ttadk-codex` and `ttadk-cursor-agent` are listed as Not detected with Re-detect when TTADK was missing at the first start. Dashboard plus one additive value (`pending`) in the status `checks[].status` enum; no change to how checks run. ([#1123](https://github.com/foolzzz/looper/pull/1123), closes #1099 and #1108)
+
 ## [2.14.91] - 2026-11-05
 
 ### Fixed
