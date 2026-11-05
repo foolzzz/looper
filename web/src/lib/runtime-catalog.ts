@@ -16,6 +16,7 @@ export const RUNTIME_TYPES: Record<string, RuntimeTypeInfo> = {
   api: { kind: "SDK", title: "Model API (SDK)" },
   "claude-code": { kind: "CLI", title: "Claude Code CLI", install: "npm install -g @anthropic-ai/claude-code" },
   codex: { kind: "CLI", title: "Codex CLI", install: "npm install -g @openai/codex" },
+  "cursor-agent": { kind: "CLI", title: "Cursor CLI", install: "curl https://cursor.com/install -fsS | bash" },
   omp: { kind: "CLI", title: "OMP CLI" },
   grok: { kind: "CLI", title: "Grok CLI" },
   dsh: { kind: "CLI", title: "DSH CLI", install: "npm install -g @deepseek-ai/dsh@0.2.1-rc.2" },

@@ -19,6 +19,7 @@ function runtime(fields: Partial<Runtime>): Runtime {
     path: "/usr/local/bin/pi", protocols: ["openai-chat", "openai-responses"], version: "1.3.0",
     capabilities: ["run", "resident_session", "resume", "steer", "read_tools", "compaction_events", "mcp"],
     roles: [...ROLES], probed_at: "2026-10-20T00:00:00Z", probe_error: null, builtin: true, profile_count: 1,
+    auth_kinds: ["api_key"],
     ...fields,
   };
 }
@@ -99,6 +100,38 @@ describe("Agent Runtimes", () => {
   };
   const apiCard = () => [...container.querySelectorAll("h3")]
     .find((node) => node.textContent === "Model API (SDK)")!.closest("li")!;
+
+  it("shows the TTADK launcher row and its full probed version beside native Codex", async () => {
+    body.runtime_types[0] = { ...body.runtime_types[0], type: "codex", runtime_id: "rt-codex" };
+    body.runtimes = [runtime({ type: "codex", runtime_id: "rt-codex" }), runtime({
+      type: "codex", runtime_id: "rt-ttadk-codex", name: "ttadk-codex", launcher: "ttadk",
+      version: "ttadk 1.0.37 / codex-cli 0.162.0", auth_kinds: ["oauth"],
+    })];
+    await show();
+    const node = [...container.querySelectorAll("li")].find((row) => row.textContent?.includes("TTADK"));
+    expect(node, "TTADK runtime card").toBeTruthy();
+    expect(node!.querySelector("h3")!.textContent).toBe("ttadk-codex");
+    expect(fact(node!, "Version")).toContain("ttadk 1.0.37 / codex-cli 0.162.0");
+    const native = [...container.querySelectorAll("h3")].find((h) => h.textContent === "Codex CLI")!.closest("li")!;
+    expect(native.textContent).not.toContain("TTADK");
+  });
+
+  it("warns about personal configuration only for runtime types that load it", async () => {
+    body.runtime_types[0] = { ...body.runtime_types[0], type: "codex", runtime_id: "rt-codex" };
+    body.runtime_types.push({ ...body.runtime_types[0], type: "cursor-agent", runtime_id: "rt-cursor-agent",
+      loads_operator_config: true });
+    body.runtimes = [runtime({ type: "codex", runtime_id: "rt-codex" }),
+      runtime({ type: "cursor-agent", runtime_id: "rt-cursor-agent" })];
+    await show();
+    const notice = "Runs with your own Cursor login and HOME: your personal Cursor and Claude Code configuration (rules, hooks, MCP servers, skills, plugins) applies to these runs and cannot be turned off.";
+    const cursor = [...container.querySelectorAll("h3")].find((h) => h.textContent === "Cursor CLI")!.closest("li")!;
+    expect(cursor.textContent).toContain(notice);
+    expect(cursor.querySelector(".text-warning")!.textContent).toBe(notice);
+    const native = [...container.querySelectorAll("h3")].find((h) => h.textContent === "Codex CLI")!.closest("li")!;
+    expect(native.textContent).not.toContain(notice);
+    expect(RUNTIME_TYPES["cursor-agent"]).toEqual({ kind: "CLI", title: "Cursor CLI", install: "curl https://cursor.com/install -fsS | bash" });
+    expect(LOGIN_HELP["cursor-agent"]).toEqual({ check: "cursor-agent status", signIn: "cursor-agent login" });
+  });
 
   it("shows an in-process runtime without PATH guidance", async () => {
     api();
