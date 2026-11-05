@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.83] - 2026-11-05
+
+### Changed
+
+- **`looper serve` listens sooner.** Startup had grown to about 45-55 s before the HTTP server listened, because every runtime CLI was probed one after another and the advisory startup checks ran one after another before listening. `register_found_runtimes` now probes every runtime type at the same time (each probe bounded by its adapter's own subprocess timeouts) and writes the rows afterwards in adapter/launcher order, so the registered rows are the same for the same probe answers; it logs `probed runtime <type> in <s> s` per probe and the total. The advisory checks (Claude, the Codex, Grok and Cursor logins, TTADK, lark-cli, git, projects root) run concurrently in a background task right after the HTTP server listens and log their problems as before; the database check still runs before serving. The listening log line gives the seconds since process start. Until the advisory checks finish, `system/status` reports only the database check under `checks`; it then reports all of them. ([#1093](https://github.com/foolzzz/looper/pull/1093))
+
 ## [2.14.82] - 2026-11-05
 
 ### Added
