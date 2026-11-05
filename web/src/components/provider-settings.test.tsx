@@ -204,18 +204,59 @@ it("describes format URLs and compatible runtime labels using registry data", as
   expect(container.textContent).toContain("Runs call https://custom.invalid/anthropic/v1/messages; the model list is https://custom.invalid/anthropic/v1/models.");
 });
 
+it.each([
+  ["both", "https://custom.invalid/v1/responses or https://custom.invalid/v1/chat/completions"],
+  ["openai-chat", "https://custom.invalid/v1/chat/completions"],
+  ["openai-responses", "https://custom.invalid/v1/responses"],
+])("describes only the selected %s OpenAI APIs", async (apis, calls) => {
+  await render(); await toggle("OpenAI");
+  await fill("OpenAI APIs it serves", apis);
+  await fill("Base URL *", "https://custom.invalid/v1/");
+  const hint = [...container.querySelectorAll("p")].find((p) => p.textContent?.startsWith("Runs call"));
+  expect(hint?.textContent).toBe(`Runs call ${calls}; the model list is https://custom.invalid/v1/models.`);
+});
+
+it.each(["https://custom.invalid/v1", "https://custom.invalid/v1/", "https://custom.invalid/"])(
+  "describes the stored Anthropic root for %s", async (url) => {
+    await render(); await toggle("Anthropic"); await fill("Base URL *", url);
+    expect(container.textContent).toContain("Runs call https://custom.invalid/v1/messages; the model list is https://custom.invalid/v1/models.");
+  },
+);
+
 it.each(["both", "openai-chat", "openai-responses"])("preserves simple URL and %s through the protocol editor", async (apis) => {
   await render(); await toggle("OpenAI"); await fill("OpenAI APIs it serves", apis);
   await fill("Base URL *", "https://custom.invalid/v1/");
   await click("Set a URL per protocol instead");
   const protocols = apis === "both" ? ["openai-responses", "openai-chat"] : [apis];
   for (const protocol of protocols) expect(field(`${protocol} URL`).value).toBe("https://custom.invalid/v1/");
-  await fill(`${protocols[0]} URL`, "https://changed.invalid/v1");
+  for (const protocol of protocols) await fill(`${protocol} URL`, "https://changed.invalid/v1");
   await click("Describe it by API format instead");
   expect(field("Base URL *").value).toBe("https://changed.invalid/v1");
   expect(field("OpenAI APIs it serves").value).toBe(apis);
   await submit();
   expect(bodies[0].endpoints).toEqual(protocols.map((protocol) => endpoint(protocol as Provider["endpoints"][number]["protocol"], "https://changed.invalid/v1")));
+});
+
+it.each(["different URLs", "mixed formats"])("keeps editing per protocol for %s", async (configuration) => {
+  await render(); await toggle("OpenAI"); await fill("Base URL *", "https://custom.invalid/v1");
+  await click("Set a URL per protocol instead");
+  if (configuration === "different URLs") await fill("openai-chat URL", "https://chat.invalid/v1");
+  else {
+    await toggle("anthropic-messages");
+    await fill("anthropic-messages URL", "https://custom.invalid/v1");
+  }
+  await click("Describe it by API format instead");
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe("This provider uses different URLs per protocol; keep editing it per protocol.");
+  expect(container.querySelectorAll('input[type="radio"]')).toHaveLength(0);
+  expect(field("openai-chat URL").value).toBe(configuration === "different URLs" ? "https://chat.invalid/v1" : "https://custom.invalid/v1");
+  expect(field("openai-responses URL").value).toBe("https://custom.invalid/v1");
+  if (configuration === "mixed formats") expect(field("anthropic-messages URL").value).toBe("https://custom.invalid/v1");
+  if (configuration === "different URLs") {
+    await fill("openai-chat URL", "https://custom.invalid/v1");
+    await click("Describe it by API format instead");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(field("OpenAI APIs it serves").value).toBe("both");
+  }
 });
 
 it("keeps the protocol editor for edits of custom providers and preset vendors", async () => {

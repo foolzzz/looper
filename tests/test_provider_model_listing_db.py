@@ -6,6 +6,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import httpx
 import pytest
 
 from looper.agents.runtimes.pricing import BUILTIN_PRICES, PRICE_FIELDS
@@ -103,6 +104,59 @@ def test_login_fetch_is_one_skipped_listing(tmp_path, monkeypatch):
                 "protocols": ["openai-responses"], "state": "skipped",
                 "problem": "a login provider's models come with Looper; fetching is for API-key providers",
                 "truncated": False, "models": []}]
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("operation", ["create", "update", "legacy"])
+def test_anthropic_saved_url_is_used_by_runs_and_listing(tmp_path, monkeypatch, operation):
+    from looper.agents.agent_settings import Launch, load_agent_settings
+    from looper.agents import model_listing, profile_registry
+    from looper.db import agent_setting_layers
+
+    root = "https://api.example.com"
+    url = root + "/v1/"
+    endpoints = [{"protocol": protocol, "base_url": url}
+                 for protocol in ("anthropic-messages", "openai-chat")]
+
+    async def run(pool):
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("provider_accounts.create", {"name": "Normalized account",
+                "vendor_type": "custom", "api_key": "test-key",
+                "endpoints": [{**e, "base_url": root} for e in endpoints] if operation == "update" else endpoints})
+            assert status == 200, answer
+            pid = answer["result"]["provider"]["provider_id"]
+            if operation == "update":
+                status, answer = await call("provider_accounts.update", {
+                    "provider_id": pid, "fields": {"endpoints": endpoints}})
+                assert status == 200, answer
+            expected = root
+            if operation == "legacy":
+                expected = root + "/v1"
+                await pool.execute("UPDATE llm_provider_endpoints SET base_url = $1 "
+                                   "WHERE provider_id = $2 AND protocol = 'anthropic-messages'", expected, pid)
+                status, answer = await call("provider_accounts.update", {
+                    "provider_id": pid, "fields": {"name": "Renamed legacy account"}})
+                assert status == 200, answer
+            stored = await db.get_provider(pid)
+            assert {e["protocol"]: e["base_url"] for e in stored["endpoints"]} == {
+                "anthropic-messages": expected, "openai-chat": url}
+            model = (await profile_registry.create_model({"provider_id": pid, "name": "test-model",
+                "protocol": "anthropic-messages"}))["model"]
+            profile = (await profile_registry.create_profile({"name": "Normalized profile",
+                "runtime_id": "rt-claude-code", "model_id": model["model_id"]}))["profile"]
+            await agent_setting_layers.put_layer("role", "worker", None, {"profile_id": profile["profile_id"]})
+            assert Launch(await load_agent_settings("worker")).environment()["ANTHROPIC_BASE_URL"] == expected
+            requests = []
+
+            def answer(request):
+                requests.append(("anthropic" if "x-api-key" in request.headers else "openai", request.url.path))
+                return httpx.Response(200, json={"data": []})
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+                result = await model_listing.fetch_provider_models(pid, client=client)
+            assert all(entry["state"] == "listed" for entry in result["listings"])
+            assert sorted(requests) == [("anthropic", "/v1/v1/models" if operation == "legacy" else "/v1/models"),
+                                        ("openai", "/v1/models")]
     run_db(run, monkeypatch, timeout=30)
 
 

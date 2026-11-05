@@ -38,10 +38,11 @@ def test_no_key_sends_no_authentication():
     assert _list(answer, key=None).models == ()
 
 
-@pytest.mark.parametrize("base_url", ["https://example.invalid", "https://example.invalid/v1/"])
-def test_anthropic_pages_use_own_path_headers_and_cursor(base_url):
+@pytest.mark.parametrize("base_url,path", [("https://example.invalid", "/v1/models"),
+                                          ("https://example.invalid/v1/", "/v1/v1/models")])
+def test_anthropic_pages_use_own_path_headers_and_cursor(base_url, path):
     def answer(request):
-        assert request.url.path == "/v1/models"
+        assert request.url.path == path
         assert request.headers["x-api-key"] == "test-key"
         assert request.headers["anthropic-version"] == listing.ANTHROPIC_VERSION
         assert request.url.params["limit"] == "1000"

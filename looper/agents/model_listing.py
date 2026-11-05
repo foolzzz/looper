@@ -90,8 +90,6 @@ async def list_models_at(family: ApiFamily, base_url: str, api_key: str | None, 
     """Read a bounded model list; never follow redirects or expose the response body."""
     anthropic = family is ApiFamily.ANTHROPIC
     root = base_url.rstrip("/")
-    if anthropic:
-        root = root.removesuffix("/v1")
     url = root + ("/v1/models" if anthropic else "/models")
     headers = {"anthropic-version": ANTHROPIC_VERSION} if anthropic else {}
     if api_key:

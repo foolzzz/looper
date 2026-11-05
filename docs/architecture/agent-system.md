@@ -1810,6 +1810,9 @@ Manager tools.
   it is not a new-account shortcut. Login endpoints have an empty URL managed
   by the CLI. Endpoint edits revalidate affected profiles in the same transaction;
   a referenced endpoint cannot be removed.
+  Saving an Anthropic endpoint removes trailing slashes and `/v1`; existing rows
+  are not rewritten, so a stored URL ending in `/v1` keeps its run behavior and
+  lists models at `<stored>/v1/models` until the endpoint is saved again.
 - **Models** (`llm_models`) have an opaque `model_id`, `provider_id`, exact
   `name` and one `protocol`. The identity triple is immutable: changing it
   requires another model and explicitly switching profiles. Settings are

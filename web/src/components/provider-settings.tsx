@@ -105,7 +105,11 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
   const keyStored = !!provider?.api_key;
   const needsConfirmation = !provider && !!vendor?.requires_url_confirmation;
   const simple = !provider && draft.vendorType === "custom" && !draft.perProtocol;
-  const displayUrl = draft.baseUrl.trim().replace(/\/+$/, "") || "<base URL>";
+  const trimmedUrl = draft.baseUrl.trim().replace(/\/+$/, "");
+  const displayUrl = (draft.format === "anthropic" ? trimmedUrl.replace(/\/v1$/, "") : trimmedUrl) || "<base URL>";
+  const openaiCalls = draft.openaiApis === "both"
+    ? `${displayUrl}/responses or ${displayUrl}/chat/completions`
+    : `${displayUrl}/${draft.openaiApis === "openai-responses" ? "responses" : "chat/completions"}`;
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     if (simple && !draft.format) {
@@ -194,7 +198,7 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
             placeholder={draft.format === "anthropic" ? "https://api.example.com/anthropic" : "https://api.example.com/v1"} />
           <p className="break-words text-[11px] text-muted-foreground">{draft.format === "anthropic"
             ? `Runs call ${displayUrl}/v1/messages; the model list is ${displayUrl}/v1/models.`
-            : `Runs call ${displayUrl}/responses or ${displayUrl}/chat/completions; the model list is ${displayUrl}/models.`}</p>
+            : `Runs call ${openaiCalls}; the model list is ${displayUrl}/models.`}</p>
         </div>
         <Button type="button" variant="ghost" size="sm" className="text-primary underline" onClick={() => set({ perProtocol: true, endpoints: simpleEndpoints(draft, registry) })}>
           Set a URL per protocol instead
@@ -227,7 +231,13 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
       {!provider && draft.vendorType === "custom" && draft.perProtocol && <Button type="button" variant="ghost" size="sm" className="text-primary underline" onClick={() => {
         const first = draft.endpoints[0];
         const format = registry.limits.api_formats.find((format) => format.protocols.some(({ protocol }) => protocol === first?.protocol));
+        if (draft.endpoints.some((endpoint) => endpoint.base_url.trim() !== first?.base_url.trim()
+          || !format?.protocols.some(({ protocol }) => protocol === endpoint.protocol))) {
+          setValidationError("This provider uses different URLs per protocol; keep editing it per protocol.");
+          return;
+        }
         const openai = draft.endpoints.filter((endpoint) => format?.protocols.some(({ protocol }) => protocol === endpoint.protocol));
+        setValidationError("");
         set({ perProtocol: false, baseUrl: first?.base_url ?? draft.baseUrl, format: format?.family ?? draft.format,
           openaiApis: format?.family === "openai" && openai.length === 1 ? first.protocol as ProviderDraft["openaiApis"] : "both" });
       }}>Describe it by API format instead</Button>}
