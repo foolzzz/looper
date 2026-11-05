@@ -1228,7 +1228,8 @@ belongs to a **Provider** account and selects exactly one protocol and its
 **Endpoint**. See the [model-layer RFC](rfcs/llm-models-v0.zh-CN.md).
 Roles select profiles ([Harness, profile and environment](#harness-profile-and-environment));
 “agent” names a running instance. Settings → LLM Providers manages accounts,
-endpoints and models; Settings → Agent Profiles selects the runtime and model.
+endpoints and models; Settings → Agent Profiles chooses a model and protocol,
+then a provider that offers it, then a runtime.
 `looper/agents/profile_registry.py` validates the same contracts for HTTP and
 Manager tools.
 
@@ -1543,7 +1544,9 @@ Manager tools.
   and plugin contents: `config/` (`CURSOR_CONFIG_DIR`, including chats), `data/`
   (`CURSOR_DATA_DIR`, including project state), and `looper-plugin/`
   (`--plugin-dir`). Run, config and data directories are private (0700), files are 0600, and run
-  directories idle for a day are removed. The plugin has its manifest at
+  directories idle for a day are removed. Worker and Reviewer launches copy the
+  cached inputs into a fresh run directory with a random 64-hex name, so even
+  identical prompts have separate execution state. The plugin has its manifest at
   `.cursor-plugin/plugin.json` and `.mcp.json` when the run has MCP servers;
   it has no rules. Cursor CLI 2026.10.22 does not apply `--plugin-dir` rules
   in headless mode, so stdin starts with `<looper_instructions>`, the runtime
@@ -1593,7 +1596,10 @@ Manager tools.
   existing Agent Profile runtime selection without new channel settings.
 
   The stream's thinking, tool calls, connections and retries become internal
-  events. The report is the assistant text after the final tool call or
+  events. Assistant text is buffered until a tool call or result commits it;
+  `retry/starting` drops uncommitted text, so a retried message appears once
+  in the activity. Tool events pass through in transcript order.
+  The report is the assistant text after the final tool call or
   resumed retry, with the leading `> Auto routed to <model>` line removed;
   that model is recorded as `routed_model`. Cursor's raw `result.result`
   concatenates attempts and is not used as the report. Tokens are retained
@@ -1616,9 +1622,14 @@ Manager tools.
   to the owner's totals; whether resumed chats report cumulative usage still
   needs verification. After a network retry, Cursor's `result.usage`
   appears to cover only the resumed part, so recorded tokens can be low.
-  Cursor's `worker-server` helper outlives a run by about a minute and is
-  shared by runs in the same working directory; ending one run can end the
-  helper another concurrent run in that directory uses.
+  Each native or TTADK run sets a private (0700) `TMPDIR` at
+  `/tmp/looper-cur-<12 hex of the run directory hash>`, created before launch
+  and removed when the run ends. This short path keeps Cursor's `worker-server`
+  socket under the 104-byte path limit and gives concurrent runs in the same
+  working directory separate helpers. Manager and Planner turns use a private
+  `TMPDIR` derived from their session directory, kept across turns and removed
+  when that session directory is reclaimed. The agent's shell commands inherit
+  this `TMPDIR` too; temporary files there have the same lifetime.
 - **The Cursor login** (`looper/agents/runtimes/cursor_login.py`) is the
   built-in provider `cursor-login` (`prov-cursor-login`, OAuth,
   `oauth_runtime_type = cursor-agent`). Its `openai-responses` endpoint is
@@ -1979,7 +1990,7 @@ provider's prices: a teammate's spend lands in its agent's run total, not in a
 record of its own. Known gaps: a teammate's model requests are not in the
 stream (its assistant messages are, with a `parent_tool_use_id`), so the soft
 per-run cap below does not see its tokens before a result reports them, and
-individual requests can be recorded through the [recording proxy](#recording-model-requests); a teammate does not get the agent's
+nothing records its requests one by one; a teammate does not get the agent's
 `--append-system-prompt-file` (the harness, role, project, task and contract
 layers).
 
@@ -2008,73 +2019,6 @@ The `llm_profiles` table and the role configs' `runtime` and `llm_profile_id`
 were never on a launch path; the one-time migration `llm_profiles_removed`
 drops them (with `/api/llm-profiles`), and a role config update naming them
 is a 400.
-
-#### Recording model requests
-
-Settings → Request recording exposes **Record model requests**, off by default
-(`llmrec.enabled`). It stores each model request and response of Claude Code
-Workers and Reviewers using API-key providers, including Anthropic's own API
-and third-party Anthropic endpoints. Runtime OAuth logins continue to connect
-directly unless **Also record Claude subscription (OAuth) runs** is enabled
-(`llmrec.include_oauth`, also off by default); that exception covers Claude Code
-subscription runs only. Other roles and runtimes are not yet covered.
-
-Each runtime root has an independent loopback HTTP recording proxy, rather
-than a proxy inside the control plane or a keeper. It survives planned control
-plane restarts without cutting kept runs' streams, and is available to runs
-without keepers. It has a private state file and lock under `.local/llmrec/`,
-rotating metadata-only logs under `logs/`, and receives its database URL over
-stdin, never in a state file. Startup reuses a healthy compatible process;
-without kept runs it replaces an outdated process on the same port. With kept
-runs it retains that process; an incompatible route format skips new recordings.
-Shutdown leaves the proxy running. A later startup with recording off and no
-kept runs stops it. The proxy exits if its identity file disappears or changes,
-or after 24 hours without requests.
-
-A random route identifies one launched process. The route replaces the whole
-`ANTHROPIC_BASE_URL`; its private file contains the real upstream and current
-run record binding. Provider authentication, endpoint classification, pricing
-and binding hashes are computed before that final override. Both `NO_PROXY`
-and `no_proxy` include loopback. The recorder binds the route before launching
-and releases it when the record closes; detaching a kept run retains the binding.
-Each request is stamped when it starts, so an in-flight request keeps its
-original record across rebinding and planned restarts.
-
-The proxy forwards request headers and bodies and raw response chunks unchanged,
-except for HTTP hop-by-hop framing and the upstream Host header. Compressed
-streams are decoded incrementally on the recording side; gzip and deflate
-need no optional dependencies. `h11>=0.16,<1` is an explicit HTTP dependency.
-`llm_request_routes` stores attribution and upstream host/path without userinfo
-or query; `llm_request_parts` deduplicates system prompts, tools and messages
-within a route; `llm_requests` stores exchange metadata, assembled responses,
-usage and redacted headers. Reconstructed request JSON is equivalent to the
-original; its serialization need not be byte-identical. Header values are
-allowlisted with a secret-name deny backstop, credential-like query values are
-redacted, and URLs containing credentials are not recorded. Bodies can contain
-private prompts, code and secrets printed by tools: operators must account for
-that before enabling recording. These diagnostic settings are not exported.
-
-Recording failures do not fail a launch: after one bounded attempt to start
-an unavailable proxy, the run connects directly and records
-`llmrec: {state: "bypassed", reason: "proxy_unavailable"}` in its metadata.
-Already running processes cannot be redirected; every five seconds the control
-plane checks health and restarts a dead proxy on its previous port. Active
-streams interrupted by a crash rely on runtime retries. Database outages retry
-writes with backoff independently of forwarding; a 256 MiB pending cap drops
-new captures. Oversized or undecodable bodies carry an explicit `record_gap`,
-including `body_encoding_unparsed` for unsupported compression. Request bodies
-are capped at 256 MiB for forwarding and 16 MiB for capture; response capture
-is capped at 16 MiB raw and 4 MiB assembled, with a 1 MiB text fallback.
-
-The operator-only v1 operations are `llmrec_settings.get`,
-`llmrec_settings.update`, `llm_requests.list` (metadata only) and
-`llm_requests.get` (reconstructed request and response). The schema-generated
-CLI exposes them as `loopercli llmrec-settings` and `loopercli llm-requests`.
-API-client tokens, agent tools, Telegram and Lark cannot read these bodies or
-change the switch; the chat channels need no change. Proxy health exposes
-requests, recorded captures, pending captures, dropped captures and write
-errors. The `llmrec` self-check skips when disabled, fails when unavailable,
-and warns for outdated processes or nonzero drop/write-error counters.
 
 ### New sessions: handoff and resume brief
 

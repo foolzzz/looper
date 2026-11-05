@@ -1760,14 +1760,14 @@ class WorkerPool:
                         or not isinstance(handle, ProcessRun):
                     break
                 first_stderr = stderr
-                # The CLI exited; leave its potentially shared worker-server helper alone.
+                # The CLI exited; keep this run's helper for its one retry.
                 ended = True
                 if deadline is not None and time.monotonic() >= deadline:
                     raise asyncio.TimeoutError
                 await recorder.record(retry_event(stderr))
                 if parent_task_id:
                     await self._activity(parent_task_id, worker_id, "phase", RETRY_SUMMARY)
-                # Reuse the prepared inputs and their content-named directory. Only
+                # Reuse the prepared inputs and this run's private directory. Only
                 # the process and its channel are fresh; this is still one run.
                 handle = ProcessRun(runtime, command, launch=launch, cwd=work_dir,
                                     session_dir=handle._session_dir, prompt_file=handle._prompt_file,

@@ -201,6 +201,10 @@ def reclaim_sessions(runtime_root: Path, *, saved: Iterable[tuple[str, str | Non
                 continue
             try:
                 _remove(directory)
+                if runtime_type == "cursor-agent":
+                    from .runtimes.cursor_agent import run_tmpdir
+
+                    shutil.rmtree(run_tmpdir(directory), ignore_errors=True)
             except OSError:
                 logger.warning("cannot remove the unused session directory %s", directory, exc_info=True)
                 continue

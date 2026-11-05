@@ -11,6 +11,36 @@ from looper.agents import self_check
 from looper.agents.http_server import AgentHTTPServer
 from looper.agents.runtimes import ttadk
 from looper.db import profile_registry
+from fake_claude import fake_claude
+
+
+def test_doctor_waits_for_cold_ttadk_sign_in_and_fails_when_signed_out(tmp_path, monkeypatch, capsys):
+    from unittest.mock import AsyncMock
+
+    from looper import ops_config
+    from looper.agents import service
+
+    executable = fake_claude(tmp_path / "ttadk", "import sys\nsys.exit(1)\n")
+    runtimes = [{"type": "codex", "executable": executable}]
+    ok = self_check.Check("unrelated", "Unrelated", self_check.OK, "ready")
+    monkeypatch.setattr(self_check, "check_database", AsyncMock(return_value=ok))
+    monkeypatch.setattr(self_check, "_database_facts", AsyncMock(
+        return_value=self_check._DatabaseFacts(ttadk_runtimes=runtimes)))
+    monkeypatch.setattr(self_check, "check_claude", lambda *args: [])
+    for name in ("check_codex_login", "check_grok_login", "check_cursor_login", "check_git", "check_lark_cli"):
+        monkeypatch.setattr(self_check, name, lambda *args: ok)
+    monkeypatch.setattr(self_check, "check_pg_dump", lambda *args: (ok, None))
+    monkeypatch.setattr(self_check, "check_step_worktrees", AsyncMock(return_value=ok))
+    monkeypatch.setattr(service, "doctor_check", lambda: ok)
+    ttadk.forget_probe()
+    try:
+        ops = ops_config.OpsConfig(runtime_root=tmp_path, path=tmp_path / ops_config.FILE)
+        assert self_check.doctor(ops) == 1
+        output = capsys.readouterr().out
+        assert "fail  TTADK" in output and "no valid sign-in" in output
+        assert ttadk._probed[(executable, "codex")][1] is ttadk.TtadkProblem.NOT_SIGNED_IN
+    finally:
+        ttadk.forget_probe()
 
 
 @pytest.mark.parametrize(("profiles", "problem", "status"), [

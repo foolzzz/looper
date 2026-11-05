@@ -34,6 +34,10 @@ class TtadkProblem(str, Enum):
     CHECKING = "checking"
     WRONG_TOOL = "wrong_tool"
 
+    @property
+    def blocks_launch(self) -> bool:
+        return self in (self.NOT_FOUND, self.NOT_SIGNED_IN, self.WRONG_TOOL)
+
     def message(self, runtime_type: str) -> str:
         if self is self.CHECKING:
             return f"checking TTADK's sign-in for `{runtime_type}`"
@@ -107,6 +111,14 @@ _CURSOR_SIGN_IN_TIMEOUT_SEC = 45.0
 _PROBE_TTL_SEC = 60.0
 _probed: dict[tuple[str, str], tuple[float, TtadkProblem | None]] = {}
 _probe_locks: dict[tuple[str, str], threading.Lock] = {}
+
+
+def launch_note(executable: str, tool: str) -> str | None:
+    """Retain an inconclusive preflight in the launch record without probing again."""
+    cached = _probed.get((executable, tool))
+    if cached is not None and cached[1] is TtadkProblem.CHECK_FAILED:
+        return f"could not finish ({cached[1].value})"
+    return None
 
 
 def _sign_in_problem(executable: str, tool: str) -> TtadkProblem | None:

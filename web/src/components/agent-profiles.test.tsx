@@ -89,6 +89,7 @@ describe("Agent Profiles", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -110,6 +111,65 @@ describe("Agent Profiles", () => {
 
   const CODEX: AgentProfile = { ...PROFILE, model_id: "model-responses", model: { ...PROFILE.model, model_id: "model-responses", protocol: "openai-responses" }, runtime_id: "rt-codex", runtime_type: "codex", agent_teams: false };
 
+  it("re-reads pending startup checks and shows failures without a reload, then stops", async () => {
+    vi.useFakeTimers();
+    let checks = [{ id: "claude_cli", label: "Claude Code CLI", status: "pending", detail: "Checking…", fix: "Install Claude Code" }];
+    const fetcher = vi.fn(async () => Response.json({ status: "ok", result: { checks } }));
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => root.render(<ClaudeCheckBanner />));
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => vi.advanceTimersByTimeAsync(2999));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    checks = [{ ...checks[0], status: "fail", detail: "CLI missing" },
+      { id: "git", label: "git", status: "pending", detail: "Checking…", fix: "" }];
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("CLI missing");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    checks = [checks[0], { ...checks[1], status: "ok" }];
+    await act(async () => vi.advanceTimersByTimeAsync(3000));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await act(async () => vi.advanceTimersByTimeAsync(9000));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps polling pending checks after a transient read error and cancels on unmount", async () => {
+    vi.useFakeTimers();
+    const pending = () => Response.json({ status: "ok", result: { checks: [
+      { id: "git", label: "git", status: "pending", detail: "Checking…", fix: "" },
+    ] } });
+    const fetcher = vi.fn().mockResolvedValueOnce(pending()).mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue(pending());
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => root.render(<ClaudeCheckBanner />));
+    await act(async () => vi.advanceTimersByTimeAsync(6000));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await act(async () => root.render(null));
+    await act(async () => vi.advanceTimersByTimeAsync(6000));
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it("refreshes the Agent Profile login while any startup check is pending", async () => {
+    vi.useFakeTimers();
+    registry.providers.push(provider("subscription", { auth: "oauth", oauth_runtime_type: "claude-code" }));
+    const loginModel = model("subscription-model", "anthropic-messages", "subscription");
+    registry.models.push(loginModel);
+    const profile = { ...PROFILE, model_id: loginModel.model_id, model: { ...PROFILE.model, model_id: loginModel.model_id },
+      provider: { ...PROFILE.provider, provider_id: "subscription", name: "subscription", auth: "oauth" as const } };
+    let checks = [{ id: "claude_login", label: "Claude login", status: "pending", detail: "Checking…", fix: "" }];
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => Response.json({ status: "ok", result:
+      String(input) === "/api/v1/system/status" ? { checks } : registry }));
+    vi.stubGlobal("fetch", fetcher);
+    await show(profile);
+    expect(container.textContent).toContain("checking the login");
+    checks = [{ ...checks[0], status: "fail", detail: "Login missing" }];
+    await act(async () => vi.advanceTimersByTimeAsync(3000));
+    expect(container.textContent).toContain("not logged in: run claude auth login");
+    const reads = () => fetcher.mock.calls.filter(([input]) => String(input) === "/api/v1/system/status").length;
+    expect(reads()).toBe(2);
+    await act(async () => vi.advanceTimersByTimeAsync(9000));
+    expect(reads()).toBe(2);
+  });
+
   it("distinguishes TTADK from native Codex in the runtime dropdown and saved profile", async () => {
     const native = registry.runtimes.find((runtime) => runtime.runtime_id === "rt-codex")!;
     registry.runtimes.push({ ...native, runtime_id: "rt-ttadk-codex", name: "ttadk-codex", launcher: "ttadk" });
@@ -122,16 +182,14 @@ describe("Agent Profiles", () => {
     expect(container.textContent).toContain("ttadk-codex (launcher: ttadk) · Provider · model");
   });
 
-  it("offers only the row's OAuth provider when selecting a TTADK runtime", async () => {
+  it("disables a TTADK runtime for an API key with the login reason", async () => {
     const native = registry.runtimes.find((runtime) => runtime.runtime_id === "rt-codex")!;
     registry.runtimes.push({ ...native, runtime_id: "rt-ttadk-codex", name: "ttadk-codex",
       launcher: "ttadk", auth_kinds: ["oauth"] });
     await show(CODEX);
-    expect([...select("Provider").options].map((option) => option.value).filter(Boolean)).toContain("provider");
-    await choose("Runtime", "rt-ttadk-codex");
-    expect([...select("Provider").options].map((option) => option.value).filter(Boolean)).toEqual(["codex-login"]);
-    expect(options()).toEqual(["codex-model"]);
-    expect(select("Model *").value).toBe("");
+    const option = select("Runtime").querySelector<HTMLOptionElement>('option[value="rt-ttadk-codex"]')!;
+    expect(option.disabled).toBe(true);
+    expect(option.textContent).toContain("takes only its own login");
   });
 
   it("shows failed Cursor and TTADK checks with their own fixes", async () => {
@@ -174,17 +232,21 @@ describe("Agent Profiles", () => {
     expect(link.getAttribute("href")).toBe("#settings/providers/provider");
   });
 
-  it("hides disabled providers' models for new profiles and retains only the current disabled model when editing", async () => {
+  it("offers enabled accounts and preserves only the edited profile's disabled model and identity", async () => {
+    registry.providers[0].enabled = false;
     registry.models = registry.models.map((item) => ({ ...item, provider_enabled: item.provider_id !== "provider" }));
     await show(null);
-    expect(options()).not.toContain("model-messages");
-    expect(options()).toContain("other-messages");
+    await input("Model *", "model");
+    await choose("Protocol *", "anthropic-messages");
+    expect([...select("Provider *").options].map((o) => o.value)).toEqual(["", "other"]);
+    expect(select("Provider *").value).toBe("other");
     await act(async () => root.unmount()); root = createRoot(container);
-    await show(PROFILE);
-    expect(options()).toContain("model-messages");
-    expect(select("Model *").value).toBe("model-messages");
-    expect(options()).not.toContain("model-chat");
-    expect(options()).not.toContain("model-responses");
+    await show({ ...PROFILE, provider: { ...PROFILE.provider, enabled: false } });
+    expect(select("Provider *").selectedOptions[0].textContent).toBe("Provider (disabled)");
+    expect(container.textContent).toContain("Provider Provider is disabled: this profile's runs do not start.");
+    expect([...select("Protocol *").options].map((o) => o.value)).not.toContain("openai-chat");
+    await submit();
+    expect(requests[0].body.model_id).toBe(PROFILE.model_id);
   });
 
   function RegistryReader({ id }: { id: string }) {
@@ -272,7 +334,7 @@ describe("Agent Profiles", () => {
   };
   const registeredModels = (names: string[], providerId = "provider", protocol: Model["protocol"] = "anthropic-messages") =>
     names.map((name) => ({ ...model(`${providerId}-${name}`, protocol, providerId), name }));
-  const modelOptions = () => [...select("Model *").options].filter((o) => o.value).map((o) => o.value);
+  const modelOptions = () => [...container.querySelectorAll<HTMLDataListElement>("datalist option")].map((o) => o.getAttribute("value"));
 
   const apiRuntime = () => {
     registry.runtime_types.push({ ...registry.runtime_types[0], type: "api", label: "Model API", runtime_id: "rt-api",
@@ -306,22 +368,23 @@ describe("Agent Profiles", () => {
 
   it("lets a detected API runtime be selected", async () => {
     apiRuntime();
-    await show();
+    await show(CODEX);
     expect([...select("Runtime").options].find((option) => option.value === "rt-api")?.disabled).toBe(false);
     await choose("Runtime", "rt-api");
     expect(select("Runtime").value).toBe("rt-api");
   });
 
-  it("offers only Responses models for the API runtime", async () => {
+  it("disables an API runtime for protocols it does not speak", async () => {
     apiRuntime();
     await show();
-    await choose("Runtime", "rt-api");
-    expect(modelOptions()).toEqual(["model-responses"]);
+    const option = select("Runtime").querySelector<HTMLOptionElement>('option[value="rt-api"]')!;
+    expect(option.disabled).toBe(true);
+    expect(option.textContent).toContain("speaks OpenAI Responses");
   });
 
   it("uses the shared effort list for the API runtime", async () => {
     apiRuntime();
-    await show();
+    await show(CODEX);
     await choose("Runtime", "rt-api");
     expect([...select("Effort").options].map((option) => option.value)).toEqual(["", ...registry.limits.effort_levels]);
   });
@@ -330,6 +393,8 @@ describe("Agent Profiles", () => {
     apiRuntime();
     await show();
     expect(container.querySelector('input[type="checkbox"]')).not.toBeNull();
+    await choose("Protocol *", "openai-responses");
+    await choose("Provider *", "provider");
     await choose("Runtime", "rt-api");
     expect(container.querySelector('input[type="checkbox"]')).toBeNull();
     expect(container.textContent).not.toContain("Agent teams");
@@ -344,74 +409,56 @@ describe("Agent Profiles", () => {
     expect(container.textContent).toContain("Codex CLI");
   });
 
-  it("pairs Messages API key providers by the server's exact supported models and saves [1m]", async () => {
+  it("enables restricted runtimes for their exact supported names and saves [1m]", async () => {
     dsh();
     registry.models = registeredModels(["unrelated", ...supported]);
-    await show();
+    await show(null);
+    await input("Model *", "deepseek-v4-pro[1m]");
+    expect(select("Protocol *").value).toBe("anthropic-messages");
+    expect(select("Provider *").value).toBe("provider");
     await choose("Runtime", "rt-dsh");
-    expect(modelOptions()).toEqual(supported.map((name) => `provider-${name}`));
-    expect(select("Model *").value).toBe("");
-    await choose("Model *", "provider-deepseek-v4-pro[1m]");
-    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    expect(requests).toHaveLength(1);
-    expect(requests[0].url).toBe("/api/v1/profiles/update");
+    await submit();
     expect(requests[0].body).toMatchObject({ runtime_id: "rt-dsh", model_id: "provider-deepseek-v4-pro[1m]", agent_teams: false });
     expect(container.textContent).toContain("the DSH runtime cannot replace its default system prompt");
   });
 
-  it.each(["chat", "oauth", "no intersection"])("offers no valid DSH pairing for %s providers", async (kind) => {
+  it.each([
+    ["openai-chat", "api_key", "deepseek-flash", "speaks Anthropic Messages"],
+    ["anthropic-messages", "oauth", "deepseek-flash", "cannot use another runtime's login"],
+    ["anthropic-messages", "api_key", "unrelated", `runs only ${supported.join(", ")}`],
+  ] as const)("explains restricted runtime refusal for %s/%s/%s", async (protocol, auth, name, reason) => {
     dsh();
-    const provider = registry.providers[0];
-    registry.models = registeredModels([kind === "no intersection" ? "deepseek-flash-extra" : supported[0]],
-      "provider", kind === "chat" ? "openai-chat" : "anthropic-messages");
-    if (kind === "oauth") Object.assign(provider, { auth: "oauth", oauth_runtime_type: "dsh" });
-    await show();
-    await choose("Runtime", "rt-dsh");
-    expect([...select("Provider").options].map((o) => o.value)).not.toContain("provider");
-    expect(select("Provider").value).toBe("");
+    registry.providers[0].auth = auth;
+    registry.models = registeredModels([name], "provider", protocol);
+    await show(null);
+    await input("Model *", name);
+    const option = select("Runtime").querySelector<HTMLOptionElement>('option[value="rt-dsh"]')!;
+    expect(option.disabled).toBe(true);
+    expect(option.textContent).toContain(reason);
   });
 
-  it("requires a registered compatible DSH model even when the provider has suggestions", async () => {
+  it("does not offer unregistered suggestions and explains an empty catalog", async () => {
     dsh();
+    registry.models = [];
     registry.providers[0].suggested_models = supported;
-    await show();
-    await choose("Runtime", "rt-dsh");
-    expect(select("Model *").tagName).toBe("SELECT");
+    await show(null);
     expect(modelOptions()).toEqual([]);
-    expect(container.textContent).toContain("No compatible models");
-    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(select("Protocol *").disabled).toBe(true);
+    expect(container.textContent).toContain("No compatible models. Add a model in LLM Providers.");
+    await submit();
     expect(requests).toEqual([]);
-    expect(container.querySelector('[role="alert"]')!.textContent).toContain("Choose a compatible model");
   });
 
-  it("uses supported_models for any runtime and preserves unrestricted runtime catalogs including pi", async () => {
+  it("reads supported names from the runtime contract", async () => {
     dsh();
     registry.runtime_types.at(-1)!.supported_models = ["server-only-model"];
     registry.models = registeredModels(["server-only-model", supported[0]]);
-    await show();
-    await choose("Runtime", "rt-dsh");
-    expect(modelOptions()).toEqual(["provider-server-only-model"]);
-    registry.runtime_types.push({ ...registry.runtime_types[0], type: "pi", label: "pi", runtime_id: "rt-pi", supported_models: null });
-    registry.runtimes.push({ ...registry.runtimes[0], type: "pi", runtime_id: "rt-pi" });
-    await show();
-    await choose("Runtime", "rt-pi");
-    expect(modelOptions()).toEqual(["provider-server-only-model", `provider-${supported[0]}`]);
-  });
-
-  it("filters DSH models by account without silently selecting another model", async () => {
-    dsh();
-    registry.models = [...registeredModels(["unrelated", supported[1]]), ...registeredModels([supported[2]], "second")];
-    registry.providers.push(provider("second"));
-    await show();
-    await choose("Runtime", "rt-dsh");
-    await choose("Model *", `provider-${supported[1]}`);
-    await choose("Provider", "second");
-    expect(modelOptions()).toEqual([`second-${supported[2]}`]);
-    expect(select("Model *").value).toBe("");
-    await choose("Model *", `second-${supported[2]}`);
-    await choose("Runtime", "rt-claude-code");
-    await choose("Runtime", "rt-dsh");
-    expect(select("Model *").value).toBe(`second-${supported[2]}`);
+    await show(null);
+    await input("Model *", supported[0]);
+    expect(select("Runtime").querySelector<HTMLOptionElement>('option[value="rt-dsh"]')!.textContent)
+      .toContain("runs only server-only-model");
+    await input("Model *", "server-only-model");
+    expect(select("Runtime").querySelector<HTMLOptionElement>('option[value="rt-dsh"]')!.disabled).toBe(false);
   });
 
   it("opens a saved DSH profile with its exact [1m] model selected", async () => {
@@ -419,7 +466,8 @@ describe("Agent Profiles", () => {
     registry.models = registeredModels(supported);
     await show({ ...PROFILE, runtime_id: "rt-dsh", runtime_type: "dsh", model_id: registry.models[3].model_id, model: registry.models[3], agent_teams: false });
     expect(select("Runtime").value).toBe("rt-dsh");
-    expect(select("Model *").value).toBe(registry.models[3].model_id);
+    expect(select("Model *").value).toBe(registry.models[3].name);
+    expect(select("Provider *").value).toBe("provider");
   });
 
   it.each([PROFILE, CODEX])("has no system prompt choice on $runtime_type, which is set per role", async (profile) => {
@@ -438,7 +486,7 @@ describe("Agent Profiles", () => {
 
   const submit = () => act(async () => container.querySelector("form")!.dispatchEvent(
     new Event("submit", { bubbles: true, cancelable: true })));
-  const options = () => [...select("Model *").options].filter((item) => item.value).map((item) => item.value);
+
   const input = async (label: string, value: string) => {
     const field = select(label) as unknown as HTMLInputElement;
     await act(async () => {
@@ -447,77 +495,115 @@ describe("Agent Profiles", () => {
     });
   };
 
-  it("requires an explicit model for a new profile and saves only its identity", async () => {
+  it("requires a model, protocol and provider and saves exactly the existing fields", async () => {
     await show(null);
-    expect(select("Model *").tagName).toBe("SELECT");
+    expect(select("Model *").tagName).toBe("INPUT");
     expect(select("Model *").value).toBe("");
+    expect([...container.querySelectorAll("label")].slice(0, 5).map((l) => l.textContent))
+      .toEqual(["Name *", "Model *", "Protocol *", "Provider *", "Runtime"]);
     await input("Name *", "New profile");
     await submit();
     expect(requests).toEqual([]);
-    expect(container.querySelector('[role="alert"]')!.textContent).toMatch(/choose.*model/i);
-    await choose("Model *", "model-messages");
+    expect(container.querySelector('[role="alert"]')!.textContent)
+      .toBe("Choose a model, its protocol and a provider before saving.");
+    await input("Model *", "model");
+    await choose("Protocol *", "anthropic-messages");
+    await submit();
+    expect(requests).toEqual([]);
+    await choose("Provider *", "provider");
     await choose("Effort", "high");
     await submit();
     expect(requests[0].body).toEqual({ name: "New profile", runtime_id: "rt-claude-code", model_id: "model-messages",
       effort: "high", agent_teams: true, custom_prompt: "" });
   });
 
-  it("filters models by exact runtime protocol, auth kind and OAuth ownership", async () => {
-    await show();
-    expect(options()).toEqual(["model-messages", "other-messages"]);
-    await choose("Runtime", "rt-codex");
-    expect(options()).toEqual(["model-responses", "codex-model"]);
-    expect(select("Model *").value).toBe("");
-    await choose("Model *", "codex-model");
+  it("switches an incompatible runtime with the reason and applies its effort and teams defaults", async () => {
+    registry.runtime_types[1].effort_levels = ["high"];
+    await show({ ...PROFILE, effort: "xhigh" });
+    await choose("Protocol *", "openai-responses");
+    await choose("Provider *", "provider");
+    expect(select("Runtime").value).toBe("rt-codex");
+    expect(select("Effort").value).toBe("");
+    expect(container.textContent).toContain("Runtime changed to Codex CLI: Claude Code CLI speaks Anthropic Messages.");
     await submit();
-    expect(requests[0].body.model_id).toBe("codex-model");
     expect(requests[0].body.agent_teams).toBe(false);
-  });
-
-  it("does not offer OAuth models when the runtime only supports API keys", async () => {
-    await show(CODEX, { ...REGISTRY, runtimes: REGISTRY.runtimes.map((item) => ({ ...item, auth_kinds: ["api_key"] })) });
-    expect(options()).toEqual(["model-responses"]);
-  });
-
-  it("keeps same-name models with distinct protocols selectable by id", async () => {
-    await show(null);
+    await choose("Protocol *", "anthropic-messages");
+    await choose("Provider *", "provider");
+    expect(container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(true);
     await choose("Runtime", "rt-stand-in");
-    const labels = [...select("Model *").options].map((item) => item.textContent);
-    expect(labels).toContain("Provider / model / anthropic-messages");
-    expect(labels).toContain("Provider / model / openai-chat");
-    await input("Name *", "Chat profile");
-    await choose("Model *", "model-chat");
+    expect(container.textContent).not.toContain("Runtime changed to");
+  });
+
+  it("offers a login model but enables only its owning runtime", async () => {
+    registry.models = [model("login-model", "anthropic-messages", "subscription")];
+    registry.providers.push(provider("subscription", { auth: "oauth", oauth_runtime_type: "claude-code" }));
+    registry.runtimes.reverse();
+    await show(null);
+    await input("Model *", "model");
+    expect(select("Runtime").value).toBe("rt-claude-code");
+    const standIn = select("Runtime").querySelector<HTMLOptionElement>('option[value="rt-stand-in"]')!;
+    expect(standIn.disabled).toBe(true);
+    expect(standIn.textContent).toContain("subscription is the login of another runtime");
+    expect([...select("Runtime").options].filter((o) => !o.disabled).map((o) => o.value)).toEqual(["rt-claude-code"]);
+    expect(container.textContent).toContain("Runtime changed to Claude Code CLI");
+    expect(select("Provider *").parentElement!.textContent).toContain("login (OAuth)");
+  });
+
+  it("lists names once in case-insensitive order and requires a choice for multiple labelled protocols", async () => {
+    registry.models.push({ ...model("z", "openai-chat"), name: "Zulu" }, { ...model("a", "openai-chat"), name: "alpha" });
+    await show(null);
+    expect(modelOptions()).toEqual(["alpha", "model", "Zulu"]);
+    await input("Model *", "model");
+    expect(select("Protocol *").value).toBe("");
+    expect([...select("Protocol *").options].slice(1).map((o) => o.textContent)).toEqual([
+      "Anthropic Messages (anthropic-messages)", "OpenAI Responses (openai-responses)", "OpenAI Chat Completions (openai-chat)",
+    ]);
+    await choose("Protocol *", "openai-chat");
+    expect(select("Provider *").value).toBe("provider");
+    expect(container.textContent).toContain("Runtimes that speak it: Stand-in");
+    expect(select("Runtime").value).toBe("rt-stand-in");
     await submit();
     expect(requests[0].body.model_id).toBe("model-chat");
-    expect(requests[0].body).not.toHaveProperty("provider_id");
-    expect(requests[0].body).not.toHaveProperty("model");
   });
 
-  it("uses provider only as a model filter, without choosing a model", async () => {
+  it("automatically chooses the only protocol and offering and retains valid protocol choices", async () => {
+    registry.models = [{ ...model("unique", "openai-chat"), name: "single" }, ...registry.models];
     await show(null);
-    await choose("Provider", "other");
-    expect(options()).toEqual(["other-messages"]);
-    expect(select("Model *").value).toBe("");
-    await choose("Model *", "other-messages");
-    await input("Name *", "Other profile");
+    await input("Model *", "single");
+    expect(select("Protocol *").value).toBe("openai-chat");
+    expect(select("Provider *").value).toBe("provider");
+    await input("Model *", "model");
+    expect(select("Protocol *").value).toBe("openai-chat");
     await submit();
-    expect(requests[0].body.model_id).toBe("other-messages");
-    expect(requests[0].body).not.toHaveProperty("provider_id");
+    expect(requests[0].body.model_id).toBe("model-chat");
   });
 
-  it("clears incompatible choices without selecting the first model when changing runtime", async () => {
-    await show();
-    await choose("Runtime", "rt-codex");
+  it("explains an unknown name without creating a model or sending a save request", async () => {
+    await show(null);
+    await input("Model *", "unknown");
+    expect(container.textContent).toContain("No enabled provider offers unknown. Add it under LLM Providers: Models, or Fetch models.");
+    expect(container.querySelector('a[href="#settings/providers"]')).not.toBeNull();
+    expect(select("Protocol *").disabled).toBe(true);
+    expect(select("Provider *").value).toBe("");
     await submit();
     expect(requests).toEqual([]);
-    await choose("Runtime", "rt-claude-code");
-    expect(select("Model *").value).toBe("");
+    expect(container.querySelector('[role="alert"]')!.textContent).toBe("Choose a model, its protocol and a provider before saving.");
+  });
+
+  it("reports when no runtime can run a selected model and blocks saving", async () => {
+    registry.models = [model("foreign", "openai-responses", "foreign-login")];
+    await show(null);
+    await input("Model *", "model");
+    expect(container.textContent).toContain("No runtime here can run this model.");
+    await submit();
+    expect(requests).toEqual([]);
+    expect(container.textContent).toContain("Choose a runtime that can run this model.");
   });
 
   it("keeps a compatible selection and the saved teams preference across runtime changes", async () => {
     await show({ ...PROFILE, agent_teams: false });
     await choose("Runtime", "rt-stand-in");
-    expect(select("Model *").value).toBe("model-messages");
+    expect(select("Model *").value).toBe("model");
     await choose("Runtime", "rt-claude-code");
     expect(container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(false);
   });
@@ -525,7 +611,7 @@ describe("Agent Profiles", () => {
   it("blocks saving a model removed by a registry refresh", async () => {
     await show();
     await show(PROFILE, { ...REGISTRY, models: [] });
-    expect(select("Model *").value).toBe("");
+    expect(select("Provider *").value).toBe("");
     await submit();
     expect(requests).toEqual([]);
     expect(container.querySelector('[role="alert"]')!.textContent).toMatch(/model/i);
@@ -536,6 +622,7 @@ describe("Agent Profiles", () => {
     let registry = REGISTRY;
     vi.stubGlobal("fetch", vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
       if (String(request) === "/api/v1/registry/view") return Response.json({ status: "ok", result: registry });
+      if (String(request) === "/api/v1/system/status") return Response.json({ status: "ok", result: { checks: [] } });
       if (init?.method === "POST") {
         requests.push({ url: String(request), body: (JSON.parse(String(init.body)).fields ?? JSON.parse(String(init.body))) });
         registry = { ...REGISTRY, profiles: [...REGISTRY.profiles, saved] };
@@ -557,7 +644,9 @@ describe("Agent Profiles", () => {
     });
     expect(container.querySelectorAll("form")).toHaveLength(1);
     await input("Name *", "New profile");
-    await choose("Model *", "model-messages");
+    await input("Model *", "model");
+    await choose("Protocol *", "anthropic-messages");
+    await choose("Provider *", "provider");
     const add = [...container.querySelectorAll("button")].find((item) => item.textContent === "Add Agent Profile")!;
     await act(async () => add.click());
     expect(parentSubmit).not.toHaveBeenCalled();
@@ -577,7 +666,7 @@ describe("Agent Profiles", () => {
     await act(async () => [...container.querySelectorAll("button")].find((item) => item.textContent?.includes("Add Agent Profile"))!.click());
     registry = { ...REGISTRY, models: [...REGISTRY.models, { ...model("fresh", "anthropic-messages"), name: "fresh" }] };
     await act(async () => window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT)));
-    expect(options()).toContain("fresh");
+    expect(modelOptions()).toContain("fresh");
     expect(select("Model *").value).toBe("");
   });
 
@@ -589,7 +678,7 @@ describe("Agent Profiles", () => {
     await act(async () => root.render(<AgentProfileForm profile={PROFILE} registry={REGISTRY} onDone={done} />));
     await submit();
     expect(container.querySelector('[role="alert"]')!.textContent).toContain("Model is no longer available");
-    expect(select("Model *").value).toBe("model-messages");
+    expect(select("Model *").value).toBe("model");
     expect(done).not.toHaveBeenCalled();
   });
 
@@ -756,6 +845,7 @@ describe("pi Agent Profiles", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/v1/registry/view") return Response.json({ status: "ok", result: PI_REGISTRY });
+      if (url === "/api/v1/system/status") return Response.json({ status: "ok", result: { checks: [] } });
       if (init?.body) requests.push({ url, body: (JSON.parse(String(init.body)).fields ?? JSON.parse(String(init.body))) });
       const answer = { profile: PI_PROFILE, warnings: [] };
       return new Response(JSON.stringify({ status: "ok", result: answer }), { status: 200 });
@@ -776,25 +866,14 @@ describe("pi Agent Profiles", () => {
     expect(field, label).toBeTruthy();
     return document.getElementById(field!.htmlFor) as HTMLSelectElement;
   };
-  const choose = async (label: string, value: string) => {
-    await act(async () => {
-      const field = select(label);
-      field.value = value;
-      field.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-  };
 
-  it("offers both compatible API-key providers and not OAuth or Anthropic", async () => {
+  it("offers only providers for the chosen name and protocol on a saved Pi profile", async () => {
     await act(async () => root.render(<AgentProfileForm profile={PI_PROFILE} registry={PI_REGISTRY} onDone={() => {}} />));
-    const provider = select("Provider");
-    expect([...provider.querySelectorAll("option")].map((option) => option.value)).toEqual(["", "responses", "chat"]);
-    expect([...provider.options].every((option) => !option.disabled || option.value === "")).toBe(true);
-    await choose("Provider", "chat");
-    expect(select("Provider").value).toBe("chat");
-    await choose("Provider", "responses");
-    expect(select("Provider").value).toBe("responses");
-    expect(container.textContent).not.toMatch(/login \(OAuth\)|Pi login|Claude login|Anthropic/);
-    expect([...select("Runtime").querySelectorAll("option")].map((option) => option.textContent)).toContain("Pi CLI");
+    expect([...select("Provider *").options].map((option) => option.value)).toEqual(["", "responses"]);
+    expect(select("Provider *").value).toBe("responses");
+    expect(select("Model *").value).toBe("selected-model");
+    expect(select("Protocol *").value).toBe("openai-responses");
+    expect([...select("Runtime").options].map((option) => option.textContent)).toContain("Pi CLI");
   });
 
   it("lists four roles and leaves the system prompt mode on the role", async () => {

@@ -802,7 +802,10 @@ async def _login_problem(profile: AgentProfile) -> str | None:
         if runtime.ttadk_tool is None:
             problem = f"{runtime.label} cannot be launched through ttadk"
         elif found := await ttadk.sign_in_problem(profile.runtime.executable or "ttadk", runtime.ttadk_tool):
-            problem = found.message(profile.runtime.type)
+            if found.blocks_launch:
+                problem = found.message(profile.runtime.type)
+            elif found is ttadk.TtadkProblem.CHECK_FAILED:
+                logger.warning("TTADK sign-in check could not finish (%s); starting run", found.value)
     return f"Agent Profile {profile.name!r} cannot run: {problem}" if problem else None
 
 
@@ -1069,6 +1072,11 @@ class Launch:
                 "state": "bypassed" if self.llmrec.reason is SkipReason.PROXY_UNAVAILABLE else "skipped",
                 "reason": self.llmrec.reason.value, "detail": self.llmrec.detail,
             }
+        from .runtimes import Launcher, ttadk
+
+        if self.profile.runtime.launcher is Launcher.TTADK and self.runtime.ttadk_tool is not None:
+            if note := ttadk.launch_note(self.profile.runtime.executable or "ttadk", self.runtime.ttadk_tool):
+                record["ttadk_check"] = note
         return {**record, **self.runtime.launch_record(self)}
 
 

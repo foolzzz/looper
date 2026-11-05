@@ -22,7 +22,7 @@ from looper.agents.library import AgentLibrary
 from looper.agents.runtimes import AuthKind, Launcher, Probe, RuntimeUnsupported, cursor_agent, ttadk
 from looper.agents.runtimes.cursor_agent import write_ttadk_shim
 from looper.agents.tiers import worker
-from test_cursor_agent import CURSOR, PERSONAL_CONFIG, _launch as _native_launch, _prompt
+from test_cursor_agent import CURSOR, PERSONAL_CONFIG, _launch as _native_launch, _prompt, cursor_tmpdirs  # noqa: F401
 from test_ttadk_runtime import _worker_run
 
 
@@ -79,12 +79,18 @@ def test_ttadk_cursor_command_preserves_native_arguments(builder: str, launch_pa
         return session._turn_argv()
 
     native, wrapped = command(_native_launch()), command(_launch())
+    if builder == "run":
+        # Each command now owns execution state, even with identical cached inputs.
+        for argv in (native, wrapped):
+            run = str(Path(argv[1].partition("=")[2]).parent)
+            argv[:] = [arg.replace(run, "<run>") for arg in argv]
     assert native[:3] == wrapped[:3]
     assert native[1].startswith("CURSOR_CONFIG_DIR=") and native[2].startswith("CURSOR_DATA_DIR=")
     shim = tmp_path / "runtime/.local/cursor-agent/ttadk-bin"
-    assert wrapped[3:10] == [f"PATH={shim}{os.pathsep}{launch_path or inherited_path}", "ttadk", "code", "-t",
+    assert wrapped[3].startswith("TMPDIR=") and native[3].startswith("TMPDIR=")
+    assert wrapped[4:11] == [f"PATH={shim}{os.pathsep}{launch_path or inherited_path}", "ttadk", "code", "-t",
                              "cursor-cli", "--skip-check", "--"]
-    assert wrapped[10:] == native[4:]
+    assert wrapped[11:] == native[5:]
     if builder == "resident-turn":
         assert native[-2:] == wrapped[-2:] == CURSOR.resume_args("saved-chat")
     assert not any(arg.startswith("HOME=") for arg in wrapped)
@@ -178,7 +184,14 @@ def test_ttadk_cursor_probe_reports_versions_and_errors(mode, monkeypatch) -> No
         "wrong-tool": "TTADK's cursor-cli command is `other`, not `agent`: Looper will not launch it"}.get(mode)
 
 
-def test_worker_reads_cursor_report_and_instructions_through_ttadk(tmp_path: Path, monkeypatch, agent_db: Any) -> None:
+@pytest.mark.parametrize("check_mode", ["success", "timeout", "signed-out"])
+def test_worker_reads_cursor_report_and_instructions_through_ttadk(
+    check_mode, tmp_path: Path, monkeypatch, agent_db: Any,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(cursor_agent.cursor_login, "launch_problem", AsyncMock(return_value=None))
+    monkeypatch.setattr(ttadk, "_CURSOR_SIGN_IN_TIMEOUT_SEC", 1.0)
     capture = tmp_path / "stdin.txt"
     _cursor_script(tmp_path / "cursor-agent", f"""
 import json, os, pathlib, sys
@@ -197,8 +210,13 @@ for event in [{{'type': 'system', 'subtype': 'init', 'session_id': 'cursor-ttadk
               {{'type': 'result', 'subtype': 'success', 'result': report}}]:
     print(json.dumps(event))
 """)
-    fake_claude(tmp_path / "ttadk", """
-import os, sys
+    fake_claude(tmp_path / "ttadk", f"""
+import os, sys, time
+if sys.argv[1] == 'models':
+    assert sys.argv[1:] == ['models', '-t', 'cursor-cli', '-f', 'json']
+    if {check_mode!r} == 'timeout': time.sleep(3)
+    if {check_mode!r} == 'signed-out': sys.exit(1)
+    print('{{"models": []}}'); sys.exit(0)
 assert sys.argv[1:6] == ['code', '-t', 'cursor-cli', '--skip-check', '--']
 for line in ['TTADK banner', 'Preparing cursor-cli']: print(line, flush=True)
 os.environ['TTADK_JWT_TOKEN'] = 'x'
@@ -206,11 +224,21 @@ os.execvp('agent', ['agent', *sys.argv[6:]])
 """)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     (tmp_path / "work").mkdir()
-    result = asyncio.run(asyncio.wait_for(_worker_run(tmp_path, monkeypatch, _launch()), 15))
+    result = asyncio.run(asyncio.wait_for(_worker_run(tmp_path, monkeypatch, _launch(), gate=True), 15))
+    if check_mode == "signed-out":
+        assert result["status"] == "failed"
+        assert ttadk.TtadkProblem.NOT_SIGNED_IN.message("cursor-agent") in result["error"]
+        assert not capture.exists()
+        agent_db.start_record.assert_not_awaited()
+        return
     assert result["status"] == "completed" and result["summary"] == "through Cursor shim"
     assert capture.is_file()
     metadata = agent_db.start_record.await_args.kwargs["metadata"]
     assert metadata["launcher"]["tool"] == "cursor-cli" and metadata["personal_config"] == list(PERSONAL_CONFIG)
+    if check_mode == "timeout":
+        assert metadata["ttadk_check"] == "could not finish (check_failed)"
+    else:
+        assert "ttadk_check" not in metadata
 
 
 def test_wrong_ttadk_cursor_tool_refuses_worker_before_any_process(tmp_path: Path, monkeypatch, agent_db: Any) -> None:

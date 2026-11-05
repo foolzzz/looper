@@ -38,7 +38,7 @@ import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from .. import child_env
 from ..ops_config import OpsConfig
@@ -50,7 +50,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-OK, WARN, FAIL, SKIP = "ok", "warn", "fail", "skip"
+OK, WARN, FAIL, SKIP, PENDING = "ok", "warn", "fail", "skip", "pending"
+CheckStatus = Literal["ok", "warn", "fail", "skip", "pending"]
 
 # The install command and documentation the Claude Code package's own README names.
 CLAUDE_INSTALL_FIX = (
@@ -82,7 +83,7 @@ _DATABASE_TIMEOUT_SECONDS = 5.0
 class Check:
     id: str
     label: str
-    status: str  # OK, WARN, FAIL or SKIP (not checked, with the reason in detail)
+    status: CheckStatus
     detail: str
     fix: str = ""
 
@@ -291,7 +292,7 @@ async def _ttadk_runtime_rows(*, pool: Any = None) -> list[dict[str, Any]]:
             if row["launcher"] == "ttadk" and row["profile_count"]]
 
 
-async def check_ttadk(runtimes: list[dict[str, Any]] | None) -> Check:
+async def check_ttadk(runtimes: list[dict[str, Any]] | None, *, wait: bool = True) -> Check:
     """Check the TTADK tools used by saved Agent Profiles, without launching a model."""
     from .runtimes import adapter, ttadk
 
@@ -304,7 +305,7 @@ async def check_ttadk(runtimes: list[dict[str, Any]] | None) -> Check:
     status = OK
     for runtime in runtimes:
         tool = adapter(runtime["type"]).ttadk_tool
-        problem = await ttadk.sign_in_problem(runtime["executable"] or "ttadk", tool, wait=False)
+        problem = await ttadk.sign_in_problem(runtime["executable"] or "ttadk", tool, wait=wait)
         if problem is not None:
             problems.append(problem.message(runtime["type"]))
             if problem not in (ttadk.TtadkProblem.CHECK_FAILED, ttadk.TtadkProblem.CHECKING):
@@ -323,7 +324,7 @@ async def ttadk_check() -> Check:
     except Exception:
         logger.warning("cannot read whether an Agent Profile uses TTADK", exc_info=True)
         runtimes = None
-    return await check_ttadk(runtimes)
+    return await check_ttadk(runtimes, wait=False)
 
 
 async def llmrec_check(*, runtime_root: Path | None = None) -> Check:

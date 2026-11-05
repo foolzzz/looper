@@ -772,7 +772,7 @@ async def _run_agent_system_owned(
 
         # Receive and persist backlog before listening. Managers wait for HTTP readiness;
         # advisory checks run afterwards and only warn here and on system/status.
-        checks = [database_check.to_dict()]
+        checks = [database_check.to_dict(), *(check.to_dict() for group in _pending_advisory_checks() for check in group)]
 
         manager = fleet.default
         manager_ops = fleet.ops("manager")
@@ -936,11 +936,37 @@ async def _run_agent_system_owned(
                 await lease.release()
 
 
+def _pending_advisory_checks() -> list[list[self_check.Check]]:
+    # Each probe owns its slots; Claude's CLI probe also checks its login.
+    groups = (
+        (("claude_cli", "Claude Code CLI"), ("claude_login", "Claude login")),
+        (("codex_login", "Codex login"),), (("grok_login", "Grok login"),),
+        (("cursor_login", "Cursor login"),), (("ttadk", "TTADK"),),
+        (("llmrec", "Model request recording"),),
+        (("lark_cli", "Lark channel"),), (("git", "git"),), (("projects_root", "Projects root"),),
+    )
+    return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
+            for group in groups]
+
+
 async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: self_check.Check, *,
                                    claude_bin: str, lark_enabled: bool, projects_root: str) -> None:
-    """Check concurrently after listening, then publish and log in the original order. Never stop serving."""
+    """Publish each probe as it finishes; keep display and final log order stable. Never stop serving."""
+    groups = _pending_advisory_checks()
+
+    async def record(index: int, probe: Awaitable[self_check.Check | list[self_check.Check]]) -> None:
+        try:
+            result = await probe
+            groups[index] = result if isinstance(result, list) else [result]
+        except Exception:
+            logger.exception("advisory startup check failed")
+            groups[index] = [self_check.Check(check.id, check.label, self_check.WARN,
+                                             "Startup check failed", "Check the service log and restart looper serve")
+                             for check in groups[index]]
+        snapshot[:] = [database.to_dict(), *(check.to_dict() for group in groups for check in group)]
+
     try:
-        results = await asyncio.gather(
+        probes = (
             asyncio.to_thread(self_check.check_claude, claude_bin),
             self_check.codex_login_check(),
             self_check.grok_login_check(),
@@ -950,16 +976,9 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
             asyncio.to_thread(self_check.check_lark_cli, lark_enabled),
             asyncio.to_thread(self_check.check_git),
             asyncio.to_thread(self_check.check_projects_root, projects_root),
-            return_exceptions=True,
         )
-        checks = [database]
-        for result in results:
-            if isinstance(result, BaseException):
-                logger.error("advisory startup check failed", exc_info=(type(result), result, result.__traceback__))
-            else:
-                checks.extend(result if isinstance(result, list) else [result])
-        snapshot[:] = [check.to_dict() for check in checks]
-        self_check.log_problems(checks)
+        await asyncio.gather(*(record(index, probe) for index, probe in enumerate(probes)))
+        self_check.log_problems([database, *(check for group in groups for check in group)])
     except Exception:
         logger.exception("advisory startup checks failed")
 
