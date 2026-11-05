@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.91] - 2026-11-05
+
+### Fixed
+
+- **Cursor runs show each message once, and each run has a private helper.** After Cursor's network retries, the discarded attempts' assistant text no longer reaches the task activity: text is held until a tool call or the result commits it, and `retry/starting` drops what was held. Native and TTADK Cursor runs now set a short private `TMPDIR` (`/tmp/looper-cur-<12 hex>`, 0700), created before launch and removed when the run ends, so Cursor's `worker-server` socket is no longer shared by concurrent runs in one working directory; Worker and Reviewer launches also copy the cached inputs into a fresh per-run directory. Manager and Planner turns keep a private `TMPDIR` for the session until its directory is reclaimed. Other runtimes are unchanged. The agent's shell commands inherit the new `TMPDIR`. ([#1119](https://github.com/foolzzz/looper/pull/1119), closes #1083)
+
 ## [2.14.90] - 2026-11-05
 
 ### Changed
