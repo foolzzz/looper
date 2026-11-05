@@ -8,6 +8,7 @@ import logging
 import os
 from pathlib import Path
 import secrets
+import ssl
 import time
 from urllib.parse import urlsplit
 from urllib.request import proxy_bypass_environment
@@ -15,8 +16,9 @@ import zlib
 
 import h11
 import httpx
+import certifi
 
-from . import ROUTE_FORMAT, ROUTE_ID, ROUTES_DIR, RouteFile, code_sha256
+from . import ROUTE_FORMAT, ROUTE_ID, ROUTES_DIR, TLS_ENV, RouteFile, code_sha256
 from .capture import MIB, build_capture, kind_of, redact_headers, redact_query
 
 log = logging.getLogger(__name__)
@@ -35,21 +37,35 @@ def _upstream_proxy(route, url):
 
 
 class _ProxyTransport(httpx.AsyncBaseTransport):
-    """Pool by upstream proxy so concurrent routes keep their own network settings."""
+    """Pool by upstream proxy and CA configuration; trust must never cross routes."""
 
     def __init__(self):
         self.transports = {}
 
     async def handle_async_request(self, request):
         proxy = request.extensions.get('llmrec_proxy')
-        if proxy not in self.transports:
-            self.transports[proxy] = httpx.AsyncHTTPTransport(proxy=proxy,
+        tls_env = request.extensions.get('llmrec_tls', {})
+        key = proxy, tuple(sorted(tls_env.items()))
+        if key not in self.transports:
+            context = _tls_context(tls_env)
+            upstream_proxy = (httpx.Proxy(proxy, ssl_context=context)
+                              if proxy and urlsplit(proxy).scheme == 'https' else proxy)
+            self.transports[key] = httpx.AsyncHTTPTransport(proxy=upstream_proxy, verify=context, trust_env=False,
                 limits=httpx.Limits(max_connections=200, max_keepalive_connections=50))
-        return await self.transports[proxy].handle_async_request(request)
+        return await self.transports[key].handle_async_request(request)
 
     async def aclose(self):
         for transport in self.transports.values():
             await transport.aclose()
+
+
+def _tls_context(env):
+    # Custom roots supplement the public bundle, including when TLS terminates at a proxy.
+    context = ssl.create_default_context(cafile=certifi.where())
+    for name in sorted(TLS_ENV):
+        if value := env.get(name):
+            context.load_verify_locations(**{'capath' if name == 'SSL_CERT_DIR' else 'cafile': value})
+    return context
 
 
 def _headers(pairs, *, request=False):
@@ -269,7 +285,9 @@ class Proxy:
             try:
                 upstream_request = self._client.build_request(request.method.decode(), url,
                     headers=_headers(request.headers.raw_items(), request=True), content=body,
-                    extensions={'llmrec_proxy': _upstream_proxy(route, url)})
+                    extensions={'llmrec_proxy': _upstream_proxy(route, url),
+                                'llmrec_tls': route.tls_env if route.tls_env is not None else
+                                    {name: os.environ[name] for name in TLS_ENV if name in os.environ}})
                 response = await self._client.send(upstream_request, stream=True)
                 values['status'] = response.status_code
                 values['response_headers'] = redact_headers(response.headers.raw, response=True)

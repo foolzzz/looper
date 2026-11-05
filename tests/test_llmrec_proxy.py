@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 import gzip
 import json
 import os
+import ssl
+import subprocess
 
 import httpx
 import pytest
@@ -41,6 +43,145 @@ def events():
     return [{'type': 'message_start', 'message': {'id': 'msg', 'content': [], 'usage': {'input_tokens': 7}}},
             {'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'}, 'usage': {'output_tokens': 3}},
             {'type': 'message_stop'}]
+
+
+@pytest.fixture(scope='module')
+def private_ca(tmp_path_factory):
+    root = tmp_path_factory.mktemp('llmrec-ca')
+    cert, key = root / 'cert.pem', root / 'key.pem'
+    subprocess.run(['openssl', 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256',
+                    '-nodes', '-keyout', str(key), '-out', str(cert), '-days', '1', '-subj', '/CN=localhost',
+                    '-addext', 'subjectAltName=IP:127.0.0.1', '-addext', 'basicConstraints=critical,CA:TRUE'],
+                   check=True, capture_output=True, timeout=5)
+    directory = root / 'certs'
+    directory.mkdir()
+    digest = subprocess.run(['openssl', 'x509', '-in', str(cert), '-hash', '-noout'],
+                            check=True, capture_output=True, text=True, timeout=5).stdout.strip()
+    (directory / f'{digest}.0').write_bytes(cert.read_bytes())
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    return cert, directory, context
+
+
+def test_custom_ca_supplements_public_trust(private_ca):
+    import certifi
+    from looper.agents.llmrec.proxy import _tls_context
+
+    cert, _, _ = private_ca
+    default = ssl.create_default_context(cafile=certifi.where())
+    custom = _tls_context({'NODE_EXTRA_CA_CERTS': str(cert)})
+    assert set(default.get_ca_certs(binary_form=True)) < set(custom.get_ca_certs(binary_form=True))
+    assert custom.verify_mode == ssl.CERT_REQUIRED
+    assert custom.check_hostname
+
+
+@pytest.mark.parametrize('source', ['provider', 'role'])
+@pytest.mark.parametrize('variable', ['NODE_EXTRA_CA_CERTS', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
+                                    'SSL_CERT_FILE', 'SSL_CERT_DIR'])
+@pytest.mark.parametrize('network', ['direct', 'http-proxy', 'https-proxy'])
+def test_recording_preserves_launch_tls_trust(tmp_path, monkeypatch, private_ca, source, variable, network):
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.llmrec.control import ProxyControl
+    from looper.agents.profile_registry import builtin_resolved_profile
+
+    cert, directory, context = private_ca
+    monkeypatch.setattr(os, 'environ', {})
+
+    class TLSModelAPI(FakeModelAPI):
+        async def __aenter__(self):
+            self._server = await asyncio.start_server(self._handle, '127.0.0.1', 0, ssl=context)
+            self.base_url = f'https://127.0.0.1:{self._server.sockets[0].getsockname()[1]}'
+            return self
+
+    async def check():
+        tunnels = set()
+        connected = []
+        async with TLSModelAPI([ResponseScript(events=events()) for _ in range(3)]) as upstream:
+            async def tunnel(reader, writer):
+                task = asyncio.current_task()
+                tunnels.add(task)
+                remote = None
+                pumps = []
+                try:
+                    head = await reader.readuntil(b'\r\n\r\n')
+                    connected.append(head.split(b'\r\n')[0])
+                    remote_reader, remote = await asyncio.open_connection(
+                        '127.0.0.1', upstream._server.sockets[0].getsockname()[1])
+                    writer.write(b'HTTP/1.1 200 Connection established\r\n\r\n')
+                    await writer.drain()
+                    async def pump(source, target):
+                        while data := await source.read(65536):
+                            target.write(data)
+                            await target.drain()
+                    pumps = [asyncio.create_task(pump(reader, remote)),
+                             asyncio.create_task(pump(remote_reader, writer))]
+                    await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for pump_task in pumps:
+                        pump_task.cancel()
+                    await asyncio.gather(*pumps, return_exceptions=True)
+                    for stream in (remote, writer):
+                        if stream:
+                            stream.close()
+                            await stream.wait_closed()
+                    tunnels.discard(task)
+
+            server = await asyncio.start_server(tunnel, '127.0.0.1', 0,
+                                                ssl=context if network == 'https-proxy' else None)
+            sink = Sink()
+            proxy = Proxy(tmp_path, sink=sink, connect_s=1)
+            await proxy.start()
+            try:
+                # Positive and negative controls exercise a real TLS handshake.
+                async with httpx.AsyncClient(trust_env=False) as client:
+                    with pytest.raises(httpx.ConnectError, match='CERTIFICATE_VERIFY_FAILED'):
+                        await client.post(upstream.base_url + '/v1/messages', json={})
+                async with httpx.AsyncClient(verify=ssl.create_default_context(cafile=str(cert)), trust_env=False) as client:
+                    assert (await client.post(upstream.base_url + '/v1/messages',
+                                             headers={'authorization': 'Bearer test-key'}, json={})).status_code == 200
+
+                control = ProxyControl(tmp_path, '', enabled=True, include_oauth=True)
+                async def healthy(**kwargs):
+                    return proxy.stats
+                monkeypatch.setattr(control, '_health', healthy)
+                monkeypatch.setattr(control, '_state', lambda: {'port': proxy.port})
+                profile = builtin_resolved_profile()
+                monkeypatch.setattr(type(Launch().runtime), 'llmrec_upstream', lambda self, launch: upstream.base_url)
+                network_env = {} if network == 'direct' else {
+                    'HTTPS_PROXY': f'{network.split("-")[0]}://127.0.0.1:{server.sockets[0].getsockname()[1]}'}
+                launch_env = tuple({**network_env, variable: str(directory if variable == 'SSL_CERT_DIR' else cert)}.items())
+                trusted_profile = profile
+                if source == 'provider':
+                    resolved = profile.resolved_model
+                    trusted_profile = replace(profile, resolved_model=replace(
+                        resolved, provider=replace(resolved.provider, env=launch_env)))
+                launch = Launch(AgentSettings(profile=trusted_profile, env=launch_env if source == 'role' else ()))
+                trusted = await control.attach(launch, agent_id='worker-test', task_id=None)
+                untrusted = await control.attach(Launch(AgentSettings(profile=profile, env=tuple(network_env.items()))),
+                                                 agent_id='reviewer-test', task_id=None)
+                # The independent proxy's environment must not override either route's trust.
+                monkeypatch.setenv('NODE_EXTRA_CA_CERTS', str(cert))
+                async with httpx.AsyncClient(trust_env=False) as client:
+                    for attached, status in ((trusted, 200), (untrusted, 502), (trusted, 200)):
+                        response = await client.post(attached.llmrec.url + '/v1/messages',
+                                                     headers={'authorization': 'Bearer test-key'}, json={})
+                        assert response.status_code == status, response.text
+                        if status == 200:
+                            assert b'message_stop' in response.content
+                            monkeypatch.setenv('SSL_CERT_FILE', str(cert))
+                await captured(sink, 3)
+                assert [item.outcome for item in sink.items] == ['completed', 'upstream_error', 'completed']
+                assert len(upstream.requests) == 3
+                if network != 'direct':
+                    assert connected and all(line.startswith(b'CONNECT 127.0.0.1:') for line in connected)
+            finally:
+                await proxy.close(grace_s=0)
+                server.close()
+                await server.wait_closed()
+                for task in list(tunnels):
+                    task.cancel()
+                await asyncio.gather(*list(tunnels), return_exceptions=True)
+    asyncio.run(asyncio.wait_for(check(), 10))
 
 
 @pytest.mark.parametrize('source', ['provider', 'role'])

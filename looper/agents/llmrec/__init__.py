@@ -11,9 +11,11 @@ from pathlib import Path
 import re
 import tempfile
 
-ROUTE_FORMAT = 2
+ROUTE_FORMAT = 3
 PROXY_ENV = frozenset(('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
                        'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'))
+TLS_ENV = frozenset(('SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS',
+                     'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'))
 STATE_DIR = Path('.local') / 'llmrec'
 ROUTES_DIR = STATE_DIR / 'routes'
 STATE_FILE = STATE_DIR / 'proxy.json'
@@ -65,6 +67,7 @@ class RouteFile:
     last_record_id: int | None = None
     ended_at: str | None = None
     proxy_env: dict[str, str] | None = None
+    tls_env: dict[str, str] | None = None
 
     @classmethod
     def read(cls, path) -> RouteFile | None:
@@ -73,9 +76,10 @@ class RouteFile:
             if not isinstance(data, dict) or data.get('format') != ROUTE_FORMAT:
                 return None
             route = cls(**data)
-            if route.proxy_env is not None and (not isinstance(route.proxy_env, dict) or any(
-                    key not in PROXY_ENV or not isinstance(value, str) for key, value in route.proxy_env.items())):
-                return None
+            for env, allowed in ((route.proxy_env, PROXY_ENV), (route.tls_env, TLS_ENV)):
+                if env is not None and (not isinstance(env, dict) or any(
+                        key not in allowed or not isinstance(value, str) for key, value in env.items())):
+                    return None
             if not isinstance(route.id, str) or not ROUTE_ID.fullmatch(route.id):
                 return None
             from urllib.parse import urlsplit

@@ -19,7 +19,7 @@ import httpx
 
 import looper
 from looper import child_env
-from . import (LOG_FILE, PROXY_ENV, ROUTES_DIR, ROUTE_FORMAT, ROUTE_ID, STATE_FILE, LlmrecRoute, LlmrecSkip,
+from . import (LOG_FILE, PROXY_ENV, TLS_ENV, ROUTES_DIR, ROUTE_FORMAT, ROUTE_ID, STATE_FILE, LlmrecRoute, LlmrecSkip,
                RouteFile, SkipReason, boot_argv, code_sha256)
 from .. import proc_tree
 from ..keeper import read_json
@@ -229,13 +229,14 @@ class ProxyControl:
         identifier = secrets.token_urlsafe(16)
         resolved = getattr(launch.profile, "resolved_model", None)
         protocol = resolved.model.protocol.value if resolved else next(iter(provider.protocols)).value
+        env = replace(launch, llmrec=None).environment()
         route = RouteFile(format=ROUTE_FORMAT, id=identifier, upstream=upstream, protocol=protocol,
                           runtime_type=runtime_type, provider_id=provider.id, model=launch.model,
                           agent_id=agent_id, task_id=task_id, step_id=step_id,
                           role=getattr(launch.role, "value", launch.role), created_at=_now(),
                           record_id=None, last_record_id=None, ended_at=None,
-                          proxy_env={name: value for name, value in replace(launch, llmrec=None).environment().items()
-                                     if name in PROXY_ENV})
+                          proxy_env={name: value for name, value in env.items() if name in PROXY_ENV},
+                          tls_env={name: value for name, value in env.items() if name in TLS_ENV})
         route.write(self.runtime_root / ROUTES_DIR / f"{identifier}.json")
         port = state["port"]
         return replace(launch, llmrec=LlmrecRoute(identifier, f"http://127.0.0.1:{port}/r/{identifier}", upstream))

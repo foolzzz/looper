@@ -94,7 +94,8 @@ def test_route_file_validation_and_private_modes(tmp_path):
     from looper.agents.llmrec import ROUTES_DIR, RouteFile
     route = RouteFile(id='a' * 22, agent_id='worker-test', upstream='https://example.test',
                       created_at=datetime.now(timezone.utc).isoformat(),
-                      proxy_env={'HTTPS_PROXY': 'http://proxy.example:8080', 'NO_PROXY': '.internal.example'})
+                      proxy_env={'HTTPS_PROXY': 'http://proxy.example:8080', 'NO_PROXY': '.internal.example'},
+                      tls_env={'NODE_EXTRA_CA_CERTS': 'certs/custom.pem'})
     path = tmp_path / ROUTES_DIR / f'{route.id}.json'
     route.write(path)
     assert RouteFile.read(path) == route
@@ -105,7 +106,9 @@ def test_route_file_validation_and_private_modes(tmp_path):
     for invalid in (replace(route, format=route.format + 1), replace(route, upstream='https://user:secret@example.test'),
                     replace(route, created_at='invalid'), replace(route, id='../invalid'), replace(route, record_id=True),
                     replace(route, proxy_env=[]), replace(route, proxy_env={'HTTPS_PROXY': 1}),
-                    replace(route, proxy_env={'ANTHROPIC_API_KEY': 'secret'})):
+                    replace(route, proxy_env={'ANTHROPIC_API_KEY': 'secret'}),
+                    replace(route, tls_env=[]), replace(route, tls_env={'NODE_EXTRA_CA_CERTS': 1}),
+                    replace(route, tls_env={'ANTHROPIC_API_KEY': 'secret'})):
         invalid.write(path)
         assert RouteFile.read(path) is None
 
