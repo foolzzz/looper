@@ -131,11 +131,11 @@ def write_run_dir(local: Path, files: Mapping[str, str], *, instructions: str = 
             (run / name).mkdir(exist_ok=True, mode=0o700)
             os.chmod(run / name, 0o700)
 
+    runs.mkdir(exist_ok=True, mode=0o700)
+    _remove_idle_homes(runs, time.time())
     if target.is_dir():
         write(target)
         return target
-    runs.mkdir(exist_ok=True, mode=0o700)
-    _remove_idle_homes(runs, time.time())
     building: Path | None = Path(tempfile.mkdtemp(prefix=".building.", dir=runs))
     try:
         write(building)
@@ -149,6 +149,20 @@ def write_run_dir(local: Path, files: Mapping[str, str], *, instructions: str = 
     finally:
         if building is not None:
             shutil.rmtree(building, ignore_errors=True)
+    return target
+
+
+def run_tmpdir(directory: Path) -> Path:
+    # Cursor falls back to TMPDIR for worker-server sockets when DATA_DIR is long.
+    # Keep enough room for its cwd slug within macOS's 104-byte socket limit.
+    key = hashlib.sha256(str(directory.absolute()).encode("utf-8")).hexdigest()[:12]
+    return Path("/tmp") / f"looper-cur-{key}"
+
+
+def prepare_tmpdir(directory: Path) -> Path:
+    target = run_tmpdir(directory)
+    target.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(target, 0o700)
     return target
 
 
@@ -291,7 +305,7 @@ class CursorAgentRuntime(RuntimeAdapter):
             program.append(executable)
         return program
 
-    def _command(self, executable: str, prompt_file: Path, launch: Launch) -> list[str]:
+    def _command(self, executable: str, prompt_file: Path, launch: Launch, *, private_run: bool = False) -> list[str]:
         args = self.launch_args(launch)  # Refuse an unusable provider before writing anything.
         servers, _ = mcp_servers(launch.library)
         files = {
@@ -302,16 +316,24 @@ class CursorAgentRuntime(RuntimeAdapter):
             files[".mcp.json"] = json.dumps({"mcpServers": servers}, ensure_ascii=False)
         run = write_run_dir(_local_dir(prompt_file), files, instructions=runtime_prompt_text(
             launch, prompt_file.read_text(encoding="utf-8"), runtime_notes(list(servers))))
+        if private_run:
+            # Identical prompts can run concurrently: cache inputs, not execution state.
+            source = run
+            run = source.parent / os.urandom(32).hex()
+            sync_dir(source=source, home=run)
         args += ["--plugin-dir", str(run / PLUGIN_DIR),
                  *(arg for directory in launch.library.plugin_dirs for arg in ("--plugin-dir", directory)),
                  *(arg for directory in dict.fromkeys(launch.knowledge.add_dirs) for arg in ("--add-dir", directory))]
         if launch.profile.runtime.launcher is Launcher.TTADK:
             ttadk.check_args(args)
-        return [*self._program(executable, launch, run), *args]
+        program = self._program(executable, launch, run)
+        if private_run:
+            program.insert(3, f"TMPDIR={prepare_tmpdir(run)}")
+        return [*program, *args]
 
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                     max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
-        return self._command(executable, prompt_file, launch)
+        return self._command(executable, prompt_file, launch, private_run=True)
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
@@ -386,6 +408,14 @@ class CursorAgentRuntime(RuntimeAdapter):
     async def login_problem(self, provider: ProviderSpec) -> str | None:
         return await cursor_login.launch_problem()
 
+    async def after_run(self, launch: Launch, command: list[str]) -> list[str]:
+        # Resident commands have no TMPDIR: their session keeps it until reclamation.
+        if len(command) > 3 and command[3].startswith("TMPDIR="):
+            directory = Path(command[1].partition("=")[2]).parent
+            if command[3] == f"TMPDIR={run_tmpdir(directory)}":
+                shutil.rmtree(run_tmpdir(directory), ignore_errors=True)
+        return []
+
     def result_notes(self, result_event: dict[str, Any] | None) -> dict[str, Any]:
         return ({"routed_model": result_event["routed_model"]}
                 if result_event and "routed_model" in result_event else {})
@@ -457,6 +487,7 @@ class CursorStream:
     session_id: str | None = None
     routed_model: str | None = None
     _final: list[str] = field(default_factory=list)
+    _pending: list[dict[str, Any]] = field(default_factory=list)
     _thinking: list[str] = field(default_factory=list)
     _open: set[str] = field(default_factory=set)
 
@@ -488,7 +519,8 @@ class CursorStream:
                     self.routed_model = match[1]
                 text = text[match.end():]
             self._final.append(text)
-            return [dict(raw)]
+            self._pending.append(dict(raw))
+            return []
         if kind == "thinking" and phase == "delta":
             self._thinking.append(str(raw.get("text") or ""))
             return []
@@ -503,7 +535,7 @@ class CursorStream:
             detail = call.get(key) or {}
             args = detail.get("args") or {}
             call_id = str(raw.get("call_id") or "")
-            events = []
+            events, self._pending = self._pending, []
             if phase == "started" or call_id not in self._open:
                 self._final.clear()
                 self._open.add(call_id)
@@ -519,6 +551,8 @@ class CursorStream:
                                     "content": content, "is_error": is_error}]}})
             return events
         if kind in ("connection", "retry"):
+            if kind == "retry" and phase == "starting":
+                self._pending.clear()
             if kind == "retry" and phase in ("starting", "resuming"):
                 self._final.clear()
             return [{"type": "system", "subtype": f"cursor_{kind}", "phase": phase,
@@ -535,7 +569,8 @@ class CursorStream:
             result.update(result="".join(self._final), modelUsage={self.model or "cursor-agent": counts})
             if self.routed_model is not None:
                 result["routed_model"] = self.routed_model
-            return [usage_event(self.model, reported_totals(result), session_id=self.session_id), result]
+            events, self._pending = self._pending, []
+            return [*events, usage_event(self.model, reported_totals(result), session_id=self.session_id), result]
         return [{"type": "system", "subtype": "cursor_event", "session_id": self.session_id, "event": dict(raw)}]
 
 
@@ -580,8 +615,7 @@ class ResidentCursor(PerTurnSession):
         if cancel.requested or first.stopped is not None or first.exit_code not in (0, 1) \
                 or cursor_failure(first.result_event, first.stderr) is None:
             return first
-        # The CLI exited; its worker-server helper may be shared by other runs.
-        # Leave it alone, as on normal exit, and keep the chat for --resume.
+        # The CLI exited; keep this session's helper and chat for --resume.
         self._tree, self._end_task = None, None
         if cancel.requested:
             return self._stopped_turn(session_started=first.session_started, usage=first.usage,
@@ -632,7 +666,7 @@ class ResidentCursor(PerTurnSession):
             if rest[index - 1] == "--plugin-dir" and rest[index] == str(source / PLUGIN_DIR):
                 rest[index] = str(home / PLUGIN_DIR)
         return ["env", f"CURSOR_CONFIG_DIR={home / CONFIG_DIR}", f"CURSOR_DATA_DIR={home / DATA_DIR}",
-                *rest, *(["--resume", self._session] if self._session else [])]
+                f"TMPDIR={prepare_tmpdir(home)}", *rest, *(["--resume", self._session] if self._session else [])]
 
     def _turn_input(self, text: str) -> str:
         return text if self._session else instructions_block(self._instructions) + "\n\n" + text
