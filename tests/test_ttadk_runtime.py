@@ -188,7 +188,8 @@ def test_ttadk_launch_gate_stops_the_worker_before_codex(
     executable, calls = _wrapper(tmp_path, mode=mode)
     if mode == "missing":
         executable = str(tmp_path / "missing-ttadk")
-    monkeypatch.setattr(ttadk, "_SIGN_IN_TIMEOUT_SEC", 1.0)
+    if mode == "timeout":
+        monkeypatch.setattr(ttadk, "_SIGN_IN_TIMEOUT_SEC", 1.0)
     native_check = AsyncMock(return_value=None)
     monkeypatch.setattr(codex_login, "launch_problem", native_check)
     result = asyncio.run(asyncio.wait_for(_worker_run(tmp_path, monkeypatch, _launch(executable=executable), gate=True), 8))

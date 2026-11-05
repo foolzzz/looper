@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from looper.agents.bus import MessageBus
-from looper.agents.channels.chat_routing import RouteAction, RouteDecision
+from looper.agents.channels.chat_routing import RouteAction, RouteDecision, RoutingSnapshot
 from looper.agents.channels.telegram import TelegramChannelAdapter
 from looper.agents.managers import ChatStopSummary, chat_stop_reply
 from looper.agents.message import MessageEnvelope, MessageType, channel_thread_id, manager_address
@@ -45,7 +45,8 @@ def test_bound_only_silences_every_telegram_entry_before_effects(tmp_path: Path,
         adapter, bus, bot, observed = telegram(tmp_path, monkeypatch, resolve_chat=resolver)
         if handler == "_cmd_help":
             await adapter._cmd_help(_tg_update(8), None)
-            resolver.assert_not_called()
+            resolver.assert_called_once_with("channel-telegram", "99")
+            resolver.reset_mock()
             observed.assert_not_awaited()
         update = _tg_update(7, "/gate 1 yes")
         await getattr(adapter, handler)(update, None)
@@ -189,7 +190,9 @@ def test_lark_binding_cannot_bypass_native_eligibility(
             return RouteDecision(RouteAction.ADMIT, "manager-bound", True)
         adapter = _lark(tmp_path, bus, transport, resolve_chat=resolve)
         await adapter._handle_lark_event(event)
-        assert resolved == lark_observations == transport.calls == []
+        expected = [] if event.get("chat_type") == "group" and not event.get("mentions") else [("channel-lark", "oc_1")]
+        assert resolved == expected
+        assert lark_observations == transport.calls == []
         await adapter.stop()
     asyncio.run(main())
 
@@ -306,6 +309,75 @@ def test_lark_bot_factory_propagates_live_routing(tmp_path: Path) -> None:
     asyncio.run(adapter.stop())
 
 
+@pytest.mark.parametrize("channel_id", [None, "channel-lark_bot-201"])
+@pytest.mark.parametrize("routing", [False, True])
+def test_lark_bot_stream_preserves_only_authorized_chat_text(
+    tmp_path, monkeypatch, caplog, lark_observations, channel_id, routing,
+):
+    from lark_platform_fake import FakeLarkPlatform
+    from looper.agents.channels.allowlist import SenderAllowlist
+    from looper.agents.channels.registry import ChannelRegistry
+
+    async def main():
+        async with FakeLarkPlatform() as fake:
+            bus = MessageBus(runtime_root=tmp_path)
+            rejected = AsyncMock()
+            adapter = make_adapter({"app_id": fake.app_id}, "test-secret", runtime_root=tmp_path,
+                allowlist=SenderAllowlist("channel-lark_bot", frozenset({OPEN_ID})), on_rejected=rejected,
+                bot_open_id=BOT_ID, base_url=fake.base_url, channel_id=channel_id, manager_running=lambda _: True)
+            adapter._bus = bus
+            adapter._reactions.add = Mock()
+            monkeypatch.setattr(adapter, "_sender_name", AsyncMock(return_value="Sender"))
+            registry = ChannelRegistry(bus)
+
+            def publish(senders):
+                registry.bindings_changed(adapter.channel_id, RoutingSnapshot(
+                    adapter.channel_id, "manager", False, {"oc_bound": "manager-bound"},
+                    senders={"oc_bound": frozenset(senders)}))
+
+            if routing:
+                # register() installs this resolver after the factory returns.
+                adapter._resolve_chat = registry.resolve_chat
+                publish({OTHER_ID})
+            events = adapter._transport.events()
+            try:
+                cases = [(OTHER_ID, "oc_bound", routing), (OPEN_ID, "oc_bound", True),
+                         (OTHER_ID, "oc_other", False), (OPEN_ID, "oc_other", True),
+                         ("ou_outsider123", "oc_bound", False)]
+                if routing:
+                    cases += [(OTHER_ID, "oc_bound", False), (OTHER_ID, "oc_bound", True)]
+                for number, (sender, chat, admitted) in enumerate(cases):
+                    if routing and number in (5, 6):
+                        publish(set() if number == 5 else {OTHER_ID})
+                    received = asyncio.create_task(anext(events))
+                    await fake.push_message(text="@_user_1 retained text", sender=sender, chat_id=chat,
+                        chat_type="group", message_id=f"om_{number}", event_id=f"evt_{number}",
+                        mentions=[{"key": "@_user_1", "id": {"open_id": BOT_ID}, "name": "Bot"}])
+                    event = await asyncio.wait_for(received, 2)
+                    assert event["content"] == ("@Bot retained text" if admitted else "")
+                    # The filter makes no drop log; the handler alone records refusals.
+                    assert not [r for r in caplog.records if "dropped a message" in r.getMessage()]
+                    await adapter._handle_lark_event(event)
+                    target = "manager-bound" if routing and chat == "oc_bound" else "manager"
+                    if admitted:
+                        envelope = bus.get_queue(target).get_nowait()
+                        assert envelope.payload["text"] == "retained text"
+                        assert envelope.source.agent_id == adapter.channel_id
+                        rejected.assert_not_awaited()
+                    else:
+                        rejected.assert_awaited_once_with(sender, chat)
+                    assert bus.get_queue("manager").empty() and bus.get_queue("manager-bound").empty()
+                    assert len([r for r in caplog.records if "dropped a message" in r.getMessage()]) == int(not admitted)
+                    rejected.reset_mock()
+                    caplog.clear()
+            finally:
+                await events.aclose()
+                await adapter.stop()
+                await bus.shutdown()
+
+    asyncio.run(main())
+
+
 @pytest.mark.parametrize("suppressed", [False, True])
 @pytest.mark.parametrize("failure", ["observation", "logging"])
 def test_observation_or_logging_failure_preserves_admission_and_silence(tmp_path, monkeypatch, suppressed, failure):
@@ -365,3 +437,20 @@ def test_native_routing_boundary_log(tmp_path, monkeypatch, caplog, lark_observa
             await adapter.stop()
         await bus.shutdown()
     asyncio.run(run())
+
+
+def test_snapshot_extra_senders_are_immutable_and_exact_to_explicit_chat():
+    ids = {"8"}
+    source = {"99": ids, "100": set()}
+    snapshot = RoutingSnapshot("channel-telegram", "manager", True,
+                               {"99": "manager-review", "100": "manager"}, senders=source)
+    ids.clear()
+    source.clear()
+    assert snapshot.resolve("99") == RouteDecision(RouteAction.ADMIT, "manager-review", True, frozenset({"8"}))
+    assert snapshot.resolve("100").senders == frozenset()
+    assert snapshot.resolve("101") == RouteDecision(RouteAction.SILENT, "manager")
+    assert dict(snapshot.senders) == {"99": frozenset({"8"})}
+    with pytest.raises(TypeError):
+        snapshot.senders["99"] = frozenset()
+    with pytest.raises(ValueError):
+        RoutingSnapshot("channel-telegram", "manager", False, {}, senders={"99": frozenset({"8"})})

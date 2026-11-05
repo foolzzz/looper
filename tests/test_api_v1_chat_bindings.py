@@ -26,7 +26,7 @@ CASES = [
 BINDING = {"channel_id": "channel-telegram", "chat_id": "-10042", "manager_id": "manager",
            "created_at": "2026-10-25T12:00:00+00:00", "channel_type": "telegram", "bot_name": "Example bot",
            "chat_name": None, "manager_name": "Example Manager", "manager_enabled": False,
-           "manager_deleted": False}
+           "manager_deleted": False, "allowed_senders": []}
 SEEN = {"chat_id": "-10042", "name": None, "count": None, "last_at": None, "binding": BINDING,
         "effective_manager_id": "manager", "effective_manager_name": "Example Manager",
         "effective_manager_enabled": False, "effective_manager_deleted": False}

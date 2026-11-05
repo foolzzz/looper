@@ -27,7 +27,7 @@ def _binding(channel, manager, name, bot):
     return {"channel_id": channel, "chat_id": "42", "manager_id": manager,
             "created_at": "2026-01-01T00:00:00Z", "channel_type": "telegram", "bot_name": bot,
             "chat_name": name, "manager_name": "Manager" if manager == "manager" else "Review",
-            "manager_enabled": manager != "manager-review", "manager_deleted": False}
+            "manager_enabled": manager != "manager-review", "manager_deleted": False, "allowed_senders": []}
 
 
 @pytest.fixture
@@ -193,7 +193,8 @@ def test_failed_move_keeps_confirmed_ownership_and_can_be_retried(managers_dashb
 def test_manager_binding_controls_have_keyboard_focus_without_horizontal_overflow(managers_dashboard, width):
     from playwright.sync_api import expect
 
-    page, base, _ = managers_dashboard
+    page, base, state = managers_dashboard
+    state["bindings"][0]["allowed_senders"] = ["123456789", "987654321"]
     page.set_viewport_size({"width": width, "height": 1000})
     page.goto(f"{base}/#settings/managers")
     move = _chats(page, "Manager").get_by_label("Move Example room to Manager", exact=True)
@@ -202,14 +203,15 @@ def test_manager_binding_controls_have_keyboard_focus_without_horizontal_overflo
     expect(unbind).to_be_focused()
     page.keyboard.press("Tab")
     expect(move).to_be_focused()
+    expect(_chats(page, "Manager").get_by_label("Extra senders for Example room", exact=True)).to_have_value("123456789, 987654321")
     move.select_option("manager-review")
+    expect(_chats(page, "Manager")).to_contain_text("Moving clears this chat's extra senders.")
     page.keyboard.press("Tab")
     expect(_chats(page, "Manager").get_by_role("button", name="Move", exact=True)).to_be_focused()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    if width == 1280:
-        directory = ROOT / ".local" / "validation"
-        directory.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(directory / "manager-chat-bindings.png"), full_page=True)
+    directory = ROOT / ".local" / "validation"
+    directory.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(directory / f"manager-chat-binding-senders-{width}.png"), full_page=True)
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")

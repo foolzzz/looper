@@ -26,7 +26,7 @@ from looper.agents.serve import seed_channel_configs
 from looper.agents.supervisor import AgentSupervisor
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from looper.agents.tiers.task import Task, TaskRouter
-from looper.db import api_clients, chat, managers, projects, tasks
+from looper.db import api_clients, channel_configs, chat, managers, projects, tasks
 from tests.db_support import run_db, until
 from tests.test_agent_channels import _lark_event, _tg_update
 from tests.test_api_v1_auth import _bearer, _send, _serving
@@ -63,12 +63,14 @@ async def delivery(root, pool, monkeypatch, kind):
         bus.subscribe_topic(MessageType.USER_MESSAGE.value, agent._receive, consumes=True)
     monkeypatch.setattr(ManagerOps, "tools_problem", AsyncMock(return_value=None))
     registry, transport = ChannelRegistry(bus), _Bot() if kind == "telegram" else StubTransport()
+    async def rejected(sender_id, chat_id):
+        await channel_configs.record_rejected(bot_id, sender_id, chat_id=chat_id, pool=pool)
     adapter = (TelegramChannelAdapter(channel_id=bot_id,
                    allowlist=SenderAllowlist(bot_id, frozenset({"7"})), manager_running=lambda _: True,
                    stop_chat=fleet.stop_chat) if kind == "telegram" else
                LarkChannelAdapter(channel_type=kind, runtime_root=root, transport=transport,
                    bot_open_id=BOT_ID, allowlist=SenderAllowlist(bot_id, frozenset({OPEN_ID})),
-                   manager_running=lambda _: True, stop_chat=fleet.stop_chat))
+                   manager_running=lambda _: True, stop_chat=fleet.stop_chat, on_rejected=rejected))
     if kind == "telegram":
         adapter._app = SimpleNamespace(bot=transport)
         adapter._acknowledge = Mock()
@@ -77,14 +79,15 @@ async def delivery(root, pool, monkeypatch, kind):
     monkeypatch.setattr(adapter, "start", start)
     await registry.register(adapter)
 
-    async def ingress(text, *, rejected=False, chat_id=None):
+    async def ingress(text, *, rejected=False, chat_id=None, group=False):
         if kind == "telegram":
             update = _tg_update(8 if rejected else 7, text, int(chat_id or native_chat))
             handler = {"/start": adapter._cmd_start, "/stop": adapter._cmd_stop}.get(text, adapter._on_message)
             await handler(update, None)
             return update
+        fields = {"chat_type": "group", "mentions": [{"id": BOT_ID, "key": "@_bot", "name": "Bot"}]} if group else {}
         await adapter._handle_lark_event(_lark_event("ou_rejected" if rejected else OPEN_ID, text,
-                                                   chat_id=chat_id or native_chat))
+                                                   chat_id=chat_id or native_chat, **fields))
 
     async def flush():
         output = bus.take_queue(bot_id)
@@ -105,7 +108,7 @@ async def delivery(root, pool, monkeypatch, kind):
             if status == 200:
                 validate_success(operation, answer)
             return status, answer
-        async def configure(manager=None, *, policy=None, remove=False):
+        async def configure(manager=None, *, policy=None, remove=False, allowed_senders=None):
             body = {"channel_id": bot_id, "chat_id": native_chat}
             if policy is not None:
                 operation, body = "channel_chats.set_policy", {"channel_id": bot_id, "bound_chats_only": policy}
@@ -113,8 +116,11 @@ async def delivery(root, pool, monkeypatch, kind):
                 operation = "manager_chat_bindings.delete"
             else:
                 operation, body = "manager_chat_bindings.put", {**body, "manager_id": manager}
+                if allowed_senders is not None:
+                    body["allowed_senders"] = allowed_senders
             status, answer = await call(operation, body)
             assert status == 200, answer
+            return answer
         try:
             yield SimpleNamespace(**locals())
         finally:
@@ -249,6 +255,81 @@ def test_hot_bound_only_silence_and_explicit_bot_owner_admission(tmp_path, monke
     run_db(run, monkeypatch, setup=seed_channel_configs, timeout=30)
 
 
+@pytest.mark.parametrize("kind", ["telegram", "lark", "lark_bot"])
+def test_extra_sender_is_admitted_only_in_the_bound_chat_until_revoked(tmp_path, monkeypatch, caplog, kind):
+    caplog.set_level("INFO")
+    async def run(pool):
+        async with delivery(tmp_path, pool, monkeypatch, kind) as d:
+            sender = "8" if kind == "telegram" else "ou_rejected"
+            other_chat = "123" if kind == "telegram" else "oc_other"
+            if kind != "telegram":
+                d.transport.names = AsyncMock(return_value={sender: "Synthetic colleague"})
+            await d.configure(REVIEW, allowed_senders=[sender])
+            await d.ingress("extra sender's turn", rejected=True, group=True)
+            admitted, = d.bus.take_queue(REVIEW)
+            admitted_logs = [r for r in caplog.records if r.msg.startswith("chat_route") and r.outcome == "admitted"]
+            assert admitted_logs[-1].sender_list == "chat_binding"
+            writes = [r for r in caplog.records if r.msg.startswith("chat_routing_write") and r.outcome == "committed"]
+            assert (writes[-1].old_sender_count, writes[-1].new_sender_count) == (0, 1)
+            assert admitted.target.agent_id == REVIEW
+            assert admitted.metadata["channel_thread_id"] == channel_thread_id(d.bot_id, d.native_chat, REVIEW, "manager")
+            if kind != "telegram":
+                assert admitted.payload["channel_context"]["sender_name"] == "Synthetic colleague"
+                d.transport.names.assert_awaited_once_with([sender])
+                # An explicitly bound direct chat follows the same exact-chat admission rule.
+                await d.ingress("same bound direct chat", rejected=True)
+                direct, = d.bus.take_queue(REVIEW)
+                assert direct.metadata["channel_thread_id"] == admitted.metadata["channel_thread_id"]
+
+            await d.ingress("another chat refuses", rejected=True, chat_id=other_chat, group=True)
+            assert d.bus.get_queue(REVIEW).empty() and d.bus.get_queue("manager").empty()
+            assert not await pool.fetchval("SELECT count(*) FROM channel_seen_chats WHERE channel_id = $1 AND chat_id = $2",
+                                          d.bot_id, other_chat)
+            if kind != "telegram":
+                refused, = await channel_configs.rejected_senders(d.bot_id, pool=pool)
+                assert (refused["sender_id"], refused["chat_id"], refused["count"]) == (sender, other_chat, 1)
+                await d.ingress("direct message refuses", rejected=True, chat_id="oc_dm")
+                assert d.bus.get_queue(REVIEW).empty() and d.bus.get_queue("manager").empty()
+                refused, = await channel_configs.rejected_senders(d.bot_id, pool=pool)
+                assert (refused["sender_id"], refused["chat_id"], refused["count"]) == (sender, None, 2)
+                assert not await pool.fetchval("SELECT count(*) FROM channel_seen_chats WHERE channel_id = $1 AND chat_id = 'oc_dm'",
+                                              d.bot_id)
+            else:
+                assert not await channel_configs.rejected_senders(d.bot_id, pool=pool)
+
+            for chat_id, owner in ((d.native_chat, REVIEW), (other_chat, "manager")):
+                await d.ingress("bot allowlisted sender", chat_id=chat_id, group=True)
+                owner_message, = d.bus.take_queue(owner)
+                assert owner_message.target.agent_id == owner
+                admitted_logs = [r for r in caplog.records if r.msg.startswith("chat_route") and r.outcome == "admitted"]
+                assert not hasattr(admitted_logs[-1], "sender_list")
+
+            await d.configure(REVIEW, allowed_senders=[])
+            await d.ingress("removed sender", rejected=True, group=True)
+            assert d.bus.get_queue(REVIEW).empty()
+            await d.fleet.get(REVIEW)._send_reply(admitted, "accepted before sender removal")
+            assert (await d.flush())[-1].payload["text"] == "accepted before sender removal"
+            await d.configure(REVIEW, allowed_senders=[sender])
+            await d.configure("manager")
+            assert not d.registry.resolve_chat(d.bot_id, d.native_chat).senders
+            await d.ingress("moved chat refuses", rejected=True, group=True)
+            assert d.bus.get_queue("manager").empty()
+
+            await d.configure(REVIEW, allowed_senders=[sender])
+            await d.configure(policy=True)
+            await d.configure(remove=True)
+            seen_before = await pool.fetchval("SELECT count FROM channel_seen_chats WHERE channel_id = $1 AND chat_id = $2",
+                                              d.bot_id, d.native_chat)
+            await d.ingress("unbound chat refuses before silence", rejected=True, group=True)
+            assert d.bus.get_queue(REVIEW).empty() and d.bus.get_queue("manager").empty()
+            assert await pool.fetchval("SELECT count FROM channel_seen_chats WHERE channel_id = $1 AND chat_id = $2",
+                                       d.bot_id, d.native_chat) == seen_before
+            if kind != "telegram":
+                refused, = await channel_configs.rejected_senders(d.bot_id, pool=pool)
+                assert (refused["sender_id"], refused["chat_id"], refused["count"]) == (sender, d.native_chat, 5)
+    run_db(run, monkeypatch, setup=seed_channel_configs, timeout=30)
+
+
 def test_generated_operator_cli_discovers_and_executes_all_five_operations(tmp_path, monkeypatch, capsys):
     from looper import loopercli
 
@@ -259,7 +340,7 @@ def test_generated_operator_cli_discovers_and_executes_all_five_operations(tmp_p
             token_file.chmod(0o600)
             for operation, flags in (
                 ("manager_chat_bindings.put", ["--channel-id", d.bot_id, "--chat-id", d.native_chat,
-                                               "--manager-id", REVIEW]),
+                                               "--manager-id", REVIEW, "--allowed-senders", '["8"]']),
                 ("manager_chat_bindings.list", []),
                 ("channel_chats.set_policy", ["--channel-id", d.bot_id, "--bound-chats-only"]),
                 ("channel_chats.list", ["--channel-id", d.bot_id]),
@@ -271,14 +352,19 @@ def test_generated_operator_cli_discovers_and_executes_all_five_operations(tmp_p
                     group, action, *flags, "--url", f"http://127.0.0.1:{d.server._port}",
                     "--operator-token-file", str(token_file)]) == 0
                 output = capsys.readouterr()
-                validate_success(operation, json.loads(output.out))
+                answer = json.loads(output.out)
+                validate_success(operation, answer)
+                if operation == "manager_chat_bindings.list":
+                    binding, = answer["result"]["bindings"]
+                    assert binding["allowed_senders"] == ["8"]
                 assert TOKEN not in output.out + output.err
             assert d.registry.resolve_chat(d.bot_id, d.native_chat).action is chat_routing.RouteAction.SILENT
     run_db(run, monkeypatch, setup=seed_channel_configs, timeout=30)
 
 
 @pytest.mark.parametrize("kind", ["telegram", "lark", "lark_bot"])
-def test_native_stop_reaches_every_owner_when_new_destination_is_off(tmp_path, monkeypatch, kind):
+@pytest.mark.parametrize("extra_sender", [False, True])
+def test_native_stop_reaches_every_owner_when_new_destination_is_off(tmp_path, monkeypatch, kind, extra_sender):
     monkeypatch.setattr(chat_settings, "_stop_enabled", True)
     async def run(pool):
         async with delivery(tmp_path, pool, monkeypatch, kind) as d:
@@ -311,12 +397,13 @@ def test_native_stop_reaches_every_owner_when_new_destination_is_off(tmp_path, m
                     untouched.append(d.fleet.default.turn_for(env.message_id))
                 await pool.execute("INSERT INTO managers (id, name, system_prompt, enabled) "
                                    "VALUES ('manager-off', 'Paused', 'Synthetic examples.', false)")
-                await d.configure("manager-off")
+                senders = ["8" if kind == "telegram" else "ou_rejected"] if extra_sender else None
+                await d.configure("manager-off", allowed_senders=senders)
                 d.adapter._manager_running = lambda _: False
-                await d.ingress("/stop")
+                await d.ingress("/stop", rejected=extra_sender, group=extra_sender)
                 assert all(t.stop is not None and t.stop.via == kind for t in targets)
                 requests = [t.stop for t in targets]
-                await d.ingress("/stop")
+                await d.ingress("/stop", rejected=extra_sender, group=extra_sender)
                 assert all(t.stop is request for t, request in zip(targets, requests))
                 await asyncio.wait_for(asyncio.gather(*running), 10)
                 output = await d.flush()
@@ -337,7 +424,7 @@ def test_real_client_cannot_request_or_confirm_operator_binding_operations(tmp_p
             identity = {"channel_id": d.bot_id, "chat_id": d.native_chat}
             for operation, body in (
                 ("manager_chat_bindings.list", {}),
-                ("manager_chat_bindings.put", {**identity, "manager_id": REVIEW}),
+                ("manager_chat_bindings.put", {**identity, "manager_id": REVIEW, "allowed_senders": ["8"]}),
                 ("manager_chat_bindings.delete", identity),
                 ("channel_chats.list", {"channel_id": d.bot_id}),
                 ("channel_chats.set_policy", {"channel_id": d.bot_id, "bound_chats_only": True}),

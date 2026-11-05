@@ -611,6 +611,7 @@ export async function fetchChatMessages(
  * not listed). */
 export interface ChatSession {
   session_id: string;
+  client: { id: string; name: string } | null;
   /** The channel the session belongs to: "web", "telegram", "lark" or "lark_bot". */
   channel: string;
   message_count: number;

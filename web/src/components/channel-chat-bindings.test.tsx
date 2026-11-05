@@ -24,7 +24,7 @@ function chat(chat_id = "42", name: string | null = "Sample chat"): SeenChat {
 function binding(channel_id: string, chat_id: string, manager_id: string): Binding {
   const manager = managers.find((m) => m.id === manager_id) ?? off;
   return { channel_id, chat_id, manager_id, created_at: stamp, channel_type: "telegram", bot_name: "Example bot",
-    chat_name: null, manager_name: manager.name, manager_enabled: manager.enabled, manager_deleted: false };
+    chat_name: null, manager_name: manager.name, manager_enabled: manager.enabled, manager_deleted: false, allowed_senders: [] };
 }
 let host: HTMLDivElement, root: Root;
 let managers: typeof owner[];
@@ -265,4 +265,16 @@ it("reports a successful write whose readback failed without claiming confirmati
   intercept = (path) => { if (path.endsWith("/put")) written = true; if (written && path === "channel_chats/list") return refused(503, "unavailable"); };
   await change(other.id); expect(select().value).toBe(""); expect(host.querySelector('[role="alert"]')?.textContent).toContain("confirm server state");
   intercept = () => undefined; await click(button("Refresh chats")); expect(select().value).toBe(other.id);
+});
+
+it.each([{ allowed_senders: [] }, { allowed_senders: ["8"] }, { allowed_senders: ["8", "9"] }])("shows the extra sender count and clear notice only for a binding with senders: %j", async ({ allowed_senders }) => {
+  bindings = [{ ...binding("channel-telegram", "42", other.id), allowed_senders }];
+  await render();
+  const text = select().closest("li")!.textContent!;
+  if (allowed_senders.length) {
+    expect(text).toContain(`Effective Manager: Review · ${allowed_senders.length} extra sender${allowed_senders.length === 1 ? "" : "s"}`);
+    expect(text).toContain("Binding this chat to another Manager clears its extra senders; edit them in Settings → Managers.");
+  } else {
+    expect(text).not.toContain("extra sender");
+  }
 });

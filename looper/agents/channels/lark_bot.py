@@ -66,10 +66,18 @@ def make_adapter(config: Mapping[str, Any], app_secret: str, *, runtime_root: Pa
     """Build a bot-token channel with its app, sender policy and event identity."""
     from .lark_api import BASE_URLS
 
+    def admit(event: dict[str, Any]) -> bool:
+        # The registry installs the live resolver on the adapter after construction.
+        decision = (adapter._resolve_chat(adapter.channel_id, event["chat_id"])
+                    if adapter._resolve_chat is not None else None)
+        sender_id = event["sender_id"]
+        return sender_id in allowlist.ids or (decision is not None and sender_id in decision.senders)
+
     config = stored_config(config)
     transport = BotTransport(config["app_id"], app_secret, base_url=base_url or BASE_URLS[config["domain"]],
-                             admit=lambda event: event["sender_id"] in allowlist.ids)
-    return LarkChannelAdapter(channel_type="lark_bot", transport=transport, runtime_root=runtime_root,
+                             admit=admit)
+    adapter = LarkChannelAdapter(channel_type="lark_bot", transport=transport, runtime_root=runtime_root,
                               allowlist=allowlist, on_rejected=on_rejected, bot_open_id=bot_open_id, backoff=True,
                               channel_id=channel_id, manager_id=manager_id, manager_running=manager_running,
                               resolve_chat=resolve_chat, stop_chat=stop_chat)
+    return adapter

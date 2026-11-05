@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import TypedDict
 
@@ -37,6 +37,7 @@ class ChatBinding(TypedDict):
     chat_id: str
     manager_id: str
     created_at: datetime
+    allowed_senders: list[str]
 
 
 class RoutingSnapshot(TypedDict):
@@ -103,20 +104,25 @@ async def list_bindings(channel_id: str | None = None, manager_id: str | None = 
         if not await reader.fetchval("SELECT deleted_at IS NULL FROM managers WHERE id = $1", manager_id):
             raise LookupError("Manager not found")
     rows = await reader.fetch(
-        "SELECT channel_id, chat_id, manager_id, created_at FROM manager_chat_bindings "
+        "SELECT channel_id, chat_id, manager_id, created_at, allowed_senders FROM manager_chat_bindings "
         "WHERE ($1::text IS NULL OR channel_id = $1) AND ($2::text IS NULL OR manager_id = $2) "
         "ORDER BY channel_id, chat_id", channel_id, manager_id)
     return [ChatBinding(**dict(row)) for row in rows]
 
 
 async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,
-                      conn: asyncpg.Connection, before_write: Callable[[], Awaitable[None]] | None = None) -> ChatBinding:
+                      conn: asyncpg.Connection, before_write: Callable[[], Awaitable[None]] | None = None,
+                      allowed_senders: Sequence[str] | None = None) -> ChatBinding:
     """Bind even to the bot's own Manager; rebinding keeps the original creation time.
 
     KEY SHARE conflicts with Manager deletion's FOR UPDATE. Recheck deleted_at
     under that lock before taking the channel lock, including after a waiter wakes.
     Disabled Managers are valid targets.
     """
+    if allowed_senders is not None and (
+            not isinstance(allowed_senders, list) or len(allowed_senders) > 100
+            or any(not isinstance(sender, str) or not sender.strip() for sender in allowed_senders)):
+        raise ValueError("allowed_senders must be a list of non-empty strings, at most 100")
     _chat_id(channel_id, chat_id)
     _manager_id(manager_id)
     _transaction(conn)
@@ -127,9 +133,13 @@ async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,
     if before_write is not None:
         await before_write()
     row = await conn.fetchrow(
-        "INSERT INTO manager_chat_bindings (channel_id, chat_id, manager_id) VALUES ($1, $2, $3) "
-        "ON CONFLICT (channel_id, chat_id) DO UPDATE SET manager_id = EXCLUDED.manager_id "
-        "RETURNING channel_id, chat_id, manager_id, created_at", channel_id, chat_id, manager_id)
+        "INSERT INTO manager_chat_bindings (channel_id, chat_id, manager_id, allowed_senders) "
+        "VALUES ($1, $2, $3, coalesce($4::text[], '{}')) "
+        "ON CONFLICT (channel_id, chat_id) DO UPDATE SET manager_id = EXCLUDED.manager_id, "
+        "allowed_senders = CASE WHEN $4::text[] IS NOT NULL THEN $4::text[] "
+        "WHEN manager_chat_bindings.manager_id = EXCLUDED.manager_id THEN manager_chat_bindings.allowed_senders "
+        "ELSE '{}' END RETURNING channel_id, chat_id, manager_id, created_at, allowed_senders",
+        channel_id, chat_id, manager_id, allowed_senders)
     return ChatBinding(**dict(row))
 
 

@@ -18,6 +18,24 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.82] - 2026-11-05
+
+### Added
+
+- **Extra senders for one chat binding.** A native chat binding can admit people who are not on the bot's sender allowlist, in that chat only. `manager_chat_bindings` gains `allowed_senders` (Lark open_ids or Telegram user ids, at most 100, checked against the bot type's id format) with an additive upgrade named `chat_binding_senders`. A message in exactly that `(channel_id, chat_id)` is admitted when its sender is on the bot's allowlist or on the binding's extra senders; anywhere else the extra senders are refused and recorded as refused senders, as before. One route decision serves admission and delivery. Moving a binding to another Manager without giving `allowed_senders` clears them. `manager_chat_bindings.put` takes `allowed_senders`, `list` returns them, and Settings → Managers shows and edits them. ([#1090](https://github.com/foolzzz/looper/pull/1090))
+
+## [2.14.81] - 2026-11-04
+
+### Added
+
+- **Cursor Agent through TTADK.** The runtime `ttadk-cursor-agent` (`rt-ttadk-cursor-agent`, launcher TTADK, type `cursor-agent`) runs Cursor's CLI as `ttadk code -t cursor-cli --skip-check -- …`, so TTADK counts the work like the Codex runs; capabilities, roles and the stdin instructions are the native runtime's. It is registered when `ttadk` and `cursor-agent` are on PATH and used only when an Agent Profile selects it. TTADK runs `agent` for `cursor-cli`, so Looper puts a shim named `agent` first on the run's own `PATH`: it runs the resolved `cursor-agent`, refuses to run without Looper's Cursor directories and unsets `TTADK_JWT_TOKEN`. A launch is refused (`WRONG_TOOL`) when TTADK's settings make `cursor-cli` run another command. The sign-in check for `cursor-cli` runs with the shim and throwaway Cursor directories and a 45 s timeout; launches wait for it, status views read the cached result and refresh in the background (new state `checking`, a warning). A run without a `result` event fails whatever `ttadk` exits with, and TTADK's non-JSON stdout preamble is dropped. ([#1085](https://github.com/foolzzz/looper/pull/1085))
+
+## [2.14.80] - 2026-11-04
+
+### Changed
+
+- **The Chat page lists loopercli conversations as their own group.** Conversations opened through the client API (`loopercli chat`) are stored like dashboard chats (channel `web`) and used to show under "Dashboard chat" with nothing marking them. `chat.list_sessions` now returns, per conversation, the API client that opened it (from `chat_threads.client_id`, its name from `api_clients`, the id when the client row is gone; null otherwise), and `operator_chat.sessions` carries it as `client`. The conversation list shows such conversations in a group `loopercli` right after "Dashboard chat", each with `via <client name>`. Stored messages, their channel, the client API and Lark/Telegram are unchanged. ([#1087](https://github.com/foolzzz/looper/pull/1087))
+
 ## [2.14.79] - 2026-11-04
 
 ### Added

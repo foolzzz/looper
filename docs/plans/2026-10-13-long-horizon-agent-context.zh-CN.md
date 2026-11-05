@@ -556,6 +556,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-04 | 聊天绑定可配置最多 100 个额外发送者，仅在精确 bot/chat 对中准入，与路由共用已提交快照；同 Manager 省略名单保留，移动时省略则清空，支持 Settings → Managers 与生成式 CLI。 |
 | 2026-11-01 | 保留运行真实链路验证（本分支未合入）：macOS launchd 替身 CLI 的控制平面升级、停机期间完成、两种 restart、单 keeper 故障重试、第二实例拒绝与锁丢失恢复通过，启动结束原因和截断轮次补入报告，systemd 读取生效 KillMode。四个定向回归文件 411 项通过；真实 Claude 因隔离目录无登录未运行，Linux 用户 systemd 和可重启的独占 PostgreSQL 集群不可用，验收仍有缺口，默认保持关闭（[证据](../validation/kept-runs/README.md)）。 |
 | 2026-10-31 | Telegram 长升级间隙积压修复（#974，本分支未合入）：现有 SQLite inbox 持久化轮询停止时间，该时刻起的消息不受年龄上限限制，较早消息仍过滤并记录日志，保留 `update_id` 去重；恢复轮询后清除磁盘上的旧停止边界，启动失败则保留。定向回归（`-n 2`）：508 passed、32 skipped，数据库项因未配置专属临时库未运行；CI 的 PR 标记筛选可收集启动积压测试的全部 12 个参数用例，CI 已配置 PostgreSQL。仅 Telegram 接入路径变化，控制台、Lark 和 CLI 无需改动。 |
 | 2026-10-31 | TTADK Codex 后续修复（本分支，未合入）：运行记录保留原生与 TTADK 的 launcher，控制台选择与已保存 Profile 显示 TTADK 运行时名称及启动器；Worker、Reviewer、Planner 的无结果错误和活动保留末尾 1000 字符的脱敏 stderr，服务先启动 HTTP 工具再重放消息和恢复任务。验证：三个 CI 失败均已复现，修复后与指定 TTADK 回归共 65 项通过（`-n 2`，一次性 PostgreSQL）；此前的 Agent Profiles 组件 48 项、TypeScript 编译及隔离浏览器截图验证保留，未调用真实模型。Telegram、Lark 和 CLI 沿用共同后端结果，无新增配置字段。 |
@@ -751,6 +752,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 | 2026-11-03 | Cursor 登录基础（本分支）：`cursor-login` provider 代表操作者本机现有的 Cursor 登录（macOS 登录钥匙串），五个建议模型无内置价格；没有文件存储、API key 或登录链接。`cursor-agent status --format json` 保留操作者的 `HOME`，使用用完即删的 `CURSOR_CONFIG_DIR`/`CURSOR_DATA_DIR`，去掉 key、token、端点和凭据存储变量，设 `NO_OPEN_BROWSER=1`、空 stdin、20 秒超时。30 秒缓存；provider 列表立即返回已有状态或检查中，最多一个后台刷新，在运行时存在前就显示登录状态；启动检查和 doctor 同步检查。2026-11-04 已验证钥匙串登录的 headless 运行（RFC 2.4）和 `status` JSON 形状，不保存或输出 `userInfo` 内容；测试使用替身 `cursor-agent`。控制台、Telegram/Lark 与 CLI 沿用现有 provider/doctor 入口。 |
 
 | 2026-11-04 | 原生 Cursor Agent Worker/Reviewer 运行时（本分支）：沿用操作者的 `HOME` 和 Cursor 登录，个人 Cursor/Claude Code 配置不可关闭；Looper 插件、配置与数据放在内容寻址的私有运行目录，stdin 单轮输入，报告仅取最后一次工具调用或重试后的文本，并保留路由模型和 token。新增 `loads_operator_config` 类型契约，控制台、Telegram/Lark 与 CLI 沿用共享注册表入口；纯文本样本保留原输出，但步骤仍须符合既有 JSON 报告契约。定向 pytest 分批验证、TypeScript 编译和 59 项组件测试通过，脱敏流样本逐字节一致；仅用替身 Cursor，真实 Worker prompt 对照评测待后续验证，eval 示例需按现有顶层 model schema 转换。 |
+| 2026-11-04 | Cursor Agent 经 TTADK（本分支）：增加 `ttadk-cursor-agent` 启动器、私有 `agent` shim、工具设置检查、版本探测和启动记录，复用原生目录与 stdin 指令并保留操作者的 `HOME`，shim 去掉 `TTADK_JWT_TOKEN`。定向替身回归 231 passed、1 skipped：Worker 可穿过 TTADK 横幅读取 Cursor 报告，工具设置错误时不启动任何进程；当前基线缺少原生 resident 会话，对应 argv 验证跳过，真实 TTADK/Cursor 与耗时未测。控制台、Telegram/Lark 与 CLI 沿用 Agent Profile 的运行时选择；启动事件在停止时丢失的统计缺口见 §5.4。 |
 
 | 2026-11-04 | Cursor Agent 管家与规划者（本分支）：逐轮续接 owner 固定目录中的 chat，首轮从 stdin 注入 Looper 指令，续接只发本轮提示；指令哈希与 chat id 一起保存，指令变化时新建会话，清理旧 chat 并按已保存会话回收 owner 目录，管家不支持 stop。控制台、Telegram/Lark 与 CLI 沿用共享角色注册入口；定向替身测试和一次性 PostgreSQL 四角色注册验证通过，未调用真实 Cursor 或模型，Planner MCP 与续接 usage 口径仍待真实验证。 |
 
@@ -899,6 +901,9 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.3 非核心待办（M6 之后统一做）
 
+- **聊天绑定额外发送者姓名**：绑定编辑器通过 `channels/people` 显示额外发送者姓名。
+- **在本聊天放行被拒绝的发送者**：对在已绑定聊天中写过消息的被拒绝发送者，提供「仅允许在本聊天」操作。
+
 - **保留运行接管异常通知管家**：升级后接管数量不足、启动时结束运行或接管失败产生 P1 时，向 Manager 通知并附可定位的原因；当前只在升级报告和 dashboard 检查中展示。
 - **Pi extension 重试与 runner 接管**：补齐 Pi 工具桥在重启间隙的安全重试，并随 runner adoption 一起验证。
 - **保留运行默认开启与无条件单实例锁**：维护者服务开启开关运行约一周、至少完成 20 次 `CONTROL_PLANE` 部署，且没有 P1（接管数少于保留数）后，在同一改动中把 keeper 默认值改为 `on`、使单控制平面锁无条件生效，并关闭 #909；此前默认保持 `off`。
@@ -921,6 +926,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **LLM 模型层（已随 2.13 发布；凭据和基线缺口仍在）**：2026-10-20 的前序演练（当时的 `tests/test_llm_registry_rehearsal_db.py`，本二进制不再包含该文件）复用 patched-v2 固定种子，在独立 disposable 源库和模板克隆迁移库验证 count-only dry-run、事务迁移及新连接二次 schema 初始化；20/20 profiles 映射、unresolved/binding/pricing mismatch 均为 0，全部引用层、静态 launch 输入、固定 usage 费用和历史聚合相等，坏引用阻止且事务回滚。dry-run 的 `models_after=27` 仅计转换模型，正常启动额外补齐 11 个内置登录模型（总计 38），测试单独核对新增项；本种子的未知厂商账户保持分离，账户合并及会话重映射由独立 apply/pinned 测试覆盖。同日的恢复演练（当时的 `tests/test_llm_registry_recovery_db.py`，本二进制不再包含该文件）已用真实完整备份恢复第三个 disposable 库，并核对结构/约束/序列、全部行、旧入口绑定/价格夹具和历史费用；固定旧源码最小回移 version=2 guard 的独立入口在 v3 库任何 DDL 前拒绝，提交后的新写入保留在迁移后库，禁止绕过备份或原地反向迁移。仍需待发布旧补丁制品验证、新旧服务副本上真实 CLI 启动/计价/会话续接对照；不能在新 schema 上直接启动未带门禁的旧版。新增迁移后服务 smoke 已在真实 `serve` 上用脚本 CLI 验证 Manager/HTTP 读回及重启续接，并运行浏览器检查迁移 profiles 和未知价提示、保留截图；选择式真实 CLI 入口把显式组合先写入 v2 再迁移，四种 CLI 已安装但本卡无独立凭据，真实请求和 Manager haiku/opus xhigh 两档 comparison 均记为未测，候选版本全量评测亦未运行。这些数字是前序证据，不是本二进制仍在执行的 v2→v3 迁移。当前只接受 `looper-config/v4`；空库记 `post_bridge_baseline`，当前库不重放初始化 DDL，精确的 v2.13.165 桥接库只走一次 `upgrade_from_bridge`。退役的 provider `protocols`/`base_url`/`models` 和层上的 `model`/`effort` 在导入时直接拒绝。真实 CLI 凭据、haiku/opus xhigh dialogs 对照仍未测；五任务、一次重复的 Sonnet 基线不是完整基线，对话基线仍缺。不能把模型层写成已无缺口。详见 [评测说明](../../evals/README.md)。
 
 以下行为已实现，但还没有在真实环境中验证过，相关改动或排查时优先补上：
+
+- **Cursor Agent 经 TTADK**：启动前缀、专用 `agent` shim、令牌移除和 stdin 指令透传只用替身验证；真实 TTADK/Cursor 运行及启动耗时未测。TTADK 不为 `cursor-cli` 注入模型 provider，只有工具结束时发出的启动事件，停止或超时结束运行会丢失该事件，统计口径仍待确认（[RFC §11.2 问题 1](../architecture/rfcs/ttadk-launch-v0.zh-CN.md#112-待决问题附推荐默认值)）。当前基线尚无原生 Cursor resident 会话，公共命令构造已支持 TTADK，resident 回合的 argv 验证待其实现后补齐。
 
 - **DSH 四角色运行时**（本分支实现，待真实验收，未标已交付）：Profile 支持 DeepSeek Messages、精确模型和 effort；private homes、逐轮 Session、append only、只读 guard、平台 MCP stdio 桥及 catalog 加载/省略见 [dsh RFC](../architecture/rfcs/dsh-runtime-v0.zh-CN.md)，不改变 Claude/OMP/pi。文档切片的定向离线回归为 75 passed、1 skipped（未配置 disposable PG），不等于四角色真实闭环通过；installed 包完整 bootstrap/resume/guard 验证未在本切片重跑，结果分级见 RFC §9。
   [validate.py 的安全入口](../../evals/README.md#dsh-validation)保留无 key、无数据库连接的 preflight。既有 smoke 已通过两任务、四角色、consult 和 API/DB 回读；`task-basic`、`task-review` 既有产物各 4 pass、无 fail/error/skipped。Manager 既有真实产物亦为 4 pass：MCP 读回、确认建任务/开始和同一 Session 连续三轮均有证据；修复已启动 Planner 尚无 Session 导致的误报后，回读 evidence gaps 为空，launcher 回归 116 passed、1 skipped（未配置 disposable PG）。本次指定真实命令仍因 sandbox 禁止进程树观察而 exit 2，显式 token 轮换真实验收保持待完成；root 用量未知比例 20%，观测金额未知。没有可比 append 基线，辅助费用仍未知；无 busy steer、append only 限制不变。CLI 无专属参数，Dashboard/Telegram/Lark 共用 adapter，未真发；本次未启动服务，UI 截图未取得。main/open PR 远端查询失败，本地 main 已分叉，pi 集成冲突尚未排除；不据此标为已交付。

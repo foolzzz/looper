@@ -1,7 +1,7 @@
-# RFC：TTADK 启动模式 v0（`ttadk-codex` 与 `ttadk-cursoragent`）
+# RFC：TTADK 启动模式 v0（`ttadk-codex` 与 `ttadk-cursor-agent`）
 
 - **状态：** 已批准（2026-10-30），按第 5 节的推荐决定实施；第 11 节的三个待决问题先按推荐默认值执行，维护者可随时调整。**2026-11-04 修订：** 维护者决定 Cursor 沿用操作者本机现有的登录（macOS 登录钥匙串里的团队登录），D8、D9 和第 2.4、6.4、6.6、6.7、7、8、9、10、11 节按此改写，第 11.2 节问题 2 已定。
-- **需求（维护者，2026-10-30）：** 开发要支持配置 TTADK 模式，codex 和 cursor-agent 都要。TTADK 是组织要求的开发模式，会记录工作量。agent 要能配置成 `ttadk-codex` 和 `ttadk-cursoragent` 两种模式。
+- **需求（维护者，2026-10-30）：** 开发要支持配置 TTADK 模式，codex 和 cursor-agent 都要。TTADK 是组织要求的开发模式，会记录工作量。agent 要能配置成 `ttadk-codex` 和 `ttadk-cursor-agent` 两种模式。
 - **相关：** [多运行时](multi-runtime-agents-v0.zh-CN.md)（P1 登录链接、P5 续接规则）、[Grok 运行时](grok-runtime-v0.zh-CN.md)（厂商 CLI 加自有登录的接法）、[Worker 引导](worker-steering-v0.zh-CN.md)（Codex `app-server`）、[开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 1 节（测试与验证方式）。
 - **核对基线：** `main` `6a3cbb94e`（v2.14.26，代码与 `181743944` 相同）。外部工具：TTADK 1.0.27（npm 包，只读源码）、Codex CLI 0.162.0、Cursor CLI `cursor-agent` 2026.10.01-14929f9（只读 `--help` 和随包的 JS）；Cursor 部分 2026-11-04 用 2026.10.22-27dcf5f 复核（只读随包的 JS，另实跑两次），TTADK 的 cursor-cli 路径用 1.0.37 复核（只读源码）。实跑见第 2 节，共 3 次 Codex 模型调用、2 次 Cursor 模型调用（真实 HOME 与双目录实验）。
 - **引用约定：** 仓库文件写「路径:行」，相对仓库根。TTADK 写成 `ttadk:<包内路径>:<行>`（`dist/` 下）；Cursor CLI 是压缩过的单文件 bundle，写成 `cursor:index.js@<字符偏移>`。
@@ -15,11 +15,11 @@ TTADK 是组织使用的 AI 编码工具包装器：`ttadk code -t <工具>`（�
 
 ### 1.2 目标
 
-- Agent Profile 能选 `ttadk-codex`、`ttadk-cursoragent` 两种模式，控制台、管家工具和 `loopercli` 用现有的 `runtime_id` 字段就能选，不加新字段。
+- Agent Profile 能选 `ttadk-codex`、`ttadk-cursor-agent` 两种模式，控制台、管家工具和 `loopercli` 用现有的 `runtime_id` 字段就能选，不加新字段。
 - 经 TTADK 的运行与原生运行用同一个适配器、同一份隔离、同一种事件格式；四类角色和咨询能用的范围与原生相同（第 7 节）。
 - 失败时说清原因和原生的替代，**从不悄悄退回原生启动**（那样会丢掉工作量记录）。
 - 每次运行的记录写明它经过了 TTADK、TTADK 的版本和模式。
-- 新增原生的 `cursor-agent` 运行时（Cursor CLI），`ttadk-cursoragent` 建在它上面。
+- 新增原生的 `cursor-agent` 运行时（Cursor CLI），`ttadk-cursor-agent` 建在它上面。
 - 不配 TTADK 的安装，命令、prompt、事件和记录逐字节不变。
 
 ### 1.3 不做
@@ -70,7 +70,7 @@ P2 的进程树里能看到 TTADK 注入给 codex 的参数，都在 Looper 的�
 | 另有一个启动事件 `ttadk_code`，在工具结束时发出；`CI=1` 或 `TTADK_NO_TELEMETRY` 会关掉它；node 先被杀则不发 | `ttadk:core/telemetry/tracker.js:46-49`、`ttadk:core/telemetry/event-api.js:59-79` | **不设 `CI=1`**（与原先笔记的做法相反）。它的代价是工具退出后 node 还要发一次请求（P1、P2 的 2-4 秒） |
 | `CI=1` 另外只关掉 shell 补全的自动安装；stdin 不是 TTY 时这一步本来就跳过，也可用 `TTADK_DISABLE_COMPLETION_AUTO_INSTALL=1` 关 | `ttadk:core/command/completion-auto-install.js:73-95` | Looper 设 `TTADK_DISABLE_COMPLETION_AUTO_INSTALL=1` 兜底，不碰操作者的 `~/.zshrc` |
 | `cursor-cli` 的命令默认是 **`agent`**，找不到时才用 `cursor-agent`；可在 `~/.ttadk/setting.json` 的 `ai_tool_commands.cursor-cli` 改 | `ttadk:core/types.js:93`、`ttadk:core/ai-tools/profiles/cursor-cli.js:36`、`ttadk:core/command/code.js:1178-1206` | `agent` 也可能指向 Grok 等其他工具；即使设置为 `"cursor-cli": "agent"`，也不能据名字判定它是 Cursor。不处理的话，`ttadk code -t cursor-cli` 会拉起 Grok（第 6.7 节） |
-| `cursor-cli` 没有任何注入（不改 MCP、不注入网关），只有 `EXEC_SOURCE`、`TTADK_LAUNCH_ID`、`PATH`；源码注释写"User handles tracking"，除 `ttadk_code` 启动事件外不记任何东西 | `ttadk:core/ai-tools/ai-tool-registry.js:169-175`、`ttadk:core/command/code.js:79`、`:1044-1048` | `ttadk-cursoragent` 的"工作量记录"只有那个启动事件，见第 11 节问题 1 |
+| `cursor-cli` 没有任何注入（不改 MCP、不注入网关），只有 `EXEC_SOURCE`、`TTADK_LAUNCH_ID`、`PATH`；源码注释写"User handles tracking"，除 `ttadk_code` 启动事件外不记任何东西 | `ttadk:core/ai-tools/ai-tool-registry.js:169-175`、`ttadk:core/command/code.js:79`、`:1044-1048` | `ttadk-cursor-agent` 的"工作量记录"只有那个启动事件，见第 11 节问题 1 |
 | TTADK 的设置和 SSO 缓存在 `~/.ttadk/`（推断：经 node 的 `os.homedir()`，在 macOS/Linux 上取 `HOME`） | `ttadk:core/config-manager/config-manager.js:246-283` | TTADK 和 Cursor 都要操作者的 `HOME`（Cursor 的钥匙串登录只在那里可用，D8），两者不冲突；进程不换 `HOME`（第 6.7 节） |
 
 ### 2.4 Cursor CLI（📄 2026.10.01 与 2026.10.22 的 bundle 和 `--help`；✅ 2026.10.22 实跑两次，真实 HOME 与双目录实验）
@@ -135,9 +135,9 @@ Cursor 的实跑（隔离 HOME 实验和钥匙串目录链接实验在 2026-10-3
 
 ## 4. 配置形态：候选方案与取舍
 
-| | 方案一：Agent Profile 加 `launcher` 字段 | 方案二：新运行时类型 `ttadk-codex`、`ttadk-cursoragent` | 方案三（推荐）：同一类型的第二行内置运行时，行上有类型化的 `launcher` |
+| | 方案一：Agent Profile 加 `launcher` 字段 | 方案二：新运行时类型 `ttadk-codex`、`ttadk-cursor-agent` | 方案三（推荐）：同一类型的第二行内置运行时，行上有类型化的 `launcher` |
 |---|---|---|---|
-| 用户怎么选 | profile 表单多一个"启动方式"，只对 Codex、Cursor Agent 显示 | 运行时下拉多两项 | 运行时下拉多两行：`ttadk-codex`、`ttadk-cursoragent`；profile 不加字段 |
+| 用户怎么选 | profile 表单多一个"启动方式"，只对 Codex、Cursor Agent 显示 | 运行时下拉多两项 | 运行时下拉多两行：`ttadk-codex`、`ttadk-cursor-agent`；profile 不加字段 |
 | 控制台、管家工具、`loopercli` | profile 表单、v1 schema、管家工具字段、导出格式都要加 `launcher` | 不用改 | 不用改；运行时视图多一个只读的 `launcher` |
 | 探测 | `rt-codex` 只探测原生 codex；TTADK 在不在只能到启动时才知道 | 每类型一行，各自探测 | 每行各自探测：`rt-ttadk-codex` 探测 TTADK 版本和它将拉起的 codex，结果显示在 Agent Runtimes 页 |
 | 存储与按类型的名单 | 不变 | `.local/<type>/…`、会话回收、办公台会话保留、咨询名单、Codex 登录检查都要认新类型；漏一处就会误删会话（`read_only_copies.py:195-208` 按类型删目录）或漏查登录 | 不变 |
@@ -151,15 +151,15 @@ Cursor 的实跑（隔离 HOME 实验和钥匙串目录链接实验在 2026-10-3
 
 | # | 决定 | 依据与备选 |
 |---|---|---|
-| D1 | **配置形态：** `agent_runtimes` 加 `launcher TEXT NOT NULL DEFAULT 'native' CHECK (launcher IN ('native','ttadk'))`；`RuntimeSpec.launcher: Launcher`。适配器用 `launchers: ClassVar[frozenset[Launcher]]` 声明支持哪些（Codex、Cursor Agent 声明 `{NATIVE, TTADK}`，其他只有 `NATIVE`）。`ttadk` 在 PATH 上时注册内置行 `rt-ttadk-codex`（名称 `ttadk-codex`，类型 `codex`）和 `rt-ttadk-cursoragent`（名称 `ttadk-cursoragent`，类型 `cursor-agent`），`executable` 为空即用 `ttadk` | 第 4 节。行名照维护者的叫法，这就是界面上显示的模式名 |
+| D1 | **配置形态：** `agent_runtimes` 加 `launcher TEXT NOT NULL DEFAULT 'native' CHECK (launcher IN ('native','ttadk'))`；`RuntimeSpec.launcher: Launcher`。适配器用 `launchers: ClassVar[frozenset[Launcher]]` 声明支持哪些（Codex、Cursor Agent 声明 `{NATIVE, TTADK}`，其他只有 `NATIVE`）。`ttadk` 在 PATH 上时注册内置行 `rt-ttadk-codex`（名称 `ttadk-codex`，类型 `codex`）和 `rt-ttadk-cursor-agent`（名称 `ttadk-cursor-agent`，类型 `cursor-agent`），`executable` 为空即用 `ttadk` | 第 4 节。id 统一为 `rt-<launcher>-<type>`，名称为 `<launcher>-<type>` |
 | D2 | **Codex 的 TTADK 模式：** 命令 `env CODEX_HOME=<home> ttadk codex --skip-check --mode mixed -- exec …`（引导用 `… -- app-server`），模型照旧以 Codex 自己的 `-m <模型>` 放在 `--` 之后；不用 TTADK 的 `-m`，不用 `-a`。只配 `codex-login` provider | 维护者建议的 `--mode auto` 在登录不是 ChatGPT 时会落到 TTADK-only，再弹出读 stdin 的模型选择（2.3）。显式 `mixed` 失败即关闭。API key provider 的 `model_provider` 会被 TTADK 覆盖（2.3），配上去就是悄悄换了 provider，所以在建档时拒绝 |
 | D3 | **环境：** 设 `TTADK_DISABLE_COMPLETION_AUTO_INSTALL=1`；**不设 `CI=1`**；TTADK 运行的 `config.toml` 在 `[shell_environment_policy]` 里排除 `TTADK_OPENAI_API_KEY`。这些变量归适配器所有（`provider_env_owned`） | `CI=1` 只关掉启动事件和补全安装（2.3），关掉启动事件可能少一条工作量记录；代价是每次运行结束多 2-4 秒 |
 | D4 | **失败：** 启动前检查，失败时拒绝启动，原因用类型化的 `TtadkProblem` 表达：`NOT_FOUND`（没有 `ttadk`）、`NOT_SIGNED_IN`（`ttadk models -t <工具> -f json` 以非零退出）、`CHECK_FAILED`（这个检查超时或输出读不懂）、`WRONG_TOOL`（`cursor-cli` 会拉起的不是 Cursor CLI，第 6.7 节）；ChatGPT 登录照旧由 `codex_login.launch_problem` 检查，mixed 模式下 TTADK 自己也会拒绝非 ChatGPT 登录。准备阶段失败（没有任何 JSON 就结束）时，运行失败信息带 TTADK 的 stderr 末尾。每条信息都写原生的替代："或者把这个 Agent Profile 的运行时换成 `codex`（不计入 TTADK 统计）"。**从不退回原生** | 维护者的要求；Worker 本来把没有 `result` 判为失败（2.3） |
 | D5 | **续接：** `can_resume` 不变，原生和 TTADK 之间切换照常续接 | P3：mixed 模式背后是同一个 ChatGPT 订阅后端，原生续接了 TTADK 建的会话，缓存命中。以后若做 TTADK-only，它是另一个 provider，按 P5 会新开会话 |
 | D6 | **记录：** `Launch.record()` 的 `profile.runtime` 加 `launcher`；TTADK 运行的 `launch_record` 加 `{"launcher": {"kind": "ttadk", "version": "<探测到的版本>", "tool": "codex"或"cursor-cli", "mode": "mixed"或null}}`。运行时视图加 `launcher`，版本写成 `ttadk 1.0.27 / codex-cli 0.162.0` | 不另建表：运行记录本来就是每次运行的审计 |
-| D7 | **新的原生 `cursor-agent` 运行时**（第 6 节），内置 provider `prov-cursor-login`（操作者本机的 Cursor 登录，D8）；`ttadk-cursoragent` 是它的 TTADK 行 | 维护者要求 cursor-agent 也有 TTADK 模式，原生运行时是前提 |
+| D7 | **新的原生 `cursor-agent` 运行时**（第 6 节），内置 provider `prov-cursor-login`（操作者本机的 Cursor 登录，D8）；`ttadk-cursor-agent` 是它的 TTADK 行 | 维护者要求 cursor-agent 也有 TTADK 模式，原生运行时是前提 |
 | D8 | **Cursor 用操作者本机现有的登录（维护者 2026-11-04 决定）：** 在 macOS 上就是登录钥匙串里的团队登录（`cursor-agent status` 显示已登录）。不用文件存储、不用 API key、不发登录链接。Cursor 进程保留操作者的真实 `HOME`；Looper 给每次运行（常驻会话则是每个 owner）一对自己的目录，`CURSOR_CONFIG_DIR`（`cli-config.json`、`chats/`、权限）和 `CURSOR_DATA_DIR`（`projects/<slug>/`：信任、MCP 批准与认证、worker 日志）；去掉 `AGENT_CLI_CREDENTIAL_STORE`、`CURSOR_API_KEY`、`CURSOR_AUTH_TOKEN`、`CURSOR_API_ENDPOINT`，设 `NO_OPEN_BROWSER=1`。登录状态由 `cursor-agent status --format json` 判断（第 6.4 节）。**代价（维护者已接受）：** 操作者的个人 Cursor 配置和 Claude Code 配置会加载，关不掉（第 7 节）。这与 Claude Code 运行时（`--setting-sources project`，`looper/agents/claude_cli.py:40-67`）以及 Codex、Grok（各用 Looper 自己的家目录）都不同，文档和 Agent Runtimes 页要明说 | 真实 HOME 与双目录实验：真实 `HOME` 加 Looper 的目录，钥匙串登录可用（`apiKeySource: "login"`），操作者 `~/.cursor` 的配置文件不变；隔离 HOME 实验和钥匙串目录链接实验：换了 `HOME` 找不到钥匙串里的登录，链接钥匙串目录会挂住。不设 `CURSOR_DATA_DIR` 时项目数据写进操作者的 `~/.cursor/projects/`（真实 HOME 实验）。`CURSOR_AUTH_TOKEN` 会被写进钥匙串（2.4），必须去掉。原先的"文件存储加链接"要操作者另登录一次，不采用（第 6.6 节） |
-| D9 | **`ttadk-cursoragent` 的 `agent`：** Looper 在自己的目录里放一个 `agent` 垫片，把它所在目录放到传给 TTADK 的 `PATH` 最前面；垫片只 `exec` Looper 启动时解析好的真正 `cursor-agent`：不改 `HOME`、不设文件存储，`CURSOR_CONFIG_DIR` 或 `CURSOR_DATA_DIR` 没设时拒绝运行，并去掉 TTADK 注入的 `TTADK_JWT_TOKEN`（第 6.7 节）。两个目录由 Looper 写进它给 `ttadk` 的环境。TTADK 的设置把 `cursor-cli` 映射成 `agent` 以外的命令时拒绝启动（`WRONG_TOOL`） | `agent` 可能是 Grok 等其他工具（2.3），所以垫片仍然需要；D8 之后 TTADK 和 Cursor 都用操作者的 `HOME`，不再需要在 TTADK 之后换 `HOME` |
+| D9 | **`ttadk-cursor-agent` 的 `agent`：** Looper 在自己的目录里放一个 `agent` 垫片，把它所在目录放到传给 TTADK 的 `PATH` 最前面；垫片只 `exec` Looper 启动时解析好的真正 `cursor-agent`：不改 `HOME`、不设文件存储，`CURSOR_CONFIG_DIR` 或 `CURSOR_DATA_DIR` 没设时拒绝运行，并去掉 TTADK 注入的 `TTADK_JWT_TOKEN`（第 6.7 节）。两个目录由 Looper 写进它给 `ttadk` 的环境。TTADK 的设置把 `cursor-cli` 映射成 `agent` 以外的命令时拒绝启动（`WRONG_TOOL`） | `agent` 可能是 Grok 等其他工具（2.3），所以垫片仍然需要；D8 之后 TTADK 和 Cursor 都用操作者的 `HOME`，不再需要在 TTADK 之后换 `HOME` |
 
 ## 6. 设计
 
@@ -176,7 +176,7 @@ Cursor 的实跑（隔离 HOME 实验和钥匙串目录链接实验在 2026-10-3
   - `sign_in_problem(executable, tool) -> TtadkProblem | None`：`ttadk models -t <工具> -f json`，20 秒超时，按退出码和 JSON 判断，结果缓存 60 秒（同 `codex_login.cached_probe` 的做法）；
   - `TtadkProblem`（枚举）及每种的说明与修复办法；
   - `check_args(args)`：工具参数里有 `-v`、`--version`、`handoff`、`--debug`、`--verbose`、`--log-level` 时抛 `RuntimeUnsupported`（2.3：这些在 `--` 之后仍被 TTADK 处理）。Looper 自己拼的参数里本来没有这些，这是防将来回归的边界检查。
-- 注册：`register_found_runtimes` 对声明了 `Launcher.TTADK` 的适配器，在 `ttadk` 在 PATH 上时另插一行 `rt-ttadk-<名>`（`builtin_runtime_id` 按 `(类型, 启动器)` 生成；`cursor-agent` 的行名照维护者写作 `ttadk-cursoragent`，由适配器的 `ttadk_runtime_name` 给出）。`probe_runtime` 照常能"重新检测"这一行。
+- 注册：`register_found_runtimes` 对声明了 `Launcher.TTADK` 的适配器，在 `ttadk` 在 PATH 上时另插一行 `rt-ttadk-<type>`（`builtin_runtime_id` 按 `(类型, 启动器)` 生成；名称统一为 `ttadk-<type>`，Cursor Agent 为 `ttadk-cursor-agent`，由适配器的 `ttadk_runtime_name` 给出）。`probe_runtime` 照常能"重新检测"这一行。
 - 导入导出：运行时条目多一个可选的 `launcher`（只在不是 `native` 时写）；导入时按名称对上已有的行，启动器不同就跳过并说明（`looper/agents/config_transfer.py:1127-1160`）。
 - 视图：`runtime_view` 和 v1 的 `RUNTIME` schema 加 `launcher`，以及按 `auth_kinds_for(launcher)` 算出的 `auth_kinds`（控制台据此过滤 provider，规则不在 TypeScript 里重写一遍）；`type_view` 不变（类型表一个类型一项）。
 
@@ -252,10 +252,10 @@ env CODEX_HOME=<home> ttadk codex --skip-check --mode mixed --
 - **`--exclude-workspace-context`（隐藏参数）：** 能跳过 `~/.claude/commands`，但同时去掉项目的规则、skill 和笔记，而 Looper 要项目的 `AGENTS.md` 等；也挡不住 hook、MCP 和个人 skill。不用。
 - **按工作区停用个人 MCP（`mcp-disabled.json`，2.4）：** 能挡住 `~/.cursor/mcp.json` 里的服务器，但文件名和格式未核实，要先知道服务器名，也挡不住 Claude 插件带的服务器。v0 不做，记为后续。
 
-### 6.7 Cursor Agent 经 TTADK（`ttadk-cursoragent`）
+### 6.7 Cursor Agent 经 TTADK（`ttadk-cursor-agent`）
 
 ```
-env CURSOR_CONFIG_DIR=<运行目录>/config CURSOR_DATA_DIR=<运行目录>/data PATH=<Looper 的垫片目录>:<原 PATH>
+env CURSOR_CONFIG_DIR=<运行目录>/config CURSOR_DATA_DIR=<运行目录>/data PATH=<Looper 的垫片目录>:<本次运行解析出的 PATH>
     ttadk code -t cursor-cli --skip-check --
     -p --output-format stream-json --force --trust --sandbox disabled --disable-auto-update --model <模型> …
 ```
@@ -275,6 +275,7 @@ env CURSOR_CONFIG_DIR=<运行目录>/config CURSOR_DATA_DIR=<运行目录>/data 
 - TTADK 1.0.37（2026-11-04 只读 `ttadk:core/command/code.js:1150-1290`、`ttadk:core/ai-tools/profiles/cursor-cli.js`）：`cursor-cli` 仍默认运行 `agent`，找不到时回退 `cursor-agent`；`cursor-cli` 没有 `PATH` 前缀，垫片目录仍在最前；工具的环境在没有预设时多出 `TTADK_JWT_TOKEN`（TTADK 换来的令牌，供 AI 调用 TTADK 的工具），Looper 的 agent 用不到，垫片去掉它（推断：Cursor 的 shell 会继承它，第 10.2 节第 13 项）；TTADK 设置里 `code.approve_mcps` 为真时会给 `cursor-cli` 加 `--approve-mcps`。
 - 启动前：读 TTADK 设置里的 `ai_tool_commands.cursor-cli`（只读这一项），不是 `agent` 时 `WRONG_TOOL`："TTADK 的设置让 cursor-cli 运行 `<命令>`，Looper 不能确认它是 Cursor CLI"。
 - 提示从 stdin 进（TTADK 继承 stdin），不作位置参数（位置参数里的 `-m…` 会被 TTADK 吃掉，2.3）。
+- 垫片前缀保留本次运行解析出的 `PATH`（包含角色、项目和 Profile 的变量）。stdout 中事件之前或之间的非 JSON 行（包括带登录邮箱的前言）由读取器丢弃，不进入事件、日志或失败信息。没有 `result` 就判失败，即使 TTADK 退出码为 0；失败信息保留 stderr 末尾的错误。
 - 记录：`launch_record` 的 `launcher.tool = "cursor-cli"`。TTADK 对 cursor-cli 只发启动事件；停止和超时时 node 先死，事件发不出（2.3），见第 11 节问题 1。
 - 各角色与原生 `cursor-agent` 相同；每个进程多出 TTADK 的准备时间（推断与 Codex 相近，未实测）。
 
@@ -292,14 +293,14 @@ env CURSOR_CONFIG_DIR=<运行目录>/config CURSOR_DATA_DIR=<运行目录>/data 
   - 后果：操作者的个人 hook 可能在 Looper 的运行里执行（真实 HOME 与双目录实验里观察的 `UserPromptSubmit` hook 没有触发，别的事件未核实）；个人指令会改变 agent 的行为（真实 HOME 实验：英文提示得到中文回复）；个人 MCP 服务器和 skill 进入 agent 的工具和上下文（真实 HOME 实验的思考提到个人 skill）；个人配置里若有同名的 `looper` MCP 服务器，哪一个生效未核实。
   - 与其他运行时的差别：Claude Code 用 `--setting-sources project` 排除个人配置（`looper/agents/claude_cli.py:40-67`），Codex、Grok 用 Looper 自己的家目录；Cursor 是唯一加载操作者个人配置的运行时。`agent-system.md`、Agent Runtimes 页和每次运行的记录（`personal_config`）都写明。
 - **Cursor 写到操作者目录的东西。** 真实 HOME 实验前后操作者的 `cli-config.json`、`agent-cli-state.json`、`mcp.json`、`prompt_history.json` 不变；Cursor 每次启动自己重写团队托管 hook 目录和 `~/.cursor/skills-cursor/` 的同步清单（双目录实验，与操作者自己用 Cursor 时相同）。Looper 总是设 `CURSOR_DATA_DIR`，项目数据不进 `~/.cursor/projects/`（真实 HOME 实验没设时进了）。
-- **垫片**只在 `ttadk-cursoragent` 的进程 `PATH` 里，不在操作者的 `PATH` 里；它执行的绝对路径由 Looper 在启动时解析（`shutil.which("cursor-agent")` 的 `realpath`），并去掉 `TTADK_JWT_TOKEN`（6.7）。
+- **垫片**只在 `ttadk-cursor-agent` 的进程 `PATH` 里，不在操作者的 `PATH` 里；它执行的绝对路径由 Looper 在启动时解析（`shutil.which("cursor-agent")` 的 `realpath`），并去掉 `TTADK_JWT_TOKEN`（6.7）。
 
 ## 8. 可观测性
 
 | 看什么 | 在哪 |
 |---|---|
 | 这次运行是否经过 TTADK、版本、工具、模式 | 运行记录 `metadata.launcher` 和 `metadata.profile.runtime.launcher`；任务动态的 `$ …` 命令行本来就显示 `ttadk codex …` |
-| TTADK 能不能用 | Agent Runtimes 页 `ttadk-codex`/`ttadk-cursoragent` 行的版本和 `probe_error`；`looper doctor` 与 `/api/v1/system/status` 新增 `ttadk` 检查（只在有 Agent Profile 用 TTADK 行时检查）：`ttadk` 不在 PATH、没有登录 → fail，检查超时 → warn |
+| TTADK 能不能用 | Agent Runtimes 页 `ttadk-codex`/`ttadk-cursor-agent` 行的版本和 `probe_error`；`looper doctor` 与 `/api/v1/system/status` 新增 `ttadk` 检查（只在有 Agent Profile 用 TTADK 行时检查）：`ttadk` 不在 PATH、没有登录 → fail，检查超时 → warn |
 | 启动为什么失败 | 任务动态的错误行：`TtadkProblem` 的说明和修复办法，或 TTADK stderr 的末尾 |
 | Cursor 登录能不能用 | Settings → LLM Providers 的 `cursor-login` 行（`cursor-agent status --format json` 的结果，30 秒缓存，后台刷新，列表不等待检查）；`looper doctor` 与 `/api/v1/system/status` 的 `cursor_login` 检查（只在有 Agent Profile 用它时检查）：未登录 → fail，检查失败 → warn |
 | Cursor 运行有没有断线重试、Auto 用了哪个模型 | 任务动态里的 `cursor_connection`、`cursor_retry` 系统事件；运行记录里的 `routed_model` |
@@ -348,14 +349,14 @@ env CURSOR_CONFIG_DIR=<运行目录>/config CURSOR_DATA_DIR=<运行目录>/data 
 | 10 | `ttadk models -t codex -f json` 在未登录时以非零退出、不进设备授权 | 读代码已确认路径（`ttadk:core/command/models.js:29-42`）；实测需要先登出 SSO，不做，单测用替身覆盖 |
 | 11 | `cursor-agent status --format json` 在 Looper 的环境下（操作者的 `HOME`、临时的两个目录）按 2.4 输出，已登录时 `status` 为 `authenticated`；从按操作者服务方式（launchd）运行的 `looper serve` 里也读得到钥匙串登录 | 2026-11-04 已核实 JSON 形状：退出码 0，`status: "authenticated"`、`isAuthenticated: true`，另有 `hasAccessToken`、`hasRefreshToken` 和 `userInfo`，用时 1.3–2.0 秒，操作者的 `~/.cursor/projects` 无新增内容；不保存或输出 `userInfo` 内容。服务进程的钥匙串访问仍需在上线后看 Settings → LLM Providers 的 `cursor-login` 行核实 |
 | 12 | 常驻会话 `--resume` 之后 `result.usage` 是这一轮的还是整个会话累计的 | 管家在 `cursor-agent` 上跑两轮，比较两轮的 `usage` |
-| 13 | TTADK 1.0.37 注入的 `TTADK_JWT_TOKEN` 到不了 agent 的 shell（`cursor-cli` 由垫片去掉；`codex` 靠 Codex 默认排除名字含 `TOKEN` 的变量，推断） | `ttadk-cursoragent` 和 `ttadk-codex` 各跑一次，让 agent 执行 `env` 并只回答有没有这个变量 |
+| 13 | TTADK 1.0.37 注入的 `TTADK_JWT_TOKEN` 到不了 agent 的 shell（`cursor-cli` 由垫片去掉；`codex` 靠 Codex 默认排除名字含 `TOKEN` 的变量，推断） | `ttadk-cursor-agent` 和 `ttadk-codex` 各跑一次，让 agent 执行 `env` 并只回答有没有这个变量 |
 
 ## 11. 默认行为的变化与待决问题
 
 ### 11.1 默认行为的变化
 
 - 没有 `ttadk` 的安装：没有变化（不注册 TTADK 行，原生命令逐字节不变）。
-- 有 `ttadk` 的安装：Agent Runtimes 多出 `ttadk-codex`（以及 Cursor 的 TTADK 接入之后的 `ttadk-cursoragent`）；不选它们的 Agent Profile 不受影响。
+- 有 `ttadk` 的安装：Agent Runtimes 多出 `ttadk-codex`（以及 Cursor 的 TTADK 接入之后的 `ttadk-cursor-agent`）；不选它们的 Agent Profile 不受影响。
 - 所有安装：LLM Providers 多出内置的 `cursor-login`（与 `grok-login` 一样随 seed 写入）。列 provider 时立即返回已有登录缓存，无缓存时显示检查中；缓存缺失或超过 30 秒时最多启动一个后台 `cursor-agent status --format json` 检查，不等待子进程。Cursor 会联网取用户信息并读钥匙串，Looper 不保存或输出 `userInfo` 内容。
 - `cursor-agent` 在 PATH 上的安装：多出运行时 `cursor-agent`。
 - **Cursor 运行加载操作者的个人配置**（D8，维护者已接受）：与 Claude Code、Codex、Grok 运行时不同，Cursor 进程用操作者的真实 `HOME`，个人的 Cursor 和 Claude Code 配置（hook、MCP、skill、规则、插件）都会生效；Agent Runtimes 页、`agent-system.md` 和每次运行的记录写明。
@@ -363,7 +364,7 @@ env CURSOR_CONFIG_DIR=<运行目录>/config CURSOR_DATA_DIR=<运行目录>/data 
 
 ### 11.2 待决问题（附推荐默认值）
 
-1. **cursor-cli 在 TTADK 里算不算工作量？** TTADK 对 cursor-cli 不注入网关，只发一个启动事件（2.3），运行被停止时这个事件还会丢。**推荐：** 照做 `ttadk-cursoragent`（在原生 `cursor-agent` 之上只多一张卡），不设 `CI=1` 保住启动事件；请维护者向 TTADK 的维护方确认 cursor-cli 的统计口径，如果统计靠 Cursor 自己的企业账号，`ttadk-cursoragent` 与原生的差别只在这个事件。补充（2026-11-04，推断）：Cursor 的团队托管设置每次启动都装上一组团队 hook（覆盖会话开始、提交提示、shell、文件编辑、结束等事件，双目录实验），组织可能借此统计 Cursor 的用量；这些 hook 在 headless 下是否执行未核实。
+1. **cursor-cli 在 TTADK 里算不算工作量？** TTADK 对 cursor-cli 不注入网关，只发一个启动事件（2.3），运行被停止时这个事件还会丢。**推荐：** 照做 `ttadk-cursor-agent`（在原生 `cursor-agent` 之上只多一张卡），不设 `CI=1` 保住启动事件；请维护者向 TTADK 的维护方确认 cursor-cli 的统计口径，如果统计靠 Cursor 自己的企业账号，`ttadk-cursor-agent` 与原生的差别只在这个事件。补充（2026-11-04，推断）：Cursor 的团队托管设置每次启动都装上一组团队 hook（覆盖会话开始、提交提示、shell、文件编辑、结束等事件，双目录实验），组织可能借此统计 Cursor 的用量；这些 hook 在 headless 下是否执行未核实。
 2. **Cursor 的登录用什么？** **已定（维护者，2026-11-04）：** 沿用操作者本机现有的登录（macOS 钥匙串里的团队登录）；不用文件存储、API key 或登录链接；接受操作者的个人配置会加载（D8，第 7 节）。
 3. **要不要 TTADK-only 模式（SSO + 网关模型，不用 ChatGPT 订阅）？** **推荐：** v0 不做。以后要做时，新增内置 provider `ttadk-gateway`（模型取自 `ttadk models -t codex -f json`），只配 TTADK 行，命令改成 `--mode ttadk-only -m <网关模型> --`；它是另一个 provider，按 P5 自动新开会话。
 

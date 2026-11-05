@@ -793,7 +793,8 @@ async def _login_problem(profile: AgentProfile) -> str | None:
     from .runtimes import Launcher, adapter, ttadk
 
     runtime = adapter(profile.runtime.type)
-    problem = await runtime.login_problem(profile.provider)
+    found = runtime.ttadk_problem() if profile.runtime.launcher is Launcher.TTADK else None
+    problem = found.message(profile.runtime.type) if found else await runtime.login_problem(profile.provider)
     if not problem and profile.runtime.launcher is Launcher.TTADK:
         if runtime.ttadk_tool is None:
             problem = f"{runtime.label} cannot be launched through ttadk"

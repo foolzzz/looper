@@ -304,10 +304,10 @@ async def check_ttadk(runtimes: list[dict[str, Any]] | None) -> Check:
     status = OK
     for runtime in runtimes:
         tool = adapter(runtime["type"]).ttadk_tool
-        problem = await ttadk.sign_in_problem(runtime["executable"] or "ttadk", tool)
+        problem = await ttadk.sign_in_problem(runtime["executable"] or "ttadk", tool, wait=False)
         if problem is not None:
             problems.append(problem.message(runtime["type"]))
-            if problem is not ttadk.TtadkProblem.CHECK_FAILED:
+            if problem not in (ttadk.TtadkProblem.CHECK_FAILED, ttadk.TtadkProblem.CHECKING):
                 status = FAIL
             elif status == OK:
                 status = WARN

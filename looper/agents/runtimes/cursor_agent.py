@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -25,8 +26,8 @@ from typing import TYPE_CHECKING, Any
 from ... import child_env
 from ..run_usage import Usage, reported_totals, run_usage
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Probe, PromptBlock, ProviderBinding, ReadOnly,
-    RunCost, RuntimeAdapter, RuntimeUnsupported, cursor_login, runtime_prompt_text,
+    ApiProtocol, AuthKind, Capability, CostSource, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly,
+    RunCost, RuntimeAdapter, RuntimeUnsupported, cursor_login, runtime_prompt_text, ttadk,
 )
 from .grok import _local_dir, _remove_idle_homes, _write_private, every_named
 from .instructions import InstructionFile
@@ -53,6 +54,35 @@ _PROBE_TIMEOUT_SEC = 10.0
 # Leave ten seconds for the HTTP round trip and serialization.
 MCP_MAX_WAIT_SECONDS = 50
 _ROUTED_MODEL = re.compile(r"^> Auto routed to ([^\n]+)\n\n?")
+
+
+def write_ttadk_shim(local: Path) -> Path:
+    """Make TTADK's `agent` resolve to Cursor only within Looper's run directories."""
+    directory = local / "cursor-agent" / "ttadk-bin"
+    target = shutil.which("cursor-agent", path=child_env.inherited().get("PATH"))
+    if target is None:
+        raise RuntimeUnsupported("Cursor's CLI (`cursor-agent`) is not on the server's PATH")
+    real = os.path.realpath(target)
+    if Path(real).is_relative_to(directory.resolve()):
+        raise RuntimeUnsupported("the agent shim would run itself")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(directory, 0o700)
+    text = (
+        "#!/bin/sh\n"
+        "# Written by Looper: TTADK runs `agent` for cursor-cli; this runs Cursor's CLI in Looper's Cursor directories.\n"
+        'if [ -z "$CURSOR_CONFIG_DIR" ] || [ -z "$CURSOR_DATA_DIR" ]; then\n'
+        '  echo "Looper\'s agent shim runs Cursor\'s CLI only in a Looper run '
+        '(CURSOR_CONFIG_DIR and CURSOR_DATA_DIR set)" >&2\n'
+        "  exit 2\n"
+        "fi\n"
+        "unset TTADK_JWT_TOKEN\n"
+        f'exec {shlex.quote(real)} "$@"\n'
+    )
+    path = directory / "agent"
+    if not path.exists() or path.read_text(encoding="utf-8") != text:
+        _write_private(path, text)
+    os.chmod(path, 0o700)
+    return directory
 
 
 def write_run_dir(local: Path, files: Mapping[str, str], *, instructions: str = "") -> Path:
@@ -148,6 +178,9 @@ class CursorAgentRuntime(RuntimeAdapter):
                               Capability.MCP, Capability.ADD_DIRS})
     protocols = frozenset({ApiProtocol.OPENAI_RESPONSES})
     auth_kinds = frozenset({AuthKind.OAUTH})
+    launchers = frozenset({Launcher.NATIVE, Launcher.TTADK})
+    ttadk_tool = "cursor-cli"
+    ttadk_runtime_name = "ttadk-cursor-agent"
     login_models = cursor_login.SUGGESTED_MODELS
     effort_levels = ()
     isolation_id = HOME_LAYOUT_ID
@@ -155,6 +188,21 @@ class CursorAgentRuntime(RuntimeAdapter):
     runtime_cost_capped = False
     can_replace_system_prompt = False
     loads_operator_config = True
+
+    def ttadk_problem(self) -> ttadk.TtadkProblem | None:
+        return ttadk.TtadkProblem.WRONG_TOOL if ttadk.tool_command("cursor-cli") != "agent" else None
+
+    def probe_for(self, executable: str, launcher: Launcher) -> Probe:
+        if launcher is Launcher.NATIVE:
+            return self.probe(executable)
+        version, error = ttadk.probe_version(executable)
+        if error:
+            return Probe(None, self.capabilities, error)
+        native = self.probe("cursor-agent")
+        error = native.error
+        if not error and (command := ttadk.tool_command("cursor-cli")) != "agent":
+            error = f"TTADK's cursor-cli command is `{command}`, not `agent`: Looper will not launch it"
+        return Probe(f"ttadk {version} / cursor-agent {native.version or 'unknown'}", native.capabilities, error)
 
     def probe(self, executable: str) -> Probe:
         with tempfile.TemporaryDirectory(prefix="looper-cursor-probe-") as temporary:
@@ -203,7 +251,18 @@ class CursorAgentRuntime(RuntimeAdapter):
             if name in dict(launch.env) or name in dict(binding.env):
                 raise RuntimeUnsupported(f"Cursor Agent runs with the operator's Cursor login: remove {name} "
                                          "from the Agent settings' or the provider's variables")
-        return cursor_login.environment({**child_env.inherited(), **dict(launch.env), **dict(binding.env)})
+        env = cursor_login.environment({**child_env.inherited(), **dict(launch.env), **dict(binding.env)})
+        return ttadk.environment(env) if launch.profile.runtime.launcher is Launcher.TTADK else env
+
+    def _program(self, executable: str, launch: Launch, run: Path) -> list[str]:
+        program = ["env", f"CURSOR_CONFIG_DIR={run / CONFIG_DIR}", f"CURSOR_DATA_DIR={run / DATA_DIR}"]
+        if launch.profile.runtime.launcher is Launcher.TTADK:
+            shim_dir = write_ttadk_shim(run.parent.parent.parent)
+            program += [f"PATH={shim_dir}{os.pathsep}{self.environment(launch).get('PATH', '')}",
+                        *ttadk.prefix(executable, "cursor-cli")]
+        else:
+            program.append(executable)
+        return program
 
     def _command(self, executable: str, prompt_file: Path, launch: Launch) -> list[str]:
         args = self.launch_args(launch)  # Refuse an unusable provider before writing anything.
@@ -216,10 +275,12 @@ class CursorAgentRuntime(RuntimeAdapter):
             files[".mcp.json"] = json.dumps({"mcpServers": servers}, ensure_ascii=False)
         run = write_run_dir(_local_dir(prompt_file), files, instructions=runtime_prompt_text(
             launch, prompt_file.read_text(encoding="utf-8"), runtime_notes(list(servers))))
-        return ["env", f"CURSOR_CONFIG_DIR={run / CONFIG_DIR}", f"CURSOR_DATA_DIR={run / DATA_DIR}", executable,
-                *args, "--plugin-dir", str(run / PLUGIN_DIR),
-                *(arg for directory in launch.library.plugin_dirs for arg in ("--plugin-dir", directory)),
-                *(arg for directory in dict.fromkeys(launch.knowledge.add_dirs) for arg in ("--add-dir", directory))]
+        args += ["--plugin-dir", str(run / PLUGIN_DIR),
+                 *(arg for directory in launch.library.plugin_dirs for arg in ("--plugin-dir", directory)),
+                 *(arg for directory in dict.fromkeys(launch.knowledge.add_dirs) for arg in ("--add-dir", directory))]
+        if launch.profile.runtime.launcher is Launcher.TTADK:
+            ttadk.check_args(args)
+        return [*self._program(executable, launch, run), *args]
 
     def run_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                     max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
@@ -304,6 +365,9 @@ class CursorAgentRuntime(RuntimeAdapter):
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         record: dict[str, Any] = {"personal_config": list(PERSONAL_CONFIG)}
+        if launch.profile.runtime.launcher is Launcher.TTADK:
+            record["launcher"] = {"kind": "ttadk", "version": launch.profile.runtime.version,
+                                  "tool": "cursor-cli", "mode": None}
         if skipped := mcp_servers(launch.library)[1]:
             record["runtime_catalog"] = {"runtime": self.type, "skipped": skipped}
         return record

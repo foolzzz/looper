@@ -8,7 +8,7 @@ afterEach(() => vi.unstubAllGlobals());
 const binding: Binding = {
   channel_id: "bot-example", chat_id: "-100123", manager_id: "manager-review",
   created_at: "2026-10-25T10:00:00+00:00", channel_type: "telegram", bot_name: "Example",
-  chat_name: null, manager_name: "Review", manager_enabled: false, manager_deleted: true,
+  chat_name: null, manager_name: "Review", manager_enabled: false, manager_deleted: true, allowed_senders: [],
 };
 const catalog: ChannelChats = {
   channel_id: binding.channel_id, bot_manager_id: "manager-owner", bound_chats_only: false,
@@ -84,4 +84,14 @@ it.each([
   vi.stubGlobal("fetch", fetcher);
   await expect(call()).rejects.toMatchObject({ name: "V1Error", status: 202, code: "needs_confirmation" });
   expect(fetcher).toHaveBeenCalledTimes(1);
+});
+
+
+it.each([{ senders: undefined }, { senders: [] }, { senders: ["ou_example"] }])("sends extra senders only when supplied: %j", async ({ senders }) => {
+  const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => Response.json({ status: "ok", result: { binding } }));
+  vi.stubGlobal("fetch", fetcher);
+  await putChatBinding(binding.channel_id, binding.chat_id, binding.manager_id, senders);
+  const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+  if (senders === undefined) expect(body).not.toHaveProperty("allowed_senders");
+  else expect(body.allowed_senders).toEqual(senders);
 });

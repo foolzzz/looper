@@ -2,8 +2,10 @@
 
 from ...db import chat_bindings as storage
 from ...db.connection import get_pool
+from .. import api_v1
 from ..api_v1 import Operation, _array, _object, _BOOL, _NULL_STR, _STR
 from ..channels import chat_routing
+from ..channels.allowlist import AllowlistError
 from ..ops import ErrorCode, OpError
 
 _ID = {"type": "string", "minLength": 1}
@@ -13,7 +15,7 @@ BINDING = _object({
     "channel_id": _ID, "chat_id": _ID, "manager_id": _ID, "created_at": _TIME,
     "channel_type": {"type": "string", "enum": ["telegram", "lark", "lark_bot"]},
     "bot_name": _STR, "chat_name": _NULL_STR, "manager_name": _STR,
-    "manager_enabled": _BOOL, "manager_deleted": _BOOL,
+    "manager_enabled": _BOOL, "manager_deleted": _BOOL, "allowed_senders": _array(_STR),
 }, closed=True)
 UNBOUND_CHAT = _object({"chat_id": _ID, "name": _NULL_STR, "count": _COUNT, "last_at": _TIME}, closed=True)
 SEEN_CHAT = _object({
@@ -36,7 +38,11 @@ OPERATIONS = (
         _object({"channel_id": _ID, "manager_id": _ID}, [], closed=True),
         _object({"bindings": _array(BINDING)}, closed=True)),
     _op("manager_chat_bindings.put", "Bind or rebind a native chat to a Manager.",
-        _object({"channel_id": _ID, "chat_id": _ID, "manager_id": _ID}, closed=True),
+        _object({"channel_id": _ID, "chat_id": _ID, "manager_id": _ID,
+                 "allowed_senders": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 100,
+                     "description": "Senders admitted only in this chat besides the bot's allowlist: Lark open_ids (ou_…) "
+                         "or Telegram user IDs. Omit to keep them (cleared when the chat moves to another Manager); [] clears."}},
+                ["channel_id", "chat_id", "manager_id"], closed=True),
         _object({"binding": BINDING}, closed=True), risk="write"),
     _op("manager_chat_bindings.delete", "Remove an explicit native chat binding.",
         _object({"channel_id": _ID, "chat_id": _ID}, closed=True),
@@ -54,7 +60,7 @@ OPERATIONS = (
 RESULTS = {}
 
 _BINDINGS = """
-    SELECT b.channel_id, b.chat_id, b.manager_id, b.created_at, c.channel_type,
+    SELECT b.channel_id, b.chat_id, b.manager_id, b.created_at, b.allowed_senders, c.channel_type,
            c.display_name AS bot_name, s.name AS chat_name, m.name AS manager_name,
            (m.enabled AND m.deleted_at IS NULL) AS manager_enabled,
            (m.deleted_at IS NOT NULL) AS manager_deleted
@@ -103,6 +109,17 @@ async def _catalog(conn, arguments):
             "has_more": len(rows) > limit, "next_cursor": chats[-1]["chat_id"] if len(rows) > limit else None}
 
 
+def validate_arguments(schema, arguments):
+    # Keep the field identifiable even when its shape fails before id validation.
+    if "allowed_senders" in schema.get("properties", {}) and isinstance(arguments, dict):
+        if "allowed_senders" in arguments:
+            senders = arguments["allowed_senders"]
+            if (not isinstance(senders, list) or len(senders) > 100
+                    or any(not isinstance(sender, str) or not sender for sender in senders)):
+                raise OpError(ErrorCode.INVALID, "allowed_senders: expected at most 100 non-empty sender ids")
+    return api_v1.validate_arguments(schema, arguments)
+
+
 async def run(server, operation, arguments, principal, headers):
     if operation.risk == "write" and server._channels is None:
         raise OpError(ErrorCode.UNAVAILABLE, "live channel routing is not available")
@@ -139,5 +156,7 @@ async def run(server, operation, arguments, principal, headers):
             return {"bindings": await _bindings(conn, **arguments)}
     except LookupError:
         raise OpError(ErrorCode.NOT_FOUND, "channel or Manager not found") from None
+    except AllowlistError as exc:
+        raise OpError(ErrorCode.INVALID, f"allowed_senders: {exc}") from None
     except ValueError:
         raise OpError(ErrorCode.INVALID, "invalid native chat routing request") from None
