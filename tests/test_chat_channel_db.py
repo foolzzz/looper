@@ -7,9 +7,33 @@ import asyncio
 
 import pytest
 
-from tests.db_support import DSN, fresh_schema
+from tests.db_support import DSN, fresh_schema, run_db
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+@pytest.mark.parametrize("client_state", ["active", "revoked", "deleted"])
+def test_sessions_keep_client_attribution(monkeypatch, client_state) -> None:
+    from looper.db import api_clients, chat
+
+    async def run(pool):
+        client, _ = await api_clients.create("Terminal client", pool=pool)
+        await chat.claim_thread("cli-conversation", "manager", client_id=client["id"], pool=pool)
+        for session in ("dashboard", "cli-conversation"):
+            await chat.save_message(session_id=session, message_id="one", role="user", content="hello", pool=pool)
+        if client_state == "revoked":
+            await api_clients.revoke(client["id"], pool=pool)
+        elif client_state == "deleted":
+            await pool.execute("DELETE FROM api_clients WHERE id = $1", client["id"])
+
+        dashboard, terminal = sorted(await chat.list_sessions(pool=pool), key=lambda row: row["session_id"], reverse=True)
+        assert dashboard["session_id"] == "dashboard"
+        assert dashboard["client_id"] is None and dashboard["client_name"] is None
+        assert terminal["session_id"] == "cli-conversation" and terminal["channel"] == "web"
+        assert terminal["client_id"] == client["id"]
+        assert terminal["client_name"] == (client["id"] if client_state == "deleted" else client["name"])
+
+    run_db(run, monkeypatch, timeout=30)
 
 
 def test_a_channel_is_stored_and_returned() -> None:

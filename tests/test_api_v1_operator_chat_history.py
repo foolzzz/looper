@@ -32,7 +32,11 @@ def history(monkeypatch):
         "channel": "lark", "delivery_failure": "send_failed", "delivery_error": "offline"}]))
     monkeypatch.setattr(chat, "list_sessions", AsyncMock(return_value=[{
         "session_id": "old-chat", "channel": "web", "first_message_at": "2026-10-24",
-        "last_message_at": "2026-10-24", "last_role": "assistant", "last_content": "Saved reply", "message_count": 1}]))
+        "last_message_at": "2026-10-24", "last_role": "assistant", "last_content": "Saved reply", "message_count": 1,
+        "client_id": None, "client_name": None}, {
+        "session_id": "cli-conversation", "channel": "web", "first_message_at": "2026-10-24",
+        "last_message_at": "2026-10-24", "last_role": "user", "last_content": "Terminal message", "message_count": 1,
+        "client_id": "client-one", "client_name": "Terminal client"}]))
     monkeypatch.setattr(chat, "save_message", AsyncMock())
 
 
@@ -58,6 +62,10 @@ def test_typed_positive_control_and_authenticated_legacy_404(tmp_path, history, 
             operation = api_v1.find("POST", path)
             assert status == 200 and answer["result"]
             api_v1.validate_arguments(operation.result, answer["result"])
+            if action == "sessions":
+                dashboard, terminal = answer["result"]["sessions"]
+                assert dashboard["client"] is None
+                assert terminal["client"] == {"id": "client-one", "name": "Terminal client"}
             assert operation.operator_only and not operation.hand and operation.tool is None
             assert (await _send(server, f"{method} /api/chat/{legacy}", _bearer(TOKEN), json.dumps(body)))[0] == 404
     asyncio.run(run())

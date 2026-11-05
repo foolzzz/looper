@@ -26,7 +26,8 @@ CHAT_TARGET_INFO = {"oneOf": [MANAGER_TARGET, PLANNER_TARGET, *(
             ["kind", *(key for key in _STEP_FIELDS if key != "task_role")], closed=True)
     for kind in ("worker", "reviewer"))]}
 CHAT_SESSION = _object({**dict.fromkeys(("session_id", "channel", "first_message_at", "last_message_at",
-                                        "last_role", "last_content"), _STR), "message_count": _INT}, closed=True)
+                                        "last_role", "last_content"), _STR), "message_count": _INT,
+    "client": {"oneOf": [_object({"id": _STR, "name": _STR}, closed=True), {"type": "null"}]}}, closed=True)
 DB_CHAT_MESSAGE = _object({**dict.fromkeys(("message_id", "role", "content", "created_at", "channel"), _STR),
     "delivery_failure": {"enum": ["no_chat", "send_failed", None]}, "delivery_error": _NULL_STR},
     ["message_id", "role", "content", "created_at"], closed=True)
@@ -66,5 +67,9 @@ async def run(server, operation, arguments, principal, headers):
     if session_id and (owner := await server._thread_owner_elsewhere(session_id, manager_id)):
         raise await server._foreign_thread_error(owner)
     if action == "sessions":
-        return _plain({"sessions": await chat.list_sessions(session_id=session_id, manager_id=manager_id)})
+        sessions = await chat.list_sessions(session_id=session_id, manager_id=manager_id)
+        for session in sessions:
+            client_id, client_name = session.pop("client_id"), session.pop("client_name")
+            session["client"] = {"id": client_id, "name": client_name} if client_id is not None else None
+        return _plain({"sessions": sessions})
     return _plain({"messages": await chat.list_messages(session_id)})

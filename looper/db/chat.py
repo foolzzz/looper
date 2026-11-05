@@ -114,15 +114,18 @@ async def list_sessions(
     rows = await pool.fetch(
         """
         SELECT s.session_id, s.channel, s.message_count, s.first_message_at, s.last_message_at,
+               s.client_id, s.client_name,
                last.role AS last_role, left(last.content, $3) AS last_content
         FROM (
-            SELECT session_id, min(m.channel) AS channel, count(*) AS message_count,
+            SELECT session_id, t.client_id, coalesce(c.name, t.client_id) AS client_name,
+                   min(m.channel) AS channel, count(*) AS message_count,
                    min(m.created_at) AS first_message_at, max(m.created_at) AS last_message_at, max(m.id) AS last_id
             FROM chat_messages m
             LEFT JOIN chat_threads t USING (session_id)
+            LEFT JOIN api_clients c ON c.id = t.client_id
             WHERE NOT starts_with(session_id, $2) AND ($4::text IS NULL OR session_id = $4)
               AND coalesce(t.manager_id, 'manager') = $5
-            GROUP BY session_id
+            GROUP BY session_id, t.client_id, c.name
             ORDER BY max(m.created_at) DESC, max(m.id) DESC
             LIMIT $1
         ) s
