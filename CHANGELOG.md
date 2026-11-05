@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.88] - 2026-11-05
+
+### Added
+
+- **Fetch a provider's model list and add the models the operator picks.** For an API-key provider, `provider_accounts.fetch_models` asks each endpoint for its models with the stored key (OpenAI formats: `GET <base_url>/models` with a Bearer key; Anthropic: `GET <base_url>/v1/models` with `x-api-key`, retried once with a Bearer key, following pagination) and answers per endpoint the models or a typed problem; the key is never logged or returned, and a failure blocks nothing. `models.add_many` registers the ticked models in one transaction: a price left out is the built-in price when Looper's table knows the model name, otherwise 0 (counted as free), and an already registered model is skipped. The registry limits gain `api_formats`. The dashboard shows the fetched checklist after Add provider succeeds for an API-key provider (nothing is added without a tick), and every API-key provider row gets Fetch models. Both operations appear as generated `loopercli` commands; the Manager tools, `models.create`, config transfer and channels are unchanged. ([#1112](https://github.com/foolzzz/looper/pull/1112))
+
 ## [2.14.87] - 2026-11-05
 
 ### Changed
