@@ -26,7 +26,7 @@ directory that a kept one links into stays too. When the current content or the 
 processes cannot be read, nothing is removed.
 
 The Manager and every Planner on a runtime that runs a process per turn (Codex,
-OMP, Grok, pi) keep their sessions in a directory of their own,
+OMP, Grok, pi, cursor-agent) keep their sessions in a directory of their own,
 ``<runtime_type>/sessions/<agent>``. ``reclaim_sessions`` removes the one of an
 agent whose saved session (``agent_sessions``) is not of that runtime type, or
 which has none, unless a running process names it.
@@ -179,7 +179,7 @@ async def current_copies(runtime_root: Path) -> list[str] | None:
 
 
 # The runtime types whose resident agents keep their sessions in a directory of their own (``per_turn``).
-SESSION_RUNTIMES = ("codex", "omp", "grok", "pi")
+SESSION_RUNTIMES = ("codex", "omp", "grok", "pi", "cursor-agent")
 
 
 def reclaim_sessions(runtime_root: Path, *, saved: Iterable[tuple[str, str | None]],

@@ -1166,8 +1166,12 @@ async def _detect(adapter: runtimes.RuntimeAdapter, launcher: Launcher = Launche
 
 async def register_found_runtimes() -> list[str]:
     """Register a built-in runtime for each runtime type other than Claude Code whose default executable is on
-    PATH (``_detect``); one that exists already, or whose name is taken, is left alone. Claude Code's built-in
-    runtime comes with the schema. Returns the names registered."""
+    PATH (``_detect``); existing rows retain their operator fields. Cursor's built-in capabilities are refreshed
+    from its adapter. Claude Code's built-in runtime comes with the schema. Returns the names registered."""
+    from ..db import profile_registry as db
+
+    cursor = runtimes.adapter("cursor-agent")
+    await db.refresh_builtin_capabilities(builtin_runtime_id(cursor), sorted(c.value for c in cursor.capabilities))
     return [adapter.ttadk_runtime_name if launcher is Launcher.TTADK else adapter.type
             for adapter in runtimes.ADAPTERS.values()
             for launcher in sorted(adapter.launchers, key=lambda item: item.value)

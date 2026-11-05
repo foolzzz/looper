@@ -7,6 +7,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import shutil
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -480,7 +481,7 @@ else:
         assert "exited with code 1" in result["error"]
 
 
-def test_runtime_metadata_prompt_inputs_and_unavailable_sessions(tmp_path: Path) -> None:
+def test_runtime_metadata_prompt_inputs_and_unavailable_consults(tmp_path: Path) -> None:
     assert CURSOR.loads_operator_config and not CURSOR.can_replace_system_prompt and not CURSOR.runtime_cost_capped
     assert CURSOR.login_models == cursor_login.SUGGESTED_MODELS and CURSOR.effort_levels == ()
     assert CURSOR.isolation_id == "cursor-operator-home/v1" and CURSOR.isolation_args(tmp_path) == []
@@ -500,13 +501,299 @@ def test_runtime_metadata_prompt_inputs_and_unavailable_sessions(tmp_path: Path)
     assert blocks[-2].note == "stdin (before the turn prompt)" and blocks[-1].text is None
     with pytest.raises(RuntimeUnsupported, match="needs Looper.*instruction prompt"):
         CURSOR.run_channel(None, launch=_launch(), cwd=tmp_path)
-    for call in (lambda: CURSOR.resident_command("cursor-agent", cwd=tmp_path, prompt_file=_prompt(tmp_path), launch=_launch()),
-                 lambda: CURSOR.resume_args("session"), lambda: CURSOR.resident_session("manager")):
-        with pytest.raises(RuntimeUnsupported, match="cannot run the Manager or a Planner yet"):
-            call()
     with pytest.raises(RuntimeUnsupported):
         CURSOR.consult_command("cursor-agent", cwd=tmp_path, prompt_file=_prompt(tmp_path), launch=_launch(),
                                session_id="session", session_dir=None, fork_dir=tmp_path / "fork")
+
+
+_RESIDENT_CURSOR = """
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+config = Path(os.environ['CURSOR_CONFIG_DIR'])
+owner = config.parent
+text = sys.stdin.read()
+with (owner / 'turns.jsonl').open('a') as log:
+    log.write(json.dumps({'argv': args, 'config': str(config), 'data': os.environ['CURSOR_DATA_DIR'],
+                          'home': os.environ.get('HOME'), 'text': text}) + '\\n')
+if '--resume' in args:
+    session = args[args.index('--resume') + 1]
+    if not (config / 'chats' / 'workspace' / session).is_dir():
+        sys.exit(1)
+else:
+    session = 'chat-' + str(len((owner / 'turns.jsonl').read_text().splitlines()))
+(config / 'chats' / 'workspace' / session).mkdir(parents=True, exist_ok=True)
+print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': session}))
+print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'pong'}]}}))
+print(json.dumps({'type': 'result', 'subtype': 'success', 'session_id': session,
+                  'usage': {'inputTokens': 60, 'outputTokens': 5, 'cacheReadTokens': 40, 'cacheWriteTokens': 0}}))
+"""
+
+
+def test_cursor_resident_command_accepts_a_launcher_path_and_rejects_wrong_prefixes() -> None:
+    session = CURSOR.resident_session("manager")
+    for program in (["cursor-agent"], ["PATH=/shim:/bin", "ttadk", "code", "-t", "cursor-cli", "--"]):
+        base = ["env", "CURSOR_CONFIG_DIR=/run/config", "CURSOR_DATA_DIR=/run/data", *program,
+                "--model", MODEL]
+        assert session._split(base) == (base, None, "ttadk" if len(program) > 1 else "cursor-agent")
+        assert session._split(base + CURSOR.resume_args(SESSION)) == (
+            base, SESSION, "ttadk" if len(program) > 1 else "cursor-agent")
+    for command in ([], ["cursor-agent"], ["env", "HOME=/home", "CURSOR_DATA_DIR=/data", "cursor-agent"],
+                    ["env", "CURSOR_CONFIG_DIR=/config", "HOME=/home", "cursor-agent"],
+                    ["env", "CURSOR_CONFIG_DIR=/config", "CURSOR_DATA_DIR=/data", "PATH=/bin"]):
+        with pytest.raises(ValueError) as failure:
+            session._split(command)
+        assert str(failure.value) == (
+            "a resident Cursor Agent command starts with env CURSOR_CONFIG_DIR=<dir> CURSOR_DATA_DIR=<dir> <program>")
+
+
+def test_cursor_resident_turns_resume_in_owner_directories_after_restart(tmp_path: Path) -> None:
+    executable = fake_claude(tmp_path / "cursor-agent", _RESIDENT_CURSOR)
+    root = tmp_path / "runtime"
+    launch = _launch(executable=executable)
+    owner = root / ".local/cursor-agent/sessions/planner-task-1"
+
+    def command(prompt: str) -> list[str]:
+        return CURSOR.resident_command(executable, cwd=tmp_path, prompt_file=_prompt(root, prompt), launch=launch)
+
+    async def run() -> None:
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        first = command("prompt A")
+        session = CURSOR.resident_session("planner-task-1")
+        assert not session.can_interrupt
+        await session.start(first, cwd=str(tmp_path), signature="a", env=launch.environment())
+        try:
+            one = await session.run_turn("hello", on_event)
+            assert one.session_started and one.result_event["result"] == "pong"
+            manifest = owner / PLUGIN_DIR / ".cursor-plugin/plugin.json"
+            unchanged = manifest.stat().st_mtime_ns
+            obsolete = owner / PLUGIN_DIR / "obsolete.json"
+            obsolete.write_text("old plugin input")
+            cursor_agent.sync_dir(source=_run_dir(first), home=owner)
+            assert not obsolete.exists() and manifest.stat().st_mtime_ns == unchanged
+            shutil.rmtree(_run_dir(first))
+            two = await session.run_turn("again", on_event)
+            assert two.session_started and two.result_event["session_id"] == "chat-1"
+            assert session.totals == Usage(input_tokens=120, output_tokens=10, cache_read_tokens=80,
+                                          cache_creation_tokens=0)
+        finally:
+            await session.stop()
+
+        # A new resident object must recover the instruction hash saved beside its chat id.
+        session = CURSOR.resident_session("planner-task-1")
+        await session.start(command("prompt A") + CURSOR.resume_args("chat-1"), cwd=str(tmp_path), signature="a",
+                            env=launch.environment())
+        try:
+            turn = await session.run_turn("next", on_event)
+            assert turn.session_started and turn.result_event["session_id"] == "chat-1"
+        finally:
+            await session.stop()
+
+    asyncio.run(run())
+    turns = [json.loads(line) for line in (owner / "turns.jsonl").read_text().splitlines()]
+    assert ["--resume" in turn["argv"] for turn in turns] == [False, True, True]
+    assert all(turn["argv"][-2:] == ["--resume", "chat-1"] for turn in turns[1:3])
+    for turn in turns:
+        assert turn["config"] == str(owner / "config") and turn["data"] == str(owner / "data")
+        assert turn["home"] == launch.environment().get("HOME")
+        assert turn["argv"][turn["argv"].index("--plugin-dir") + 1] == str(owner / PLUGIN_DIR)
+    assert turns[0]["text"].startswith("<looper_instructions>\n") and turns[0]["text"].endswith("\n\nhello")
+    assert turns[1]["text"] == "again" and turns[2]["text"] == "next"
+    assert json.loads((owner / PLUGIN_DIR / ".cursor-plugin/plugin.json").read_text())["name"] == "looper"
+    assert not (owner / PLUGIN_DIR / "rules").exists()
+    assert [path.name for path in (owner / "config/chats/workspace").iterdir()] == ["chat-1"]
+    assert all(stat.S_IMODE((owner / name).stat().st_mode) == 0o700 for name in (".", "config", "data"))
+
+
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("incomplete_replacement", [False, True])
+def test_cursor_manager_changed_instructions_handoff_before_replacement_and_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any, restart: bool, incomplete_replacement: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from looper.agents.bus import MessageBus
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from tests.test_manager_reply import WEB
+
+    snapshot = """
+with (owner / 'snapshots.jsonl').open('a') as log:
+    log.write(json.dumps({'instructions': (owner / 'looper-instructions.md').read_text(),
+                          'chats': sorted(p.name for p in (config / 'chats/workspace').iterdir())}) + '\\n')
+"""
+    body = _RESIDENT_CURSOR.replace("print(json.dumps({'type': 'system'", snapshot + "print(json.dumps({'type': 'system'", 1)
+    if incomplete_replacement:
+        body = body.replace("print(json.dumps({'type': 'assistant'", (
+            "if session == 'chat-3' and '--resume' not in args: sys.exit(1)\n"
+            "print(json.dumps({'type': 'assistant'"), 1)
+    executable = fake_claude(tmp_path / "cursor-agent", body)
+    launch = _launch(executable=executable)
+    root = tmp_path / "runtime"
+    owner = root / ".local/cursor-agent/sessions/manager"
+
+    def manager(bus: MessageBus, prompt: str) -> ManagerAgent:
+        agent = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=root)
+        agent._bus = bus
+        agent._load_agent_settings = AsyncMock(return_value=launch.settings)
+        agent._composed_prompt = lambda _: SystemPrompt(prompt)
+        return agent
+
+    async def run() -> None:
+        bus = MessageBus(runtime_root=root)
+        agent = manager(bus, "prompt A")
+        try:
+            async def send(text: str) -> None:
+                await agent._handle(MessageEnvelope.create(
+                    source=WEB, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE, payload={"text": text}))
+
+            await send("hello")
+            assert agent._session_id == "chat-1"
+            if restart:
+                await agent.stop()
+                agent = manager(bus, "prompt B")
+            else:
+                agent._composed_prompt = lambda _: SystemPrompt("prompt B")
+            await send("again")
+            assert agent._session_id == "chat-3"
+            old = owner / "config/chats/workspace/chat-1"
+            assert old.exists() is incomplete_replacement
+            if incomplete_replacement:
+                await send("finish")
+                assert not old.exists()
+        finally:
+            await agent.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 25))
+    turns = [json.loads(line) for line in (owner / "turns.jsonl").read_text().splitlines()]
+    snapshots = [json.loads(line) for line in (owner / "snapshots.jsonl").read_text().splitlines()]
+    assert turns[1]["argv"][-2:] == ["--resume", "chat-1"]
+    assert turns[1]["text"].startswith("[HANDOFF]")
+    assert "prompt A" in snapshots[1]["instructions"] and "prompt B" not in snapshots[1]["instructions"]
+    assert "--resume" not in turns[2]["argv"]
+    assert "prompt B\n</looper_instructions>\n\n[RESUME]" in turns[2]["text"]
+    assert "Handoff from your previous session" in turns[2]["text"] and "pong" in turns[2]["text"]
+    assert "again" in turns[2]["text"]
+    assert snapshots[2]["chats"] == ["chat-1", "chat-3"]
+    if incomplete_replacement:
+        assert turns[3]["argv"][-2:] == ["--resume", "chat-3"]
+    assert [p.name for p in (owner / "config/chats/workspace").iterdir()] == ["chat-3"]
+
+
+def test_cursor_missing_chat_marks_session_stale_and_owner_starts_over(tmp_path: Path) -> None:
+    executable = fake_claude(tmp_path / "cursor-agent", _RESIDENT_CURSOR)
+    root = tmp_path / "runtime"
+    launch = _launch(executable=executable)
+    command = CURSOR.resident_command(executable, cwd=tmp_path, prompt_file=_prompt(root), launch=launch)
+
+    async def run() -> None:
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        session = CURSOR.resident_session("manager")
+        await session.start(command, cwd=str(tmp_path), signature="s", env=launch.environment())
+        try:
+            await session.run_turn("hello", on_event)
+            shutil.rmtree(root / ".local/cursor-agent/sessions/manager/config/chats")
+            failed = await session.run_turn("gone", on_event)
+            assert (failed.result_event, failed.session_started, failed.exit_code) == (None, False, 1)
+            assert session.stale("s")
+        finally:
+            await session.stop()
+        await session.start(command, cwd=str(tmp_path), signature="s", env=launch.environment())
+        try:
+            restarted = await session.run_turn("start over", on_event)
+            assert restarted.session_started and restarted.result_event["session_id"] == "chat-3"
+            assert not session.stale("s")
+        finally:
+            await session.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_cursor_planner_changed_instructions_use_handoff_and_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent_db: Any, restart: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from looper.agents.tiers.planner import PlanStep, PlannerAgent, TaskPlan
+
+    brief = '```json\n{"handoff": "remember the pending parser check"}\n```'
+    body = _RESIDENT_CURSOR.replace("'text': 'pong'", f"'text': {brief!r} if text.startswith('[HANDOFF]') else 'pong'")
+    executable = fake_claude(tmp_path / "cursor-agent", body)
+    root = tmp_path / "runtime"
+    launch = _launch(executable=executable)
+    plan = TaskPlan("plan-1", "goal-1", "Inspect", str(tmp_path))
+
+    def planner(prompt: str) -> PlannerAgent:
+        agent = PlannerAgent(task_id="task-1", runtime_root=root)
+        agent._plan = plan
+        monkeypatch.setattr(agent, "_load_agent_settings", AsyncMock(return_value=launch.settings))
+        monkeypatch.setattr(agent, "_system_prompt", lambda *args, **kwargs: SystemPrompt(prompt))
+        return agent
+
+    async def run() -> None:
+        agent = planner("prompt A")
+        try:
+            assert await agent._turn("hello") == "pong"
+            assert plan.session_id == "chat-1"
+            plan.steps.append(PlanStep("step-1", 0, "Check the parser"))
+            if restart:
+                await agent.stop()
+                agent = planner("prompt B")
+            else:
+                monkeypatch.setattr(agent, "_system_prompt", lambda *args, **kwargs: SystemPrompt("prompt B"))
+            assert await agent._turn("again") == "pong"
+            assert plan.session_id == "chat-3"
+            assert [entry.kind.value for entry in plan.journal] == ["handoff", "session_switch"]
+        finally:
+            await agent.stop()
+
+    asyncio.run(asyncio.wait_for(run(), 20))
+    owner = root / ".local/cursor-agent/sessions/planner-task-1"
+    turns = [json.loads(line) for line in (owner / "turns.jsonl").read_text().splitlines()]
+    assert turns[1]["argv"][-2:] == ["--resume", "chat-1"] and turns[1]["text"].startswith("[HANDOFF]")
+    assert "--resume" not in turns[2]["argv"]
+    assert "prompt B\n</looper_instructions>\n\n[RESUME]" in turns[2]["text"]
+    assert "remember the pending parser check" in turns[2]["text"]
+    assert [p.name for p in (owner / "config/chats/workspace").iterdir()] == ["chat-3"]
+
+
+def test_cursor_init_without_result_persists_chat_before_callback_and_resumes_after_restart(tmp_path: Path) -> None:
+    body = _RESIDENT_CURSOR.replace(
+        "print(json.dumps({'type': 'assistant'", "if '--resume' not in args: sys.exit(1)\nprint(json.dumps({'type': 'assistant'", 1)
+    executable = fake_claude(tmp_path / "cursor-agent", body)
+    root = tmp_path / "runtime"
+    launch = _launch(executable=executable)
+    command = CURSOR.resident_command(executable, cwd=tmp_path, prompt_file=_prompt(root), launch=launch)
+    owner = root / ".local/cursor-agent/sessions/manager"
+
+    async def run() -> None:
+        async def on_event(event: dict[str, Any]) -> None:
+            if event.get("subtype") == "init":
+                saved = json.loads((owner / "session.json").read_text())
+                assert saved == {"session_id": "chat-1", "instructions_sha256": hashlib.sha256(
+                    (owner / cursor_agent.INSTRUCTIONS_FILE).read_bytes()).hexdigest(), "cwd": str(tmp_path)}
+
+        for restart in (False, True):
+            session = CURSOR.resident_session("manager")
+            await session.start(command + (CURSOR.resume_args("chat-1") if restart else []),
+                                cwd=str(tmp_path), signature="s", env=launch.environment())
+            try:
+                turn = await session.run_turn("continue" if restart else "hello", on_event)
+                assert turn.session_started
+                assert (turn.result_event is not None) is restart
+            finally:
+                await session.stop()
+
+    asyncio.run(asyncio.wait_for(run(), 15))
+    turns = [json.loads(line) for line in (owner / "turns.jsonl").read_text().splitlines()]
+    assert turns[1]["argv"][-2:] == ["--resume", "chat-1"]
+    assert turns[1]["text"] == "continue"
 
 
 def test_cursor_mcp_config_carries_wait_cap_only_to_platform_server(tmp_path: Path) -> None:
