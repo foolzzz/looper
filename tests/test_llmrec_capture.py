@@ -93,7 +93,8 @@ def test_route_file_validation_and_private_modes(tmp_path):
     import stat
     from looper.agents.llmrec import ROUTES_DIR, RouteFile
     route = RouteFile(id='a' * 22, agent_id='worker-test', upstream='https://example.test',
-                      created_at=datetime.now(timezone.utc).isoformat())
+                      created_at=datetime.now(timezone.utc).isoformat(),
+                      proxy_env={'HTTPS_PROXY': 'http://proxy.example:8080', 'NO_PROXY': '.internal.example'})
     path = tmp_path / ROUTES_DIR / f'{route.id}.json'
     route.write(path)
     assert RouteFile.read(path) == route
@@ -101,8 +102,10 @@ def test_route_file_validation_and_private_modes(tmp_path):
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(path.parent.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(path.parent.parent.parent.stat().st_mode) == 0o700
-    for invalid in (replace(route, format=2), replace(route, upstream='https://user:secret@example.test'),
-                    replace(route, created_at='invalid'), replace(route, id='../invalid'), replace(route, record_id=True)):
+    for invalid in (replace(route, format=route.format + 1), replace(route, upstream='https://user:secret@example.test'),
+                    replace(route, created_at='invalid'), replace(route, id='../invalid'), replace(route, record_id=True),
+                    replace(route, proxy_env=[]), replace(route, proxy_env={'HTTPS_PROXY': 1}),
+                    replace(route, proxy_env={'ANTHROPIC_API_KEY': 'secret'})):
         invalid.write(path)
         assert RouteFile.read(path) is None
 

@@ -10,6 +10,7 @@ from pathlib import Path
 import secrets
 import time
 from urllib.parse import urlsplit
+from urllib.request import proxy_bypass_environment
 import zlib
 
 import h11
@@ -21,6 +22,34 @@ from .capture import MIB, build_capture, kind_of, redact_headers, redact_query
 log = logging.getLogger(__name__)
 HOP = {'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer',
        'transfer-encoding', 'upgrade'}
+
+
+def _upstream_proxy(route, url):
+    env = route.proxy_env if route.proxy_env is not None else os.environ
+    proxies = {name: env.get(f'{name}_proxy', env.get(f'{name.upper()}_PROXY', ''))
+               for name in ('http', 'https', 'all', 'no')}
+    target = urlsplit(url)
+    if proxy_bypass_environment(target.netloc, proxies):
+        return None
+    return proxies.get(target.scheme) or proxies['all'] or None
+
+
+class _ProxyTransport(httpx.AsyncBaseTransport):
+    """Pool by upstream proxy so concurrent routes keep their own network settings."""
+
+    def __init__(self):
+        self.transports = {}
+
+    async def handle_async_request(self, request):
+        proxy = request.extensions.get('llmrec_proxy')
+        if proxy not in self.transports:
+            self.transports[proxy] = httpx.AsyncHTTPTransport(proxy=proxy,
+                limits=httpx.Limits(max_connections=200, max_keepalive_connections=50))
+        return await self.transports[proxy].handle_async_request(request)
+
+    async def aclose(self):
+        for transport in self.transports.values():
+            await transport.aclose()
 
 
 def _headers(pairs, *, request=False):
@@ -93,8 +122,8 @@ class Proxy:
     async def start(self):
         self._code_sha256 = code_sha256()
         self._client = httpx.AsyncClient(
-            trust_env=True, timeout=httpx.Timeout(self.read_idle_s, connect=self.connect_s, write=60, pool=10),
-            limits=httpx.Limits(max_connections=200, max_keepalive_connections=50))
+            transport=_ProxyTransport(), trust_env=False,
+            timeout=httpx.Timeout(self.read_idle_s, connect=self.connect_s, write=60, pool=10))
         self._client.headers.clear()
         try:
             self._server = await asyncio.start_server(self._handle, '127.0.0.1', self.port)
@@ -239,7 +268,8 @@ class Proxy:
             nonlocal response_sent, response, response_buffer, response_bytes
             try:
                 upstream_request = self._client.build_request(request.method.decode(), url,
-                    headers=_headers(request.headers.raw_items(), request=True), content=body)
+                    headers=_headers(request.headers.raw_items(), request=True), content=body,
+                    extensions={'llmrec_proxy': _upstream_proxy(route, url)})
                 response = await self._client.send(upstream_request, stream=True)
                 values['status'] = response.status_code
                 values['response_headers'] = redact_headers(response.headers.raw, response=True)

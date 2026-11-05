@@ -237,9 +237,10 @@ class ClaudeCodeRuntime(RuntimeAdapter):
 
         if isinstance(launch.llmrec, LlmrecRoute):
             env[BASE_URL] = launch.llmrec.url
+            bypass = env.get("no_proxy", env.get("NO_PROXY", ""))
             for name in ("NO_PROXY", "no_proxy"):
-                values = [value.strip() for value in env.get(name, "").split(",") if value.strip()]
-                if "127.0.0.1" not in values:
+                values = [value.strip() for value in env.get(name, bypass).split(",") if value.strip()]
+                if values != ["*"] and "127.0.0.1" not in values:
                     values.append("127.0.0.1")
                 env[name] = ",".join(values)
         return env

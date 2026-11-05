@@ -11,7 +11,9 @@ from pathlib import Path
 import re
 import tempfile
 
-ROUTE_FORMAT = 1
+ROUTE_FORMAT = 2
+PROXY_ENV = frozenset(('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+                       'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'))
 STATE_DIR = Path('.local') / 'llmrec'
 ROUTES_DIR = STATE_DIR / 'routes'
 STATE_FILE = STATE_DIR / 'proxy.json'
@@ -62,6 +64,7 @@ class RouteFile:
     record_id: int | None = None
     last_record_id: int | None = None
     ended_at: str | None = None
+    proxy_env: dict[str, str] | None = None
 
     @classmethod
     def read(cls, path) -> RouteFile | None:
@@ -70,6 +73,9 @@ class RouteFile:
             if not isinstance(data, dict) or data.get('format') != ROUTE_FORMAT:
                 return None
             route = cls(**data)
+            if route.proxy_env is not None and (not isinstance(route.proxy_env, dict) or any(
+                    key not in PROXY_ENV or not isinstance(value, str) for key, value in route.proxy_env.items())):
+                return None
             if not isinstance(route.id, str) or not ROUTE_ID.fullmatch(route.id):
                 return None
             from urllib.parse import urlsplit

@@ -248,7 +248,7 @@ def test_kept_proxy_route_format_mismatch_skips_new_launch(tmp_path, monkeypatch
         try:
             await started(control)
             original = control._state()
-            monkeypatch.setattr(module, "ROUTE_FORMAT", 2)
+            monkeypatch.setattr(module, "ROUTE_FORMAT", module.ROUTE_FORMAT + 1)
             await control.at_start([42])
             assert control._state()["pid"] == original["pid"]
             attached = await control.attach(launch, agent_id="worker", task_id=None)

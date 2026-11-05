@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import gzip
 import json
+import os
 
 import httpx
 import pytest
@@ -40,6 +41,90 @@ def events():
     return [{'type': 'message_start', 'message': {'id': 'msg', 'content': [], 'usage': {'input_tokens': 7}}},
             {'type': 'message_delta', 'delta': {'stop_reason': 'end_turn'}, 'usage': {'output_tokens': 3}},
             {'type': 'message_stop'}]
+
+
+@pytest.mark.parametrize('source', ['provider', 'role'])
+@pytest.mark.parametrize('scheme', ['http', 'https'])
+def test_recording_uses_launch_proxy_not_server_proxy(tmp_path, monkeypatch, source, scheme):
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.llmrec.control import ProxyControl
+    from looper.agents.profile_registry import builtin_resolved_profile
+
+    # An unreachable server proxy must never override the launch's own proxy.
+    monkeypatch.setattr(os, 'environ', {'HTTP_PROXY': 'http://127.0.0.1:1',
+                                      'HTTPS_PROXY': 'http://127.0.0.1:1'})
+
+    async def check():
+        received = []
+        async def forward(reader, writer):
+            try:
+                head = await reader.readuntil(b'\r\n\r\n')
+                received.append(head.split(b'\r\n')[0])
+                if scheme == 'http':
+                    length = next(int(line.split(b':')[1]) for line in head.split(b'\r\n')
+                                  if line.lower().startswith(b'content-length:'))
+                    await reader.readexactly(length)
+                    writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}')
+                else:
+                    # Verify CONNECT reaches this proxy, without requiring TLS or an external provider.
+                    writer.write(b'HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(forward, '127.0.0.1', 0)
+        proxy = Proxy(tmp_path, sink=Sink(), connect_s=0.2)
+        await proxy.start()
+        try:
+            profile = builtin_resolved_profile()
+            proxy_env = ((f'{scheme.upper()}_PROXY', f'http://127.0.0.1:{server.sockets[0].getsockname()[1]}'),)
+            if source == 'provider':
+                resolved = profile.resolved_model
+                profile = replace(profile, resolved_model=replace(resolved, provider=replace(resolved.provider, env=proxy_env)))
+            launch = Launch(AgentSettings(profile=profile, env=proxy_env if source == 'role' else ()))
+            monkeypatch.setattr(type(launch.runtime), 'llmrec_upstream', lambda self, launch: f'{scheme}://127.0.0.1:1')
+            control = ProxyControl(tmp_path, '', enabled=True, include_oauth=True)
+            async def healthy(**kwargs):
+                return proxy.stats
+            monkeypatch.setattr(control, '_health', healthy)
+            monkeypatch.setattr(control, '_state', lambda: {'port': proxy.port})
+            attached = await control.attach(launch, agent_id='worker-test', task_id=None)
+            async with httpx.AsyncClient(trust_env=False) as client:
+                response = await client.post(attached.llmrec.url + '/v1/messages', json={})
+            expected = b'POST http://127.0.0.1:1/v1/messages HTTP/1.1' if scheme == 'http' else b'CONNECT 127.0.0.1:1 HTTP/1.1'
+            assert received == [expected]
+            assert response.status_code == (200 if scheme == 'http' else 502)
+        finally:
+            await proxy.close(grace_s=0)
+            server.close()
+            await server.wait_closed()
+    asyncio.run(asyncio.wait_for(check(), 5))
+
+
+@pytest.mark.parametrize('proxy_env', [
+    {},
+    {'HTTP_PROXY': 'http://127.0.0.1:1', 'NO_PROXY': '127.0.0.1'},
+    {'HTTP_PROXY': 'http://127.0.0.1:1', 'no_proxy': '*'},
+    {'HTTP_PROXY': 'http://127.0.0.1:1', 'http_proxy': ''},
+])
+def test_route_proxy_bypass_and_explicit_empty_environment(tmp_path, monkeypatch, proxy_env):
+    monkeypatch.setattr(os, 'environ', {'HTTP_PROXY': 'http://127.0.0.1:1'})
+    async def check():
+        async with FakeModelAPI([ResponseScript(events=events())]) as upstream:
+            value = replace(route(tmp_path, upstream.base_url), proxy_env=proxy_env)
+            value.write(tmp_path / ROUTES_DIR / f'{value.id}.json')
+            proxy = Proxy(tmp_path, sink=Sink(), connect_s=0.2)
+            await proxy.start()
+            try:
+                async with httpx.AsyncClient(trust_env=False) as client:
+                    response = await client.post(f'http://127.0.0.1:{proxy.port}/r/{value.id}/messages',
+                                                headers={'authorization': 'Bearer test-key'}, json={})
+                assert response.status_code == 200
+                assert len(upstream.requests) == 1
+            finally:
+                await proxy.close(grace_s=0)
+    asyncio.run(asyncio.wait_for(check(), 5))
 
 
 def test_passthrough_headers_base_path_and_binding(tmp_path):
