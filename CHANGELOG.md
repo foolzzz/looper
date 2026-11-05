@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.87] - 2026-11-05
+
+### Changed
+
+- **A Cursor run is retried once when its CLI gives up after reconnecting.** When Cursor's CLI exits without a result and its stderr names `RetriableError: WritableIterable is closed` (also when TTADK exits 0), Looper starts a fresh process once: Worker and Reviewer runs reuse the same prompt and input directories, Manager and Planner turns resume the recorded chat with the same turn. The run records a `cursor_run_retry` event, and the Planner and Worker activity shows "Cursor's CLI gave up after reconnecting; retried once". A second failure keeps both stderr tails in the error. Other failures, stops, cancellations, timeouts and missing logins are not retried. ([#1104](https://github.com/foolzzz/looper/pull/1104))
+
 ## [2.14.86] - 2026-11-05
 
 ### Changed
