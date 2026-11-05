@@ -22,7 +22,7 @@ from looper.agents.library import AgentLibrary
 from looper.agents.runtimes import AuthKind, Launcher, Probe, RuntimeUnsupported, cursor_agent, ttadk
 from looper.agents.runtimes.cursor_agent import write_ttadk_shim
 from looper.agents.tiers import worker
-from test_cursor_agent import CURSOR, PERSONAL_CONFIG, _launch as _native_launch, _prompt
+from test_cursor_agent import CURSOR, PERSONAL_CONFIG, _launch as _native_launch, _prompt, cursor_tmpdirs  # noqa: F401
 from test_ttadk_runtime import _worker_run
 
 
@@ -79,12 +79,18 @@ def test_ttadk_cursor_command_preserves_native_arguments(builder: str, launch_pa
         return session._turn_argv()
 
     native, wrapped = command(_native_launch()), command(_launch())
+    if builder == "run":
+        # Each command now owns execution state, even with identical cached inputs.
+        for argv in (native, wrapped):
+            run = str(Path(argv[1].partition("=")[2]).parent)
+            argv[:] = [arg.replace(run, "<run>") for arg in argv]
     assert native[:3] == wrapped[:3]
     assert native[1].startswith("CURSOR_CONFIG_DIR=") and native[2].startswith("CURSOR_DATA_DIR=")
     shim = tmp_path / "runtime/.local/cursor-agent/ttadk-bin"
-    assert wrapped[3:10] == [f"PATH={shim}{os.pathsep}{launch_path or inherited_path}", "ttadk", "code", "-t",
+    assert wrapped[3].startswith("TMPDIR=") and native[3].startswith("TMPDIR=")
+    assert wrapped[4:11] == [f"PATH={shim}{os.pathsep}{launch_path or inherited_path}", "ttadk", "code", "-t",
                              "cursor-cli", "--skip-check", "--"]
-    assert wrapped[10:] == native[4:]
+    assert wrapped[11:] == native[5:]
     if builder == "resident-turn":
         assert native[-2:] == wrapped[-2:] == CURSOR.resume_args("saved-chat")
     assert not any(arg.startswith("HOME=") for arg in wrapped)

@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.90] - 2026-11-05
+
+### Changed
+
+- **The Agent Profile form asks for the model first.** Settings → Agent Profiles (and wherever the form is nested) now takes a model name (typed, or chosen from the names on enabled providers, each listed once), then its protocol, then one of the enabled providers that offer that model over that protocol, then a runtime. Built-in runtimes that cannot run the chosen model are disabled with the reason, and an incompatible runtime is switched to the first compatible one with a note. A typed name no enabled provider offers shows a message and a link to LLM Providers. Dashboard only: the saved body and the API (`runtime_id`, `model_id`) are unchanged, and nothing model-visible changes. ([#1118](https://github.com/foolzzz/looper/pull/1118))
+
 ## [2.14.89] - 2026-11-05
 
 ### Added

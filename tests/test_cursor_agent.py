@@ -42,6 +42,23 @@ SESSION = "00000000-0000-4000-8000-000000000001"
 FIXTURE = Path(__file__).parent / "fixtures" / "cursor-stream-sample.jsonl"
 
 
+@pytest.fixture(autouse=True)
+def cursor_tmpdirs(monkeypatch: pytest.MonkeyPatch):
+    # Command-only and resident-session tests also own short directories in /tmp.
+    created = set()
+    prepare = cursor_agent.prepare_tmpdir
+
+    def tracked(directory: Path) -> Path:
+        target = prepare(directory)
+        created.add(target)
+        return target
+
+    monkeypatch.setattr(cursor_agent, "prepare_tmpdir", tracked)
+    yield
+    for target in created:
+        shutil.rmtree(target, ignore_errors=True)
+
+
 def _launch(*, executable: str = "cursor-agent", library: AgentLibrary | None = None,
             env: tuple[tuple[str, str], ...] = (), provider_env: tuple[tuple[str, str], ...] = (),
             effort: str = "") -> Launch:
@@ -114,6 +131,8 @@ def test_cursor_stream_preserves_events_and_uses_only_the_final_attempt(stream: 
     assert events[-2]["type"] == "usage"
     if stream == "routed":
         return
+    assert [block["text"] for block in _blocks(events, "text")] == [
+        "> Auto routed to Grok 4.7\n\n我先执行这一条命令，再按它的输出原样回复。", "pong HOME=/home/user"]
     init = [event for event in events if event.get("subtype") == "init"]
     assert len(init) == 1 and init[0]["runtime"] == "cursor-agent" and init[0]["session_id"] == SESSION
     assert init[0]["model"] == MODEL and init[0]["model_display"] == "Auto Balance"
@@ -140,13 +159,15 @@ def test_cursor_stream_preserves_events_and_uses_only_the_final_attempt(stream: 
 @pytest.mark.parametrize("resuming", [True, False], ids=["starting-and-resuming", "starting-only"])
 def test_stream_retry_start_discards_every_previous_attempt(resuming: bool) -> None:
     stream = CursorStream()
+    activity = []
 
     def assistant(text: str) -> None:
-        stream.translate({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
+        emitted = stream.translate({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
+        assert emitted == []
 
     assistant("discard text before the last tool")
-    stream.translate({"type": "tool_call", "subtype": "started", "call_id": "last-tool",
-                      "tool_call": {"readToolCall": {"args": {"path": "result.txt"}}}})
+    activity += stream.translate({"type": "tool_call", "subtype": "started", "call_id": "last-tool",
+                                  "tool_call": {"readToolCall": {"args": {"path": "result.txt"}}}})
     assert stream.translate({"type": "result"})[-1]["result"] == ""
     for attempt in (1, 2):
         assistant(f"discard attempt {attempt}")
@@ -156,9 +177,12 @@ def test_stream_retry_start_discards_every_previous_attempt(resuming: bool) -> N
             stream.translate({"type": "retry", "subtype": "resuming", "attempt": attempt})
     assistant("> Auto routed to Grok 4.7\n\nlast attempt's ")
     assistant("report")
-    result = stream.translate({"type": "result", "result": "all attempts concatenated"})[-1]
+    activity += stream.translate({"type": "result", "result": "all attempts concatenated"})
+    result = activity[-1]
     assert result["result"] == "last attempt's report"
     assert result["routed_model"] == "Grok 4.7"
+    assert [block["text"] for block in _blocks(activity, "text")] == [
+        "discard text before the last tool", "> Auto routed to Grok 4.7\n\nlast attempt's ", "report"]
 
 
 @pytest.mark.parametrize("interleaved", [False, True])
@@ -181,8 +205,7 @@ def test_command_materializes_private_plugin_and_reuses_only_the_same_prompt(tmp
     library = AgentLibrary(plugin_dirs=("/plugins/one", "/plugins/two"), mcp_config=str(config))
     launch = dataclasses.replace(_launch(library=library), knowledge=AgentKnowledge(add_dirs=("/knowledge", "/knowledge")))
     prompt = _prompt(tmp_path / "runtime")
-    command = CURSOR.run_command("cursor-agent", cwd=tmp_path, prompt_file=prompt, launch=launch,
-                                 session_dir=tmp_path / "unused-session")
+    command = CURSOR.resident_command("cursor-agent", cwd=tmp_path, prompt_file=prompt, launch=launch)
     run = _run_dir(command)
     assert command == ["env", f"CURSOR_CONFIG_DIR={run}/config", f"CURSOR_DATA_DIR={run}/data", "cursor-agent",
                        "-p", "--output-format", "stream-json", "--force", "--trust", "--sandbox", "disabled",
@@ -207,10 +230,10 @@ def test_command_materializes_private_plugin_and_reuses_only_the_same_prompt(tmp
     # Cached runs restore generated files the CLI removed.
     (plugin / ".mcp.json").unlink()
     (run / "config").rmdir()
-    again = CURSOR.run_command("cursor-agent", cwd=tmp_path, prompt_file=prompt, launch=launch)
+    again = CURSOR.resident_command("cursor-agent", cwd=tmp_path, prompt_file=prompt, launch=launch)
     assert _run_dir(again) == run and (run / "config").is_dir()
     assert {name: (plugin / name).read_text() for name in files} == files
-    other = CURSOR.run_command("cursor-agent", cwd=tmp_path, prompt_file=_prompt(tmp_path / "runtime", "OTHER"), launch=launch)
+    other = CURSOR.resident_command("cursor-agent", cwd=tmp_path, prompt_file=_prompt(tmp_path / "runtime", "OTHER"), launch=launch)
     assert _run_dir(other) != run
 
 
@@ -245,7 +268,7 @@ def test_stream_recovers_missing_tool_starts_and_clears_retried_reports() -> Non
     stream.translate(assistant("discard this attempt"))
     stream.translate({"type": "retry", "subtype": "resuming", "attempt": 1})
     stream.translate(assistant("> Auto routed to second\n\nfinal"))
-    usage, result = stream.translate({"type": "result", "usage": {"inputTokens": -1, "outputTokens": 2}})
+    usage, result = stream.translate({"type": "result", "usage": {"inputTokens": -1, "outputTokens": 2}})[-2:]
     assert result["result"] == "final" and result["routed_model"] == "first"
     assert result["modelUsage"] == {"cursor-agent": {"inputTokens": 0, "outputTokens": 2,
                                                    "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}}
@@ -432,7 +455,8 @@ for arg in args:
 prompt = sys.stdin.read()
 pathlib.Path(os.environ['CURSOR_CONFIG_DIR'], 'cli-config.json').write_text('{{"stand_in":true}}')
 pathlib.Path({str(capture)!r}).write_text(json.dumps({{'HOME': os.environ['HOME'], 'prompt': prompt,
-    'config': os.environ['CURSOR_CONFIG_DIR'], 'argv': sys.argv[1:]}}))
+    'config': os.environ['CURSOR_CONFIG_DIR'], 'tmpdir': os.environ['TMPDIR'], 'argv': sys.argv[1:]}}))
+assert pathlib.Path(os.environ['TMPDIR']).is_dir()
 if {mode not in ('stderr-without-result', 'init-without-result')!r}: print({stream!r}, end='')
 else:
     if {mode == 'init-without-result'!r}: print({stream.splitlines()[0]!r})
@@ -466,6 +490,7 @@ else:
     assert "## How you work" in seen["prompt"]
     assert "</looper_instructions>\n\n" in seen["prompt"]
     config = Path(seen["config"])
+    assert not Path(seen["tmpdir"]).exists()
     assert config.is_relative_to(tmp_path / "runtime/.local/cursor-agent/runs")
     assert json.loads((config / "cli-config.json").read_text()) == {"stand_in": True}
     assert not (home / ".cursor").exists() and list(home.iterdir()) == []
@@ -477,6 +502,9 @@ else:
     if mode not in ("stderr-without-result", "init-without-result"):
         assert finish["output_text"] == final and finish["metadata"]["routed_model"] == "Grok 4.7"
         if mode == "recorded-report":
+            messages = [call.kwargs["summary"] for call in agent_db.insert_activity.await_args_list
+                        if call.kwargs["kind"] == "text"]
+            assert messages.count("pong HOME=/home/user") == 1
             # The transport keeps the recorded reply; the Worker's established JSON report contract still applies.
             assert result["status"] == "failed" and result["final_message"] == final
             assert "JSON status report" in result["summary"]
@@ -522,7 +550,8 @@ owner = config.parent
 text = sys.stdin.read()
 with (owner / 'turns.jsonl').open('a') as log:
     log.write(json.dumps({'argv': args, 'config': str(config), 'data': os.environ['CURSOR_DATA_DIR'],
-                          'home': os.environ.get('HOME'), 'text': text}) + '\\n')
+                          'home': os.environ.get('HOME'), 'tmpdir': os.environ['TMPDIR'], 'text': text}) + '\\n')
+assert Path(os.environ['TMPDIR']).is_dir()
 if '--resume' in args:
     session = args[args.index('--resume') + 1]
     if not (config / 'chats' / 'workspace' / session).is_dir():

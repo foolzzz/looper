@@ -157,6 +157,9 @@ def dashboard_server(tmp_path, database_admin_url, staged_dashboard_dir, dashboa
     if request.node.originalname == "test_disabled_provider_refuses_manager_turn_and_can_be_enabled_again":
         configured = os.environ.get("LOOPER_PROVIDER_ENABLED_SMOKE_PORT")
         port = int(configured) if configured else port
+    if request.node.originalname == "test_profile_form_chooses_model_protocol_and_enabled_provider":
+        configured = os.environ.get("LOOPER_PROFILE_FORM_SMOKE_PORT")
+        port = int(configured) if configured else port
     with _running_dashboard(tmp_path, database_admin_url, port=port) as server:
         yield server
 
@@ -734,17 +737,15 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     _settings(page, server, "profiles/new")
     profile_form = page.get_by_role("form", name="New Agent Profile", exact=True)
     profile_form.get_by_label("Name *", exact=True).fill("Smoke profile")
-    profile_form.get_by_label("Runtime", exact=True).select_option("rt-claude-code")
     profile_form.get_by_role("button", name="Add Agent Profile", exact=True).click()
-    expect(profile_form.get_by_role("alert")).to_contain_text("compatible model")
+    expect(profile_form.get_by_role("alert")).to_contain_text("Choose a model, its protocol and a provider")
     # Missing CLIs are honestly unavailable, rather than supplied by fake executables.
     unavailable = profile_form.get_by_label("Runtime", exact=True).locator('option[value="rt-codex"]')
     expect(unavailable).to_be_disabled()
-    profile_form.get_by_label("Provider", exact=True).select_option(pid)
-    choices = profile_form.get_by_label("Model *", exact=True)
-    expect(choices.locator(f'option[value="{mid}"]')).to_have_count(1)
-    expect(choices.locator(f'option[value="{by_protocol["openai-chat"]["model_id"]}"]')).to_have_count(0)
-    choices.select_option(mid)
+    profile_form.get_by_label("Model *", exact=True).fill(MODEL_NAME)
+    profile_form.get_by_label("Protocol *", exact=True).select_option("anthropic-messages")
+    profile_form.get_by_label("Provider *", exact=True).select_option(pid)
+    expect(unavailable).to_be_disabled()
     profile_form.get_by_label("Effort", exact=True).select_option("high")
     profile_form.get_by_label("Custom prompt", exact=True).fill("Public smoke preview marker")
     _finish_form(profile_form, "Add Agent Profile")
@@ -782,9 +783,9 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     selection.select_option("__new_profile__")
     nested = role.get_by_role("group", name="New Agent Profile", exact=True)
     nested.get_by_label("Name *", exact=True).fill("Embedded smoke profile")
-    nested.get_by_label("Runtime", exact=True).select_option("rt-claude-code")
-    nested.get_by_label("Provider", exact=True).select_option(pid)
-    nested.get_by_label("Model *", exact=True).select_option(mid)
+    nested.get_by_label("Model *", exact=True).fill(MODEL_NAME)
+    nested.get_by_label("Protocol *", exact=True).select_option("anthropic-messages")
+    nested.get_by_label("Provider *", exact=True).select_option(pid)
     _finish_form(nested, "Add Agent Profile")
     embedded = next(p for p in server.api.post("/api/v1/registry/view", {})["result"]["profiles"]
                     if p["name"] == "Embedded smoke profile")
@@ -1002,31 +1003,30 @@ def test_pi_and_dsh_profile_choices_match_their_typed_runtime_contract(dashboard
     runtime = form.get_by_label("Runtime", exact=True)
     choice = form.get_by_label("Model *", exact=True)
     effort = form.get_by_label("Effort", exact=True)
-    providers = form.get_by_label("Provider", exact=True)
-    for name, protocols, efforts in (
-        ("pi", ("openai-responses", "openai-chat"), ("off", "minimal", "low", "medium", "high", "xhigh", "max")),
-        ("dsh", ("anthropic-messages",), ("low", "high", "max")),
+    providers = form.get_by_label("Provider *", exact=True)
+    form.get_by_role("button", name="Add Agent Profile", exact=True).click()
+    expect(form.get_by_role("alert")).to_contain_text("Choose a model, its protocol and a provider")
+    choice.fill(supported[-1])
+    protocol = form.get_by_label("Protocol *", exact=True)
+    expect(protocol).to_have_value("")
+    for name, wire_protocol, efforts in (
+        ("pi", "openai-responses", ("off", "minimal", "low", "medium", "high", "xhigh", "max")),
+        ("dsh", "anthropic-messages", ("low", "high", "max")),
     ):
-        runtime.select_option(f"rt-{name}")
+        protocol.select_option(wire_protocol)
+        expect(providers).to_have_value(pid)
         assert providers.locator("option").evaluate_all("nodes => nodes.map(n => n.value).filter(Boolean)") == [pid]
-        expected = {m["model_id"] for m in models
-                    if m["protocol"] in protocols and (name == "pi" or m["name"] in supported)}
-        assert set(choice.locator("option").evaluate_all("nodes => nodes.map(n => n.value).filter(Boolean)")) == expected
+        runtime.select_option(f"rt-{name}")
         assert effort.locator("option").evaluate_all("nodes => nodes.map(n => n.value).filter(Boolean)") == list(efforts)
-        form.get_by_role("button", name="Add Agent Profile", exact=True).click()
-        expect(form.get_by_role("alert")).to_contain_text("Choose a compatible model")
-        selected = next(m for m in models if m["protocol"] == protocols[0] and m["name"] == supported[-1])
-        choice.select_option(selected["model_id"])
         effort.select_option("xhigh" if name == "pi" else "max")
-    # Switching from pi clears its incompatible model and effort instead of silently
-    # submitting a hidden xhigh value to DSH. Compatible settings remain selected.
+    protocol.select_option("openai-responses")
     runtime.select_option("rt-pi")
     effort.select_option("xhigh")
+    protocol.select_option("anthropic-messages")
     runtime.select_option("rt-dsh")
-    expect(choice).to_have_value("")
+    expect(choice).to_have_value(supported[-1])
     expect(effort).to_have_value("")
     selected = next(m for m in models if m["protocol"] == "anthropic-messages" and m["name"] == supported[-1])
-    choice.select_option(selected["model_id"])
     effort.select_option("max")
     form.get_by_label("Custom prompt", exact=True).fill("Typed runtime public marker")
     _finish_form(form, "Add Agent Profile")
@@ -1142,6 +1142,93 @@ def test_disabled_provider_refuses_manager_turn_and_can_be_enabled_again(dashboa
         assert next(row for row in registry["providers"] if row["provider_id"] == pid)["enabled"] is True
         assert next(row for row in registry["profiles"] if row["profile_id"] == profile["profile_id"])["provider"]["enabled"] is True
         assert requests == []
+    finally:
+        stub.shutdown()
+        stub.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("width", [1280, 768])
+def test_profile_form_chooses_model_protocol_and_enabled_provider(dashboard_page, dashboard_server, width):
+    """Real form save/readback with two accounts, protocols and an unavailable pairing."""
+    expect = pytest.importorskip("playwright.sync_api").expect
+    page, server = dashboard_page, dashboard_server
+    page.set_viewport_size({"width": width, "height": 900})
+    calls = []
+
+    class UnusedProvider(BaseHTTPRequestHandler):
+        def do_POST(self):
+            calls.append(self.path)
+            self.send_error(503, "Profile configuration must not call a model")
+
+        def log_message(self, *args):
+            pass
+
+    stub = ThreadingHTTPServer(("127.0.0.1", 0), UnusedProvider)
+    thread = Thread(target=stub.serve_forever, daemon=True)
+    thread.start()
+    try:
+        models = {}
+        for name, protocols in (("Enabled account", ("openai-chat", "anthropic-messages")),
+                                ("Disabled account", ("openai-chat",))):
+            provider = server.api.post("/api/v1/provider_accounts/create", {
+                "name": name, "vendor_type": "custom", "endpoints": [
+                    {"protocol": protocol, "base_url": f"http://127.0.0.1:{stub.server_port}"}
+                    for protocol in protocols],
+            })["result"]["provider"]
+            pid = provider["provider_id"]
+            for protocol in protocols:
+                models[name, protocol] = server.api.post("/api/v1/ops/models/create", {
+                    "provider": pid, "name": MODEL_NAME, "protocol": protocol,
+                    "input_usd_per_mtok": 0, "output_usd_per_mtok": 0,
+                    "cache_read_usd_per_mtok": 0, "cache_write_usd_per_mtok": 0,
+                })["result"]["model"]
+            if name == "Disabled account":
+                server.api.post("/api/v1/provider_accounts/set_enabled", {"provider_id": pid, "enabled": False})
+        _settings(page, server, "profiles/new")
+        form = page.get_by_role("form", name="New Agent Profile", exact=True)
+        form.get_by_label("Name *", exact=True).fill("Model first smoke")
+        choice = form.get_by_label("Model *", exact=True)
+        datalist = page.locator("datalist").filter(has=page.locator(f'option[value="{MODEL_NAME}"]'))
+        expect(datalist.locator(f'option[value="{MODEL_NAME}"]')).to_have_count(1)
+        choice.fill(MODEL_NAME)
+        protocol = form.get_by_label("Protocol *", exact=True)
+        expect(protocol).to_have_value("")
+        assert set(protocol.locator("option").evaluate_all("ns => ns.map(n => n.value).filter(Boolean)")) == {
+            "openai-chat", "anthropic-messages"}
+        protocol.select_option("openai-chat")
+        providers = form.get_by_label("Provider *", exact=True)
+        enabled = models["Enabled account", "openai-chat"]
+        assert providers.locator("option").evaluate_all("ns => ns.map(n => n.value).filter(Boolean)") == [enabled["provider_id"]]
+        expect(providers).to_have_value(enabled["provider_id"])
+        claude = form.get_by_label("Runtime", exact=True).locator('option[value="rt-claude-code"]')
+        expect(claude).to_be_disabled()
+        expect(claude).to_contain_text("speaks Anthropic Messages")
+        expect(form.get_by_role("alert")).to_contain_text("No runtime here can run this model.")
+        screenshot = os.environ.get("LOOPER_DASHBOARD_SMOKE_SCREENSHOT")
+        if screenshot:
+            destination = Path(screenshot).resolve()
+            assert destination.is_relative_to(REPO_ROOT / ".local")
+            page.screenshot(path=str(destination.with_stem(f"{destination.stem}-runtime-{width}")))
+        choice.fill("unknown-model")
+        expect(form).to_contain_text("No enabled provider offers unknown-model.")
+        expect(form.get_by_role("link", name="LLM Providers", exact=True)).to_have_attribute("href", "#settings/providers")
+        form.get_by_role("button", name="Add Agent Profile", exact=True).click()
+        expect(form.get_by_role("alert")).to_contain_text("Choose a model, its protocol and a provider")
+        if screenshot:
+            page.screenshot(path=str(destination.with_stem(f"{destination.stem}-unknown-{width}")))
+        choice.fill(MODEL_NAME)
+        protocol.select_option("anthropic-messages")
+        expect(claude).to_be_enabled()
+        selected = models["Enabled account", "anthropic-messages"]
+        _finish_form(form, "Add Agent Profile")
+        profile = next(p for p in server.api.post("/api/v1/registry/view", {})["result"]["profiles"]
+                       if p["name"] == "Model first smoke")
+        assert (profile["model_id"], profile["runtime_id"]) == (selected["model_id"], "rt-claude-code")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        assert calls == []
     finally:
         stub.shutdown()
         stub.server_close()

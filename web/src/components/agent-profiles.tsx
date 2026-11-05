@@ -18,6 +18,7 @@ import {
   deleteAgentProfile,
   fetchStatus,
   fetchPromptPreview,
+  protocolLabel,
   updateAgentProfile,
   type AgentProfile,
   type AgentRole,
@@ -43,13 +44,23 @@ function runtimeType(registry: Registry, runtime: Runtime | undefined) {
 }
 
 /** Match the model's exact protocol and account authentication to the runtime, as the server does. */
-function pairs(registry: Registry, runtime: Runtime | undefined, model: Model): boolean {
+function pairProblem(registry: Registry, runtime: Runtime | undefined, model: Model): string | null {
   const type = runtimeType(registry, runtime);
   const provider = registry.providers.find((p) => p.provider_id === model.provider_id);
-  return !!runtime && !!type && !!provider && type.protocols.includes(model.protocol)
-    && (!type.supported_models || type.supported_models.includes(model.name))
-    && runtime.auth_kinds.includes(provider.auth)
-    && (provider.auth !== "oauth" || provider.oauth_runtime_type === type.type);
+  if (!runtime || !type || !provider) return "not available";
+  if (!type.protocols.includes(model.protocol)) {
+    return `speaks ${type.protocols.map((protocol) => protocolLabel(registry, protocol as Model["protocol"])).join(", ")}`;
+  }
+  if (type.supported_models && !type.supported_models.includes(model.name)) {
+    return `runs only ${type.supported_models.join(", ")}`;
+  }
+  if (!runtime.auth_kinds.includes(provider.auth)) {
+    return provider.auth === "api_key" ? "takes only its own login" : "cannot use another runtime's login";
+  }
+  if (provider.auth === "oauth" && provider.oauth_runtime_type !== type.type) {
+    return `${provider.name} is the login of another runtime`;
+  }
+  return null;
 }
 
 /** Agent teams for a profile on `runtime` that does not say: on for Claude Code, whose feature they are, off for
@@ -128,9 +139,9 @@ function LoginHint({ provider, typeLabel, claude }: { provider: Provider; typeLa
 // --- The form ---
 
 /**
- * Create or edit an Agent Profile: a name, then Runtime → a compatible registered Model, and its effort.
- * Provider is only a filter; the selected model determines the account. `nested` renders it
- * without a form element of its own, for use inside another form; `onDone` gets the saved profile, or nothing
+ * Create or edit an Agent Profile: a name, then a model and its protocol, then a provider that offers it, then a
+ * runtime that can run it, and its effort. `nested` renders it without a form element of its own, for use inside
+ * another form; `onDone` gets the saved profile, or nothing
  * when cancelled.
  */
 export function AgentProfileForm({
@@ -152,6 +163,8 @@ export function AgentProfileForm({
     return {
       name: profile?.name ?? "",
       runtime_id: runtime?.runtime_id ?? "",
+      modelName: profile?.model.name ?? "",
+      protocol: profile?.model.protocol ?? "",
       model_id: profile?.model_id ?? "",
       effort: profile?.effort ?? "",
       agent_teams: profile?.agent_teams ?? defaultTeams(registry, runtime),
@@ -159,54 +172,78 @@ export function AgentProfileForm({
     };
   });
   const action = useAction();
-  const [providerFilter, setProviderFilter] = useState("");
+  const [runtimeNote, setRuntimeNote] = useState("");
   const [modelError, setModelError] = useState("");
   const [warnings, setWarnings] = useState<string[]>([]);
   const [saved, setSaved] = useState<AgentProfile | null>(null);
-  const set = (change: Partial<typeof draft>) => setDraft((d) => ({ ...d, ...change }));
+  const set = (change: Partial<typeof draft>) => {
+    setRuntimeNote("");
+    setDraft((d) => ({ ...d, ...change }));
+  };
   const runtime = registry.runtimes.find((r) => r.runtime_id === draft.runtime_id);
   const type = runtimeType(registry, runtime);
-  const compatible = registry.models.filter((m) => pairs(registry, runtime, m)
-    && (m.provider_enabled || m.model_id === profile?.model_id));
-  const model = compatible.find((m) => m.model_id === draft.model_id);
+  const usable = registry.models.filter((m) => m.provider_enabled || m.model_id === profile?.model_id);
+  const names = [...new Set(usable.map((m) => m.name))].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+  const protocolsFor = (name: string) => registry.limits.api_formats.flatMap((format) => format.protocols)
+    .filter(({ protocol }) => usable.some((m) => m.name === name && m.protocol === protocol));
+  const protocols = protocolsFor(draft.modelName);
+  const offering = usable.filter((m) => m.name === draft.modelName && m.protocol === draft.protocol);
+  const model = offering.find((m) => m.model_id === draft.model_id);
   const provider = registry.providers.find((p) => p.provider_id === model?.provider_id);
-  const fitting = registry.providers.filter((p) => compatible.some((m) => m.provider_id === p.provider_id));
-  const models = compatible.filter((m) => !providerFilter || m.provider_id === providerFilter);
+  const noRuntime = model && !selectable.some((r) => !pairProblem(registry, r, model));
   const typeLabel = type?.label ?? runtime?.type_label ?? "";
   const effortLevels = type?.effort_levels ?? registry.limits.effort_levels;
   // Agent teams are a Claude Code feature: the server refuses them on another runtime.
   const teams = type?.type === "claude-code";
   const undetected = registry.runtime_types.filter((t) => !registry.runtimes.some((r) => r.builtin && r.type === t.type));
 
-  const chooseRuntime = (runtimeId: string) => {
-    const next = registry.runtimes.find((r) => r.runtime_id === runtimeId);
+  const applyRuntime = (next: Runtime) => {
     const nextContract = runtimeType(registry, next);
     const nextType = nextContract?.type;
     const nextEfforts = nextContract?.effort_levels ?? registry.limits.effort_levels;
     // Another runtime type takes its default (on for Claude Code); back on the profile's own type, its saved setting.
     const agentTeams = nextType === type?.type ? draft.agent_teams
       : profile && profile.runtime_type === nextType ? profile.agent_teams : defaultTeams(registry, next);
-    setProviderFilter("");
-    setModelError("");
-    set({ runtime_id: runtimeId,
-          model_id: model && pairs(registry, next, model) ? model.model_id : "",
+    set({ runtime_id: next.runtime_id,
           effort: nextEfforts.includes(draft.effort) ? draft.effort : "",
           agent_teams: agentTeams });
   };
-  const chooseProvider = (providerId: string) => {
-    setProviderFilter(providerId);
+  const selectModel = (nextModel: Model | undefined) => {
     setModelError("");
-    if (model && providerId && model.provider_id !== providerId) set({ model_id: "" });
+    setRuntimeNote("");
+    set({ model_id: nextModel?.model_id ?? "" });
+    if (!nextModel) return;
+    const reason = pairProblem(registry, runtime, nextModel);
+    if (!reason) return;
+    const next = selectable.find((r) => !pairProblem(registry, r, nextModel));
+    if (next) {
+      applyRuntime(next);
+      setRuntimeNote(`Runtime changed to ${runtimeTitle(next)}: ${runtime ? runtimeTitle(runtime) : "Runtime"} ${reason}.`);
+    }
+  };
+  const chooseModel = (modelName: string, protocol: string) => {
+    const choices = usable.filter((m) => m.name === modelName && m.protocol === protocol);
+    set({ modelName, protocol });
+    selectModel(choices.length === 1 ? choices[0] : choices.find((m) => m.model_id === draft.model_id));
+  };
+  const chooseName = (modelName: string) => {
+    const choices = protocolsFor(modelName).map((p) => p.protocol);
+    chooseModel(modelName, choices.length === 1 ? choices[0] : choices.find((p) => p === draft.protocol) ?? "");
   };
 
   const save = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!model) {
-      setModelError("Choose a compatible model before saving.");
+      setModelError("Choose a model, its protocol and a provider before saving.");
+      return;
+    }
+    if (pairProblem(registry, runtime, model)) {
+      setModelError("Choose a runtime that can run this model.");
       return;
     }
     setModelError("");
-    const body = { ...draft, name: draft.name.trim(), effort: draft.effort || null,
+    const body = { name: draft.name.trim(), runtime_id: draft.runtime_id, model_id: model.model_id,
+                   custom_prompt: draft.custom_prompt, effort: draft.effort || null,
                    agent_teams: teams && draft.agent_teams };
     let answer: { profile: AgentProfile; warnings: string[] } | null = null;
     const done = await action.run(async () => {
@@ -228,12 +265,51 @@ export function AgentProfileForm({
           <label htmlFor={`${id}-name`} className={LABEL}>Name *</label>
           <Input id={`${id}-name`} value={draft.name} maxLength={registry.limits.name_max_chars} onChange={(e) => set({ name: e.target.value })} placeholder="claude-code/sonnet" spellCheck={false} autoCapitalize="none" className="font-mono" autoFocus />
         </div>
+        <div className="space-y-1">
+          <label htmlFor={`${id}-model`} className={LABEL}>Model *</label>
+          <Input id={`${id}-model`} list={`${id}-model-names`} value={draft.modelName} onChange={(e) => chooseName(e.target.value)} placeholder="Type or choose a model" className="font-mono" aria-invalid={!!modelError} aria-describedby={modelError ? `${id}-model-error` : undefined} />
+          <datalist id={`${id}-model-names`}>
+            {names.map((name) => <option key={name} value={name} />)}
+          </datalist>
+          {!usable.length && <p className="text-[11px] text-muted-foreground">No compatible models. Add a model in <a href={settingsHref("providers")} className="underline underline-offset-2">LLM Providers</a>.</p>}
+          {draft.modelName && !usable.some((m) => m.name === draft.modelName) && <p className="text-[11px] text-muted-foreground">No enabled provider offers {draft.modelName}. Add it under <a href={settingsHref("providers")} className="underline underline-offset-2">LLM Providers</a>: Models, or Fetch models.</p>}
+          {modelError && <p id={`${id}-model-error`} role="alert" className="text-xs text-destructive">{modelError}</p>}
+        </div>
+        <div className="space-y-1">
+          <label htmlFor={`${id}-protocol`} className={LABEL}>Protocol *</label>
+          <select id={`${id}-protocol`} value={draft.protocol} disabled={!protocols.length} onChange={(e) => chooseModel(draft.modelName, e.target.value)} className={SELECT}>
+            <option value="">Choose a protocol</option>
+            {protocols.map((p) => <option key={p.protocol} value={p.protocol}>{p.label} ({p.protocol})</option>)}
+          </select>
+          {draft.protocol && <p className="text-[11px] text-muted-foreground">Runtimes that speak it: {registry.runtime_types.filter((t) => t.protocols.includes(draft.protocol as Model["protocol"])).map((t) => t.label).join(", ")}</p>}
+        </div>
+        <div className="space-y-1">
+          <label htmlFor={`${id}-provider`} className={LABEL}>Provider *</label>
+          <select id={`${id}-provider`} value={model?.provider_id ?? ""} onChange={(e) => selectModel(offering.find((m) => m.provider_id === e.target.value))} className={SELECT} aria-describedby={`${id}-provider-hint`}>
+            <option value="">Choose a provider</option>
+            {offering.map((m) => <option key={m.provider_id} value={m.provider_id}>{m.provider_name}{m.provider_enabled ? "" : " (disabled)"}</option>)}
+          </select>
+          <div id={`${id}-provider-hint`} className="space-y-0.5 text-[11px] text-muted-foreground">
+            {provider?.auth === "oauth" && (provider.login || type?.type === "claude-code") && (
+              <LoginHint provider={provider} typeLabel={typeLabel} claude={login} />
+            )}
+            {provider?.enabled === false && <p className="text-warning">Provider {provider.name} is disabled: this profile&apos;s runs do not start.{" "}<a href={settingsHref("providers", provider.provider_id)} className="underline underline-offset-2">Enable it in LLM Providers</a>.</p>}
+          </div>
+        </div>
         <div className="min-w-0 space-y-1">
           <label htmlFor={`${id}-runtime`} className={LABEL}>Runtime</label>
-          <select id={`${id}-runtime`} value={draft.runtime_id} onChange={(e) => chooseRuntime(e.target.value)} className={`${SELECT} min-w-0 truncate`}>
-            {selectable.map((r) => (
-              <option key={r.runtime_id} value={r.runtime_id}>{runtimeTitle(r)}</option>
-            ))}
+          <select id={`${id}-runtime`} value={draft.runtime_id} onChange={(e) => {
+            const next = selectable.find((r) => r.runtime_id === e.target.value);
+            setRuntimeNote("");
+            setModelError("");
+            if (next) applyRuntime(next);
+          }} className={`${SELECT} min-w-0 truncate`}>
+            {selectable.map((r) => {
+              const reason = model ? pairProblem(registry, r, model) : null;
+              return <option key={r.runtime_id} value={r.runtime_id} disabled={r.builtin && !!reason}>
+                {runtimeTitle(r)}{reason ? ` — ${reason}` : ""}
+              </option>;
+            })}
             {undetected.map((t) => {
               const hint = t.in_process ? t.probe_error || "not available" : "not on the server's PATH";
               return (
@@ -246,25 +322,8 @@ export function AgentProfileForm({
               <option key={p.title} value="" disabled>{p.title} (planned)</option>
             ))}
           </select>
-        </div>
-        <div className="space-y-1">
-          <label htmlFor={`${id}-provider`} className={LABEL}>Provider</label>
-          <select id={`${id}-provider`} value={providerFilter} onChange={(e) => chooseProvider(e.target.value)} className={SELECT} aria-describedby={`${id}-provider-hint`}>
-            <option value="">All compatible providers</option>
-            {fitting.map((p) => <option key={p.provider_id} value={p.provider_id}>{p.name}</option>)}
-          </select>
-          <p className="text-[11px] text-muted-foreground">Filter models by provider.</p>
-        </div>
-        <div className="space-y-1">
-          <label htmlFor={`${id}-model`} className={LABEL}>Model *</label>
-          <select id={`${id}-model`} value={model?.model_id ?? ""} onChange={(e) => { set({ model_id: e.target.value }); setModelError(""); }} className={`${SELECT} font-mono`} aria-invalid={!!modelError} aria-describedby={modelError ? `${id}-model-error` : undefined}>
-            <option value="">Choose a model</option>
-            {models.map((m) => (
-              <option key={m.model_id} value={m.model_id}>{m.provider_name} / {m.name} / {m.protocol}</option>
-            ))}
-          </select>
-          {!compatible.length && <p className="text-[11px] text-muted-foreground">No compatible models. Add a model in <a href={settingsHref("providers")} className="underline underline-offset-2">LLM Providers</a>.</p>}
-          {modelError && <p id={`${id}-model-error`} role="alert" className="text-xs text-destructive">{modelError}</p>}
+          {runtimeNote && <p className="text-[11px] text-muted-foreground">{runtimeNote}</p>}
+          {noRuntime && <p role="alert" className="text-xs text-destructive">No runtime here can run this model.</p>}
         </div>
         <div className="space-y-1">
           <label htmlFor={`${id}-effort`} className={LABEL}>Effort</label>
@@ -308,15 +367,9 @@ export function AgentProfileForm({
           </p>
         </div>
       </div>
-      <div id={`${id}-provider-hint`} className="space-y-0.5 text-[11px] text-muted-foreground">
-        {provider?.auth === "oauth" && (provider.login || type?.type === "claude-code") && (
-          <LoginHint provider={provider} typeLabel={typeLabel} claude={login} />
-        )}
-        <p>
-          Runs of this profile use this effort; to run a role with another effort, select or create a profile
-          with it.
-        </p>
-      </div>
+      <p className="text-[11px] text-muted-foreground">
+        Runs of this profile use this effort; to run a role with another effort, select or create a profile with it.
+      </p>
       {warnings.length > 0 && (
         <div role="status" className="space-y-1 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
           <p className="font-medium">Saved, with a warning:</p>
