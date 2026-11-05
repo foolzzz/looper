@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 import uuid
-from types import SimpleNamespace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -15,7 +15,7 @@ from looper.agents import gate_routing, gate_service
 from looper.agents.channels.allowlist import SENDER_ID_FORMATS, sender_ids
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address, is_lark
 from looper.agents.task_notice import NotifyChannel, NotifyTarget, TargetKind, link_line, notify_channel, notify_target
-from looper.agents.tiers.manager import ManagerAgent, channel_line
+from looper.agents.tiers.manager import ManagerAgent, ManagerConfig, channel_line
 
 
 def _message(*, group: bool = False, **context: Any) -> MessageEnvelope:
@@ -83,7 +83,7 @@ def test_bot_group_origin_and_gate_target(group: bool) -> None:
                                              NotifyTarget(TargetKind.USER, "ou_requester123"))
 
 
-def test_bot_open_gates_are_filtered_to_its_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bot_open_gates_are_filtered_to_its_chat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.agents.tiers import manager
 
     calls = []
@@ -97,9 +97,10 @@ def test_bot_open_gates_are_filtered_to_its_chat(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(manager.db_user_gates, "open_gates", open_gates)
     monkeypatch.setattr(manager, "gate_dashboard_target", dashboard_target)
-    default_manager = SimpleNamespace(agent_id="manager", _log="Manager")
-    assert asyncio.run(ManagerAgent._open_gates_section(default_manager, _message())) == []
-    assert calls == [{"chat": ("channel-lark_bot", "ou_requester123"), "manager_id": "manager", "dashboard": False}]
+    default_manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+    assert asyncio.run(default_manager._open_gates_section(_message())) == []
+    assert calls == [{"chat": ("channel-lark_bot", "ou_requester123"), "manager_id": "manager",
+                      "project_ids": None, "dashboard": False}]
 
 
 def test_bot_allowlist_uses_lark_open_ids() -> None:

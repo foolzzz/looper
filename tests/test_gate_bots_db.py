@@ -6,7 +6,7 @@ disposable database."""
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -217,17 +217,17 @@ def test_gate_lists_are_numbered_per_bot(monkeypatch: pytest.MonkeyPatch) -> Non
     run_db(test, monkeypatch)
 
 
-def test_the_manager_sees_only_the_open_gates_of_the_bots_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_manager_sees_only_the_open_gates_of_the_bots_chat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(pool: Any) -> None:
-        from looper.agents.tiers.manager import ManagerAgent
+        from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 
         await _task_with_gate(pool, "task-a", origin="channel-lark", chat="oc_team", kind="chat")
         await _task_with_gate(pool, "task-b", origin="channel-lark-5", chat="oc_team", kind="chat", step_id="step-b1",
                               project_name="notes")
-        manager = SimpleNamespace(agent_id="manager", _log="manager")
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
 
         async def tasks_in(bot: str) -> list[str]:
-            lines = await ManagerAgent._open_gates_section(manager, _lark_group("hi", bot))  # type: ignore[arg-type]
+            lines = await manager._open_gates_section(_lark_group("hi", bot))
             return [line.split(" ")[4] for line in lines[1:-1]]
 
         assert await tasks_in("channel-lark-5") == ["task-b"]
