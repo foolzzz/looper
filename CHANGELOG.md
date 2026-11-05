@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.82] - 2026-11-05
+
+### Added
+
+- **Extra senders for one chat binding.** A native chat binding can admit people who are not on the bot's sender allowlist, in that chat only. `manager_chat_bindings` gains `allowed_senders` (Lark open_ids or Telegram user ids, at most 100, checked against the bot type's id format) with an additive upgrade named `chat_binding_senders`. A message in exactly that `(channel_id, chat_id)` is admitted when its sender is on the bot's allowlist or on the binding's extra senders; anywhere else the extra senders are refused and recorded as refused senders, as before. One route decision serves admission and delivery. Moving a binding to another Manager without giving `allowed_senders` clears them. `manager_chat_bindings.put` takes `allowed_senders`, `list` returns them, and Settings → Managers shows and edits them. ([#1090](https://github.com/foolzzz/looper/pull/1090))
+
 ## [2.14.81] - 2026-11-04
 
 ### Added
