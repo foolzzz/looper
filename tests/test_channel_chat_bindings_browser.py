@@ -102,7 +102,7 @@ def channels_dashboard(dashboard_url):  # noqa: F811 - pytest injects the shared
                 binding = {**body, "created_at": STAMP, "channel_type": "telegram",
                            "bot_name": "Synthetic bot", "chat_name": "Synthetic room",
                            "manager_name": manager["name"], "manager_enabled": manager["enabled"],
-                           "manager_deleted": False}
+                           "manager_deleted": False, "allowed_senders": []}
                 state["bindings"][(body["channel_id"], body["chat_id"])] = binding
                 result = {"binding": binding}
             elif path == "manager_chat_bindings/delete":

@@ -5,6 +5,7 @@ export interface Binding {
   chat_id: string;
   manager_id: string;
   created_at: string;
+  allowed_senders: string[];
   channel_type: "telegram" | "lark" | "lark_bot";
   bot_name: string;
   chat_name: string | null;
@@ -49,9 +50,10 @@ export async function fetchChatBindings(filters: { channel_id?: string; manager_
   return result.bindings;
 }
 
-export async function putChatBinding(channelId: string, chatId: string, managerId: string): Promise<{ binding: Binding }> {
+export async function putChatBinding(channelId: string, chatId: string, managerId: string, allowedSenders?: string[]): Promise<{ binding: Binding }> {
   const result = await callV1<{ binding: Binding }>("/api/v1/manager_chat_bindings/put",
-    { channel_id: channelId, chat_id: chatId, manager_id: managerId });
+    { channel_id: channelId, chat_id: chatId, manager_id: managerId,
+      ...(allowedSenders === undefined ? {} : { allowed_senders: allowedSenders }) });
   if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
   return result;
 }

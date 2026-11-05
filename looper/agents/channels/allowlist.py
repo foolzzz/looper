@@ -9,7 +9,8 @@ senders their configuration lists:
   the Settings page: Telegram numeric user IDs (``allowed_user_ids``) and Lark
   ``open_id`` values (``allowed_open_ids``, the sender id the Lark adapter
   reads from each message event);
-- a message from anyone else never reaches the Manager: the adapter logs one
+- a message from anyone else, except a chat binding's extra senders in that chat only,
+  never reaches the Manager: the adapter logs one
   line with the channel and the sender id (never the text) and sends no reply;
 - a channel whose list is empty or invalid does not start (``start_problem``
   says why, for the log and the Settings page).
@@ -154,14 +155,14 @@ class SenderAllowlist:
     channel_id: str  # names the channel in log lines
     ids: frozenset[str]
 
-    def admits(self, sender_id: object) -> bool:
+    def admits(self, sender_id: object, *, chat_senders: frozenset[str] = frozenset()) -> bool:
         """Whether a message from ``sender_id`` may reach the Manager.
 
         A refused sender is logged as one line with the channel and the id,
         never the message text.
         """
         sender = "" if sender_id is None else str(sender_id)
-        if sender and sender in self.ids:
+        if sender and (sender in self.ids or sender in chat_senders):
             return True
         logger.warning("%s: dropped a message from sender %r, who is not on the sender allowlist",
                        self.channel_id, sender[:80] or "<unknown>")

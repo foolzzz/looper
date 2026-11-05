@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { FormFooter, LABEL, Row, SELECT } from "@/components/registry-ui";
 import type { ManagerInfo } from "@/lib/api";
 import { deleteChatBinding, fetchChannelChats, fetchChatBindings, putChatBinding,
@@ -102,7 +103,13 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
   reload: () => Promise<void>; onRemoved: () => void;
 }) {
   const id = useId();
+  const senderId = useId();
   const [target, setTarget] = useState(b.manager_id);
+  const [senders, setSenders] = useState(b.allowed_senders.join(", "));
+  useEffect(() => { setSenders(b.allowed_senders.join(", ")); }, [b.allowed_senders]);
+  const ids = senders.split(/[,\s]+/).map((value) => value.trim()).filter(Boolean);
+  const sendersUnchanged = ids.length === b.allowed_senders.length
+    && ids.every((value, index) => value === b.allowed_senders[index]);
   const [policy, setPolicy] = useState<ChannelChats | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [error, setError] = useState("");
@@ -150,8 +157,23 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
         {!options.some((m) => m.id === target) && <option value={target} disabled>Unavailable Manager</option>}
         {options.map((m) => <option key={m.id} value={m.id}>{m.name}{!m.enabled ? " · Off" : ""}</option>)}
       </select>
-      <Button size="sm" variant="outline" disabled={busy || target === b.manager_id || !options.some((m) => m.id === target)}
-        onClick={() => void run(() => putChatBinding(b.channel_id, b.chat_id, target))}>Move</Button>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="outline" disabled={busy || target === b.manager_id || !options.some((m) => m.id === target)}
+          onClick={() => void run(() => putChatBinding(b.channel_id, b.chat_id, target))}>Move</Button>
+        {target !== b.manager_id && b.allowed_senders.length > 0 && <p className="text-xs text-muted-foreground">Moving clears this chat's extra senders.</p>}
+      </div>
+      <div className="space-y-2">
+        <label htmlFor={senderId} className={LABEL}>Extra senders in this chat</label>
+        <Input id={senderId} aria-label={`Extra senders for ${name}`} aria-describedby={`${senderId}-help`}
+          value={senders} disabled={busy} onChange={(event) => setSenders(event.target.value)}
+          placeholder={b.channel_type === "telegram" ? "123456789, …" : "ou_…, ou_…"} />
+        <p id={`${senderId}-help`} className="text-[11px] text-muted-foreground">
+          Allowed here besides the bot's allowed senders, in this chat only: a direct message or another chat still refuses them.
+          {b.channel_type === "telegram" ? " Telegram user IDs, comma-separated." : " Lark open_ids (ou_…), comma-separated."}
+        </p>
+        <Button size="sm" variant="outline" disabled={busy || sendersUnchanged}
+          onClick={() => void run(() => putChatBinding(b.channel_id, b.chat_id, b.manager_id, ids))}>Save senders</Button>
+      </div>
       {policy && <div className="space-y-2">
         <p className="text-xs text-muted-foreground">{policy.bound_chats_only
           ? "After unbinding, this bot will stay silent in this chat (bound chats only)."
@@ -164,6 +186,6 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
     <p className="break-all text-xs text-muted-foreground">
       {{ telegram: "Telegram", lark: "Lark", lark_bot: "Lark Bot" }[b.channel_type]} · {b.bot_name} · {b.channel_id}
     </p>
-    <p className="break-all text-xs text-muted-foreground">Chat ID: {b.chat_id} · Bound to {b.manager_name}{b.manager_deleted ? " · Deleted" : !b.manager_enabled ? " · Off" : ""}</p>
+    <p className="break-all text-xs text-muted-foreground">Chat ID: {b.chat_id} · Bound to {b.manager_name}{b.manager_deleted ? " · Deleted" : !b.manager_enabled ? " · Off" : ""}{b.allowed_senders.length > 0 ? ` · ${b.allowed_senders.length} extra sender${b.allowed_senders.length === 1 ? "" : "s"}` : ""}</p>
   </Row>;
 }

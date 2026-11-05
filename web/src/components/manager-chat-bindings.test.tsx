@@ -30,7 +30,7 @@ const managers = [manager("manager", "Manager"), manager("review", "Review", fal
 function binding(patch: Partial<bindingsApi.Binding> = {}): bindingsApi.Binding {
   return { channel_id: "bot-one", chat_id: "42", chat_name: "Design", bot_name: "Example Bot",
     channel_type: "telegram", manager_id: "manager", manager_name: "Manager", manager_enabled: true,
-    manager_deleted: false, created_at: "", ...patch };
+    manager_deleted: false, created_at: "", allowed_senders: [], ...patch };
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -63,8 +63,8 @@ describe("Manager explicit chats", () => {
     b.fetchChatBindings.mockImplementation(async () => rows.slice());
     b.fetchChannelChats.mockResolvedValue({ channel_id: "bot-one", bot_manager_id: "manager", bound_chats_only: false,
       chats: [], unbound_chats: [], has_more: false, next_cursor: null });
-    b.putChatBinding.mockImplementation(async (_bot, _chat, target) => {
-      rows = rows.map((row) => ({ ...row, manager_id: target, manager_name: managers.find((v) => v.id === target)!.name }));
+    b.putChatBinding.mockImplementation(async (_bot, _chat, target, senders) => {
+      rows = rows.map((row) => ({ ...row, allowed_senders: senders ?? (row.manager_id === target ? row.allowed_senders : []), manager_id: target, manager_name: managers.find((v) => v.id === target)!.name }));
       return { binding: rows[0] };
     });
     b.deleteChatBinding.mockImplementation(async (channel_id, chat_id) => {
@@ -78,6 +78,49 @@ describe("Manager explicit chats", () => {
     await render();
     expect(region().textContent).toContain("Design");
     expect(region().textContent).toContain("Bound to Manager");
+  });
+  it.each(["lark", "lark_bot", "telegram"] as const)("edits %s extra senders and confirms them after readback", async (channel_type) => {
+    rows = [binding({ channel_type, allowed_senders: ["a", "b"] })];
+    await render();
+    const input = region().querySelector('input[aria-label="Extra senders for Design"]') as HTMLInputElement;
+    expect(input.value).toBe("a, b");
+    expect(input.placeholder).toBe(channel_type === "telegram" ? "123456789, …" : "ou_…, ou_…");
+    expect(region().textContent).toContain("2 extra senders");
+    expect(button("Save senders", region()).disabled).toBe(true);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, " a, b ");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(button("Save senders", region()).disabled).toBe(true);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, " a, b c , ");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(button("Save senders", region()).disabled).toBe(false);
+    await click(button("Save senders", region()));
+    expect(b.putChatBinding).toHaveBeenCalledWith("bot-one", "42", "manager", ["a", "b", "c"]);
+    expect(region().textContent).toContain("3 extra senders");
+    expect(button("Save senders", region()).disabled).toBe(true);
+  });
+  it.each([{ allowed_senders: [] }, { allowed_senders: ["8"] }])("warns about moving only with extra senders: %j", async ({ allowed_senders }) => {
+    rows = [binding({ allowed_senders })];
+    await render();
+    expect(region().textContent).not.toContain("Moving clears");
+    await select("review");
+    expect(region().textContent?.includes("Moving clears this chat's extra senders.")).toBe(allowed_senders.length > 0);
+  });
+  it("shows sender save errors in the row and keeps edits available", async () => {
+    await render();
+    const input = region().querySelector('input[aria-label="Extra senders for Design"]') as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "bad");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    b.putChatBinding.mockRejectedValueOnce(new V1Error(400, "invalid", "allowed_senders: bad"));
+    await click(button("Save senders", region()));
+    expect(region().querySelector('[role="alert"]')?.textContent).toContain("allowed_senders: bad");
+    expect(input.value).toBe("bad");
+    expect(button("Save senders", region()).disabled).toBe(false);
   });
   it("omits implicit default conversations", async () => {
     rows = [];
@@ -119,6 +162,7 @@ describe("Manager explicit chats", () => {
     b.putChatBinding.mockReturnValueOnce(write.promise);
     await render(); await select("archive"); await click(button("Move", region()));
     expect(button("Unbind", region()).disabled).toBe(true);
+    expect(button("Save senders", region()).disabled).toBe(true);
     await act(async () => write.reject(new V1Error(503, "unavailable", "Try again")));
     expect(region().textContent).toContain("Design");
     expect(region().querySelector('[role="alert"]')?.textContent).toContain("unavailable");

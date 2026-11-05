@@ -5100,9 +5100,18 @@ use the built-in rows only. Bot runner changes take effect after a restart.
 **Chat bindings and admission** (stage 3). Settings → Channels lists the complete
 paginated seen/bound catalog and historical newest 20 suppressed chats; Settings →
 Managers lists explicit bindings for rebind/unbind. Names can be null and fall back
-to native ids. Observation starts after upgrade, only for eligible allowlisted
+to native ids. Observation starts after upgrade, only for eligible admitted
 messages; it stores metadata, never message bodies. The exact bot/chat pair is the
-routing key. An explicit binding wins; without one the bot owner receives messages,
+routing key. An explicit binding may also carry extra senders
+(`allowed_senders`, the bot type's sender ids, at most 100), changed only through
+`manager_chat_bindings.put` (Settings → Managers, loopercli). A message in exactly
+that bot/chat pair is admitted when its sender is on the bot's allowlist or on that
+binding's extra senders; the adapter takes one decision from the committed snapshot
+for both admission and destination. Anywhere else, a direct message or another chat,
+an extra sender is refused like any unlisted sender, and Lark records the refusal.
+A put without `allowed_senders` keeps them for the same Manager and clears them when
+the chat moves to another Manager; unbinding or removing the bot drops them.
+Previous binaries ignore the column and refuse these senders. An explicit binding wins; without one the bot owner receives messages,
 unless `bound_chats_only` is true (default false). Then new unbound ingress, including
 Telegram local commands and native `/stop`, causes no turn, reply, reaction or
 status. Explicitly binding to the owner admits it using the unsuffixed identity.
@@ -5130,7 +5139,7 @@ implementation supplies it and is retested.
 - **Sender allowlist** (`looper/agents/channels/allowlist.py`, RFC decision 8):
   the Manager runs any command it is asked to, so Telegram and Lark pass on
   only the messages of the senders their configuration lists. A message from
-  anyone else never reaches the Manager: the adapter logs one line with the
+  anyone else (but a chat binding's extra senders, in that chat only) never reaches the Manager: the adapter logs one line with the
   channel and the sender id (never the text) and sends no reply. An enabled
   channel whose list is empty or invalid does not start; the startup log and
   Settings → Channels (`start_problem`) say why. The list holds at most 100
