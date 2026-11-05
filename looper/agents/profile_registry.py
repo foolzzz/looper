@@ -72,7 +72,6 @@ EFFORTS_MAX = 10
 CONCURRENCY_MAX = 1_000
 # What the API shows, and takes back unchanged, in place of a stored API key.
 SECRET_MASK = "***"
-RUNTIME_PROBE_TIMEOUT_SECONDS = 15
 
 
 class RegistryError(ValueError):
@@ -1141,12 +1140,10 @@ async def _probe(runtime_type: str, executable: str, server_claude: str,
     adapter = runtimes.adapter(runtime_type)
     started = time.monotonic()
     try:
-        probe = await asyncio.wait_for(asyncio.to_thread(
-            adapter.probe_for, _probe_executable(runtime_type, executable, server_claude, launcher), launcher),
-            timeout=RUNTIME_PROBE_TIMEOUT_SECONDS)
-    except TimeoutError:
-        probe = runtimes.Probe(None, adapter.capabilities,
-                               f"the probe did not answer within {RUNTIME_PROBE_TIMEOUT_SECONDS:g} s")
+        # Adapters bound their subprocesses. An outer timeout also counts executor queue time and
+        # abandons the thread's real result, which is the only probe the registry should persist.
+        probe = await asyncio.to_thread(
+            adapter.probe_for, _probe_executable(runtime_type, executable, server_claude, launcher), launcher)
     finally:
         name = adapter.ttadk_runtime_name if launcher is Launcher.TTADK else adapter.type
         logging.getLogger(__name__).info("probed runtime %s in %.3f s", name, time.monotonic() - started)
