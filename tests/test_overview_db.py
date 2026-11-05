@@ -409,3 +409,86 @@ def test_another_task_running_in_a_directory_is_found_and_an_ended_one_or_itself
         assert await db_tasks.others_active_in("/w/b", "task-other", pool=pool) is False
 
     run_db(test, monkeypatch)
+
+
+def test_project_filters_bound_reads_and_keep_the_running_filter(monkeypatch):
+    from looper.agents import projects as project_service
+    from looper.db import llm_records, plans, projects, tasks, user_gates
+    from tests.test_managers_schema_db import _manager
+    from tests.test_user_gates_db import _gate, _gate_step
+
+    async def test(pool):
+        a = await projects.create_project(name="A", pool=pool)
+        b = await projects.create_project(name="B", pool=pool)
+        idle = await projects.create_project(name="Idle", pool=pool)
+        await _manager(pool, "review")
+        for task_id, project, owner, status in [
+            ("task-a", a, "manager", "executing"), ("task-own", a, "manager-review", "init"),
+            ("task-b", b, "manager-review", "planning"),
+        ]:
+            await tasks.create_task(task_id=task_id, requirement=task_id, project_id=project["id"],
+                                    manager_id=owner, status=status, pool=pool)
+            step_id = f"step-{task_id}"
+            await plans.save(task_id, plan={"plan_id": f"plan-{task_id}", "status": "executing"},
+                             steps=[_gate_step(step_id, status="waiting_user")],
+                             gates=[_gate(step_id, state="open", opened_at=datetime.now(timezone.utc))], pool=pool)
+            await llm_records.start_record(agent_id=f"planner-{task_id}", task_id=task_id, pool=pool)
+        await llm_records.start_record(agent_id="manager-review", pool=pool)
+        assert len(await tasks.list_tasks(pool=pool)) == 3
+        assert len(await user_gates.open_gates(10, pool=pool)) == 3
+        for ids, expected in [([a["id"]], {"task-a", "task-own"}), ([], set())]:
+            assert {row["id"] for row in await tasks.list_tasks(project_ids=ids, pool=pool)} == expected
+            assert sum((await tasks.count_by_status(project_ids=ids, pool=pool)).values()) == len(expected)
+            counts = await tasks.status_counts(project_ids=ids, pool=pool)
+            assert {row["project_id"] for row in counts} == set(ids)
+            assert sum(row["count"] for row in counts) == len(expected)
+            assert {row["task_id"] for row in await user_gates.open_gates(10, project_ids=ids, pool=pool)} == expected
+            listed = await project_service.list_tasks_page(project_ids=ids, compact=True)
+            assert {row["task_id"] for row in listed["tasks"]} == expected
+            listed = await project_service.list_projects(project_ids=ids)
+            assert {row["project_id"] for row in listed["projects"]} == set(ids)
+            spend = await llm_records.spend_since(None, manager_id="manager-review", project_ids=ids, pool=pool)
+            assert spend["runs"] == len(expected) + 1
+        assert {row["id"] for row in await tasks.list_tasks(project_ids=[a["id"]], status="running", pool=pool)} == {"task-a"}
+        assert await tasks.count_by_status(project_ids=[a["id"]], pool=pool) == {"running": 1, "init": 1}
+        assert {row["id"] for row in await tasks.list_tasks(project_ids=[a["id"]], manager_id="manager-review", pool=pool)} == {"task-own"}
+        rows = await tasks.status_counts(project_ids=[idle["id"]], pool=pool)
+        assert len(rows) == 1 and rows[0]["status"] is None and rows[0]["count"] == 0
+    run_db(test, monkeypatch, timeout=25)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_project_overview_keeps_cross_creator_planners_runs_and_own_health(monkeypatch, empty):
+    from looper.agents.overview import build_overview
+    from looper.db import llm_records, projects, tasks
+    from tests.test_managers_schema_db import _manager
+
+    async def test(pool):
+        a = await projects.create_project(name="A", pool=pool)
+        b = await projects.create_project(name="B", pool=pool)
+        await _manager(pool, "review")
+        planners, runs = [], []
+        for task_id, project, owner in [("task-a", a, "manager"), ("task-b", b, "manager-review")]:
+            await tasks.create_task(task_id=task_id, requirement=task_id, project_id=project["id"],
+                                    manager_id=owner, status="running", pool=pool)
+            planners.append({"planner_id": f"planner-{task_id}", "task_id": task_id, "project_id": project["id"],
+                             "requirement": task_id, "name": task_id})
+            runs.append({"agent_id": f"worker-{task_id}", "task_id": task_id, "project_id": project["id"],
+                         "role": "worker", "state": "running", "since": datetime.now(timezone.utc),
+                         "step": "work", "instruction": "work"})
+            await llm_records.start_record(agent_id=f"planner-{task_id}", task_id=task_id, pool=pool)
+        await llm_records.start_record(agent_id="manager-review", pool=pool)
+        health = {"healthy": False, "state": "down", "up": False, "restart_count": 1,
+                  "last_crash_at": None, "next_restart_at": None}
+        overview = await build_overview(task_router=SimpleNamespace(running_planners=lambda: planners),
+            worker_pool=SimpleNamespace(runs=lambda: runs), manager=SimpleNamespace(agent_id="manager-review", busy=False),
+            supervisor=SimpleNamespace(agent_status=lambda: {"manager-review": health, "other": health}),
+            manager_id="manager-review", project_ids=[] if empty else [a["id"]])
+        assert overview["tasks"]["total"] == (0 if empty else 1)
+        assert [p["task_id"] for p in overview["agents"]["planners"]] == ([] if empty else ["task-a"])
+        assert [r["task_id"] for r in overview["agents"]["workers"]] == ([] if empty else ["task-a"])
+        assert [p["project_id"] for p in overview["projects"]] == ([] if empty else [a["id"]])
+        assert overview["spend_today"]["runs"] == (1 if empty else 2)
+        assert [entry["name"] for entry in overview["health"]["unhealthy"]] == ["manager-review"]
+        assert overview["schedules"]["total"] == 0
+    run_db(test, monkeypatch, timeout=20)

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
@@ -52,6 +53,22 @@ STATUS_GROUPS: Mapping[str, TaskGroup] = MappingProxyType({
     "completed": TaskGroup.COMPLETED,
     "cancelled": TaskGroup.CANCELLED,
 })
+
+
+@dataclass(frozen=True)
+class TaskFilter:
+    """The tasks a read may return: only ``manager_id``'s, only those in ``project_ids`` (None: no bound)."""
+
+    manager_id: str | None = None
+    project_ids: tuple[str, ...] | None = None
+
+    @property
+    def bounded(self) -> bool:
+        return self.manager_id is not None or self.project_ids is not None
+
+    def admits(self, task: Mapping[str, Any]) -> bool:
+        return ((self.manager_id is None or task.get("manager_id") == self.manager_id)
+                and (self.project_ids is None or task.get("project_id") in self.project_ids))
 
 
 # The Planner stores its own phase as the task's status, so Running covers those phases too.
@@ -596,6 +613,7 @@ async def list_tasks(
     schedule_id: str | None = None,
     before: str | None = None,
     manager_id: str | None = None,
+    project_ids: Sequence[str] | None = None,
     query: str = "",
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
@@ -613,10 +631,11 @@ async def list_tasks(
           AND ($6::text IS NULL OR (t.created_at, t.id) < (SELECT b.created_at, b.id FROM tasks b WHERE b.id = $6))
           AND ($9::text IS NULL OR t.manager_id = $9)
           AND ($10 = '' OR {_SEARCH.format(parameter='$10')})
+          AND ($11::text[] IS NULL OR t.project_id = ANY($11))
         ORDER BY t.created_at DESC, t.id DESC LIMIT $7 OFFSET $8
         """,
         project_id, STATUS_FILTERS.get(status, (status,)) if status is not None else None,
-        statuses, inside, schedule_id, before, limit, offset, manager_id, query,
+        statuses, inside, schedule_id, before, limit, offset, manager_id, query, project_ids,
     )
     return [_task(r) for r in rows]
 
@@ -627,6 +646,7 @@ async def count_by_status(
     group: TaskGroup | None = None,
     schedule_id: str | None = None,
     manager_id: str | None = None,
+    project_ids: Sequence[str] | None = None,
     query: str = "",
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, int]:
@@ -637,8 +657,9 @@ async def count_by_status(
     rows = await pool.fetch(
         f"SELECT t.status, count(*) AS n FROM tasks t JOIN projects p ON p.id=t.project_id "
         f"WHERE {_FILTERS} AND ($6 = '' OR {_SEARCH.format(parameter='$6')}) "
-        "AND ($7::text IS NULL OR t.manager_id = $7) GROUP BY t.status",
-        project_id, None, statuses, inside, schedule_id, query, manager_id,
+        "AND ($7::text IS NULL OR t.manager_id = $7) "
+        "AND ($8::text[] IS NULL OR t.project_id = ANY($8)) GROUP BY t.status",
+        project_id, None, statuses, inside, schedule_id, query, manager_id, project_ids,
     )
     counts: dict[str, int] = {}
     for row in rows:
@@ -652,7 +673,8 @@ async def task_exists(task_id: str, *, pool: asyncpg.Pool | None = None) -> bool
     return bool(await pool.fetchval("SELECT EXISTS (SELECT 1 FROM tasks WHERE id = $1)", task_id))
 
 
-async def status_counts(*, manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+async def status_counts(*, manager_id: str | None = None, project_ids: Sequence[str] | None = None,
+                        pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """How many tasks are in each status, every task counted (with ``manager_id``, that Manager's only): one row
     per project and status (``project_id``, ``project_name``, ``status``, ``count``). A project without tasks has
     one row with ``status`` None and ``count`` 0; tasks of no project have ``project_id`` None."""
@@ -660,10 +682,11 @@ async def status_counts(*, manager_id: str | None = None, pool: asyncpg.Pool | N
     rows = await pool.fetch(
         """
         SELECT p.id AS project_id, p.name AS project_name, t.status, count(t.id) AS count
-        FROM projects p FULL JOIN (SELECT * FROM tasks WHERE $1::text IS NULL OR manager_id = $1) t
-             ON t.project_id = p.id
+        FROM projects p FULL JOIN (SELECT * FROM tasks WHERE ($1::text IS NULL OR manager_id = $1)
+             AND ($2::text[] IS NULL OR project_id = ANY($2))) t ON t.project_id = p.id
+        WHERE ($2::text[] IS NULL OR p.id = ANY($2))
         GROUP BY p.id, p.name, t.status
         """,
-        manager_id,
+        manager_id, project_ids,
     )
     return [dict(r) for r in rows]

@@ -661,3 +661,79 @@ def test_repoint_is_explicit_and_keeps_the_existing_target_path(monkeypatch: pyt
         assert (await managers.get_template("manager-review", "review", pool=pool))["work_dir"] == "/target/example"
 
     run_db(test, monkeypatch, timeout=20)
+
+
+def test_project_scope_roundtrip_uses_project_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        document = _document(_manager(task_scope="projects", scope_projects=["Example"],
+                                       templates=[_template(project="Example")]), projects=[{"name": "Example"}])
+        preview = await _run(pool, document, apply=False)
+        assert (await _run(pool, document)).view() == {**preview.view(), "applied": True}
+        stored = await managers.get_manager("manager-review", pool=pool)
+        assert stored["scope_project_ids"] == [await pool.fetchval("SELECT id FROM projects WHERE name = 'Example'")]
+        exported = next(entry for entry in (await _export(pool))["managers"] if entry["id"] == "manager-review")
+        assert exported["scope_projects"] == ["Example"]
+        assert "scope_project_ids" not in exported
+        assert (await _run(pool, _document(exported))).writes == 0
+
+    run_db(test, monkeypatch, timeout=20)
+
+
+@pytest.mark.parametrize("scope", ["all", "own"])
+def test_unbounded_manager_export_has_no_scope_projects(scope: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _run(pool, _document(_manager(task_scope=scope)))
+        exported = next(entry for entry in (await _export(pool))["managers"] if entry["id"] == "manager-review")
+        assert "scope_projects" not in exported
+
+    run_db(test, monkeypatch, timeout=15)
+
+
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("scope_names,reason", [
+    (["Missing"], "no project 'Missing' in scope_projects; include projects or create it first"),
+    ([], "task_scope projects needs scope_project_ids"),
+])
+def test_project_scope_import_refuses_missing_or_empty_projects(
+    apply: bool, scope_names: list[str], reason: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        with pytest.raises(transfer.ConfigFileError, match=reason):
+            await _run(pool, _document(_manager(task_scope="projects", scope_projects=scope_names)), apply=apply)
+        assert await managers.get_manager("manager-review", pool=pool) is None
+
+    run_db(test, monkeypatch, timeout=15)
+
+
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("template_project", [None, "Other"])
+def test_project_scope_import_checks_stored_templates(
+    apply: bool, template_project: str | None, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def test(pool: Any) -> None:
+        await _run(pool, _document(_manager(templates=[_template(project=template_project)]),
+                                  projects=[{"name": "Example"}, {"name": "Other"}]))
+        document = _document({"id": "manager-review", "name": "Review", "task_scope": "projects",
+                              "scope_projects": ["Example"]})
+        with pytest.raises(transfer.ConfigFileError, match="outside this Manager's projects"):
+            await _run(pool, document, apply=apply)
+        assert (await managers.get_manager("manager-review", pool=pool))["task_scope"] == "own"
+        # The file may repair the stored template in the same atomic import.
+        document["managers"][0]["templates"] = [{"key": "review", "name": "Review", "project": "Example"}]
+        await _run(pool, document, apply=apply)
+        if apply:
+            assert (await managers.get_manager("manager-review", pool=pool))["task_scope"] == "projects"
+
+    run_db(test, monkeypatch, timeout=20)
+
+
+def test_project_scope_import_can_leave_scope_and_clear_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _run(pool, _document(_manager(task_scope="projects", scope_projects=["Example"]),
+                                  projects=[{"name": "Example"}]))
+        document = _document({"id": "manager-review", "name": "Review", "task_scope": "own"})
+        preview = await _run(pool, document, apply=False)
+        assert (await _run(pool, document)).view() == {**preview.view(), "applied": True}
+        assert (await managers.get_manager("manager-review", pool=pool))["scope_project_ids"] == []
+
+    run_db(test, monkeypatch, timeout=20)

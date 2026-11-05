@@ -31,7 +31,7 @@ const m = vi.mocked(api);
 function manager(patch: Partial<api.ManagerInfo> = {}): api.ManagerInfo {
   return {
     id: "manager-review", name: "Review", description: "", builtin: false, enabled: true, tools: "tasks",
-    task_scope: "own", task_policy: "free", idle_timeout_seconds: 1800, system_prompt: "Review things.", profile_id: null, profile_name: null,
+    task_scope: "own", scope_project_ids: [], task_policy: "free", idle_timeout_seconds: 1800, system_prompt: "Review things.", profile_id: null, profile_name: null,
     templates: [], revision: 0, created_at: "2026-10-24T00:00:00Z", updated_at: "2026-10-24T00:00:00Z",
     state: { running: false, busy: false, healthy: true, sync: "ok" },
     spend: { today_usd: 0, last_7d_usd: 0, runs_today: 0 },
@@ -129,6 +129,50 @@ describe("Managers settings", () => {
     await click(button("Save"));
     expect(m.updateManager).toHaveBeenCalledWith("manager-review", { task_scope: "all" });
     expect(container.textContent).not.toContain("own tasks");
+  });
+
+  it("chosen projects forces Tasks only and requires a project before saving both scope fields", async () => {
+    m.fetchProjects.mockResolvedValue([{ project_id: "proj-a", name: "Reviews" }] as api.Project[]);
+    m.fetchManagers.mockResolvedValue([DEFAULT, manager({ tools: "all" })]);
+    await render();
+    await click(find('[aria-label="Edit Manager Review"]'));
+    await type(field("Task visibility"), "projects");
+    expect(field<HTMLSelectElement>("Tools").value).toBe("tasks");
+    expect(field<HTMLSelectElement>("Tools").disabled).toBe(true);
+    await click(button("Save"));
+    expect(container.textContent).toContain("Choose at least one project.");
+    expect(m.updateManager).not.toHaveBeenCalled();
+    await click(container.querySelector('fieldset input[type="checkbox"]')!);
+    await click(button("Save"));
+    expect(m.updateManager).toHaveBeenCalledWith("manager-review", {
+      tools: "tasks", task_scope: "projects", scope_project_ids: ["proj-a"],
+    });
+  });
+
+  it("sends both scope fields when only the chosen projects change", async () => {
+    m.fetchProjects.mockResolvedValue([{ project_id: "proj-a", name: "Reviews" },
+      { project_id: "proj-b", name: "Maintenance" }] as api.Project[]);
+    m.fetchManagers.mockResolvedValue([DEFAULT, manager({ task_scope: "projects", scope_project_ids: ["proj-a"] })]);
+    await render();
+    expect(container.textContent).toContain("projects: Reviews");
+    await click(find('[aria-label="Edit Manager Review"]'));
+    await click(container.querySelectorAll('fieldset input[type="checkbox"]')[1]);
+    await click(button("Save"));
+    expect(m.updateManager).toHaveBeenCalledWith("manager-review", {
+      task_scope: "projects", scope_project_ids: ["proj-a", "proj-b"],
+    });
+  });
+
+  it("warns when the Manager's last scope project was deleted", async () => {
+    m.fetchManagers.mockResolvedValue([DEFAULT, manager({ task_scope: "projects" })]);
+    await render();
+    const warning = find('[title="Its projects were deleted: it sees and creates no task until you choose them."]');
+    expect(warning.textContent).toBe("no projects");
+    await click(find('[aria-label="Edit Manager Review"]'));
+    expect(container.textContent).toContain("Its projects were deleted: it sees and creates no task until you choose them.");
+    await type(field("Name"), "Renamed");
+    await click(button("Save"));
+    expect(m.updateManager).toHaveBeenCalledWith("manager-review", { name: "Renamed" });
   });
 
   it.each([0, 60, 86400])("saves idle timeout %s as an integer", async (seconds) => {

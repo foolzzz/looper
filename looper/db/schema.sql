@@ -208,8 +208,8 @@ CREATE TABLE IF NOT EXISTS managers (
     profile_id    TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
     tools         TEXT NOT NULL DEFAULT 'tasks' CONSTRAINT managers_tools_check CHECK (tools IN ('all', 'tasks')),
     -- Which tasks the Manager sees and may act on (its task tools, overview counts, spend, task-derived reads):
-    -- 'all' every task, 'own' only the tasks it created. Independent of tools; any combination is valid.
-    task_scope    TEXT NOT NULL DEFAULT 'own' CONSTRAINT managers_task_scope_check CHECK (task_scope IN ('all', 'own')),
+    -- 'all' every task, 'own' only tasks it created, 'projects' tasks in scope_project_ids (Tasks tools only).
+    task_scope    TEXT NOT NULL DEFAULT 'own' CONSTRAINT managers_task_scope_check CHECK (task_scope IN ('all', 'own', 'projects')),
     task_policy   TEXT NOT NULL DEFAULT 'free'
                   CONSTRAINT managers_task_policy_check CHECK (task_policy IN ('free', 'templates_only')),
     enabled       BOOLEAN NOT NULL DEFAULT true,
@@ -217,13 +217,18 @@ CREATE TABLE IF NOT EXISTS managers (
                   CONSTRAINT managers_idle_timeout_seconds_check
                   CHECK (idle_timeout_seconds = 0 OR idle_timeout_seconds BETWEEN 60 AND 86400),
     -- Bumped in the same transaction by every write that changes what the Manager may do (tools, task_scope,
-    -- task_policy, enabled, a template saved or removed): ManagerOps compares it at each call.
+    -- scope_project_ids (including project deletion), task_policy, enabled, a template saved or removed):
+    -- ManagerOps compares it at each call.
     revision      BIGINT NOT NULL DEFAULT 0,
     -- Deleted on the dashboard: the row stays so its chat threads keep their owner (they never fall to the default
     -- Manager) and its id is never reused; a deleted row is disabled and hidden from every view.
     deleted_at    TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    scope_project_ids TEXT[] NOT NULL DEFAULT '{}',
+    CONSTRAINT managers_scope_projects_check CHECK (cardinality(scope_project_ids) <= 20
+        AND (task_scope = 'projects' OR cardinality(scope_project_ids) = 0)),
+    CONSTRAINT managers_scope_tools_check CHECK (task_scope <> 'projects' OR tools = 'tasks'),
     CONSTRAINT managers_default_check CHECK (id <> 'manager' OR
         (system_prompt IS NULL AND profile_id IS NULL AND tools = 'all' AND task_scope = 'all' AND enabled
          AND deleted_at IS NULL AND idle_timeout_seconds = 0)),

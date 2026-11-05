@@ -20,6 +20,8 @@ from looper.agents.channels.chat_history import CHAT_RECORD, record_reply
 from looper.agents.gate_routing import RouteKind
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.projects import RequestError
+from looper.agents.ops.service import DEFAULT_SCOPE
+from looper.db.tasks import TaskFilter
 from looper.agents.tiers import manager as manager_module
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 
@@ -51,7 +53,7 @@ class _World:
         self.stored: list[str] = []
 
         async def open_gates(limit: int, *, chat: Any = None, dashboard: bool = False,
-                              manager_id: Any = None, pool: Any = None) -> Any:
+                              manager_id: Any = None, project_ids: Any = None, pool: Any = None) -> Any:
             self.listed_with.append(chat)
             if chat is None:
                 return list(self.gates)[:limit]
@@ -103,13 +105,16 @@ class _World:
                 async def tools_problem() -> None:
                     return None
 
+                async def current_scope() -> Any:
+                    return DEFAULT_SCOPE
+
                 async def library_with_server(library: Any, root: Any) -> Any:
                     return library
 
                 manager.ops = SimpleNamespace(platform=SimpleNamespace(task_router=SimpleNamespace(
                     has_planner=lambda task_id: True)), tools_problem=tools_problem,
                     asks_in=lambda message_id: False, begin_turn=lambda turn, binding=None: "", publish_binding=lambda binding: None, end_turn=lambda turn: None,
-                    library_with_server=library_with_server)
+                    library_with_server=library_with_server, current_scope=current_scope)
                 base = {"chat_id": "42" if source == TELEGRAM else "ou_me", "chat_type": "p2p",
                         "sender_id": "ou_me", "message_id": "om_9"}
                 await manager._handle(MessageEnvelope.create(
@@ -352,3 +357,47 @@ class TestReplyUnderACard:
         world.refuse = RequestError("409 Conflict", "gate g1 is closed")
         [(text, _)] = self._reply(world, "/end", monkeypatch)
         assert text == gate_routing.ENDED_REPLY and world.model == []
+
+
+@pytest.mark.parametrize("answer_scope", [("proj-a",), ()])
+def test_project_scope_gate_answer_rechecks_the_task_project(world: _World,
+                                                            monkeypatch: pytest.MonkeyPatch,
+                                                            answer_scope: tuple[str, ...]) -> None:
+    async def run() -> None:
+        gates = [{**_gate("ta", "g1", "A"), "project_id": "proj-a", "task_manager_id": "manager"},
+                 {**_gate("tb", "g2", "B"), "project_id": "proj-b", "task_manager_id": "manager"}]
+
+        async def open_gates(limit: int, *, manager_id: Any = None, project_ids: Any = None, **kwargs: Any) -> Any:
+            scope = TaskFilter(manager_id=manager_id, project_ids=project_ids)
+            return [g for g in gates if scope.admits({"manager_id": g["task_manager_id"],
+                                                     "project_id": g["project_id"]})][:limit]
+
+        async def get_task(task_id: str) -> Any:
+            return next({"id": g["task_id"], "manager_id": g["task_manager_id"],
+                         "project_id": g["project_id"]} for g in gates if g["task_id"] == task_id)
+
+        monkeypatch.setattr(gate_commands.db_user_gates, "open_gates", open_gates)
+        monkeypatch.setattr(gate_commands.db_tasks, "get_task", get_task)
+        envelope = MessageEnvelope.create(source=LARK, target=MANAGER_ADDRESS,
+            message_type=MessageType.USER_MESSAGE,
+            payload={"channel_context": {"chat_id": "ou_me", "sender_id": "ou_me"}})
+
+        async def call(text: str, ids: tuple[str, ...]) -> Any:
+            return await gate_commands.handle(envelope, text, has_planner=lambda task_id: True,
+                bus=None, source=MANAGER_ADDRESS, manager_id="manager-review", scope=TaskFilter(project_ids=ids))
+
+        listed = await call("/gates", ("proj-a",))
+        assert "【A】" in listed and "【B】" not in listed
+        gate_commands.settle(envelope.message_id, True)
+        await call("/gate 1 yes", ("proj-a",))
+        assert [p["task_id"] for p in world.posts] == ["ta"]
+        world.posts.clear()
+
+        # The saved number referred to B when B was in scope; recheck against the current scope.
+        await call("/gates", ("proj-b",))
+        gate_commands.settle(envelope.message_id, True)
+        reply = await call("/gate 1 yes", answer_scope)
+        assert "不在这个管家的范围里" in reply and not world.posts
+        assert "【B】" not in reply.split("\n\n", 1)[-1]
+
+    asyncio.run(run())

@@ -19,6 +19,7 @@ import asyncpg
 
 from ..db import connection as db_connection, llm_records as db_llm_records, managers as db_managers, projects as db_projects
 from ..db import role_templates as db_role_templates
+from ..db.tasks import TaskFilter
 from . import projects, task_templates
 from .profile_registry import RegistryError, check_selection
 from .projects import HTTP_400, HTTP_404, HTTP_409, RequestError
@@ -29,7 +30,7 @@ MAX_ENABLED_MANAGERS = 8  # includes the default Manager
 DEFAULT_MANAGER_ID = "manager"
 MANAGER_KEY_PATTERN = r"^[a-z][a-z0-9-]{1,30}$"
 MANAGER_FIELDS = ("key", "name", "description", "system_prompt", "profile_id", "tools", "task_scope", "task_policy",
-                  "enabled", "idle_timeout_seconds")
+                  "enabled", "idle_timeout_seconds", "scope_project_ids")
 TEMPLATE_FIELDS = ("name", "description", "project_id", "work_dir", "workspace_mode", "requirement",
                    "planner_instructions", "profiles", "role_templates", "inputs")
 SYSTEM_PROMPT_MAX = 20_000
@@ -52,6 +53,7 @@ class TaskScope(str, Enum):
 
     ALL = "all"
     OWN = "own"
+    PROJECTS = "projects"
 
 
 class TaskPolicy(str, Enum):
@@ -73,6 +75,19 @@ class ManagerDefinition:
     builtin: bool
     revision: int
     idle_timeout_seconds: int = 1800
+    scope_project_ids: tuple[str, ...] = ()
+
+    def tool_tasks(self) -> TaskFilter:
+        if self.task_scope is TaskScope.PROJECTS:
+            return TaskFilter(project_ids=self.scope_project_ids)
+        if self.task_scope is TaskScope.OWN:
+            return TaskFilter(manager_id=self.id)
+        return TaskFilter()
+
+    def listed_tasks(self) -> TaskFilter:
+        if self.task_scope is TaskScope.PROJECTS:
+            return self.tool_tasks()
+        return TaskFilter(manager_id=self.id)
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> "ManagerDefinition":
@@ -81,7 +96,8 @@ class ManagerDefinition:
                    tools=ManagerTools(row["tools"]), task_scope=TaskScope(row["task_scope"]),
                    task_policy=TaskPolicy(row["task_policy"]), enabled=bool(row["enabled"]),
                    builtin=row["id"] == DEFAULT_MANAGER_ID, revision=int(row.get("revision") or 0),
-                   idle_timeout_seconds=row.get("idle_timeout_seconds", 0 if row["id"] == DEFAULT_MANAGER_ID else 1800))
+                   idle_timeout_seconds=row.get("idle_timeout_seconds", 0 if row["id"] == DEFAULT_MANAGER_ID else 1800),
+                   scope_project_ids=tuple(row.get("scope_project_ids") or ()))
 
 
 _listener: Callable[[str], Awaitable[None]] | None = None
@@ -116,7 +132,8 @@ def _enum_text(field: str, values: Mapping[str, str]) -> str:
 
 _ENUM_HELP = {
     "tools": ("tools", ManagerTools, {"all": "every tool", "tasks": "only the task tools"}),
-    "task_scope": ("task_scope", TaskScope, {"all": "every task", "own": "only the tasks this Manager created"}),
+    "task_scope": ("task_scope", TaskScope, {"all": "every task", "own": "only the tasks this Manager created",
+                                          "projects": "only the tasks of the projects in scope_project_ids"}),
     "task_policy": ("task_policy", TaskPolicy, {"free": "any task", "templates_only": "only tasks made from a "
                                                                                      "template"}),
 }
@@ -187,6 +204,12 @@ async def checked_values(data: Mapping[str, Any], *, own_id: str | None,
                 values[field] = enum(data[field]).value
             except ValueError:
                 raise _refuse(_enum_text(field, help_text)) from None
+    if "scope_project_ids" in data:
+        ids = data["scope_project_ids"]
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 20
+                or any(not isinstance(item, str) or not item.strip() for item in ids)):
+            raise _refuse("scope_project_ids must list 1 to 20 project ids")
+        values["scope_project_ids"] = sorted({item.strip() for item in ids})
     if "enabled" in data:
         if not isinstance(data["enabled"], bool):
             raise _refuse("enabled must be true or false")
@@ -199,6 +222,46 @@ async def checked_values(data: Mapping[str, Any], *, own_id: str | None,
             raise _refuse("the default Manager's idle_timeout_seconds must be 0")
         values["idle_timeout_seconds"] = timeout
     return values
+
+
+def final_scope(current: Mapping[str, Any] | None, values: dict[str, Any]) -> tuple[TaskScope, tuple[str, ...]]:
+    """Validate the resulting scope, including partial updates and scopes emptied by deletion."""
+    stored = current or {}
+    scope = TaskScope(values.get("task_scope", stored.get("task_scope", "own")))
+    ids = tuple(values.get("scope_project_ids", stored.get("scope_project_ids") or ()))
+    if not {"task_scope", "scope_project_ids", "tools"}.intersection(values):
+        return scope, ids
+    if "scope_project_ids" in values and scope is not TaskScope.PROJECTS:
+        raise _refuse("scope_project_ids goes with task_scope projects")
+    if scope is TaskScope.PROJECTS:
+        if "task_scope" in values or "scope_project_ids" in values:
+            if "scope_project_ids" not in values and stored.get("task_scope") != "projects":
+                ids = ()
+            if not ids:
+                raise _refuse("task_scope projects needs scope_project_ids: the projects this Manager works in")
+        if values.get("tools", stored.get("tools", "tasks")) != "tasks":
+            raise _refuse("task_scope projects works only with tools tasks: a Manager with every tool would reach "
+                          "projects and settings outside its projects")
+    elif stored.get("task_scope") == "projects":
+        values["scope_project_ids"] = []
+        ids = ()
+    return scope, ids
+
+
+async def _lock_scope_projects(ids: tuple[str, ...], *, conn: asyncpg.Connection) -> None:
+    found = await db_managers.lock_scope_projects(ids, conn=conn)
+    missing = sorted(set(ids) - found)
+    if missing:
+        raise _refuse(f"no project {missing[0]!r}")
+
+
+async def _check_scope_templates(manager_id: str, ids: tuple[str, ...], *, conn: asyncpg.Connection) -> None:
+    for template in await db_managers.list_templates(manager_id, pool=conn):
+        if template["project_id"] not in ids:
+            project = await db_projects.get_project(template["project_id"], pool=conn) if template["project_id"] else None
+            target = project["name"] if project else "no project"
+            raise _refuse(f"template {template['key']!r} targets {target}, outside this Manager's projects: "
+                          "change the template first", HTTP_409)
 
 
 # --- Views ---
@@ -221,6 +284,7 @@ def manager_view(row: Mapping[str, Any], templates: list[Mapping[str, Any]]) -> 
         "id": row["id"], "name": row["name"], "description": row["description"],
         "system_prompt": row["system_prompt"], "profile_id": row["profile_id"],
         "profile_name": row.get("profile_name"), "tools": row["tools"], "task_scope": row["task_scope"],
+        "scope_project_ids": list(row.get("scope_project_ids") or []),
         "task_policy": row["task_policy"], "enabled": row["enabled"], "builtin": row["id"] == DEFAULT_MANAGER_ID,
         "idle_timeout_seconds": row.get("idle_timeout_seconds", 0 if row["id"] == DEFAULT_MANAGER_ID else 1800),
         "revision": row["revision"], "created_at": row["created_at"], "updated_at": row["updated_at"],
@@ -276,6 +340,7 @@ async def create_manager(data: Mapping[str, Any]) -> dict[str, Any]:
     values = await checked_values(data, own_id=None)
     if "system_prompt" not in data:
         raise _refuse("system_prompt is required: say who this Manager is and how it works")
+    scope, ids = final_scope(None, values)
     values.setdefault("enabled", True)
     if await db_managers.key_used(manager_id):
         used_by_deleted = await db_managers.get_manager(manager_id) is None
@@ -283,10 +348,14 @@ async def create_manager(data: Mapping[str, Any]) -> dict[str, Any]:
                       else f"key {key} is used by another Manager", HTTP_409)
     try:
         async with db_connection.transaction() as conn:
+            if scope is TaskScope.PROJECTS:
+                await _lock_scope_projects(ids, conn=conn)
             await db_managers.lock_managers(conn)
             if values["enabled"] and await db_managers.count_enabled(conn=conn) >= MAX_ENABLED_MANAGERS:
                 raise _too_many()
             await db_managers.insert_manager({"id": manager_id, **values}, conn=conn)
+            if scope is TaskScope.PROJECTS:
+                await _check_scope_templates(manager_id, ids, conn=conn)
     except asyncpg.UniqueViolationError:
         raise _refuse("a Manager with this key or name exists: pick another", HTTP_409) from None
     except asyncpg.ForeignKeyViolationError:
@@ -310,18 +379,28 @@ async def update_manager(manager_id: str, data: Mapping[str, Any]) -> dict[str, 
         raise _refuse(f"nothing to change; the fields are {', '.join(f for f in MANAGER_FIELDS if f != 'key')}")
     if manager_id == DEFAULT_MANAGER_ID and set(data) - {"name", "description", "idle_timeout_seconds"}:
         raise _refuse(_DEFAULT_ONLY)
-    values = await checked_values(data, own_id=manager_id)
+    checked = await checked_values(data, own_id=manager_id)
+    values = dict(checked)
+    scope, ids = final_scope(row, values)
     try:
         async with db_connection.transaction() as conn:
+            if scope is TaskScope.PROJECTS and "scope_project_ids" in values:
+                await _lock_scope_projects(ids, conn=conn)
             if values.get("enabled") is True:
                 await db_managers.lock_managers(conn)
-                current = await db_managers.lock_for_update(manager_id, conn=conn)
-                if current is None or current["deleted_at"] is not None:
-                    raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
-                if not current["enabled"] and await db_managers.count_enabled(conn=conn) >= MAX_ENABLED_MANAGERS:
-                    raise _too_many()
-            if await db_managers.update_manager(manager_id, values, conn=conn) is None:
+            current = await db_managers.lock_for_update(manager_id, conn=conn)
+            if current is None or current["deleted_at"] is not None:
                 raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
+            values = dict(checked)
+            scope, ids = final_scope(current, values)
+            if values.get("enabled") is True and not current["enabled"]:
+                if await db_managers.count_enabled(conn=conn) >= MAX_ENABLED_MANAGERS:
+                    raise _too_many()
+            if await db_managers.update_manager(manager_id, values, conn=conn,
+                                                only_if_changed="scope_project_ids" in values) is None:
+                raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
+            if scope is TaskScope.PROJECTS:
+                await _check_scope_templates(manager_id, ids, conn=conn)
     except asyncpg.UniqueViolationError:
         raise _refuse("a Manager with this name exists: pick another", HTTP_409) from None
     except asyncpg.ForeignKeyViolationError:
@@ -459,7 +538,13 @@ async def put_template(manager_id: str, key: str, data: Mapping[str, Any]) -> di
         raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
     values = await checked_template_values(manager_id, key, data)
     try:
-        stored = await db_managers.put_template(manager_id, key, values)
+        async with db_connection.transaction() as conn:
+            current = await db_managers.lock_for_update(manager_id, conn=conn)
+            if current is None or current["deleted_at"] is not None:
+                raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
+            if current["task_scope"] == "projects" and values["project_id"] not in current["scope_project_ids"]:
+                raise _refuse("this Manager works only in its projects: give the template one of them")
+            stored = await db_managers.put_template(manager_id, key, values, conn=conn)
     except asyncpg.ForeignKeyViolationError:
         raise _refuse("the project or an Agent Profile was removed meanwhile", HTTP_409) from None
     if stored is None:  # deleted after the early check

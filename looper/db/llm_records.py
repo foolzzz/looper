@@ -583,7 +583,8 @@ _SPEND = f"""count(*) AS runs,
 
 
 async def spend_since(since: datetime | None, *, until: datetime | None = None, project_id: str | None = None,
-                      manager_id: str | None = None, pool: asyncpg.Pool | None = None) -> dict[str, Any]:
+                      manager_id: str | None = None, project_ids: Sequence[str] | None = None,
+                      pool: asyncpg.Pool | None = None) -> dict[str, Any]:
     """What every agent's runs started at or after ``since`` (and before ``until``; None for no bound) cost, the
     Manager's included, split by basis; with ``project_id``, only the runs of that project's tasks that make up
     their cost (their Planners', Workers' and Reviewers', as ``task_costs`` counts them); with ``manager_id``, only
@@ -599,6 +600,11 @@ async def spend_since(since: datetime | None, *, until: datetime | None = None, 
     pool = pool or get_pool()
     by_manager, args = (("", ()) if manager_id is None
                         else (" AND (r.agent_id = $4 OR t.manager_id = $4)", (manager_id,)))
+    if project_ids is not None:
+        if manager_id is None:
+            by_manager, args = " AND t.project_id = ANY($4::text[])", (project_ids,)
+        else:
+            by_manager, args = " AND (r.agent_id = $4 OR t.project_id = ANY($5::text[]))", (manager_id, project_ids)
     row = await pool.fetchrow(
         f"SELECT {_SPEND} FROM llm_records r LEFT JOIN tasks t ON t.id = r.task_id WHERE {_IN_RANGE}{by_manager}",
         since, until, project_id, *args,

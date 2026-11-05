@@ -4099,7 +4099,7 @@ export async function fetchGates(
 // --- Managers: each with its own duty, tools, task visibility and task templates ---
 
 export type ManagerTools = "all" | "tasks";
-export type TaskScope = "all" | "own";
+export type TaskScope = "all" | "own" | "projects";
 export type TaskPolicy = "free" | "templates_only";
 
 export interface TemplateInput {
@@ -4136,6 +4136,7 @@ export interface ManagerInfo {
   enabled: boolean;
   tools: ManagerTools;
   task_scope: TaskScope;
+  scope_project_ids: string[];
   task_policy: TaskPolicy;
   idle_timeout_seconds: number;
   system_prompt: string | null;
@@ -4157,6 +4158,7 @@ export interface ManagerFields {
   profile_id?: string | null;
   tools?: ManagerTools;
   task_scope?: TaskScope;
+  scope_project_ids?: string[];
   task_policy?: TaskPolicy;
   idle_timeout_seconds?: number;
   enabled?: boolean;

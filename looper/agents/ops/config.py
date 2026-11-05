@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Awaitable, Iterable, Mapping
+from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
-from ...db import llm_records as db_llm_records, projects as db_projects
+from ...db import llm_records as db_llm_records, projects as db_projects, managers as db_managers
 from .. import catalog, profile_registry, projects
 from ..agent_settings import SettingsError, SettingsNotFound
 from ..projects import RequestError, project_name
@@ -53,14 +53,16 @@ async def answered(request: Awaitable[T]) -> T:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
 
 
-async def project_named(raw: Any, *, manager_id: str | None = None) -> dict[str, Any]:
+async def project_named(raw: Any, *, manager_id: str | None = None,
+                        project_ids: Sequence[str] | None = None) -> dict[str, Any]:
     """The project of that name (ignoring case), with its counts; refuses an unknown one."""
     try:
         name = project_name(raw)
     except ValueError as exc:
         raise OpError(ErrorCode.INVALID, f"project: {exc}") from None
     row = await db_projects.find_project_by_name(name)
-    project = await db_projects.get_project(row["id"], manager_id=manager_id) if row is not None else None
+    project = await db_projects.get_project(row["id"], manager_id=manager_id) \
+        if row is not None and (project_ids is None or row["id"] in project_ids) else None
     if project is None:
         raise OpError(ErrorCode.NOT_FOUND, f"no project named {name!r}; the Projects line before the message lists "
                                            "them")
@@ -123,8 +125,9 @@ def _project_listed(view: Mapping[str, Any]) -> dict[str, Any]:
 
 async def _projects(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
+    f = call.scope.tasks
     if action == "list":
-        listed = await projects.list_projects(manager_id=call.manager_id if call.scoped else None)
+        listed = await projects.list_projects(manager_id=f.manager_id, project_ids=f.project_ids)
         return {"projects": [_project_listed(p) for p in listed["projects"]],
                 **({"projects_root": listed["projects_root"]} if listed["projects_root"] else {})}
     if action == "create":
@@ -138,7 +141,7 @@ async def _projects(call: Call) -> dict[str, Any]:
         if project is None:
             raise OpError(ErrorCode.NOT_FOUND, "the project no longer exists")
     else:
-        project = await project_named(arguments["project"], manager_id=call.manager_id if call.scoped else None)
+        project = await project_named(arguments["project"], manager_id=f.manager_id, project_ids=f.project_ids)
     if action == "get":
         return {"project": projects.project_view(project)}
     if action == "update":
@@ -179,9 +182,15 @@ async def _deleting_project(call: Call) -> str | None:
         clauses.append(("再" if clauses else "")
                        + f"删除它的全部 {count} 个任务（步骤工作区、任务目录、会话和记录；结果分支保留）")
     effects = "它没有任务和定时任务。" if not clauses else "会先" + "，".join(clauses) + "。"
+    scoped_managers = await db_managers.managers_scoped_to(project["id"])
+    scope_note = ""
+    if scoped_managers:
+        names = "其他管家" if call.scoped else "管家" + "、".join(f"「{m['name']}」" for m in scoped_managers)
+        scope_note = (f"它在{names}的项目范围里：删除后会从它们的范围里去掉；范围变空的管家看不到也建不了任务，"
+                      "要在设置 → 管家里重新选择项目。")
     return (f"要删除项目「{project['name']}」（默认目录：{project['work_dir'] or '没有'}）吗？{effects}它的 "
             "Agent 设置、规划者可选的 Agent Profile 列表、技能和 MCP 的安装、项目知识和它自己写的技能会一起删除，不能恢复；"
-            "目录里的文件不受影响。")
+            "目录里的文件不受影响。" + scope_note)
 
 
 _PROJECT_FIELD_WORDS = {"name": "名称", "description": "描述", "background": "背景"}

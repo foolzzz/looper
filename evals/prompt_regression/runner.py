@@ -504,6 +504,7 @@ def run_task(
     user_gates: str | None = None,
     notes_root: Path | None = None,
     vault_dir: Path | None = None,
+    fake: bool = False,
 ) -> dict[str, Any]:
     """Create and start ``task`` in ``work_dir``, wait until it ends, and read back what it shows.
 
@@ -601,6 +602,15 @@ def run_task(
             elif answer_gates(api, task, task_id, detail, answered, now=time.time() + clock_offset):
                 pass  # the user answered a gate; look again at the next poll
             elif chat_pending and detail.get("steps") and detail.get("phase") in ("executing", "verifying"):
+                if fake and task.fake.get("wait_for_input"):
+                    # This case tests forwarding to a live Worker, not delivery during process startup.
+                    records = api.post("/api/v1/runs/list", {"task_id": task_id, "limit": 500})["result"]["records"]
+                    if not any(event.get("event", {}).get("type") == "system"
+                               and event["event"].get("subtype") == "init"
+                               for record in records if metrics.role(record) == "worker"
+                               for event in _all_events(api, int(record["id"]))):
+                        time.sleep(poll)
+                        continue
                 try:
                     api.post("/api/v1/operator_chat/send", {"text": task.chat, "target": {"kind": "planner", "task_id": task_id}})
                     chat_pending = False
@@ -1043,7 +1053,7 @@ def run(
                                                      cap_left=cap_left, clock_offset=clock_offset,
                                                      step_workspaces=step_workspaces,
                                                      chosen_profile_id=chosen_profile_id, user_gates=user_gates,
-                                                     notes_root=notes_root, vault_dir=vault_dir),
+                                                     notes_root=notes_root, vault_dir=vault_dir, fake=mode == "fake"),
                 total_cap_usd=total_cap_usd,
                 reps=reps,
                 results=results,

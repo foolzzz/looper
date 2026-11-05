@@ -480,3 +480,87 @@ def test_each_managers_view_carries_the_fleets_state_under_state(monkeypatch: py
         assert {m["id"] for m in view["managers"]} >= {"manager", "manager-seer"}
 
     run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("fields,message", [
+    ({"scope_project_ids": ["proj-missing"]}, "scope_project_ids goes with task_scope projects"),
+    ({"task_scope": "projects"}, "task_scope projects needs scope_project_ids"),
+    ({"task_scope": "projects", "scope_project_ids": ["proj-missing"], "tools": "all"},
+     "task_scope projects works only with tools tasks"),
+    ({"task_scope": "projects", "scope_project_ids": []}, "scope_project_ids must list 1 to 20 project ids"),
+    ({"task_scope": "projects", "scope_project_ids": [" "]}, "scope_project_ids must list 1 to 20 project ids"),
+    ({"task_scope": "projects", "scope_project_ids": ["proj-missing"] * 21},
+     "scope_project_ids must list 1 to 20 project ids"),
+    ({"task_scope": "projects", "scope_project_ids": ["proj-missing"]}, "no project 'proj-missing'"),
+])
+def test_project_scope_rejects_invalid_writes(monkeypatch, fields, message):
+    async def test(pool):
+        from looper.agents import managers_api
+        from looper.agents.projects import RequestError
+
+        with pytest.raises(RequestError, match=message):
+            await managers_api.create_manager(_body("scope-check", **fields))
+        await managers_api.create_manager(_body("scope-check"))
+        with pytest.raises(RequestError, match=message):
+            await managers_api.update_manager("manager-scope-check", fields)
+        assert (await _list())["manager-scope-check"]["task_scope"] == "own"
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_project_scope_normalizes_ids_and_clears_them_when_leaving(monkeypatch):
+    async def test(pool):
+        from looper.agents import managers_api
+
+        first, second = await _project("first"), await _project("second")
+        status, answer = await _create("desk", task_scope="projects", scope_project_ids=[second, first, first])
+        assert status == 200, answer
+        made = answer["manager"]
+        assert made["scope_project_ids"] == sorted([first, second])
+        changed = (await managers_api.update_manager("manager-desk", {"scope_project_ids": [f" {first} "]}))["manager"]
+        assert changed["scope_project_ids"] == [first] and changed["revision"] > made["revision"]
+        same = (await managers_api.update_manager("manager-desk", {"scope_project_ids": [first, first]}))["manager"]
+        assert same["revision"] == changed["revision"]
+        left = (await managers_api.update_manager("manager-desk", {"task_scope": "all", "tools": "all"}))["manager"]
+        assert left["scope_project_ids"] == [] and left["task_scope"] == "all"
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("target", [None, "outside"])
+def test_project_scope_checks_templates_on_put_and_scope_change(monkeypatch, target):
+    async def test(pool):
+        from looper.agents import managers_api
+        from looper.agents.projects import RequestError
+
+        inside, outside = await _project("inside"), await _project("outside")
+        project_id = outside if target else None
+        await _create("desk", task_scope="projects", scope_project_ids=[inside])
+        with pytest.raises(RequestError, match="give the template one of them"):
+            await managers_api.put_template("manager-desk", "pr", _template(project_id=project_id))
+        await managers_api.put_template("manager-desk", "pr", _template(project_id=inside))
+        await managers_api.update_manager("manager-desk", {"task_scope": "own"})
+        await managers_api.put_template("manager-desk", "pr", _template(project_id=project_id))
+        with pytest.raises(RequestError, match="change the template first") as failure:
+            await managers_api.update_manager("manager-desk", {"task_scope": "projects", "scope_project_ids": [inside]})
+        assert failure.value.status == "409 Conflict"
+        assert (await _list())["manager-desk"]["task_scope"] == "own"
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_emptied_project_scope_allows_unrelated_edits(monkeypatch):
+    async def test(pool):
+        from looper.agents import managers_api
+        from looper.agents.projects import RequestError
+        from looper.db import projects
+
+        project = await _project()
+        await _create("desk", task_scope="projects", scope_project_ids=[project])
+        await projects.delete_project(project)
+        view = (await managers_api.update_manager("manager-desk", {"name": "Renamed desk", "tools": "tasks"}))["manager"]
+        assert view["scope_project_ids"] == [] and view["task_scope"] == "projects"
+        with pytest.raises(RequestError, match="needs scope_project_ids"):
+            await managers_api.update_manager("manager-desk", {"task_scope": "projects"})
+
+    run_db(test, monkeypatch, timeout=30)

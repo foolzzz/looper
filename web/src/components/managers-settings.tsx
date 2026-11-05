@@ -47,6 +47,7 @@ const TEXTAREA =
   "w-full rounded-md border border-input bg-transparent p-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 const POLL_MS = 5000;
 const MAX_INPUTS = 10;
+const NO_PROJECTS = "Its projects were deleted: it sees and creates no task until you choose them.";
 
 type Reload = () => Promise<void>;
 
@@ -60,6 +61,7 @@ interface ManagerDraft {
   profile_id: string | null;
   tools: ManagerTools;
   task_scope: TaskScope;
+  scope_project_ids: string[];
   task_policy: TaskPolicy;
   idle_timeout_seconds: string;
   enabled: boolean;
@@ -74,6 +76,7 @@ function draftOf(manager: ManagerInfo | null): ManagerDraft {
     profile_id: manager?.profile_id ?? null,
     tools: manager?.tools ?? "tasks",
     task_scope: manager?.task_scope ?? "own",
+    scope_project_ids: [...(manager?.scope_project_ids ?? [])],
     task_policy: manager?.task_policy ?? "free",
     idle_timeout_seconds: String(manager?.idle_timeout_seconds ?? 1800),
     enabled: manager?.enabled ?? true,
@@ -105,6 +108,14 @@ function ManagerForm({
   const { registry } = useRegistry();
   const [draft, setDraft] = useState<ManagerDraft>(initial ?? draftOf(manager));
   const [keyError, setKeyError] = useState("");
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsError, setProjectsError] = useState("");
+  useEffect(() => {
+    let alive = true;
+    fetchProjects().then((list) => { if (alive) setProjects(list); })
+      .catch((err) => { if (alive) setProjectsError(errorText(err)); });
+    return () => { alive = false; };
+  }, []);
   const action = useAction();
   const fixed = manager?.builtin ?? false;
   const set = (patch: Partial<ManagerDraft>) => setDraft((d) => ({ ...d, ...patch }));
@@ -120,14 +131,20 @@ function ManagerForm({
     let keyRejected = false;
     const ok = await action.run(async () => {
       try {
+        if (!fixed && draft.task_scope === "projects" && !draft.scope_project_ids.length
+            && (manager?.task_scope !== "projects" || manager.scope_project_ids.length > 0)) {
+          throw new Error("Choose at least one project.");
+        }
         const idleTimeout = Number(draft.idle_timeout_seconds);
         if (!fixed && (!draft.idle_timeout_seconds.trim() || !Number.isInteger(idleTimeout)
             || (idleTimeout !== 0 && (idleTimeout < 60 || idleTimeout > 86400)))) {
           throw new Error("Idle timeout must be 0 (off) or a whole number from 60 to 86400 seconds.");
         }
         if (!manager) {
-          const { key, ...rest } = draft;
-          await createManager({ key: key.trim(), ...rest, name, description, idle_timeout_seconds: idleTimeout });
+          const { key, scope_project_ids, ...rest } = draft;
+          await createManager({ key: key.trim(), ...rest,
+            ...(draft.task_scope === "projects" ? { scope_project_ids } : {}),
+            name, description, idle_timeout_seconds: idleTimeout });
         } else if (fixed) {
           await updateManager(manager.id, { name, description });
         } else {
@@ -137,7 +154,12 @@ function ManagerForm({
           if (draft.system_prompt !== (manager.system_prompt ?? "")) changes.system_prompt = draft.system_prompt;
           if (draft.profile_id !== manager.profile_id) changes.profile_id = draft.profile_id;
           if (draft.tools !== manager.tools) changes.tools = draft.tools;
-          if (draft.task_scope !== manager.task_scope) changes.task_scope = draft.task_scope;
+          const scopeChanged = draft.task_scope !== manager.task_scope;
+          const projectsChanged = [...draft.scope_project_ids].sort().join(",") !== [...(manager.scope_project_ids ?? [])].sort().join(",");
+          if (scopeChanged || (draft.task_scope === "projects" && projectsChanged)) {
+            changes.task_scope = draft.task_scope;
+            if (draft.task_scope === "projects") changes.scope_project_ids = draft.scope_project_ids;
+          }
           if (draft.task_policy !== manager.task_policy) changes.task_policy = draft.task_policy;
           if (idleTimeout !== manager.idle_timeout_seconds) changes.idle_timeout_seconds = idleTimeout;
           if (draft.enabled !== manager.enabled) changes.enabled = draft.enabled;
@@ -205,7 +227,7 @@ function ManagerForm({
             </div>
             <div className="space-y-1">
               <label htmlFor={`${id}-tools`} className={LABEL}>Tools</label>
-              <select id={`${id}-tools`} value={draft.tools} className={SELECT}
+              <select id={`${id}-tools`} value={draft.tools} className={SELECT} disabled={draft.task_scope === "projects"}
                       onChange={(e) => set({ tools: e.target.value as ManagerTools })}>
                 <option value="tasks">Tasks only</option>
                 <option value="all">All tools</option>
@@ -219,17 +241,40 @@ function ManagerForm({
             <div className="space-y-1">
               <label htmlFor={`${id}-scope`} className={LABEL}>Task visibility</label>
               <select id={`${id}-scope`} value={draft.task_scope} className={SELECT}
-                      onChange={(e) => set({ task_scope: e.target.value as TaskScope })}>
+                      onChange={(e) => set({ task_scope: e.target.value as TaskScope,
+                        ...(e.target.value === "projects" ? { tools: "tasks" } : {}) })}>
                 <option value="own">Own tasks</option>
                 <option value="all">Every task</option>
+                <option value="projects">Chosen projects</option>
               </select>
               <p className="text-[11px] text-muted-foreground">
                 {draft.task_scope === "own"
                   ? "Only the tasks this Manager created: its task tools, overview, spend and task counts see nothing else."
-                  : "Every task, also those other Managers created."}
+                  : draft.task_scope === "projects"
+                    ? "Only the tasks of the chosen projects, whoever created them (also schedules and API clients); it creates tasks only there. Works with Tasks only."
+                    : "Every task, also those other Managers created."}
                 {" "}A change applies at the next tool call, also on a running Manager.
               </p>
             </div>
+            {draft.task_scope === "projects" && (
+              <fieldset className="space-y-2 sm:col-span-2">
+                <legend className={LABEL}>Projects</legend>
+                {manager?.task_scope === "projects" && !manager.scope_project_ids?.length && (
+                  <p className="text-xs text-warning">{NO_PROJECTS}</p>
+                )}
+                {projectsError && <p role="alert" className="text-xs text-destructive">{projectsError}</p>}
+                {!projects.length && !projectsError && <p className="text-xs text-muted-foreground">No projects available.</p>}
+                {projects.map((project) => (
+                  <label key={project.project_id} className="flex min-h-11 items-center gap-2 text-sm">
+                    <input type="checkbox" checked={draft.scope_project_ids.includes(project.project_id)}
+                           onChange={(e) => set({ scope_project_ids: e.target.checked
+                             ? [...draft.scope_project_ids, project.project_id]
+                             : draft.scope_project_ids.filter((pid) => pid !== project.project_id) })} />
+                    {project.name}
+                  </label>
+                ))}
+              </fieldset>
+            )}
             <div className="space-y-1">
               <label htmlFor={`${id}-policy`} className={LABEL}>Task creation</label>
               <select id={`${id}-policy`} value={draft.task_policy} className={SELECT}
@@ -578,7 +623,13 @@ function ManagerRow({ manager, managers, bindings, snapshot, reload }: {
         <>
           <RowName name={manager.name} builtin={manager.builtin} />
           <Badge variant="outline">{allTools ? "all tools" : "tasks only"}</Badge>
-          <Badge variant="outline">{manager.builtin || manager.task_scope === "all" ? "every task" : "own tasks"}</Badge>
+          {manager.task_scope === "projects" ? (
+            manager.scope_project_ids.length
+              ? <Badge variant="outline"><span>projects: {manager.scope_project_ids.map((pid, i) => (
+                  <span key={pid}>{i > 0 ? ", " : ""}<ProjectName id={pid} /></span>
+                ))}</span></Badge>
+              : <Badge variant="warning" title={NO_PROJECTS}>no projects</Badge>
+          ) : <Badge variant="outline">{manager.builtin || manager.task_scope === "all" ? "every task" : "own tasks"}</Badge>}
           {manager.task_policy === "templates_only" && <Badge variant="outline">templates only</Badge>}
           {pending && (
             <Badge variant="warning" title={manager.state.sync_error}>Not in force yet</Badge>

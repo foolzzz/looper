@@ -175,3 +175,31 @@ def test_gate_snapshot_keys_and_recheck(monkeypatch: pytest.MonkeyPatch) -> None
         assert out and "请先用 /gates" in out
 
     run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_projects_scope_sections_include_other_creators_only_in_chosen_projects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, empty: bool,
+) -> None:
+    async def test(pool: Any) -> None:
+        from looper.agents.ops.service import ManagerOps, Platform, scope_for
+
+        a, b = await _project(pool, "scope-a"), await _project(pool, "scope-b")
+        await _manager(pool, "review", task_scope="projects", scope_project_ids=[] if empty else [a["id"]])
+        await _task(pool, "ready-a", "manager", a)
+        await _task(pool, "ready-b", REVIEW, b)
+        await _task(pool, "gate-a", "manager", a, gate=True, status="running")
+        await _task(pool, "gate-b", REVIEW, b, gate=True, status="running")
+        definition = await _definition(pool)
+        agent = _agent(tmp_path, definition)
+        agent.ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9",
+                               scope=scope_for(definition))
+        text = await agent._build_user_message("hi", envelope=_web())
+        assert "scope-b" not in text and "ready-b" not in text and "gate-b" not in text
+        if empty:
+            assert "none: this Manager's projects were deleted" in text
+            assert "scope-a" not in text and "ready-a" not in text and "gate-a" not in text
+        else:
+            assert "scope-a" in text and "ready-a" in text and "gate-a" in text
+
+    run_db(test, monkeypatch)

@@ -139,6 +139,12 @@ tell the user to use the general Manager or the dashboard.""",
     ManagerTools.ALL: "You have every platform tool.",
 }
 SCOPE_TASKS = {
+    TaskScope.PROJECTS: """\
+You see and act on only the tasks of the projects listed under "Projects"
+in each message, whoever created them; the Ready tasks and Open gates list
+those tasks, and you create tasks only in those projects. Tasks of other
+projects are not yours: when asked about one, tell the user to use the
+general Manager or the dashboard.""",
     TaskScope.OWN: """\
 You see and act on only the tasks you created. Other Managers' tasks are hidden
 from you and not yours: when asked about one, tell the user to use the general
@@ -2540,12 +2546,25 @@ class ManagerAgent:
             command.extend(runtime.resume_args(self._session_id))
         return command
 
+    async def _listed(self) -> db_tasks.TaskFilter:
+        if self.ops is None:
+            return db_tasks.TaskFilter(manager_id=self.agent_id)
+        return (await self.ops.current_scope()).listed
+
     async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "",
                                   envelope: MessageEnvelope | None = None) -> str:
-        parts = await self._projects_section()
-        parts += await self._templates_section()
-        parts += await self._ready_tasks_section()
-        parts += await self._open_gates_section(envelope)
+        try:
+            listed = await self._listed()
+        except Exception:
+            logger.warning("%s could not read the Manager's scope", self._log, exc_info=True)
+            parts = ["Projects: (could not be read)", ""]
+            parts += await self._templates_section()
+            parts += ["Ready tasks: (could not be read)", "", "Open gates: (could not be read)", ""]
+        else:
+            parts = await self._projects_section(listed)
+            parts += await self._templates_section()
+            parts += await self._ready_tasks_section(listed)
+            parts += await self._open_gates_section(envelope, listed)
 
         if self._goal_snapshots:
             parts.append("当前活跃目标:")
@@ -2560,10 +2579,11 @@ class ManagerAgent:
         parts.append(user_message)
         return "\n".join(parts)
 
-    async def _projects_section(self) -> list[str]:
+    async def _projects_section(self, listed: db_tasks.TaskFilter | None = None) -> list[str]:
         """The existing projects, so Claude can name a task's project."""
         try:
-            projects = await db_projects.list_projects()
+            listed = await self._listed() if listed is None else listed
+            projects = await db_projects.list_projects(project_ids=listed.project_ids)
         except Exception:
             logger.warning("%s could not list projects", self._log, exc_info=True)
             return ["Projects: (could not be read)", ""]
@@ -2576,7 +2596,8 @@ class ManagerAgent:
                 line += f": {description if len(description) <= 80 else description[:79] + '…'}"
             lines.append(line)
         if not projects:
-            lines.append("  (none yet)")
+            lines.append("  (none: this Manager's projects were deleted; the operator chooses them in "
+                         "Settings → Managers)" if listed.project_ids is not None else "  (none yet)")
         lines.append("")
         return lines
 
@@ -2611,11 +2632,12 @@ class ManagerAgent:
         lines.append("")
         return lines
 
-    async def _ready_tasks_section(self) -> list[str]:
+    async def _ready_tasks_section(self, listed: db_tasks.TaskFilter | None = None) -> list[str]:
         """The tasks created but not started, newest first, so Claude can start one by its id; none, no section."""
         try:
+            listed = await self._listed() if listed is None else listed
             tasks = await db_tasks.list_tasks(limit=READY_TASKS_LISTED, status=db_tasks.READY,
-                                          manager_id=self.agent_id)
+                                             manager_id=listed.manager_id, project_ids=listed.project_ids)
         except Exception:
             logger.warning("%s could not list the ready tasks", self._log, exc_info=True)
             return ["Ready tasks: (could not be read)", ""]
@@ -2628,7 +2650,8 @@ class ManagerAgent:
         lines.append("")
         return lines
 
-    async def _open_gates_section(self, envelope: MessageEnvelope | None) -> list[str]:
+    async def _open_gates_section(self, envelope: MessageEnvelope | None,
+                                  listed: db_tasks.TaskFilter | None = None) -> list[str]:
         """The user gates that wait for the user in the running tasks, the latest opened first, so Claude can pass
         the user's answer on (``looper_task_gate_reply``): in a Lark or Telegram chat only the gates whose messages
         go to that chat (``gate_service.gate_chat``), so no other chat's gate shows in it; in the dashboard chat all,
@@ -2639,29 +2662,32 @@ class ManagerAgent:
             chat = origin_chat(origin["channel"], origin["chat"] or "", group=origin["group"],
                                sender=origin["sender"] or "")
         try:
+            listed = await self._listed() if listed is None else listed
             if here:
                 dashboard = await gate_dashboard_target()
                 gates = await db_user_gates.open_gates(
-                    OPEN_GATES_LISTED, chat=(origin["channel_id"], chat), manager_id=self.agent_id,
+                    OPEN_GATES_LISTED, chat=(origin["channel_id"], chat), manager_id=listed.manager_id,
+                    project_ids=listed.project_ids,
                     dashboard=dashboard is not None and (dashboard.channel_id, dashboard.target.id) ==
                     (origin["channel_id"], chat))
             else:
-                gates = await db_user_gates.open_gates(OPEN_GATES_LISTED, manager_id=self.agent_id)
+                gates = await db_user_gates.open_gates(
+                    OPEN_GATES_LISTED, manager_id=listed.manager_id, project_ids=listed.project_ids)
                 dashboard = await gate_dashboard_target() if gates else None
         except Exception:
             logger.warning("%s could not list the open gates", self._log, exc_info=True)
             return ["Open gates: (could not be read)", ""]
-        listed: list[tuple[dict[str, Any], str]] = []
+        visible: list[tuple[dict[str, Any], str]] = []
         for gate in gates:
             gate_chat = gate_chat_of(gate, dashboard)
             if here and (gate_chat is None or (gate_chat.channel_id, gate_chat.target.id) !=
                          (origin["channel_id"], chat)):
                 continue
-            listed.append((gate, "" if here else f"; chat: {gate_chat.label() if gate_chat else 'the task page only'}"))
-        if not listed:
+            visible.append((gate, "" if here else f"; chat: {gate_chat.label() if gate_chat else 'the task page only'}"))
+        if not visible:
             return []
         lines = [f"Open gates{' of this chat' if here else ''} (waiting for the user's answer; newest first):"]
-        for gate, where in listed[:OPEN_GATES_LISTED]:
+        for gate, where in visible[:OPEN_GATES_LISTED]:
             waits = "the Planner, which is answering" if gate.get("waiting_for_planner") else "the user"
             questions = "; ".join(f"{item.get('id')} {clip(str(item.get('question') or ''), 80)}"
                                   for item in gate.get("agenda") or [] if item.get("status") in (None, "open"))
@@ -2714,7 +2740,7 @@ class ManagerAgent:
         try:
             return await gate_commands.handle(envelope, text, has_planner=self.ops.platform.task_router.has_planner,
                                               bus=self._bus, source=self.agent_address,
-                                              manager_id=self.agent_id)
+                                              manager_id=self.agent_id, scope=await self._listed())
         except Exception as exc:
             logger.exception("%s: the gate command %r failed", self._log, text[:40])
             return f"关卡命令出错：{exc}"

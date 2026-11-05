@@ -341,3 +341,86 @@ def test_template_write_vs_delete(monkeypatch: pytest.MonkeyPatch) -> None:
         assert await pool.fetchval("SELECT count(*) FROM manager_task_templates WHERE manager_id = 'manager-yy'") == 0
 
     run_db(body, monkeypatch)
+
+
+async def _before_project_scope(conn):
+    from looper.db import connection
+
+    await connection.ensure_schema(conn)
+    await conn.execute("ALTER TABLE managers DROP CONSTRAINT managers_scope_tools_check, "
+                       "DROP COLUMN scope_project_ids")
+    await conn.execute("ALTER TABLE managers DROP CONSTRAINT managers_task_scope_check, "
+                       "ADD CONSTRAINT managers_task_scope_check CHECK (task_scope IN ('all', 'own'))")
+
+
+def test_project_scope_upgrade_once_and_fresh_parity():
+    from looper.db import connection
+    from tests.bridge_schema_support import structure, witness
+    from tests.db_support import fresh_connection
+
+    async def body():
+        async with fresh_connection() as old, fresh_connection() as fresh:
+            await _before_project_scope(old)
+            before, shape = await witness(old), await structure(old)
+            assert await connection.schema_change_pending(old)
+            assert await witness(old) == before and await structure(old) == shape
+            await connection.ensure_schema(old)
+            assert await old.fetchval("SELECT scope_project_ids FROM managers WHERE id='manager'") == []
+            await connection.ensure_schema(fresh)
+            assert await structure(old) == await structure(fresh)
+            after, shape = await witness(old), await structure(old)
+            assert not await connection.schema_change_pending(old)
+            await connection.ensure_schema(old)
+            assert await witness(old) == after and await structure(old) == shape
+            assert await old.fetchval("SELECT count(*) FROM schema_migrations WHERE name='manager_scope_projects'") == 1
+            assert not await fresh.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations "
+                                            "WHERE name='manager_scope_projects')")
+    asyncio.run(asyncio.wait_for(body(), 30))
+
+
+@pytest.mark.parametrize("upgraded", [False, True], ids=["fresh", "upgraded"])
+@pytest.mark.parametrize("tools,scope,ids,constraint", [
+    ("all", "projects", ["p"], "managers_scope_tools_check"),
+    ("tasks", "own", ["p"], "managers_scope_projects_check"),
+    ("tasks", "projects", [f"p{i}" for i in range(21)], "managers_scope_projects_check"),
+    ("tasks", "projects", [], None),
+    ("tasks", "projects", ["p"], None),
+])
+def test_project_scope_constraints_on_fresh_and_upgraded(upgraded, tools, scope, ids, constraint):
+    from looper.db import connection
+    from tests.db_support import fresh_connection
+
+    async def body():
+        async with fresh_connection() as conn:
+            if upgraded:
+                await _before_project_scope(conn)
+            await connection.ensure_schema(conn)
+            async def insert():
+                await conn.execute("INSERT INTO managers (id,name,system_prompt,tools,task_scope,scope_project_ids) "
+                                   "VALUES ('manager-review','Review','Review',$1,$2,$3)", tools, scope, ids)
+            if constraint:
+                with pytest.raises(asyncpg.CheckViolationError, match=constraint):
+                    await insert()
+            else:
+                await insert()
+    asyncio.run(asyncio.wait_for(body(), 30))
+
+
+def test_project_scope_storage_normalizes_and_preserves_identical_revision(monkeypatch):
+    from looper.db import managers, projects
+
+    async def body(pool):
+        a = await projects.create_project(name="A", pool=pool)
+        b = await projects.create_project(name="B", pool=pool)
+        made = await _manager(pool, "review", task_scope="projects", scope_project_ids=[b["id"], a["id"], a["id"]])
+        expected = sorted([a["id"], b["id"]])
+        assert made["scope_project_ids"] == expected
+        async with pool.acquire() as conn, conn.transaction():
+            assert await managers.lock_scope_projects([a["id"], "missing"], conn=conn) == {a["id"]}
+            same = await managers.update_manager(made["id"], {"scope_project_ids": list(reversed(expected))},
+                                                 conn=conn, only_if_changed=True)
+            assert same["revision"] == made["revision"]
+        assert await managers.managers_scoped_to(a["id"], pool=pool) == [{"id": made["id"], "name": made["name"]}]
+        await managers.delete_manager(made["id"])
+        assert await managers.managers_scoped_to(a["id"], pool=pool) == []
+    run_db(body, monkeypatch, timeout=20)
