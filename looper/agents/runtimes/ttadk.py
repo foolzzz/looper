@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from enum import Enum
 from pathlib import Path
 
@@ -27,9 +31,12 @@ class TtadkProblem(str, Enum):
     NOT_FOUND = "not_found"
     NOT_SIGNED_IN = "not_signed_in"
     CHECK_FAILED = "check_failed"
+    CHECKING = "checking"
     WRONG_TOOL = "wrong_tool"
 
     def message(self, runtime_type: str) -> str:
+        if self is self.CHECKING:
+            return f"checking TTADK's sign-in for `{runtime_type}`"
         if self is self.WRONG_TOOL:
             explanation = (f"TTADK's settings make cursor-cli run `{tool_command('cursor-cli')}`, "
                            "so Looper cannot confirm it is Cursor's CLI")
@@ -96,17 +103,34 @@ def tool_command(tool: str) -> str:
 
 
 _SIGN_IN_TIMEOUT_SEC = 20.0
+_CURSOR_SIGN_IN_TIMEOUT_SEC = 45.0
 _PROBE_TTL_SEC = 60.0
 _probed: dict[tuple[str, str], tuple[float, TtadkProblem | None]] = {}
+_probe_locks: dict[tuple[str, str], threading.Lock] = {}
 
 
 def _sign_in_problem(executable: str, tool: str) -> TtadkProblem | None:
     if shutil.which(executable) is None:
         return TtadkProblem.NOT_FOUND
     try:
-        done = subprocess.run([executable, "models", "-t", tool, "-f", "json"],
-                              capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                              timeout=_SIGN_IN_TIMEOUT_SEC, check=False, env=child_env.inherited())
+        with ExitStack() as stack:
+            env = child_env.inherited()
+            timeout = _SIGN_IN_TIMEOUT_SEC
+            if tool == "cursor-cli":
+                from . import cursor_login
+                from .cursor_agent import write_ttadk_shim
+
+                directory = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="looper-ttadk-cursor-")))
+                shim = write_ttadk_shim(directory)
+                env = environment(cursor_login.environment(env))
+                env["PATH"] = f"{shim}{os.pathsep}{env.get('PATH', '')}"
+                for name, child in zip(cursor_login.DIRECTORY_VARS, ("config", "data")):
+                    (directory / child).mkdir(mode=0o700)
+                    env[name] = str(directory / child)
+                timeout = _CURSOR_SIGN_IN_TIMEOUT_SEC
+            done = subprocess.run([executable, "models", "-t", tool, "-f", "json"],
+                                  capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                  timeout=timeout, check=False, env=env)
         if done.returncode != 0:
             return TtadkProblem.NOT_SIGNED_IN
         result = json.loads(done.stdout)
@@ -114,20 +138,52 @@ def _sign_in_problem(executable: str, tool: str) -> TtadkProblem | None:
             return None
     except FileNotFoundError:
         return TtadkProblem.NOT_FOUND
-    except (OSError, UnicodeError, ValueError, subprocess.TimeoutExpired):
+    except (OSError, UnicodeError, ValueError, subprocess.TimeoutExpired, RuntimeUnsupported):
         pass
     return TtadkProblem.CHECK_FAILED
 
 
-async def sign_in_problem(executable: str, tool: str) -> TtadkProblem | None:
+def _refresh_probe(executable: str, tool: str) -> TtadkProblem | None:
     key = (executable, tool)
     cached = _probed.get(key)
     if cached is None or time.monotonic() - cached[0] > _PROBE_TTL_SEC:
-        problem = await asyncio.to_thread(_sign_in_problem, executable, tool)
+        problem = _sign_in_problem(executable, tool)
         _probed[key] = (time.monotonic(), problem)
     return _probed[key][1]
 
 
+def _cached_probe(executable: str, tool: str) -> TtadkProblem | None:
+    with _probe_locks.setdefault((executable, tool), threading.Lock()):
+        return _refresh_probe(executable, tool)
+
+
+def _background_probe(executable: str, tool: str, lock: threading.Lock) -> None:
+    try:
+        _refresh_probe(executable, tool)
+    finally:
+        lock.release()
+
+
+async def sign_in_problem(executable: str, tool: str, *, wait: bool = True) -> TtadkProblem | None:
+    """Launches wait for a current answer; status views return cached state and refresh in the background."""
+    if wait:
+        return await asyncio.to_thread(_cached_probe, executable, tool)
+    key = (executable, tool)
+    cached = _probed.get(key)
+    lock = _probe_locks.setdefault(key, threading.Lock())
+    if (cached is None or time.monotonic() - cached[0] > _PROBE_TTL_SEC) and lock.acquire(blocking=False):
+        try:
+            threading.Thread(target=_background_probe, args=(executable, tool, lock),
+                             name="ttadk-sign-in", daemon=True).start()
+        except BaseException:
+            lock.release()
+            raise
+    return cached[1] if cached else TtadkProblem.CHECKING
+
+
 def forget_probe() -> None:
     """Invalidate cached sign-in checks, including after test stand-ins change."""
+    for lock in list(_probe_locks.values()):
+        with lock:
+            pass
     _probed.clear()

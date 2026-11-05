@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import stat
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -353,13 +354,19 @@ assert all(pathlib.Path(env[name]).is_dir() for name in ('CURSOR_CONFIG_DIR', 'C
 pathlib.Path({str(capture)!r}).write_text(json.dumps({{'argv': sys.argv[1:], 'env': env}}))
 if {mode!r} == 'version': print('2026.10.22')
 if {mode!r} == 'error': print('boom', file=sys.stderr); raise SystemExit(1)
-if {mode!r} == 'timeout':
-    import time
-    time.sleep(2)
 """)
     assert cursor_agent._PROBE_TIMEOUT_SEC == 10.0
     if mode == "timeout":
-        monkeypatch.setattr(cursor_agent, "_PROBE_TIMEOUT_SEC", 0.2)
+        run = subprocess.run
+
+        def timeout_after_capture(argv, **kwargs):
+            # Exercise the real environment before injecting the failure: process
+            # startup can exceed a short timeout before the capture is written.
+            done = run(argv, **kwargs)
+            assert done.returncode == 0, done.stderr
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        monkeypatch.setattr(cursor_agent.subprocess, "run", timeout_after_capture)
     if mode == "missing":
         Path(executable).unlink()
     result = CURSOR.probe(executable)
