@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from looper.agents.bus import MessageBus
-from looper.agents.channels.chat_routing import RouteAction, RouteDecision
+from looper.agents.channels.chat_routing import RouteAction, RouteDecision, RoutingSnapshot
 from looper.agents.channels.telegram import TelegramChannelAdapter
 from looper.agents.managers import ChatStopSummary, chat_stop_reply
 from looper.agents.message import MessageEnvelope, MessageType, channel_thread_id, manager_address
@@ -45,7 +45,8 @@ def test_bound_only_silences_every_telegram_entry_before_effects(tmp_path: Path,
         adapter, bus, bot, observed = telegram(tmp_path, monkeypatch, resolve_chat=resolver)
         if handler == "_cmd_help":
             await adapter._cmd_help(_tg_update(8), None)
-            resolver.assert_not_called()
+            resolver.assert_called_once_with("channel-telegram", "99")
+            resolver.reset_mock()
             observed.assert_not_awaited()
         update = _tg_update(7, "/gate 1 yes")
         await getattr(adapter, handler)(update, None)
@@ -189,7 +190,9 @@ def test_lark_binding_cannot_bypass_native_eligibility(
             return RouteDecision(RouteAction.ADMIT, "manager-bound", True)
         adapter = _lark(tmp_path, bus, transport, resolve_chat=resolve)
         await adapter._handle_lark_event(event)
-        assert resolved == lark_observations == transport.calls == []
+        expected = [] if event.get("chat_type") == "group" and not event.get("mentions") else [("channel-lark", "oc_1")]
+        assert resolved == expected
+        assert lark_observations == transport.calls == []
         await adapter.stop()
     asyncio.run(main())
 
@@ -365,3 +368,20 @@ def test_native_routing_boundary_log(tmp_path, monkeypatch, caplog, lark_observa
             await adapter.stop()
         await bus.shutdown()
     asyncio.run(run())
+
+
+def test_snapshot_extra_senders_are_immutable_and_exact_to_explicit_chat():
+    ids = {"8"}
+    source = {"99": ids, "100": set()}
+    snapshot = RoutingSnapshot("channel-telegram", "manager", True,
+                               {"99": "manager-review", "100": "manager"}, senders=source)
+    ids.clear()
+    source.clear()
+    assert snapshot.resolve("99") == RouteDecision(RouteAction.ADMIT, "manager-review", True, frozenset({"8"}))
+    assert snapshot.resolve("100").senders == frozenset()
+    assert snapshot.resolve("101") == RouteDecision(RouteAction.SILENT, "manager")
+    assert dict(snapshot.senders) == {"99": frozenset({"8"})}
+    with pytest.raises(TypeError):
+        snapshot.senders["99"] = frozenset()
+    with pytest.raises(ValueError):
+        RoutingSnapshot("channel-telegram", "manager", False, {}, senders={"99": frozenset({"8"})})

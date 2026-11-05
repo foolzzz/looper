@@ -12,8 +12,8 @@ import asyncpg
 import pytest
 
 from looper.db import channel_configs, chat, connection, managers
-from tests.db_support import DSN, fresh_schema, run_db
-from tests.bridge_schema_support import bridge_source as bridge_source, initialize_bridge
+from tests.db_support import DSN, fresh_connection, fresh_schema, run_db
+from tests.bridge_schema_support import bridge_source as bridge_source, initialize_bridge, structure, witness
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -607,3 +607,69 @@ def test_metadata_failure_rolls_back_both_counters_and_logs_without_raising(capl
         assert any(record.name == store.__name__ for record in caplog.records)
 
     run_db(run, timeout=30)
+
+
+def test_extra_senders_replace_keep_clear_move_and_delete():
+    from looper.db import chat_bindings as store
+
+    async def run(pool):
+        await _seed(pool)
+        async def put(manager=TARGET, senders=None):
+            async with pool.acquire() as conn, conn.transaction():
+                return await store.put_binding(BOT, "7", manager, conn=conn, allowed_senders=senders)
+        first = await put(senders=["8", "9"])
+        assert first["allowed_senders"] == ["8", "9"]
+        assert await store.list_bindings(BOT, pool=pool) == [first]
+        async with pool.acquire() as conn, conn.transaction():
+            assert (await store.routing_snapshot(BOT, conn=conn))["bindings"] == [first]
+        assert await put() == first
+        assert (await put("manager-other"))["allowed_senders"] == []
+        assert (await put(TARGET, ["8"]))["allowed_senders"] == ["8"]
+        assert (await put(senders=[]))["allowed_senders"] == []
+        await put(senders=["9"])
+        async with pool.acquire() as conn, conn.transaction():
+            assert await store.delete_binding(BOT, "7", conn=conn)
+        assert await store.list_bindings(BOT, pool=pool) == []
+    run_db(run, timeout=30)
+
+
+@pytest.mark.parametrize("senders", ["8", ("8",), [""], [" "], [8], ["8"] * 101])
+def test_extra_senders_storage_rejects_invalid_shape_before_writing(senders):
+    from looper.db import chat_bindings as store
+
+    async def run(pool):
+        await _seed(pool)
+        original = await _put(pool)
+        async with pool.acquire() as conn, conn.transaction():
+            with pytest.raises(ValueError, match="allowed_senders"):
+                await store.put_binding(BOT, "7", TARGET, conn=conn, allowed_senders=senders)
+        assert await store.list_bindings(BOT, pool=pool) == [original]
+    run_db(run, timeout=30)
+
+
+def test_extra_senders_upgrade_once_preserves_bindings_and_matches_fresh():
+    async def run():
+        async with fresh_connection() as old, fresh_connection() as fresh:
+            column = "    allowed_senders TEXT[] NOT NULL DEFAULT '{}' CONSTRAINT manager_chat_bindings_allowed_senders_check CHECK (cardinality(allowed_senders) <= 100),\n"
+            sql = connection.SCHEMA_PATH.read_text()
+            assert sql.count(column) == 1
+            await old.execute(sql.replace(column, ""))
+            await old.execute("INSERT INTO schema_migrations (name) VALUES ('post_bridge_baseline')")
+            await old.execute("INSERT INTO registry_schema_version (id, version) VALUES (TRUE, 4)")
+            await old.execute(connection.SEEDS_PATH.read_text())
+            await _seed(old)
+            await old.execute("INSERT INTO manager_chat_bindings (channel_id, chat_id, manager_id) VALUES ($1, '7', $2)", BOT, TARGET)
+            before, shape = await witness(old), await structure(old)
+            assert await connection.schema_change_pending(old)
+            assert await witness(old) == before and await structure(old) == shape
+            await connection.ensure_schema(old)
+            assert dict(await old.fetchrow("SELECT * FROM manager_chat_bindings")) == {
+                **before["manager_chat_bindings"][0], "allowed_senders": []}
+            await connection.ensure_schema(fresh)
+            assert await structure(old) == await structure(fresh)
+            after, shape = await witness(old), await structure(old)
+            assert not await connection.schema_change_pending(old)
+            await connection.ensure_schema(old)
+            assert await witness(old) == after and await structure(old) == shape
+            assert await old.fetchval("SELECT count(*) FROM schema_migrations WHERE name='chat_binding_senders'") == 1
+    asyncio.run(asyncio.wait_for(run(), 30))

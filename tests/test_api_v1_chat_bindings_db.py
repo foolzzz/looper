@@ -102,7 +102,7 @@ def test_binding_crud_filters_and_idempotency_have_closed_enriched_readback(tmp_
             first = answer["result"]["binding"]
             assert first == {**_binding(), "created_at": first["created_at"], "channel_type": "telegram",
                 "bot_name": "Example bot", "chat_name": None, "manager_name": "Review",
-                "manager_enabled": True, "manager_deleted": False}
+                "manager_enabled": True, "manager_deleted": False, "allowed_senders": []}
             assert (await call("manager_chat_bindings.put", _binding()))[1]["result"]["binding"] == first
             for filters in ({}, {"channel_id": BOT}, {"manager_id": TARGET},
                             {"channel_id": BOT, "manager_id": TARGET}):
@@ -590,4 +590,39 @@ def test_routing_write_boundary_log(tmp_path, monkeypatch, caplog, operation, bo
             monkeypatch.setattr(routing.logger, "info", Mock(side_effect=RuntimeError("logging unavailable")))
             assert (await call(operation, body))[0] == 200
             assert await routing.load_snapshot(BOT, pool=pool) == registry._routing[BOT]
+    _run(run, monkeypatch)
+
+
+@pytest.mark.parametrize("kind,chat_id,valid,bad", [
+    ("lark", "oc_bound", "ou_colleague123", "on_wrong123"),
+    ("telegram", "7", "8", "-8"),
+])
+def test_extra_senders_readback_and_invalid_id_leave_binding_and_snapshot_unchanged(
+        tmp_path, monkeypatch, kind, chat_id, valid, bad):
+    async def run(pool):
+        bot = "channel-" + kind
+        async with _api(tmp_path, pool) as (call, registry, _):
+            request = {"channel_id": bot, "chat_id": chat_id, "manager_id": TARGET, "allowed_senders": [valid, valid]}
+            status, answer = await call("manager_chat_bindings.put", request)
+            assert status == 200, answer
+            binding = answer["result"]["binding"]
+            assert binding["allowed_senders"] == [valid]
+            listed = (await call("manager_chat_bindings.list", {"channel_id": bot}))[1]["result"]["bindings"]
+            assert listed == [binding]
+            catalog = (await call("channel_chats.list", {"channel_id": bot}))[1]["result"]["chats"]
+            assert catalog[0]["binding"] == binding
+            before = registry.resolve_chat(bot, chat_id)
+            status, too_many = await call("manager_chat_bindings.put", {**request, "allowed_senders": [valid] * 101})
+            assert status == 400 and too_many["error"]["code"] == "invalid", too_many
+            assert too_many["error"]["message"].startswith("allowed_senders:")
+            status, answer = await call("manager_chat_bindings.put", {**request, "allowed_senders": [bad]})
+            assert status == 400 and answer["error"]["code"] == "invalid", answer
+            assert answer["error"]["message"].startswith("allowed_senders:")
+            assert bad in answer["error"]["message"]
+            assert registry.resolve_chat(bot, chat_id) == before
+            assert (await call("manager_chat_bindings.list", {"channel_id": bot}))[1]["result"]["bindings"] == [binding]
+            status, answer = await call("manager_chat_bindings.put", {**request, "manager_id": OTHER, "allowed_senders": [valid]})
+            assert status == 200 and answer["result"]["binding"]["allowed_senders"] == [valid]
+            status, answer = await call("manager_chat_bindings.put", {"channel_id": bot, "chat_id": chat_id, "manager_id": TARGET})
+            assert status == 200 and answer["result"]["binding"]["allowed_senders"] == []
     _run(run, monkeypatch)

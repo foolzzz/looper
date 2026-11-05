@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
@@ -18,6 +18,7 @@ from ...db import chat_bindings as storage
 from ...db.channel_configs import BUILTIN_CHANNEL_IDS
 from ...db.connection import get_pool
 from ..message import channel_thread_id
+from . import allowlist
 
 if TYPE_CHECKING:
     from .registry import ChannelRegistry
@@ -34,12 +35,13 @@ def boundary_log(log: logging.Logger, event: str, **fields: Any) -> None:
 
 
 def log_route(log: logging.Logger, channel_id: str, chat_id: str, route: RouteDecision,
-              *, reason: str | None = None, outcome: str = "admitted") -> None:
+              *, reason: str | None = None, outcome: str = "admitted", via_chat_senders: bool = False) -> None:
     silent = route.action is RouteAction.SILENT
     boundary_log(log, "chat_route", channel_id=channel_id, chat_id=chat_id,
                  manager_id=None if silent else route.manager_id, action=route.action.value,
                  reason=reason or ("only_bound_chats" if silent else "explicit_binding" if route.explicit else "bot_manager"),
-                 outcome="silenced" if silent else outcome)
+                 outcome="silenced" if silent else outcome,
+                 **({"sender_list": "chat_binding"} if via_chat_senders else {}))
 
 
 def log_refusal(log: logging.Logger, operation: Any, principal: Any, reason: str) -> None:
@@ -59,6 +61,7 @@ class RouteDecision:
     action: RouteAction
     manager_id: str
     explicit: bool = False
+    senders: frozenset[str] = frozenset()
 
 
 ChatResolver = Callable[[str, str], RouteDecision]
@@ -71,6 +74,7 @@ class RoutingSnapshot:
     bot_manager_id: str
     bound_only: bool
     bindings: Mapping[str, str]
+    senders: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.bound_only, bool):
@@ -79,17 +83,26 @@ class RoutingSnapshot:
         bindings = dict(self.bindings)
         for chat_id, manager_id in bindings.items():
             channel_thread_id(self.channel_id, chat_id, manager_id, self.bot_manager_id)
+        senders = {}
+        for chat_id, ids in self.senders.items():
+            if chat_id not in bindings:
+                raise ValueError("extra senders require an explicit chat binding")
+            if frozen := frozenset(ids):
+                senders[chat_id] = frozen
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
+        object.__setattr__(self, "senders", MappingProxyType(senders))
 
     @classmethod
     def from_storage(cls, row: storage.RoutingSnapshot) -> RoutingSnapshot:
         return cls(row["channel_id"], row["manager_id"], row["bound_chats_only"],
-                   {item["chat_id"]: item["manager_id"] for item in row["bindings"]})
+                   {item["chat_id"]: item["manager_id"] for item in row["bindings"]},
+                   {item["chat_id"]: frozenset(item["allowed_senders"]) for item in row["bindings"]})
 
     def resolve(self, chat_id: str) -> RouteDecision:
         target = self.bindings.get(chat_id)
         return RouteDecision(RouteAction.SILENT if target is None and self.bound_only else RouteAction.ADMIT,
-                             target if target is not None else self.bot_manager_id, target is not None)
+                             target if target is not None else self.bot_manager_id, target is not None,
+                             senders=self.senders.get(chat_id, frozenset()))
 
 
 async def load_snapshot(channel_id: str, *, pool: Any = None) -> RoutingSnapshot:
@@ -160,6 +173,10 @@ async def _mutate(channel_id: str, change: Callable[..., Awaitable[Any]],
             values = ({"old_manager_id": before.bindings.get(chat_id), "new_manager_id": snapshot.bindings.get(chat_id)}
                       if chat_id is not None else
                       {"old_bound_chats_only": before.bound_only, "new_bound_chats_only": snapshot.bound_only})
+            if action == "manager_chat_bindings.put":
+                old_count, new_count = len(before.senders.get(chat_id, ())), len(snapshot.senders.get(chat_id, ()))
+                if old_count or new_count:
+                    values.update(old_sender_count=old_count, new_sender_count=new_count)
             boundary_log(logger, "chat_routing_write", channel_id=channel_id, chat_id=chat_id,
                          action=action, principal_kind=principal_kind, outcome="committed", **values)
 
@@ -169,15 +186,24 @@ async def _mutate(channel_id: str, change: Callable[..., Awaitable[Any]],
 
 async def bind_chat(channel_id: str, chat_id: str, manager_id: str, *,
                     registry: ChannelRegistry | None = None, pool: Any = None, principal_kind: Literal["client", "operator"] = "operator",
-                    readback: Callable[[Any], Awaitable[None]] | None = None) -> RoutingSnapshot:
+                    readback: Callable[[Any], Awaitable[None]] | None = None,
+                    allowed_senders: Sequence[str] | None = None) -> RoutingSnapshot:
     """Capture any response under the same lock as the write, before commit/publication."""
+    ids = (list(allowlist.sender_ids(storage._kind(channel_id), list(allowed_senders)))
+           if allowed_senders is not None else None)
+    stored: storage.ChatBinding
+
     async def change(conn: Any, capture: Any) -> None:
-        await storage.put_binding(channel_id, chat_id, manager_id, conn=conn, before_write=capture)
+        nonlocal stored
+        stored = await storage.put_binding(channel_id, chat_id, manager_id, conn=conn, before_write=capture,
+                                           allowed_senders=ids)
         if readback is not None:
             await readback(conn)
 
     snapshot, _ = await _mutate(channel_id, change,
-        lambda old: replace(old, bindings={**old.bindings, chat_id: manager_id}), registry=registry, pool=pool,
+        lambda old: replace(old, bindings={**old.bindings, chat_id: manager_id},
+            senders={**{k: v for k, v in old.senders.items() if k != chat_id},
+                     chat_id: frozenset(stored["allowed_senders"])}), registry=registry, pool=pool,
         action="manager_chat_bindings.put", principal_kind=principal_kind, chat_id=chat_id)
     return snapshot
 
@@ -186,7 +212,8 @@ async def unbind_chat(channel_id: str, chat_id: str, *,
                       registry: ChannelRegistry | None = None, pool: Any = None, principal_kind: Literal["client", "operator"] = "operator") -> bool:
     _, deleted = await _mutate(channel_id,
         lambda conn, capture: storage.delete_binding(channel_id, chat_id, conn=conn, before_write=capture),
-        lambda old: replace(old, bindings={key: value for key, value in old.bindings.items() if key != chat_id}),
+        lambda old: replace(old, bindings={key: value for key, value in old.bindings.items() if key != chat_id},
+                            senders={key: value for key, value in old.senders.items() if key != chat_id}),
         registry=registry, pool=pool, action="manager_chat_bindings.delete", principal_kind=principal_kind, chat_id=chat_id)
     return deleted
 

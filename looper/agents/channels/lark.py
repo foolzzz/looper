@@ -409,7 +409,9 @@ class LarkChannelAdapter(ChannelAdapter):
             return
 
         # Before anything else: an unlisted sender is logged, recorded (who, where and when) and never answered.
-        if not self._allowlist.admits(sender_open_id):
+        decision = self._resolve_chat(self.channel_id, chat_id) if self._resolve_chat is not None else None
+        chat_senders = decision.senders if decision is not None else frozenset()
+        if not self._allowlist.admits(sender_open_id, chat_senders=chat_senders):
             if self._on_rejected is not None and isinstance(sender_open_id, str) and sender_open_id:
                 try:
                     await self._on_rejected(sender_open_id, chat_id if group else None)
@@ -432,8 +434,7 @@ class LarkChannelAdapter(ChannelAdapter):
         message_id = event.get("message_id") or ""
         manager_id, explicit = self._manager_id, False
         metadata = {"origin_channel_id": self.channel_id}
-        if self._resolve_chat is not None:
-            decision = self._resolve_chat(self.channel_id, chat_id)
+        if decision is not None:
             manager_id, explicit = decision.manager_id, decision.explicit
             silent = decision.action is RouteAction.SILENT
             if not silent:
@@ -448,7 +449,8 @@ class LarkChannelAdapter(ChannelAdapter):
         if await self._turned_off(chat_id, message_id if group else None, manager_id=manager_id,
                                   explicit=explicit, stop=is_stop_command(text)):
             return
-        log_route(logger, self.channel_id, chat_id, RouteDecision(RouteAction.ADMIT, manager_id, explicit))
+        log_route(logger, self.channel_id, chat_id, decision or RouteDecision(RouteAction.ADMIT, manager_id, explicit),
+                  via_chat_senders=sender_open_id not in self._allowlist.ids)
         self._reactions.add(chat_id, message_id)  # the bot saw it; in the background, the Manager gets it now
         correlation_id = str(_uuid.uuid4())
         self._correlation_chat[correlation_id] = chat_id

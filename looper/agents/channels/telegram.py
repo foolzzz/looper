@@ -442,10 +442,10 @@ class TelegramChannelAdapter(ChannelAdapter):
         while len(self._correlation_chat) > _CORRELATION_MAX:
             self._correlation_chat.popitem(last=False)
 
-    def _admits(self, update: Any) -> bool:
+    def _admits(self, update: Any, chat_senders: frozenset[str] = frozenset()) -> bool:
         """Whether the update's sender is on the allowlist; anyone else is logged and gets no reply."""
         user = getattr(update, "effective_user", None)
-        return self._allowlist.admits(getattr(user, "id", None))
+        return self._allowlist.admits(getattr(user, "id", None), chat_senders=chat_senders)
 
     def _acknowledge(self, update: Any) -> None:
         """React to a direct message the Manager gets, in the background: the bot saw it."""
@@ -493,13 +493,13 @@ class TelegramChannelAdapter(ChannelAdapter):
         return handle
 
     async def _admitted(self, update: Any, *, text_required: bool = False) -> RouteDecision | None:
-        if not self._admits(update):
-            return None
-        if text_required and (not update.message or not update.message.text):
-            return None
         chat_id = update.effective_chat.id
         route = (self._resolve_chat(self.channel_id, str(chat_id)) if self._resolve_chat is not None
                  else RouteDecision(RouteAction.ADMIT, self._manager_id))
+        if not self._admits(update, route.senders):
+            return None
+        if text_required and (not update.message or not update.message.text):
+            return None
         if self._resolve_chat is not None:
             await observe_chat(self.channel_id, str(chat_id), suppressed=route.action is RouteAction.SILENT)
         if route.action is RouteAction.SILENT:
@@ -569,7 +569,8 @@ class TelegramChannelAdapter(ChannelAdapter):
 
         if await self._turned_off(update.effective_chat.id, route, text):
             return
-        log_route(logger, self.channel_id, str(update.effective_chat.id), route)
+        log_route(logger, self.channel_id, str(update.effective_chat.id), route,
+                  via_chat_senders=str(update.effective_user.id) not in self._allowlist.ids)
         self._acknowledge(update)
         chat_id = update.effective_chat.id
         correlation_id = str(_uuid.uuid4())

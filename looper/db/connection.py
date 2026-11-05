@@ -100,6 +100,7 @@ _RUNTIME_LAUNCHER = "runtime_launcher"
 _CURSOR_LOGIN = "cursor_login"
 _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
+_CHAT_BINDING_SENDERS = "chat_binding_senders"
 _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
 _PROJECT_ACTIVITY = "project_activity"
@@ -237,6 +238,16 @@ async def _task_reply_route_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('tasks') AND attname = 'origin_reply_route' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _chat_binding_senders_pending(conn: asyncpg.Connection) -> bool:
+    """Unmarked bindings without extra senders need the additive upgrade."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _CHAT_BINDING_SENDERS):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('manager_chat_bindings') AND attname = 'allowed_senders' "
         "AND attnum > 0 AND NOT attisdropped)")
 
 
@@ -386,6 +397,11 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _project_activity_pending(conn):
             await conn.execute(_PROJECT_ACTIVITY_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
+        if await _chat_binding_senders_pending(conn):
+            await conn.execute("ALTER TABLE manager_chat_bindings ADD COLUMN allowed_senders TEXT[] NOT NULL "
+                               "DEFAULT '{}' CONSTRAINT manager_chat_bindings_allowed_senders_check "
+                               "CHECK (cardinality(allowed_senders) <= 100)")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CHAT_BINDING_SENDERS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -421,4 +437,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _runtime_launcher_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
-            or await _project_activity_pending(conn)))
+            or await _project_activity_pending(conn) or await _chat_binding_senders_pending(conn)))
