@@ -54,7 +54,7 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
   const capabilities = runtime ? runtime.capabilities : type?.capabilities ?? [];
   const roles = runtime ? runtime.roles : type?.roles ?? [];
   const command = runtime?.executable || runtime?.default_executable || type?.default_executable || "";
-  const title = custom ? runtime!.name : info?.title ?? type?.label ?? runtime?.type ?? "";
+  const title = custom || runtime?.launcher === "ttadk" ? runtime!.name : info?.title ?? type?.label ?? runtime?.type ?? "";
   const redetect = () => action.run(() => probeRuntime(runtime?.runtime_id ?? type!.runtime_id));
 
   return (
@@ -65,6 +65,7 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
         badges={
           <>
             {custom && <Badge variant="outline">custom</Badge>}
+            {runtime?.launcher === "ttadk" && <Badge variant="outline">TTADK</Badge>}
             <Badge variant={variant}>
               <Icon className="mr-1 h-3 w-3" aria-hidden="true" />
               {label}
@@ -94,6 +95,11 @@ function RuntimeCard({ type, runtime }: { type: RuntimeType | undefined; runtime
           ) : null}
           {runtime?.probed_at && (
             <span className="text-muted-foreground"> · checked {new Date(runtime.probed_at).toLocaleString()}</span>
+          )}
+          {type?.loads_operator_config && (
+            <p className="text-warning">
+              Runs with your own Cursor login and HOME: your personal Cursor and Claude Code configuration (rules, hooks, MCP servers, skills, plugins) applies to these runs and cannot be turned off.
+            </p>
           )}
         </Fact>
         <Fact label="Roles">
@@ -159,13 +165,13 @@ export function RuntimesSection() {
     );
   }
   const builtin = (type: RuntimeType) => registry.runtimes.find((r) => r.builtin && r.runtime_id === type.runtime_id);
-  const custom = registry.runtimes.filter((r) => !r.builtin);
+  const additional = registry.runtimes.filter((r) => !r.builtin || r.launcher === "ttadk");
   return (
     <ul className="grid gap-4 xl:grid-cols-2">
       {registry.runtime_types.map((type) => (
         <RuntimeCard key={type.type} type={type} runtime={builtin(type)} />
       ))}
-      {custom.map((runtime) => (
+      {additional.map((runtime) => (
         <RuntimeCard key={runtime.runtime_id} type={registry.runtime_types.find((t) => t.type === runtime.type)} runtime={runtime} />
       ))}
       {PLANNED_RUNTIMES.map((planned) => (

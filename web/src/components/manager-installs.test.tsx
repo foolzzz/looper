@@ -48,7 +48,7 @@ const registry = (runtimeType = "claude-code", capabilities: string[] = ["claude
   profiles: [{ ...PROFILE, runtime_type: runtimeType }],
   runtimes: [{ runtime_id: "runtime", name: "Runtime", type: runtimeType, type_label: "Runtime", in_process: false,
     executable: "", default_executable: null, path: null, protocols: [], version: null, capabilities,
-    roles: ["manager"], probed_at: null, probe_error: null, builtin: false, profile_count: 1 }],
+    roles: ["manager"], auth_kinds: ["api_key"], probed_at: null, probe_error: null, builtin: false, profile_count: 1 }],
   runtime_types: [], providers: [], models: [], vendor_types: [], prices: { as_of: "", sources: [], models: {} },
   limits: { model_fields: [], name_max_chars: 100, models_max: 10, price_fields: [], protocols: [], auth_kinds: [],
     effort_levels: [], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [] },

@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RuntimesSection } from "@/components/runtime-cards";
+import { ClaudeCheckBanner } from "@/components/claude-check-banner";
 import { TaskAgentsSection } from "@/components/task-agents";
 import { profileLabel, useRegistry } from "@/lib/use-registry";
 import { AgentProfileForm, AgentProfilesSection, AgentProfileSelect } from "@/components/agent-profiles";
@@ -47,6 +48,7 @@ const REGISTRY: Registry = {
     runtime_id: `rt-${type}`, name: type, type, type_label: type, executable: "", default_executable: type,
     path: null, in_process: false, protocols: type === "codex" ? ["openai-responses"] : type === "stand-in" ? ["anthropic-messages", "openai-chat"] : ["anthropic-messages"], version: null, capabilities: [], roles: ["worker"],
     probed_at: null, probe_error: null, builtin: true, profile_count: 0,
+    auth_kinds: ["api_key", "oauth"],
   })),
   providers: [provider("provider"), provider("other"), provider("codex-login", { auth: "oauth", oauth_runtime_type: "codex" }),
     provider("foreign-login", { auth: "oauth", oauth_runtime_type: "grok" })],
@@ -118,6 +120,33 @@ describe("Agent Profiles", () => {
     expect(runtimes.selectedOptions[0].textContent).toBe("ttadk-codex (launcher: ttadk)");
     await act(async () => root.render(<AgentProfilesSection />));
     expect(container.textContent).toContain("ttadk-codex (launcher: ttadk) · Provider · model");
+  });
+
+  it("offers only the row's OAuth provider when selecting a TTADK runtime", async () => {
+    const native = registry.runtimes.find((runtime) => runtime.runtime_id === "rt-codex")!;
+    registry.runtimes.push({ ...native, runtime_id: "rt-ttadk-codex", name: "ttadk-codex",
+      launcher: "ttadk", auth_kinds: ["oauth"] });
+    await show(CODEX);
+    expect([...select("Provider").options].map((option) => option.value).filter(Boolean)).toContain("provider");
+    await choose("Runtime", "rt-ttadk-codex");
+    expect([...select("Provider").options].map((option) => option.value).filter(Boolean)).toEqual(["codex-login"]);
+    expect(options()).toEqual(["codex-model"]);
+    expect(select("Model *").value).toBe("");
+  });
+
+  it("shows failed Cursor and TTADK checks with their own fixes", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "ok", result: { checks: [
+      { id: "cursor_login", label: "Cursor login", status: "fail", detail: "Not signed in", fix: "Run cursor-agent login" },
+      { id: "ttadk", label: "TTADK", status: "fail", detail: "Not available", fix: "Install ttadk" },
+    ] } })));
+    await act(async () => root.render(<ClaudeCheckBanner />));
+    const problems = [...container.querySelectorAll('[role="alert"] p')].map((node) => node.textContent);
+    expect(problems).toHaveLength(2);
+    expect(problems[0]).toContain("Cursor login: Not signed in");
+    expect(problems[0]).toContain("To fix: Run cursor-agent login");
+    expect(problems[1]).toContain("TTADK: Not available");
+    expect(problems[1]).toContain("To fix: Install ttadk");
+    expect(container.textContent).not.toContain("then restart");
   });
 
   it.each([
@@ -211,7 +240,7 @@ describe("Agent Profiles", () => {
       auth_kinds: ["api_key"], can_replace_system_prompt: false,
       replace_system_prompt_refusal: "the DSH runtime cannot replace its default system prompt",
     });
-    registry.runtimes.push({ ...registry.runtimes[0], type: "dsh", runtime_id: "rt-dsh", type_label: "DSH" });
+    registry.runtimes.push({ ...registry.runtimes[0], type: "dsh", runtime_id: "rt-dsh", type_label: "DSH", auth_kinds: ["api_key"] });
 
   };
   const registeredModels = (names: string[], providerId = "provider", protocol: Model["protocol"] = "anthropic-messages") =>
@@ -222,7 +251,7 @@ describe("Agent Profiles", () => {
     registry.runtime_types.push({ ...registry.runtime_types[0], type: "api", label: "Model API", runtime_id: "rt-api",
       in_process: true, protocols: ["openai-responses"], roles: ["manager"], auth_kinds: ["api_key"], supported_models: null });
     registry.runtimes.push({ ...registry.runtimes[0], type: "api", runtime_id: "rt-api", type_label: "Model API",
-      in_process: true, path: null, protocols: ["openai-responses"], roles: ["manager"] });
+      in_process: true, path: null, protocols: ["openai-responses"], roles: ["manager"], auth_kinds: ["api_key"] });
   };
 
   it("shows the package probe error for an unavailable in-process runtime", async () => {
@@ -419,7 +448,7 @@ describe("Agent Profiles", () => {
   });
 
   it("does not offer OAuth models when the runtime only supports API keys", async () => {
-    await show(CODEX, { ...REGISTRY, runtime_types: REGISTRY.runtime_types.map((item) => ({ ...item, auth_kinds: ["api_key"] })) });
+    await show(CODEX, { ...REGISTRY, runtimes: REGISTRY.runtimes.map((item) => ({ ...item, auth_kinds: ["api_key"] })) });
     expect(options()).toEqual(["model-responses"]);
   });
 
@@ -645,6 +674,7 @@ const PI_RUNTIME: Runtime = {
   path: "/usr/local/bin/pi", in_process: false, protocols: ["openai-chat", "openai-responses"], version: "1.3.0",
   capabilities: ["run", "resident_session", "resume"], roles: [...PI_ROLES],
   probed_at: null, probe_error: null, builtin: true, profile_count: 1,
+  auth_kinds: ["api_key"],
 };
 
 const PI_TYPE: RuntimeType = {

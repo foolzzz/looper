@@ -2841,6 +2841,8 @@ export interface RuntimeType {
 export interface Runtime {
   runtime_id: string;
   launcher?: "native" | "ttadk";
+  /** Provider authentication accepted by this runtime's launcher, computed by the server. */
+  auth_kinds: ProviderAuth[];
   in_process: boolean;
   name: string;
   type: string;

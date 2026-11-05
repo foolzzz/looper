@@ -46,9 +46,9 @@ function runtimeType(registry: Registry, runtime: Runtime | undefined) {
 function pairs(registry: Registry, runtime: Runtime | undefined, model: Model): boolean {
   const type = runtimeType(registry, runtime);
   const provider = registry.providers.find((p) => p.provider_id === model.provider_id);
-  return !!type && !!provider && type.protocols.includes(model.protocol)
+  return !!runtime && !!type && !!provider && type.protocols.includes(model.protocol)
     && (!type.supported_models || type.supported_models.includes(model.name))
-    && type.auth_kinds.includes(provider.auth)
+    && runtime.auth_kinds.includes(provider.auth)
     && (provider.auth !== "oauth" || provider.oauth_runtime_type === type.type);
 }
 
