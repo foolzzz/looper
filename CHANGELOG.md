@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.85] - 2026-11-05
+
+### Added
+
+- **A scenario Manager can own a set of projects.** The new task scope `projects` (with `scope_project_ids`, 1 to 20 projects, and `tools = tasks`) lets a Manager list, read, supplement, instruct, control and cancel every task of those projects, whoever created it, and create tasks only there; anything else answers `forbidden`. Its per-turn `Projects`, `Ready tasks` and `Open gates` sections and `/gates` follow the same filter, and its templates must target its projects. Deleting a project removes it from every scope and the confirmation names the affected Managers; a Manager left with no project sees and creates nothing and says so. Settings → Managers offers "Projects" with a project picker, and config export/import carries the scope by project name. A named upgrade adds `managers.scope_project_ids` and its constraints. Managers with `all` or `own` are unchanged. ([#1103](https://github.com/foolzzz/looper/pull/1103))
+
 ## [2.14.84] - 2026-11-05
 
 ### Changed
