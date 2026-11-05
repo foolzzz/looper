@@ -53,13 +53,14 @@ PROVIDER = _object({
     "suggested_models": _STRINGS,
     "login": {**PROVIDER_LOGIN, "type": ["object", "null"]},
     "env": _array(PROVIDER_ENV_ENTRY), "max_concurrency": _NULL_INT,
-    "api_key": _NULL_STR, "builtin": _BOOL, "endpoint_count": _INT,
+    "api_key": _NULL_STR, "builtin": _BOOL, "enabled": _BOOL, "endpoint_count": _INT,
     "model_count": _INT, "profile_count": _INT, "created_at": _STR, "updated_at": _STR,
 }, closed=True)
 MODEL_PRICE = _object({"override": _NULL_NUMBER, "effective": _NULL_NUMBER,
     "source": {"type": "string", "enum": ["override", "builtin", "unknown"]}}, closed=True)
 MODEL = _object({
     "model_id": _STR, "provider_id": _STR, "provider_name": _STR, "name": _STR,
+    "provider_enabled": _BOOL,
     "protocol": API_PROTOCOL, "context_window": _NULL_INT,
     **dict.fromkeys(profile_registry.PRICE_FIELDS, _NULL_NUMBER),
     "efforts": _NULL_STRINGS, "background_model": _NULL_STR,
@@ -90,7 +91,7 @@ PROFILE_USED_BY = _object({
 PROFILE_MODEL = _object({name: MODEL["properties"][name]
                          for name in ("model_id", "name", "protocol", "provider_id")}, closed=True)
 PROFILE_PROVIDER = _object({name: PROVIDER["properties"][name]
-                            for name in ("provider_id", "name", "vendor_type", "auth")}, closed=True)
+                            for name in ("provider_id", "name", "vendor_type", "auth", "enabled")}, closed=True)
 AGENT_PROFILE = _object({
     "profile_id": _STR, "name": _STR, "model_id": _STR, "model": PROFILE_MODEL,
     "effort": _NULL_STR, "agent_teams": _BOOL, "custom_prompt": _STR,

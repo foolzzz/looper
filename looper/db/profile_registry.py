@@ -23,7 +23,7 @@ from .connection import get_pool
 _PROVIDER_JSON = (
     "json_build_object('id', p.id, 'name', p.name, 'vendor_type', p.vendor_type, 'auth', p.auth, "
     "'oauth_runtime_type', p.oauth_runtime_type, 'env', p.env, 'max_concurrency', p.max_concurrency, "
-    "'builtin', p.builtin)"
+    "'builtin', p.builtin, 'enabled', p.enabled)"
 )
 PROFILE_JSON = (
     "json_build_object('id', a.id, 'name', a.name, 'model_id', a.model_id, 'effort', a.effort, "
@@ -166,7 +166,7 @@ async def get_api_key(provider_id: str, *, pool: asyncpg.Pool | asyncpg.Connecti
     return await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1", provider_id)
 
 
-_PROVIDER_COLUMNS = ("name", "vendor_type", "auth", "oauth_runtime_type", "env", "max_concurrency")
+_PROVIDER_COLUMNS = ("name", "vendor_type", "auth", "oauth_runtime_type", "env", "max_concurrency", "enabled")
 _JSON_COLUMNS = ("env",)
 
 
@@ -217,7 +217,7 @@ async def insert_provider(conn: asyncpg.Connection, fields: Mapping[str, Any], a
     """Add an account, its endpoints and separate key, without registering suggested models. Raises
     ``asyncpg.UniqueViolationError`` for a name in use."""
     provider_id = new_id("prov")
-    fields = {"env": [], **fields}
+    fields = {"env": [], "enabled": True, **fields}
     values = ", ".join(f"${i}" + ("::jsonb" if c in _JSON_COLUMNS else "")
                        for i, c in enumerate(_PROVIDER_COLUMNS, start=2))
     await conn.execute(
@@ -244,6 +244,11 @@ async def update_provider(conn: asyncpg.Connection, provider_id: str, fields: Ma
         await _set_endpoints(conn, provider_id, fields["endpoints"])
     if not keep_key:
         await _set_secret(conn, provider_id, api_key)
+
+
+async def set_provider_enabled(conn: asyncpg.Connection, provider_id: str, enabled: bool) -> None:
+    await conn.execute("UPDATE llm_providers SET enabled = $2, updated_at = now() "
+                       "WHERE id = $1 AND enabled IS DISTINCT FROM $2", provider_id, enabled)
 
 
 async def delete_provider(provider_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> bool:

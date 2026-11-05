@@ -1797,7 +1797,14 @@ Manager tools.
   startup.
 - **Providers** (`llm_providers`) are accounts: `name`, typed `vendor_type`,
   `auth`, `oauth_runtime_type`, `env`, `max_concurrency` (`null` = no limit,
-  stored and checked only), and a separate API key in `llm_provider_secrets`.
+  stored and checked only), `enabled` (boolean, default true), and a separate
+  API key in `llm_provider_secrets`. Disabling preserves endpoints, the key,
+  models, Agent Profiles and all profile selections; those profiles are
+  refused at launch until the provider is enabled again. Existing runs keep
+  running. Disabling always succeeds and warns where affected profiles are
+  selected. New profiles and changes to another model cannot select a
+  disabled provider's model; edits that keep a profile's current model and
+  saves of settings, templates and allowed lists remain valid.
   The API returns the key as `***` or `null`; sending `***` keeps it and
   `null` removes it. Only the launch path loads it. Login accounts use their
   runtime's own login and never copy OAuth tokens. Vendor templates suggest
@@ -1841,7 +1848,8 @@ Manager tools.
   preserves profile ids (including their `agent-` prefix) and selections;
   database migration is still gated below.
 
-The built-ins exist on every database and are read-only: the runtime
+The built-ins exist on every database and are read-only, except that a
+built-in provider can be disabled and enabled: the runtime
 `claude-code`, the providers `claude-subscription` (Claude Code's login),
 `codex-login` (Codex's ChatGPT login, above) and `grok-login`, and the
 profile `claude-code/opus` (`BUILTIN_PROFILE`), which a role runs when nothing
@@ -1859,7 +1867,8 @@ must have what each role reached needs (`ROLE_CAPABILITIES`):
 Workers and Reviewers; a layer of every role (`system`) or of a project
 checks all of them. A row still referred to is not deleted (409). The
 resolved profile is checked again when each run starts
-(`agent_settings.profile_problem`): a run whose profile cannot run fails with
+(`agent_settings.profile_problem`): a run whose profile cannot run, including
+when its provider is disabled, fails with
 the reason (the Manager answers with it, the Planner's turn fails, a Worker
 or Reviewer step fails) and never runs another profile.
 
@@ -3138,7 +3147,9 @@ tokens, plugin hook context 3.8k).
 `loopercli config export <file>` and `loopercli config import <file>`
 (`looper/agents/config_transfer.py`) move an installation's agent configuration
 through one JSON file. Every export is `format: looper-config/v4`. The registry sections are
-`runtimes`, `providers` (account settings and endpoints keyed by protocol),
+`runtimes`, `providers` (account settings and endpoints keyed by protocol;
+`enabled: false` is exported only for disabled accounts, and importing a file
+without `enabled` keeps an existing account's state),
 `models` (settings keyed by provider name, exact model name and protocol), and
 `profiles` (runtime name and a composite `model` reference). Built-ins exist
 everywhere and are not exported. Registry database ids are never portable references.
@@ -3540,7 +3551,7 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
 | `looper_concurrency` | Change one task's (`task_id`) own `worker` and `reviewer` limits, `limits` per role (1–64, `null` clears one to the default), in any task but a completed one; `planner` is refused. There are no project limits: the description tells the Manager to say so, and a call naming `project` is refused (`invalid`, an unknown argument) and changes nothing. Then the WorkerPool checks again. The answer gives each role's limit before and after with its source, the task's own and the default, and says that lowering stops nothing that runs | write |
 | `looper_projects` | `list` (name, default directory, task, active task and schedule counts, background cut to 200 characters), `get` one (as `GET /api/projects` lists it), `create` (`name`, `work_dir`, `background`), `update` its `name`, `work_dir` or `background` (`projects.create_project`, `update_project`); a `work_dir` change that moves enabled or queued command schedules without their own `work_dir` asks first, listing each one's name, state, command and old → new directory, and is refused (`conflict`) when they or the directory changed before the answer, or, for a scoped Manager, when one belongs to another Manager; `delete` one with its tasks and schedules, stopping its running tasks first (the user confirms first). Template use and another Manager's tasks or schedules are refused before confirmation. The confirmation lists schedule, running-task and task counts; settings, allowed list, installs, knowledge and own skills go with it, while result branches and the project directory's files stay | list and get read; write; delete, and such a `work_dir` change, are high |
 | `looper_agent_profiles` | `list`, `create`, `update`, `delete`; create selects `runtime` and `model` (model id or exact `{provider, name, protocol}`), plus `name`, `effort`, `agent_teams`, `custom_prompt`; no profile system-prompt mode. Returns derived account/model information; selected profiles cannot be deleted | list reads; write; delete is high |
-| `looper_providers` | `list` accounts and vendor suggestions; `register` an API-key account with `name`, `vendor_type`, `endpoints`, `env`, `max_concurrency`, without a key. The user enters the key in Settings | list reads; write |
+| `looper_providers` | `list` accounts, their `enabled` state and vendor suggestions; `register` an enabled API-key account with `name`, `vendor_type`, `endpoints`, `env`, `max_concurrency`, without a key. `update` changes account settings or `enabled`; built-in accounts take only `enabled`. Disabling preserves profile selections and warns which runs will not start. The user enters the key in Settings | list reads; write |
 | `looper_models` | `list` (optional provider/runtime filter), `create` an exact provider/name/protocol entry, `update` its settings, `delete` an unused model; no key arguments | list reads; write; delete is high |
 | `looper_catalog` | `list` the items (kind, qualified name, description, `manager_install_count`) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`) | list reads; write |
 | `looper_costs` | One task's cost (`task_id`: `GET /api/tasks/:id`'s `cost`), or what the runs started in a range cost (`period` `today`, `this_week` or `this_month` from the server's local midnight, or `since` and `until`, a day or an ISO date-time, a day as `until` counting whole; all time by default), money and subscription equivalent apart as the overview's today: by project (their tasks' runs; the total also counts the Manager's), or with `project` its total and its 10 costliest tasks (`llm_records.spend_since`, `task_spend`) | read |
@@ -4413,7 +4424,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `role_configs` | Each role's own settings, keyed by `role` (`manager`, `planner`, `worker`, `reviewer`): display name, role prompt and its recommended `default_prompt`, turns, timeout, enabled |
 | `agent_setting_layers` | Agent settings by layer: `scope` (`system`, `role`, `project`, `role_project`), `role`, `project_id` (goes with its project), and the nullable `harness_prompt`, `profile_id` (the effort is the profile's), `env` (ordered `[{key, value}]`, `null` value = unset), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` `role` layer only: the default for every task) and `system_prompt_mode` (`append` or `replace`, the `role` layers only, enforced by a CHECK; null: the role's built-in value); one row per layer and place |
 | `agent_runtimes` | Runtimes, built in (one per type found on PATH) or registered by hand before and kept while an Agent Profile uses them (`builtin` false): `name`, `type` (an adapter), `executable` (`''` = the type's default), the probe's `version`, `capabilities`, `probed_at`, `probe_error`, `builtin` |
-| `llm_providers` | Account: `name`, `vendor_type`, `auth`, `oauth_runtime_type`, `env`, `max_concurrency`, `builtin`; endpoints and models are separate tables |
+| `llm_providers` | Account: `name`, `vendor_type`, `auth`, `oauth_runtime_type`, `env`, `max_concurrency`, `builtin`, `enabled` (boolean, default true; false refuses its profiles at launch); endpoints and models are separate tables |
 | `llm_provider_endpoints` | One endpoint per `(provider_id, protocol)`: `base_url`, legacy `use_runtime_default` |
 | `llm_models` | Exact `(provider_id, name, protocol)`, context, four price overrides, efforts, background model, catalog order and builtin flag; profile references restrict deletion |
 | `llm_model_migration_map` | Append-only legacy provider/name/protocol → provider/model id mapping; no secrets or foreign keys to deletable current objects |
@@ -4870,7 +4881,7 @@ The OpenAPI document is authoritative for fields, authentication and errors. Pro
 | `/api/v1/project_agent_settings/{get,update,update_role}` | POST | `project_agent_settings.{get,update,update_role}` |
 | `/api/v1/allowed_profiles/{get,replace}` | POST | `allowed_profiles.{get,replace}` |
 | `/api/v1/project_admin/{list,create,update,delete}` | POST | `project_admin.{list,create,update,delete}`; delete removes schedules and their run history first, stops running tasks (waits up to 60 s), then deletes all tasks and the project with single-task workspace/session cleanup; result branches stay. The user confirms first; conflicts allow retry after partial cleanup. An update whose `work_dir` change moves enabled or queued command schedules answers `needs_confirmation` for a client token, with the same list; the dashboard's own update runs at once. |
-| `/api/v1/provider_accounts/{list,create,update,delete,clear_login_problem}` | POST | `provider_accounts.{list,create,update,delete,clear_login_problem}` |
+| `/api/v1/provider_accounts/{list,create,update,delete,clear_login_problem,set_enabled}` | POST | `provider_accounts.{list,create,update,delete,clear_login_problem,set_enabled}`; `set_enabled` is the operator's boolean enable/disable transition, including built-in accounts |
 | `/api/v1/registry/view` | POST | `registry.view` |
 | `/api/v1/runtimes/probe` | POST | `runtimes.probe` |
 | `/api/v1/runs/{for_task,list,get,events,usage}` | POST | `runs.{for_task,list,get,events,usage}` |

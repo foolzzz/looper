@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
 from urllib.parse import urlsplit
 
 import pytest
@@ -102,7 +104,7 @@ def _wait_ready(server):
 
 
 @contextmanager
-def _running_dashboard(tmp_path, admin_url):
+def _running_dashboard(tmp_path, admin_url, *, port=None):
     home, root, work, bin_dir = (tmp_path / name for name in ("home", "runtime", "work", "bin"))
     for directory in (home, root, work, bin_dir):
         directory.mkdir()
@@ -116,7 +118,7 @@ def _running_dashboard(tmp_path, admin_url):
                GROK_HOME=str(home / ".grok"), XDG_CONFIG_HOME=str(home / ".config"))
     with fresh_database(admin_url) as (url, _):
         _seed(url, work)
-        port = free_port()
+        port = port or free_port()
         ops = ops_config.OpsConfig(runtime_root=root, path=root / ops_config.FILE,
                                    database_url=url, port=port, operator_notes_root=str(home / "notes"))
         ops_config.write_private(ops.path, ops_config.render(ops))
@@ -143,8 +145,12 @@ def _running_dashboard(tmp_path, admin_url):
 
 
 @pytest.fixture
-def dashboard_server(tmp_path, database_admin_url, staged_dashboard_dir):
-    with _running_dashboard(tmp_path, database_admin_url) as server:
+def dashboard_server(tmp_path, database_admin_url, staged_dashboard_dir, request):
+    port = None
+    if request.node.originalname == "test_disabled_provider_refuses_manager_turn_and_can_be_enabled_again":
+        configured = os.environ.get("LOOPER_PROVIDER_ENABLED_SMOKE_PORT")
+        port = int(configured) if configured else None
+    with _running_dashboard(tmp_path, database_admin_url, port=port) as server:
         yield server
 
 
@@ -773,3 +779,114 @@ def test_pi_and_dsh_profile_choices_match_their_typed_runtime_contract(dashboard
     persisted = next(p for p in _registry_state(server)["profiles"] if p["id"] == profile["profile_id"])
     assert persisted["model_id"] == selected["model_id"] and persisted["effort"] == "max"
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("width", [1280, 768])
+def test_disabled_provider_refuses_manager_turn_and_can_be_enabled_again(dashboard_page, dashboard_server, width):
+    """Use the real dashboard and Manager refusal path without starting an LLM."""
+    expect = pytest.importorskip("playwright.sync_api").expect
+    page, server = dashboard_page, dashboard_server
+    page.set_viewport_size({"width": width, "height": 900})
+    if configured := os.environ.get("LOOPER_PROVIDER_ENABLED_SMOKE_PORT"):
+        assert urlsplit(server.api.base_url).port == int(configured)
+    assert urlsplit(server.api.base_url).port != 8767
+    requests = []
+
+    class UnusedProvider(BaseHTTPRequestHandler):
+        def do_POST(self):
+            requests.append(self.path)
+            self.send_error(503, "This provider must not be called")
+
+        def log_message(self, *args):
+            pass
+
+    stub = ThreadingHTTPServer(("127.0.0.1", 0), UnusedProvider)
+    thread = Thread(target=stub.serve_forever, daemon=True)
+    thread.start()
+    try:
+        provider = server.api.post("/api/v1/provider_accounts/create", {
+            "name": ACCOUNT, "vendor_type": "custom", "api_key": SECRET,
+            "endpoints": [{"protocol": "anthropic-messages",
+                           "base_url": f"http://127.0.0.1:{stub.server_port}"}],
+        })["result"]["provider"]
+        pid = provider["provider_id"]
+        model = server.api.post("/api/v1/ops/models/create", {
+            "provider": pid, "name": MODEL_NAME, "protocol": "anthropic-messages",
+        })["result"]["model"]
+        profile = server.api.post("/api/v1/profiles/create", {
+            "name": "Smoke profile", "runtime_id": "rt-claude-code", "model_id": model["model_id"],
+        })["result"]["profile"]
+
+        async def select_manager_profile():
+            import asyncpg
+            from looper.db.agent_sessions import select_profile
+
+            conn = await asyncpg.connect(server.database_url, timeout=5)
+            try:
+                await select_profile("manager", profile["profile_id"], pool=conn)
+                assert await conn.fetchval(
+                    "SELECT selected_profile_id FROM agent_sessions WHERE agent_id = 'manager'"
+                ) == profile["profile_id"]
+            finally:
+                await conn.close()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            executor.submit(lambda: asyncio.run(select_manager_profile())).result(timeout=10)
+        _settings(page, server, "providers")
+        account = _row(page, ACCOUNT)
+        switch = account.get_by_role("switch", name=f"Enable provider {ACCOUNT}", exact=True)
+        expect(switch).to_be_checked()
+        dialogs = []
+
+        def disable_confirmation(dialog):
+            dialogs.append(dialog.message)
+            dialog.accept()
+
+        page.once("dialog", disable_confirmation)
+        with page.expect_response(lambda response: response.url.endswith("/api/v1/provider_accounts/set_enabled")) as changed:
+            switch.click()
+        assert changed.value.status == 200
+        assert dialogs == [f'Disable provider "{ACCOUNT}"? 1 Agent Profile(s) use it. They keep their selections, '
+                           'but their runs will not start until you enable it again.']
+        answer = changed.value.json()["result"]
+        assert answer["provider"]["enabled"] is False
+        assert any("Manager" in warning and "Smoke profile" in warning for warning in answer["warnings"])
+        expect(switch).not_to_be_checked()
+        expect(account.get_by_text("Disabled", exact=True)).to_be_visible()
+        expect(account.get_by_role("status")).to_contain_text("Disabled, with these effects:")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        screenshots = REPO_ROOT / ".local" / "provider-enabled"
+        screenshots.mkdir(parents=True, exist_ok=True)
+        account.screenshot(path=str(screenshots / f"providers-{width}.png"))
+        _settings(page, server, "profiles")
+        affected = _row(page, "Smoke profile")
+        expect(affected).to_contain_text(f"Provider {ACCOUNT} is disabled: this profile's runs do not start.")
+        expect(affected.get_by_role("link", name="Enable it in LLM Providers")).to_have_attribute(
+            "href", f"#settings/providers/{pid}")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        affected.screenshot(path=str(screenshots / f"profiles-{width}.png"))
+
+        page.goto(f"{server.api.base_url}/#chat", wait_until="domcontentloaded")
+        message = page.get_by_role("textbox", name="Message", exact=True)
+        message.fill("Check the disabled provider")
+        message.press("Enter")
+        refusal = f"provider '{ACCOUNT}' is disabled; enable it in Settings → LLM Providers"
+        expect(page.get_by_text(refusal, exact=False).last).to_be_visible(timeout=30000)
+        assert requests == []
+
+        _settings(page, server, "providers")
+        switch = _row(page, ACCOUNT).get_by_role("switch", name=f"Enable provider {ACCOUNT}", exact=True)
+        with page.expect_response(lambda response: response.url.endswith("/api/v1/provider_accounts/set_enabled")) as enabled:
+            switch.click()
+        assert enabled.value.status == 200
+        expect(switch).to_be_checked()
+        registry = server.api.post("/api/v1/registry/view", {})["result"]
+        assert next(row for row in registry["providers"] if row["provider_id"] == pid)["enabled"] is True
+        assert next(row for row in registry["profiles"] if row["profile_id"] == profile["profile_id"])["provider"]["enabled"] is True
+        assert requests == []
+    finally:
+        stub.shutdown()
+        stub.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()

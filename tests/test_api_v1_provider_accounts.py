@@ -14,7 +14,7 @@ from looper.agents.ops import OpError
 from tests.test_api_v1_auth import CLIENT_TOKEN, _bearer, _send, _serving, clients as clients
 from tests.test_operator_auth import TOKEN
 
-ACTIONS = ("list", "create", "update", "delete", "clear_login_problem")
+ACTIONS = ("list", "create", "update", "delete", "clear_login_problem", "set_enabled")
 
 
 @pytest.mark.parametrize("action", ACTIONS)
@@ -24,7 +24,8 @@ def test_client_refused_before_validation_service_or_audit(tmp_path, monkeypatch
         pytest.fail("credential requests must be refused before validation, service or audit")
 
     monkeypatch.setattr(api_v1, "validate_arguments", forbidden)
-    for name in ("list_providers", "create_provider", "update_provider", "delete_provider", "clear_login_problem"):
+    for name in ("list_providers", "create_provider", "update_provider", "delete_provider", "clear_login_problem",
+                 "set_provider_enabled"):
         monkeypatch.setattr(profile_registry, name, forbidden)
 
     async def run():
@@ -43,6 +44,10 @@ def test_client_refused_before_validation_service_or_audit(tmp_path, monkeypatch
     ("update", {"provider_id": "prov-example", "fields": {}}),
     ("update", {"provider_id": "prov-example", "fields": {"extra": True}}),
     ("delete", {"provider_id": None}), ("clear_login_problem", {"provider_id": 3}),
+    ("set_enabled", {"provider_id": "prov-example"}),
+    ("set_enabled", {"provider_id": "prov-example", "enabled": "false"}),
+    ("set_enabled", {"provider_id": "prov-example", "enabled": 0}),
+    ("set_enabled", {"provider_id": "prov-example", "enabled": False, "extra": True}),
 ])
 def test_requests_reject_missing_identifiers_unknown_fields_and_empty_patch(action, body):
     operation = api_v1.find("POST", f"/api/v1/provider_accounts/{action}")
@@ -57,6 +62,8 @@ def test_requests_reject_missing_identifiers_unknown_fields_and_empty_patch(acti
      {"provider_id": "prov-example", "fields": {"api_key": None}}),
     ("delete", ["--provider-id", "prov-example"], {"provider_id": "prov-example"}),
     ("clear_login_problem", ["--provider-id", "prov-example"], {"provider_id": "prov-example"}),
+    ("set_enabled", ["--provider-id", "prov-example", "--no-enabled"],
+     {"provider_id": "prov-example", "enabled": False}),
 ])
 def test_generated_cli_preserves_request_shape_without_server_imports(action, options, body, tmp_path):
     document = api_v1.document()
@@ -115,6 +122,7 @@ def test_unexpected_credential_failure_never_logs_raw_exception_or_request(tmp_p
     ("profile", 409, "provider account conflict"),
     ("validation", 400, "invalid provider account request"),
     ("missing", 404, "provider not found"),
+    ("missing-toggle", 404, "provider not found"),
 ])
 def test_public_provider_refusals_cross_transport(tmp_path, monkeypatch, caplog, case, status, message):
     from tests.db_support import run_db
@@ -145,6 +153,7 @@ def test_public_provider_refusals_cross_transport(tmp_path, monkeypatch, caplog,
                 "profile": ("update", {"provider_id": pid, "fields": {"endpoints": []}}),
                 "validation": ("update", {"provider_id": pid, "fields": {"max_concurrency": "invalid"}}),
                 "missing": ("delete", {"provider_id": "prov-missing"}),
+                "missing-toggle": ("set_enabled", {"provider_id": "prov-missing", "enabled": False}),
             }[case]
             code, answer = await call(action, request)
             assert code == status and answer["error"]["message"] == message, answer

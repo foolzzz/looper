@@ -64,5 +64,5 @@ export function profileName(profile: { name: string; effort: string | null }) {
 
 /** The model's derived provider and exact protocol disambiguate same-name models. */
 export function profileLabel(profile: AgentProfile) {
-  return `${profileName(profile)} — ${profile.runtime_name} · ${profile.provider.name} / ${profile.model.name} / ${profile.model.protocol}`;
+  return `${profileName(profile)} — ${profile.runtime_name} · ${profile.provider.name} / ${profile.model.name} / ${profile.model.protocol}${profile.provider.enabled === false ? " · provider disabled" : ""}`;
 }

@@ -189,7 +189,7 @@ def test_agent_profiles_are_created_changed_and_read_back(monkeypatch: pytest.Mo
             "claude-code", model["model_id"], {"model_id": model["model_id"], "name": "sonnet",
             "protocol": "anthropic-messages", "provider_id": "prov-claude-subscription"}, "low")
         assert profile["provider"] == {"provider_id": "prov-claude-subscription", "name": "claude-subscription",
-                                        "vendor_type": "claude-subscription", "auth": "oauth"}
+                                        "vendor_type": "claude-subscription", "auth": "oauth", "enabled": True}
         assert profile["agent_teams"] is False and profile["custom_prompt"] == "Be concise."
         assert profile["used_by"] is None
         opus = next(m for m in (await _ok("POST", "/api/v1/ops/models/list", {}))["models"] if m["name"] == "opus")

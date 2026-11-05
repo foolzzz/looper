@@ -17,7 +17,7 @@ const PROFILE: AgentProfile = {
   model: { model_id: "model-messages", name: "model", protocol: "anthropic-messages", provider_id: "provider" }, effort: null, agent_teams: true,
   custom_prompt: "", runtime_id: "rt-claude-code", runtime_type: "claude-code",
   runtime_name: "Claude Code", builtin: false,
-  provider: { provider_id: "provider", name: "Provider", vendor_type: "custom", auth: "api_key" },
+  provider: { provider_id: "provider", name: "Provider", vendor_type: "custom", auth: "api_key", enabled: true },
   roles: ["worker"], used_by: { layers: [], task_count: 0, schedule_count: 0, allowed_in: [] }, warnings: [],
   cost: { source: "runtime", equivalent: false, unpriced: [] },
 };
@@ -25,11 +25,11 @@ const provider = (id: string, extra: Partial<Provider> = {}): Provider => ({
   provider_id: id, name: id === "provider" ? "Provider" : id, vendor_type: "custom", auth: "api_key",
   oauth_runtime_type: null, endpoints: ["anthropic-messages", "openai-chat", "openai-responses"].map((protocol) => ({
     protocol: protocol as Model["protocol"], base_url: "https://example.com", use_runtime_default: false,
-  })), suggested_models: [], login: null, env: [], max_concurrency: null, api_key: null, builtin: false,
+  })), suggested_models: [], login: null, env: [], max_concurrency: null, api_key: null, builtin: false, enabled: true,
   endpoint_count: 3, model_count: 0, profile_count: 1, created_at: "", updated_at: "", ...extra,
 });
 const model = (id: string, protocol: Model["protocol"], providerId = "provider"): Model => ({
-  model_id: id, name: "model", protocol, provider_id: providerId, provider_name: providerId === "provider" ? "Provider" : providerId,
+  model_id: id, name: "model", protocol, provider_id: providerId, provider_name: providerId === "provider" ? "Provider" : providerId, provider_enabled: true,
   context_window: null, input_usd_per_mtok: null, output_usd_per_mtok: null, cache_read_usd_per_mtok: null,
   cache_write_usd_per_mtok: null, efforts: null, background_model: null, catalog_order: 0, builtin: false,
   profile_count: 0, endpoint: { protocol, base_url: "https://example.com", use_runtime_default: false },
@@ -158,6 +158,33 @@ describe("Agent Profiles", () => {
     expect(profileLabel({ ...PROFILE, name, effort })).toBe(
       `${name} — Claude Code · Provider / model / anthropic-messages`,
     );
+  });
+
+  it("marks disabled providers in every profile selector label", () => {
+    expect(profileLabel({ ...PROFILE, provider: { ...PROFILE.provider, enabled: false } })).toBe(
+      "Profile — Claude Code · Provider / model / anthropic-messages · provider disabled",
+    );
+  });
+
+  it("explains disabled provider refusal on the affected profile row with a settings link", async () => {
+    registry.profiles = [{ ...PROFILE, provider: { ...PROFILE.provider, enabled: false } }];
+    await act(async () => root.render(<AgentProfilesSection />));
+    expect(container.textContent).toContain("Provider Provider is disabled: this profile's runs do not start.");
+    const link = [...container.querySelectorAll("a")].find((item) => item.textContent === "Enable it in LLM Providers")!;
+    expect(link.getAttribute("href")).toBe("#settings/providers/provider");
+  });
+
+  it("hides disabled providers' models for new profiles and retains only the current disabled model when editing", async () => {
+    registry.models = registry.models.map((item) => ({ ...item, provider_enabled: item.provider_id !== "provider" }));
+    await show(null);
+    expect(options()).not.toContain("model-messages");
+    expect(options()).toContain("other-messages");
+    await act(async () => root.unmount()); root = createRoot(container);
+    await show(PROFILE);
+    expect(options()).toContain("model-messages");
+    expect(select("Model *").value).toBe("model-messages");
+    expect(options()).not.toContain("model-chat");
+    expect(options()).not.toContain("model-responses");
   });
 
   function RegistryReader({ id }: { id: string }) {

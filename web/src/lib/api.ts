@@ -2950,6 +2950,7 @@ export interface Provider {
   max_concurrency: number | null;
   api_key: string | null;
   builtin: boolean;
+  enabled: boolean;
   endpoint_count: number;
   model_count: number;
   profile_count: number;
@@ -2961,6 +2962,7 @@ export interface Model {
   model_id: string;
   provider_id: string;
   provider_name: string;
+  provider_enabled: boolean;
   name: string;
   protocol: ApiProtocol;
   context_window: number | null;
@@ -3003,7 +3005,7 @@ export interface AgentProfile {
   runtime_id: string;
   runtime_name: string;
   runtime_type: string;
-  provider: Pick<Provider, "provider_id" | "name" | "vendor_type" | "auth">;
+  provider: Pick<Provider, "provider_id" | "name" | "vendor_type" | "auth" | "enabled">;
   builtin: boolean;
   roles: AgentRole[];
   used_by: ProfileUsedBy;
@@ -3104,6 +3106,17 @@ export async function updateProvider(
 ): Promise<{ provider: Provider; warnings: string[] }> {
   const result = await callV1<{ provider: Provider; warnings: string[] }>("/api/v1/provider_accounts/update",
     { provider_id: providerId, fields });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
+}
+
+export async function setProviderEnabled(
+  providerId: string,
+  enabled: boolean,
+): Promise<{ provider: Provider; warnings: string[] }> {
+  const result = await callV1<{ provider: Provider; warnings: string[] }>("/api/v1/provider_accounts/set_enabled",
+    { provider_id: providerId, enabled });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
   return result;

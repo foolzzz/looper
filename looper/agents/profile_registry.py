@@ -219,8 +219,11 @@ class ProviderSpec:
     max_concurrency: int | None = None
     api_key: str | None = field(default=None, repr=False, compare=False)
     builtin: bool = False
+    enabled: bool = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise RegistryError("enabled must be true or false")
         vendor = _typed_enum(VendorType, self.vendor_type, "vendor_type")
         auth = _typed_enum(AuthKind, self.auth, "auth")
         if auth is not vendor.auth_kind or self.oauth_runtime_type != vendor.oauth_runtime_type:
@@ -783,7 +786,14 @@ def provider_spec(row: Mapping[str, Any]) -> ProviderSpec:
     """An account's public fields, never its separately stored API key."""
     return ProviderSpec(row["id"], row["name"], VendorType(row["vendor_type"]), AuthKind(row["auth"]),
                         row.get("oauth_runtime_type"), _env(row.get("env")), row.get("max_concurrency"),
-                        builtin=bool(row.get("builtin")))
+                        builtin=bool(row.get("builtin")), enabled=bool(row.get("enabled", True)))
+
+
+def disabled_problem(provider: ProviderSpec) -> str | None:
+    """Why ``provider``'s models cannot be used now; None while it is enabled."""
+    if provider.enabled:
+        return None
+    return f"provider {provider.name!r} is disabled; enable it in Settings → LLM Providers"
 
 
 def servable_roles(capabilities: Iterable[Any], runtime_type: str | None = None) -> list[str]:
@@ -864,6 +874,7 @@ def provider_view(row: Mapping[str, Any], logins: Mapping[str, Mapping[str, str]
         "login": dict(logins[row["oauth_runtime_type"]]) if oauth and row["oauth_runtime_type"] in (logins or {}) else None,
         "env": list(row.get("env") or []), "max_concurrency": row["max_concurrency"],
         "api_key": SECRET_MASK if row.get("api_key_set") else None, "builtin": row["builtin"],
+        "enabled": row.get("enabled", True),
         "endpoint_count": len(row["endpoints"]),
         "model_count": row.get("model_count", 0), "profile_count": row.get("profile_count", 0),
         "created_at": row["created_at"], "updated_at": row["updated_at"],
@@ -891,6 +902,7 @@ def model_view(row: Mapping[str, Any]) -> dict[str, Any]:
         warnings += _context_suffix_warnings(name for name in (row["name"], row["background_model"]) if name)
     return {
         "model_id": row["id"], "provider_id": row["provider_id"], "provider_name": row["provider_name"],
+        "provider_enabled": account.get("enabled", True),
         "protocol": row["protocol"], **{name: row[name] for name in MODEL_FIELDS},
         "catalog_order": row["catalog_order"], "builtin": row["builtin"],
         "profile_count": row["profile_count"], "endpoint": dict(row["endpoint"]),
@@ -1046,7 +1058,8 @@ def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED,
         "runtime_id": row["runtime_id"], "runtime_name": row["runtime_name"], "runtime_type": row["runtime_type"],
         "provider_id": provider["id"], "provider_name": provider["name"], "builtin": row["builtin"],
         "provider": {"provider_id": provider["id"], "name": provider["name"],
-                     "vendor_type": provider["vendor_type"], "auth": provider["auth"]},
+                     "vendor_type": provider["vendor_type"], "auth": provider["auth"],
+                     "enabled": provider.get("enabled", True)},
         "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt,
         "roles": servable_roles(spec.runtime.capabilities, spec.runtime.type), "used_by": dict(used_by),
         "cost": cost_basis(cost_profile), "warnings": profile_warnings(cost_profile),
@@ -1428,6 +1441,36 @@ async def clear_login_problem(provider_id: str) -> dict[str, Any]:
     return await _provider_answer(provider_id)
 
 
+async def set_provider_enabled(provider_id: str, enabled: Any) -> dict[str, Any]:
+    """Enable or disable a provider, built-in ones too. Disabled, it keeps its endpoints, key, models and
+    Agent Profiles, and their selections; runs of those profiles are refused at launch. Never refused;
+    disabling warns where its profiles are selected."""
+    from ..db import profile_registry as db
+    from ..db.connection import transaction
+
+    if not isinstance(enabled, bool):
+        raise RegistryError("enabled must be true or false")
+    warnings: list[str] = []
+    async with transaction() as conn:
+        if not await db.lock_provider(conn, provider_id):
+            raise RegistryNotFound(f"no provider {provider_id!r}")
+        await db.set_provider_enabled(conn, provider_id, enabled)
+        row = await _existing_provider(provider_id, conn)
+        if not enabled:
+            usage = await db.profile_usage(pool=conn)
+            for profile in sorted(await db.list_profiles(pool=conn, provider_id=provider_id),
+                                  key=lambda p: (p["name"], p["id"])):
+                if profile["id"] == BUILTIN_PROFILE.id:
+                    warnings.append("Agent Profile 'claude-code/opus' is what a role runs when nothing "
+                                    "selects another profile: those runs will not start")
+                elif used := usage.get(profile["id"]):
+                    warnings.append(f"Agent Profile {profile['name']!r} is selected by {usage_text(used)}: "
+                                    "its runs will not start")
+            if len(warnings) > 10:
+                warnings = [*warnings[:10], f"and {len(warnings) - 10} more Agent Profiles"]
+    return {"provider": provider_view(row, await _logins([row])), "warnings": warnings}
+
+
 async def delete_provider(provider_id: str) -> dict[str, Any]:
     import asyncpg
 
@@ -1606,6 +1649,8 @@ async def create_profile(data: Any, *, manager_id: str | None = None) -> dict[st
     try:
         async with transaction() as conn:
             runtime, model = await _parts(fields["runtime_id"], fields["model_id"], conn)
+            if problem := disabled_problem(model.provider):
+                raise RegistryError(f"{problem}, or choose a model of another provider")
             fields["agent_teams"] = (_agent_teams(data["agent_teams"]) if "agent_teams" in data
                                      else default_agent_teams(runtime))
             model.check_runtime(runtime, fields["effort"])
@@ -1667,6 +1712,9 @@ async def update_profile(profile_id: str, data: Any, *, manager_id: str | None =
                                            fields.get("model_id", row["model_id"]), conn)
             await conn.execute("SELECT 1 FROM agent_profiles WHERE id = $1 FOR UPDATE", profile_id)
             current = await _existing_profile(profile_id, conn)
+            if "model_id" in fields and fields["model_id"] != current["model_id"]:
+                if problem := disabled_problem(model.provider):
+                    raise RegistryError(f"{problem}, or choose a model of another provider")
             if current["model_id"] != row["model_id"] or current["runtime_id"] != row["runtime_id"]:
                 raise RegistryConflict("Agent Profile changed concurrently: reload it before updating")
             if "agent_teams" not in fields and runtime.type != current["runtime_type"]:

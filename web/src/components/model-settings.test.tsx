@@ -17,11 +17,11 @@ const endpoint = (protocol: Model["protocol"]) => ({ protocol, base_url: "https:
 const provider = (changes: Partial<Provider> = {}): Provider => ({
   provider_id: "provider-1", name: "Account", vendor_type: "deepseek", auth: "api_key", oauth_runtime_type: null,
   endpoints: [endpoint("openai-chat"), endpoint("anthropic-messages")], suggested_models: [], login: null,
-  env: [], max_concurrency: null, api_key: "***", builtin: false, endpoint_count: 2, model_count: 0,
+  env: [], max_concurrency: null, api_key: "***", builtin: false, enabled: true, endpoint_count: 2, model_count: 0,
   profile_count: 0, created_at: "", updated_at: "", ...changes,
 });
 const model = (changes: Partial<Model> = {}): Model => ({
-  model_id: "model-1", provider_id: "provider-1", provider_name: "Account", name: "exact[1m]", protocol: "openai-chat",
+  model_id: "model-1", provider_id: "provider-1", provider_name: "Account", provider_enabled: true, name: "exact[1m]", protocol: "openai-chat",
   context_window: null, efforts: null, background_model: null, input_usd_per_mtok: null, output_usd_per_mtok: null,
   cache_read_usd_per_mtok: null, cache_write_usd_per_mtok: null, catalog_order: 0, builtin: false, profile_count: 0,
   endpoint: endpoint("openai-chat"), prices: Object.fromEntries(PRICE_FIELDS.map((key) => [key,

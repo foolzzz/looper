@@ -166,7 +166,8 @@ export function AgentProfileForm({
   const set = (change: Partial<typeof draft>) => setDraft((d) => ({ ...d, ...change }));
   const runtime = registry.runtimes.find((r) => r.runtime_id === draft.runtime_id);
   const type = runtimeType(registry, runtime);
-  const compatible = registry.models.filter((m) => pairs(registry, runtime, m));
+  const compatible = registry.models.filter((m) => pairs(registry, runtime, m)
+    && (m.provider_enabled || m.model_id === profile?.model_id));
   const model = compatible.find((m) => m.model_id === draft.model_id);
   const provider = registry.providers.find((p) => p.provider_id === model?.provider_id);
   const fitting = registry.providers.filter((p) => compatible.some((m) => m.provider_id === p.provider_id));
@@ -525,6 +526,14 @@ function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registr
         </span>
       </p>
       <UsedBy used={profile.used_by} />
+      {profile.provider.enabled === false && (
+        <p className="flex items-start gap-1 text-xs text-warning">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <span>Provider {profile.provider.name} is disabled: this profile&apos;s runs do not start.{" "}
+            <a href={settingsHref("providers", profile.provider.provider_id)} className="underline underline-offset-2">Enable it in LLM Providers</a>.
+          </span>
+        </p>
+      )}
       {profile.cost.unpriced.length > 0 && (
         <p className="flex items-start gap-1 text-xs text-warning">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />

@@ -101,6 +101,7 @@ _CURSOR_LOGIN = "cursor_login"
 _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
 _CHAT_BINDING_SENDERS = "chat_binding_senders"
+_PROVIDER_ENABLED = "provider_enabled"
 _MANAGER_SCOPE_PROJECTS = "manager_scope_projects"
 _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
@@ -259,6 +260,16 @@ async def _chat_binding_senders_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('manager_chat_bindings') AND attname = 'allowed_senders' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _provider_enabled_pending(conn: asyncpg.Connection) -> bool:
+    """Recorded upgrades never repair DDL; fresh schemas already contain the column."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROVIDER_ENABLED):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('llm_providers') AND attname = 'enabled' "
         "AND attnum > 0 AND NOT attisdropped)")
 
 
@@ -427,6 +438,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                                "DEFAULT '{}' CONSTRAINT manager_chat_bindings_allowed_senders_check "
                                "CHECK (cardinality(allowed_senders) <= 100)")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CHAT_BINDING_SENDERS)
+        if await _provider_enabled_pending(conn):
+            await conn.execute("ALTER TABLE llm_providers ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT true")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROVIDER_ENABLED)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -463,4 +477,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _chat_binding_senders_pending(conn)
-            or await _manager_scope_projects_pending(conn)))
+            or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)))

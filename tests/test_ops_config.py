@@ -490,7 +490,7 @@ def test_manager_provider_vendor_defaults(monkeypatch, vendor):
     provider = {"provider_id": "new", "name": vendor.value, "vendor_type": vendor.value, "auth": "api_key",
                 "endpoints": [{"protocol": e.protocol.value, "base_url": e.base_url,
                                "use_runtime_default": e.use_runtime_default} for e in defaults.endpoints],
-                "model_count": 0, "profile_count": 0, "builtin": False, "login": None, "api_key": None}
+                "model_count": 0, "profile_count": 0, "builtin": False, "enabled": True, "login": None, "api_key": None}
     create = AsyncMock(return_value={"provider": provider})
     monkeypatch.setattr(manager_config.profile_registry, "create_provider", create)
     fields = {"name": vendor.value, "vendor_type": vendor.value}
@@ -513,7 +513,7 @@ def test_manager_provider_vendor_defaults(monkeypatch, vendor):
 def test_manager_provider_explicit_overrides(monkeypatch, empty):
     provider = {"provider_id": "new", "name": "custom", "vendor_type": "deepseek", "auth": "api_key",
                 "endpoints": [{"protocol": "openai-chat", "base_url": "https://example.com"}],
-                "model_count": 0, "profile_count": 0, "builtin": False, "login": None, "api_key": None}
+                "model_count": 0, "profile_count": 0, "builtin": False, "enabled": True, "login": None, "api_key": None}
     create = AsyncMock(return_value={"provider": provider})
     monkeypatch.setattr(manager_config.profile_registry, "create_provider", create)
     fields = {"name": "custom", "vendor_type": "deepseek", "endpoints": provider["endpoints"],
