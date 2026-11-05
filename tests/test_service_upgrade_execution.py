@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import io
 import asyncio
 import multiprocessing
 import os
 import plistlib
 import signal
 import subprocess
+import tarfile
 import venv
 import zipfile
 from datetime import datetime, timezone
@@ -824,11 +826,14 @@ def test_wheel_dashboard_is_staged_and_published_atomically_while_http_serves(
                 publications.append(destination)
 
             monkeypatch.setattr(service, "_swap_directory", publish)
-            expected = await asyncio.to_thread(_REAL_INSTALLER, deployment.host, str(wheel),
-                wheel=True, build_web=build_web, dependencies=False)
+            # Server startup snapshots the checkout's manifest before listening;
+            # keep that unrelated work outside the live-installation deadline.
+            expected = await asyncio.wait_for(asyncio.to_thread(
+                _REAL_INSTALLER, deployment.host, str(wheel),
+                wheel=True, build_web=build_web, dependencies=False), 10)
             assert expected == (b"new dashboard", components.web_fingerprints(static)[1])
 
-    asyncio.run(asyncio.wait_for(run(), 10))
+    asyncio.run(run())
     assert publications == [static]
     assert len(installs) == 1
     assert not list(tmp_path.glob(".dist-upgrade-*"))
@@ -1055,26 +1060,138 @@ def checkout_install(deployment, tmp_path):
     config.parent.mkdir()
     config.write_bytes(components.CONFIG.read_bytes())
     commands = []
+    sources = {"web/src/app.ts": b"target dashboard source",
+               "looper/components.toml": components.CONFIG.read_bytes(),
+               "looper/components.py": Path(components.__file__).read_bytes()}
 
     def run(argv, **kwargs):
         commands.append(list(argv))
         if argv[:3] == [deployment.host.executable, "-I", "-c"]:
             return subprocess.CompletedProcess(argv, 0, str(tmp_path / ".venv"), "")
+        if "archive" in argv:
+            with tarfile.open(argv[argv.index("--output") + 1], "w") as archive:
+                for name, content in sources.items():
+                    entry = tarfile.TarInfo(name)
+                    entry.size = len(content)
+                    archive.addfile(entry, io.BytesIO(content))
         if "--outDir" in argv:
             staged = Path(argv[-1])
             (staged / "assets").mkdir()
             (staged / "index.html").write_text("new dashboard")
             (staged / "assets/app.js").write_text("script")
-        return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 0, "1" * 40 if "rev-parse" in argv else "", "")
 
     deployment.host.run = run
-    return SimpleNamespace(host=deployment.host, web=web, commands=commands)
+    return SimpleNamespace(host=deployment.host, web=web, commands=commands, sources=sources)
+
+
+@pytest.mark.parametrize("kind", ["FULL", "CONTROL_PLANE", "WEB_ONLY"])
+def test_checkout_build_precedes_drain_and_stop(deployment, checkout_install, monkeypatch, kind):
+    target = manifest("web", "1.0.1")
+    if kind != "WEB_ONLY":
+        target.components["control_plane"] = "b" * 64
+    deployment.scenario.target = target
+    deployment.host.get_status = lambda *args: {**deployment.responses.status, "keepers": {
+        "mode": "on" if kind == "CONTROL_PLANE" else "off", "pending": 0}}
+    deployment.host.get_index = lambda *args: b"new dashboard"
+    monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
+    dist = checkout_install.web / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("old dashboard")
+    run, swap = deployment.host.run, service._swap_directory
+    staged_paths = []
+
+    def execute(argv, **kwargs):
+        if "archive" in argv:
+            assert argv[-4:] == ["1" * 40, "web", "looper/components.py", "looper/components.toml"]
+        if "ci" in argv or "--outDir" in argv:
+            assert deployment.state.running
+            assert "drain" not in deployment.events
+            assert (dist / "index.html").read_text() == "old dashboard"
+            assert (checkout_install.web / "src/app.ts").read_text() == "dashboard source"
+            web = Path(argv[argv.index("--prefix") + 1])
+            assert web != checkout_install.web
+            assert (web / "src/app.ts").read_bytes() == checkout_install.sources["web/src/app.ts"]
+            assert (web.parent / "looper/components.py").is_file()
+            deployment.events.append("ci" if "ci" in argv else "build")
+            deployment.elapsed[0] += 3 if "ci" in argv else 7
+        elif "merge" in argv or "sync" in argv:
+            assert deployment.state.running == (kind == "WEB_ONLY")
+            deployment.events.append("merge" if "merge" in argv else "sync")
+            deployment.elapsed[0] += 1
+            deployment.scenario.current = target
+        result = run(argv, **kwargs)
+        if "--outDir" in argv:
+            staged_paths.append(Path(argv[-1]))
+            target.verification["web"] = components.web_fingerprints(Path(argv[-1]))[1]
+        return result
+
+    def publish(staged, destination):
+        deployment.events.append("swap")
+        expected = components._fingerprint({"web/src/app.ts": checkout_install.sources["web/src/app.ts"]})
+        assert (staged / components.WEB_SOURCE_RECORD).read_text().strip() == expected
+        swap(staged, destination)
+
+    deployment.host.run = execute
+    monkeypatch.setattr(service, "_swap_directory", publish)
+    assert cli.main(["service", "upgrade", "--to", "candidate"]) == 0
+    actions = [event for event in deployment.events if event in {
+        "ci", "build", "stop", "merge", "sync", "swap", "start"}]
+    assert actions == (["ci", "build", "merge", "swap"] if kind == "WEB_ONLY" else
+                       ["ci", "build", "stop", "merge", "sync", "swap", "start"])
+    assert (dist / "index.html").read_text() == "new dashboard"
+    assert all(not path.exists() for path in staged_paths)
+    data = report(deployment)
+    assert data["prepare_seconds"] == 10
+    assert data["gap_seconds"] == (0 if kind == "WEB_ONLY" else 2)
+    assert data["plan"] == kind
+
+
+@pytest.mark.parametrize("failure", ["archive", "ci", "build", "missing_index"])
+def test_checkout_build_failure_leaves_running_checkout_untouched(
+        deployment, checkout_install, monkeypatch, failure):
+    deployment.scenario.target = manifest("web", "1.0.1")
+    deployment.scenario.target.components["control_plane"] = "b" * 64
+    monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
+    dist = checkout_install.web / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("old dashboard")
+    run = deployment.host.run
+
+    def execute(argv, **kwargs):
+        deployment.elapsed[0] += 1
+        if ((failure == "archive" and "archive" in argv) or (failure == "ci" and "ci" in argv)
+                or (failure == "build" and "--outDir" in argv)):
+            return subprocess.CompletedProcess(argv, 1, "", "preparation failed")
+        result = run(argv, **kwargs)
+        if failure == "missing_index" and "--outDir" in argv:
+            (Path(argv[-1]) / "index.html").unlink()
+        return result
+
+    deployment.host.run = execute
+    assert cli.main(["service", "upgrade"]) == 1
+    assert deployment.state.running and deployment.state.pid == 123456789
+    assert deployment.events == []
+    assert not any("merge" in argv or "sync" in argv for argv in checkout_install.commands)
+    assert (dist / "index.html").read_text() == "old dashboard"
+    assert (checkout_install.web / "src/app.ts").read_text() == "dashboard source"
+    assert sorted(path.name for path in checkout_install.web.iterdir()) == ["dist", "src"]
+    assert report(deployment)["prepare_seconds"] > 0
+    assert report(deployment)["gap_seconds"] == 0
+    assert report(deployment)["serving"] is True
 
 
 @pytest.mark.parametrize("build_web", [False, True], ids=["noop", "web_only"])
 def test_checkout_live_upgrade_does_not_sync_dependencies(checkout_install, build_web):
-    _REAL_INSTALLER(checkout_install.host, "candidate", wheel=False, build_web=build_web, dependencies=False)
-    assert checkout_install.commands[0][:4] == ["git", "-C", str(checkout_install.host.cwd), "merge"]
+    from contextlib import nullcontext
+
+    preparation = (service._prepare_checkout_dashboard(checkout_install.host, "candidate") if build_web
+                   else nullcontext(None))
+    with preparation as staged:
+        _REAL_INSTALLER(checkout_install.host, "candidate", wheel=False, build_web=build_web,
+                        dependencies=False, prepared_web=staged)
+    assert any(argv[:4] == ["git", "-C", str(checkout_install.host.cwd), "merge"]
+               for argv in checkout_install.commands)
     assert not any("sync" in argv for argv in checkout_install.commands)
     assert (checkout_install.web / "dist/index.html").exists() == build_web
 
@@ -1088,7 +1205,8 @@ def test_full_checkout_sync_retains_test_extra_and_other_installed_packages(chec
 
 def test_checkout_dashboard_build_uses_service_python(checkout_install):
     checkout_install.host.executable = "/service venv/bin/python"
-    _REAL_INSTALLER(checkout_install.host, "candidate", wheel=False, build_web=True, dependencies=False)
+    with service._prepare_checkout_dashboard(checkout_install.host, "candidate"):
+        pass
     build = next(argv for argv in checkout_install.commands if "--outDir" in argv)
     assert build[:3] == ["env", "PYTHON=/service venv/bin/python", "npm"]
 
@@ -1110,10 +1228,11 @@ def test_upgrade_tools_run_without_python_or_virtualenv_overrides(
             return run(argv, **kwargs)
 
         host.run = record
-        _REAL_INSTALLER(host, "candidate", wheel=False, build_web=True, dependencies=True,
-                        sync_environment=tmp_path / ".venv")
+        with service._prepare_checkout_dashboard(host, "candidate") as staged:
+            _REAL_INSTALLER(host, "candidate", wheel=False, build_web=True, dependencies=True,
+                            sync_environment=tmp_path / ".venv", prepared_web=staged)
         assert len(environments) == 3  # uv sync, npm ci and npm run build
-        assert environments[0]["UV_PROJECT_ENVIRONMENT"] == str(tmp_path / ".venv")
+        assert environments[-1]["UV_PROJECT_ENVIRONMENT"] == str(tmp_path / ".venv")
     else:
         host.environ["PIP_TARGET"] = "/x"
         host.run = lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, wheel_paths(host), "")
