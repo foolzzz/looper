@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.84] - 2026-11-05
+
+### Changed
+
+- **A source-checkout upgrade builds the dashboard before it stops the service.** When the plan rebuilds the dashboard, the upgrade now exports the target commit's `web/` sources (with the fingerprint hook the build needs) into a temporary directory next to `web/dist`, runs `npm ci` and the build there, checks `index.html` and records the web fingerprint while the service keeps serving. A failing build aborts the upgrade before the drain and the stop, with nothing changed. The stopped interval only holds the git fast-forward, the dependency sync and the swap of the already built `web/dist`. The upgrade report gains `prepare_seconds` next to `gap_seconds`. Wheel installs are unchanged. ([#1100](https://github.com/foolzzz/looper/pull/1100))
+
 ## [2.14.83] - 2026-11-05
 
 ### Changed
