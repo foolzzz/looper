@@ -13,6 +13,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -129,7 +130,13 @@ def test_serve_without_claude_starts_and_reports_it(tmp_path: Path, monkeypatch:
     with fresh_database(str(DSN)) as (database_url, _), running_server(
         database_url=database_url, runtime_root=tmp_path, bin_dir=tmp_path / "bin", log_path=log,
     ) as api:
-        checks = {check["id"]: check for check in api.post("/api/v1/system/status", {})["result"]["checks"]}
+        deadline = time.monotonic() + 10
+        while True:
+            checks = {check["id"]: check for check in api.post("/api/v1/system/status", {})["result"]["checks"]}
+            if "claude_cli" in checks:
+                break
+            assert time.monotonic() < deadline, "advisory startup checks did not finish"
+            time.sleep(0.05)
 
     assert [checks[name]["status"] for name in ("database", "claude_cli", "claude_login", "cursor_login", "lark_cli")] == [
         "ok", "fail", "skip", "skip", "skip"]

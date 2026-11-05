@@ -67,10 +67,15 @@ def test_ttadk_cursor_command_preserves_native_arguments(builder: str, launch_pa
         kwargs = {"cwd": tmp_path, "prompt_file": prompt, "launch": launch}
         if builder == "run":
             return CURSOR.run_command(executable, **kwargs)
-        argv = CURSOR.resident_command(executable, **kwargs) + CURSOR.resume_args("saved-chat")
+        argv = CURSOR.resident_command(executable, **kwargs)
         session = CURSOR.resident_session("cursor-command-test")
         session._base, session._session, program = session._split(argv)
         assert program == executable
+        # A resumed chat retains the owner's instructions from its initial turn.
+        session._turn_argv()
+        session._base, session._session, program = session._split(argv + CURSOR.resume_args("saved-chat"))
+        assert program == executable
+        session._session_initialized()
         return session._turn_argv()
 
     native, wrapped = command(_native_launch()), command(_launch())
@@ -80,6 +85,8 @@ def test_ttadk_cursor_command_preserves_native_arguments(builder: str, launch_pa
     assert wrapped[3:10] == [f"PATH={shim}{os.pathsep}{launch_path or inherited_path}", "ttadk", "code", "-t",
                              "cursor-cli", "--skip-check", "--"]
     assert wrapped[10:] == native[4:]
+    if builder == "resident-turn":
+        assert native[-2:] == wrapped[-2:] == CURSOR.resume_args("saved-chat")
     assert not any(arg.startswith("HOME=") for arg in wrapped)
     assert "LOOPER PROMPT" not in wrapped
     monkeypatch.setattr(CURSOR, "launch_args", lambda launch: ["--version"])

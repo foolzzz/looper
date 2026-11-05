@@ -49,6 +49,7 @@ import asyncio
 import logging
 import math
 import re
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import MISSING, dataclass, field, fields, replace
 from typing import Any
@@ -1137,46 +1138,68 @@ def _probe_executable(runtime_type: str, executable: str, server_claude: str,
 async def _probe(runtime_type: str, executable: str, server_claude: str,
                  launcher: Launcher = Launcher.NATIVE) -> dict[str, Any]:
     adapter = runtimes.adapter(runtime_type)
-    probe = await asyncio.to_thread(adapter.probe_for,
-                                   _probe_executable(runtime_type, executable, server_claude, launcher), launcher)
+    started = time.monotonic()
+    try:
+        # Adapters bound their subprocesses. An outer timeout also counts executor queue time and
+        # abandons the thread's real result, which is the only probe the registry should persist.
+        probe = await asyncio.to_thread(
+            adapter.probe_for, _probe_executable(runtime_type, executable, server_claude, launcher), launcher)
+    finally:
+        name = adapter.ttadk_runtime_name if launcher is Launcher.TTADK else adapter.type
+        logging.getLogger(__name__).info("probed runtime %s in %.3f s", name, time.monotonic() - started)
     return {"version": probe.version, "capabilities": sorted(c.value for c in probe.capabilities),
             "probe_error": probe.error}
 
 
-async def _detect(adapter: runtimes.RuntimeAdapter, launcher: Launcher = Launcher.NATIVE) -> bool:
-    """Register and probe this adapter/launcher pair when its executable is available and its built-in id
-    and name are free; return whether it was added."""
+async def _detected_runtime(adapter: runtimes.RuntimeAdapter,
+                            launcher: Launcher = Launcher.NATIVE) -> dict[str, Any] | None:
+    """Probe an available, unregistered pair without writing, so startup can gather then write in order."""
     import shutil
 
     from ..db import profile_registry as db
 
     executable = "ttadk" if launcher is Launcher.TTADK else adapter.default_executable
     if not adapter.in_process and shutil.which(executable) is None:
-        return False
+        return None
     if await db.get_runtime(builtin_runtime_id(adapter, launcher)) is not None:
-        return False
+        return None
     probe = await _probe(adapter.type, "", adapter.default_executable, launcher)
     if adapter.in_process and probe["probe_error"]:
         logging.getLogger(__name__).info("%s not registered: %s", adapter.label, probe["probe_error"])
-        return False
-    return await db.insert_builtin_runtime(builtin_runtime_id(adapter, launcher), {
+        return None
+    return {
         "name": adapter.ttadk_runtime_name if launcher is Launcher.TTADK else adapter.type,
-        "type": adapter.type, "executable": "", "launcher": launcher.value, **probe})
+        "type": adapter.type, "executable": "", "launcher": launcher.value, **probe}
+
+
+async def _detect(adapter: runtimes.RuntimeAdapter, launcher: Launcher = Launcher.NATIVE) -> bool:
+    """Register this adapter/launcher pair if its executable is available and its id and name are free."""
+    from ..db import profile_registry as db
+
+    row = await _detected_runtime(adapter, launcher)
+    return row is not None and await db.insert_builtin_runtime(builtin_runtime_id(adapter, launcher), row)
 
 
 async def register_found_runtimes() -> list[str]:
     """Register a built-in runtime for each runtime type other than Claude Code whose default executable is on
-    PATH (``_detect``); existing rows retain their operator fields. Cursor's built-in capabilities are refreshed
-    from its adapter. Claude Code's built-in runtime comes with the schema. Returns the names registered."""
+    PATH; existing rows retain their operator fields. Cursor's built-in capabilities are refreshed from its
+    adapter. Claude Code's built-in runtime comes with the schema. Probe concurrently, then write in
+    adapter/launcher order. Returns the names registered."""
     from ..db import profile_registry as db
 
+    started = time.monotonic()
     cursor = runtimes.adapter("cursor-agent")
     await db.refresh_builtin_capabilities(builtin_runtime_id(cursor), sorted(c.value for c in cursor.capabilities))
-    return [adapter.ttadk_runtime_name if launcher is Launcher.TTADK else adapter.type
-            for adapter in runtimes.ADAPTERS.values()
-            for launcher in sorted(adapter.launchers, key=lambda item: item.value)
-            if not (adapter is runtimes.CLAUDE_CODE and launcher is Launcher.NATIVE)
-            and await _detect(adapter, launcher)]
+    pairs = [(adapter, launcher) for adapter in runtimes.ADAPTERS.values()
+             for launcher in sorted(adapter.launchers, key=lambda item: item.value)
+             if not (adapter is runtimes.CLAUDE_CODE and launcher is Launcher.NATIVE)]
+    rows = await asyncio.gather(*(_detected_runtime(adapter, launcher) for adapter, launcher in pairs))
+    found = []
+    for (adapter, launcher), row in zip(pairs, rows):
+        if row is not None and await db.insert_builtin_runtime(builtin_runtime_id(adapter, launcher), row):
+            found.append(row["name"])
+    logging.getLogger(__name__).info("probed runtimes in %.3f s total", time.monotonic() - started)
+    return found
 
 
 async def _existing_runtime(runtime_id: str) -> dict[str, Any]:
