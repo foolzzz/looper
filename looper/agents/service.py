@@ -50,6 +50,7 @@ import socket
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 import tempfile
 import tomllib
@@ -58,7 +59,7 @@ import urllib.request
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1121,10 +1122,42 @@ def _install_wheel(host: Host, source: str, *, dependencies: bool, environment: 
                    *([] if dependencies else ["--no-deps"]), source], installing=True, env=environment)
 
 
+@dataclass(frozen=True)
+class _PreparedDashboard:
+    directory: Path
+    expected: tuple[bytes, str]
+
+
+@contextmanager
+def _prepare_checkout_dashboard(host: Host, source: str):
+    from ..components import record_web_source, web_fingerprints
+
+    # Keep the staged assets on the destination's filesystem for atomic publication.
+    # Export the target's fingerprint hook too: Vite calls it during the build.
+    with tempfile.TemporaryDirectory(prefix=".web-upgrade-", dir=host.cwd / "web") as directory:
+        scratch = Path(directory)
+        archive = scratch / "sources.tar"
+        _checked(host, ["git", "-C", str(host.cwd), "archive", "--format=tar", "--output", str(archive),
+                        source, "web", "looper/components.py", "looper/components.toml"], installing=True)
+        sources = scratch / "sources"
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(sources, filter="data")
+        web, staged = sources / "web", scratch / "dist"
+        staged.mkdir()
+        _checked(host, ["npm", "ci", "--prefix", str(web)], installing=True, env=_tool_environment(host))
+        _checked(host, ["env", f"PYTHON={host.executable}", "npm", "run", "build", "--prefix", str(web),
+                        "--", "--outDir", str(staged)], installing=True, env=_tool_environment(host))
+        if not (staged / "index.html").is_file():
+            raise ServiceError("the dashboard build did not produce index.html")
+        record_web_source(sources, staged)
+        yield _PreparedDashboard(staged, ((staged / "index.html").read_bytes(), web_fingerprints(staged)[1]))
+
+
 def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
                     dependencies: bool = True, sync_environment: Path | None = None,
-                    wheel_environment: Mapping[str, str] | None = None) -> tuple[bytes, str] | None:
-    from ..components import record_web_source, web_fingerprints
+                    wheel_environment: Mapping[str, str] | None = None,
+                    prepared_web: _PreparedDashboard | None = None) -> tuple[bytes, str] | None:
+    from ..components import web_fingerprints
 
     if wheel:
         if wheel_environment is None:
@@ -1159,6 +1192,8 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
                 shutil.rmtree(staged, ignore_errors=True)
         _install_wheel(host, source, dependencies=dependencies, environment=wheel_environment)
         return None
+    if build_web and prepared_web is None:
+        raise ServiceError("the dashboard must be prepared before installing the checkout")
     if dependencies and sync_environment is None:
         sync_environment = _checkout_sync_environment(host)
     _checked(host, ["git", "-C", str(host.cwd), "merge", "--ff-only", source], installing=True)
@@ -1170,20 +1205,8 @@ def _install_target(host: Host, source: str, *, wheel: bool, build_web: bool,
                  env={**_tool_environment(host), "UV_PROJECT_ENVIRONMENT": str(sync_environment)})
     if not build_web:
         return None
-    web = host.cwd / "web"
-    staged = Path(tempfile.mkdtemp(prefix=".dist-upgrade-", dir=web))
-    try:
-        _checked(host, ["npm", "ci", "--prefix", str(web)], installing=True, env=_tool_environment(host))
-        _checked(host, ["env", f"PYTHON={host.executable}", "npm", "run", "build", "--prefix", str(web),
-                        "--", "--outDir", str(staged)], installing=True, env=_tool_environment(host))
-        if not (staged / "index.html").is_file():
-            raise ServiceError("the dashboard build did not produce index.html")
-        record_web_source(host.cwd, staged)
-        expected = ((staged / "index.html").read_bytes(), web_fingerprints(staged)[1])
-        _swap_directory(staged, web / "dist")
-        return expected
-    finally:
-        shutil.rmtree(staged, ignore_errors=True)
+    _swap_directory(prepared_web.directory, host.cwd / "web/dist")
+    return prepared_web.expected
 
 
 def _deploy_report(report: dict, log_path: Path | None) -> str:
@@ -1240,7 +1263,8 @@ def _deployment_signals():
 @_deployment_signals()
 def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path: Path | None,
                   plan, running, target, installer, timeout: float, drain_timeout: float,
-                  no_force: bool, turns_timeout: float = 180) -> str:
+                  no_force: bool, turns_timeout: float = 180,
+                  prepare: Callable[[], None] | None = None) -> str:
     from ..components import Manifest
     from ..upgrade import UpgradeKind
 
@@ -1268,7 +1292,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
         return ServiceError(f"port {port} is served by another process{owner}; not starting a second server")
 
     report = {"plan": plan.kind.value, "reasons": list(plan.reasons), "drain_seconds": 0.0,
-              "gap_seconds": 0.0, "interrupted": [], "kept_before": 0, "adopted": 0,
+              "prepare_seconds": 0.0, "gap_seconds": 0.0, "interrupted": [], "kept_before": 0, "adopted": 0,
               "running_code_fingerprint": running.components["control_plane"],
               "installed_package_version": running.version, "status": "failed"}
     if control_plane:
@@ -1280,6 +1304,12 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
         raise ServiceError("the service manager has no running PID; cannot confirm exit before installing or restarting")
     try:
         expected = None
+        if prepare is not None:
+            started = host.clock()
+            try:
+                prepare()
+            finally:
+                report["prepare_seconds"] = round(host.clock() - started, 3)
         if plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE):
             started = host.clock()
             # Mark the attempt first: a lost response may still have begun draining.
@@ -1593,10 +1623,19 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
                 "changed    " + (", ".join(plan.changed_components) or "none"),
                 *((f"keepers    on ({len(keepers)} live)",) if keeper_on else ()),
                 *("reason     " + reason for reason in plan.reasons)))
-        return _execute_plan(host, mgr, port=port, root=root, log_path=log_path, plan=plan,
-            running=running, target=target,
-            installer=lambda: _install_target(host, source, wheel=wheel, build_web="web" in plan.changed_components,
-                dependencies=dependencies, sync_environment=sync_environment, wheel_environment=wheel_environment),
-            timeout=timeout, drain_timeout=drain_timeout, turns_timeout=turns_timeout, no_force=no_force)
+        with ExitStack() as preparation:
+            prepared_web = None
+
+            def prepare() -> None:
+                nonlocal prepared_web
+                prepared_web = preparation.enter_context(_prepare_checkout_dashboard(host, source))
+
+            build_web = "web" in plan.changed_components
+            return _execute_plan(host, mgr, port=port, root=root, log_path=log_path, plan=plan,
+                running=running, target=target, prepare=prepare if build_web and not wheel else None,
+                installer=lambda: _install_target(host, source, wheel=wheel, build_web=build_web,
+                    dependencies=dependencies, sync_environment=sync_environment, wheel_environment=wheel_environment,
+                    prepared_web=prepared_web),
+                timeout=timeout, drain_timeout=drain_timeout, turns_timeout=turns_timeout, no_force=no_force)
     except (ValueError, KeyError, zipfile.BadZipFile) as exc:
         raise ServiceError(str(exc)) from exc

@@ -4631,6 +4631,16 @@ upgrade refuses. With keeper mode off, previews and full-drain reports retain
 their existing behavior. The upgrade refuses unless it runs with the service's
 own `looper` and checkout.
 
+For source checkouts, an upgrade that changes the dashboard exports the target
+commit's web sources and fingerprint hook into a temporary directory, installs
+the npm dependencies and builds the dashboard before draining or stopping the
+service. The live `web/dist` stays untouched; a failed build leaves the service
+running and the checkout unchanged. The stopped interval contains the fast-forward
+merge, the required Python dependency sync and publication of the prepared
+dashboard by atomic directory swap. Upgrade reports and logs separate this build
+time as `prepare_seconds` from the service's `gap_seconds`. Wheel installs keep
+their existing behavior.
+
 A `CONTROL_PLANE` upgrade begins a turns drain with `--drain-timeout` as the
 server deadline. While any run is not keepable, that deadline applies; once
 only turns block, the CLI enforces `--turns-timeout`, measured from the start
