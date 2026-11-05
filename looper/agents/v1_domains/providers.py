@@ -19,7 +19,7 @@ PROVIDER_PATCH = {**_object(_FIELDS, [], closed=True), "minProperties": 1,
                   "anyOf": [{"required": [name]} for name in _FIELDS]}
 COMPACT_PROVIDER = _object({name: PROVIDER["properties"][name] for name in (
     "provider_id", "name", "vendor_type", "auth", "endpoints", "model_count",
-    "profile_count", "builtin", "login", "max_concurrency")}, closed=True)
+    "profile_count", "builtin", "enabled", "login", "max_concurrency")}, closed=True)
 COMPACT_PROVIDER["properties"]["api_key"] = _STR
 _WARNINGS = {"warnings": _array(_STR)}
 _PROVIDER_RESULT = _object({"provider": PROVIDER, **_WARNINGS}, closed=True)
@@ -53,6 +53,8 @@ OPERATIONS = (
         PROVIDER_CREATE, _PROVIDER_RESULT),
     _op("update", "Update a provider account; omitted or *** keys keep, null clears; operator only.",
         _object({"provider_id": _STR, "fields": PROVIDER_PATCH}, closed=True), _PROVIDER_RESULT),
+    _op("set_enabled", "Enable or disable a provider account, built-in ones too; operator only.",
+        _object({"provider_id": _STR, "enabled": _BOOL}, closed=True), _PROVIDER_RESULT),
     _op("delete", "Delete an unused, non-builtin provider account; operator only.",
         _object({"provider_id": _STR}, closed=True), _object({"deleted": _STR}, closed=True), "high"),
     _op("clear_login_problem", "Use the selected runtime login again; operator only.",
@@ -76,6 +78,8 @@ async def run(server, operation, arguments, principal, headers):
             return await profile_registry.create_provider(arguments)
         if action == "update":
             return await profile_registry.update_provider(arguments["provider_id"], arguments["fields"])
+        if action == "set_enabled":
+            return await profile_registry.set_provider_enabled(arguments["provider_id"], arguments["enabled"])
         if action == "delete":
             return await profile_registry.delete_provider(arguments["provider_id"])
         return await profile_registry.clear_login_problem(arguments["provider_id"])

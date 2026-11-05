@@ -36,8 +36,9 @@ async def _ok(chat, tool_name, **arguments):
 def test_model_reference_schema_and_fixed_descriptions():
     providers, models = _tool("looper_providers"), _tool("looper_models")
     assert providers.schema["properties"]["action"]["enum"] == ["list", "register", "update"]
+    assert providers.schema["properties"]["enabled"]["type"] == "boolean"
     assert providers.description == ("LLM accounts: list vendors and accounts; register an API-key account "
-        "without its key; update an account's name, endpoints, env or max_concurrency. "
+        "without its key; update an account's name, endpoints, env, max_concurrency or enabled. "
         "Never take or pass a key; the user enters it on the dashboard.")
     assert models.description == ("LLM models: list (optionally compatible with a runtime); create; update "
         "settings; delete an unused model with confirmation. A model is one provider, exact name and "

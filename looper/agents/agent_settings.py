@@ -826,11 +826,13 @@ async def _with_api_key(settings: AgentSettings) -> tuple[AgentSettings, str | N
 
 def profile_problem(profile: AgentProfile, role: AgentType) -> str | None:
     """Why ``profile`` cannot run ``role`` now, checked as when it was selected; None when it can."""
-    from .profile_registry import RegistryError, check_pairing, check_roles
+    from .profile_registry import RegistryError, check_pairing, check_roles, disabled_problem
     from .runtimes import ADAPTERS
 
     if isinstance(profile, AgentProfile) and not isinstance(profile, ResolvedAgentProfile):
         return f"Agent Profile {profile.name!r} cannot run: its model binding is missing or invalid"
+    if isinstance(profile, ResolvedAgentProfile) and (problem := disabled_problem(profile.resolved_model.provider)):
+        return f"Agent Profile {profile.name!r} cannot run: {problem}"
     if profile.runtime.type not in ADAPTERS:
         return (f"Agent Profile {profile.name!r} runs on a {profile.runtime.type!r} runtime, which this version "
                 "cannot run")

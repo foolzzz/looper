@@ -40,7 +40,7 @@ const PROFILE: api.AgentProfile = {
   profile_id: "profile", name: "Profile", model_id: "model", effort: null, agent_teams: false, custom_prompt: "",
   model: { model_id: "model", name: "Model", protocol: "anthropic-messages", provider_id: "provider" },
   runtime_id: "runtime", runtime_name: "Claude Code", runtime_type: "claude-code", builtin: false,
-  provider: { provider_id: "provider", name: "Provider", vendor_type: "custom", auth: "api_key" },
+  provider: { provider_id: "provider", name: "Provider", vendor_type: "custom", auth: "api_key", enabled: true },
   roles: ["manager"], used_by: { layers: [], task_count: 0, schedule_count: 0, allowed_in: [] },
   warnings: [], cost: { source: "runtime", equivalent: false, unpriced: [] },
 };

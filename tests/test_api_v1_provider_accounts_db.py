@@ -167,7 +167,8 @@ def test_compact_client_results_are_exact_and_still_refuse_keys(tmp_path, monkey
             provider = answer["result"]["provider"]
             pid = provider["provider_id"]
             assert set(provider) == {"provider_id", "name", "vendor_type", "auth", "endpoints", "model_count",
-                                     "profile_count", "builtin", "login", "max_concurrency", "api_key"}
+                                     "profile_count", "builtin", "enabled", "login", "max_concurrency", "api_key"}
+            assert provider["enabled"] is True
             assert provider["api_key"].startswith("missing:")
             status, answer = await call("ops.providers.update", {"provider": pid, "api_key": SECRET}, client=True)
             assert status == 403 and answer["error"]["code"] == "forbidden", answer

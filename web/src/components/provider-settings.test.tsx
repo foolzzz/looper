@@ -28,7 +28,7 @@ const VENDORS: VendorType[] = [
 const account = (changes: Partial<Provider> = {}): Provider => ({
   provider_id: "account-1", name: "Saved account", vendor_type: "deepseek", auth: "api_key",
   oauth_runtime_type: null, endpoints: [endpoint("openai-chat", "https://saved.invalid/v2")],
-  env: [], max_concurrency: 3, api_key: "***", builtin: false, login: null, suggested_models: [],
+  env: [], max_concurrency: 3, api_key: "***", builtin: false, enabled: true, login: null, suggested_models: [],
   endpoint_count: 1, model_count: 2, profile_count: 4, created_at: "", updated_at: "", ...changes,
 });
 const registry = (): Registry => ({
@@ -56,7 +56,7 @@ beforeEach(() => {
     }
     const path = String(input);
     expect(init?.method).toBe("POST");
-    expect(path).toMatch(/^\/api\/v1\/provider_accounts\/(create|update|delete|clear_login_problem|fetch_models)$/);
+    expect(path).toMatch(/^\/api\/v1\/provider_accounts\/(create|update|delete|clear_login_problem|set_enabled|fetch_models)$/);
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     requests.push({ path, body });
     if (path.endsWith("/fetch_models")) return Response.json({ status: "ok", result: { provider_id: body.provider_id,
@@ -69,7 +69,9 @@ beforeEach(() => {
       data = { ...data, providers: data.providers.filter((provider) => provider.provider_id !== body.provider_id) };
       return Response.json({ status: "ok", result: { deleted: body.provider_id } });
     }
-    const saved: Provider = path.endsWith("/clear_login_problem")
+    const saved: Provider = path.endsWith("/set_enabled")
+      ? { ...data.providers.find((provider) => provider.provider_id === body.provider_id)!, enabled: body.enabled }
+      : path.endsWith("/clear_login_problem")
       ? { ...data.providers.find((provider) => provider.provider_id === body.provider_id)!, login: { state: "chatgpt", detail: "ChatGPT login" } }
       : account({ ...fields, auth: VENDORS.find((v) => v.vendor_type === fields.vendor_type)?.auth ?? "api_key", api_key: fields.api_key === null ? null : "***" } as Partial<Provider>);
     data = { ...data, providers: [saved] };
@@ -128,7 +130,7 @@ it("offers custom and built-in vendors together and starts a blank custom accoun
 });
 
 it("prefills all vendor endpoints once, saves their own URLs and never submits suggested models", async () => {
-  data.models = [{ model_id: "model-1", provider_id: "account-1", provider_name: "Saved account",
+  data.models = [{ model_id: "model-1", provider_id: "account-1", provider_name: "Saved account", provider_enabled: true,
     name: "separate-model", protocol: "openai-chat", context_window: 100000, efforts: null, background_model: null,
     input_usd_per_mtok: 2, output_usd_per_mtok: null, cache_read_usd_per_mtok: null, cache_write_usd_per_mtok: null,
     catalog_order: 0, builtin: false, profile_count: 1, endpoint: endpoint("openai-chat", "https://saved.invalid/v2"),
@@ -460,6 +462,49 @@ it("stops checking the Cursor login when the last registry consumer unmounts", a
   await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
   expect(registryReads).toBe(1);
   expect(vi.getTimerCount()).toBe(0);
+});
+
+it("disables with confirmation, preserves selections and displays effects until acknowledged", async () => {
+  data.providers = [account()];
+  const confirmed = vi.fn(() => true); vi.stubGlobal("confirm", confirmed);
+  warnings = ["Agent Profile 'worker' is selected by the defaults of every role: its runs will not start"];
+  await render(false); await click("Enable provider Saved account");
+  expect(confirmed).toHaveBeenCalledWith('Disable provider "Saved account"? 4 Agent Profile(s) use it. They keep their selections, but their runs will not start until you enable it again.');
+  expect(requests).toEqual([{ path: "/api/v1/provider_accounts/set_enabled", body: { provider_id: "account-1", enabled: false } }]);
+  expect(container.querySelector('[role="switch"]')!.getAttribute("aria-checked")).toBe("false");
+  expect(container.textContent).toContain("Disabled: its Agent Profiles do not run");
+  expect([...container.querySelectorAll("span")].some((item) => item.textContent === "Disabled")).toBe(true);
+  expect(container.querySelector('[role="status"]')!.textContent).toContain("Disabled, with these effects:");
+  expect(container.querySelector('[role="status"]')!.textContent).toContain(warnings[0]);
+  await click("OK"); expect(container.querySelector('[role="status"]')).toBeNull();
+  await click("Enable provider Saved account");
+  expect(confirmed).toHaveBeenCalledTimes(1);
+  expect(requests[1].body).toEqual({ provider_id: "account-1", enabled: true });
+  expect(container.textContent).not.toContain("Disabled: its Agent Profiles do not run");
+});
+
+it("does not disable when the confirmation is cancelled", async () => {
+  data.providers = [account()]; vi.stubGlobal("confirm", vi.fn(() => false));
+  await render(false); await click("Enable provider Saved account");
+  expect(requests).toEqual([]);
+  expect(container.querySelector('[role="switch"]')!.getAttribute("aria-checked")).toBe("true");
+});
+
+it("toggles a built-in provider without profiles without confirmation", async () => {
+  data.providers = [account({ builtin: true, profile_count: 0 })];
+  const confirmed = vi.fn(); vi.stubGlobal("confirm", confirmed);
+  await render(false); await click("Enable provider Saved account");
+  expect(confirmed).not.toHaveBeenCalled();
+  expect(requests[0]).toEqual({ path: "/api/v1/provider_accounts/set_enabled", body: { provider_id: "account-1", enabled: false } });
+  expect(container.querySelector('[aria-label="Edit provider Saved account"]')).toBeNull();
+});
+
+it("keeps the provider enabled and shows a failed transition's error", async () => {
+  data.providers = [account({ profile_count: 0 })]; failure = "provider update failed";
+  await render(false); await click("Enable provider Saved account");
+  expect(container.querySelector('[role="switch"]')!.getAttribute("aria-checked")).toBe("true");
+  expect(container.querySelector('[role="alert"]')!.textContent).toBe(failure);
+  expect(container.querySelector('[role="status"]')).toBeNull();
 });
 
 it("offers on-demand model fetching only for API-key providers", async () => {

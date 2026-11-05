@@ -72,7 +72,7 @@ def test_released_registry_upgrades_cursor_checks_once(previous_login_schema):
             assert await connection.schema_change_pending(old)
             await connection.ensure_schema(old)
             await _assert_cursor_provider(old)
-            assert dict(await old.fetchrow("SELECT * FROM llm_providers WHERE id='saved'")) == before
+            assert dict(await old.fetchrow("SELECT * FROM llm_providers WHERE id='saved'")) == {**before, "enabled": True}
             await connection.ensure_schema(fresh)
             assert await structure(old) == await structure(fresh)
             marker = await old.fetchrow("SELECT * FROM schema_migrations WHERE name='cursor_login'")
@@ -113,11 +113,13 @@ def test_released_registry_preserves_custom_cursor_login_name(previous_login_sch
                        "SELECT * FROM llm_provider_endpoints WHERE provider_id='saved-0'",
                        "SELECT * FROM llm_models WHERE id='model-saved'",
                        "SELECT * FROM agent_profiles WHERE id='saved-profile'"]
-            before = [await conn.fetch(query) for query in queries]
+            before = [[dict(row) for row in await conn.fetch(query)] for query in queries]
+            # The availability migration enables existing accounts without changing saved fields.
+            expected = [[{**row, "enabled": True} for row in before[0]], *before[1:]]
             for _ in range(2):  # Upgrade, then restart through the same startup path.
                 await connection.ensure_schema(conn)
                 await _assert_cursor_provider(conn)
-                assert [await conn.fetch(query) for query in queries] == before
+                assert [[dict(row) for row in await conn.fetch(query)] for query in queries] == expected
                 assert await conn.fetchval("SELECT name FROM llm_providers WHERE id='prov-cursor-login'") == (
                     f"cursor-login ({len(occupied_names)})")
                 assert not await connection.schema_change_pending(conn)

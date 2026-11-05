@@ -112,7 +112,7 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                         [*before[table], {"sequencename": "project_activity_seq_seq", "last_value": None}],
                         key=lambda row: row["sequencename"])
                 elif table in ("llm_providers", "llm_provider_endpoints", "llm_models"):
-                    # Only Cursor's new builtins may be added; every historical field stays intact.
+                    # Only Cursor's new builtins and enabled=True may be added; historical fields stay intact.
                     key = "id" if table == "llm_providers" else "provider_id"
                     cursor_rows = [r for r in after[table] if r[key] == "prov-cursor-login"]
                     expected = [r for r in fresh_rows[table] if r[key] == "prov-cursor-login"]
@@ -120,7 +120,9 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                     expected = [{**r, "created_at": upgraded_at, "updated_at": upgraded_at}
                                 if "created_at" in r else r for r in expected]
                     assert cursor_rows == expected, table
-                    assert [r for r in after[table] if r[key] != "prov-cursor-login"] == before[table], table
+                    historical = [{**r, "enabled": True} for r in before[table]] \
+                        if table == "llm_providers" else before[table]
+                    assert [r for r in after[table] if r[key] != "prov-cursor-login"] == historical, table
                 else:
                     assert after[table] == before[table], table
             assert json.loads(after["tasks"][0]["config"]) == {"worker": {"max_turns": 9}}

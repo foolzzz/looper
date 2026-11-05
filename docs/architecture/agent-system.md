@@ -1810,9 +1810,6 @@ Manager tools.
   it is not a new-account shortcut. Login endpoints have an empty URL managed
   by the CLI. Endpoint edits revalidate affected profiles in the same transaction;
   a referenced endpoint cannot be removed.
-  Saving an Anthropic endpoint removes trailing slashes and `/v1`; existing rows
-  are not rewritten, so a stored URL ending in `/v1` keeps its run behavior and
-  lists models at `<stored>/v1/models` until the endpoint is saved again.
 - **Models** (`llm_models`) have an opaque `model_id`, `provider_id`, exact
   `name` and one `protocol`. The identity triple is immutable: changing it
   requires another model and explicitly switching profiles. Settings are
@@ -1835,9 +1832,8 @@ Manager tools.
   Price views expose each field's `override`, `effective` and `source`
   (`override`, `builtin`, `unknown`). `null` falls back to the built-in price
   table; zero is an explicit free price. `models.add_many`, used by the
-  checklist and the dashboard's Add model form, defaults each omitted price to
-  `null` when the built-in table prices that field for the model name, and to
-  `0.0` otherwise. Explicit prices
+  checklist, defaults each omitted price to `null` when the built-in table
+  prices that field for the model name, and to `0.0` otherwise. Explicit prices
   are preserved. `models.create` keeps omitted prices `null`, with a built-in
   fallback or an unknown price when there is none. Zero-priced
   runs cost $0.00, add $0 to task and project totals, and never trigger spend

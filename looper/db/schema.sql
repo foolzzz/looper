@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS llm_providers (
             AND oauth_runtime_type = 'cursor-agent')
         OR (vendor_type NOT IN ('claude-subscription', 'codex-login', 'grok-login', 'cursor-login')
             AND auth = 'api_key' AND oauth_runtime_type IS NULL)
-    )
+    ),
+    -- false: its Agent Profiles do not run (refused at launch); nothing else changes.
+    enabled BOOLEAN NOT NULL DEFAULT true
 );
 CREATE TABLE IF NOT EXISTS llm_provider_secrets (
     provider_id  TEXT PRIMARY KEY REFERENCES llm_providers(id) ON DELETE CASCADE,
