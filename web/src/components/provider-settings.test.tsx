@@ -239,6 +239,42 @@ it.each(["both", "openai-chat", "openai-responses"])("preserves simple URL and %
   expect(bodies[0].endpoints).toEqual(protocols.map((protocol) => endpoint(protocol as Provider["endpoints"][number]["protocol"], "https://changed.invalid/v1")));
 });
 
+it.each(["https://api.example.com/v1", "https://api.example.com/v1/"])("normalizes %s only in the simple Anthropic form", async (url) => {
+  await render(); await toggle("Anthropic"); await fill("Base URL *", url);
+  expect(container.textContent).toContain("Looper adds /v1/messages itself, so this is saved as https://api.example.com.");
+  await submit();
+  expect(bodies[0].endpoints).toEqual([endpoint("anthropic-messages", "https://api.example.com")]);
+});
+
+it("preserves the typed Anthropic URL when submitting per protocol", async () => {
+  await render(); await toggle("Anthropic");
+  await fill("Base URL *", "https://host/gateway/v1/");
+  await click("Set a URL per protocol instead");
+  expect(field("anthropic-messages URL").value).toBe("https://host/gateway/v1/");
+  expect(container.textContent).not.toContain("Looper adds /v1/messages itself");
+  await submit();
+  expect(bodies[0].endpoints).toEqual([endpoint("anthropic-messages", "https://host/gateway/v1/")]);
+});
+
+it("copies the typed URL to every protocol before a format is chosen", async () => {
+  await render(); await fill("Base URL *", "https://host/gateway/v1/");
+  await click("Set a URL per protocol instead");
+  for (const protocol of data.limits.protocols) expect(field(`${protocol} URL`).value).toBe("https://host/gateway/v1/");
+  await submit();
+  expect(bodies[0].endpoints).toEqual(data.limits.protocols.map((protocol) => endpoint(protocol as Provider["endpoints"][number]["protocol"], "https://host/gateway/v1/")));
+});
+
+it.each(["openai-chat", "openai-responses"])("keeps %s after clearing all protocol boxes", async (apis) => {
+  await render(); await toggle("OpenAI"); await fill("OpenAI APIs it serves", apis);
+  await fill("Base URL *", "https://host/gateway/v1");
+  await click("Set a URL per protocol instead"); await toggle(apis);
+  await click("Describe it by API format instead");
+  expect(field("OpenAI APIs it serves").value).toBe(apis);
+  expect(field("Base URL *").value).toBe("https://host/gateway/v1");
+  await submit();
+  expect(bodies[0].endpoints).toEqual([endpoint(apis as Provider["endpoints"][number]["protocol"], "https://host/gateway/v1")]);
+});
+
 it.each(["different URLs", "mixed formats"])("keeps editing per protocol for %s", async (configuration) => {
   await render(); await toggle("OpenAI"); await fill("Base URL *", "https://custom.invalid/v1");
   await click("Set a URL per protocol instead");

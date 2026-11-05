@@ -370,7 +370,9 @@ def listing_gateway():
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            status = 200 if self.path == "/v1/models" and self.headers.get("Authorization") == "Bearer test-key" else 401
+            authenticated = (self.headers.get("Authorization") == "Bearer test-key"
+                             or self.headers.get("x-api-key") == "test-key")
+            status = 200 if urlsplit(self.path).path == "/v1/models" and authenticated else 401
             body = json.dumps({"data": [{"id": name} for name in names]}).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -585,7 +587,7 @@ def test_anthropic_provider_edits_preserve_unchanged_url(dashboard_page, dashboa
     for name, changes, expected_url in (
         ("Legacy account", {"Name *": "Renamed account"}, stored_url),
         ("Renamed account", {"API key": SECRET}, stored_url),
-        ("Renamed account", {"anthropic-messages URL": "https://api.example.com/v1/"}, "https://api.example.com"),
+        ("Renamed account", {"anthropic-messages URL": "https://api.example.com/v1/"}, "https://api.example.com/v1/"),
     ):
         _row(page, name).get_by_role("button", name=f"Edit provider {name}", exact=True).click()
         form = page.get_by_role("form", name=f"Edit provider {name}", exact=True)
@@ -598,10 +600,45 @@ def test_anthropic_provider_edits_preserve_unchanged_url(dashboard_page, dashboa
         assert endpoint["base_url"] == expected_url
     _row(page, "Renamed account").get_by_role("button", name="Edit provider Renamed account", exact=True).click()
     form = page.get_by_role("form", name="Edit provider Renamed account", exact=True)
-    expect(form.get_by_label("anthropic-messages URL", exact=True)).to_have_value("https://api.example.com")
+    expect(form.get_by_label("anthropic-messages URL", exact=True)).to_have_value("https://api.example.com/v1/")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     assert SECRET not in page.content()
     form.screenshot(path=str(tmp_path / f"anthropic-provider-{width}.png"))
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("width", [1280, 768])
+def test_simple_anthropic_form_normalizes_before_submit(dashboard_page, dashboard_server, listing_gateway, tmp_path, width):
+    expect = pytest.importorskip("playwright.sync_api").expect
+    page, server = dashboard_page, dashboard_server
+    url, _ = listing_gateway
+    root = url.removesuffix("/v1")
+    page.set_viewport_size({"width": width, "height": 900})
+    _settings(page, server, "providers")
+    page.get_by_role("button", name="Add provider", exact=True).click()
+    form = page.get_by_role("form", name="Add a provider")
+    form.get_by_label("Name *", exact=True).fill("Anthropic gateway")
+    form.get_by_label("Base URL *", exact=True).fill(url + "/")
+    form.get_by_role("button", name="Set a URL per protocol instead", exact=True).click()
+    for protocol in ("anthropic-messages", "openai-responses", "openai-chat"):
+        expect(form.get_by_label(f"{protocol} URL", exact=True)).to_have_value(url + "/")
+    for protocol in ("openai-responses", "openai-chat"):
+        form.get_by_role("checkbox", name=protocol, exact=True).uncheck()
+    form.get_by_role("button", name="Describe it by API format instead", exact=True).click()
+    expect(form.get_by_role("radio", name="Anthropic", exact=True)).to_be_checked()
+    expect(form.get_by_text(f"Looper adds /v1/messages itself, so this is saved as {root}.", exact=True)).to_be_visible()
+    form.get_by_label("API key", exact=True).fill("test-key")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    form.screenshot(path=str(tmp_path / f"simple-anthropic-{width}.png"))
+    with page.expect_response(lambda response: response.url.endswith("/api/v1/provider_accounts/create")) as created:
+        form.get_by_role("button", name="Add provider", exact=True).click()
+    assert created.value.status == 200
+    assert created.value.request.post_data_json["endpoints"] == [
+        {"protocol": "anthropic-messages", "base_url": root, "use_runtime_default": False}]
+    provider = next(provider for provider in server.api.post("/api/v1/registry/view", {})["result"]["providers"]
+                    if provider["name"] == "Anthropic gateway")
+    assert provider["endpoints"][0]["base_url"] == root
+    expect(form.get_by_role("checkbox", name="gateway-alpha", exact=True)).to_be_visible()
 
 
 @pytest.mark.installed

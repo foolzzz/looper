@@ -174,12 +174,12 @@ def test_dsh_policy_profile_create_edit_and_provider_update_need_no_key(
         for effort in ("low", "high", "max", None):
             changed = (await _ok("PUT", f"/api/agent-profiles/{profile_id}", {"effort": effort}))["profile"]
             assert changed["effort"] == effort
-        # Saving a Messages endpoint removes the version suffix before readback.
+        # Saving a Messages endpoint preserves the version suffix on readback.
         changed = (await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider_id, "fields": {"endpoints": [
             {"protocol": "anthropic-messages", "base_url": "https://gateway.example/messages/v1/"}],
             "api_key": None,
         }}))["provider"]
-        assert changed["endpoints"][0]["base_url"] == "https://gateway.example/messages"
+        assert changed["endpoints"][0]["base_url"] == "https://gateway.example/messages/v1/"
         assert changed["api_key"] is None
         assert (await db.get_profile(profile_id))["model"]["name"] == model
 

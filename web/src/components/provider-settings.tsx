@@ -77,13 +77,18 @@ function simpleEndpoints(draft: ProviderDraft, registry: Registry): ProviderEndp
     .map(({ protocol }) => ({ protocol, base_url: draft.baseUrl, use_runtime_default: false }));
 }
 
+function simpleBaseUrl(draft: ProviderDraft): string {
+  const url = draft.baseUrl.trim();
+  return draft.format === "anthropic" ? url.replace(/\/v1\/?$/, "") : url;
+}
+
 function providerBody(draft: ProviderDraft, provider: Provider | null, registry: Registry): CreateProviderFields {
   const simple = !provider && draft.vendorType === "custom" && !draft.perProtocol;
   const fields: CreateProviderFields = {
     name: draft.name.trim(), vendor_type: draft.vendorType,
     endpoints: (simple ? simpleEndpoints(draft, registry) : draft.endpoints).map(({ protocol, base_url, use_runtime_default }) => {
       const previous = provider?.endpoints.find((endpoint) => endpoint.protocol === protocol);
-      const url = previous?.base_url === base_url ? base_url : base_url.trim();
+      const url = simple ? simpleBaseUrl(draft) : previous?.base_url === base_url ? base_url : base_url.trim();
       return { protocol, base_url: url, use_runtime_default: url ? false : use_runtime_default };
     }),
     env: envEntries(draft.env), max_concurrency: numberOrTyped(draft.maxConcurrency),
@@ -109,8 +114,8 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
   const keyStored = !!provider?.api_key;
   const needsConfirmation = !provider && !!vendor?.requires_url_confirmation;
   const simple = !provider && draft.vendorType === "custom" && !draft.perProtocol;
-  const trimmedUrl = draft.baseUrl.trim().replace(/\/+$/, "");
-  const displayUrl = (draft.format === "anthropic" ? trimmedUrl.replace(/\/v1$/, "") : trimmedUrl) || "<base URL>";
+  const simpleUrl = simpleBaseUrl(draft);
+  const displayUrl = simpleUrl.replace(/\/+$/, "") || "<base URL>";
   const openaiCalls = draft.openaiApis === "both"
     ? `${displayUrl}/responses or ${displayUrl}/chat/completions`
     : `${displayUrl}/${draft.openaiApis === "openai-responses" ? "responses" : "chat/completions"}`;
@@ -200,11 +205,17 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
           <Input id={`${id}-base-url`} className="font-mono" spellCheck={false} autoCapitalize="none" value={draft.baseUrl}
             onChange={(event) => set({ baseUrl: event.target.value })}
             placeholder={draft.format === "anthropic" ? "https://api.example.com/anthropic" : "https://api.example.com/v1"} />
+          {draft.format === "anthropic" && simpleUrl !== draft.baseUrl.trim() && <p className="break-words text-[11px] text-muted-foreground">
+            Looper adds /v1/messages itself, so this is saved as {simpleUrl}.
+          </p>}
           <p className="break-words text-[11px] text-muted-foreground">{draft.format === "anthropic"
             ? `Runs call ${displayUrl}/v1/messages; the model list is ${displayUrl}/v1/models.`
             : `Runs call ${openaiCalls}; the model list is ${displayUrl}/models.`}</p>
         </div>
-        <Button type="button" variant="ghost" size="sm" className="text-primary underline" onClick={() => set({ perProtocol: true, endpoints: simpleEndpoints(draft, registry) })}>
+        <Button type="button" variant="ghost" size="sm" className="text-primary underline" onClick={() => set({ perProtocol: true,
+          endpoints: !draft.format && draft.baseUrl.trim()
+            ? registry.limits.protocols.map((protocol) => ({ protocol: protocol as ProviderEndpoint["protocol"], base_url: draft.baseUrl, use_runtime_default: false }))
+            : simpleEndpoints(draft, registry) })}>
           Set a URL per protocol instead
         </Button>
       </> : <fieldset className="space-y-2">
@@ -244,7 +255,7 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
         const openai = draft.endpoints.filter((endpoint) => format?.protocols.some(({ protocol }) => protocol === endpoint.protocol));
         setValidationError("");
         set({ perProtocol: false, baseUrl: first?.base_url ?? draft.baseUrl, format: format?.family ?? draft.format,
-          openaiApis: format?.family === "openai" && openai.length === 1 ? first.protocol as ProviderDraft["openaiApis"] : "both" });
+          openaiApis: !first ? draft.openaiApis : format?.family === "openai" && openai.length === 1 ? first.protocol as ProviderDraft["openaiApis"] : "both" });
       }}>Describe it by API format instead</Button>}
       {needsConfirmation && <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <input type="checkbox" aria-label="Confirm endpoint URLs" className="h-4 w-4 accent-primary" checked={draft.urlsConfirmed}

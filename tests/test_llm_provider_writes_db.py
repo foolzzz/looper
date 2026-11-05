@@ -151,8 +151,8 @@ def test_provider_edit_preserves_unchanged_anthropic_url(monkeypatch, stored_url
 
         answer = await service.update_provider("prov-test", {"endpoints": [
             {"protocol": "anthropic-messages", "base_url": "https://api.example.com/v1/"}]})
-        assert answer["provider"]["endpoints"][0]["base_url"] == "https://api.example.com"
-        assert await pool.fetchval("SELECT base_url FROM llm_provider_endpoints WHERE provider_id = 'prov-test'") == "https://api.example.com"
+        assert answer["provider"]["endpoints"][0]["base_url"] == "https://api.example.com/v1/"
+        assert await pool.fetchval("SELECT base_url FROM llm_provider_endpoints WHERE provider_id = 'prov-test'") == "https://api.example.com/v1/"
 
     _run(test, monkeypatch)
 

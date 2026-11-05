@@ -275,12 +275,6 @@ class Endpoint:
     def from_entry(cls, entry: Mapping[str, Any]) -> Endpoint:
         return cls(**_entry_values(cls, entry))
 
-    def for_save(self) -> Endpoint:
-        """Store Messages roots once, without changing endpoints read from existing rows."""
-        if self.protocol is ApiProtocol.ANTHROPIC_MESSAGES:
-            return replace(self, base_url=self.base_url.rstrip("/").removesuffix("/v1"))
-        return self
-
     def check_provider(self, provider: ProviderSpec) -> None:
         if self.provider_id != provider.id:
             raise RegistryError("endpoint and provider must belong to the same account")
@@ -1365,8 +1359,6 @@ def _provider_fields(data: Mapping[str, Any], current: Mapping[str, Any] | None)
         if marker and not previous.get("use_runtime_default"):
             raise RegistryError("use_runtime_default is reserved for migrated endpoints")
         endpoint = Endpoint(provider_id, ApiProtocol(protocol), url, marker)
-        if not previous or url != previous["base_url"]:
-            endpoint = endpoint.for_save()
         endpoint.check_provider(spec)
         endpoints.append({"protocol": protocol, "base_url": endpoint.base_url, "use_runtime_default": marker})
     fields["endpoints"] = endpoints
