@@ -46,6 +46,7 @@ import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-
 import { TaskWorkspaceField, type WorkspaceChoice } from "@/components/task-workspace-field";
 import { TaskDetailRoute } from "./task-detail";
 
+// Chip order only; the backend defines the statuses each filter covers and counts them.
 const STATUS_FILTERS = [
   "all", "init", "running", "waiting", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
 ] as const;
@@ -519,7 +520,6 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
       alive = false;
     };
   }, [nameKnown, loading, scheduleFilter]);
-  const filtered = filter === "all" ? projectTasks : projectTasks.filter((t) => t.status === filter);
   // Every task under the URL's filters, not only the pages loaded.
   const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
   const shownTotal = filter === "all" ? total : counts[filter] || 0;
@@ -721,7 +721,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         <div className="flex h-64 items-center justify-center">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
-      ) : filtered.length === 0 ? (
+      ) : projectTasks.length === 0 ? (
         <div className="flex h-64 items-center justify-center">
           <p className="text-sm text-muted-foreground">
             {filter !== "all"
@@ -735,7 +735,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         </div>
       ) : (
         <div className="rounded-lg border border-border bg-card divide-y divide-border">
-          {filtered.map((task) => (
+          {projectTasks.map((task) => (
             <div
               key={task.task_id}
               className="px-5 py-4 cursor-pointer hover:bg-muted/50 transition-colors"
@@ -882,10 +882,10 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
           ))}
         </div>
       )}
-      {!loading && filtered.length > 0 && (nextBefore || filtered.length < shownTotal) && (
+      {!loading && projectTasks.length > 0 && (nextBefore || projectTasks.length < shownTotal) && (
         <div className="flex flex-wrap items-center justify-center gap-3 text-xs text-muted-foreground">
           <span>
-            Showing {filtered.length} of {shownTotal}
+            Showing {projectTasks.length} of {shownTotal}
           </span>
           {nextBefore && (
             <Button type="button" variant="outline" size="sm" onClick={loadMore} disabled={loadingMore} className="h-11 sm:h-8">
