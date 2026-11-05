@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.86] - 2026-11-05
+
+### Changed
+
+- **The Agent Runtimes page shows the new rows and runtime.** TTADK rows (`ttadk-codex`, `ttadk-cursoragent`) are listed with their row name and a TTADK badge, the Cursor Agent card says its runs use the operator's own Cursor login and `HOME`, so the personal Cursor and Claude Code configuration applies and cannot be turned off, and the top banner now also shows the `cursor_login` and `ttadk` doctor failures. The Agent Profile runtime dropdown pairs a model with a runtime by the authentication kinds that runtime's launcher accepts. Dashboard only; `loopercli` and the Manager's tools need no change. ([#1107](https://github.com/foolzzz/looper/pull/1107))
+
 ## [2.14.85] - 2026-11-05
 
 ### Added
