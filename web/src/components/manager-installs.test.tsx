@@ -50,7 +50,7 @@ const registry = (runtimeType = "claude-code", capabilities: string[] = ["claude
     executable: "", default_executable: null, path: null, protocols: [], version: null, capabilities,
     roles: ["manager"], auth_kinds: ["api_key"], probed_at: null, probe_error: null, builtin: false, profile_count: 1 }],
   runtime_types: [], providers: [], models: [], vendor_types: [], prices: { as_of: "", sources: [], models: {} },
-  limits: { model_fields: [], name_max_chars: 100, models_max: 10, price_fields: [], protocols: [], auth_kinds: [],
+  limits: { api_formats: [{ family: "anthropic", label: "Anthropic", protocols: [{ protocol: "anthropic-messages", label: "Anthropic Messages" }] }, { family: "openai", label: "OpenAI", protocols: [{ protocol: "openai-responses", label: "OpenAI Responses" }, { protocol: "openai-chat", label: "OpenAI Chat Completions" }] }],  model_fields: [], name_max_chars: 100, models_max: 10, price_fields: [], protocols: [], auth_kinds: [],
     effort_levels: [], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [] },
     secret_mask: "", provider_env_owned: [] },
 });

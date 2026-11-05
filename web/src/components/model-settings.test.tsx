@@ -43,7 +43,7 @@ beforeEach(() => {
       suggested_models: [{ name: "vendor-exact", protocol: "openai-chat", context_window: 128000, efforts: [], input_usd_per_mtok: 0 },
         { name: "vendor-exact", protocol: "anthropic-messages", context_window: 1000000, background_model: "vendor-small" }] }],
     prices: { as_of: "", sources: [], models: {} },
-    limits: { name_max_chars: 100, models_max: 50, price_fields: PRICE_FIELDS, model_fields: [],
+    limits: { api_formats: [{ family: "anthropic", label: "Anthropic", protocols: [{ protocol: "anthropic-messages", label: "Anthropic Messages" }] }, { family: "openai", label: "OpenAI", protocols: [{ protocol: "openai-responses", label: "OpenAI Responses" }, { protocol: "openai-chat", label: "OpenAI Chat Completions" }] }],  name_max_chars: 100, models_max: 50, price_fields: PRICE_FIELDS, model_fields: [],
       protocols: ["openai-chat", "anthropic-messages", "openai-responses"], auth_kinds: ["api_key", "oauth"],
       effort_levels: ["low", "high"], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [] },
       secret_mask: "***", provider_env_owned: [] },

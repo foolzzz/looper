@@ -161,7 +161,7 @@ async def get_model(model_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | 
 
 
 async def get_api_key(provider_id: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> str | None:
-    """A provider's API key, for the launch that uses it; None without one."""
+    """A provider's API key, for a launch or a model listing; None without one."""
     pool = pool or get_pool()
     return await pool.fetchval("SELECT api_key FROM llm_provider_secrets WHERE provider_id = $1", provider_id)
 

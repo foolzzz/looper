@@ -15,6 +15,7 @@ import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { useAction } from "@/lib/use-action";
 import { useRegistry } from "@/lib/use-registry";
 import { useSettingsTarget } from "@/lib/settings-target";
+import { ProviderModelPicker } from "@/components/provider-model-picker";
 import { ModelsSection } from "@/components/model-settings";
 
 const usedBy = (count: number) =>
@@ -84,6 +85,7 @@ function providerBody(draft: ProviderDraft, provider: Provider | null, registry:
 function ProviderForm({ provider, registry, onDone }: { provider: Provider | null; registry: Registry; onDone: () => void }) {
   const id = useId();
   const [draft, setDraft] = useState<ProviderDraft>(() => providerDraft(provider));
+  const [savedProvider, setSavedProvider] = useState<Provider | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [validationError, setValidationError] = useState("");
   const action = useAction();
@@ -108,9 +110,17 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
     if (!done || !result) return;
     // Do not retain a submitted secret while showing a server warning.
     set({ apiKey: "" });
-    if (result.warnings.length) setWarnings(result.warnings);
-    else onDone();
+    setWarnings(result.warnings);
+    if (!provider && result.provider.auth === "api_key") setSavedProvider(result.provider);
+    else if (!result.warnings.length) onDone();
   };
+
+  if (savedProvider) return <form onSubmit={(event) => event.preventDefault()} aria-label="Add a provider" className="space-y-3">
+    {warnings.length > 0 && <div role="status" className="space-y-1 text-xs text-warning">
+      <p className="font-medium">Saved, with a warning:</p>{warnings.map((warning) => <p key={warning}>{warning}</p>)}
+    </div>}
+    <ProviderModelPicker provider={savedProvider} registry={registry} intro={`Saved. Tick the models ${savedProvider.name} offers to add them:`} onDone={onDone} />
+  </form>;
 
   return (
     <form onSubmit={save} aria-label={provider ? `Edit provider ${provider.name}` : "Add a provider"} className="space-y-3">
@@ -251,6 +261,7 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
       setWarnings(result.warnings);
     });
   };
+  const [fetching, setFetching] = useState(false);
   // An import's "secrets to fill in" links here (#settings/providers/<id>) to open the form.
   const ref = useSettingsTarget<HTMLLIElement>("provider", provider.provider_id, () => setEditing(!provider.builtin));
   const action = useAction();
@@ -276,6 +287,9 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
       actions={
         <>
           <Switch checked={provider.enabled} label={`Enable provider ${provider.name}`} disabled={toggle.busy} onChange={setEnabled} />
+          {provider.auth === "api_key" && <Button type="button" size="sm" variant="ghost"
+            aria-label={`Fetch the models of provider ${provider.name}`} aria-expanded={fetching}
+            onClick={() => setFetching(!fetching)}>Fetch models</Button>}
           <Button type="button" size="sm" variant="ghost" aria-label={`Models for provider ${provider.name}`}
             aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>Models</Button>
           {!provider.builtin && (
@@ -299,6 +313,7 @@ function ProviderRow({ provider, registry }: { provider: Provider; registry: Reg
               <ProviderForm provider={provider} registry={registry} onDone={() => setEditing(false)} />
             </div>
           )}
+          {fetching && <div className={EDIT_BOX}><ProviderModelPicker provider={provider} registry={registry} onDone={() => setFetching(false)} /></div>}
           {expanded && <div className="pt-2"><ModelsSection provider={provider} registry={registry} /></div>}
         </>
       }

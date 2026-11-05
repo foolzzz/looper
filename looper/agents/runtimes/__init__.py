@@ -82,12 +82,32 @@ if TYPE_CHECKING:
     from .ttadk import TtadkProblem
 
 
+class ApiFamily(str, Enum):
+    """The wire format shared by protocols that use one provider model list."""
+
+    ANTHROPIC = "anthropic"
+    OPENAI = "openai"
+
+    @property
+    def label(self) -> str:
+        return {self.ANTHROPIC: "Anthropic", self.OPENAI: "OpenAI"}[self]
+
+
 class ApiProtocol(str, Enum):
     """The LLM API an agent's requests speak; a runtime speaks some, a provider serves some."""
 
     ANTHROPIC_MESSAGES = "anthropic-messages"
     OPENAI_RESPONSES = "openai-responses"
     OPENAI_CHAT = "openai-chat"
+
+    @property
+    def family(self) -> ApiFamily:
+        return ApiFamily.ANTHROPIC if self is self.ANTHROPIC_MESSAGES else ApiFamily.OPENAI
+
+    @property
+    def label(self) -> str:
+        return {self.ANTHROPIC_MESSAGES: "Anthropic Messages", self.OPENAI_RESPONSES: "OpenAI Responses",
+                self.OPENAI_CHAT: "OpenAI Chat Completions"}[self]
 
 
 class AuthKind(str, Enum):

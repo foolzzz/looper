@@ -2914,6 +2914,7 @@ export interface RegistryLimits {
   model_fields: string[];
   price_fields: PriceField[];
   protocols: string[];
+  api_formats: ApiFormat[];
   auth_kinds: ProviderAuth[];
   effort_levels: string[];
   /** The runtime capabilities each role needs. */
@@ -2922,6 +2923,13 @@ export interface RegistryLimits {
   secret_mask: string;
   /** Variables a provider's env cannot set: the runtimes' bindings set them. */
   provider_env_owned: string[];
+}
+
+export type ApiFamily = "anthropic" | "openai";
+export interface ApiFormat {
+  family: ApiFamily;
+  label: string;
+  protocols: { protocol: ApiProtocol; label: string }[];
 }
 
 export type ApiProtocol = "anthropic-messages" | "openai-chat" | "openai-responses";
@@ -3054,6 +3062,30 @@ export type ModelFields = Partial<Record<PriceField | "context_window", number |
 /** A model's account, exact name and protocol are immutable after creation. */
 export type CreateModelFields = ModelFields & Pick<Model, "provider_id" | "name" | "protocol">;
 
+export interface ListedModel {
+  name: string;
+  context_window: number | null;
+  registered: ApiProtocol[];
+  builtin_price: boolean;
+  addable: boolean;
+  problem: string | null;
+}
+
+export interface ModelListing {
+  family: ApiFamily;
+  base_url: string;
+  protocols: ApiProtocol[];
+  state: "listed" | "failed" | "skipped";
+  problem: string | null;
+  truncated: boolean;
+  models: ListedModel[];
+}
+
+export function protocolLabel(registry: Registry, protocol: ApiProtocol): string {
+  return registry.limits.api_formats.flatMap((format) => format.protocols)
+    .find((item) => item.protocol === protocol)?.label ?? protocol;
+}
+
 export interface PromptBlock {
   name: string;
   owner: "looper" | "runtime";
@@ -3097,6 +3129,23 @@ export async function createProvider(fields: CreateProviderFields): Promise<{ pr
   const result = await callV1<{ provider: Provider; warnings: string[] }>("/api/v1/provider_accounts/create", fields);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  return result;
+}
+
+export async function fetchProviderModels(providerId: string): Promise<{ provider_id: string; listings: ModelListing[] }> {
+  const result = await callV1<{ provider_id: string; listings: ModelListing[] }>("/api/v1/provider_accounts/fetch_models",
+    { provider_id: providerId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function addModels(providerId: string, models: Omit<CreateModelFields, "provider_id">[]): Promise<{
+  models: Model[]; skipped: { name: string; protocol: ApiProtocol; reason: string }[]; warnings: string[];
+}> {
+  const result = await callV1<{ models: Model[]; skipped: { name: string; protocol: ApiProtocol; reason: string }[]; warnings: string[] }>(
+    "/api/v1/models/add_many", { provider_id: providerId, models: models.map(modelSettings) });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  if (result.models.length) window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
   return result;
 }
 

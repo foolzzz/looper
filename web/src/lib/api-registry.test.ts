@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { fetchRegistry, probeRuntime, REGISTRY_CHANGED_EVENT } from "@/lib/api";
+import { addModels, fetchProviderModels, fetchRegistry, probeRuntime, REGISTRY_CHANGED_EVENT } from "@/lib/api";
 import { resetSessionGuard } from "@/lib/session";
 
 beforeEach(() => resetSessionGuard());
@@ -49,4 +49,32 @@ it.each([404, 409, 202])("keeps HTTP %s probe failures or pending results from a
     expect(event).not.toHaveBeenCalled();
     expect(fetcher).toHaveBeenCalledTimes(1);
   } finally { window.removeEventListener(REGISTRY_CHANGED_EVENT, event); }
+});
+
+it("fetches models with only the stored provider id and without a registry mutation", async () => {
+  const result = { provider_id: "provider", listings: [] };
+  const fetcher = vi.fn(async () => Response.json({ status: "ok", result }));
+  vi.stubGlobal("fetch", fetcher);
+  const changed = vi.fn(); window.addEventListener(REGISTRY_CHANGED_EVENT, changed);
+  try {
+    await expect(fetchProviderModels("provider")).resolves.toEqual(result);
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/v1/provider_accounts/fetch_models", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ provider_id: "provider" }),
+    }));
+    expect(changed).not.toHaveBeenCalled();
+  } finally { window.removeEventListener(REGISTRY_CHANGED_EVENT, changed); }
+});
+
+it.each([true, false])("announces a bulk addition only when models were added (%s)", async (added) => {
+  const result = { models: added ? [{ name: "custom-model" }] : [], skipped: [], warnings: [] };
+  const fetcher = vi.fn(async () => Response.json({ status: "ok", result }));
+  vi.stubGlobal("fetch", fetcher);
+  const changed = vi.fn(); window.addEventListener(REGISTRY_CHANGED_EVENT, changed);
+  try {
+    await expect(addModels("provider", [{ name: "custom-model", protocol: "openai-chat" }])).resolves.toEqual(result);
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/v1/models/add_many", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ provider_id: "provider", models: [{ name: "custom-model", protocol: "openai-chat" }] }),
+    }));
+    expect(changed).toHaveBeenCalledTimes(added ? 1 : 0);
+  } finally { window.removeEventListener(REGISTRY_CHANGED_EVENT, changed); }
 });

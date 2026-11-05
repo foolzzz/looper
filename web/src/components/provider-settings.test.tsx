@@ -34,7 +34,7 @@ const account = (changes: Partial<Provider> = {}): Provider => ({
 const registry = (): Registry => ({
   runtime_types: [], runtimes: [], providers: [], models: [], profiles: [], vendor_types: VENDORS,
   prices: { as_of: "", sources: [], models: {} },
-  limits: { name_max_chars: 100, models_max: 50, price_fields: [], model_fields: [],
+  limits: { api_formats: [{ family: "anthropic", label: "Anthropic", protocols: [{ protocol: "anthropic-messages", label: "Anthropic Messages" }] }, { family: "openai", label: "OpenAI", protocols: [{ protocol: "openai-responses", label: "OpenAI Responses" }, { protocol: "openai-chat", label: "OpenAI Chat Completions" }] }],  name_max_chars: 100, models_max: 50, price_fields: [], model_fields: [],
     protocols: ["anthropic-messages", "openai-chat", "openai-responses"], auth_kinds: ["api_key", "oauth"],
     effort_levels: [], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [] },
     secret_mask: "***", provider_env_owned: [] },
@@ -56,9 +56,12 @@ beforeEach(() => {
     }
     const path = String(input);
     expect(init?.method).toBe("POST");
-    expect(path).toMatch(/^\/api\/v1\/provider_accounts\/(create|update|delete|clear_login_problem|set_enabled)$/);
+    expect(path).toMatch(/^\/api\/v1\/provider_accounts\/(create|update|delete|clear_login_problem|set_enabled|fetch_models)$/);
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     requests.push({ path, body });
+    if (path.endsWith("/fetch_models")) return Response.json({ status: "ok", result: { provider_id: body.provider_id,
+      listings: [{ family: "openai", base_url: "https://saved.invalid/v2", protocols: ["openai-chat"], state: "failed",
+        problem: "could not connect to the endpoint", truncated: false, models: [] }] } });
     const fields = path.endsWith("/update") ? body.fields : body;
     bodies.push(fields);
     if (failure) return Response.json({ status: "error", error: { code: "conflict", message: failure } }, { status: 409 });
@@ -70,7 +73,7 @@ beforeEach(() => {
       ? { ...data.providers.find((provider) => provider.provider_id === body.provider_id)!, enabled: body.enabled }
       : path.endsWith("/clear_login_problem")
       ? { ...data.providers.find((provider) => provider.provider_id === body.provider_id)!, login: { state: "chatgpt", detail: "ChatGPT login" } }
-      : account({ ...fields, api_key: fields.api_key === null ? null : "***" } as Partial<Provider>);
+      : account({ ...fields, auth: VENDORS.find((v) => v.vendor_type === fields.vendor_type)?.auth ?? "api_key", api_key: fields.api_key === null ? null : "***" } as Partial<Provider>);
     data = { ...data, providers: [saved] };
     return Response.json({ status: "ok", result: { provider: saved, warnings } });
   }));
@@ -146,6 +149,10 @@ it("prefills all vendor endpoints once, saves their own URLs and never submits s
     env: VENDORS[0].env, api_key: "synthetic-key", endpoints: [
       endpoint("anthropic-messages", "https://edited.invalid/anthropic"),
       endpoint("openai-chat", "https://edited.invalid/chat"), VENDORS[0].endpoints[2]] });
+  expect(container.textContent).toContain("Saved. Tick the models deepseek offers to add them:");
+  expect(requests[1]).toEqual({ path: "/api/v1/provider_accounts/fetch_models", body: { provider_id: "account-1" } });
+  expect(JSON.stringify(requests[1])).not.toContain("synthetic-key");
+  await click("Done");
   expect(container.querySelector("form")).toBeNull();
   expect(container.textContent).not.toContain("suggestion-only");
   expect(container.querySelector("table")).toBeNull();
@@ -212,6 +219,8 @@ it("new login accounts use their runtime endpoint without an editable URL", asyn
   expect((field("openai-responses URL") as HTMLInputElement).disabled).toBe(true);
   await submit(); expect(bodies[0].vendor_type).toBe("codex-login");
   expect(bodies[0].endpoints).toEqual([endpoint("openai-responses", "")]);
+  expect(container.querySelector("form")).toBeNull();
+  expect(requests).toHaveLength(1);
 });
 
 it("requires explicit confirmation of self-hosted vendor URLs before saving", async () => {
@@ -239,7 +248,7 @@ it("retains server warnings until acknowledged", async () => {
   warnings = ["The server returned an account warning"];
   await render(); await fill("Vendor", "deepseek"); await submit();
   expect(container.querySelector('[role="status"]')?.textContent).toContain(warnings[0]);
-  expect(container.querySelector("form")).not.toBeNull(); await click("OK");
+  expect(container.querySelector("form")).not.toBeNull(); await click("Done");
   expect(container.querySelector("form")).toBeNull();
 });
 
@@ -365,4 +374,15 @@ it("keeps the provider enabled and shows a failed transition's error", async () 
   expect(container.querySelector('[role="switch"]')!.getAttribute("aria-checked")).toBe("true");
   expect(container.querySelector('[role="alert"]')!.textContent).toBe(failure);
   expect(container.querySelector('[role="status"]')).toBeNull();
+});
+
+it("offers on-demand model fetching only for API-key providers", async () => {
+  data.providers = [account(), account({ provider_id: "login", name: "Login account", auth: "oauth", api_key: null })];
+  await render(false);
+  expect(container.querySelectorAll('button[aria-label^="Fetch the models"]')).toHaveLength(1);
+  await click("Fetch the models of provider Saved account");
+  expect(container.textContent).toContain("could not list models: could not connect to the endpoint");
+  expect(container.querySelector('button[aria-label="Fetch the models of provider Saved account"]')?.getAttribute("aria-expanded")).toBe("true");
+  await click("Done");
+  expect(container.querySelector('button[aria-label="Fetch the models of provider Saved account"]')?.getAttribute("aria-expanded")).toBe("false");
 });
