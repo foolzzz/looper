@@ -478,6 +478,10 @@ class RuntimeAdapter(ABC):
 
     # --- Sessions and the stream ---
 
+    def instructions_changed(self, command: list[str], *, label: str, session_id: str) -> bool:
+        """Whether this saved session needs a handoff because its instructions cannot be replaced on resume."""
+        return False
+
     @abstractmethod
     def resident_session(self, label: str) -> ResidentSession:
         """A resident session, not started yet: ``start``, then one ``run_turn`` per user turn, ``stop``."""

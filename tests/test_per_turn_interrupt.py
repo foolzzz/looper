@@ -409,6 +409,63 @@ def test_after_the_stop_no_event_reaches_on_event_and_a_setsid_grandchild_is_gon
     assert not after_stop
 
 
+def test_stopping_a_turn_drains_buffered_output_without_delaying_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    from test_codex_runtime import CODEX, _launch, _resident_command
+
+    body = _PRELUDE % "CODEX_HOME" + '''
+emit({'type': 'thread.started', 'thread_id': 'thread-1'})
+for i in range(100):
+    emit({'type': 'item.completed', 'item': {'id': str(i), 'type': 'agent_message', 'text': 'tick'}})
+hang()
+'''
+    command = _resident_command(tmp_path / "runtime", fake_claude(tmp_path / "codex", body), "prompt")
+    session = CODEX.resident_session("manager")
+    home = _home(command, "CODEX_HOME").parent.parent / "sessions" / "manager"
+    home.mkdir(parents=True, exist_ok=True)
+    snapshot = proc_tree._snapshot
+
+    def slow_snapshot() -> Any:
+        time.sleep(0.05)
+        return snapshot()
+
+    # Every lookup is slow, as on a busy host. Buffered events must not add one lookup each to a stop.
+    monkeypatch.setattr(proc_tree, "_snapshot", slow_snapshot)
+    monkeypatch.setattr(proc_tree, "_REFRESH_MIN_SEC", 0)
+
+    async def run() -> Any:
+        await session.start(command, cwd=str(tmp_path), signature="s", env=_launch().environment())
+        cancel = _cancel()
+        received: list[dict[str, Any]] = []
+        stopped = asyncio.Event()
+
+        async def on_event(event: dict[str, Any]) -> None:
+            received.append(event)
+            # The first callback holds the reader until all subsequent events are buffered and the child exists.
+            await asyncio.wait_for(_until(lambda: (home / "pids").exists()), 8)
+            cancel.request()
+            stopped.set()
+
+        running = asyncio.create_task(session.run_turn("hello", on_event, cancel=cancel))
+        try:
+            await asyncio.wait_for(stopped.wait(), 8)
+            turn = await asyncio.wait_for(running, 4)
+            assert len(received) == 1
+            assert all(not _alive(pid) for pid in _pids(home))
+            return turn
+        finally:
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+            await session.stop()
+
+    turn = asyncio.run(asyncio.wait_for(run(), 15))
+    assert turn.stopped is StopMethod.KILL and turn.result_event[USER_STOP]
+    assert turn.session_started and turn.prompt_sent
+
+
 def test_a_stderr_that_never_closes_does_not_hang_the_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents.runtimes import per_turn
     from test_codex_runtime import CODEX, _launch, _resident_command

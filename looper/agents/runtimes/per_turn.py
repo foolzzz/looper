@@ -179,6 +179,13 @@ class PerTurnSession(ABC):
     def _turn_ended(self, *, new_session: bool) -> None:
         """Called after a turn with a result; ``new_session`` when it started the session it named."""
 
+    def _session_initialized(self) -> None:
+        """Called as soon as system/init identifies the chat, before handing the event to the owner."""
+
+    def _turn_input(self, text: str) -> str:
+        """The stdin message, after the runtime prepared the turn's command and session."""
+        return text
+
     # --- The session ---
 
     async def start(
@@ -283,7 +290,7 @@ class PerTurnSession(ABC):
             assert process.stdin is not None and process.stdout is not None
             try:
                 if not cancel.requested:
-                    process.stdin.write(text.encode("utf-8"))
+                    process.stdin.write(self._turn_input(text).encode("utf-8"))
                     await process.stdin.drain()
                     process.stdin.close()
                     sent = True
@@ -294,11 +301,13 @@ class PerTurnSession(ABC):
                 if event.get("type") == "system" and event.get("subtype") == "init":
                     session_started = True
                     self._session = stream.session_id or self._session
+                    self._session_initialized()
                 if cancel.requested:  # read on only for what the turn spent
-                    await tree.refresh()
+                    # The stop's tree.end() owns discovery and cleanup; buffered output must not delay it.
                     continue
                 await on_event(event)
-                await tree.refresh()
+                if not cancel.requested:
+                    await tree.refresh()
                 if cancel.requested:
                     continue
                 if stop is not None and (capped := stop()) is not None:

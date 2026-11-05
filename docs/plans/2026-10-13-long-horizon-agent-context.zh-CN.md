@@ -752,6 +752,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 2026-11-04 | 原生 Cursor Agent Worker/Reviewer 运行时（本分支）：沿用操作者的 `HOME` 和 Cursor 登录，个人 Cursor/Claude Code 配置不可关闭；Looper 插件、配置与数据放在内容寻址的私有运行目录，stdin 单轮输入，报告仅取最后一次工具调用或重试后的文本，并保留路由模型和 token。新增 `loads_operator_config` 类型契约，控制台、Telegram/Lark 与 CLI 沿用共享注册表入口；纯文本样本保留原输出，但步骤仍须符合既有 JSON 报告契约。定向 pytest 分批验证、TypeScript 编译和 59 项组件测试通过，脱敏流样本逐字节一致；仅用替身 Cursor，真实 Worker prompt 对照评测待后续验证，eval 示例需按现有顶层 model schema 转换。 |
 
+| 2026-11-04 | Cursor Agent 管家与规划者（本分支）：逐轮续接 owner 固定目录中的 chat，首轮从 stdin 注入 Looper 指令，续接只发本轮提示；指令哈希与 chat id 一起保存，指令变化时新建会话，清理旧 chat 并按已保存会话回收 owner 目录，管家不支持 stop。控制台、Telegram/Lark 与 CLI 沿用共享角色注册入口；定向替身测试和一次性 PostgreSQL 四角色注册验证通过，未调用真实 Cursor 或模型，Planner MCP 与续接 usage 口径仍待真实验证。 |
+
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。

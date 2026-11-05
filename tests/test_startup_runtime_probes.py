@@ -7,6 +7,7 @@ import logging
 import shutil
 import time
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -48,7 +49,11 @@ def _adapter(runtime_type, *, delay, error=None, finished=None):
 
 
 def _install(monkeypatch, adapters, store):
-    monkeypatch.setattr(runtimes, "ADAPTERS", {adapter.type: adapter for adapter in adapters})
+    cursor = runtimes.adapter("cursor-agent")
+    by_type = {adapter.type: adapter for adapter in adapters}
+    monkeypatch.setattr(runtimes, "adapter", {"cursor-agent": cursor, **by_type}.__getitem__)
+    monkeypatch.setattr(runtimes, "ADAPTERS", by_type)
+    monkeypatch.setattr(db, "refresh_builtin_capabilities", AsyncMock())
     monkeypatch.setattr(shutil, "which", lambda executable: f"/stub/{executable}")
     monkeypatch.setattr(db, "get_runtime", store.get)
     monkeypatch.setattr(db, "insert_builtin_runtime", store.insert)

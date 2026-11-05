@@ -1084,7 +1084,7 @@ it does not hunt down the processes the turn started:
   `proc_tree.end` finds (`kill`).
 - A process that detached from the agent's tree (`setsid`, a double fork,
   its ancestors gone) is never chased.
-- On a runtime without an interrupt (Codex, OMP, Pi, DSH, Grok's per-turn
+- On a runtime without an interrupt (Codex, Cursor Agent, OMP, Pi, DSH, Grok's per-turn
   fallback) the stop is refused: `POST /api/chat/stop` answers `409`
   `cannot_interrupt`, `/stop` says so, the dashboard's Stop button is
   disabled with that reason and Esc does nothing. A stop never kills such a
@@ -1098,7 +1098,7 @@ stopped:
 |---|---|---|---|
 | Claude Code (`ResidentClaude`) | writes a `control_request` `interrupt` to Claude's stdin and waits up to `INTERRUPT_GRACE_SEC` (5 s) for the turn's `result` (`control`); without one, or when stdin is closed, kills Claude (`kill`, the turn returns a synthetic `user_stop_result`) | `control`: the process stays; `kill`: the next turn starts it again with `--resume` | `control`: the result's; `kill`: what the events had reported |
 | Grok over ACP (`AcpGrok`) | `session/cancel`, waits for `stopReason: cancelled` up to `CANCEL_GRACE_SEC` (`cancel`); past it the process is ended (`kill`) | `cancel`: process and session stay | the response's `_meta.usage` |
-| Codex, OMP, Pi, DSH and Grok's per-turn fallback (`PerTurnSession`) | not offered: the user's stop is refused (`cannot_interrupt`) and the turn runs on. Its `cancel` (a turn handed one already requested, or a caller other than `stop_turn`) starts no process, or ends the turn's tree through `proc_tree.end` (`kill`) | the session id is kept; the next turn resumes it | OMP, Pi and DSH report usage per message; Codex only when a turn ends (`usage_complete` false) |
+| Codex, Cursor Agent, OMP, Pi, DSH and Grok's per-turn fallback (`PerTurnSession`) | not offered: the user's stop is refused (`cannot_interrupt`) and the turn runs on. Its `cancel` (a turn handed one already requested, or a caller other than `stop_turn`) starts no process, or ends the turn's tree through `proc_tree.end` (`kill`) | the session id is kept; the next turn resumes it | OMP, Pi and DSH report usage per message; Codex and Cursor Agent only when a turn ends (`usage_complete` false) |
 
 The per-turn runtimes have no interrupt the Manager can send: it runs them as
 one process per turn, not over Codex's app-server or OMP/Pi's rpc, whose
@@ -1258,7 +1258,7 @@ Manager tools.
   `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`,
   `OmpRuntime`, `GrokRuntime`, `CursorAgentRuntime` and `PiRuntime` (`codex`,
   `omp`, `grok`, `cursor-agent`, `pi`, below) translate
-  them at launch; Codex, OMP and, by default, Pi keep the Manager's and a Planner's session
+  them at launch; Codex, Cursor Agent, OMP and, by default, Pi keep the Manager's and a Planner's session
   with one process per turn (`runtimes/per_turn.py`), Grok with one process
   over ACP (`runtimes/grok_acp.py`, `RuntimeAdapter.resident_transport`).
   Capabilities:
@@ -1273,7 +1273,7 @@ Manager tools.
   `resume`, `steer`, `read_tools`, `compaction_events` and `mcp` when the
   probe accepts version 1.3.0 or newer and every required help flag, and none
   otherwise. Pi's `mcp` is the Looper platform bridge only; Cursor Agent has
-  `run`, `mcp` and `add_dirs`). Codex and OMP list `steer` when
+  `run`, `resident_session`, `resume`, `mcp` and `add_dirs`). Codex and OMP list `steer` when
   their probe finds the steering protocol (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md));
   Claude Code and Grok do not. Pi's `steer` is in that probed set.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
@@ -1524,9 +1524,8 @@ Manager tools.
   never read), in the provider's view and in the `grok_login` self-check,
   skipped while no Agent Profile uses the login.
 - **Cursor Agent** (`looper/agents/runtimes/cursor_agent.py`, the
-  `cursor-agent` CLI) runs Workers and Reviewers with the operator's existing
-  Cursor login only (`prov-cursor-login`). It does not yet run the Manager or
-  a Planner, resume a resident session or consult a completed run. It runs
+  `cursor-agent` CLI) runs all four roles with the operator's existing
+  Cursor login only (`prov-cursor-login`). It cannot consult a completed run. It runs
   `-p --output-format stream-json --force --trust --sandbox disabled
   --disable-auto-update --model <model>` with the prompt written to stdin,
   then stdin closed; there is no positional prompt or effort setting.
@@ -1550,6 +1549,22 @@ Manager tools.
   in headless mode, so stdin starts with `<looper_instructions>`, the runtime
   notes and Looper's full prompt, then `</looper_instructions>`, a blank line
   and the turn's prompt. The prompt preview shows the same two parts.
+  The Manager and Planners use one process per turn (`ResidentCursor`),
+  resuming the `system/init` chat id with `--resume <id>` in the owner's fixed
+  working directory. Their private directories are
+  `<runtime_root>/.local/cursor-agent/sessions/<owner>/config`, `data` and
+  `looper-plugin`; each turn syncs the generated plugin and instructions from
+  the run directory, retaining the last copy if that directory has expired.
+  Only the first turn sends the instructions block; resumed turns send only
+  the turn prompt. At `system/init`, `session.json` stores the chat id,
+  instruction hash and working directory, so a restart before the result can
+  still resume it. Different or unknown instructions go through the session
+  switch: the old chat writes a handoff with its retained instructions, then
+  the new chat gets the new instructions and a resume brief. The owner's other
+  chats under `config/chats/<workspace>/<id>` are removed only after the new
+  chat completes a turn, including when it first has to resume an interrupted turn.
+  Saved owner directories survive reclamation; unsaved, idle ones are removed.
+  The Manager's stop is refused (`can_interrupt` is false), as for Codex.
   The notes say Looper reads only the final message, its instructions take
   precedence over conflicting personal rules, and its platform tools have
   names such as `looper_room_*`. The launch also passes installed plugins and
@@ -1572,7 +1587,9 @@ Manager tools.
   Cursor's `system/init` display name is retained as `model_display` in the
   launch record.
 
-  Two known limits remain: after a network retry, Cursor's `result.usage`
+  Usage assumes each result reports that turn's own tokens, which are added
+  to the owner's totals; whether resumed chats report cumulative usage still
+  needs verification. After a network retry, Cursor's `result.usage`
   appears to cover only the resumed part, so recorded tokens can be low.
   Cursor's `worker-server` helper outlives a run by about a minute and is
   shared by runs in the same working directory; ending one run can end the
@@ -4416,15 +4433,6 @@ or the file `--config` names; `looper/ops_config.py`). There is no default
 URL: without one, `looper serve` and `looper doctor` do not start, and say to run `looper config init-ops` or edit the file. A
 database that already exists keeps the name it had (often `loopx`, from before
 the rename), because it holds the user's data.
-
-At startup, runtime detection and version probes run concurrently, each bounded
-by 15 seconds; their registry rows are written in a stable order once probes
-return. PostgreSQL and required initialization complete before HTTP listens.
-Advisory checks (Claude, Codex/Grok/Cursor login, TTADK, lark-cli, git and the
-projects root) run concurrently in a background task after the server listens;
-problems are logged in the same stable order and never stop serving.
-`POST /api/v1/system/status` continues to report checks with login state read
-on demand. The listening log reports elapsed seconds since process start.
 
 ### Renamed from LoopX
 

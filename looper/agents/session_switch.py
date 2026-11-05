@@ -13,8 +13,10 @@ restart. Their next turn starts a new session instead when:
   not.
 - ``SESSION_LOST``: the runtime could not resume the saved session (it no
   longer exists), or there is none to resume for work under way.
+- ``INSTRUCTIONS_CHANGED``: the runtime binds the saved chat to its original
+  instructions, and the next turn needs different instructions (Cursor Agent).
 
-Before a ``PROFILE_CHANGED`` switch, an old session whose process still runs
+Before a ``PROFILE_CHANGED`` or ``INSTRUCTIONS_CHANGED`` switch, an available old session
 takes one handoff turn: it writes for the next session what that one cannot
 read back (its understanding of the code, unfinished reasoning, open risks).
 The new session's first turn then gets a resume brief: why it is new, the
@@ -37,6 +39,7 @@ if TYPE_CHECKING:
 
 class SwitchReason(str, Enum):
     PROFILE_CHANGED = "profile_changed"
+    INSTRUCTIONS_CHANGED = "instructions_changed"
     SESSION_LOST = "session_lost"
     CONTEXT_FULL = "context_full"
 
@@ -65,19 +68,29 @@ class SessionSwitch:
                     f"{side(self.new_runtime, self.new_profile)}: {self.detail}")
         if self.reason is SwitchReason.CONTEXT_FULL:
             return f"context full: {self.detail}"
+        if self.reason is SwitchReason.INSTRUCTIONS_CHANGED:
+            return f"instructions changed: {self.detail}"
         return f"session lost: {self.detail}"
 
 
 def profile_switch(
     session_id: str | None, session_runtime: str | None, session_profile: str | None, launch: Launch, *,
-    session_provider: str | None,
+    session_provider: str | None, command: list[str] | None = None, label: str = "",
 ) -> SessionSwitch | None:
     """The switch a turn about to run with ``launch`` makes from the session saved with ``session_runtime``,
     ``session_provider`` and ``session_profile``; None when there is no saved session
     or the turn's profile resumes it."""
     provider = launch.profile.provider.id
-    if not session_id or can_resume(session_runtime, session_provider, launch.runtime, provider):
+    if not session_id:
         return None
+    if can_resume(session_runtime, session_provider, launch.runtime, provider):
+        if command is None or not launch.runtime.instructions_changed(command, label=label, session_id=session_id):
+            return None
+        return SessionSwitch(
+            SwitchReason.INSTRUCTIONS_CHANGED, "the saved chat is bound to different or unknown instructions",
+            old_runtime=session_runtime, old_profile=session_profile, new_runtime=launch.runtime.type,
+            new_profile=launch.profile.id, old_provider=session_provider, new_provider=provider,
+        )
     old, old_provider = session_runtime, session_provider
     detail = (f"a {launch.runtime.type} process cannot resume a {old} session" if old != launch.runtime.type
               else f"a session of provider {old_provider} cannot go on with provider {provider}")
