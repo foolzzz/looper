@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.78] - 2026-11-04
+
+### Fixed
+
+- **The Tasks page's Running filter lists tasks whose Planner is working.** The filter matched `status == "running"` exactly, so tasks holding the Planner's own statuses (`planning`, `executing`, `verifying`, `stopping`) did not appear under it, and its chip had no count. `running` now covers `assigned`, `running`, `planning`, `executing`, `verifying` and `stopping` in the task list (`status=running` in the API), and the per-filter counts sum them, each task counted once. ([#1088](https://github.com/foolzzz/looper/pull/1088))
+
 ## [2.14.77] - 2026-11-04
 
 ### Added
