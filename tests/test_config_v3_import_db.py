@@ -93,7 +93,7 @@ async def test_import_roundtrip_retains_ids_and_secret(tmp_path, runtime_default
             assert exported["providers"][0]["api_key"] == transfer.PLACEHOLDER
             assert exported["providers"][0]["endpoints"] == {
                 "anthropic-messages": {"base_url": "", "use_runtime_default": True}
-                if runtime_default else {"base_url": "https://example.invalid"}}
+                if runtime_default else {"base_url": "https://example.invalid/v1/"}}
             assert (await transfer.run_import(conn, exported, apply=True)).writes == 0
             assert await conn.fetchval("SELECT api_key FROM llm_provider_secrets s JOIN llm_providers p "
                                        "ON p.id = s.provider_id WHERE p.name = 'account'") == "synthetic-saved-key"

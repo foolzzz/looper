@@ -1352,7 +1352,7 @@ def _provider_fields(data: Mapping[str, Any], current: Mapping[str, Any] | None)
         if marker and not previous.get("use_runtime_default"):
             raise RegistryError("use_runtime_default is reserved for migrated endpoints")
         endpoint = Endpoint(provider_id, ApiProtocol(protocol), url, marker)
-        if current is None or "endpoints" in data:
+        if not previous or url != previous["base_url"]:
             endpoint = endpoint.for_save()
         endpoint.check_provider(spec)
         endpoints.append({"protocol": protocol, "base_url": endpoint.base_url, "use_runtime_default": marker})

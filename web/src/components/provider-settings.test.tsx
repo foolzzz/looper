@@ -279,6 +279,18 @@ it("keeps migrated runtime defaults until an explicit endpoint URL replaces them
   expect(bodies[1].endpoints).toEqual([endpoint("openai-chat", "https://explicit.invalid/v1")]);
 });
 
+it.each(["rename", "replace key"])("preserves an unchanged Anthropic URL when saving %s", async (edit) => {
+  const storedUrl = "https://example.invalid/v1/";
+  data.providers = [account({ endpoints: [endpoint("anthropic-messages", storedUrl)] })];
+  await render(false); await click("Edit provider Saved account");
+  expect(field("anthropic-messages URL").getAttribute("placeholder")).toBe("https://api.example.com");
+  if (edit === "rename") await fill("Name *", "Renamed account");
+  else await fill("API key", "synthetic-replacement");
+  await submit();
+  expect(bodies[0].endpoints).toEqual([endpoint("anthropic-messages", storedUrl)]);
+  expect(bodies[0].api_key).toBe(edit === "rename" ? "***" : "synthetic-replacement");
+});
+
 it("switching back to custom clears vendor endpoints and environment", async () => {
   await render(); await toggle("OpenAI"); await fill("Base URL *", "https://old.invalid/v1");
   await fill("OpenAI APIs it serves", "openai-chat"); await click("Set a URL per protocol instead");

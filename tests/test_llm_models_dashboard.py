@@ -550,6 +550,54 @@ def test_provider_model_checklist_and_stored_key_failure(dashboard_page, dashboa
 
 @pytest.mark.installed
 @pytest.mark.parametrize("width", [1280, 768])
+def test_anthropic_provider_edits_preserve_unchanged_url(dashboard_page, dashboard_server, tmp_path, width):
+    expect = pytest.importorskip("playwright.sync_api").expect
+    page, server = dashboard_page, dashboard_server
+    stored_url = "https://example.invalid/v1/"
+
+    async def seed():
+        import asyncpg
+
+        conn = await asyncpg.connect(server.database_url, timeout=5)
+        try:
+            await conn.execute("INSERT INTO llm_providers (id, name, vendor_type, auth) "
+                               "VALUES ('prov-legacy', 'Legacy account', 'custom', 'api_key'); "
+                               "INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url) "
+                               "VALUES ('prov-legacy', 'anthropic-messages', 'https://example.invalid/v1/')")
+            await conn.execute("INSERT INTO llm_provider_secrets (provider_id, api_key) VALUES ('prov-legacy', $1)",
+                               SECRET + "-old")
+        finally:
+            await conn.close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(asyncio.run, seed()).result(timeout=15)
+
+    page.set_viewport_size({"width": width, "height": 900})
+    _settings(page, server, "providers")
+    for name, changes, expected_url in (
+        ("Legacy account", {"Name *": "Renamed account"}, stored_url),
+        ("Renamed account", {"API key": SECRET}, stored_url),
+        ("Renamed account", {"anthropic-messages URL": "https://api.example.com/v1/"}, "https://api.example.com"),
+    ):
+        _row(page, name).get_by_role("button", name=f"Edit provider {name}", exact=True).click()
+        form = page.get_by_role("form", name=f"Edit provider {name}", exact=True)
+        expect(form.get_by_label("anthropic-messages URL", exact=True)).to_have_attribute(
+            "placeholder", "https://api.example.com")
+        for label, value in changes.items():
+            form.get_by_label(label, exact=True).fill(value)
+        _finish_form(form, "Save")
+        endpoint = next(e for e in _registry_state(server)["endpoints"] if e["provider_id"] == "prov-legacy")
+        assert endpoint["base_url"] == expected_url
+    _row(page, "Renamed account").get_by_role("button", name="Edit provider Renamed account", exact=True).click()
+    form = page.get_by_role("form", name="Edit provider Renamed account", exact=True)
+    expect(form.get_by_label("anthropic-messages URL", exact=True)).to_have_value("https://api.example.com")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    assert SECRET not in page.content()
+    form.screenshot(path=str(tmp_path / f"anthropic-provider-{width}.png"))
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("width", [1280, 768])
 def test_provider_account_actions_preserve_mask_and_refresh(dashboard_page, dashboard_server, width):
     expect = pytest.importorskip("playwright.sync_api").expect
     page, server = dashboard_page, dashboard_server

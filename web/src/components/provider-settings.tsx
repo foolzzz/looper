@@ -79,9 +79,11 @@ function providerBody(draft: ProviderDraft, provider: Provider | null, registry:
   const simple = !provider && draft.vendorType === "custom" && !draft.perProtocol;
   const fields: CreateProviderFields = {
     name: draft.name.trim(), vendor_type: draft.vendorType,
-    endpoints: (simple ? simpleEndpoints(draft, registry) : draft.endpoints).map(({ protocol, base_url, use_runtime_default }) => ({
-      protocol, base_url: base_url.trim(), use_runtime_default: base_url.trim() ? false : use_runtime_default,
-    })),
+    endpoints: (simple ? simpleEndpoints(draft, registry) : draft.endpoints).map(({ protocol, base_url, use_runtime_default }) => {
+      const previous = provider?.endpoints.find((endpoint) => endpoint.protocol === protocol);
+      const url = previous?.base_url === base_url ? base_url : base_url.trim();
+      return { protocol, base_url: url, use_runtime_default: url ? false : use_runtime_default };
+    }),
     env: envEntries(draft.env), max_concurrency: numberOrTyped(draft.maxConcurrency),
   };
   const auth = provider?.auth ?? registry.vendor_types.find((v) => v.vendor_type === draft.vendorType)?.auth;
@@ -221,7 +223,8 @@ function ProviderForm({ provider, registry, onDone }: { provider: Provider | nul
                 <Input id={`${id}-${protocol}-url`} value={endpoint.base_url} disabled={login}
                   onChange={(e) => set({ endpoints: draft.endpoints.map((entry) => entry.protocol === protocol
                     ? { ...entry, base_url: e.target.value } : entry), urlsConfirmed: false })}
-                  placeholder={login ? "Runtime login" : endpoint.use_runtime_default ? "Migrated runtime default" : "https://api.example.com/v1"}
+                  placeholder={login ? "Runtime login" : endpoint.use_runtime_default ? "Migrated runtime default"
+                    : protocol === "anthropic-messages" ? "https://api.example.com" : "https://api.example.com/v1"}
                   spellCheck={false} autoCapitalize="none" className="font-mono" />
               </div>}
             </div>

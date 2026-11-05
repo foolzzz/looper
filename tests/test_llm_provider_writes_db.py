@@ -128,6 +128,36 @@ def test_secret_urls_are_rejected(url):
 
 
 @needs_db
+@pytest.mark.parametrize("stored_url", ["https://example.invalid/v1", "https://example.invalid/v1/"])
+@pytest.mark.parametrize("edit", ["rename", "rename_with_endpoints", "replace_key"])
+def test_provider_edit_preserves_unchanged_anthropic_url(monkeypatch, stored_url, edit):
+    async def test(pool):
+        await _seed(pool, profile=True)
+        await pool.execute("INSERT INTO llm_provider_secrets (provider_id, api_key) VALUES ('prov-test', $1)",
+                           SECRET + "-old")
+        await pool.execute("UPDATE llm_provider_endpoints SET base_url = $1 WHERE provider_id = 'prov-test'",
+                           stored_url)
+        changes = {"api_key": SECRET} if edit == "replace_key" else {"name": "Renamed account"}
+        if edit != "rename":
+            changes["endpoints"] = [{"protocol": "anthropic-messages", "base_url": stored_url}]
+        answer = await service.update_provider("prov-test", changes)
+        assert answer["provider"]["endpoints"][0]["base_url"] == stored_url
+        assert await pool.fetchval("SELECT base_url FROM llm_provider_endpoints WHERE provider_id = 'prov-test'") == stored_url
+        if edit == "replace_key":
+            assert await db.get_api_key("prov-test") == SECRET
+        else:
+            assert answer["provider"]["name"] == "Renamed account"
+            assert await db.get_api_key("prov-test") == SECRET + "-old"
+
+        answer = await service.update_provider("prov-test", {"endpoints": [
+            {"protocol": "anthropic-messages", "base_url": "https://api.example.com/v1/"}]})
+        assert answer["provider"]["endpoints"][0]["base_url"] == "https://api.example.com"
+        assert await pool.fetchval("SELECT base_url FROM llm_provider_endpoints WHERE provider_id = 'prov-test'") == "https://api.example.com"
+
+    _run(test, monkeypatch)
+
+
+@needs_db
 def test_creation_defaults_are_copied_once_without_models(monkeypatch):
     async def test(pool):
         answer = await service.create_provider({"name": "Vendor account", "vendor_type": "deepseek"})

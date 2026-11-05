@@ -1225,7 +1225,7 @@ class _Importer:
                 unknown = set(raw) - {"base_url", "use_runtime_default"}
                 if unknown:
                     raise _Skip(f"unknown endpoint field {sorted(unknown)[0]!r}")
-                endpoint = Endpoint.from_entry({"provider_id": provider_id, "protocol": protocol, **raw}).for_save()
+                endpoint = Endpoint.from_entry({"provider_id": provider_id, "protocol": protocol, **raw})
                 endpoint.check_provider(spec)
                 endpoints[protocol] = endpoint
             # Preserve endpoints absent from the file. A changed endpoint must

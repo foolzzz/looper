@@ -366,6 +366,41 @@ def _without_time(path: Path) -> dict[str, Any]:
     return data
 
 
+@pytest.mark.parametrize("fresh", [False, True], ids=["same-installation", "fresh-installation"])
+def test_anthropic_url_roundtrip_preserves_stored_url(tmp_path: Path, fresh: bool) -> None:
+    async def test():
+        async with _installation() as (source, source_url), _installation(schema=False) as (target, target_url):
+            await source.execute("""
+                INSERT INTO llm_providers (id, name, vendor_type, auth)
+                VALUES ('prov-test', 'Saved account', 'custom', 'api_key');
+                INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url)
+                VALUES ('prov-test', 'anthropic-messages', 'https://example.invalid/v1/');
+                INSERT INTO llm_models (id, provider_id, name, protocol)
+                VALUES ('model-test', 'prov-test', 'test-model', 'anthropic-messages');
+                INSERT INTO agent_profiles (id, name, runtime_id, model_id)
+                VALUES ('agent-test', 'Test profile', 'rt-claude-code', 'model-test');
+            """)
+            exported = tmp_path / "config.json"
+            code, _, err = await _transfer_file(source_url, "export", str(exported))
+            assert code == 0, err
+            provider = _by_name(json.loads(exported.read_text())["providers"], "Saved account")
+            assert provider["endpoints"]["anthropic-messages"]["base_url"] == "https://example.invalid/v1/"
+            pool, url = (target, target_url) if fresh else (source, source_url)
+            for apply in (False, True):
+                code, out, err = await _transfer_file(url, "import", str(exported), apply=apply, json_output=True)
+                assert code == 0, err
+                plan = _plan(out)
+                assert not [change for change in plan["changes"] if change["action"] == "skipped"], plan
+                for section in ("providers", "models", "profiles"):
+                    assert plan["counts"][section]["added" if fresh else "unchanged"] == 1, plan
+            assert await pool.fetchval("SELECT base_url FROM llm_provider_endpoints e "
+                                       "JOIN llm_providers p ON p.id = e.provider_id "
+                                       "WHERE p.name = 'Saved account'") == "https://example.invalid/v1/"
+            assert await pool.fetchval("SELECT count(*) FROM agent_profiles WHERE name = 'Test profile'") == 1
+
+    asyncio.run(asyncio.wait_for(test(), timeout=30))
+
+
 def test_configuration_export_excludes_api_session_state(tmp_path: Path) -> None:
     async def run():
         from looper.db import agent_sessions, api_sessions
