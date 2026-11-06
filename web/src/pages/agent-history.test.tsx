@@ -188,6 +188,43 @@ describe("recorded model requests", () => {
     expect(redacted.classList.contains("text-muted-foreground")).toBe(true);
   });
 
+  it.each([1, 2])("shows no new-message divider for %i unchanged messages", async (length) => {
+    const body = row.request_body as { messages: unknown[] };
+    row = capturedRequest(1, { request_body: { ...body, messages: body.messages.slice(0, length) }, new_from_index: null });
+    await show();
+    await click("Model requests · 2");
+    await click("recorded-model");
+    const viewer = host.querySelector('[aria-label="Model request 1"]')!;
+    expect(viewer.textContent).toContain(`Messages · ${length}`);
+    expect(viewer.textContent).toContain("Earlier message");
+    expect(viewer.textContent).not.toContain("New in this request");
+  });
+
+  it.each([
+    [399, "completed", false], [400, "completed", true], [429, "completed", true],
+    [500, "completed", true], [200, "upstream_error", true], [null, "upstream_error", true],
+  ] as const)("styles HTTP %s / %s as a failure: %s", async (status, outcome, failure) => {
+    row = capturedRequest(1, { status, outcome });
+    await show();
+    await click("Model requests · 2");
+    const badge = [...button("recorded-model").querySelectorAll("span")]
+      .find((item) => item.textContent === `${status ?? "—"} · ${outcome}`)!;
+    expect(badge.classList.contains("text-destructive")).toBe(failure);
+    expect(badge.classList.contains("text-success")).toBe(!failure);
+  });
+
+  it("shows unassembled raw text directly in the Response section", async () => {
+    row = capturedRequest(1, { response_body: null, response_raw: "data: incomplete synthetic response", record_gap: "unparsable_stream" });
+    await show();
+    await click("Model requests · 2");
+    await click("recorded-model");
+    const viewer = host.querySelector('[aria-label="Model request 1"]')!;
+    const response = [...viewer.querySelectorAll("h4")].find((item) => item.textContent === "Response")!.nextElementSibling!;
+    expect(response.textContent).toContain(row.response_raw);
+    expect(response.textContent).not.toContain("null");
+    expect(button("Raw response").parentElement?.querySelector("pre")).toBeNull();
+  });
+
   it.each([
     ["an unsplit array", [{ unexpected_body: "retained array entry" }]],
     ["unknown fields and message attributes", { custom_parameter: { retained: "unknown field" },
@@ -224,9 +261,13 @@ describe("recorded model requests", () => {
   });
 
   it.each([
-    ["request_too_large", "larger than 16 MiB"], ["response_too_large", "larger than 4 MiB"],
-    ["undecodable_encoding", "encoding the recorder cannot read"],
-    ["unparsable_request", "stored unsplit"], ["unparsable_stream", "first 1 MiB of raw text"],
+    ["request_too_large", "The request body exceeded the recorder's size limit (16 MiB, or 64 KiB for other endpoints), so only its hash and size were kept."],
+    ["response_too_large", "The response body exceeded 4 MiB; only usage, stop reason, stop sequence and status fields were kept when present."],
+    ["body_encoding_unparsed", "The body was compressed in a way the recorder could not decode; the raw response text is kept when present."],
+    ["undecodable_encoding", "The body was compressed in a way the recorder could not decode; the raw response text is kept when present."],
+    ["unparsable_request", "The request body could not be parsed, so only its hash and size were kept."],
+    ["unparsable_stream", "The response could not be assembled, so only raw text (up to 1,048,576 characters) was kept for its body."],
+    ["rejected_by_database", "The database rejected the body; only the recording metadata was kept."],
   ])("explains the %s capture gap", async (gap, explanation) => {
     row = capturedRequest(1, { record_gap: gap });
     await show();

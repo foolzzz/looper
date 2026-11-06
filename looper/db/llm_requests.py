@@ -200,7 +200,7 @@ def _new_from_index(skeleton: Any, previous: Any, path: str) -> int | None:
     if current is None or before is None:
         return None
     return next((index for index, sha in enumerate(current)
-                 if index >= len(before) or sha != before[index]), len(current))
+                 if index >= len(before) or sha != before[index]), None)
 
 
 async def _restore(rows, conn) -> list[dict[str, Any]]:

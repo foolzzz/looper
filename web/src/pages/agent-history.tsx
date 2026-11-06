@@ -165,12 +165,14 @@ function Pre({ text }: { text: string }) {
   );
 }
 
+const ENCODING_GAP_EXPLANATION = "The body was compressed in a way the recorder could not decode; the raw response text is kept when present.";
 const GAP_EXPLANATIONS: Record<string, string> = {
-  request_too_large: "The request was larger than 16 MiB and only its hash and size were kept.",
-  response_too_large: "The response was larger than 4 MiB and only its usage and stop reason were kept.",
-  undecodable_encoding: "The response was compressed with an encoding the recorder cannot read.",
-  unparsable_request: "The request body was not the JSON its endpoint expects, so it was stored unsplit.",
-  unparsable_stream: "The response stream could not be assembled, so only its first 1 MiB of raw text was kept.",
+  request_too_large: "The request body exceeded the recorder's size limit (16 MiB, or 64 KiB for other endpoints), so only its hash and size were kept.",
+  response_too_large: "The response body exceeded 4 MiB; only usage, stop reason, stop sequence and status fields were kept when present.",
+  body_encoding_unparsed: ENCODING_GAP_EXPLANATION,
+  undecodable_encoding: ENCODING_GAP_EXPLANATION,
+  unparsable_request: "The request body could not be parsed, so only its hash and size were kept.",
+  unparsable_stream: "The response could not be assembled, so only raw text (up to 1,048,576 characters) was kept for its body.",
   rejected_by_database: "The database rejected the body; only the recording metadata was kept.",
 };
 
@@ -240,7 +242,6 @@ function RequestViewer({ id }: { id: number }) {
           {item.tool_calls != null && <ContentBlocks value={item.tool_calls} />}
         </div>;
       })}
-      {request.new_from_index === messages.length && <p className="border-t border-primary pt-2 text-xs text-primary">New in this request</p>}
       </div>
     </Collapsible>
     {typeof body.input === "string" && <Collapsible title="Input" defaultOpen><Pre text={body.input} /></Collapsible>}
@@ -249,7 +250,7 @@ function RequestViewer({ id }: { id: number }) {
     <Collapsible title="Stored request JSON"><Pre text={jsonText(request.request_body)} /></Collapsible>
     <RequestHeaders title="Headers" headers={request.request_headers} />
     <h4 className="text-sm font-medium">Response</h4>
-    <ContentBlocks value={content ?? request.response_body} />
+    <ContentBlocks value={content ?? request.response_body ?? request.response_raw} />
     <p className="break-all text-xs text-muted-foreground">Stop reason: {jsonText(stop)}</p>
     <Collapsible title="Usage"><Pre text={jsonText(request.usage ?? response.usage)} /></Collapsible>
     <Collapsible title="Stored response JSON"><Pre text={jsonText(request.response_body)} /></Collapsible>
@@ -272,7 +273,7 @@ function RequestRow({ row, selected, onSelect }: { row: LlmRequestRow; selected:
     className="flex min-h-11 w-full flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-border px-3 py-2 text-left text-xs hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
     <span className="font-mono tabular-nums">{formatClock(row.started_at)}</span>
     <span>{row.kind}</span><span className="break-all">{row.model ?? "unknown model"}</span>
-    <Badge variant={row.outcome === "completed" ? "success" : "destructive"}>{row.status ?? "—"} · {row.outcome}</Badge>
+    <Badge variant={row.outcome === "completed" && (row.status === null || row.status < 400) ? "success" : "destructive"}>{row.status ?? "—"} · {row.outcome}</Badge>
     <span>TTFB {ms(row.ttfb_ms)}</span><span>Duration {ms(row.duration_ms)}</span>
     <span className="font-mono" title="in / cache read / cache write / out">{[row.input_tokens, row.cache_read_tokens, row.cache_write_tokens, row.output_tokens].map((n) => n ?? "—").join(" / ")}</span>
     {row.record_gap && <Badge variant="destructive">{row.record_gap}</Badge>}

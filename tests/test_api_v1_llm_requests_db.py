@@ -211,6 +211,36 @@ def test_request_message_difference_uses_previous_capture_time(tmp_path, monkeyp
     run_db(check, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("path,key", [("/v1/messages", "messages"),
+    ("/v1/chat/completions", "messages"), ("/v1/responses", "input")])
+def test_unchanged_and_prefix_retries_have_no_new_messages(tmp_path, monkeypatch, path, key):
+    from datetime import timedelta
+    from looper.agents.llmrec import RouteFile
+    from looper.db import llm_requests
+
+    async def check(pool):
+        route = RouteFile(id=secrets.token_urlsafe(16), upstream="https://example.invalid", agent_id="worker-retry")
+        a = {"role": "user", "content": "a"}
+        b = {"role": "assistant", "content": "b"}
+        bodies = [{key: messages} for messages in ([a, b], [a, b], [a], [], [a], [b])]
+        captures = [_capture(route, index + 1, body, path=path) for index, body in enumerate(bodies)]
+        for index, item in enumerate(captures):
+            item.started_at = captures[0].started_at + timedelta(seconds=index)
+        await llm_requests.write_batch(captures, pool=pool)
+        async with v1_api(tmp_path, pool) as call:
+            code, reply = await call("llm_requests.export", {"agent_id": route.agent_id})
+            assert code == 200, reply
+            exported = reply["result"]["requests"]
+            assert len(exported) == len(bodies)
+            for row, body, expected in zip(exported, bodies, [None, None, None, None, 0, 0], strict=True):
+                assert row["request_body"] == body
+                assert row["new_from_index"] == expected
+                code, reply = await call("llm_requests.get", {"request_id": row["id"]})
+                assert code == 200, reply
+                assert reply["result"]["request"]["new_from_index"] == expected
+    run_db(check, monkeypatch, timeout=30)
+
+
 def test_missing_request_part_fails_without_partial_body(tmp_path, monkeypatch):
     from looper.agents.llmrec import RouteFile
     from looper.db import llm_requests
