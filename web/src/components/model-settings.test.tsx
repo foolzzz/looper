@@ -33,9 +33,10 @@ let container: HTMLDivElement;
 let writes: { url: string; method: string; body: Record<string, unknown> }[];
 let failure: string;
 let warnings: string[];
+let skipped: boolean;
 let registryReads: number;
 beforeEach(() => {
-  writes = []; failure = ""; warnings = []; registryReads = 0;
+  writes = []; failure = ""; warnings = []; skipped = false; registryReads = 0;
   data = {
     runtime_types: [], runtimes: [], providers: [provider()], models: [], profiles: [],
     vendor_types: [{ vendor_type: "deepseek", auth: "api_key", oauth_runtime_type: null,
@@ -54,9 +55,14 @@ beforeEach(() => {
     if (url === "/api/v1/registry/view") { registryReads++; return Response.json({ status: "ok", result: data }); }
     const body = init?.body ? JSON.parse(String(init.body)) : {};
     writes.push({ url, method: init!.method!, body });
-    if (!/^\/api\/v1\/ops\/models\/(create|update|delete)$/.test(url)) throw new Error(`Unexpected write: ${url}`);
+    if (url !== "/api/v1/models/add_many" && !/^\/api\/v1\/ops\/models\/(create|update|delete)$/.test(url)) throw new Error(`Unexpected write: ${url}`);
     if (failure) return Response.json({ status: "error", error: { code: "invalid", message: failure } }, { status: 400 });
-    const { model: id, provider: providerId, ...fields } = body;
+    const bulk = url === "/api/v1/models/add_many";
+    if (bulk && skipped) return Response.json({ status: "ok", result: {
+      models: [], skipped: [{ ...body.models[0], reason: "already registered" }], warnings,
+    } });
+    const { model: id, provider: providerId, ...fields } = bulk
+      ? { provider: body.provider_id, ...body.models[0] } : body;
     if (url.endsWith("/delete")) {
       data = { ...data, models: data.models.filter((m) => m.model_id !== id) };
       return Response.json({ status: "ok", result: { deleted: id } });
@@ -64,10 +70,11 @@ beforeEach(() => {
     const existing = data.models.find((m) => m.model_id === id);
     const saved = model({ model_id: `model-${data.models.length + 1}`, ...existing,
       ...(providerId ? { provider_id: providerId } : {}), ...fields });
+    if (bulk) for (const key of PRICE_FIELDS) saved[key] = fields[key] ?? 0;
     saved.prices = Object.fromEntries(PRICE_FIELDS.map((key) => [key, { override: saved[key], effective: saved[key],
       source: saved[key] === null ? "unknown" : "override" }])) as Model["prices"];
     data = { ...data, models: [...data.models.filter((m) => m.model_id !== saved.model_id), saved] };
-    return Response.json({ status: "ok", result: { model: saved, warnings } });
+    return Response.json({ status: "ok", result: bulk ? { models: [saved], skipped: [], warnings } : { model: saved, warnings } });
   }));
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
@@ -107,11 +114,10 @@ it("places models only inside the expanded provider and scopes them to that acco
 it("creates and edits identical exact names independently for two protocols using only model APIs", async () => {
   await open(); await add(); await submit();
   await add("anthropic-messages"); await submit();
-  expect(writes.slice(0, 2).map((w) => [w.url, w.method, w.body.provider, w.body.name, w.body.protocol])).toEqual([
-    ["/api/v1/ops/models/create", "POST", "provider-1", "exact[1m]", "openai-chat"],
-    ["/api/v1/ops/models/create", "POST", "provider-1", "exact[1m]", "anthropic-messages"],
+  expect(writes.slice(0, 2).map((w) => [w.url, w.method, w.body])).toEqual([
+    ["/api/v1/models/add_many", "POST", { provider_id: "provider-1", models: [{ name: "exact[1m]", protocol: "openai-chat" }] }],
+    ["/api/v1/models/add_many", "POST", { provider_id: "provider-1", models: [{ name: "exact[1m]", protocol: "anthropic-messages" }] }],
   ]);
-  for (const write of writes) expect(write.body).not.toHaveProperty("provider_id");
   for (const protocol of ["openai-chat", "anthropic-messages"]) {
     await edit(protocol);
     expect(field("Protocol *").disabled).toBe(true); expect(field("Exact model name *").disabled).toBe(true);
@@ -135,16 +141,53 @@ it("requires protocol before the exact name and copies only that API's explicitl
   await fill("Vendor suggestion", "vendor-exact");
   expect(field("Context window").value).toBe("128000"); expect(field("Effort support").value).toBe("none");
   expect(writes).toHaveLength(0); await submit();
-  expect(writes[0].body).toMatchObject({ protocol: "openai-chat", context_window: 128000, efforts: [], input_usd_per_mtok: 0 });
+  expect(writes[0].body.models).toEqual([expect.objectContaining({ protocol: "openai-chat", context_window: 128000, efforts: [], input_usd_per_mtok: 0 })]);
   await add("anthropic-messages", ""); await fill("Vendor suggestion", "vendor-exact");
   expect(field("Context window").value).toBe("1000000"); await submit();
-  expect(writes[1].body).toMatchObject({ name: "vendor-exact", protocol: "anthropic-messages", background_model: "vendor-small" });
+  expect(writes[1].body.models).toEqual([expect.objectContaining({ name: "vendor-exact", protocol: "anthropic-messages", background_model: "vendor-small" })]);
 });
 
 it("keeps custom model names exact without deriving suffixes from context or protocol", async () => {
   data.providers = [provider({ vendor_type: "custom" })]; await open(); await add("openai-chat", "My.Model-V2[1m]");
   await fill("Context window", "200000"); await submit();
-  expect(writes[0].body.name).toBe("My.Model-V2[1m]"); expect(container.textContent).toContain("My.Model-V2[1m]");
+  expect(writes[0].body.models).toEqual([{ name: "My.Model-V2[1m]", protocol: "openai-chat", context_window: 200000 }]); expect(container.textContent).toContain("My.Model-V2[1m]");
+});
+
+it("omits every unset create field so server defaults apply and preserves a typed zero", async () => {
+  await open(); await add(); await fill("Input price", "0"); await submit();
+  expect(writes).toEqual([{ url: "/api/v1/models/add_many", method: "POST", body: {
+    provider_id: "provider-1", models: [{ name: "exact[1m]", protocol: "openai-chat", input_usd_per_mtok: 0 }],
+  } }]);
+  expect(container.textContent).toContain("Input: 0 (free)");
+  expect(container.querySelector('[role="status"]')).toBeNull();
+});
+
+it("keeps an already registered create visible as an action error", async () => {
+  await open(); await add(); skipped = true; await submit();
+  expect(container.querySelector('[role="alert"]')?.textContent)
+    .toBe("Model exact[1m] (openai-chat) is already registered on Account.");
+  expect(container.querySelector("form")).toBeTruthy();
+  expect(field("Exact model name *").value).toBe("exact[1m]");
+  expect(data.models).toHaveLength(0);
+});
+
+it("explains create price defaults and labels protocols while preserving edit override copy", async () => {
+  data.models = [model()]; await open(); await add();
+  expect(container.querySelector("legend")?.textContent).toBe("Prices · USD per million tokens (optional)");
+  for (const [, label] of NUMERIC_FIELDS.slice(1)) expect(field(label).getAttribute("placeholder")).toBe("Built-in price, else 0");
+  expect(container.textContent).toContain("Empty: Looper's built-in price when it knows this model, otherwise 0, so its runs count as free. Enter prices to count real spend and let spend caps stop its runs.");
+  expect([...(field("Protocol *") as HTMLSelectElement).options].map((option) => option.text)).toEqual([
+    "Choose a protocol", "OpenAI Chat Completions (openai-chat)", "Anthropic Messages (anthropic-messages)",
+  ]);
+  await click("Cancel"); await edit();
+  expect(container.querySelector("legend")?.textContent).toBe("Price overrides · USD per million tokens");
+  for (const [, label] of NUMERIC_FIELDS.slice(1)) expect(field(label).getAttribute("placeholder")).toBe("Use built-in price, if known");
+  expect(container.textContent).toContain("Empty clears the override and uses a built-in price if known. 0 means explicitly free.");
+  await submit();
+  expect(writes).toEqual([{ url: "/api/v1/ops/models/update", method: "POST", body: {
+    model: "model-1", context_window: null, efforts: null, background_model: null,
+    input_usd_per_mtok: null, output_usd_per_mtok: null, cache_read_usd_per_mtok: null, cache_write_usd_per_mtok: null,
+  } }]);
 });
 
 it("clears suggestions and their settings when choosing another protocol", async () => {
@@ -161,7 +204,7 @@ it("shows context, efforts, background, usage and all four effective price sourc
   prices.output_usd_per_mtok = { override: null, effective: 2, source: "builtin" };
   data.models = [model({ context_window: 123456, efforts: ["high"], background_model: "small", profile_count: 2, prices })];
   await open();
-  for (const text of ["123456", "high", "small", "2 Agent Profiles", "0 (override)", "2 (builtin)", "unknown"]) expect(container.textContent).toContain(text);
+  for (const text of ["123456", "high", "small", "2 Agent Profiles", "Input: 0 (free)", "2 (builtin)", "unknown"]) expect(container.textContent).toContain(text);
   expect(container.textContent).toContain("Cache read"); expect(container.textContent).toContain("Cache write");
   await edit(); expect(field("Output price").value).toBe(""); await submit();
   expect(writes[0].body.output_usd_per_mtok).toBeNull();
