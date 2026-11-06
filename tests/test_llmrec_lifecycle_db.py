@@ -91,6 +91,82 @@ def test_boot_reuse_and_upgrade(tmp_path, short_checks, kept):
     asyncio.run(asyncio.wait_for(run(), 25))
 
 
+@pytest.mark.parametrize("replacement", ["tick", "start"])
+def test_kept_outdated_proxy_replaced_with_gateway_disabled(tmp_path, monkeypatch, short_checks, replacement):
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.llmrec import LlmrecRoute
+    from looper.agents.profile_registry import builtin_resolved_profile
+
+    async def run(pool):
+        schema = await pool.fetchval("SELECT current_schema()")
+        url = urlsplit(DSN)
+        scoped_dsn = urlunsplit(url._replace(query=urlencode([*parse_qsl(url.query), ("search_path", schema)])))
+        control = ProxyControl(tmp_path, scoped_dsn, enabled=True, include_oauth=True)
+        adopted = ProxyControl(tmp_path, scoped_dsn, enabled=True, include_oauth=True)
+        boot = module.boot_argv
+
+        def legacy_boot(*args):
+            argv = boot(*args)
+            argv[3] = argv[3].replace("from looper.agents.llmrec.__main__ import main;",
+                "from looper.agents.llmrec import proxy; proxy.code_sha256 = lambda: 'old-code'; "
+                "from looper.agents.llmrec.__main__ import main;")
+            return argv
+
+        try:
+            with monkeypatch.context() as old:
+                old.setattr(module, "boot_argv", legacy_boot)
+                await started(control)
+            initial = control._state()
+            route = RouteFile(id="e" * 22, upstream="https://model.example.invalid", agent_id="kept-worker",
+                              created_at="2026-01-01T00:00:00+00:00", record_id=42)
+            path = tmp_path / ROUTES_DIR / f"{route.id}.json"
+            route.write(path)
+            await adopted.at_start([42])
+            assert not adopted.gateway_enabled
+            assert (await adopted.status())["proxy"]["state"] == "outdated"
+            await adopted.tick()
+            assert not await adopted._start()
+            assert adopted._state()["pid"] == initial["pid"]
+            assert RouteFile.read(path) == route
+            # A resident route pins the proxy even between turns.
+            adopted.release(42, end_route=False)
+            await adopted.tick()
+            assert adopted._state()["pid"] == initial["pid"]
+            adopted.bind(route.id, 43)
+            adopted.release(43, end_route=True)
+            if replacement == "tick":
+                await adopted.tick()
+            else:
+                assert await adopted._start()
+            current = adopted._state()
+            assert current["pid"] != initial["pid"] and current["instance"] != initial["instance"]
+            assert current["port"] == initial["port"]
+            assert not await adopted._running(initial)
+            assert (await adopted.status())["proxy"]["state"] == "running"
+            script = ResponseScript(events=[{"type": "message_start", "message": {
+                "id": "msg_test", "type": "message", "role": "assistant", "content": [],
+                "usage": {"input_tokens": 1, "output_tokens": 0}}}, {"type": "message_stop"}])
+            async with FakeModelAPI([script]) as upstream:
+                launch = Launch(AgentSettings(profile=builtin_resolved_profile()))
+                monkeypatch.setattr(type(launch.runtime), "llmrec_upstream", lambda self, launch: upstream.base_url)
+                attached = await adopted.attach(launch, agent_id="new-worker", task_id=None)
+                assert isinstance(attached.llmrec, LlmrecRoute)
+                async with httpx.AsyncClient(trust_env=False, timeout=3) as client:
+                    response = await client.post(f"{attached.llmrec.url}/messages",
+                        json={"model": "after-upgrade", "messages": [], "stream": True},
+                        headers={"authorization": "Bearer test-key"})
+                    assert response.status_code == 200 and b"message_stop" in response.content
+                assert len(upstream.requests) == 1
+                async def written():
+                    return await pool.fetchval("SELECT count(*) FROM llm_requests WHERE model='after-upgrade'") == 1
+                await wait_for(written)
+        finally:
+            await cleanup(adopted)
+            await cleanup(control)
+
+    run_db(run, timeout=30)
+
+
 def test_crash_restarts_on_original_port(tmp_path, short_checks):
     async def run():
         control = ProxyControl(tmp_path, DSN, enabled=True)

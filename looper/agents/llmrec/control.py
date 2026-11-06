@@ -196,7 +196,7 @@ class ProxyControl:
             if port is None and self.gateway_enabled:
                 port = self.gateway_port
             if await self._health():
-                if not self.gateway_enabled or not self._outdated:
+                if not self._outdated:
                     return port is None or self._state()["port"] == port
                 # Kept agents still use this process, including idle resident routes.
                 # Defer replacement until every route has ended; never advertise it as ready.
@@ -294,7 +294,7 @@ class ProxyControl:
     async def tick(self) -> None:
         if self.gateway_enabled or (self.runtime_root / STATE_FILE).exists():
             health = await self._health()
-            if not health or (self.gateway_enabled and self._outdated):
+            if not health or self._outdated:
                 await self._start()
 
     async def set_enabled(self, enabled, *, include_oauth=None) -> None:
