@@ -25,8 +25,8 @@ from typing import Any
 
 import pytest
 
-from evals.prompt_regression.runner import Api, EvalError, fresh_database, running_server
-from tests.db_support import DSN
+from evals.prompt_regression.runner import Api, EvalError, running_server
+from tests.db_support import DSN, fresh_database_without_recording
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -165,7 +165,7 @@ def test_a_task_carries_on_after_the_server_restarts(tmp_path: Path) -> None:
         path.mkdir()
     cut_off = {"a": "verified", "b": "dispatched", "c": "completed", "d": "pending"}
 
-    with fresh_database(str(DSN)) as (database_url, _):
+    with fresh_database_without_recording(str(DSN)) as (database_url, _):
         # Only the stand-ins and system tools: installed runtimes otherwise get probed at startup.
         server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home,
                   "env": {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}}
@@ -223,7 +223,7 @@ def test_a_task_failed_at_its_cap_continues_from_the_database_after_a_restart(tm
     for path in (runtime, work, home):
         path.mkdir()
 
-    with fresh_database(str(DSN)) as (database_url, _):
+    with fresh_database_without_recording(str(DSN)) as (database_url, _):
         server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home,
                   "env": {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}}
         with running_server(**server, log_path=root / "first.log") as api:
@@ -255,7 +255,7 @@ def test_a_ready_task_stays_ready_through_a_restart_until_it_is_started(tmp_path
     for path in (runtime, work, home):
         path.mkdir()
 
-    with fresh_database(str(DSN)) as (database_url, _):
+    with fresh_database_without_recording(str(DSN)) as (database_url, _):
         server = {"database_url": database_url, "runtime_root": runtime, "bin_dir": bin_dir, "home": home,
                   "env": {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}"}}
         with running_server(**server, log_path=root / "first.log") as api:

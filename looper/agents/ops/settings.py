@@ -22,11 +22,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
-from ...db import agent_sessions as db_agent_sessions
+from ...db import agent_sessions as db_agent_sessions, system_settings
 from ...db import agent_setting_layers as db_layers, profile_registry as db_profiles, role_configs as db_roles
 from .. import agent_settings, projects, schedules, scheduler_settings, vault, wait_service, waits
 from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, TASK_ROLES, AgentType, Layer, LayerValues, SettingsError
 from ..agent_settings import default_concurrency, index_layers, layer_update, resolve
+from ..llmrec import settings as llmrec_settings
 from ..project_execution import format_usd
 from ..tiers.journal import clip
 from ..tiers.worker import recheck_limits
@@ -234,11 +235,49 @@ async def _wait_set(call: Call) -> dict[str, Any]:
     return {"changes": [{"setting": name, "before": before[name], "after": after[name]} for name in values]}
 
 
+def _llmrec_values(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    values = arguments.get("llmrec")
+    if not isinstance(values, Mapping) or not values:
+        raise OpError(ErrorCode.INVALID, "llmrec: give retention_days and/or max_total_mb (null: the built-in)")
+    try:
+        return llmrec_settings.checked(values)
+    except ValueError as exc:
+        raise OpError(ErrorCode.INVALID, str(exc)) from None
+
+
+def _llmrec_shown(name: str, entry: Mapping[str, Any]) -> str:
+    unit = "天" if name == "retention_days" else "MiB"
+    return f"{entry['value']} {unit}（{_SOURCE_WORDS[entry['source']]}）"
+
+
+async def _llmrec_confirming(call: Call) -> str:
+    values = _llmrec_values(call.arguments)
+    before = await llmrec_settings.settings_view()
+    lines = ["要修改请求录制的系统保留限制吗？"]
+    for name, value in values.items():
+        unit = "天" if name == "retention_days" else "MiB"
+        after = f"{value} {unit}" if value is not None else f"内置默认 {before[name]['built_in']} {unit}"
+        lines.append(f"- {name}：{_llmrec_shown(name, before[name])} → {after}")
+    lines.append("限制从下一次每小时清理生效；超龄或超出容量的最旧请求会被永久删除。")
+    return "\n".join(lines)
+
+
+async def _llmrec_set(call: Call) -> dict[str, Any]:
+    values = _llmrec_values(call.arguments)
+    before = await llmrec_settings.settings_view()
+    await system_settings.put_settings({"llmrec." + name: None if value is None else str(value)
+                                        for name, value in values.items()})
+    after = await llmrec_settings.settings_view()
+    return {"changes": [{"setting": name, "before": before[name], "after": after[name]} for name in values]}
+
+
 async def _confirming(call: Call) -> str | None:
     """What a change of the vault, the shared defaults, a limit, or one raising a spend cap does, for the user to confirm;
     None for any other call (``write``), or another action."""
     if call.arguments["action"] == "scheduler":
         return await _scheduler_confirming(call)
+    if call.arguments["action"] == "llmrec":
+        return await _llmrec_confirming(call)
     if call.arguments["action"] == "waits":
         return await _wait_confirming(call)
     if call.arguments["action"] == "knowledge_vault":
@@ -408,6 +447,7 @@ async def _view(call: Call) -> dict[str, Any]:
         answer = {"scheduler": {name: _scheduler_shown(entry, days=name == "run_retention_days")
                                 for name, entry in scheduler.items()},
                 "waits": await waits.settings_view(),
+                "llmrec": await llmrec_settings.settings_view(),
                 "shared_defaults": _layer_set(view["system"]["values"], profiles),
                 "roles": {role: {"set": _layer_set(entry["values"], profiles),
                                  "effective": _effective(entry["effective"]), "timeout_seconds": timeouts.get(role)}
@@ -460,6 +500,8 @@ async def _settings(call: Call) -> dict[str, Any]:
         return await _allowed(call)
     if action == "scheduler":
         return await _scheduler_set(call)
+    if action == "llmrec":
+        return await _llmrec_set(call)
     if action == "waits":
         return await _wait_set(call)
     if action == "knowledge_vault":
@@ -474,7 +516,9 @@ TOOLS: tuple[Tool, ...] = (
                     "project. view (with project: its layers and allowed profiles); set values on one layer (no role "
                     "nor project: shared defaults); allowed_profiles: add or remove the profiles a project's Planners "
                     "may choose (an empty list: they may choose any profile); scheduler: the schedules' system settings (the user "
-                    "confirms them first); waits: system limits for wait steps (the user confirms first). "
+                    "confirms them first); llmrec: recording retention_days (1–90, default 7) and "
+                    "max_total_mb (256–65536 MiB, default 2048), read by view and changed after confirmation; "
+                    "waits: system limits for wait steps (the user confirms first). "
                     "knowledge_vault: the notes folder agents read in projects that turn it on, and "
                     "the folders they may write (the user confirms first). The user confirms shared defaults, limits and "
                     "higher spend caps first. Model and "
@@ -483,7 +527,11 @@ TOOLS: tuple[Tool, ...] = (
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
                 "action": {"type": "string", "enum": ["view", "set", "allowed_profiles", "scheduler", "waits",
-                                                      "knowledge_vault"]},
+                                                      "knowledge_vault", "llmrec"]},
+                "llmrec": {"type": "object", "additionalProperties": False,
+                           "description": "llmrec: recording retention limits only; null restores the built-in.",
+                           "properties": {"retention_days": {"type": ["integer", "null"], "minimum": 1, "maximum": 90},
+                                          "max_total_mb": {"type": ["number", "null"], "minimum": 256, "maximum": 65536}}},
                 "waits": {"type": "object", "description": "waits: max_wait_seconds (longest wait step), "
                           "min_check_seconds (least gap between checks); null restores the built-in default."},
                 "knowledge_vault": {"type": "object", "description": "knowledge_vault: path (absolute), writable "

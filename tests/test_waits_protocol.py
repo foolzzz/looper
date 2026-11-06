@@ -381,7 +381,7 @@ def test_wait_states(state: WaitState) -> None:
 @pytest.fixture
 def settings(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     store: dict[str, str] = {}
-    async def get(keys: Any) -> dict[str, str]:
+    async def get(keys: Any, *, pool: Any = None) -> dict[str, str]:
         return {key: store[key] for key in keys if key in store}
     async def put(values: Any) -> None:
         for key, value in values.items():

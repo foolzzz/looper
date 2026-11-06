@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+- Model request recording is now on by default for eligible API-key runs,
+  including upgrades that never explicitly set the recording switch. Explicit
+  off settings remain off; Claude subscription (OAuth) recording remains off
+  by default. Settings → Request recording now controls retention (default
+  7 days, range 1–90 days) and capacity (default 2048 MiB, range 256–65536 MiB),
+  shows recorded size, and offers confirmed deletion. Hourly cleanup expires
+  over-age requests and unreferenced parts even when recording is disabled,
+  then evicts requests oldest-first by recorded byte budget without locking
+  the recording tables or running `VACUUM FULL`. Manager cleanup also removes
+  its recorded requests.
+
 ## [2.14.103] - 2026-11-05
 
 ### Added

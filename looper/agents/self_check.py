@@ -327,6 +327,14 @@ async def ttadk_check() -> Check:
     return await check_ttadk(runtimes, wait=False)
 
 
+async def _llmrec_storage(conn=None):
+    from .llmrec import settings
+    from ..db import llm_requests
+    from ..db.connection import get_pool
+
+    return await llm_requests.logical_bytes(conn if conn is not None else get_pool()), await settings.max_total_mb(conn)
+
+
 async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = "") -> Check:
     """Request recording is advisory; forwarding and writer counters expose missing captures."""
     from .llmrec.control import controller
@@ -334,6 +342,7 @@ async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = 
 
     control = controller()
     try:
+        storage = None
         if control is None:
             if database_url:
                 import asyncpg
@@ -341,11 +350,12 @@ async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = 
                 conn = await asyncpg.connect(database_url, timeout=_DATABASE_TIMEOUT_SECONDS)
                 try:
                     values = await system_settings.get_settings(["llmrec.enabled"], pool=conn)
+                    storage = await _llmrec_storage(conn)
                 finally:
                     await conn.close()
             else:
                 values = await system_settings.get_settings(["llmrec.enabled"])
-            enabled = values.get("llmrec.enabled") == "true"
+            enabled = values.get("llmrec.enabled", "true") == "true"
             proxy = {"state": "unavailable"}
             if enabled and runtime_root is not None:
                 from .llmrec.control import ProxyControl
@@ -354,18 +364,23 @@ async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = 
         else:
             status = await control.status()
             enabled, proxy = status["enabled"], status["proxy"]
-        if not enabled:
-            return Check("llmrec", "Model request recording", SKIP, "off")
-        if proxy["state"] in ("unavailable", "stopped"):
+        if enabled and proxy["state"] in ("unavailable", "stopped"):
             errors = f"; write_errors={proxy['write_errors']} since proxy startup" if proxy.get("write_errors") else ""
             return Check("llmrec", "Model request recording", FAIL, "recording proxy unavailable" + errors)
-        if proxy["state"] == "outdated" or proxy.get("dropped", 0) or proxy.get("write_errors", 0) or proxy.get("gaps", 0):
+        warnings = []
+        if enabled and (proxy["state"] == "outdated" or proxy.get("dropped", 0) or proxy.get("write_errors", 0)
+                        or proxy.get("gaps", 0)):
             reasons = proxy.get("gap_reasons", {})
             common = max(reasons, key=reasons.get) if reasons else "unknown"
-            return Check("llmrec", "Model request recording", WARN,
-                         f"{proxy['state']}; dropped={proxy.get('dropped', 0)}, write_errors={proxy.get('write_errors', 0)}, "
-                         f"gaps={proxy.get('gaps', 0)} since proxy startup, most_common_gap={common}")
-        return Check("llmrec", "Model request recording", OK, "proxy running")
+            warnings.append(f"{proxy['state']}; dropped={proxy.get('dropped', 0)}, "
+                            f"write_errors={proxy.get('write_errors', 0)}, gaps={proxy.get('gaps', 0)} "
+                            f"since proxy startup, most_common_gap={common}")
+        stored, cap = storage if storage is not None else await _llmrec_storage()
+        usage = f"recorded requests use {stored / (1024 * 1024):.1f} MiB of {cap:g} MiB cap"
+        if warnings or stored > 0.9 * cap * 1024 * 1024:
+            return Check("llmrec", "Model request recording", WARN, "; ".join([*warnings, usage]))
+        detail = ("proxy running" if enabled else "off") + "; " + usage
+        return Check("llmrec", "Model request recording", OK if enabled else SKIP, detail)
     except Exception:
         return Check("llmrec", "Model request recording", WARN, "recording status unavailable")
 

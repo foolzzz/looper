@@ -342,3 +342,80 @@ def test_translation_column_upgrade_preserves_rows_and_runs_once():
             await old.execute("ALTER TABLE llm_requests DROP COLUMN translation")
             assert not await connection.schema_change_pending(old)
     asyncio.run(asyncio.wait_for(body(), 30))
+
+
+def test_recorded_bytes_count_inserted_utf8_and_deduplicated_parts():
+    async def body(pool):
+        first = capture(seq=1)
+        first.response_raw = "答\0案"
+        first.response_bytes = 2**30  # Wire sizes do not count toward retained content.
+        await llm_requests.write_batch([first, first], pool=pool)
+        row = await pool.fetchrow("SELECT * FROM llm_requests")
+        expected = 0
+        for name in llm_requests._COLUMNS:
+            if name == "stored_bytes":
+                continue
+            value = row[name]
+            if name in llm_requests._JSON_COLUMNS and value is not None:
+                value = json.dumps(json.loads(value), ensure_ascii=False, separators=(",", ":"))
+            if isinstance(value, str):
+                expected += len(value.encode("utf-8"))
+        assert row["stored_bytes"] == expected
+        parts = await pool.fetch("SELECT stored_bytes,body FROM llm_request_parts")
+        assert len(parts) == len(first.parts)
+        for part in parts:
+            assert part["stored_bytes"] == len(json.dumps(json.loads(part["body"]), ensure_ascii=False,
+                                                        separators=(",", ":")).encode("utf-8"))
+        async with pool.acquire() as conn:
+            assert await llm_requests.logical_bytes(conn) == expected + sum(p["stored_bytes"] for p in parts)
+        # The hourly query depends only on the byte columns; changing the body alone does
+        # not change its result or force a row-to-text/TOAST scan.
+        await pool.execute("UPDATE llm_requests SET response_raw = repeat('x', 100000)")
+        async with pool.acquire() as conn:
+            assert await llm_requests.logical_bytes(conn) == expected + sum(p["stored_bytes"] for p in parts)
+    run_db(body, timeout=15)
+
+
+def test_recorded_bytes_upgrade_backfills_once_and_preserves_bodies():
+    from tests.bridge_schema_support import structure, witness
+
+    async def body():
+        async with fresh_connection() as old, fresh_connection() as fresh:
+            await connection.ensure_schema(old)
+            # A connection supplies acquire() only on pools, so seed through the actual
+            # writer using a pool pinned to this disposable schema.
+            schema = await old.fetchval("SELECT current_schema()")
+            pool = await asyncpg.create_pool(DSN, min_size=1, max_size=1, server_settings={"search_path": schema})
+            try:
+                await llm_requests.write_batch([capture()], pool=pool)
+            finally:
+                await pool.close()
+            await old.execute("ALTER TABLE llm_requests DROP COLUMN stored_bytes; "
+                              "ALTER TABLE llm_request_parts DROP COLUMN stored_bytes")
+            request = dict(await old.fetchrow("SELECT * FROM llm_requests"))
+            parts = [dict(row) for row in await old.fetch("SELECT * FROM llm_request_parts ORDER BY sha256")]
+            # Adding the nullable trailing byte column adds one comma to row::text.
+            request_bytes = await old.fetchval("SELECT octet_length(row::text) + 1 FROM llm_requests row")
+            part_bytes = dict(await old.fetch("SELECT sha256, octet_length(row::text) + 1 FROM llm_request_parts row"))
+            before = await witness(old)
+            assert await connection.schema_change_pending(old)
+            assert await witness(old) == before
+            await connection.ensure_schema(old)
+            await connection.ensure_schema(fresh)
+            assert await structure(old) == await structure(fresh)
+            upgraded = dict(await old.fetchrow("SELECT * FROM llm_requests"))
+            assert upgraded.pop("stored_bytes") == request_bytes and upgraded == request
+            for upgraded, previous in zip(await old.fetch("SELECT * FROM llm_request_parts ORDER BY sha256"), parts):
+                upgraded = dict(upgraded)
+                assert upgraded.pop("stored_bytes") == part_bytes[previous["sha256"]] and upgraded == previous
+            assert await old.fetchval("SELECT count(*) FROM schema_migrations "
+                                      "WHERE name='llm_requests_stored_bytes'") == 1
+            after = await witness(old)
+            assert not await connection.schema_change_pending(old)
+            await connection.ensure_schema(old)
+            assert await witness(old) == after
+            assert not await fresh.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations "
+                                           "WHERE name='llm_requests_stored_bytes')")
+            await old.execute("ALTER TABLE llm_requests DROP COLUMN stored_bytes")
+            assert not await connection.schema_change_pending(old)
+    asyncio.run(asyncio.wait_for(body(), 30))

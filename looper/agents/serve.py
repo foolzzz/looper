@@ -689,7 +689,7 @@ async def _run_agent_system_owned(
             try:
                 from ..db import system_settings
                 values = await system_settings.get_settings(["llmrec.enabled", "llmrec.include_oauth"], pool=pool)
-                control = ProxyControl(runtime_root, dsn, enabled=values.get("llmrec.enabled") == "true",
+                control = ProxyControl(runtime_root, dsn, enabled=values.get("llmrec.enabled", "true") == "true",
                                        include_oauth=values.get("llmrec.include_oauth") == "true")
                 install(control)
                 await control.at_start(scan.record_ids)

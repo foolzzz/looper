@@ -14,7 +14,8 @@ from urllib.parse import unquote, urlsplit
 import asyncpg
 import pytest
 
-from evals.prompt_regression.runner import EvalError, fresh_database
+from evals.prompt_regression.runner import EvalError
+from tests.db_support import fresh_database_without_recording
 from tests.runner_support import (
     DISPOSABLE_SERVERS, OPERATOR_DATABASES, require_disposable_database, serving)
 
@@ -39,7 +40,7 @@ def query(url, sql, *args, execute=False):
 
 
 def seed(url, api):
-    # Only fixture rows, in the database just created by fresh_database.
+    # Only fixture rows, in the database just created for this test.
     query(url, """
         INSERT INTO agent_runtimes (id,name,type,version,capabilities)
           VALUES ('rt-test-runner','Test runner','test-runner','0.1.0',
@@ -157,7 +158,7 @@ def test_isolated_serve_tools_host_charge_and_pre_request_denial(tmp_path):
     log = tmp_path / "serve.log"
     with ExitStack() as resources:
         try:
-            url, _ = resources.enter_context(fresh_database(admin))
+            url, _ = resources.enter_context(fresh_database_without_recording(admin))
         except EvalError:
             pytest.skip("serve acceptance untested: disposable PostgreSQL is unavailable or lacks CREATEDB")
         with serving(database_url=url, runtime_root=tmp_path / "runtime", home=tmp_path / "home",

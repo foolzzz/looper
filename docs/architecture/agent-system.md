@@ -121,7 +121,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   can preview history cleanup in Settings → Managers or
   `manager_cleanup.preview`, then cancel or explicitly choose permanent cleanup.
   `manager_cleanup.purge` removes only that deleted Manager's exact-owner chat
-  bodies, run records and cascading events, and actions after 30 days by
+  bodies, run records and cascading events, actions and recording routes
+  (including their requests and shared parts) after 30 days by
   default (an integer 30–3650). It rechecks retention and runtime/dependency
   blockers under a database lock, and commits all deletions together.
   Manager and thread tombstones survive; keys and thread owners cannot be
@@ -1186,7 +1187,9 @@ line includes its child's arguments.
 
 Housekeeping never touches `.local/runs`: it prunes `.local/command-runs`,
 `logs/schedules` and `.local/command-runner`, and rotates `serve.log` and
-`probe.log`. `scheduler_settings.run_retention_days` prunes only closed
+`probe.log`. Its `llm requests` step prunes recorded requests and their unused
+routes; its `llm route files` step cleans expired route files under
+`.local/llmrec`. `scheduler_settings.run_retention_days` prunes only closed
 schedule runs and notifications. No automatic retention pass deletes
 `llm_records`.
 
@@ -3430,23 +3433,40 @@ So:
 ### Model request recording (`llmrec`)
 
 `looper/agents/llmrec` records the HTTP exchanges of newly launched Claude
-Code Workers and Reviewers, including their subagents and teammates, through
-a loopback reverse proxy. Manager and Planner turns, other runtimes and
-TTADK launches are not covered. API-key runs are eligible when recording is
+Code Workers, Reviewers, Planners, Managers and consults, including their
+subagents and teammates, through a loopback reverse proxy. The in-process
+API runtime is also recorded. Codex, OMP, Pi, DSH, Grok, Cursor and TTADK
+launches are not covered. API-key runs are eligible when recording is
 enabled; Claude subscription runs also require the OAuth opt-in. Runs started
 before a settings change keep their existing route.
 
-- **Settings and access.** `llmrec.enabled` and `llmrec.include_oauth` are
-  both off by default. Settings → Request recording and the operator-only
-  `llmrec_settings.get` / `llmrec_settings.update` operations control them.
-  Turning recording on requires confirmation that prompts, code, tool output
-  and model replies will be stored. Turning it off keeps existing captures;
+- **Settings and access.** Recording (`llmrec.enabled`) is on by default,
+  including after an upgrade when the operator has never set it. An explicitly
+  stored `false` keeps it off. Turn it off in Settings → Request recording or
+  with `loopercli llmrec-settings update --enabled false`. Claude subscription
+  runs need the separate `llmrec.include_oauth` setting, which is off by default.
+  The operator-only `llmrec_settings.get` / `llmrec_settings.update` operations
+  control these settings. Turning recording on by hand in the dashboard
+  requires confirmation that prompts, code, tool output and model replies
+  will be stored. Turning it off keeps existing captures;
   either change applies to future launches, and running agents keep their
   existing route until restart. The page also shows the proxy state
   (`running`, `stopped`, `unavailable` or `outdated`), port, requests, recorded
-  requests, dropped requests and write errors. Captures, settings and exports
+  requests, dropped requests and write errors. The retention limits are
+  `llmrec.retention_days` (1–90 days, default 7) and `llmrec.max_total_mb`
+  (256–65536 MiB, default 2048). The next hourly cleanup removes over-age
+  requests, then evicts the oldest requests by recorded byte budget to 90% of
+  the cap when it is exceeded. Recorded size sums the bytes saved with requests
+  and deduplicated parts; physical PostgreSQL table size is not the cap. The
+  page and self-check show recorded MiB against the limit. The Manager can
+  read both limits with `looper_settings` `view`, and change them with action
+  `llmrec` after the same user confirmation as other system settings; null
+  restores a built-in limit. Captures, recording switches, purge and exports
   remain operator-only: API-client tokens receive 403, these operations are
-  not agent tools, and nothing is sent to Telegram or Lark.
+  not agent tools. The dashboard asks for confirmation before calling
+  `llm_requests.purge`; an operator API or CLI call executes immediately,
+  as with other operator operations. Telegram and Lark use the same Manager
+  settings tool; recorded bodies are never sent to those channels.
 - **Dashboard viewer.** Open a run on the agent's history page, then expand
   **Model requests**. Rows show timing, model, outcome, token usage, byte sizes
   and capture gaps; requests received after a turn ended appear separately.
@@ -3544,8 +3564,9 @@ before a settings change keep their existing route.
 - **Redaction boundary.** Credential headers, cookies, unknown header values
   and sensitive query parameters are redacted before storage. Credentials in
   upstream URLs are refused for recording. Bodies are not secret-scrubbed:
-  prompts, code and tool output can contain sensitive data. Recording is an
-  explicit operator choice; OAuth runs remain excluded without their opt-in.
+  prompts, code and tool output can contain sensitive data. Recording is
+  on by default; operators can turn it off. OAuth runs remain excluded without
+  their opt-in.
 
 ### The Manager's platform tools
 

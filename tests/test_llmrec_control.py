@@ -29,6 +29,19 @@ def launch():
     return Launch(AgentSettings(profile=profile))
 
 
+@pytest.mark.parametrize('enabled', [None, 'false', 'true'])
+def test_self_check_without_controller_defaults_recording_on(monkeypatch, enabled):
+    from looper.agents import self_check
+    from looper.db import system_settings
+
+    monkeypatch.setattr(control, '_control', None)
+    monkeypatch.setattr(system_settings, 'get_settings', AsyncMock(
+        return_value={} if enabled is None else {'llmrec.enabled': enabled}))
+    monkeypatch.setattr(self_check, '_llmrec_storage', AsyncMock(return_value=(0, 2048)))
+    check = asyncio.run(self_check.llmrec_check())
+    assert check.status == (self_check.SKIP if enabled == 'false' else self_check.FAIL)
+
+
 @pytest.mark.parametrize('foreign', ['instance', 'pid'])
 def test_failed_health_requires_matching_instance_and_pid(tmp_path, monkeypatch, foreign):
     owner = control.ProxyControl(tmp_path, '', enabled=True)
@@ -117,8 +130,10 @@ def test_self_check_reports_gaps_through_proxy_status(tmp_path, monkeypatch):
     monkeypatch.setattr(owner, '_health', AsyncMock(return_value=proxy.stats))
     monkeypatch.setattr(owner, '_state', lambda: {'port': 1234, 'pid': 1})
     monkeypatch.setattr(control, '_control', owner)
+    monkeypatch.setattr(self_check, '_llmrec_storage', AsyncMock(return_value=(0, 2048)))
     status = asyncio.run(owner.status())
-    api_v1.validate_arguments(api_v1.find('POST', '/api/v1/llmrec_settings/get').result, status)
+    api_v1.validate_arguments(api_v1.find('POST', '/api/v1/llmrec_settings/get').result['properties']['proxy'],
+                              status['proxy'])
     assert status['proxy']['recorded'] == 4 and status['proxy']['gaps'] == 3
     check = asyncio.run(self_check.llmrec_check())
     assert check.status == self_check.WARN

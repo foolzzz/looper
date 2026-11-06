@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { previewManagerCleanup, purgeManagerCleanup, type ManagerCleanupResult } from "@/lib/manager-cleanup-api";
 import { errorText } from "@/lib/use-action";
 
-const IMPACT = "聊天消息正文、模型运行记录及其事件、Manager 操作历史将永久删除，无法恢复。Manager 身份和会话归属记录永久保留，旧身份与旧会话不能重新分配；不会删除运行文件。";
+const IMPACT = "聊天消息正文、模型运行记录及其事件、模型请求及其内容、Manager 操作历史将永久删除，无法恢复。Manager 身份和会话归属记录永久保留，旧身份与旧会话不能重新分配；不会删除运行文件。";
 
 /** Operator-only cleanup is deliberately separate from the live Manager list. */
 export function ManagerCleanup() {
@@ -115,6 +115,7 @@ export function ManagerCleanup() {
             <p className="text-sm">保留会话归属记录：{result.counts.threads} 条（不删除）</p>
             <dl className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2" aria-label={result.purged ? "实际删除数量" : "待删除数量"}>
               {([["聊天消息", result.counts.chat_messages], ["模型运行记录", result.counts.llm_records],
+                ["模型请求", result.counts.llm_requests],
                 ["运行事件", result.counts.llm_record_events], ["操作历史", result.counts.manager_actions]] as const)
                 .map(([label, count]) => <div key={label} className="flex justify-between gap-3"><dt>{result.purged ? "已删除" : "待删除"}{label}</dt><dd>{count}</dd></div>)}
             </dl>
