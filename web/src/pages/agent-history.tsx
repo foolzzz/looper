@@ -22,14 +22,17 @@ import {
 import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
 import { ContextUsagePanel } from "@/components/context-usage";
+import { LlmRequestExport } from "@/components/llm-request-export";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
-import { cn } from "@/lib/utils";
+import { cn, formatBytes } from "@/lib/utils";
 import { compactionChange, formatTokens, formatUsd, runCostLabel } from "@/lib/usage";
 import {
   fetchChatMessages,
   fetchLlmRecord,
   fetchLlmRecordEvents,
   fetchLlmRecords,
+  fetchLlmRequests,
+  fetchLlmRequest,
   fetchTaskActivity,
   runProfile,
   type ActivityEvent,
@@ -37,6 +40,8 @@ import {
   type DbChatMessage,
   type LlmRecord,
   type LlmRecordEvent,
+  type LlmRequest,
+  type LlmRequestRow,
   type ProjectInstructionFile,
   type PromptLayers,
   type RunRole,
@@ -158,6 +163,189 @@ function Pre({ text }: { text: string }) {
       {text}
     </pre>
   );
+}
+
+const GAP_EXPLANATIONS: Record<string, string> = {
+  request_too_large: "The request was larger than 16 MiB and only its hash and size were kept.",
+  response_too_large: "The response was larger than 4 MiB and only its usage and stop reason were kept.",
+  undecodable_encoding: "The response was compressed with an encoding the recorder cannot read.",
+  unparsable_request: "The request body was not the JSON its endpoint expects, so it was stored unsplit.",
+  unparsable_stream: "The response stream could not be assembled, so only its first 1 MiB of raw text was kept.",
+  rejected_by_database: "The database rejected the body; only the recording metadata was kept.",
+};
+
+const objectOf = (value: unknown): Block => value && typeof value === "object" && !Array.isArray(value) ? value as Block : {};
+const jsonText = (value: unknown) => typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "null";
+
+/** Long blocks stay available in full, one expansion away. */
+function RequestBlock({ value }: { value: unknown }) {
+  const block = objectOf(value);
+  const text = block.type === "text" && typeof block.text === "string" ? block.text
+    : block.type === "thinking" && typeof block.thinking === "string" ? block.thinking : jsonText(value);
+  const label = String(block.type ?? "text");
+  return text.length > 2000
+    ? <Collapsible title={`${label} · ${text.length.toLocaleString()} chars`}><Pre text={text} /></Collapsible>
+    : <div className="space-y-1"><span className="text-xs text-muted-foreground">{label}</span><Pre text={text} /></div>;
+}
+
+function ContentBlocks({ value }: { value: unknown }) {
+  return <div className="space-y-2">{(Array.isArray(value) ? value : [value]).map((block, i) => <RequestBlock key={i} value={block} />)}</div>;
+}
+
+function RequestHeaders({ title, headers }: { title: string; headers: Record<string, string> | null }) {
+  return <Collapsible title={title}>
+    <dl className="space-y-1 font-mono text-xs">
+      {Object.entries(headers ?? {}).map(([name, value]) => <div key={name} className="flex flex-wrap gap-x-2">
+        <dt>{name}:</dt><dd className={cn("break-all", value === "<redacted>" && "italic text-muted-foreground")}>{value}</dd>
+      </div>)}
+    </dl>
+  </Collapsible>;
+}
+
+function RequestViewer({ id }: { id: number }) {
+  const [request, setRequest] = useState<LlmRequest | null>(null);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setRequest(null); setError("");
+    fetchLlmRequest(id, controller.signal).then((value) => { if (!controller.signal.aborted) setRequest(value); })
+      .catch((err) => { if (!controller.signal.aborted) setError(String(err)); });
+    return () => controller.abort();
+  }, [id, attempt]);
+  if (error) return <div role="alert" className="text-xs text-destructive">{error} <button type="button" className="min-h-11 underline" onClick={() => setAttempt(attempt + 1)}>Retry</button></div>;
+  if (!request) return <p role="status" className="text-xs text-muted-foreground">Loading request…</p>;
+  const body = objectOf(request.request_body), response = objectOf(request.response_body);
+  const messages = Array.isArray(body.messages) ? body.messages : Array.isArray(body.input) ? body.input : [];
+  const tools = Array.isArray(body.tools) ? body.tools : [];
+  const system = body.system ?? body.instructions ?? messages.filter((m) => ["system", "developer"].includes(String(objectOf(m).role))).map((m) => objectOf(m).content);
+  const systemText = (value: unknown): string => Array.isArray(value) ? value.map(systemText).join("\n\n") : typeof value === "string" ? value : typeof objectOf(value).text === "string" ? String(objectOf(value).text) : value == null ? "" : jsonText(value);
+  const parameters = Object.fromEntries(Object.entries(body).filter(([key]) => !["system", "instructions", "tools", "messages", "input"].includes(key)));
+  const choices = Array.isArray(response.choices) ? response.choices : [];
+  const content = response.content ?? response.output ?? (choices.length ? choices.map((choice) => objectOf(choice).message) : request.response_body);
+  const stop = response.stop_reason ?? response.status ?? choices.map((choice) => objectOf(choice).finish_reason);
+  return <div className="space-y-3 rounded-md border border-border p-3" aria-label={`Model request ${id}`}>
+    <h4 className="text-sm font-medium">Request · {id}</h4>
+    <Collapsible title="System" defaultOpen><Pre text={systemText(system)} /></Collapsible>
+    <Collapsible title={`Tools · ${tools.length}`} defaultOpen>
+      <div className="space-y-2">{tools.map((tool, index) => <Collapsible key={index} title={String(objectOf(tool).name ?? objectOf(objectOf(tool).function).name ?? `Tool ${index + 1}`)}><Pre text={jsonText(tool)} /></Collapsible>)}</div>
+    </Collapsible>
+    <Collapsible title={`Messages · ${messages.length}`} defaultOpen>
+      <div className="space-y-3">{messages.map((message, index) => {
+        const item = objectOf(message);
+        return <div key={index} className="space-y-2">
+          {request.new_from_index === index && <p className="border-t border-primary pt-2 text-xs font-medium text-primary">New in this request</p>}
+          <p className="text-xs font-medium">{String(item.role ?? item.type ?? `Message ${index + 1}`)}</p>
+          <ContentBlocks value={item.content ?? message} />
+          {item.tool_calls != null && <ContentBlocks value={item.tool_calls} />}
+        </div>;
+      })}
+      {request.new_from_index === messages.length && <p className="border-t border-primary pt-2 text-xs text-primary">New in this request</p>}
+      </div>
+    </Collapsible>
+    {typeof body.input === "string" && <Collapsible title="Input" defaultOpen><Pre text={body.input} /></Collapsible>}
+    {(!request.request_body || typeof request.request_body !== "object") && <Collapsible title="Stored body" defaultOpen><Pre text={jsonText(request.request_body)} /></Collapsible>}
+    <Collapsible title="Parameters"><Pre text={jsonText(parameters)} /></Collapsible>
+    <Collapsible title="Stored request JSON"><Pre text={jsonText(request.request_body)} /></Collapsible>
+    <RequestHeaders title="Headers" headers={request.request_headers} />
+    <h4 className="text-sm font-medium">Response</h4>
+    <ContentBlocks value={content ?? request.response_body} />
+    <p className="break-all text-xs text-muted-foreground">Stop reason: {jsonText(stop)}</p>
+    <Collapsible title="Usage"><Pre text={jsonText(request.usage ?? response.usage)} /></Collapsible>
+    <Collapsible title="Stored response JSON"><Pre text={jsonText(request.response_body)} /></Collapsible>
+    {request.response_raw !== null && <Collapsible title="Raw response"><Pre text={request.response_raw} /></Collapsible>}
+    <RequestHeaders title="Response headers" headers={request.response_headers} />
+    <Collapsible title="Facts" defaultOpen>
+      {request.record_gap && <p className="mb-2 text-xs text-destructive">{request.record_gap}: {GAP_EXPLANATIONS[request.record_gap] ?? "The recorder reported a capture gap."}</p>}
+      <Pre text={jsonText({ route_id: request.route.id, upstream_host: request.route.upstream_host,
+        upstream_path: request.route.upstream_path, request_sha256: request.request_sha256,
+        request_bytes: request.request_bytes, response_bytes: request.response_bytes,
+        outcome: request.outcome, error: request.error, record_gap: request.record_gap,
+        body_sanitized: request.body_sanitized })} />
+    </Collapsible>
+  </div>;
+}
+
+function RequestRow({ row, selected, onSelect }: { row: LlmRequestRow; selected: boolean; onSelect: () => void }) {
+  const ms = (value: number | null) => value === null ? "—" : `${value} ms`;
+  return <button type="button" aria-expanded={selected} onClick={onSelect}
+    className="flex min-h-11 w-full flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-border px-3 py-2 text-left text-xs hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+    <span className="font-mono tabular-nums">{formatClock(row.started_at)}</span>
+    <span>{row.kind}</span><span className="break-all">{row.model ?? "unknown model"}</span>
+    <Badge variant={row.outcome === "completed" ? "success" : "destructive"}>{row.status ?? "—"} · {row.outcome}</Badge>
+    <span>TTFB {ms(row.ttfb_ms)}</span><span>Duration {ms(row.duration_ms)}</span>
+    <span className="font-mono" title="in / cache read / cache write / out">{[row.input_tokens, row.cache_read_tokens, row.cache_write_tokens, row.output_tokens].map((n) => n ?? "—").join(" / ")}</span>
+    {row.record_gap && <Badge variant="destructive">{row.record_gap}</Badge>}
+    <span className="text-muted-foreground">Request {formatBytes(row.request_bytes)} · Response {row.response_bytes === null ? "—" : formatBytes(row.response_bytes)}</span>
+  </button>;
+}
+
+/** Mounted only inside an open run; fetch every route and stop polling as soon as the run ends. */
+function ModelRequests({ record }: { record: LlmRecord }) {
+  const [rows, setRows] = useState<LlmRequestRow[]>([]);
+  const [between, setBetween] = useState<LlmRequestRow[]>([]);
+  const [open, setOpen] = useState(false);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [attempt, setAttempt] = useState(0);
+  const state = record.metadata?.llmrec?.state;
+  useEffect(() => {
+    if (!state || state === "skipped" || state === "bypassed") return;
+    const controller = new AbortController();
+    let pending = false;
+    const all = async (betweenTurns: boolean) => {
+      const result: LlmRequestRow[] = [];
+      let before: number | undefined;
+      while (true) {
+        const page = await fetchLlmRequests({ record_id: record.id, ...(betweenTurns ? { between_turns: true } : {}),
+          limit: 500, ...(before === undefined ? {} : { before_id: before }) }, controller.signal);
+        result.push(...page);
+        if (page.length < 500) break;
+        const next = Math.min(...page.map((row) => row.id));
+        if (before !== undefined && next >= before) throw new Error("The request cursor did not advance.");
+        before = next;
+      }
+      // Millisecond timestamps alone lose PostgreSQL's microsecond ordering.
+      const fraction = (iso: string) => Number(`0.${iso.match(/\.(\d+)/)?.[1] ?? "0"}`);
+      return result.sort((a, b) => Date.parse(a.started_at) - Date.parse(b.started_at)
+        || fraction(a.started_at) - fraction(b.started_at) || a.id - b.id);
+    };
+    const load = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const [turnRows, afterRows] = await Promise.all([all(false), all(true)]);
+        if (!controller.signal.aborted) { setRows(turnRows); setBetween(afterRows); setError(""); }
+      } catch (err) { if (!controller.signal.aborted) setError(String(err)); }
+      finally { pending = false; if (!controller.signal.aborted) setLoading(false); }
+    };
+    void load();
+    const timer = record.status === "running" ? setInterval(() => void load(), POLL_MS) : undefined;
+    return () => { controller.abort(); clearInterval(timer); };
+  }, [record.id, record.status, state, attempt]);
+  if (!state) return null;
+  if (state === "skipped" || state === "bypassed") return <p className="text-xs text-muted-foreground">Requests not recorded: {record.metadata?.llmrec?.reason ?? "unknown"}{record.metadata?.llmrec?.detail ? ` (${record.metadata.llmrec.detail})` : ""}</p>;
+  const showRows = (requests: LlmRequestRow[]) => requests.map((row) => <div key={row.id} className="space-y-2">
+    <RequestRow row={row} selected={selected === row.id} onSelect={() => setSelected(selected === row.id ? null : row.id)} />
+    {selected === row.id && <RequestViewer key={row.id} id={row.id} />}
+  </div>);
+  return <section className="rounded-md border border-border" aria-label="Model requests">
+    <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
+      <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className="flex min-h-11 items-center gap-2 text-xs">
+        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}Model requests · {rows.length + between.length}
+      </button>
+      <LlmRequestExport filter={{ record_id: record.id }} label="Export JSONL" />
+    </div>
+    {open && <div className="space-y-2 border-t border-border p-3">
+      {error && <p role="alert" className="text-xs text-destructive">{error} <button type="button" className="min-h-11 underline" onClick={() => setAttempt(attempt + 1)}>Retry</button></p>}
+      {loading && <p role="status" className="text-xs text-muted-foreground">Loading requests…</p>}
+      {!loading && !error && !rows.length && !between.length && <p className="text-xs text-muted-foreground">No model requests recorded.</p>}
+      {showRows(rows)}
+      {!!between.length && <p className="border-t border-border pt-3 text-xs text-muted-foreground">After the turn ended</p>}
+      {showRows(between)}
+    </div>}
+  </section>;
 }
 
 function LaunchCommand({ record }: { record: LlmRecord }) {
@@ -910,6 +1098,7 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOp
           <LaunchCommand record={record} />
           <SystemPrompt record={record} />
           <LoadedLibrary record={record} />
+          <ModelRequests record={record} />
           {record.input_text && (
             <Collapsible icon={<User className="h-3 w-3" />} title={`Input · ${record.input_text.length} chars`} defaultOpen={record.input_text.length < 400}>
               <Pre text={record.input_text} />
@@ -1006,6 +1195,7 @@ export function AgentHistoryPage({ sub }: { sub: string }) {
             task {taskId}
           </a>
         )}
+        <LlmRequestExport key={agentId} filter={{ agent_id: agentId }} checkVisibility />
       </div>
 
       {role === "Planner" && (

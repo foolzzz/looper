@@ -3439,10 +3439,72 @@ before a settings change keep their existing route.
 - **Settings and access.** `llmrec.enabled` and `llmrec.include_oauth` are
   both off by default. Settings → Request recording and the operator-only
   `llmrec_settings.get` / `llmrec_settings.update` operations control them.
-  Until the viewer is available, read captured exchanges with
-  `loopercli llm-requests list/get` or the operator API's `llm_requests.list` /
-  `llm_requests.get`; the list contains metadata and the detail reconstructs the body.
-  These operations use `POST /api/v1/<domain>/<action>` and are not agent tools.
+  Turning recording on requires confirmation that prompts, code, tool output
+  and model replies will be stored. Turning it off keeps existing captures;
+  either change applies to future launches, and running agents keep their
+  existing route until restart. The page also shows the proxy state
+  (`running`, `stopped`, `unavailable` or `outdated`), port, requests, recorded
+  requests, dropped requests and write errors. Captures, settings and exports
+  remain operator-only: API-client tokens receive 403, these operations are
+  not agent tools, and nothing is sent to Telegram or Lark.
+- **Dashboard viewer.** Open a run on the agent's history page, then expand
+  **Model requests**. Rows show timing, model, outcome, token usage, byte sizes
+  and capture gaps; requests received after a turn ended appear separately.
+  Running records refresh every two seconds and stop polling when they end.
+  A skipped recording shows its reason. Selecting a row opens an inline
+  viewer for system text, tools, messages, parameters and headers, followed
+  by the assembled response, raw response when retained, and route and capture
+  facts. Redacted header values stay visibly marked; capture gaps explain
+  what was not stored. The server computes `new_from_index` from request-part
+  hashes against the previous request on the same route, ordered by
+  `started_at` then `id`. It marks the first changed or appended message in
+  `messages` (Anthropic or Chat) or `input` (Responses); it is null for the
+  first request or an unsplit body. The dashboard and export use this same
+  comparison. A missing stored part fails the request with its id instead of
+  returning a partial body.
+- **Export.** Use **Export JSONL** on a run, or **Export model requests** on
+  an agent's history or a task's Agents tab. Dashboard exports show progress
+  and can be cancelled before download. The CLI streams pages with constant
+  memory and creates a file readable only by its owner (mode 0600):
+
+  ```sh
+  loopercli llm-requests export --record 123 --out run.jsonl \
+    --operator-token-file operator-token --url http://127.0.0.1:8798
+  ```
+
+  Choose one of `--record`, `--agent` or `--task`, optionally bounded by
+  `--since` and `--until`; `--since` can also select a time window without a
+  scope. `--out -` writes JSONL to stdout; the request count goes to stderr.
+  The operator API's `llm_requests.export` uses ascending request ids and
+  pages of at most 50 rows, with `after_id` / `next_after_id` cursors. At
+  least one scope or `since` is required. List and detail remain available
+  through `llm_requests.list` / `llm_requests.get`. All use
+  `POST /api/v1/<domain>/<action>`.
+
+  The first JSONL line is a header: `type=llmrec_export` identifies the file,
+  `format=1` versions its layout, `exported_at` is the export timestamp,
+  `filter` contains the scope and time bounds, and `redaction` states that
+  header values outside the allowlist were never stored and bodies are
+  complete unless `record_gap` says otherwise. Every subsequent line is one
+  complete detail result with these fields:
+
+  | Fields | Meaning |
+  | --- | --- |
+  | `id`, `route_id`, `proxy_instance`, `proxy_seq` | Capture identity and its originating proxy sequence. |
+  | `record_id`, `after_record_id`, `agent_id`, `task_id` | Run and owner attribution; `after_record_id` identifies the previous turn for requests received between turns. |
+  | `started_at`, `method`, `path`, `kind`, `model`, `stream` | Request time, endpoint, request category, model and streaming mode. |
+  | `request_headers`, `response_headers` | Stored headers, with absent credential and non-allowlisted values explicitly represented as redacted. |
+  | `request_body`, `response_body`, `response_raw` | Reconstructed request JSON, assembled response and retained raw response text when present. |
+  | `new_from_index` | First differing message index, computed by the server as described above. |
+  | `request_bytes`, `response_bytes`, `request_sha256`, `body_sanitized` | Original byte counts and request hash; the flag identifies body normalization. |
+  | `status`, `outcome`, `error`, `record_gap` | HTTP status, completion or failure, diagnostic error and explicit capture omission. |
+  | `ttfb_ms`, `duration_ms` | Time to first response byte and total duration in milliseconds. |
+  | `input_tokens`, `cache_read_tokens`, `cache_write_tokens`, `output_tokens`, `usage` | Token counters and the provider's usage object. |
+  | `route` | Route `id`, `agent_id`, `task_id`, `step_id`, `role`, `runtime_type`, `provider_id`, `protocol`, `model`, `upstream_host` and `upstream_path`. |
+
+  Bodies are exported without additional filtering. The header and each
+  request's `outcome` / `record_gap` expose omissions; no content is silently
+  removed during export.
 - **Recorded content.** Each exchange includes its method, path with redacted
   query parameters, redacted headers, request JSON (system prompt, messages, tools and tool results),
   assembled JSON/SSE response, usage, status, timing and failure or capture

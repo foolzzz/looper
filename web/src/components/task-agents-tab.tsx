@@ -1,5 +1,6 @@
 import { Bot, ChevronRight, Loader2 } from "lucide-react";
 import { TaskAgentsSection } from "@/components/task-agents";
+import { LlmRequestExport } from "@/components/llm-request-export";
 import { Badge } from "@/components/ui/badge";
 import {
   runProfile,
@@ -228,6 +229,7 @@ export function TaskAgentsTab({ task, onAgents, runs = null, runsError = "" }: {
 }) {
   return (
     <div className="space-y-6 p-5">
+      <LlmRequestExport filter={{ task_id: task.task_id }} checkVisibility />
       {task.agents && <TaskAgentsSection taskId={task.task_id} agents={task.agents} onSaved={onAgents} />}
       {task.roles?.length ? <DefinedRoles roles={task.roles} /> : null}
       <StepRuns task={task} records={runs} error={runsError} />

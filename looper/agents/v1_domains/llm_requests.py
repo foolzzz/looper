@@ -1,6 +1,7 @@
 """Operator-only request recording settings and captured exchanges."""
 
 import logging
+from datetime import datetime, timezone
 
 from looper.db import llm_requests, system_settings
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT
@@ -32,18 +33,23 @@ _FIELDS = {
     "usage": _NULL_OBJECT, "record_gap": _NULL_STR, "body_sanitized": _BOOL,
 }
 ROW = _object(_FIELDS, closed=True)
-FULL = _object({**_FIELDS, "request_body": {}, "response_body": {}, "response_raw": _NULL_STR}, closed=True)
+ROUTE = _object({"id": _STR, "agent_id": _STR, "task_id": _NULL_STR, "step_id": _NULL_STR,
+    "role": _NULL_STR, "runtime_type": _STR, "provider_id": _NULL_STR, "protocol": _NULL_STR,
+    "model": _NULL_STR, "upstream_host": _STR, "upstream_path": _STR}, closed=True)
+FULL = _object({**_FIELDS, "request_body": {}, "response_body": {}, "response_raw": _NULL_STR,
+    "new_from_index": _NULL_INT, "route": ROUTE}, closed=True)
 SCHEMAS = {"LlmRequest": FULL, "LlmRequestRow": ROW, "LlmrecSettings": SETTINGS}
 RESULTS = {}
 
 
-def _op(name, fields, result, required=None, risk="read"):
+def _op(name, fields, result, required=None, risk="read", hand=False):
     description = {"llmrec_settings.get": "Read model request recording settings and proxy health.",
         "llmrec_settings.update": "Set recording for future launches. Bodies can contain prompts, code and tool output.",
         "llm_requests.list": "List captured request metadata without bodies.",
-        "llm_requests.get": "Read a captured exchange with the complete reconstructed request."}[name]
+        "llm_requests.get": "Read a captured exchange with the complete reconstructed request.",
+        "llm_requests.export": "Export complete captured exchanges in id-ordered pages."}[name]
     return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), description, description,
-                     _object(fields, required, closed=True), result, risk=risk, operator_only=True)
+                     _object(fields, required, closed=True), result, risk=risk, operator_only=True, hand=hand)
 
 
 OPERATIONS = (
@@ -54,6 +60,11 @@ OPERATIONS = (
         "before_id": {"type": "integer", "minimum": 1},
         "limit": {"type": "integer", "minimum": 1, "maximum": 500}},
         _object({"requests": _array(ROW)}, closed=True), []),
+    _op("llm_requests.export", {"task_id": {"type": "string", "minLength": 1},
+        "agent_id": {"type": "string", "minLength": 1}, "record_id": {"type": "integer", "minimum": 1},
+        "since": _STR, "until": _STR, "after_id": {"type": "integer", "minimum": 1},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+        _object({"requests": _array(FULL), "next_after_id": _NULL_INT}, closed=True), [], hand=True),
     _op("llm_requests.get", {"request_id": {"type": "integer", "minimum": 1}},
         _object({"request": FULL}, closed=True)),
 )
@@ -87,11 +98,28 @@ async def run(server, operation, arguments, principal, headers):
                 if arguments.get("between_turns") and not arguments.get("record_id"):
                     raise OpError(ErrorCode.INVALID, "between_turns requires record_id")
                 result = {"requests": await llm_requests.list_requests(**arguments)}
+            case "llm_requests.export":
+                timestamps = {}
+                for key in ("since", "until"):
+                    if key in arguments:
+                        try:
+                            value = datetime.fromisoformat(arguments[key])
+                        except ValueError:
+                            raise OpError(ErrorCode.INVALID, f"{key} must be an ISO 8601 timestamp") from None
+                        timestamps[key] = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+                if len(timestamps) == 2 and timestamps["until"] <= timestamps["since"]:
+                    raise OpError(ErrorCode.INVALID, "until must be after since")
+                try:
+                    result = await llm_requests.export_page(**arguments)
+                except ValueError as error:
+                    raise OpError(ErrorCode.INVALID, str(error)) from None
             case _:
                 row = await llm_requests.get_request(arguments["request_id"])
                 if row is None:
                     raise OpError(ErrorCode.NOT_FOUND, "model request not found")
                 result = {"request": row}
+    except llm_requests.MissingRequestPart as error:
+        raise OpError(ErrorCode.INTERNAL, str(error)) from None
     except OpError:
         raise
     except Exception as error:

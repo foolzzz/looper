@@ -483,7 +483,9 @@ def test_a_command_is_generated_for_each_operation_without_a_hand_written_one() 
     assert ("task-control", "start-over") in names
     hand = {op.operation_id.partition(".")[0].replace("_", "-") for op in api_v1.operations() if op.hand}
     assert {"chat", "confirm", "openapi"} <= hand
-    assert not {head for head, *_ in names} & hand
+    hand_commands = {tuple(op.operation_id.replace("_", "-").partition(".")[::2])
+                     for op in api_v1.operations() if op.hand}
+    assert not names & hand_commands
 
 
 def test_confirm_and_chat_are_listed_once_and_chat_send_is_not_generated(cli: Run) -> None:
