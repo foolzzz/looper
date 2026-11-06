@@ -3430,6 +3430,52 @@ So:
   turn's context, cost and compactions. That is the Manager's and the
   Planners' context over time.
 
+### Translated models (local gateway)
+
+Claude Code can run an `openai-chat` model through Looper's local gateway.
+Register the provider's Chat Completions endpoint and API key, add the exact
+model name, and select it in an Agent Profile with the native Claude Code
+runtime. The dashboard labels this pairing **via local gateway**. Manager,
+Planner, Worker, Reviewer and consult use the same profile resolution;
+Telegram and Lark use that validation through their profile selection too.
+OAuth providers and TTADK launchers cannot use translated models.
+
+A model's optional `chat_dialect` selects the upstream vendor's Chat
+Completions conventions, even when the provider is a gateway serving several
+vendors. Auto uses the provider's default: `deepseek` for DeepSeek,
+`moonshot` for Kimi, `zhipu` for GLM, and `generic` otherwise. Explicit choices
+also include `openai`, `qwen`, `vllm`, `minimax`, `ark` and `openrouter`.
+Only `openai-chat` models accept this field. Thinking follows Claude Code's
+own setting; the gateway translates its request for the selected dialect.
+Responses models are not supported by this path.
+
+Translation works with request recording off: Looper starts the loopback
+proxy on demand and attaches a translation route with recording disabled.
+When recording is on, translated requests use the existing capture pipeline.
+Claude Code receives only that route's URL; it never falls back to a direct
+upstream connection. A missing, unavailable or outdated gateway, or an
+upstream URL containing credentials, refuses the run with a specific reason.
+Startup checks report gateway availability and warn when upstream usage is
+missing, since spend would be understated.
+
+Context sizes during translated streams are estimates: `message_start` puts
+the estimate in `input_tokens`, with both cache counts zero. The gateway uses
+the previous request's exact total prompt tokens on the same route (input +
+cache read + cache write), plus appended message bytes at four UTF-8 bytes per
+token, rounded up. A route without a usage anchor, or a changed prompt prefix,
+uses the whole translated request's JSON byte size instead. Anchors live only
+in proxy memory (up to 1,024 routes); a restart or eviction loses them. This
+lets Claude Code account for context and Looper apply its context-full switch.
+Billing still uses the upstream's exact cumulative `message_delta` usage.
+Captures identify the initial estimate in `translation.start_usage_estimated`
+and `translation.start_input_tokens`.
+
+Resident Manager and Planner sessions reuse their translation route. A model,
+provider or dialect change changes the binding hash and restarts the resident
+process on its next turn. Existing direct profiles and recording routes keep
+their behavior. The gateway owns the attribution-header, tool-search and
+experimental-beta settings needed for translated requests.
+
 ### Model request recording (`llmrec`)
 
 `looper/agents/llmrec` records the HTTP exchanges of newly launched Claude

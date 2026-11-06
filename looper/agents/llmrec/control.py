@@ -20,7 +20,7 @@ import httpx
 import looper
 from looper import child_env
 from . import (LOG_FILE, PROXY_ENV, TLS_ENV, ROUTES_DIR, ROUTE_FORMAT, ROUTE_ID, STATE_FILE, LlmrecRoute, LlmrecSkip,
-               RouteFile, SkipReason, boot_argv, code_sha256)
+               RouteFile, RouteKind, SkipReason, boot_argv, code_sha256)
 from .. import proc_tree
 from ..keeper import read_json
 
@@ -70,6 +70,21 @@ async def _bypass(launch, *, agent_id, task_id):
     return replace(launch, llmrec=LlmrecSkip(SkipReason.PROXY_UNAVAILABLE))
 
 
+async def _gateway_unavailable(launch, *, agent_id, task_id):
+    logger.warning("Local gateway unavailable for %s", agent_id)
+    if task_id:
+        from looper.db import activity
+
+        try:
+            await activity.insert_activity(task_id=task_id, worker=agent_id, kind="error",
+                summary="This run cannot start: the local gateway is unavailable.")
+        except Exception:
+            logger.debug("could not insert gateway failure activity")
+    # Exception text can contain endpoints or credentials; keep the launch diagnostic bounded and safe.
+    return replace(launch, llmrec=LlmrecSkip(SkipReason.GATEWAY_UNAVAILABLE,
+                                           "local proxy startup or route setup failed"))
+
+
 class ProxyControl:
     def __init__(self, runtime_root, dsn, *, enabled, include_oauth=False):
         self.runtime_root = Path(runtime_root)
@@ -81,6 +96,7 @@ class ProxyControl:
         self._failed_health = None
         self._health_at = 0.0
         self._start_lock = asyncio.Lock()
+        self._start_attempted = False
         self._children: dict[int, asyncio.subprocess.Process] = {}
         self._resident: dict[str, RouteFile] = {}
 
@@ -122,7 +138,8 @@ class ProxyControl:
                 pass
         self._health_cache, self._health_at = result, time.monotonic()
         if result is not None:
-            self._outdated = result.get("route_format") != ROUTE_FORMAT
+            self._outdated = (result.get("route_format") != ROUTE_FORMAT
+                              or result.get("features", {}).get("translate", 0) < 1)
         return result
 
     async def _owns_process(self, state) -> bool:
@@ -162,6 +179,7 @@ class ProxyControl:
         if not preserve_state and (current is None or all(
                 current[key] == state[key] for key in ("instance", "pid", "start_time"))):
             (self.runtime_root / STATE_FILE).unlink(missing_ok=True)
+            self._start_attempted = False
         self._health_cache, self._health_at = None, 0.0
         if not preserve_state:
             self._failed_health = None
@@ -170,6 +188,7 @@ class ProxyControl:
         async with self._start_lock:
             if await self._health():
                 return True
+            self._start_attempted = True
             previous = self._state()
             port = port if port is not None else previous["port"] if previous else 0
             if previous and self._failed_health and all(
@@ -254,14 +273,20 @@ class ProxyControl:
         counters = health or self._failed_health or {}
         return {"enabled": self.enabled, "include_oauth": self.include_oauth, "proxy": {
             "state": "outdated" if health and self._outdated else "running" if health else
-                     "unavailable" if self.enabled or state else "stopped",
+                     "unavailable" if self.enabled or state or self._start_attempted else "stopped",
             "port": state["port"] if state else None, "pid": state["pid"] if state else None,
             **{name: int(counters.get(name, 0)) for name in ("requests", "recorded", "gaps", "dropped", "write_errors")},
-            "gap_reasons": counters.get("gap_reasons", {})}}
+            "gap_reasons": counters.get("gap_reasons", {})},
+            "translate": counters.get("translate", {})}
 
     async def attach(self, launch, *, agent_id, task_id, step_id=None, reuse=False, cwd=None):
         from ..runtimes import AuthKind, Launcher
 
+        from .gateway import translated
+
+        if translated(launch):
+            return await self._attach_translated(launch, agent_id=agent_id, task_id=task_id,
+                                                 step_id=step_id, reuse=reuse, cwd=cwd)
         if not self.enabled:
             return launch
         provider = launch.profile.provider
@@ -307,8 +332,9 @@ class ProxyControl:
             path = self.runtime_root / ROUTES_DIR / f"{previous.id}.json"
             previous = RouteFile.read(path)
             if previous is not None and not previous.ended_at and (
-                    previous.upstream, previous.runtime_type, previous.provider_id, previous.model
-            ) == (upstream, runtime_type, provider.id, launch.model):
+                    previous.upstream, previous.runtime_type, previous.provider_id, previous.model,
+                    previous.kind, previous.dialect, previous.models
+            ) == (upstream, runtime_type, provider.id, launch.model, RouteKind.RECORD, None, None):
                 if (previous.proxy_env, previous.tls_env) != (proxy_env, tls_env):
                     replace(previous, proxy_env=proxy_env, tls_env=tls_env).write(path)
                 return replace(launch, llmrec=LlmrecRoute(
@@ -330,6 +356,77 @@ class ProxyControl:
         port = state["port"]
         return replace(launch, llmrec=LlmrecRoute(identifier, f"http://127.0.0.1:{port}/r/{identifier}", upstream))
 
+    async def _attach_translated(self, launch, *, agent_id, task_id, step_id=None, reuse=False, cwd=None):
+        from .gateway import dialect_for
+
+        upstream = launch.runtime.llmrec_upstream(launch)
+        try:
+            url = urlsplit(upstream)
+            credentials = url.username is not None or url.password is not None or any(
+                any(marker in name.lower() for marker in _SECRET_MARKERS)
+                for name, _ in parse_qsl(url.query, keep_blank_values=True))
+        except ValueError:
+            credentials = True
+        if credentials:
+            return replace(launch, llmrec=LlmrecSkip(SkipReason.CREDENTIALS_IN_URL))
+        health = await self._health(cached=not reuse)
+        if not health:
+            if not await self._start():
+                return await _gateway_unavailable(launch, agent_id=agent_id, task_id=task_id)
+            health = await self._health()
+        if not health:
+            return await _gateway_unavailable(launch, agent_id=agent_id, task_id=task_id)
+        if (self._outdated or health.get("route_format") != ROUTE_FORMAT
+                or health.get("features", {}).get("translate", 0) < 1):
+            return replace(launch, llmrec=LlmrecSkip(SkipReason.PROXY_OUTDATED))
+        state = self._state()
+        if state is None:
+            return await _gateway_unavailable(launch, agent_id=agent_id, task_id=task_id)
+        provider = launch.profile.provider
+        binding = launch.runtime.bind_provider(provider, launch.model, launch.effort)
+        env = {**child_env.inherited(), **dict(launch.env), **dict(binding.env)}
+        proxy_env = {name: value for name, value in env.items() if name in PROXY_ENV}
+        tls_env = {name: os.path.realpath(os.path.join(cwd or os.getcwd(), value)) if value else value
+                   for name, value in env.items() if name in TLS_ENV}
+        dialect = dialect_for(launch)
+        background = provider.catalog_model(launch.model).background_model
+        # Claude Code consumes context suffixes itself; upstream API names never carry them.
+        models = {}
+        for name in (launch.model, background):
+            if name:
+                api_name = launch.runtime.api_model(name)
+                models[name] = api_name
+                models[api_name] = api_name
+        runtime_type = launch.profile.runtime.type
+        previous = self._resident.get(agent_id) if reuse else None
+        if previous is not None:
+            path = self.runtime_root / ROUTES_DIR / f"{previous.id}.json"
+            previous = RouteFile.read(path)
+            if previous is not None and not previous.ended_at and (
+                    previous.upstream, previous.runtime_type, previous.provider_id, previous.model,
+                    previous.kind, previous.dialect, previous.models
+            ) == (upstream, runtime_type, provider.id, launch.model, RouteKind.TRANSLATE, dialect, models):
+                if (previous.proxy_env, previous.tls_env, previous.record) != (proxy_env, tls_env, self.enabled):
+                    replace(previous, proxy_env=proxy_env, tls_env=tls_env, record=self.enabled).write(path)
+                return replace(launch, llmrec=LlmrecRoute(previous.id,
+                    f"http://127.0.0.1:{state['port']}/r/{previous.id}", upstream,
+                    kind=RouteKind.TRANSLATE, record=self.enabled))
+            if previous is not None:
+                replace(previous, ended_at=previous.ended_at or _now()).write(path)
+        identifier = secrets.token_urlsafe(16)
+        route = RouteFile(id=identifier, upstream=upstream, protocol="openai-chat", api="openai-chat",
+                          kind=RouteKind.TRANSLATE, record=self.enabled, dialect=dialect, models=models,
+                          runtime_type=runtime_type, provider_id=provider.id, model=launch.model,
+                          agent_id=agent_id, task_id=task_id, step_id=step_id,
+                          role=getattr(launch.role, "value", launch.role), created_at=_now(),
+                          proxy_env=proxy_env, tls_env=tls_env)
+        route.write(self.runtime_root / ROUTES_DIR / f"{identifier}.json")
+        if reuse:
+            self._resident[agent_id] = route
+        return replace(launch, llmrec=LlmrecRoute(identifier,
+            f"http://127.0.0.1:{state['port']}/r/{identifier}", upstream,
+            kind=RouteKind.TRANSLATE, record=self.enabled))
+
     def bind(self, route_id, record_id):
         if not ROUTE_ID.fullmatch(route_id):
             raise ValueError("invalid request recording route")
@@ -349,11 +446,22 @@ class ProxyControl:
 
 
 async def attach(launch, **kwargs):
+    from ..profile_registry import RegistryError
+    from ..runtimes import RuntimeUnsupported
+
     if _control is None:
         return launch
     try:
         return await _control.attach(launch, **kwargs)
+    except RegistryError as exc:
+        raise RuntimeUnsupported(str(exc)) from None
+    except RuntimeUnsupported:
+        raise
     except (OSError, ValueError):
+        from .gateway import translated
+
+        if translated(launch):
+            return await _gateway_unavailable(launch, agent_id=kwargs["agent_id"], task_id=kwargs["task_id"])
         return await _bypass(launch, agent_id=kwargs["agent_id"], task_id=kwargs["task_id"])
 
 

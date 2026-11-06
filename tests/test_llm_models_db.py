@@ -86,7 +86,7 @@ def test_update_schema_rejects_identity_before_accessing_database(changes):
 
 
 @pytest.mark.parametrize("runtime_type,protocols", [
-    ("claude-code", {"anthropic-messages"}), ("codex", {"openai-responses"}),
+    ("claude-code", {"anthropic-messages", "openai-chat"}), ("codex", {"openai-responses"}),
     ("omp", {"anthropic-messages", "openai-chat", "openai-responses"}), ("grok", set()),
     ("pi", {"openai-chat", "openai-responses"}), ("dsh", {"anthropic-messages"})])
 def test_service_runtime_filter_obeys_adapter_pairing(runtime_type, protocols, monkeypatch):
@@ -293,7 +293,7 @@ def test_runtime_filter_uses_exact_protocol_and_login_owner(monkeypatch):
                            "VALUES ('rt-test', 'Test Codex', 'codex', 'codex', '{}')")
         models = (await service.list_models(runtime_id="rt-claude-code"))["models"]
         assert messages in {m["model_id"] for m in models}
-        assert chat not in {m["model_id"] for m in models}
+        assert chat in {m["model_id"] for m in models}
         assert not any(m["provider_id"] == "prov-codex-login" for m in models)
         assert (await service.list_models(provider_id="prov-test", runtime_id="rt-test"))["models"] == []
         codex = (await service.list_models(runtime_id="rt-test"))["models"]
@@ -409,10 +409,12 @@ def test_http_provider_model_profile_flow(monkeypatch, tmp_path):
         model = (await client.ok("POST", "/api/v1/ops/models/create", body, status=200))["model"]
         mid = model["model_id"]
         assert mid.startswith("model-") and model["provider_id"] == pid
-        chat = (await client.ok("POST", "/api/v1/ops/models/create", {**body, "protocol": "openai-chat"}, status=200))["model"]
+        chat = (await client.ok("POST", "/api/v1/ops/models/create", {
+            **body, "protocol": "openai-chat", "chat_dialect": "deepseek"}, status=200))["model"]
+        assert chat["chat_dialect"] == chat["effective_chat_dialect"] == "deepseek"
         assert mid != chat["model_id"]
         listed = (await client.ok("POST", "/api/v1/ops/models/list", {"provider": pid, "runtime": 'rt-claude-code'}))["models"]
-        assert [m["model_id"] for m in listed] == [mid]
+        assert {m["model_id"] for m in listed} == {mid, chat["model_id"]}
         assert len((await client.ok("POST", "/api/v1/ops/models/list", {"provider": pid}))["models"]) == 2
         assert (await client.ok("POST", "/api/v1/models/get", {"model": mid}))["model"] == model
         changed = (await client.ok("POST", "/api/v1/ops/models/update", {"model": mid,
@@ -548,7 +550,7 @@ def test_http_model_creation_rejects_invalid_settings(monkeypatch, tmp_path, cha
 
 
 @pytest.mark.parametrize("runtime_type,protocol,auth,owner,error", [
-    ("claude-code", "openai-chat", "api_key", None, "exact protocol"),
+    ("codex", "openai-chat", "api_key", None, "exact protocol"),
     ("omp", "anthropic-messages", "oauth", "claude-code", "only use its own runtime"),
     ("grok", "openai-responses", "api_key", None, "auth kind"),
     ("codex", "openai-responses", "oauth", "grok", "only use its own runtime"),
@@ -633,7 +635,7 @@ def test_http_model_filters_and_readback_use_registry_views(monkeypatch, tmp_pat
         "id": "rt-test", "name": "Test runtime", "type": "claude-code", "executable": "", "capabilities": []}))
     async def test(client, pool):
         listed = await client.ok("POST", "/api/v1/ops/models/list", {"provider": 'prov-test', "runtime": 'rt-test'})
-        assert [m["protocol"] for m in listed["models"]] == ["anthropic-messages"]
+        assert [m["protocol"] for m in listed["models"]] == ["anthropic-messages", "openai-chat"]
         assert models.await_args.kwargs == {"provider_id": "prov-test"}
         saved = (await client.ok("POST", "/api/v1/models/get", {"model": 'model-test'}))["model"]
         assert saved == listed["models"][0]
@@ -683,3 +685,31 @@ def test_http_normalized_profile_preview_uses_launch_builder(monkeypatch, tmp_pa
         assert any("Preview identity" in (block["text"] or "") for block in answer["blocks"])
         assert loader.await_count == 1
     _run_http(test, monkeypatch, tmp_path, database=False)
+
+
+@pytest.mark.parametrize("vendor,override,expected", [
+    ("deepseek", None, "deepseek"), ("kimi-moonshot", None, "moonshot"),
+    ("glm-zai", None, "zhipu"), ("custom", None, "generic"), ("custom", "openai", "openai"),
+])
+def test_model_view_resolves_chat_dialect_from_vendor(vendor, override, expected):
+    row = _row(protocol="openai-chat", chat_dialect=override)
+    row["provider"]["vendor_type"] = vendor
+    view = service.model_view(row)
+    assert view["chat_dialect"] == override
+    assert view["effective_chat_dialect"] == expected
+    assert service.model_view(_row())["effective_chat_dialect"] is None
+
+
+@needs_db
+def test_chat_dialect_round_trips_create_update_and_add_many(monkeypatch):
+    async def test(pool):
+        created = (await service.create_model(_body(protocol="openai-chat", chat_dialect="deepseek")))["model"]
+        assert created["chat_dialect"] == created["effective_chat_dialect"] == "deepseek"
+        updated = (await service.update_model(created["model_id"], {"chat_dialect": "openai"}))["model"]
+        assert updated["chat_dialect"] == "openai"
+        restored = (await service.update_model(created["model_id"], {"chat_dialect": None}))["model"]
+        assert restored["chat_dialect"] is None and restored["effective_chat_dialect"] == "generic"
+        added = await service.add_models("prov-test", [{"name": "second", "protocol": "openai-chat",
+                                                        "chat_dialect": "moonshot"}])
+        assert added["models"][0]["chat_dialect"] == "moonshot"
+    _run(test, monkeypatch)

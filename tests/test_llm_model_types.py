@@ -239,7 +239,7 @@ def test_opencode_model_families_do_not_cross_protocols():
 
 
 @pytest.mark.parametrize("runtime_type,protocols", [
-    ("claude-code", {ApiProtocol.ANTHROPIC_MESSAGES}),
+    ("claude-code", {ApiProtocol.ANTHROPIC_MESSAGES, ApiProtocol.OPENAI_CHAT}),
     ("codex", {ApiProtocol.OPENAI_RESPONSES}),
     ("omp", set(ApiProtocol)),
     ("grok", set()),  # Grok currently accepts only its own login.
@@ -317,3 +317,69 @@ def test_profile_runtime_options_are_validated(field, value):
                "model_id": "model-test", field: value}
     with pytest.raises(RegistryError):
         AgentProfile.from_entry(payload)
+
+
+@pytest.mark.parametrize("dialect", [None, "deepseek", "openai", "generic"])
+def test_chat_dialect_is_preserved_in_binding_catalog(dialect):
+    resolved = ResolvedModel(model(chat_dialect=dialect), provider(),
+                             Endpoint("prov-test", ApiProtocol.OPENAI_CHAT, "https://example.invalid"))
+    assert resolved.binding_provider().catalog[0].chat_dialect == dialect
+
+
+@pytest.mark.parametrize("dialect", ["unknown", 1, [], True])
+def test_chat_dialect_requires_known_string(dialect):
+    with pytest.raises(RegistryError, match="chat_dialect"):
+        model(chat_dialect=dialect)
+
+
+@pytest.mark.parametrize("protocol", [ApiProtocol.ANTHROPIC_MESSAGES, ApiProtocol.OPENAI_RESPONSES])
+def test_chat_dialect_only_applies_to_chat_models(protocol):
+    with pytest.raises(RegistryError, match="chat_dialect applies only to openai-chat models"):
+        model(protocol=protocol, chat_dialect="deepseek")
+
+
+@pytest.mark.parametrize("runtime_type,protocol,auth,launcher,error", [
+    ("claude-code", ApiProtocol.ANTHROPIC_MESSAGES, AuthKind.API_KEY, "native", None),
+    ("claude-code", ApiProtocol.OPENAI_CHAT, AuthKind.API_KEY, "native", None),
+    ("claude-code", ApiProtocol.OPENAI_CHAT, AuthKind.OAUTH, "native", "login providers cannot be translated"),
+    ("claude-code", ApiProtocol.OPENAI_CHAT, AuthKind.API_KEY, "ttadk", "TTADK"),
+    ("codex", ApiProtocol.OPENAI_CHAT, AuthKind.API_KEY, "native", "share no protocol"),
+])
+def test_legacy_pairing_accepts_translation_only_for_native_api_key(runtime_type, protocol, auth, launcher, error):
+    from looper.agents.profile_registry import LegacyProviderSpec, check_pairing
+    from looper.agents.runtimes import Launcher
+
+    runtime = RuntimeSpec("rt-test", "test", runtime_type, launcher=Launcher(launcher))
+    account = LegacyProviderSpec("prov-test", "test", auth, frozenset({protocol}),
+                                 runtime_type if auth is AuthKind.OAUTH else None,
+                                 base_url="https://provider.example.invalid/v1")
+    if error:
+        with pytest.raises(RegistryError, match=error):
+            check_pairing(runtime, account, "test-model")
+    else:
+        check_pairing(runtime, account, "test-model")
+
+
+def test_resolved_translation_refuses_ttadk_launcher():
+    from looper.agents.runtimes import Launcher
+
+    resolved = ResolvedModel(model(), provider(), Endpoint("prov-test", ApiProtocol.OPENAI_CHAT,
+                                                          "https://example.invalid"))
+    with pytest.raises(RegistryError, match="TTADK"):
+        resolved.check_runtime(RuntimeSpec("rt-test", "test", "claude-code", launcher=Launcher.TTADK))
+
+
+def test_vendor_default_dialect_change_restarts_resident_binding():
+    from dataclasses import replace
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.profile_registry import ResolvedAgentProfile
+
+    account = provider(api_key="synthetic-test-key")
+    resolved = ResolvedModel(model(), account, Endpoint(account.id, ApiProtocol.OPENAI_CHAT,
+                                                       "https://example.invalid"))
+    profile = ResolvedAgentProfile("agent-test", "test", RuntimeSpec("rt-test", "test", "claude-code"),
+                                   resolved.model.id, resolved_model=resolved)
+    first = Launch(AgentSettings(profile=profile))
+    changed = replace(resolved, provider=replace(account, vendor_type=VendorType.DEEPSEEK))
+    second = Launch(AgentSettings(profile=replace(profile, resolved_model=changed)))
+    assert first.binding_sha256 != second.binding_sha256

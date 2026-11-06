@@ -87,7 +87,7 @@ def _registry(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, key: bool = Tr
         {"id": "model-gpt-5.5", "provider_id": "prov-cpa", "name": "gpt-5.5", "protocol": "openai-responses",
          "context_window": None, "input_usd_per_mtok": None, "output_usd_per_mtok": None,
          "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None, "efforts": None,
-         "background_model": None, "catalog_order": 0, "builtin": False}]))
+         "background_model": None, "chat_dialect": None, "catalog_order": 0, "builtin": False}]))
     return rows
 
 

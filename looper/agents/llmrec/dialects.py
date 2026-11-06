@@ -49,6 +49,7 @@ class Dialect:
     thinking_on: Mapping[str, Any] | None = None
     thinking_off: Mapping[str, Any] | None = None
     effort_field: str | None = None
+    effort_values: frozenset[str] = frozenset()
     usage_fields: tuple[UsageField, ...] = (UsageField.CACHED_TOKENS,)
     include_usage: bool = True
     prompt_cache_key: bool = False
@@ -77,16 +78,18 @@ DIALECTS: Mapping[ChatDialect, Dialect] = {
     ChatDialect.GENERIC: _GENERIC,
     # https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create — 2026-11-05 查.
     ChatDialect.OPENAI: Dialect(ChatDialect.OPENAI, max_tokens_field='max_completion_tokens', reasoning_field=None,
-        reasoning_replay=ReasoningReplay.NONE, effort_field='reasoning_effort', prompt_cache_key=True,
+        reasoning_replay=ReasoningReplay.NONE, effort_field='reasoning_effort',
+        effort_values=frozenset({'minimal', 'low', 'medium', 'high'}), prompt_cache_key=True,
         extra={'store': False}, rejects_when_thinking=frozenset({'temperature', 'top_p'}), max_stop=4, images=True),
     # https://api-docs.deepseek.com/api/create-chat-completion ; https://api-docs.deepseek.com/guides/thinking_mode — 2026-11-05 查.
     ChatDialect.DEEPSEEK: Dialect(ChatDialect.DEEPSEEK, max_output_cap=393216, reasoning_fill_empty=True,
         thinking_on={'thinking': {'type': 'enabled'}}, thinking_off={'thinking': {'type': 'disabled'}},
-        effort_field='reasoning_effort', usage_fields=(UsageField.PROMPT_CACHE_HIT_TOKENS, UsageField.CACHED_TOKENS),
+        effort_field='reasoning_effort', effort_values=frozenset({'low', 'high', 'max'}), usage_fields=(UsageField.PROMPT_CACHE_HIT_TOKENS, UsageField.CACHED_TOKENS),
         rejects_when_thinking=frozenset({'temperature', 'top_p', 'presence_penalty', 'frequency_penalty'}), max_stop=16),
     # https://platform.kimi.ai/docs/api/chat ; https://platform.kimi.ai/docs/guide/context-caching.md — 2026-11-05 查.
     ChatDialect.MOONSHOT: Dialect(ChatDialect.MOONSHOT, max_tokens_field='max_completion_tokens',
-        effort_field='reasoning_effort', prompt_cache_key=True, tool_message_name=True,
+        effort_field='reasoning_effort', effort_values=frozenset({'low', 'high', 'max'}),
+        prompt_cache_key=True, tool_message_name=True,
         rejects=frozenset({'temperature'}), max_stop=5, images=True, base64_images_only=True),
     # https://docs.z.ai/api-reference/llm/chat-completion ; https://docs.z.ai/guides/capabilities/thinking-mode — 2026-11-05 查.
     ChatDialect.ZHIPU: Dialect(ChatDialect.ZHIPU, max_output_cap=131072,

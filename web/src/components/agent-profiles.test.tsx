@@ -13,7 +13,7 @@ import { fetchPromptPreview, REGISTRY_CHANGED_EVENT, type AgentProfile, type Reg
 
 const REFUSAL = "the Stand-in runtime cannot replace its default system prompt";
 const PROFILE: AgentProfile = {
-  profile_id: "p", name: "Profile", model_id: "model-messages",
+  model_path: "direct", profile_id: "p", name: "Profile", model_id: "model-messages",
   model: { model_id: "model-messages", name: "model", protocol: "anthropic-messages", provider_id: "provider" }, effort: null, agent_teams: true,
   custom_prompt: "", runtime_id: "rt-claude-code", runtime_type: "claude-code",
   runtime_name: "Claude Code", builtin: false,
@@ -30,14 +30,14 @@ const provider = (id: string, extra: Partial<Provider> = {}): Provider => ({
 });
 const model = (id: string, protocol: Model["protocol"], providerId = "provider"): Model => ({
   model_id: id, name: "model", protocol, provider_id: providerId, provider_name: providerId === "provider" ? "Provider" : providerId, provider_enabled: true,
-  context_window: null, input_usd_per_mtok: null, output_usd_per_mtok: null, cache_read_usd_per_mtok: null,
+  chat_dialect: null, effective_chat_dialect: null, context_window: null, input_usd_per_mtok: null, output_usd_per_mtok: null, cache_read_usd_per_mtok: null,
   cache_write_usd_per_mtok: null, efforts: null, background_model: null, catalog_order: 0, builtin: false,
   profile_count: 0, endpoint: { protocol, base_url: "https://example.com", use_runtime_default: false },
   prices: {} as Model["prices"], warnings: [], created_at: "", updated_at: "",
 });
 const REGISTRY: Registry = {
   runtime_types: ["claude-code", "codex", "stand-in"].map<Registry["runtime_types"][number]>((type) => ({
-    type, in_process: false, label: type === "stand-in" ? "Stand-in" : "Claude Code", default_executable: type,
+    translated_protocols: [], type, in_process: false, label: type === "stand-in" ? "Stand-in" : "Claude Code", default_executable: type,
     runtime_id: `rt-${type}`, protocols: type === "codex" ? ["openai-responses"] : type === "stand-in" ? ["anthropic-messages", "openai-chat"] : ["anthropic-messages"], capabilities: [], roles: ["worker"],
     auth_kinds: ["api_key", "oauth"], can_replace_system_prompt: type !== "stand-in", can_interrupt: type === "claude-code",
     supported_models: null,
@@ -110,6 +110,37 @@ describe("Agent Profiles", () => {
   };
 
   const CODEX: AgentProfile = { ...PROFILE, model_id: "model-responses", model: { ...PROFILE.model, model_id: "model-responses", protocol: "openai-responses" }, runtime_id: "rt-codex", runtime_type: "codex", agent_teams: false };
+
+  it("keeps Claude Code selectable for chat models and labels their gateway path", async () => {
+    registry.runtime_types[0].translated_protocols = ["openai-chat"];
+    await show();
+    await choose("Protocol *", "openai-chat");
+    const option = select("Runtime").querySelector<HTMLOptionElement>('option[value="rt-claude-code"]')!;
+    expect(option.disabled).toBe(false);
+    expect(option.textContent).toContain("via local gateway");
+    expect(select("Runtime").value).toBe("rt-claude-code");
+    expect(container.textContent).toContain("Runtimes that reach it through the local gateway: Claude Code");
+    expect(container.textContent).toContain("Runs are refused when the gateway is unavailable.");
+    await submit();
+    expect(requests[0].body).toMatchObject({ runtime_id: "rt-claude-code", model_id: "model-chat" });
+    registry.profiles = [{ ...PROFILE, model_path: "translated" }];
+    await act(async () => root.render(<AgentProfilesSection />));
+    expect(container.querySelector('[data-slot="badge"]')?.textContent ?? container.textContent).toContain("via local gateway");
+  });
+
+  it.each([
+    ["oauth", "native", "login providers cannot be translated"],
+    ["api_key", "ttadk", "TTADK manages its own provider; use the native launcher"],
+  ] as const)("explains the translated pairing refusal for %s/%s", async (auth, launcher, reason) => {
+    registry.runtime_types[0].translated_protocols = ["openai-chat"];
+    registry.providers[0].auth = auth;
+    registry.runtimes[0].launcher = launcher;
+    await show();
+    await choose("Protocol *", "openai-chat");
+    const option = select("Runtime").querySelector<HTMLOptionElement>('option[value="rt-claude-code"]')!;
+    expect(option.disabled).toBe(true);
+    expect(option.textContent).toContain(reason);
+  });
 
   it("re-reads pending startup checks and shows failures without a reload, then stops", async () => {
     vi.useFakeTimers();
@@ -794,7 +825,7 @@ const PI_RUNTIME: Runtime = {
 };
 
 const PI_TYPE: RuntimeType = {
-  type: "pi", in_process: false, label: "pi", default_executable: "pi", runtime_id: "rt-pi",
+  translated_protocols: [], type: "pi", in_process: false, label: "pi", default_executable: "pi", runtime_id: "rt-pi",
   supported_models: null,
   loads_operator_config: false,
   protocols: ["openai-chat", "openai-responses"], capabilities: ["run", "resident_session", "resume"],

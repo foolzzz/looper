@@ -74,7 +74,7 @@ from .profile_registry import (
 )
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
-from .runtimes import AuthKind, Capability, CostSource, ReadOnly
+from .runtimes import ApiProtocol, AuthKind, Capability, CostSource, ReadOnly
 from .system_prompt_mode import SystemPromptMode, system_prompt_mode
 
 if TYPE_CHECKING:
@@ -987,9 +987,14 @@ class Launch:
         self._check_binding()
         binding = self.runtime.bind_provider(self.profile.provider, self.model, self.effort)
         model = self.profile.resolved_model if isinstance(self.profile, ResolvedAgentProfile) else None
+        from .llmrec.dialects import default_dialect
+
         effective = None if model is None else [
             model.model.name, model.model.protocol.value, model.model.context_window, model.model.efforts,
-            model.model.background_model, model.endpoint.base_url, model.endpoint.use_runtime_default,
+            model.model.background_model,
+            (model.model.chat_dialect or default_dialect(model.provider.vendor_type).value)
+            if model.model.protocol is ApiProtocol.OPENAI_CHAT else None,
+            model.endpoint.base_url, model.endpoint.use_runtime_default,
             [[entry.id, entry.name, entry.catalog_order, *[getattr(entry, name) for name in PRICE_FIELDS]]
              for entry in self.settings.pricing_catalog],
             # Resident sessions retain their pricer until restarted; refresh it for the next turn as well.
@@ -1035,10 +1040,15 @@ class Launch:
             "model_choice": {"model": self.model, "source": self.model_source.value, "effort": self.effort or None},
             "settings_sources": self.settings.sources(),
         }
+        from .llmrec.gateway import translated, dialect_for, gateway_refusal
+        from .llmrec import RouteKind
+
+        is_translated = translated(self)
         if isinstance(self.profile, ResolvedAgentProfile):
             model = self.profile.resolved_model.model
             record["llm_model"] = {"model_id": model.id, "provider_id": model.provider_id,
-                                   "name": model.name, "protocol": model.protocol.value}
+                                   "name": model.name, "protocol": model.protocol.value,
+                                   "path": "translated" if is_translated else "direct"}
         from .runtimes.pricing import PRICES_AS_OF
 
         # Audit the same frozen prices used by usage events and the final result. Never serialize a provider
@@ -1064,7 +1074,15 @@ class Launch:
             record["library"] = library
         if self.max_budget_usd is not None:
             record["max_budget_usd"] = self.max_budget_usd
-        if isinstance(self.llmrec, LlmrecRoute):
+        if is_translated and not (isinstance(self.llmrec, LlmrecRoute) and self.llmrec.kind is RouteKind.TRANSLATE):
+            record["llmrec"] = {"state": "refused",
+                "reason": self.llmrec.reason.value if isinstance(self.llmrec, LlmrecSkip) else "gateway_unavailable",
+                "detail": gateway_refusal(self.llmrec, self.model)}
+        elif is_translated:
+            record["llmrec"] = {"state": "translating", "route": self.llmrec.id,
+                "upstream_host": urlsplit(self.llmrec.upstream).hostname,
+                "recording": self.llmrec.record, "dialect": dialect_for(self)}
+        elif isinstance(self.llmrec, LlmrecRoute):
             record["llmrec"] = {"state": "recording", "route": self.llmrec.id,
                                 "upstream_host": urlsplit(self.llmrec.upstream).hostname}
         elif isinstance(self.llmrec, LlmrecSkip):

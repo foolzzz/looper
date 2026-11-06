@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { EDIT_BOX, EditDelete, FormFooter, LABEL, RegistryList, Row, RowName, SELECT } from "@/components/registry-ui";
 import {
   addModels, deleteModel, protocolLabel, updateModel,
-  type ApiProtocol, type ModelFields, type Model, type PriceField, type Provider, type Registry,
+  type ApiProtocol, type ChatDialect, type ModelFields, type Model, type PriceField, type Provider, type Registry,
 } from "@/lib/api";
 import { settingsHref } from "@/lib/settings-pages";
 import { useAction } from "@/lib/use-action";
@@ -16,7 +16,7 @@ const PRICES: { key: PriceField; label: string }[] = [
   { key: "cache_write_usd_per_mtok", label: "Cache write" },
 ];
 type NumericField = PriceField | "context_window";
-type ModelDefaults = Partial<Pick<Model, NumericField | "efforts" | "background_model" | "name">>;
+type ModelDefaults = Partial<Pick<Model, NumericField | "efforts" | "background_model" | "name" | "chat_dialect">>;
 type EffortSupport = "unknown" | "none" | "supported";
 interface ModelDraft {
   protocol: ApiProtocol | "";
@@ -26,11 +26,12 @@ interface ModelDraft {
   effortSupport: EffortSupport;
   efforts: string;
   background: string;
+  dialect: ChatDialect | "";
 }
 
 function modelDraft(model: ModelDefaults = {}, protocol: ModelDraft["protocol"] = ""): ModelDraft {
   return {
-    protocol, name: model.name ?? "", suggestion: "",
+    protocol, name: model.name ?? "", suggestion: "", dialect: model.chat_dialect ?? "",
     numbers: {
       context_window: model.context_window == null ? "" : String(model.context_window),
       input_usd_per_mtok: model.input_usd_per_mtok == null ? "" : String(model.input_usd_per_mtok),
@@ -59,6 +60,7 @@ function modelSettings(draft: ModelDraft): ModelFields {
     efforts: draft.effortSupport === "unknown" ? null : draft.effortSupport === "none" ? []
       : draft.efforts.split(",").map((effort) => effort.trim()).filter(Boolean),
     background_model: draft.background || null,
+    ...(draft.protocol === "openai-chat" ? { chat_dialect: draft.dialect || null } : {}),
   };
 }
 
@@ -77,6 +79,9 @@ function ModelForm({ model, provider, registry, onDone }: {
   const set = (change: Partial<ModelDraft>) => setDraft((current) => ({ ...current, ...change }));
   const suggestions = registry.vendor_types.find((vendor) => vendor.vendor_type === provider.vendor_type)
     ?.suggested_models.filter((suggestion) => suggestion.protocol === draft.protocol) ?? [];
+  const defaultDialect = provider.vendor_type === "deepseek" ? "deepseek"
+    : ["kimi-moonshot", "kimi-moonshot-cn"].includes(provider.vendor_type) ? "moonshot"
+    : ["glm-bigmodel", "glm-zai"].includes(provider.vendor_type) ? "zhipu" : "generic";
   const profiles = model ? registry.profiles.filter((profile) => profile.model_id === model.model_id) : [];
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -130,6 +135,16 @@ function ModelForm({ model, provider, registry, onDone }: {
         {suggestions.map((suggestion) => <option key={suggestion.name} value={suggestion.name}>{suggestion.name}</option>)}
       </select>
       <p className="text-[11px] text-muted-foreground">Suggestions for {draft.protocol} only. A suggestion is registered only when you choose Add model.</p>
+    </div>}
+    {draft.protocol === "openai-chat" && <div className="space-y-1">
+      <label htmlFor={`${id}-dialect`} className={LABEL}>Chat dialect</label>
+      <select id={`${id}-dialect`} className={SELECT} value={draft.dialect}
+        onChange={(event) => set({ dialect: event.target.value as ChatDialect | "" })}>
+        <option value="">Auto (from provider: {defaultDialect})</option>
+        {(["generic", "openai", "deepseek", "moonshot", "zhipu", "qwen", "vllm", "minimax", "ark", "openrouter"] as const)
+          .map((dialect) => <option key={dialect} value={dialect}>{dialect}</option>)}
+      </select>
+      <p className="text-[11px] text-muted-foreground">Choose the model’s dialect when a gateway serves models from another vendor.</p>
     </div>}
     {numberInput("context_window", "Context window")}
     <p className="text-[11px] text-muted-foreground">Context does not rewrite the exact model name.</p>

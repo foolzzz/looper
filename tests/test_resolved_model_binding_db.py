@@ -84,7 +84,7 @@ def test_each_model_binds_only_its_endpoint_and_fails_before_request(index, prot
         assert config['api'] == ('openai-completions' if protocol is registry.ApiProtocol.OPENAI_CHAT else protocol.value)
         assert 'synthetic-binding-secret' not in repr(settings)
         assert 'synthetic-binding-secret' not in str(launch.record())
-        if protocol is not registry.ApiProtocol.ANTHROPIC_MESSAGES:
+        if protocol is registry.ApiProtocol.OPENAI_RESPONSES:
             await pool.execute("UPDATE agent_profiles SET runtime_id = 'rt-claude-code' WHERE id = $1",
                                f'profile-binding-{index}')
             key = AsyncMock(side_effect=AssertionError('invalid pairing read a secret'))
@@ -114,4 +114,14 @@ def test_reload_changes_binding_but_keeps_prior_run_price_snapshot(monkeypatch):
         third = Launch(await load_agent_settings('worker'))
         assert second.binding_sha256 != third.binding_sha256
         assert third.settings.resolved_model.model.input_usd_per_mtok == 9
+    _run(test, monkeypatch)
+
+
+def test_chat_dialect_change_restarts_resident_binding(monkeypatch):
+    async def test(pool):
+        await agent_setting_layers.put_layer('role', 'worker', None, {'profile_id': 'profile-binding-2'})
+        first = Launch(await load_agent_settings('worker'))
+        await pool.execute("UPDATE llm_models SET chat_dialect = 'deepseek' WHERE id = 'model-binding-2'")
+        second = Launch(await load_agent_settings('worker'))
+        assert first.binding_sha256 != second.binding_sha256
     _run(test, monkeypatch)

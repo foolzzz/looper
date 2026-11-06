@@ -97,6 +97,7 @@ describe("LayerSettingsForm's system prompt mode", () => {
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const API_PROFILE: AgentProfile = {
+  model_path: "direct",
   profile_id: "api-manager", name: "API Manager", model_id: "responses-model",
   model: { model_id: "responses-model", name: "model", protocol: "openai-responses", provider_id: "provider" },
   effort: null, agent_teams: false, custom_prompt: "", runtime_id: "rt-api", runtime_type: "api", runtime_name: "Model API",

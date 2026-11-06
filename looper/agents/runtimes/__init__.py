@@ -110,6 +110,21 @@ class ApiProtocol(str, Enum):
                 self.OPENAI_CHAT: "OpenAI Chat Completions"}[self]
 
 
+class ModelPath(str, Enum):
+    """How a runtime reaches a model's protocol."""
+
+    DIRECT = "direct"
+    TRANSLATED = "translated"
+
+
+def model_path(adapter: RuntimeAdapter, protocol: ApiProtocol) -> ModelPath | None:
+    if protocol in adapter.protocols:
+        return ModelPath.DIRECT
+    if protocol in adapter.translated_protocols:
+        return ModelPath.TRANSLATED
+    return None
+
+
 class AuthKind(str, Enum):
     """How a provider authenticates: a runtime type's own login, or an API key Looper stores."""
 
@@ -358,6 +373,8 @@ class RuntimeAdapter(ABC):
     # are passed in process by the caller, without an MCP entry.
     hosts_runs: ClassVar[bool] = False
     protocols: ClassVar[frozenset[ApiProtocol]]
+    # Reachable only through Looper's local translating gateway.
+    translated_protocols: ClassVar[frozenset[ApiProtocol]] = frozenset()
     # The provider auth kinds it can be started with now; OAUTH is the type's own login.
     auth_kinds: ClassVar[frozenset[AuthKind]]
     launchers: ClassVar[frozenset[Launcher]] = frozenset({Launcher.NATIVE})

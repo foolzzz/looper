@@ -28,7 +28,7 @@ function runtime(fields: Partial<Runtime>): Runtime {
 function registry(pi: Runtime | null): Registry {
   return {
     runtime_types: [{
-      type: "pi", in_process: false, label: "pi", default_executable: "pi", runtime_id: "rt-pi",
+      translated_protocols: [], type: "pi", in_process: false, label: "pi", default_executable: "pi", runtime_id: "rt-pi",
       supported_models: null,
       loads_operator_config: false,
       protocols: ["openai-chat", "openai-responses"],

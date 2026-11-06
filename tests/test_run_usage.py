@@ -207,6 +207,27 @@ class TestResidentClaudeBaseline:
 
 
 class TestRecorder:
+    def test_translated_assistant_records_estimated_context_and_exact_billing(self, agent_db: Any) -> None:
+        from looper.agents.llmrec.dialects import ChatDialect, DIALECTS
+        from looper.agents.llmrec.translate_stream import StreamTranslator
+
+        stream = StreamTranslator(DIALECTS[ChatDialect.OPENAI], 'client', 'msg-test', start_input_tokens=123)
+        start = json.loads(stream.start()[0].decode().split('data: ', 1)[1])
+        stream.feed({'choices': [{'delta': {'content': 'hello'}, 'finish_reason': 'stop'}],
+                     'usage': {'prompt_tokens': 100, 'completion_tokens': 7,
+                               'prompt_tokens_details': {'cached_tokens': 40, 'cache_write_tokens': 10}}})
+        delta = next(json.loads(frame.decode().split('data: ', 1)[1]) for frame in stream.finish()
+                     if frame.startswith(b'event: message_delta'))
+        # Claude Code snapshots message_start usage in its assistant event;
+        # result usage comes from the final cumulative message_delta instead.
+        finish = self._record(agent_db, [
+            {'type': 'assistant', 'message': {**start['message'], 'content': [{'type': 'text', 'text': 'hello'}]}},
+            {'type': 'result', 'usage': delta['usage'], 'total_cost_usd': 0.01},
+        ])
+        assert finish['context_tokens'] == 123
+        assert (finish['input_tokens'], finish['cache_read_tokens'], finish['cache_creation_tokens'],
+                finish['output_tokens']) == (50, 40, 10, 7)
+
     def _record(self, agent_db: Any, turn: list[dict[str, Any]], usage: Usage | None = None) -> dict[str, Any]:
         async def _run() -> None:
             recorder = ClaudeRunRecorder(agent_id="manager", task_id=None, command=["claude"], cwd=".",

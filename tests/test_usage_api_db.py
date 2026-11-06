@@ -124,7 +124,8 @@ def test_launch_records_identity_and_the_prices_used_without_credentials() -> No
     launch = _model_launch()
     record = launch.record()
     assert record["llm_model"] == {
-        "model_id": "model-test", "provider_id": "prov-test", "name": "glm-5.3[1m]", "protocol": "anthropic-messages"}
+        "model_id": "model-test", "provider_id": "prov-test", "name": "glm-5.3[1m]",
+        "protocol": "anthropic-messages", "path": "direct"}
     assert record["profile"]["provider"]["auth"] == "api_key"
     pricing = record["pricing"]
     assert pricing["cost_source"] == "provider_price"

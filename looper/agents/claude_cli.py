@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import re
+import tempfile
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -124,19 +126,41 @@ def _outside_memory(cwd: Path) -> list[str]:
     return patterns
 
 
-def isolation_args(cwd: str | os.PathLike[str]) -> list[str]:
+def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = None,
+                   settings_dir: Path | None = None) -> list[str]:
     """The flags that keep the operator's personal Claude Code configuration out of an agent run in ``cwd``.
 
-    Every agent's command carries them, so the agents cannot diverge. The
-    result depends only on ``cwd`` (and where the operator's configuration
-    lives), so a resident agent's command stays the same between turns.
+    Every agent's command carries them, so the agents cannot diverge.
+    The explicit ``env`` pins runtime-owned variables over project settings;
+    it requires a private file so credentials never enter argv or run records.
+    The result depends only on those values, ``cwd`` and where the operator's
+    configuration lives, so a resident agent's command stays the same between turns.
     """
     settings = {"autoMemoryEnabled": False, "claudeMdExcludes": _outside_memory(Path(cwd)),
                 "crossSessionInbound": "refuse"}
+    if env is not None:
+        settings["env"] = env
+    content = json.dumps(settings, ensure_ascii=False, separators=(",", ":"))
+    if env is not None:
+        if settings_dir is None:
+            raise ValueError("runtime settings with environment values require a private settings directory")
+        settings_dir = settings_dir.absolute()
+        settings_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target = settings_dir / f"{hashlib.sha256(content.encode('utf-8')).hexdigest()}.json"
+        # Atomic replacement keeps concurrent launches from reading partial settings and repairs damaged files.
+        fd, temporary = tempfile.mkstemp(prefix=".settings-", dir=settings_dir)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), 0o600)
+                handle.write(content)
+            os.replace(temporary, target)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+        content = str(target)
     return [
         "--setting-sources", "project",
         "--strict-mcp-config",
-        "--settings", json.dumps(settings, ensure_ascii=False, separators=(",", ":")),
+        "--settings", content,
     ]
 
 

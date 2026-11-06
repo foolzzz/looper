@@ -25,6 +25,7 @@ from ...db import llm_records as db_llm_records, projects as db_projects, manage
 from .. import catalog, profile_registry, projects
 from ..agent_settings import SettingsError, SettingsNotFound
 from ..projects import RequestError, project_name
+from ..llmrec.dialects import ChatDialect
 from ..runtimes import ApiProtocol, AuthKind, VendorType
 from ..tiers.journal import clip
 from . import Call, ErrorCode, OpError, Risk, Tool, check_arguments
@@ -253,7 +254,7 @@ def _profile_listed(view: Mapping[str, Any]) -> dict[str, Any]:
     used = profile_registry.usage_text(view["used_by"])
     return {"profile_id": view["profile_id"], "name": view["name"], "runtime": view["runtime_name"],
             "provider": view["provider"], "model_id": view["model_id"], "model": view["model"],
-            "effort": view["effort"],
+            "effort": view["effort"], "model_path": view["model_path"],
             "agent_teams": view["agent_teams"],
             "custom_prompt": view.get("custom_prompt", ""),
             "roles": view["roles"], "builtin": view["builtin"],
@@ -636,6 +637,10 @@ _MODEL_SETTINGS = {
     **{field: {"type": ["number", "null"]} for field in profile_registry.PRICE_FIELDS},
     "efforts": {"type": ["array", "null"], "items": {"type": "string"}},
     "background_model": {"type": ["string", "null"]},
+    "chat_dialect": {"type": ["string", "null"],
+                     "enum": [None, *[dialect.value for dialect in ChatDialect]],
+                     "description": "OpenAI Chat Completions dialect; null uses the provider vendor default. "
+                                    "Applies only to openai-chat models."},
 }
 
 
@@ -715,7 +720,8 @@ TOOLS: tuple[Tool, ...] = (
         name="looper_models",
         description="LLM models: list (optionally compatible with a runtime); create; update settings; delete an "
                     "unused model with confirmation. A model is one provider, exact name and protocol; use its "
-                    "id or full reference.",
+                    "id or full reference. chat_dialect selects the openai-chat translation dialect; null uses "
+                    "the provider vendor default.",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {

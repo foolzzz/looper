@@ -385,9 +385,61 @@ async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = 
         return Check("llmrec", "Model request recording", WARN, "recording status unavailable")
 
 
+async def _translated_profile_rows(*, pool=None):
+    from ..db.connection import get_pool
+
+    pool = pool if pool is not None else get_pool()
+    return await pool.fetch("""SELECT r.type, m.protocol FROM agent_profiles p
+        JOIN agent_runtimes r ON r.id = p.runtime_id
+        JOIN llm_models m ON m.id = p.model_id""")
+
+
+async def gateway_check(*, runtime_root: Path | None = None, database_url: str = "") -> Check:
+    """A translated profile requires a gateway that can start on demand, even with recording disabled."""
+    from .llmrec.control import controller, ProxyControl
+    from .runtimes import adapter, ApiProtocol, ModelPath, model_path
+
+    try:
+        if database_url:
+            import asyncpg
+
+            conn = await asyncpg.connect(database_url, timeout=_DATABASE_TIMEOUT_SECONDS)
+            try:
+                rows = await _translated_profile_rows(pool=conn)
+            finally:
+                await conn.close()
+        else:
+            rows = await _translated_profile_rows()
+        if not any(model_path(adapter(row["type"]), ApiProtocol(row["protocol"])) is ModelPath.TRANSLATED
+                   for row in rows):
+            return Check("gateway", "Local gateway", SKIP, "no Agent Profile requires translation")
+        control = controller()
+        if control is None and runtime_root is not None:
+            control = ProxyControl(runtime_root, "", enabled=False)
+        status = await control.status() if control is not None else {}
+        proxy = status.get("proxy", {})
+        if proxy.get("state") is None:
+            return Check("gateway", "Local gateway", WARN, "gateway status unavailable")
+        if proxy["state"] == "stopped":
+            return Check("gateway", "Local gateway", OK, "gateway starts on the first translated run")
+        if proxy["state"] == "unavailable":
+            return Check("gateway", "Local gateway", FAIL, "local gateway unavailable; translated runs cannot start")
+        if proxy["state"] == "outdated":
+            return Check("gateway", "Local gateway", FAIL,
+                         "an older gateway is kept alive by running agents; translated runs cannot start; "
+                         "it is replaced once they finish")
+        missing = status.get("translate", {}).get("usage_missing", 0)
+        if missing:
+            return Check("gateway", "Local gateway", WARN,
+                         f"usage_missing={missing} since proxy startup; model spending is underestimated")
+        return Check("gateway", "Local gateway", OK, "gateway running")
+    except Exception:
+        return Check("gateway", "Local gateway", WARN, "gateway status unavailable")
+
+
 # The checks of the runtimes' own logins, by id: what reads each now (``/api/v1/system/status`` reads them on every poll).
 LOGIN_CHECKS = {"codex_login": codex_login_check, "grok_login": grok_login_check,
-                "cursor_login": cursor_login_check, "ttadk": ttadk_check, "llmrec": llmrec_check}
+                "cursor_login": cursor_login_check, "ttadk": ttadk_check, "llmrec": llmrec_check, "gateway": gateway_check}
 
 
 def check_lark_cli(lark_enabled: bool | None) -> Check:
@@ -614,6 +666,7 @@ async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Chec
     git = await asyncio.to_thread(check_git)
     return [database, *claude, codex, grok, cursor, await check_ttadk(facts.ttadk_runtimes),
             await llmrec_check(runtime_root=ops.runtime_root, database_url=ops.database_url),
+            await gateway_check(runtime_root=ops.runtime_root, database_url=ops.database_url),
             check_lark_cli(facts.lark_enabled),
             pg_dump, git, check_projects_root(ops.projects_root),
             await check_step_worktrees(facts.worktree_projects)]

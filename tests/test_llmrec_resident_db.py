@@ -334,3 +334,78 @@ with urllib.request.urlopen(req, timeout=10) as response:
                 await service.stop()
 
     run_db(body, monkeypatch, timeout=40)
+
+
+@pytest.mark.parametrize("role", ["manager", "planner"])
+def test_resident_gateway_refusal_records_failure_and_reaches_manager_chat(monkeypatch, tmp_path, role):
+    from looper.agents.bus import MessageBus
+    from looper.agents.llmrec import control
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.agents.tiers.planner import PlannerAgent, PlannerTurnError, TaskPlan
+
+    async def body(pool):
+        provider = await _provider("chat-key", base_url="http://127.0.0.1:1/v1", protocol="openai-chat")
+        profile = (await _profile(provider, "haiku", protocol="openai-chat"))["profile"]["profile_id"]
+        await _ok("PUT", f"/api/agent-settings/roles/{role}", {"profile_id": profile})
+        task = await _task(tmp_path)
+        work = tmp_path / "w"
+        work.mkdir(exist_ok=True)
+        executable = _resident_executable(tmp_path)
+        root = tmp_path / "runtime"
+        bus = MessageBus(root)
+        if role == "manager":
+            agent = ManagerAgent(config=ManagerConfig(claude_bin=executable, work_dir=work), runtime_root=root)
+            agent._bus, agent._clean_start = bus, True
+
+            async def tools_work():
+                return None
+
+            monkeypatch.setattr(agent, "_tools_problem", tools_work)
+        else:
+            agent = PlannerAgent(task_id=task, runtime_root=root, claude_bin=executable)
+            agent._plan = TaskPlan(plan_id="gateway-plan", goal_id="", requirement="Reply briefly.",
+                                  work_dir=str(work), project_id=await _project_of(task))
+
+        class UnavailableControl(control.ProxyControl):
+            async def _health(self, *, cached=False):
+                return None
+
+            async def _start(self, *, port=None):
+                return False
+
+        control.install(UnavailableControl(root, "", enabled=False))
+        web = channel_address("web")
+        queue = bus.get_queue(web.agent_id)
+        envelope = MessageEnvelope.create(source=web, target=MANAGER_ADDRESS,
+            message_type=MessageType.USER_MESSAGE, payload={"text": "Reply briefly."}, metadata={"task_id": task})
+        try:
+            if role == "manager":
+                await agent._handle(envelope)
+                replies = []
+                while not queue.empty():
+                    event = queue.get_nowait()
+                    if event.message_type == MessageType.AGENT_REPLY:
+                        replies.append(event)
+                assert len(replies) == 1
+                assert replies[0].payload["outcome"] == "failed"
+                assert "gateway could not start" in replies[0].payload["text"]
+                assert "looper doctor" in replies[0].payload["text"]
+            else:
+                with pytest.raises(PlannerTurnError, match="cannot start Claude Code:.*gateway could not start"):
+                    await agent._run_turn("Reply briefly.")
+            row = await pool.fetchrow("SELECT metadata, status, error FROM llm_records WHERE agent_id=$1", agent.agent_id)
+            assert row is not None and row["status"] == "failed"
+            assert "gateway could not start" in row["error"]
+            metadata = json.loads(row["metadata"])
+            assert metadata["llm_model"]["path"] == "translated"
+            assert metadata["llmrec"]["state"] == "refused"
+            assert metadata["llmrec"]["reason"] == "gateway_unavailable"
+            assert not (tmp_path / "launch.json").exists()
+            assert await pool.fetchval("SELECT count(*) FROM llm_requests") == 0
+        finally:
+            control.install(None)
+            await agent._claude.stop()
+            await bus.shutdown()
+
+    run_db(body, monkeypatch, timeout=30)

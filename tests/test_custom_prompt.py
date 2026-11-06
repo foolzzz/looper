@@ -119,10 +119,11 @@ def test_manager_profile_tool_exposes_and_returns_custom_prompt() -> None:
                       "provider_id": "prov-claude-subscription"},
             "provider": {"provider_id": "prov-claude-subscription", "name": "login",
                          "vendor_type": "claude-subscription", "auth": "oauth"},
-            "effort": None, "agent_teams": False,
+            "effort": None, "model_path": "direct", "agent_teams": False,
             "custom_prompt": "CUSTOM", "roles": [], "builtin": False,
             "used_by": {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": []}}
     assert _profile_listed(view)["custom_prompt"] == "CUSTOM"
+    assert _profile_listed(view)["model_path"] == "direct"
     assert replace(builtin_resolved_profile(), custom_prompt="CUSTOM").record()["custom_prompt"] == "CUSTOM"
 
 

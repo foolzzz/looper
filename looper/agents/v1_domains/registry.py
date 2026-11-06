@@ -31,13 +31,13 @@ PROVIDER_ENDPOINT = _object({"provider_id": _STR, "protocol": API_PROTOCOL,
 
 RUNTIME_TYPE = _object({
     "type": _STR, "label": _STR, "default_executable": _STR, "runtime_id": _STR,
-    "protocols": _STRINGS, "capabilities": _STRINGS, "roles": _array(ROLE),
+    "protocols": _STRINGS, "translated_protocols": _STRINGS, "capabilities": _STRINGS, "roles": _array(ROLE),
     "auth_kinds": _array(PROVIDER_AUTH), "supported_models": _NULL_STRINGS,
     "effort_levels": _NULL_STRINGS, "in_process": _BOOL,
     "can_replace_system_prompt": _BOOL, "replace_system_prompt_refusal": _NULL_STR,
     "loads_operator_config": _BOOL,
     "can_interrupt": _BOOL, "probe_error": _NULL_STR,
-}, ["type", "label", "default_executable", "runtime_id", "protocols", "capabilities", "roles",
+}, ["type", "label", "default_executable", "runtime_id", "protocols", "translated_protocols", "capabilities", "roles",
     "auth_kinds", "supported_models", "in_process", "can_replace_system_prompt",
     "replace_system_prompt_refusal", "can_interrupt", "loads_operator_config"], closed=True)
 RUNTIME = _object({
@@ -65,13 +65,14 @@ MODEL = _object({
     "protocol": API_PROTOCOL, "context_window": _NULL_INT,
     **dict.fromkeys(profile_registry.PRICE_FIELDS, _NULL_NUMBER),
     "efforts": _NULL_STRINGS, "background_model": _NULL_STR,
+    "chat_dialect": _NULL_STR, "effective_chat_dialect": _NULL_STR,
     "catalog_order": _INT, "builtin": _BOOL, "profile_count": _INT,
     "endpoint": PROVIDER_ENDPOINT,
     "prices": _object(dict.fromkeys(profile_registry.PRICE_FIELDS, MODEL_PRICE), closed=True),
     "warnings": _STRINGS, "created_at": _STR, "updated_at": _STR,
 }, closed=True)
 VENDOR_MODEL = _object({name: MODEL["properties"][name] for name in (
-    "name", "protocol", "context_window", "background_model", "efforts", *profile_registry.PRICE_FIELDS)},
+    "name", "protocol", "context_window", "background_model", "efforts", "chat_dialect", *profile_registry.PRICE_FIELDS)},
     ["name", "protocol"], closed=True)
 VENDOR_TYPE = _object({
     "vendor_type": VENDOR_KIND, "auth": PROVIDER_AUTH, "oauth_runtime_type": _NULL_STR,
@@ -95,6 +96,7 @@ PROFILE_PROVIDER = _object({name: PROVIDER["properties"][name]
                             for name in ("provider_id", "name", "vendor_type", "auth", "enabled")}, closed=True)
 AGENT_PROFILE = _object({
     "profile_id": _STR, "name": _STR, "model_id": _STR, "model": PROFILE_MODEL,
+    "model_path": {"type": "string", "enum": ["direct", "translated"]},
     "effort": _NULL_STR, "agent_teams": _BOOL, "custom_prompt": _STR,
     "runtime_id": _STR, "runtime_name": _STR, "runtime_type": _STR,
     "provider_id": _STR, "provider_name": _STR, "provider": PROFILE_PROVIDER,

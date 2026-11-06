@@ -2982,6 +2982,7 @@ export interface RuntimeType {
   /** The id its built-in runtime has once found on the server's PATH: rt-<type>. */
   runtime_id: string;
   protocols: string[];
+  translated_protocols: string[];
   capabilities: string[];
   /** The roles its capabilities let it run. */
   roles: AgentRole[];
@@ -3127,6 +3128,8 @@ export interface Provider {
   updated_at: string;
 }
 
+export type ChatDialect = "generic" | "openai" | "deepseek" | "moonshot" | "zhipu" | "qwen" | "vllm" | "minimax" | "ark" | "openrouter";
+
 export interface Model {
   model_id: string;
   provider_id: string;
@@ -3134,6 +3137,8 @@ export interface Model {
   provider_enabled: boolean;
   name: string;
   protocol: ApiProtocol;
+  chat_dialect: ChatDialect | null;
+  effective_chat_dialect: ChatDialect | null;
   context_window: number | null;
   input_usd_per_mtok: number | null;
   output_usd_per_mtok: number | null;
@@ -3167,6 +3172,7 @@ export interface AgentProfile {
   profile_id: string;
   name: string;
   model_id: string;
+  model_path: "direct" | "translated";
   model: Pick<Model, "model_id" | "name" | "protocol" | "provider_id">;
   effort: string | null;
   agent_teams: boolean;
@@ -3218,6 +3224,7 @@ export interface ProfileFields {
 export type ModelFields = Partial<Record<PriceField | "context_window", number | string | null>> & {
   efforts?: string[] | null;
   background_model?: string | null;
+  chat_dialect?: ChatDialect | null;
 };
 
 /** A model's account, exact name and protocol are immutable after creation. */

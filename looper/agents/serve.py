@@ -993,7 +993,7 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
         (("claude_cli", "Claude Code CLI"), ("claude_login", "Claude login")),
         (("codex_login", "Codex login"),), (("grok_login", "Grok login"),),
         (("cursor_login", "Cursor login"),), (("ttadk", "TTADK"),),
-        (("llmrec", "Model request recording"),),
+        (("llmrec", "Model request recording"),), (("gateway", "Local gateway"),),
         (("lark_cli", "Lark channel"),), (("git", "git"),), (("projects_root", "Projects root"),),
     )
     return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
@@ -1024,6 +1024,7 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
             self_check.cursor_login_check(),
             self_check.ttadk_check(),
             self_check.llmrec_check(),
+            self_check.gateway_check(),
             asyncio.to_thread(self_check.check_lark_cli, lark_enabled),
             asyncio.to_thread(self_check.check_git),
             asyncio.to_thread(self_check.check_projects_root, projects_root),

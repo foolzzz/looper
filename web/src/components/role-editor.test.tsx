@@ -9,6 +9,7 @@ import type { AgentProfile, AllowedProfile, PlannerRole } from "@/lib/api";
 
 it.each([true, false])("preserves profile names in both role pickers when provider enabled is %s", async (enabled) => {
   const profile: AgentProfile = {
+  model_path: "direct",
     profile_id: "disabled", name: "Saved profile", model_id: "model", effort: "high", agent_teams: false,
     model: { model_id: "model", name: "Exact model", protocol: "anthropic-messages", provider_id: "account" },
     custom_prompt: "", runtime_id: "runtime", runtime_type: "claude-code", runtime_name: "Claude Code", builtin: false,

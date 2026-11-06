@@ -153,7 +153,7 @@ def test_models_have_natural_keys_and_preserve_price_metadata():
         assert {field: chat.get(field) for field in MODEL_FIELDS} == {
             "name": "same-name", "context_window": 1000000, "input_usd_per_mtok": 0,
             "output_usd_per_mtok": 2.5, "cache_read_usd_per_mtok": 0.25, "cache_write_usd_per_mtok": 3,
-            "efforts": ["low", "high"], "background_model": "background[1m]"}
+            "efforts": ["low", "high"], "background_model": "background[1m]", "chat_dialect": None}
         assert chat["catalog_order"] == 9
         messages = models[("Account", "same-name", "anthropic-messages")]
         assert messages.get("input_usd_per_mtok") is None and messages["efforts"] == []

@@ -57,7 +57,8 @@ from urllib.parse import parse_qsl, urlsplit
 
 from . import runtimes
 from .model_names import parse_model_name
-from .runtimes import ApiFamily, ApiProtocol, AuthKind, Capability, Launcher, RuntimeUnsupported, VendorType
+from .runtimes import (ApiFamily, ApiProtocol, AuthKind, Capability, Launcher, ModelPath, RuntimeUnsupported,
+                       VendorType, model_path)
 
 NAME_MAX_CHARS = 240
 EXECUTABLE_MAX_CHARS = 1_000
@@ -66,7 +67,7 @@ API_KEY_MAX_CHARS = 4_000
 MODELS_MAX = 100
 PRICE_MAX_USD = 10_000
 PRICE_FIELDS = ("input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok")
-MODEL_FIELDS = ("name", "context_window", *PRICE_FIELDS, "efforts", "background_model")
+MODEL_FIELDS = ("name", "context_window", *PRICE_FIELDS, "efforts", "background_model", "chat_dialect")
 CONTEXT_WINDOW_MAX = 100_000_000
 EFFORTS_MAX = 10
 CONCURRENCY_MAX = 1_000
@@ -114,6 +115,7 @@ class CatalogModel:
     cache_write_usd_per_mtok: float | None = None
     efforts: tuple[str, ...] | None = None
     background_model: str | None = None
+    chat_dialect: str | None = None
 
     @classmethod
     def from_entry(cls, entry: Mapping[str, Any]) -> CatalogModel:
@@ -300,11 +302,14 @@ class ModelSpec:
     cache_write_usd_per_mtok: float | None = None
     efforts: tuple[str, ...] | None = None
     background_model: str | None = None
+    chat_dialect: str | None = None
     catalog_order: int = 0
     builtin: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "protocol", _typed_enum(ApiProtocol, self.protocol, "protocol"))
+        if self.chat_dialect is not None and self.protocol is not ApiProtocol.OPENAI_CHAT:
+            raise RegistryError("chat_dialect applies only to openai-chat models")
         values = {name: getattr(self, name) for name in MODEL_FIELDS}
         if isinstance(values["efforts"], tuple):
             values["efforts"] = list(values["efforts"])
@@ -338,8 +343,13 @@ class ResolvedModel:
 
     def check_runtime(self, runtime: RuntimeSpec, effort: str | None = None) -> None:
         adapter = _runtime_type(runtime.type)
-        if self.model.protocol not in adapter.protocols:
-            raise RegistryError("runtime does not support the model's exact protocol")
+        path = model_path(adapter, self.model.protocol)
+        if path is None:
+            raise RegistryError(f"runtime speaks {_listed(adapter.protocols)} and does not support the model's "
+                                f"exact protocol {self.model.protocol.value}; local gateway protocols: "
+                                f"{_listed(adapter.translated_protocols) or 'none'}")
+        if path is ModelPath.TRANSLATED:
+            _check_translated_pairing(runtime, self.provider.auth, self.provider.name, adapter)
         if self.provider.auth is AuthKind.OAUTH and self.provider.oauth_runtime_type != runtime.type:
             raise RegistryError("a login provider can only use its own runtime")
         if self.provider.auth not in adapter.auth_kinds_for(runtime.launcher):
@@ -590,9 +600,16 @@ def _models(raw: Any) -> list[dict[str, Any]]:
             background = model_name(entry.get("background_model"), field="background_model") or None
         except SettingsError as exc:
             raise RegistryError(str(exc)) from None
+        dialect = entry.get("chat_dialect")
+        if dialect is not None:
+            from .llmrec.dialects import ChatDialect
+
+            if not isinstance(dialect, str):
+                raise RegistryError("chat_dialect must be a string or null")
+            dialect = _typed_enum(ChatDialect, dialect, "chat_dialect").value
         models.append({"name": name, "context_window": _context_window(entry.get("context_window")),
                        **{f: _price(entry.get(f), f) for f in PRICE_FIELDS}, "efforts": _efforts(entry.get("efforts")),
-                       "background_model": background})
+                       "background_model": background, "chat_dialect": dialect})
     return models
 
 
@@ -661,6 +678,14 @@ def _ttadk_pairing_problem(runtime: RuntimeSpec, provider_name: str, adapter: ru
             f"Use the {runtime.type}-login provider, or the {runtime.type} runtime")
 
 
+def _check_translated_pairing(runtime: RuntimeSpec, auth: AuthKind, provider_name: str,
+                              adapter: runtimes.RuntimeAdapter) -> None:
+    if auth is not AuthKind.API_KEY:
+        raise RegistryError("login providers cannot be translated; use an API-key provider")
+    if runtime.launcher is not Launcher.NATIVE:
+        raise RegistryError(_ttadk_pairing_problem(runtime, provider_name, adapter))
+
+
 def check_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str, effort: str | None = None) -> None:
     """Refuse a profile of ``runtime``, ``provider`` and ``model`` that could not run (the module's rules)."""
     try:
@@ -668,10 +693,12 @@ def check_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str
     except RuntimeUnsupported:
         raise RegistryError(f"runtime {runtime.name!r} is of type {runtime.type!r}, which this version cannot run") \
             from None
-    if not adapter.protocols & provider.protocols:
+    if not (adapter.protocols | adapter.translated_protocols) & provider.protocols:
         raise RegistryError(
             f"runtime {runtime.name!r} ({adapter.label}) speaks {_listed(adapter.protocols)} and provider "
             f"{provider.name!r} serves {_listed(provider.protocols)}: they share no protocol")
+    if not adapter.protocols & provider.protocols:
+        _check_translated_pairing(runtime, provider.auth, provider.name, adapter)
     if provider.auth is AuthKind.OAUTH and provider.oauth_runtime_type != runtime.type:
         raise RegistryError(
             f"provider {provider.name!r} is the login of {provider.oauth_runtime_type} runtimes: it pairs only with "
@@ -817,6 +844,7 @@ def type_view(adapter: runtimes.RuntimeAdapter) -> dict[str, Any]:
     return {"type": adapter.type, "label": adapter.label, "default_executable": adapter.default_executable,
             "runtime_id": builtin_runtime_id(adapter),
             "protocols": sorted(p.value for p in adapter.protocols),
+            "translated_protocols": sorted(p.value for p in adapter.translated_protocols),
             "capabilities": sorted(c.value for c in adapter.capabilities),
             "roles": servable_roles(adapter.capabilities, adapter.type), "in_process": adapter.in_process,
             "supported_models": sorted(adapter.supported_models) if adapter.supported_models is not None else None,
@@ -891,6 +919,7 @@ def provider_view(row: Mapping[str, Any], logins: Mapping[str, Mapping[str, str]
 def model_view(row: Mapping[str, Any]) -> dict[str, Any]:
     """A callable model's identity, settings and usage, without account secrets."""
     from .runtimes.pricing import model_price
+    from .llmrec.dialects import ChatDialect, default_dialect
 
     account = row["provider"]
     provider = LegacyProviderSpec(
@@ -910,7 +939,10 @@ def model_view(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "model_id": row["id"], "provider_id": row["provider_id"], "provider_name": row["provider_name"],
         "provider_enabled": account.get("enabled", True),
-        "protocol": row["protocol"], **{name: row[name] for name in MODEL_FIELDS},
+        "protocol": row["protocol"], **{name: row.get(name) for name in MODEL_FIELDS},
+        "effective_chat_dialect": (ChatDialect(row["chat_dialect"]) if row.get("chat_dialect") else
+                                   default_dialect(VendorType(account["vendor_type"]))).value
+        if row["protocol"] == ApiProtocol.OPENAI_CHAT.value else None,
         "catalog_order": row["catalog_order"], "builtin": row["builtin"],
         "profile_count": row["profile_count"], "endpoint": dict(row["endpoint"]),
         "prices": prices, "warnings": warnings,
@@ -1072,6 +1104,7 @@ def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED,
         "model": {"model_id": model["id"], "name": model["name"], "protocol": model["protocol"],
                   "provider_id": model["provider_id"]},
         "runtime_id": row["runtime_id"], "runtime_name": row["runtime_name"], "runtime_type": row["runtime_type"],
+        "model_path": model_path(_runtime_type(spec.runtime.type), ApiProtocol(model["protocol"])),
         "provider_id": provider["id"], "provider_name": provider["name"], "builtin": row["builtin"],
         "provider": {"provider_id": provider["id"], "name": provider["name"],
                      "vendor_type": provider["vendor_type"], "auth": provider["auth"],

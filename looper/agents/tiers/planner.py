@@ -3431,6 +3431,10 @@ class PlannerAgent:
         except OSError as exc:
             raise PlannerTurnError(f"cannot write the system prompt file: {exc}") from None
         try:
+            from ..llmrec.gateway import translated
+
+            if translated(launch):
+                launch.environment()
             base = self._claude_command(prompt_file, settings, launch, plan.work_dir)
         except (OSError, RuntimeUnsupported) as exc:
             error = f"cannot start {launch.runtime.label}: {exc}"

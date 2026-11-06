@@ -308,7 +308,7 @@ def _registry_state(server):
 
 
 @pytest.mark.parametrize("runtime, exact_model, compatible, incompatible", [
-    ("claude-code", MODEL_NAME, "anthropic-messages", "openai-chat"),
+    ("claude-code", MODEL_NAME, "anthropic-messages", "openai-responses"),
     ("pi", MODEL_NAME, "openai-responses", "anthropic-messages"),
     ("dsh", "deepseek-flash[1m]", "anthropic-messages", "openai-chat"),
 ])

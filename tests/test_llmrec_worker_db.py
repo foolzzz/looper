@@ -226,3 +226,79 @@ def test_codex_worker_is_not_covered(monkeypatch, tmp_path):
         finally:
             control.install(None)
     run_db(body, monkeypatch, timeout=25)
+
+
+@pytest.mark.parametrize("case", ["recording", "recording-off", "unavailable"])
+def test_worker_translated_profile_records_gateway_state(monkeypatch, tmp_path, case):
+    from looper.agents.llmrec import ROUTE_FORMAT, ROUTES_DIR, RouteFile, control
+    from looper.agents.llmrec.proxy import Proxy
+    from looper.agents.llmrec.writer import DbSink
+
+    async def body(pool):
+        events = [
+            {"id": "chat-test", "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 2}},
+        ]
+        async with FakeModelAPI([ResponseScript(events=events)], api_key=KEY) as upstream:
+            provider = await _provider("chat-key", base_url=upstream.base_url, protocol="openai-chat",
+                                       models=[{"name": "haiku", "chat_dialect": "openai"}])
+            profile = (await _profile(provider, "haiku", protocol="openai-chat"))["profile"]["profile_id"]
+            await _ok("PUT", "/api/agent-settings/roles/worker", {"profile_id": profile})
+            task = await _task(tmp_path)
+            seen = tmp_path / "seen.json"
+            executable = _standin(tmp_path / "claude", seen)
+            sink = DbSink(pool)
+            proxy = Proxy(tmp_path / "runtime", sink=sink)
+            port = await proxy.start()
+            writer = asyncio.create_task(sink.run())
+
+            class LocalControl(control.ProxyControl):
+                def _state(self):
+                    return {"port": port, "pid": os.getpid(), "instance": proxy.instance}
+
+                async def _health(self, *, cached=False):
+                    return None if case == "unavailable" else {"route_format": ROUTE_FORMAT,
+                        "features": {"translate": 1}, **proxy.stats}
+
+                async def _start(self, *, port=None):
+                    return False
+
+            control.install(LocalControl(tmp_path / "runtime", "", enabled=case == "recording"))
+            try:
+                result = await _work(executable, task, tmp_path)
+                row = await pool.fetchrow("SELECT id, metadata, status, error FROM llm_records WHERE task_id=$1", task)
+                assert row is not None
+                metadata = json.loads(row["metadata"])
+                assert metadata["llm_model"]["path"] == "translated"
+                if case == "unavailable":
+                    assert result["status"] == row["status"] == "failed"
+                    assert "Cannot prepare Claude Code:" in result["error"]
+                    assert "gateway could not start" in result["error"]
+                    assert metadata["llmrec"]["state"] == "refused"
+                    assert metadata["llmrec"]["reason"] == "gateway_unavailable"
+                    assert not seen.exists() and not upstream.requests
+                else:
+                    assert result["status"] == "completed", result
+                    assert row["status"] == "completed"
+                    assert metadata["llmrec"]["state"] == "translating"
+                    assert metadata["llmrec"]["recording"] == (case == "recording")
+                    assert metadata["llmrec"]["dialect"] == "openai"
+                    assert metadata["llmrec"]["upstream_host"] == "127.0.0.1"
+                    route = RouteFile.read(tmp_path / "runtime" / ROUTES_DIR / f'{metadata["llmrec"]["route"]}.json')
+                    assert route.kind == "translate" and route.record == (case == "recording")
+                    assert route.ended_at and route.last_record_id == row["id"]
+                    assert upstream.requests[0].path == "/v1/chat/completions"
+                    assert upstream.requests[0].body["model"] == "haiku"
+                await proxy.close()
+                await sink.close(timeout=5)
+                assert await pool.fetchval("SELECT count(*) FROM llm_requests") == int(case == "recording")
+                assert not await pool.fetchval("SELECT count(*) FROM activity WHERE task_id=$1 AND summary LIKE $2",
+                                               task, "Model requests of this run are not recorded:%")
+            finally:
+                control.install(None)
+                await proxy.close()
+                await sink.close(timeout=1)
+                writer.cancel()
+                await asyncio.gather(writer, return_exceptions=True)
+
+    run_db(body, monkeypatch, timeout=35)

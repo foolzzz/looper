@@ -25,7 +25,7 @@ def chunk(delta=None, finish=None, **extra):
 
 
 def translated(chunks, dialect=DIALECT):
-    stream = StreamTranslator(dialect, 'client-model', 'msg-test')
+    stream = StreamTranslator(dialect, 'client-model', 'msg-test', start_input_tokens=123)
     frames = stream.start()
     for item in chunks:
         frames.extend(stream.feed(item))
@@ -34,13 +34,13 @@ def translated(chunks, dialect=DIALECT):
 
 
 def test_start_immediately_announces_message_and_ping():
-    stream = StreamTranslator(DIALECT, 'client-model', 'msg-test')
+    stream = StreamTranslator(DIALECT, 'client-model', 'msg-test', start_input_tokens=123)
     start = events(stream.start())
     assert [event['type'] for event in start] == ['message_start', 'ping']
     assert start[0]['message'] == {
         'id': 'msg-test', 'type': 'message', 'role': 'assistant', 'model': 'client-model',
         'content': [], 'stop_reason': None, 'stop_sequence': None,
-        'usage': {'input_tokens': 0, 'cache_creation_input_tokens': 0,
+        'usage': {'input_tokens': 123, 'cache_creation_input_tokens': 0,
                   'cache_read_input_tokens': 0, 'output_tokens': 0}}
     assert events([stream.ping()]) == [{'type': 'ping'}]
 
@@ -266,3 +266,11 @@ def test_delta_checks_text_before_opening_a_block():
         stream._delta('thinking', [1])
     assert stream.open is None
     assert stream.index == 0
+
+
+@pytest.mark.parametrize('finish', ['stop', 'content_filter'])
+def test_refusal_deltas_are_preserved_as_text(finish):
+    _, result = translated([chunk({'refusal': 'Cannot help '}), chunk({'refusal': 'with that.'}, finish)])
+    message = _anthropic(result)
+    assert message['content'] == [{'type': 'text', 'text': 'Cannot help with that.'}]
+    assert message['stop_reason'] == ('refusal' if finish == 'content_filter' else 'end_turn')

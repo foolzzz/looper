@@ -297,10 +297,19 @@ def test_preview_unknown_profile(monkeypatch):
         asyncio.run(module.preview("agent-missing", "worker"))
 
 
-@pytest.mark.parametrize("role,status", [(None, 400), ("bad", 400), ("worker", 200)])
-def test_preview_endpoint(monkeypatch, role, status):
+@pytest.mark.parametrize("role,status,protocol", [
+    (None, 400, ApiProtocol.ANTHROPIC_MESSAGES),
+    ("bad", 400, ApiProtocol.ANTHROPIC_MESSAGES),
+    ("worker", 200, ApiProtocol.ANTHROPIC_MESSAGES),
+    ("planner", 200, ApiProtocol.OPENAI_CHAT),
+])
+def test_preview_endpoint(monkeypatch, role, status, protocol):
     from looper.agents.http_server import AgentHTTPServer
     module, profile, _ = _dependencies(monkeypatch)
+    row = module.db_profiles.get_profile.return_value
+    row["model"]["protocol"] = row["endpoint"]["protocol"] = protocol.value
+    if protocol is ApiProtocol.OPENAI_CHAT:
+        row["endpoint"].update(base_url="https://chat.example.invalid/v1", use_runtime_default=False)
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=SimpleNamespace())
     writer = _Writer()
@@ -350,8 +359,8 @@ def test_preview_endpoint_missing_model_is_400(monkeypatch):
 @pytest.mark.parametrize("runtime,changes,reason", [
     ("claude-code", {"runtime_type": "unknown-runtime"}, "unknown-runtime"),
     ("claude-code", {"runtime_capabilities": [Capability.RUN.value]}, "lacks"),
-    ("claude-code", {"model": {"protocol": ApiProtocol.OPENAI_CHAT.value},
-                     "endpoint": {"protocol": ApiProtocol.OPENAI_CHAT.value}}, "exact protocol"),
+    ("claude-code", {"model": {"protocol": ApiProtocol.OPENAI_RESPONSES.value},
+                     "endpoint": {"protocol": ApiProtocol.OPENAI_RESPONSES.value}}, "exact protocol"),
     ("codex", {"provider": {"vendor_type": "grok-login", "auth": "oauth", "oauth_runtime_type": "grok"},
                "endpoint": {"use_runtime_default": False}}, "own runtime"),
 ])

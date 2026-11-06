@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS llm_models (
     efforts                   TEXT[] CHECK (llm_model_efforts_valid(efforts)),
     background_model          TEXT CHECK (length(background_model) BETWEEN 1 AND 200
                                   AND background_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$'),
+    chat_dialect              TEXT CHECK (chat_dialect IS NULL OR protocol = 'openai-chat'),
     catalog_order             INTEGER NOT NULL DEFAULT 0 CHECK (catalog_order >= 0),
     builtin                   BOOLEAN NOT NULL DEFAULT false,
     created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),

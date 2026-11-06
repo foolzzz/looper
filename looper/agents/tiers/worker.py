@@ -1539,6 +1539,11 @@ class WorkerPool:
                     wp.handle = handle
                     if isinstance(handle, ProcessRun):
                         wp.process = handle.process
+            except RuntimeUnsupported as exc:
+                error = f"Cannot prepare {runtime.label}: {exc}"
+                await recorder.finish(output_text=None, result_event=None, error=error,
+                                      outcome=RunOutcome.RUN_FAILED.value)
+                return _verify_failed(error) if is_verify else _work_failed(error)
             except RunStartError as exc:
                 if hosted:
                     await handle.end()
