@@ -102,6 +102,7 @@ class _ResponseBuffer:
         self.failed = False
         self.decoder = None
         encoding = (encoding or '').strip().lower()
+        self.gzip = encoding == 'gzip'
         if encoding in ('gzip', 'deflate'):
             self.decoder = zlib.decompressobj(47)
         elif encoding not in ('', 'identity'):
@@ -117,6 +118,12 @@ class _ResponseBuffer:
         try:
             while chunk:
                 if self.decoder and self.decoder.eof:
+                    # Padding may arrive in a later chunk; keep the completed
+                    # decoder until a real next member begins.
+                    if self.gzip:
+                        chunk = chunk.lstrip(b'\0')
+                    if not chunk:
+                        break
                     self.decoder = zlib.decompressobj(47)
                 data = self.decoder.decompress(chunk, 16 * MIB + 1 - len(self.decoded)) if self.decoder else chunk
                 if len(self.decoded) + len(data) > 16 * MIB:

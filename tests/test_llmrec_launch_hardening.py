@@ -14,24 +14,28 @@ from looper.agents.profile_registry import builtin_resolved_profile
 
 
 @pytest.mark.parametrize('lower,upper,expected', [
-    (None, 'internal.example,.corp.example', 'internal.example,.corp.example,127.0.0.1'),
-    ('', 'internal.example,.corp.example', '127.0.0.1'),
-    ('lower.example', 'upper.example', 'lower.example,127.0.0.1'),
-    (None, '*', '*'),
-    ('', '*', '127.0.0.1'),
+    (None, 'internal.example,.corp.example', 'internal.example,.corp.example,127.0.0.1,localhost,::1'),
+    ('', 'internal.example', 'internal.example,127.0.0.1,localhost,::1'),
+    ('lower.example', 'upper.example', 'lower.example,127.0.0.1,localhost,::1'),
+    (None, None, '127.0.0.1,localhost,::1'),
+    ('', '*', '*'),
     ('*', 'upper.example', '*'),
+    ('localhost,127.0.0.1,localhost,::1', '', 'localhost,127.0.0.1,::1'),
 ])
-def test_recording_preserves_lowercase_proxy_bypass_precedence(monkeypatch, lower, upper, expected):
-    if lower is None:
-        monkeypatch.delenv('no_proxy', raising=False)
-    else:
-        monkeypatch.setenv('no_proxy', lower)
-    monkeypatch.setenv('NO_PROXY', upper)
+def test_recording_preserves_nonempty_proxy_bypass(monkeypatch, lower, upper, expected):
+    for name, value in [('no_proxy', lower), ('NO_PROXY', upper)]:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
     launch = Launch(AgentSettings(profile=builtin_resolved_profile()))
+    original = launch.environment()
+    assert original.get('no_proxy') == lower and original.get('NO_PROXY') == upper
     recorded = replace(launch, llmrec=LlmrecRoute('a' * 22, 'http://127.0.0.1:1/r/' + 'a' * 22,
                                                'https://api.anthropic.com'))
     env = recorded.environment()
     assert env['no_proxy'] == env['NO_PROXY'] == expected
+    assert launch.environment() == original
 
 
 def test_busy_pinned_port_exits_without_replacing_state(tmp_path):

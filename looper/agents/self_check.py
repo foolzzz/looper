@@ -357,7 +357,8 @@ async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = 
         if not enabled:
             return Check("llmrec", "Model request recording", SKIP, "off")
         if proxy["state"] in ("unavailable", "stopped"):
-            return Check("llmrec", "Model request recording", FAIL, "recording proxy unavailable")
+            errors = f"; write_errors={proxy['write_errors']} since proxy startup" if proxy.get("write_errors") else ""
+            return Check("llmrec", "Model request recording", FAIL, "recording proxy unavailable" + errors)
         if proxy["state"] == "outdated" or proxy.get("dropped", 0) or proxy.get("write_errors", 0) or proxy.get("gaps", 0):
             reasons = proxy.get("gap_reasons", {})
             common = max(reasons, key=reasons.get) if reasons else "unknown"

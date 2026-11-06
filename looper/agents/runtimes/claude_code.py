@@ -240,11 +240,14 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # The loopback endpoint hides first-party tool search support from Claude Code.
             if official_endpoint(launch.llmrec.upstream):
                 env.setdefault("ENABLE_TOOL_SEARCH", "true")
-            # An explicitly empty lowercase value overrides the uppercase bypass list.
-            bypass = env.get("no_proxy", env.get("NO_PROXY", ""))
-            values = [value.strip() for value in bypass.split(",") if value.strip()]
-            if values != ["*"] and "127.0.0.1" not in values:
-                values.append("127.0.0.1")
+            bypass = env.get("no_proxy") or env.get("NO_PROXY") or ""
+            values = list(dict.fromkeys(value.strip() for value in bypass.split(",") if value.strip()))
+            # A standalone wildcard already includes loopback. Some clients
+            # recognize it only as the entire bypass value.
+            if values != ["*"]:
+                for value in ("127.0.0.1", "localhost", "::1"):
+                    if value not in values:
+                        values.append(value)
             for name in ("NO_PROXY", "no_proxy"):
                 env[name] = ",".join(values)
         return env

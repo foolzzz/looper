@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from looper.agents.llmrec.capture import build_capture
-from looper.agents.llmrec.proxy import Proxy, _ProxyTransport, _upstream_proxy
+from looper.agents.llmrec.proxy import Proxy, _ProxyTransport, _ResponseBuffer, _upstream_proxy
 from tests.test_llmrec_proxy import Sink, captured, events, route
 
 
@@ -158,10 +158,13 @@ def test_default_proxy_timeout_leaves_read_deadline_to_client(tmp_path, monkeypa
     asyncio.run(asyncio.wait_for(check(), 5))
 
 
-def test_multimember_gzip_keeps_later_usage(tmp_path):
+@pytest.mark.parametrize('padding', [False, True])
+def test_multimember_gzip_keeps_later_usage(tmp_path, padding):
     async def check():
         stream = [f'data: {json.dumps(event)}\n\n'.encode() for event in events()]
         compressed = gzip.compress(stream[0]) + gzip.compress(b''.join(stream[1:]))
+        if padding:
+            compressed += b'\0' * 16
 
         async def reply(path):
             return 200, {'Content-Type': 'text/event-stream', 'Content-Encoding': 'gzip'}, compressed
@@ -185,6 +188,33 @@ def test_multimember_gzip_keeps_later_usage(tmp_path):
             finally:
                 await proxy.close(grace_s=0)
     asyncio.run(asyncio.wait_for(check(), 5))
+
+
+@pytest.mark.parametrize('tail', ['same_chunk', 'later_chunk', 'second_member', 'invalid_tail', 'truncated_member'])
+def test_gzip_capture_chunk_boundaries(tail):
+    payload = b''.join(f'data: {json.dumps(event)}\n\n'.encode() for event in events())
+    first = gzip.compress(payload)
+    chunks = {
+        'same_chunk': [first + b'\0' * 16],
+        'later_chunk': [first, b'\0', b'\0' * 15],
+        'second_member': [gzip.compress(payload[:10]), gzip.compress(payload[10:])],
+        'invalid_tail': [first, b'not gzip'],
+        'truncated_member': [first, gzip.compress(payload)[:10]],
+    }[tail]
+    buffer = _ResponseBuffer('gzip')
+    for chunk in chunks:
+        buffer.append(chunk)
+    buffer.finish()
+    invalid = tail in ('invalid_tail', 'truncated_member')
+    assert buffer.failed is invalid
+    for decoded, gap in [(None, False), (bytes(buffer.decoded), buffer.failed)]:
+        result = build_capture(request_body=b'{}', response_data=b''.join(chunks),
+            decoded_response=decoded, encoding_gap=gap, path='/v1/messages',
+            response_headers={'content-type': 'text/event-stream', 'content-encoding': 'gzip'})
+        assert result.record_gap == ('body_encoding_unparsed' if invalid else None)
+        if not invalid:
+            assert result.output_tokens == 3
+            assert result.response_body['stop_reason'] == 'end_turn'
 
 
 def test_unknown_anthropic_content_delta_marks_stream_gap():
