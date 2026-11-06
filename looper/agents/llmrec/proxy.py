@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from datetime import datetime, timezone
 import json
 import logging
@@ -129,7 +130,8 @@ class Proxy:
         self.port = port
         self.instance = instance or secrets.token_urlsafe(16)
         self.connect_s, self.read_idle_s = connect_s, read_idle_s
-        self._stats = dict(requests=0, recorded=0, dropped=0)
+        self._stats = dict(requests=0, recorded=0, gaps=0, dropped=0)
+        self._gap_reasons = Counter()
         self._routes = {}
         self._handlers = set()
         self._server = None
@@ -138,7 +140,10 @@ class Proxy:
 
     @property
     def stats(self):
-        return {**self._stats, 'write_errors': getattr(self.sink, 'write_errors', 0),
+        return {**self._stats, 'recorded': getattr(self.sink, 'recorded', self._stats['recorded']),
+                'gaps': getattr(self.sink, 'gaps', self._stats['gaps']),
+                'gap_reasons': dict(getattr(self.sink, 'gap_reasons', self._gap_reasons)),
+                'write_errors': getattr(self.sink, 'write_errors', 0),
                 'pending': getattr(self.sink, 'pending', 0)}
 
     async def start(self):
@@ -361,7 +366,11 @@ class Proxy:
                     encoding_gap=response_buffer.failed, **values)
                 if capture is not None:
                     if self.sink.offer(capture):
-                        self._stats['recorded'] += 1
+                        if capture.record_gap:
+                            self._stats['gaps'] += 1
+                            self._gap_reasons[capture.record_gap] += 1
+                        else:
+                            self._stats['recorded'] += 1
                     else:
                         self._stats['dropped'] += 1
             except Exception:

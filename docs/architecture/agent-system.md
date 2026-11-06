@@ -3439,13 +3439,18 @@ before a settings change keep their existing route.
 - **Settings and access.** `llmrec.enabled` and `llmrec.include_oauth` are
   both off by default. Settings → Request recording and the operator-only
   `llmrec_settings.get` / `llmrec_settings.update` operations control them.
-  The Runs view and `llm_requests.list` / `llm_requests.get` expose captured
-  exchanges; the list contains metadata and the detail reconstructs the body.
+  Until the viewer is available, read captured exchanges with
+  `loopercli llm-requests list/get` or the operator API's `llm_requests.list` /
+  `llm_requests.get`; the list contains metadata and the detail reconstructs the body.
   These operations use `POST /api/v1/<domain>/<action>` and are not agent tools.
 - **Recorded content.** Each exchange includes its method, path with redacted
   query parameters, redacted headers, request JSON (system prompt, messages, tools and tool results),
   assembled JSON/SSE response, usage, status, timing and failure or capture
   gap. Shared request parts are deduplicated per route in PostgreSQL.
+  NUL characters in stored bodies become literal `\u0000` text and set
+  `body_sanitized`; byte sizes and request hashes still describe the original
+  content. A database data error retries that row once without bodies,
+  with `record_gap=rejected_by_database` and the error class in `error`.
   Requests are attributed to the route's agent, task, step and current run;
   requests between runs keep `after_record_id` instead of being assigned to
   the next run. Token-count requests are separate from model calls. Bodyless
@@ -3457,7 +3462,9 @@ before a settings change keep their existing route.
   survive a control-plane restart and is adopted or replaced when safe;
   `serve` checks its health every five seconds. Forwarding does not wait for
   database writes: a bounded asynchronous sink retries writes and reports
-  dropped requests or write errors in proxy status. Upstream TLS uses the OS
+  dropped requests or write errors in proxy status. Complete recordings and
+  gaps have separate counters; self-check warns about gaps since proxy startup,
+  including their count and most common reason. Upstream TLS uses the OS
   trust store through `truststore` (the certifi bundle if unavailable), plus
   each route's configured CA files/directories. Upstream proxy and TLS
   settings stay isolated per route; the proxy process does not inherit

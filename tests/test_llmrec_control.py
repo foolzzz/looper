@@ -33,6 +33,31 @@ def test_proxy_process_leaves_tls_overrides_to_routes(tmp_path, monkeypatch):
     assert environment['HTTPS_PROXY'] == 'http://proxy.example:8080'
 
 
+def test_self_check_reports_gaps_through_proxy_status(tmp_path, monkeypatch):
+    from looper.agents import api_v1, self_check
+    from looper.agents.llmrec.proxy import Proxy
+    from looper.agents.llmrec.writer import DbSink
+
+    sink = DbSink(None)
+    sink.recorded = 4
+    sink.gaps = 3
+    sink.gap_reasons = {'unparsable_stream': 1, 'rejected_by_database': 2}
+    proxy = Proxy(tmp_path, sink=sink)
+    owner = control.ProxyControl(tmp_path, '', enabled=True)
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value=proxy.stats))
+    monkeypatch.setattr(owner, '_state', lambda: {'port': 1234, 'pid': 1})
+    monkeypatch.setattr(control, '_control', owner)
+    status = asyncio.run(owner.status())
+    api_v1.validate_arguments(api_v1.find('POST', '/api/v1/llmrec_settings/get').result, status)
+    assert status['proxy']['recorded'] == 4 and status['proxy']['gaps'] == 3
+    check = asyncio.run(self_check.llmrec_check())
+    assert check.status == self_check.WARN
+    assert 'gaps=3' in check.detail and 'rejected_by_database' in check.detail
+    fresh = Proxy(tmp_path, sink=DbSink(None))
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value=fresh.stats))
+    assert asyncio.run(self_check.llmrec_check()).status == self_check.OK
+
+
 @pytest.mark.parametrize('failure', ['start_false', 'start_error', 'missing_state', 'route_write'])
 def test_proxy_bypass_warns_once_and_adds_task_activity(tmp_path, monkeypatch, caplog, failure, launch):
     owner = control.ProxyControl(tmp_path, '', enabled=True, include_oauth=True)

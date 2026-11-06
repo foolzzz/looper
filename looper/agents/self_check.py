@@ -349,9 +349,12 @@ async def llmrec_check(*, runtime_root: Path | None = None) -> Check:
             return Check("llmrec", "Model request recording", SKIP, "off")
         if proxy["state"] in ("unavailable", "stopped"):
             return Check("llmrec", "Model request recording", FAIL, "recording proxy unavailable")
-        if proxy["state"] == "outdated" or proxy.get("dropped", 0) or proxy.get("write_errors", 0):
+        if proxy["state"] == "outdated" or proxy.get("dropped", 0) or proxy.get("write_errors", 0) or proxy.get("gaps", 0):
+            reasons = proxy.get("gap_reasons", {})
+            common = max(reasons, key=reasons.get) if reasons else "unknown"
             return Check("llmrec", "Model request recording", WARN,
-                         f"{proxy['state']}; dropped={proxy.get('dropped', 0)}, write_errors={proxy.get('write_errors', 0)}")
+                         f"{proxy['state']}; dropped={proxy.get('dropped', 0)}, write_errors={proxy.get('write_errors', 0)}, "
+                         f"gaps={proxy.get('gaps', 0)} since proxy startup, most_common_gap={common}")
         return Check("llmrec", "Model request recording", OK, "proxy running")
     except Exception:
         return Check("llmrec", "Model request recording", WARN, "recording status unavailable")

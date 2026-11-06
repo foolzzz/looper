@@ -15,7 +15,8 @@ _NULL_OBJECT = {"type": ["object", "null"]}
 _BOOL = {"type": "boolean"}
 PROXY = _object({"state": {"type": "string", "enum": ["running", "stopped", "unavailable", "outdated"]},
     "port": _NULL_INT, "pid": _NULL_INT,
-    **dict.fromkeys(("requests", "recorded", "dropped", "write_errors"), _INT)}, closed=True)
+    **dict.fromkeys(("requests", "recorded", "gaps", "dropped", "write_errors"), _INT),
+    "gap_reasons": {"type": "object", "additionalProperties": _INT}}, closed=True)
 SETTINGS = _object({"enabled": _BOOL, "include_oauth": _BOOL, "proxy": PROXY}, closed=True)
 _FIELDS = {
     "id": _INT, "route_id": _STR, "proxy_instance": _STR, "proxy_seq": _INT,
@@ -28,7 +29,7 @@ _FIELDS = {
     "request_headers": {"type": "object"}, "response_headers": _NULL_OBJECT,
     "request_bytes": _INT, "request_sha256": _STR, "response_bytes": _NULL_INT,
     **dict.fromkeys(("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"), _NULL_INT),
-    "usage": _NULL_OBJECT, "record_gap": _NULL_STR,
+    "usage": _NULL_OBJECT, "record_gap": _NULL_STR, "body_sanitized": _BOOL,
 }
 ROW = _object(_FIELDS, closed=True)
 FULL = _object({**_FIELDS, "request_body": {}, "response_body": {}, "response_raw": _NULL_STR}, closed=True)
@@ -65,7 +66,7 @@ async def settings():
     enabled = values.get("llmrec.enabled") == "true"
     return {"enabled": enabled, "include_oauth": values.get("llmrec.include_oauth") == "true",
         "proxy": {"state": "unavailable" if enabled else "stopped", "port": None, "pid": None,
-                  "requests": 0, "recorded": 0, "dropped": 0, "write_errors": 0}}
+                  "requests": 0, "recorded": 0, "gaps": 0, "gap_reasons": {}, "dropped": 0, "write_errors": 0}}
 
 
 async def run(server, operation, arguments, principal, headers):

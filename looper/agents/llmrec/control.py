@@ -204,7 +204,8 @@ class ProxyControl:
             "state": "outdated" if health and self._outdated else "running" if health else
                      "unavailable" if self.enabled or state else "stopped",
             "port": state["port"] if state else None, "pid": state["pid"] if state else None,
-            **{name: int((health or {}).get(name, 0)) for name in ("requests", "recorded", "dropped", "write_errors")}}}
+            **{name: int((health or {}).get(name, 0)) for name in ("requests", "recorded", "gaps", "dropped", "write_errors")},
+            "gap_reasons": (health or {}).get("gap_reasons", {})}}
 
     async def attach(self, launch, *, agent_id, task_id, step_id=None, reuse=False):
         from ..runtimes import AuthKind

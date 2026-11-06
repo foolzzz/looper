@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from copy import copy
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -14,19 +16,35 @@ from .connection import get_pool
 if TYPE_CHECKING:
     from looper.agents.llmrec.capture import Capture
 
+logger = logging.getLogger(__name__)
+
 
 _COLUMNS = (
     "route_id", "proxy_instance", "proxy_seq", "record_id", "after_record_id", "agent_id", "task_id",
     "started_at", "method", "path", "kind", "model", "stream", "status", "outcome", "error", "ttfb_ms",
     "duration_ms", "request_headers", "response_headers", "request_body", "request_bytes", "request_sha256",
     "response_body", "response_raw", "response_bytes", "input_tokens", "output_tokens", "cache_read_tokens",
-    "cache_write_tokens", "usage", "record_gap",
+    "cache_write_tokens", "usage", "record_gap", "body_sanitized",
 )
 _JSON_COLUMNS = {"request_headers", "response_headers", "request_body", "response_body", "usage"}
 _LIST_COLUMNS = ", ".join(["id", *(c for c in _COLUMNS if c not in {"request_body", "response_body", "response_raw"})])
 
 
-def _json(value: Any) -> str | None:
+def _sanitize(value: Any, capture: Capture) -> Any:
+    if isinstance(value, str):
+        if "\0" in value:
+            capture.body_sanitized = True
+            return value.replace("\0", "\\u0000")
+    elif isinstance(value, list):
+        return [_sanitize(item, capture) for item in value]
+    elif isinstance(value, dict):
+        return {key: _sanitize(item, capture) for key, item in value.items()}
+    return value
+
+
+def _json(value: Any, capture: Capture | None = None) -> str | None:
+    if capture is not None:
+        value = _sanitize(value, capture)
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")) if value is not None else None
 
 
@@ -45,7 +63,7 @@ def _row(row: asyncpg.Record) -> dict[str, Any]:
 
 
 async def write_batch(captures: list[Capture], *, pool: asyncpg.Pool) -> None:
-    """Commit a batch atomically; retries of the same proxy sequence are harmless."""
+    """Commit a batch with rejected bodies isolated; sequence retries are harmless."""
     if not captures:
         return
     values = [f"${i}::jsonb" if name in _JSON_COLUMNS else f"${i}"
@@ -55,7 +73,7 @@ async def write_batch(captures: list[Capture], *, pool: asyncpg.Pool) -> None:
     statement = (f"INSERT INTO llm_requests ({', '.join(_COLUMNS)}) VALUES ({', '.join(values)}) "
                  "ON CONFLICT (proxy_instance, proxy_seq) DO NOTHING")
     async with pool.acquire() as conn, conn.transaction():
-        for capture in captures:
+        async def write(capture):
             route = capture.route
             upstream = urlsplit(route.upstream)
             await conn.execute("""
@@ -72,7 +90,7 @@ async def write_batch(captures: list[Capture], *, pool: asyncpg.Pool) -> None:
                 await conn.executemany("""
                     INSERT INTO llm_request_parts (route_id, sha256, body, bytes) VALUES ($1,$2,$3::jsonb,$4)
                     ON CONFLICT DO NOTHING
-                    """, [(route.id, sha, _json(body), len(_json(body).encode("utf-8")))
+                    """, [(route.id, sha, _json(body, capture), len(_json(body).encode("utf-8")))
                           for sha, body in capture.parts.items()])
             args = []
             for name in _COLUMNS:
@@ -89,11 +107,32 @@ async def write_batch(captures: list[Capture], *, pool: asyncpg.Pool) -> None:
                 else:
                     value = getattr(capture, name)
                 if name in _JSON_COLUMNS:
-                    value = _json(value)
+                    value = _json(value, capture)
+                elif name == "response_raw":
+                    value = _sanitize(value, capture)
                 elif name == "started_at":
                     value = _time(value)
                 args.append(value)
             await conn.execute(statement, *args)
+
+        for capture in captures:
+            capture.body_sanitized = getattr(capture, "body_sanitized", False)
+            try:
+                # PostgreSQL aborts a failed transaction: roll back this row before its fallback.
+                async with conn.transaction():
+                    await write(capture)
+            except asyncpg.DataError as error:
+                capture.record_gap = "rejected_by_database"
+                capture.error = type(error).__name__
+                fallback = copy(capture)
+                fallback.skeleton, fallback.parts = None, {}
+                fallback.response_body = fallback.response_raw = fallback.usage = None
+                try:
+                    async with conn.transaction():
+                        await write(fallback)
+                except asyncpg.DataError as fallback_error:
+                    # Even metadata may be invalid. Never let one rejected row block later captures.
+                    logger.warning("model request metadata rejected; error_class=%s", type(fallback_error).__name__)
 
 
 async def list_requests(*, record_id: int | None = None, agent_id: str | None = None,

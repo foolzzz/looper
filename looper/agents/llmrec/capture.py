@@ -292,6 +292,7 @@ class Capture:
     cache_write_tokens: int | None = None
     usage: dict | None = None
     record_gap: str | None = None
+    body_sanitized: bool = False
 
     def size(self):
         return (len(canonical(self.skeleton)) + len(canonical(self.parts)) + len(canonical(self.response_body))

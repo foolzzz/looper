@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from typing import TYPE_CHECKING
+
+import asyncpg
 
 from looper.db import llm_requests
 
 if TYPE_CHECKING:
-    import asyncpg
     from .capture import Capture
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,8 @@ class DbSink:
         self.max_pending_bytes = max_pending_bytes
         self.pending = 0
         self.recorded = 0
+        self.gaps = 0
+        self.gap_reasons: Counter[str] = Counter()
         self.write_errors = 0
         self._pending_bytes = 0
         self._queue: asyncio.Queue[tuple[Capture, int]] = asyncio.Queue()
@@ -63,14 +67,25 @@ class DbSink:
                     if self.pool is None:
                         raise ConnectionError("recording database is not connected")
                     await llm_requests.write_batch([capture for capture, _ in batch], pool=self.pool)
-                except Exception:
+                except (OSError, TimeoutError, asyncpg.PostgresConnectionError,
+                        asyncpg.TransactionRollbackError, asyncpg.InsufficientResourcesError,
+                        asyncpg.OperatorInterventionError):
                     self.write_errors += 1
                     # Database exceptions can contain DSNs or query parameters. Log metadata only.
                     logger.warning("model request write failed; pending=%d retry_s=%d", self.pending, backoff)
                     await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 30)
                     continue
-                self.recorded += len(batch)
+                except Exception as error:
+                    self.write_errors += 1
+                    logger.error("model request writer stopped; error_class=%s", type(error).__name__)
+                    raise
+                for capture, _ in batch:
+                    if reason := getattr(capture, "record_gap", None):
+                        self.gaps += 1
+                        self.gap_reasons[reason] += 1
+                    else:
+                        self.recorded += 1
                 self.pending -= len(batch)
                 self._pending_bytes -= sum(size for _, size in batch)
                 batch.clear()

@@ -340,7 +340,7 @@ def test_route_proxy_bypass_and_explicit_empty_environment(tmp_path, monkeypatch
 def test_passthrough_headers_base_path_and_binding(tmp_path):
     async def check():
         sink = Sink()
-        scripts = [ResponseScript(events=events()), ResponseScript(events=events())]
+        scripts = [ResponseScript(events=events()), ResponseScript(events=['invalid event'])]
         async with FakeModelAPI(scripts) as upstream:
             value = route(tmp_path, upstream.base_url)
             proxy = Proxy(tmp_path, sink=sink)
@@ -360,9 +360,12 @@ def test_passthrough_headers_base_path_and_binding(tmp_path):
                     assert upstream.requests[0].headers['authorization'] == 'Bearer test-key'
                     assert 'user-agent' not in upstream.requests[0].headers
                     assert 'accept-encoding' not in upstream.requests[0].headers
+                    assert proxy.stats['recorded'] == 1 and proxy.stats['gaps'] == 0
                     replace(value, record_id=18).write(tmp_path / ROUTES_DIR / f'{value.id}.json')
                     assert (await client.post(url, headers={'authorization': 'Bearer test-key'}, json={'messages': []})).status_code == 200
                     assert (await captured(sink, 2)).record_id == 18
+                    assert proxy.stats['recorded'] == 1 and proxy.stats['gaps'] == 1
+                    assert proxy.stats['gap_reasons'] == {'unparsable_stream': 1}
             finally:
                 await proxy.close(grace_s=0)
     asyncio.run(check())

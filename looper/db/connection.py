@@ -168,7 +168,8 @@ CREATE TABLE IF NOT EXISTS llm_requests (
     cache_write_tokens BIGINT,
     usage             JSONB,
     record_gap        TEXT CHECK (record_gap IN ('request_too_large', 'response_too_large', 'undecodable_encoding', 'body_encoding_unparsed',
-                                                 'unparsable_request', 'unparsable_stream')),
+                                                 'unparsable_request', 'unparsable_stream', 'rejected_by_database')),
+    body_sanitized    BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE (proxy_instance, proxy_seq)
 );
 CREATE INDEX IF NOT EXISTS idx_llm_requests_record ON llm_requests (record_id, started_at);
