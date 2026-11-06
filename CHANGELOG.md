@@ -28,6 +28,18 @@ How the agent system works today is described in
   capacity pressure can briefly lock recording tables to reclaim physical
   PostgreSQL space. Manager cleanup also removes its recorded requests.
 
+## [2.14.99] - 2026-11-05
+
+### Fixed
+
+- **Recording proxy hardening, so that turning request recording on changes nothing for a model call except that it is recorded.** No change while recording is off. ([#1138](https://github.com/foolzzz/looper/pull/1138))
+  - Upstream URLs: a query string on the configured upstream is kept and merged with the request's; a same-origin `Location` redirect is rewritten to a `/r-origin/<route>` path so the follow-up request stays on the recording route.
+  - Proxies and TLS: `NO_PROXY`/`no_proxy` always gain `127.0.0.1`, `localhost` and `::1` (a lone `*` stays as it is, and an explicitly empty lowercase value overrides the uppercase one); relative TLS trust paths are resolved against the agent's working directory.
+  - Gzip: concatenated and zero-padded gzip responses are decoded in full for capture; a truncated stream or an unknown content-block delta is marked instead of being stored as complete.
+  - Timeouts: the upstream read timeout of 600 seconds is removed.
+  - Stable port: a port that cannot be bound is no longer replaced by another one; the proxy fails and the controller retries the same port. A proxy whose writer has stopped answers health with 503 and is replaced on the same port.
+  - Self-check and reads: the `llmrec` check reads the setting with the database URL when no controller is running and reports `write_errors`; `llm_requests` reads fetch only the stored parts a request references; NUL characters in recorded events are kept as `\u0000` and the event is marked `body_sanitized`.
+
 ## [2.14.98] - 2026-11-06
 
 ### Added
