@@ -308,6 +308,8 @@ def test_preview_endpoint(monkeypatch, role, status, protocol):
     module, profile, _ = _dependencies(monkeypatch)
     row = module.db_profiles.get_profile.return_value
     row["model"]["protocol"] = row["endpoint"]["protocol"] = protocol.value
+    if protocol is ApiProtocol.OPENAI_CHAT:
+        row["endpoint"].update(base_url="https://chat.example.invalid/v1", use_runtime_default=False)
     server = AgentHTTPServer(web_adapter=SimpleNamespace(), supervisor=SimpleNamespace(),
                              task_router=SimpleNamespace())
     writer = _Writer()

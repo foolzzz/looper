@@ -33,6 +33,25 @@ async def _ok(chat, tool_name, **arguments):
     return answer["result"]
 
 
+@needs_db
+@pytest.mark.parametrize("protocol,path", [("openai-chat", "translated"), ("anthropic-messages", "direct")])
+def test_profile_tool_preserves_model_path_in_create_update_and_list(monkeypatch, tmp_path, protocol, path):
+    async def test(pool):
+        chat = _Chat(tmp_path)
+        model = (await registry.create_model({"provider_id": "prov-test", "name": "path-model",
+                                             "protocol": protocol}))["model"]
+        created = (await _ok(chat, "looper_agent_profiles", action="create", name="Path profile",
+                            runtime="rt-claude-code", model=model["model_id"]))["profile"]
+        assert created["model_path"] == path
+        updated = (await _ok(chat, "looper_agent_profiles", action="update", profile=created["profile_id"],
+                            name="Renamed path profile"))["profile"]
+        assert updated["model_path"] == path
+        profiles = (await _ok(chat, "looper_agent_profiles", action="list"))["profiles"]
+        assert next(p for p in profiles if p["profile_id"] == created["profile_id"]) == updated
+
+    _run(test, monkeypatch)
+
+
 def test_model_reference_schema_and_fixed_descriptions():
     providers, models = _tool("looper_providers"), _tool("looper_models")
     assert providers.schema["properties"]["action"]["enum"] == ["list", "register", "update"]

@@ -168,6 +168,10 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     def isolation_args(self, cwd: str | Path) -> list[str]:
         return claude_cli.isolation_args(cwd)
 
+    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
+        if provider.protocols == self.translated_protocols and not provider.base_url.strip():
+            raise RuntimeUnsupported("Cannot prepare Claude Code: the model's OpenAI endpoint has no base URL")
+
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
         """What points a run at ``provider`` (the module's notes), followed by the provider's own variables.
 
@@ -207,6 +211,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             unset=(API_KEY,))
 
     def _translated_binding(self, provider: ProviderSpec, model: str) -> ProviderBinding:
+        self.check_pairing(provider, model)
         if provider.auth is not AuthKind.API_KEY or not provider.api_key:
             raise RuntimeUnsupported("Claude Code translated models require a provider API key")
         if len(provider.catalog) != 1 or provider.catalog[0].name != model:
@@ -282,6 +287,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         from ..llmrec.gateway import translated
 
         if translated(launch):
+            self.check_pairing(launch.profile.provider, launch.model)
             return launch.profile.provider.base_url
         return self.environment(replace(launch, llmrec=None)).get(BASE_URL) or "https://api.anthropic.com"
 

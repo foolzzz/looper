@@ -380,7 +380,7 @@ async def _translated_profile_rows(*, pool=None):
 
 
 async def gateway_check(*, runtime_root: Path | None = None, database_url: str = "") -> Check:
-    """A translated profile requires a reachable gateway, even with recording disabled."""
+    """A translated profile requires a gateway that can start on demand, even with recording disabled."""
     from .llmrec.control import controller, ProxyControl
     from .runtimes import adapter, ApiProtocol, ModelPath, model_path
 
@@ -403,11 +403,16 @@ async def gateway_check(*, runtime_root: Path | None = None, database_url: str =
             control = ProxyControl(runtime_root, "", enabled=False)
         status = await control.status() if control is not None else {}
         proxy = status.get("proxy", {})
-        if proxy.get("state") in (None, "unavailable", "stopped"):
+        if proxy.get("state") is None:
+            return Check("gateway", "Local gateway", WARN, "gateway status unavailable")
+        if proxy["state"] == "stopped":
+            return Check("gateway", "Local gateway", OK, "gateway starts on the first translated run")
+        if proxy["state"] == "unavailable":
             return Check("gateway", "Local gateway", FAIL, "local gateway unavailable; translated runs cannot start")
         if proxy["state"] == "outdated":
-            return Check("gateway", "Local gateway", WARN,
-                         "an older gateway is kept alive by running agents; it is replaced once they finish")
+            return Check("gateway", "Local gateway", FAIL,
+                         "an older gateway is kept alive by running agents; translated runs cannot start; "
+                         "it is replaced once they finish")
         missing = status.get("translate", {}).get("usage_missing", 0)
         if missing:
             return Check("gateway", "Local gateway", WARN,

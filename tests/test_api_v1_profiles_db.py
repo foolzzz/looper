@@ -45,6 +45,51 @@ async def _create(call, **fields):
     return answer["result"]["profile"]
 
 
+@pytest.mark.usefixtures("current_turn")
+def test_profiles_refuse_legacy_chat_endpoint_without_base_url(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from looper.agents.llmrec import ROUTES_DIR, control
+    from tests.test_ops_tasks_db import _Chat
+    from tests.test_provider_binding_db import _task, _work
+
+    async def run(pool):
+        model = (await profile_registry.create_model({"provider_id": "prov-test", "name": "legacy-chat",
+            "protocol": "openai-chat"}))["model"]
+        profile = (await profile_registry.create_profile({"name": "Legacy chat", "runtime_id": "rt-claude-code",
+            "model_id": model["model_id"]}))["profile"]
+        pid = profile["profile_id"]
+        await agent_setting_layers.put_layer("role", "worker", None, {"profile_id": pid})
+        await pool.execute("UPDATE llm_provider_endpoints SET base_url = '', use_runtime_default = true "
+                           "WHERE provider_id = 'prov-test' AND protocol = 'openai-chat'")
+        before = await pool.fetch("SELECT * FROM agent_profiles ORDER BY id")
+        diagnostic = "Cannot prepare Claude Code: the model's OpenAI endpoint has no base URL"
+        async with _api(tmp_path, pool) as call:
+            for operation, body in [
+                ("profiles.create", {"name": "Unroutable", "runtime_id": "rt-claude-code", "model_id": model["model_id"]}),
+                ("profiles.update", {"profile_id": pid, "fields": {"name": "Unroutable"}}),
+            ]:
+                status, answer = await call(operation, body)
+                assert status == 400 and answer["error"]["message"] == diagnostic, answer
+        chat = _Chat(tmp_path)
+        for fields in ({"action": "create", "name": "Unroutable", "runtime": "rt-claude-code",
+                        "model": model["model_id"]}, {"action": "update", "profile": pid, "name": "Unroutable"}):
+            (answer,) = await chat.say("保存配置", ("looper_agent_profiles", fields))
+            assert answer["status"] == "error" and answer["error"]["message"] == diagnostic, answer
+        assert await pool.fetch("SELECT * FROM agent_profiles ORDER BY id") == before
+        owner = control.ProxyControl(tmp_path / "runtime", '', enabled=False)
+        monkeypatch.setattr(control, '_control', owner)
+        start = AsyncMock(side_effect=AssertionError('invalid model must not start a proxy'))
+        monkeypatch.setattr(owner, '_start', start)
+        task = await _task(tmp_path)
+        outcome = await _work(str(tmp_path / "must-not-start-claude"), task, tmp_path)
+        assert outcome["status"] == "failed" and diagnostic in outcome["error"], outcome
+        start.assert_not_awaited()
+        assert not list((tmp_path / "runtime" / ROUTES_DIR).glob('*.json'))
+
+    run_with_models(run, monkeypatch)
+
+
 def test_full_and_compact_profiles_preserve_usage_shapes_and_warning_results(tmp_path, monkeypatch):
     async def run(pool):
         async with _api(tmp_path, pool) as call:
@@ -64,7 +109,7 @@ def test_full_and_compact_profiles_preserve_usage_shapes_and_warning_results(tmp
             compact = compact["result"]["profile"]
             assert isinstance(compact["used_by"], str) and "session" in compact["used_by"]
             assert set(compact) == {"profile_id", "name", "runtime", "provider", "model_id", "model", "effort",
-                                    "agent_teams", "custom_prompt", "roles", "builtin", "used_by"}
+                                    "agent_teams", "custom_prompt", "roles", "builtin", "used_by", "model_path"}
             listing = (await call("agent_profiles.list"))[1]["result"]["profiles"]
             assert next(p for p in listing if p["profile_id"] == pid) == compact
             assert (await db.get_profile(pid))["name"] == "Renamed" and full["effort"] is None

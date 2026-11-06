@@ -351,7 +351,8 @@ def test_legacy_pairing_accepts_translation_only_for_native_api_key(runtime_type
 
     runtime = RuntimeSpec("rt-test", "test", runtime_type, launcher=Launcher(launcher))
     account = LegacyProviderSpec("prov-test", "test", auth, frozenset({protocol}),
-                                 runtime_type if auth is AuthKind.OAUTH else None)
+                                 runtime_type if auth is AuthKind.OAUTH else None,
+                                 base_url="https://provider.example.invalid/v1")
     if error:
         with pytest.raises(RegistryError, match=error):
             check_pairing(runtime, account, "test-model")

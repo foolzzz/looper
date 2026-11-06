@@ -96,6 +96,7 @@ class ProxyControl:
         self._failed_health = None
         self._health_at = 0.0
         self._start_lock = asyncio.Lock()
+        self._start_attempted = False
         self._children: dict[int, asyncio.subprocess.Process] = {}
         self._resident: dict[str, RouteFile] = {}
 
@@ -186,6 +187,7 @@ class ProxyControl:
         async with self._start_lock:
             if await self._health():
                 return True
+            self._start_attempted = True
             previous = self._state()
             port = port if port is not None else previous["port"] if previous else 0
             if previous and self._failed_health and all(
@@ -270,7 +272,7 @@ class ProxyControl:
         counters = health or self._failed_health or {}
         return {"enabled": self.enabled, "include_oauth": self.include_oauth, "proxy": {
             "state": "outdated" if health and self._outdated else "running" if health else
-                     "unavailable" if self.enabled or state else "stopped",
+                     "unavailable" if self.enabled or state or self._start_attempted else "stopped",
             "port": state["port"] if state else None, "pid": state["pid"] if state else None,
             **{name: int(counters.get(name, 0)) for name in ("requests", "recorded", "gaps", "dropped", "write_errors")},
             "gap_reasons": counters.get("gap_reasons", {})},
@@ -443,10 +445,17 @@ class ProxyControl:
 
 
 async def attach(launch, **kwargs):
+    from ..profile_registry import RegistryError
+    from ..runtimes import RuntimeUnsupported
+
     if _control is None:
         return launch
     try:
         return await _control.attach(launch, **kwargs)
+    except RegistryError as exc:
+        raise RuntimeUnsupported(str(exc)) from None
+    except RuntimeUnsupported:
+        raise
     except (OSError, ValueError):
         from .gateway import translated
 

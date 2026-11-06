@@ -254,7 +254,7 @@ def _profile_listed(view: Mapping[str, Any]) -> dict[str, Any]:
     used = profile_registry.usage_text(view["used_by"])
     return {"profile_id": view["profile_id"], "name": view["name"], "runtime": view["runtime_name"],
             "provider": view["provider"], "model_id": view["model_id"], "model": view["model"],
-            "effort": view["effort"],
+            "effort": view["effort"], "model_path": view["model_path"],
             "agent_teams": view["agent_teams"],
             "custom_prompt": view.get("custom_prompt", ""),
             "roles": view["roles"], "builtin": view["builtin"],

@@ -1,6 +1,8 @@
 """Claude Code can use Chat models only with an attached translation route."""
 from dataclasses import replace
+import asyncio
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -67,6 +69,26 @@ def test_translated_launch_refuses_missing_translation_route(translated_launch, 
         launch.environment()
     assert launch.record()['llmrec']['state'] == 'refused'
     assert diagnostic in launch.record()['llmrec']['detail']
+
+
+def test_translated_launch_refuses_empty_upstream_before_starting_route(translated_launch, tmp_path, monkeypatch):
+    from looper.agents.llmrec import ROUTES_DIR, control
+
+    resolved = translated_launch.profile.resolved_model
+    endpoint = replace(resolved.endpoint, base_url='', use_runtime_default=True)
+    profile = replace(translated_launch.profile, resolved_model=replace(resolved, endpoint=endpoint))
+    launch = replace(translated_launch, settings=replace(translated_launch.settings, profile=profile))
+    owner = control.ProxyControl(tmp_path, '', enabled=False)
+    monkeypatch.setattr(control, '_control', owner)
+    start = AsyncMock(side_effect=AssertionError('invalid upstream must not start a proxy'))
+    monkeypatch.setattr(owner, '_start', start)
+    diagnostic = "Cannot prepare Claude Code: the model's OpenAI endpoint has no base URL"
+    with pytest.raises(RuntimeUnsupported, match=diagnostic):
+        asyncio.run(control.attach(launch, agent_id='worker-test', task_id=None))
+    with pytest.raises(RuntimeUnsupported, match=diagnostic):
+        launch.runtime.bind_provider(launch.settings.resolved_model.binding_provider(), launch.model, launch.effort)
+    start.assert_not_awaited()
+    assert not list((tmp_path / ROUTES_DIR).glob('*.json'))
 
 
 @pytest.mark.parametrize('official', [True, False])

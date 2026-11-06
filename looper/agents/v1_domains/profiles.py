@@ -1,4 +1,4 @@
-"""Full dashboard profiles and previews, alongside unchanged compact Manager results."""
+"""Full dashboard profiles and previews, alongside compact Manager results."""
 
 from .. import profile_registry, prompt_preview
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _BOOL, _OBJ
@@ -14,6 +14,7 @@ PROFILE_RESULT = _object({"profile": AGENT_PROFILE, "warnings": _array(_STR)}, c
 COMPACT_PROFILE = _object({
     "profile_id": _STR, "name": _STR, "runtime": _STR, "provider": PROFILE_PROVIDER,
     "model_id": _STR, "model": PROFILE_MODEL, "effort": _NULL_STR, "agent_teams": _BOOL,
+    "model_path": AGENT_PROFILE["properties"]["model_path"],
     "custom_prompt": _STR, "roles": _array(ROLE), "builtin": _BOOL, "used_by": _NULL_STR,
 }, closed=True)
 PROMPT_BLOCK = _object({"name": _STR, "owner": {"type": "string", "enum": ["looper", "runtime"]},
