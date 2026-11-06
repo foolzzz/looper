@@ -12,6 +12,7 @@ from tests.db_support import DSN, run_db
 from tests.fake_model_api import FakeModelAPI, ResponseScript
 from tests.test_profile_registry_db import _ok
 from tests.test_provider_binding_db import KEY, _profile, _provider, _task, _work
+from tests.test_llmrec_proxy import private_ca as private_ca
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
@@ -49,8 +50,8 @@ def _standin(path: Path, seen: Path, *, reviewer=False):
 
 
 @pytest.mark.parametrize("case,recorded", [("third-party", True), ("reviewer", True), ("official", True),
-    ("oauth-off", False), ("oauth-on", True), ("off", False), ("unavailable", False)])
-def test_worker_recording_binding_and_bypass(monkeypatch, tmp_path, caplog, case, recorded):
+    ("oauth-off", False), ("oauth-on", True), ("off", False), ("unavailable", False), ("relative-ca", True)])
+def test_worker_recording_binding_and_bypass(monkeypatch, tmp_path, caplog, case, recorded, request):
     from looper.agents.llmrec import LlmrecRoute, ROUTES_DIR, RouteFile
     from looper.agents.llmrec import control
     from looper.agents.llmrec.proxy import Proxy
@@ -58,6 +59,11 @@ def test_worker_recording_binding_and_bypass(monkeypatch, tmp_path, caplog, case
     from looper.db import llm_requests
 
     async def body(pool):
+        if case == 'relative-ca':
+            cert, _, _ = request.getfixturevalue('private_ca')
+            (tmp_path / 'w').mkdir()
+            (tmp_path / 'w' / 'ca.pem').write_bytes(cert.read_bytes())
+            monkeypatch.setenv('NODE_EXTRA_CA_CERTS', 'ca.pem')
         async with FakeModelAPI([ResponseScript(events=_EVENTS)], api_key=KEY) as upstream:
             origin = upstream.base_url.removesuffix('/v1')
             base = origin + '/anthropic'
@@ -152,6 +158,8 @@ def test_worker_recording_binding_and_bypass(monkeypatch, tmp_path, caplog, case
                     route = RouteFile.read(tmp_path / 'runtime' / ROUTES_DIR / f'{after.llmrec.id}.json')
                     assert route.ended_at and route.record_id is None and route.last_record_id == row['id']
                     assert route.role == role
+                    if case == 'relative-ca':
+                        assert route.tls_env['NODE_EXTRA_CA_CERTS'] == str(tmp_path / 'w' / 'ca.pem')
                     assert metadata['llmrec']['state'] == 'recording'
                     saved = await llm_requests.get_request(rows[0]['id'], pool=pool)
                     assert saved['response_body']['content'][0]['text'] == 'ok'

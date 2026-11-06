@@ -208,15 +208,29 @@ async def _restore(rows, conn) -> list[dict[str, Any]]:
 
     if not rows:
         return []
-    parts = await conn.fetch("SELECT route_id, sha256, body FROM llm_request_parts WHERE route_id = ANY($1::text[])",
-                             list({row["route_id"] for row in rows}))
+    items = [_row(row) for row in rows]
+    references = set()
+    for item in items:
+        pending = [item["request_body"]]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                if set(value) == {"$llmrec_part"}:
+                    references.add((item["route_id"], value["$llmrec_part"]))
+                else:
+                    pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+    parts = await conn.fetch(
+        "SELECT route_id, sha256, body FROM llm_request_parts WHERE (route_id, sha256) IN "
+        "(SELECT * FROM unnest($1::text[], $2::text[]))",
+        [route_id for route_id, _ in references], [sha for _, sha in references]) if references else []
     by_route: dict[str, dict[str, Any]] = {}
     for part in parts:
         by_route.setdefault(part["route_id"], {})[part["sha256"]] = (json.loads(part["body"])
             if isinstance(part["body"], str) else part["body"])
     result = []
-    for row in rows:
-        item = _row(row)
+    for item in items:
         skeleton = item["request_body"]
         item["new_from_index"] = _new_from_index(skeleton, item.pop("previous_body"), item["path"])
         try:

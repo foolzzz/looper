@@ -1371,7 +1371,7 @@ class WorkerPool:
         from ..llmrec.control import attach
 
         launch = await attach(launch, agent_id=worker_id, task_id=parent_task_id or None,
-                              step_id=payload.get("task_id") or None)
+                              step_id=payload.get("task_id") or None, cwd=work_dir)
         background = str((project or {}).get("background") or "")
         if task_role is None:
             system_prompt = build_system_prompt(

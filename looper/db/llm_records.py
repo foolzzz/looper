@@ -173,6 +173,27 @@ async def end_unfinished_records(*, keep: Collection[int] = (), pool: asyncpg.Po
     return int(result.split()[-1])
 
 
+def _event_json(event: dict[str, Any]) -> str:
+    """Keep otherwise PostgreSQL-incompatible NUL text, marking the stored event."""
+    sanitized = False
+
+    def clean(value: Any) -> Any:
+        nonlocal sanitized
+        if isinstance(value, str) and "\0" in value:
+            sanitized = True
+            return value.replace("\0", "\\u0000")
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        if isinstance(value, dict):
+            return {clean(key): clean(item) for key, item in value.items()}
+        return value
+
+    stored = clean(event)
+    if sanitized:
+        stored["body_sanitized"] = True
+    return json.dumps(stored, ensure_ascii=False)
+
+
 async def append_events(
     record_id: int,
     events: list[tuple[int, dict[str, Any]]],
@@ -185,7 +206,7 @@ async def append_events(
     pool = pool or get_pool()
     await pool.executemany(
         "INSERT INTO llm_record_events (record_id, seq, event) VALUES ($1, $2, $3::jsonb)",
-        [(record_id, seq, json.dumps(event, ensure_ascii=False)) for seq, event in events],
+        [(record_id, seq, _event_json(event)) for seq, event in events],
     )
 
 
@@ -200,7 +221,7 @@ async def update_event(
     pool = pool or get_pool()
     await pool.execute(
         "UPDATE llm_record_events SET event = $3::jsonb WHERE record_id = $1 AND seq = $2",
-        record_id, seq, json.dumps(event, ensure_ascii=False),
+        record_id, seq, _event_json(event),
     )
 
 

@@ -2,12 +2,16 @@
 
 import asyncio
 import logging
+import signal
+import sys
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from looper.agents.agent_settings import AgentSettings, Launch
-from looper.agents.llmrec import TLS_ENV, LlmrecSkip, RouteFile, SkipReason
+from looper.agents.keeper import write_json
+from looper.agents.llmrec import STATE_FILE, TLS_ENV, LlmrecSkip, RouteFile, SkipReason
 from looper.agents.llmrec import control
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.db import activity
@@ -16,6 +20,65 @@ from looper.db import activity
 @pytest.fixture
 def launch():
     return Launch(AgentSettings(profile=builtin_resolved_profile()))
+
+
+@pytest.mark.parametrize('foreign', ['instance', 'pid'])
+def test_failed_health_requires_matching_instance_and_pid(tmp_path, monkeypatch, foreign):
+    owner = control.ProxyControl(tmp_path, '', enabled=True)
+    state = {'pid': 1234, 'instance': 'owned', 'start_time': 'owned-start', 'port': 12345}
+    (tmp_path / STATE_FILE).parent.mkdir(parents=True)
+    write_json(tmp_path / STATE_FILE, state)
+    monkeypatch.setattr(owner, '_running', AsyncMock(return_value=True))
+    data = {**state, foreign: 'foreign' if foreign == 'instance' else 4321, 'write_errors': 7}
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: client(**kwargs,
+        transport=httpx.MockTransport(lambda request: httpx.Response(503, json=data))))
+
+    async def run():
+        assert await owner._health() is None
+        assert owner._failed_health is None
+        assert (await owner.status())['proxy']['write_errors'] == 0
+        stop = AsyncMock()
+        monkeypatch.setattr(owner, '_stop', stop)
+        monkeypatch.setattr(asyncio, 'create_subprocess_exec', AsyncMock(side_effect=OSError('no spawn')))
+        with pytest.raises(OSError, match='no spawn'):
+            await owner._start()
+        stop.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('identity', ['matching', 'changed_instance', 'changed_start_time'])
+def test_stop_escalates_only_for_owned_process(tmp_path, identity):
+    async def run():
+        owner = control.ProxyControl(tmp_path, '', enabled=True)
+        child = await asyncio.create_subprocess_exec(sys.executable, '-c',
+            "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); signal.pause()",
+            stdout=asyncio.subprocess.PIPE)
+        try:
+            assert await asyncio.wait_for(child.stdout.readline(), 3) == b'ready\n'
+            state = {'pid': child.pid, 'instance': 'owned', 'port': 12345,
+                     'start_time': await asyncio.to_thread(control.proc_tree._start_time, child.pid)}
+            current = {**state}
+            if identity == 'changed_instance':
+                current['instance'] = 'replacement'
+            elif identity == 'changed_start_time':
+                state['start_time'] = 'previous-process'
+            (tmp_path / STATE_FILE).parent.mkdir(parents=True)
+            write_json(tmp_path / STATE_FILE, current)
+            await owner._stop(state, grace_s=.05)
+            if identity == 'matching':
+                assert await asyncio.wait_for(child.wait(), 2) == -signal.SIGKILL
+                assert owner._state() is None
+            else:
+                assert child.returncode is None
+                assert owner._state() == current
+        finally:
+            if child.returncode is None:
+                child.kill()
+            await child.wait()
+
+    asyncio.run(asyncio.wait_for(run(), 10))
 
 
 def test_proxy_process_leaves_tls_overrides_to_routes(tmp_path, monkeypatch):

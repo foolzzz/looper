@@ -3,6 +3,7 @@
 import asyncio
 import os
 import signal
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -99,6 +100,82 @@ def test_crash_restarts_on_original_port(tmp_path, short_checks):
         finally:
             await cleanup(control)
     asyncio.run(asyncio.wait_for(run(), 20))
+
+
+@pytest.mark.parametrize('replacement_fails', [False, True])
+def test_failed_writer_replaced_on_original_port_and_records_again(tmp_path, short_checks, monkeypatch, replacement_fails):
+    from looper.agents import self_check
+
+    async def run(pool):
+        schema = await pool.fetchval('SELECT current_schema()')
+        url = urlsplit(DSN)
+        scoped_dsn = urlunsplit(url._replace(query=urlencode([*parse_qsl(url.query), ('search_path', schema)])))
+        control = ProxyControl(tmp_path, scoped_dsn, enabled=True)
+        monkeypatch.setattr(module, '_control', control)
+        script = ResponseScript(events=[{'type': 'message_start', 'message': {
+            'id': 'msg_test', 'type': 'message', 'role': 'assistant', 'content': [],
+            'usage': {'input_tokens': 1, 'output_tokens': 0}}}, {'type': 'message_stop'}])
+        try:
+            await started(control)
+            first = control._state()
+            await pool.execute("ALTER TABLE llm_requests ADD CONSTRAINT reject_capture CHECK (model <> 'reject-writer')")
+            async with FakeModelAPI([script, script, script]) as upstream:
+                route = RouteFile(id='d' * 22, upstream=upstream.base_url, agent_id='worker-recovery',
+                    protocol='anthropic-messages', created_at='2026-01-01T00:00:00+00:00')
+                route.write(tmp_path / ROUTES_DIR / f'{route.id}.json')
+                async with httpx.AsyncClient(trust_env=False, timeout=3) as client:
+                    endpoint = f"http://127.0.0.1:{first['port']}"
+
+                    async def send(model):
+                        response = await client.post(f'{endpoint}/r/{route.id}/messages',
+                            json={'model': model, 'messages': [], 'stream': True},
+                            headers={'authorization': 'Bearer test-key'})
+                        assert response.status_code == 200 and b'message_stop' in response.content
+
+                    async def written():
+                        return await pool.fetchval('SELECT count(*) FROM llm_requests') == 1
+
+                    await send('before-failure')
+                    await wait_for(written)
+                    await send('reject-writer')
+
+                    async def failed():
+                        response = await client.get(f'{endpoint}/llmrec/health')
+                        return response.status_code == 503
+
+                    await wait_for(failed)
+                    status = (await control.status())['proxy']
+                    assert status['state'] == 'unavailable'
+                    assert status['write_errors'] == 1 and status['recorded'] == 1
+                    check = await self_check.llmrec_check()
+                    assert check.status == self_check.FAIL and 'write_errors=1' in check.detail
+                    await pool.execute('ALTER TABLE llm_requests DROP CONSTRAINT reject_capture')
+                    if replacement_fails:
+                        with monkeypatch.context() as patch:
+                            patch.setattr(asyncio, 'create_subprocess_exec', AsyncMock(side_effect=OSError('boot failed')))
+                            with pytest.raises(OSError, match='boot failed'):
+                                await control.tick()
+                        status = (await control.status())['proxy']
+                        assert status['state'] == 'unavailable' and status['write_errors'] == 1
+                        assert status['port'] == first['port']
+                    await control.tick()
+                    await wait_for(control._health)
+                    second = control._state()
+                    assert second['pid'] != first['pid'] and second['instance'] != first['instance']
+                    assert second['port'] == first['port']
+                    assert not await control._running(first)
+                    await send('after-recovery')
+
+                    async def recovered():
+                        return await pool.fetchval("SELECT count(*) FROM llm_requests WHERE model='after-recovery'") == 1
+
+                    await wait_for(recovered)
+                    assert (await control.status())['proxy']['recorded'] == 1
+                    assert len(upstream.requests) == 3
+        finally:
+            await cleanup(control)
+
+    run_db(run, timeout=35)
 
 
 def test_state_removal_ends_proxy(tmp_path, short_checks):

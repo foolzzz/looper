@@ -106,8 +106,16 @@ def decode(data, encoding):
         return data
     if encoding in ('gzip', 'deflate'):
         try:
-            decoder = zlib.decompressobj(47)
-            return decoder.decompress(data) + decoder.flush()
+            decoded = bytearray()
+            while data:
+                decoder = zlib.decompressobj(47)
+                decoded.extend(decoder.decompress(data) + decoder.flush())
+                if not decoder.eof:
+                    return None
+                data = decoder.unused_data
+                if encoding == 'gzip':
+                    data = data.lstrip(b'\0')
+            return bytes(decoded)
         except zlib.error:
             return None
     return None
@@ -142,6 +150,8 @@ def _anthropic(events):
                 block[key] = block.get(key, '') + delta.get(key, '')
             elif dtype == 'citations_delta':
                 block.setdefault('citations', []).append(delta['citation'])
+            else:
+                raise ValueError('unknown content-block delta')
         elif kind == 'message_delta' and message is not None:
             message.update(event.get('delta', {}))
             message.setdefault('usage', {}).update(event.get('usage', {}))

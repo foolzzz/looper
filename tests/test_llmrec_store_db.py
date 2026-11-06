@@ -186,6 +186,34 @@ def test_batch_idempotence_parts_and_full_request_readback():
     run_db(body, timeout=30)
 
 
+def test_request_readback_fetches_only_its_referenced_parts(monkeypatch):
+    async def body(pool):
+        first, later = capture(), capture(seq=2)
+        later.skeleton, later.parts = {"messages": []}, {"f" * 64: {"text": "unrelated later turn"}}
+        await llm_requests.write_batch([first, later], pool=pool)
+        request_id = await pool.fetchval("SELECT id FROM llm_requests WHERE proxy_seq = 1")
+        assert await pool.fetchval("SELECT count(*) FROM llm_request_parts") == len(first.parts) + 1
+
+        fetched = []
+        fetch = asyncpg.Connection.fetch
+
+        async def observe(conn, query, *args, **kwargs):
+            rows = await fetch(conn, query, *args, **kwargs)
+            if "FROM llm_request_parts" in query:
+                fetched.extend(row["sha256"] for row in rows)
+            return rows
+
+        monkeypatch.setattr(asyncpg.Connection, "fetch", observe)
+        result = await llm_requests.get_request(request_id, pool=pool)
+        assert result["request_body"] == first.original
+        assert set(fetched) == set(first.parts)
+        later_id = await pool.fetchval("SELECT id FROM llm_requests WHERE proxy_seq = 2")
+        assert (await llm_requests.get_request(later_id, pool=pool))["request_body"] == {"messages": []}
+        assert set(fetched) == set(first.parts)
+
+    run_db(body, timeout=10)
+
+
 def test_missing_record_and_between_turn_filters():
     async def body(pool):
         record_id = await llm_records.start_record(agent_id="worker-test", pool=pool)
