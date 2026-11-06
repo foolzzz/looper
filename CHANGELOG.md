@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.102] - 2026-11-05
+
+### Added
+
+- **`looper serve` logs how long each startup step takes.** Observability only; no change to the startup order. ([#1149](https://github.com/foolzzz/looper/pull/1149))
+  - One INFO line, `startup steps: name=seconds ... total=seconds`, follows "HTTP server listening". Steps that are skipped are not listed.
+  - The server status gains an optional `startup_steps` object, and `looper service upgrade` copies it into the upgrade report when present.
+
 ## [2.14.101] - 2026-11-05
 
 ### Fixed
