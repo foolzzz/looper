@@ -371,7 +371,8 @@ async def _providers(call: Call) -> dict[str, Any]:
         answer = await answered(profile_registry.update_provider(provider_id, fields)) \
             if fields or "enabled" not in arguments else {}
         if "enabled" in arguments:
-            changed = await answered(profile_registry.set_provider_enabled(provider_id, arguments["enabled"]))
+            changed = await answered(profile_registry.set_provider_enabled(
+                provider_id, arguments["enabled"], manager_id=call.manager_id if call.scoped else None))
             answer = {**changed, "warnings": [*answer.get("warnings", []), *changed.get("warnings", [])]}
     else:
         _required(arguments, action, "name", "vendor_type")

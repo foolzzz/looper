@@ -796,6 +796,13 @@ def disabled_problem(provider: ProviderSpec) -> str | None:
     return f"provider {provider.name!r} is disabled; enable it in Settings → LLM Providers"
 
 
+def check_profile_model(model: ResolvedModel, current_model_id: str | None = None) -> None:
+    """Refuse new bindings to disabled providers; an existing exact model stays editable."""
+    if model.model.id != current_model_id:
+        if problem := disabled_problem(model.provider):
+            raise RegistryError(f"{problem}, or choose a model of another provider")
+
+
 def servable_roles(capabilities: Iterable[Any], runtime_type: str | None = None) -> list[str]:
     """The roles a runtime with ``capabilities`` (``Capability`` members or their values) can run, in order."""
     have = {getattr(c, "value", c) for c in capabilities}
@@ -1453,10 +1460,10 @@ async def clear_login_problem(provider_id: str) -> dict[str, Any]:
     return await _provider_answer(provider_id)
 
 
-async def set_provider_enabled(provider_id: str, enabled: Any) -> dict[str, Any]:
+async def set_provider_enabled(provider_id: str, enabled: Any, *, manager_id: str | None = None) -> dict[str, Any]:
     """Enable or disable a provider, built-in ones too. Disabled, it keeps its endpoints, key, models and
     Agent Profiles, and their selections; runs of those profiles are refused at launch. Never refused;
-    disabling warns where its profiles are selected."""
+    disabling warns where its profiles are selected, limited to ``manager_id``'s own usage when given."""
     from ..db import profile_registry as db
     from ..db.connection import transaction
 
@@ -1469,15 +1476,18 @@ async def set_provider_enabled(provider_id: str, enabled: Any) -> dict[str, Any]
         await db.set_provider_enabled(conn, provider_id, enabled)
         row = await _existing_provider(provider_id, conn)
         if not enabled:
-            usage = await db.profile_usage(pool=conn)
+            usage = await db.profile_usage(pool=conn, manager_id=manager_id)
             for profile in sorted(await db.list_profiles(pool=conn, provider_id=provider_id),
                                   key=lambda p: (p["name"], p["id"])):
+                messages: list[str] = []
                 if profile["id"] == BUILTIN_PROFILE.id:
-                    warnings.append("Agent Profile 'claude-code/opus' is what a role runs when nothing "
+                    messages.append("Agent Profile 'claude-code/opus' is what a role runs when nothing "
                                     "selects another profile: those runs will not start")
-                elif used := usage.get(profile["id"]):
-                    warnings.append(f"Agent Profile {profile['name']!r} is selected by {usage_text(used)}: "
+                if used := usage.get(profile["id"]):
+                    messages.append(f"Agent Profile {profile['name']!r} is selected by {usage_text(used)}: "
                                     "its runs will not start")
+                if messages:
+                    warnings.append(". ".join(messages))
             if len(warnings) > 10:
                 warnings = [*warnings[:10], f"and {len(warnings) - 10} more Agent Profiles"]
     return {"provider": provider_view(row, await _logins([row])), "warnings": warnings}
@@ -1710,8 +1720,7 @@ async def create_profile(data: Any, *, manager_id: str | None = None) -> dict[st
     try:
         async with transaction() as conn:
             runtime, model = await _parts(fields["runtime_id"], fields["model_id"], conn)
-            if problem := disabled_problem(model.provider):
-                raise RegistryError(f"{problem}, or choose a model of another provider")
+            check_profile_model(model)
             fields["agent_teams"] = (_agent_teams(data["agent_teams"]) if "agent_teams" in data
                                      else default_agent_teams(runtime))
             model.check_runtime(runtime, fields["effort"])
@@ -1773,9 +1782,8 @@ async def update_profile(profile_id: str, data: Any, *, manager_id: str | None =
                                            fields.get("model_id", row["model_id"]), conn)
             await conn.execute("SELECT 1 FROM agent_profiles WHERE id = $1 FOR UPDATE", profile_id)
             current = await _existing_profile(profile_id, conn)
-            if "model_id" in fields and fields["model_id"] != current["model_id"]:
-                if problem := disabled_problem(model.provider):
-                    raise RegistryError(f"{problem}, or choose a model of another provider")
+            if "model_id" in fields:
+                check_profile_model(model, current["model_id"])
             if current["model_id"] != row["model_id"] or current["runtime_id"] != row["runtime_id"]:
                 raise RegistryConflict("Agent Profile changed concurrently: reload it before updating")
             if "agent_teams" not in fields and runtime.type != current["runtime_type"]:

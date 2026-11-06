@@ -17,6 +17,7 @@ import {
   type RoleTemplates,
 } from "@/lib/api";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
+import { useRegistry } from "@/lib/use-registry";
 
 /** Editing roles: a task's role on the task page (a new version by the user), and a project's role templates. */
 
@@ -126,6 +127,7 @@ function DefinitionFields({
 }) {
   const id = useId();
   const profiles = useAllowedProfiles(projectId, kind);
+  const { registry } = useRegistry();
   const set = (field: keyof Definition) => (e: { target: { value: string } }) =>
     onChange({ ...draft, [field]: e.target.value });
   // A profile the list no longer holds stays chosen until the user picks another, so saving says why.
@@ -180,11 +182,14 @@ function DefinitionFields({
           {draft.profile_id && profiles && !listed && (
             <option value={draft.profile_id}>Not on the project&apos;s list</option>
           )}
-          {profiles?.map((p) => (
-            <option key={p.profile_id} value={p.profile_id}>
-              {p.name}
-            </option>
-          ))}
+          {profiles?.map((p) => {
+            const profile = registry?.profiles.find((profile) => profile.profile_id === p.profile_id);
+            return (
+              <option key={p.profile_id} value={p.profile_id}>
+                {p.name}{profile?.provider.enabled === false ? " · provider disabled" : ""}
+              </option>
+            );
+          })}
         </select>
         <p id={`${id}-profile-help`} className="text-xs text-muted-foreground">
           {profiles?.length === 0

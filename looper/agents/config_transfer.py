@@ -1319,7 +1319,7 @@ class _Importer:
             self.record("models", label, Action.SKIPPED, reason=str(exc))
 
     async def profile(self, entry: Any) -> None:
-        from .profile_registry import RegistryError, entry_name, default_agent_teams
+        from .profile_registry import RegistryError, check_profile_model, entry_name, default_agent_teams
 
         label = str(entry.get("name")) if isinstance(entry, Mapping) else "None"
         try:
@@ -1344,6 +1344,7 @@ class _Importer:
             spec = self._profile_spec(row["id"] if row else f"new:{name}", name, runtime, key,
                                       entry.get("effort"), entry.get("agent_teams", default_agent_teams(self.runtimes[runtime][1])),
                                       entry.get("custom_prompt", ""))
+            check_profile_model(spec.resolved_model, self.profiles[name][1].model_id if row else None)
             spec.resolved_model.check_runtime(spec.runtime, spec.effort)
             values = {"runtime": spec.runtime.name, "provider": key[0], "model": key[1], "protocol": key[2],
                       "effort": spec.effort, "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt}
