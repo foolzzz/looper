@@ -18,16 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
-- Model request recording is now on by default for eligible API-key runs,
-  including upgrades that never explicitly set the recording switch. Explicit
-  off settings remain off; Claude subscription (OAuth) recording remains off
-  by default. Settings → Request recording now controls retention (default
-  7 days, range 1–90 days) and capacity (default 2048 MiB, range 256–65536 MiB),
-  shows recorded size, and offers confirmed deletion. Hourly cleanup expires
-  over-age requests and unreferenced parts even when recording is disabled,
-  then evicts requests oldest-first by recorded byte budget without locking
-  the recording tables or running `VACUUM FULL`. Manager cleanup also removes
-  its recorded requests.
+## [2.14.104] - 2026-11-06
+
+### Changed
+
+- **Model request recording is on by default and bounded by age and size.** ([#1145](https://github.com/foolzzz/looper/pull/1145))
+  - Recording is on for eligible API-key runs, including upgrades that never stored the recording switch. An explicit off stays off; Claude subscription (OAuth) recording stays off by default.
+  - Settings → Request recording controls retention (default 7 days, 1–90) and capacity (default 2048 MiB, 256–65536), shows the recorded size and offers confirmed deletion. The Manager's `looper_settings` tool gains the `llmrec` action to read and change the two limits after user confirmation.
+  - Hourly cleanup expires over-age requests and unreferenced parts even when recording is off, then evicts the oldest requests by recorded byte budget down to 90 % of the cap, without locking the recording tables or running `VACUUM FULL`. It also removes expired route files.
+  - New operator-only `llm_requests.purge` (`task_id`, `agent_id` or `all`); Manager cleanup also removes the Manager's recorded requests. The `llmrec` self-check shows recorded size against the cap.
+  - `ensure_schema` adds and backfills a `stored_bytes` column on `llm_requests` and `llm_request_parts` once.
 
 ## [2.14.103] - 2026-11-05
 
