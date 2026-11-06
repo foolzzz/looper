@@ -24,10 +24,10 @@ _COLUMNS = (
     "started_at", "method", "path", "kind", "model", "stream", "status", "outcome", "error", "ttfb_ms",
     "duration_ms", "request_headers", "response_headers", "request_body", "request_bytes", "request_sha256",
     "response_body", "response_raw", "response_bytes", "input_tokens", "output_tokens", "cache_read_tokens",
-    "cache_write_tokens", "usage", "record_gap", "body_sanitized",
+    "cache_write_tokens", "usage", "translation", "record_gap", "body_sanitized",
 )
 _JSON_COLUMNS = {"request_headers", "response_headers", "request_body", "response_body", "usage",
-                 "route", "previous_body"}
+                 "route", "previous_body", "translation"}
 _LIST_COLUMNS = ", ".join(["id", *(c for c in _COLUMNS if c not in {"request_body", "response_body", "response_raw"})])
 
 

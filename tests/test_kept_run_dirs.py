@@ -307,6 +307,21 @@ def test_an_unresponsive_keeper_and_its_child_are_ended(tmp_path):
     asyncio.run(run())
 
 
+def test_exited_child_state_allows_the_keeper_to_finish_shutdown(tmp_path, monkeypatch):
+    record = kept_dirs.KeeperRecord(123, "start", None, None, keeper.KeeperState.EXITED,
+                                    keeper.EndReason.ENDED, None, None)
+    keeper.write_json(tmp_path / keeper.STATE, {"format": 1, **vars(record)})
+    # The child has exited, but the keeper still has sockets and files to close.
+    starts = iter([{123: "start"}, {123: "start"}, {}])
+    monkeypatch.setattr(proc_tree, "_start_times", lambda pids: next(starts, {}))
+    signals = []
+    monkeypatch.setattr(kept_dirs.os, "kill", lambda pid, sig: signals.append((pid, sig)))
+
+    asyncio.run(kept_dirs.end_keeper(record, tmp_path))
+
+    assert signals == [(123, signal.SIGTERM)]
+
+
 def test_reused_keeper_pid_is_not_signalled(tmp_path, monkeypatch):
     record = kept_dirs.KeeperRecord(123, "old", None, None, keeper.KeeperState.STARTING, None, None, None)
     monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {123: "new"})

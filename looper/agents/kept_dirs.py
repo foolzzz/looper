@@ -139,9 +139,8 @@ async def end_keeper(record: KeeperRecord, run_dir: Path) -> None:
     await _signal_keeper(record, signal.SIGTERM, run_dir)
     deadline = asyncio.get_running_loop().time() + 10
     while asyncio.get_running_loop().time() < deadline:
-        state = read_json(run_dir / STATE)
-        if ((state or {}).get("state") == KeeperState.EXITED
-                or not await _running(record.keeper_pid, record.keeper_started)):
+        # EXITED describes the child; the keeper still has to finish its own shutdown.
+        if not await _running(record.keeper_pid, record.keeper_started):
             break
         await asyncio.sleep(0.1)
     await _end_child(record, run_dir)

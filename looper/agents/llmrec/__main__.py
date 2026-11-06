@@ -17,7 +17,7 @@ import sys
 import time
 
 # Import the complete recorder before serving: an in-place upgrade must not mix versions.
-from . import capture as capture, control, proxy, writer
+from . import capture as capture, control, dialects, proxy, translate, translate_stream, writer
 from . import LOCK_FILE, LOG_FILE, ROUTE_FORMAT, STATE_FILE, code_sha256
 from .. import proc_tree
 from ..keeper import read_json, write_json

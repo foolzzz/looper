@@ -266,7 +266,8 @@ def tokens(path, body):
     prompt = count(usage.get('prompt_tokens'))
     if incoming is None and prompt is not None and cached is not None:
         incoming = max(0, prompt - cached)
-    return incoming, count(usage.get('completion_tokens')), cached, 0, usage
+    written = count(details.get('cache_write_tokens', 0))
+    return incoming, count(usage.get('completion_tokens')), cached, written, usage
 
 
 @dataclass
@@ -301,13 +302,14 @@ class Capture:
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
     usage: dict | None = None
+    translation: dict | None = None
     record_gap: str | None = None
     body_sanitized: bool = False
 
     def size(self):
         return (len(canonical(self.skeleton)) + len(canonical(self.parts)) + len(canonical(self.response_body))
                 + len((self.response_raw or '').encode()) + len(canonical(self.request_headers))
-                + len(canonical(self.response_headers)) + 1024)
+                + len(canonical(self.response_headers)) + len(canonical(self.translation)) + 1024)
 
 
 def build_capture(*, request_body, response_data, decoded_response=None, encoding_gap=False, **values):
