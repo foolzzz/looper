@@ -107,6 +107,7 @@ _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
 _PROJECT_ACTIVITY = "project_activity"
 _LLM_REQUESTS = "llm_requests"
+_LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -167,6 +168,7 @@ CREATE TABLE IF NOT EXISTS llm_requests (
     cache_read_tokens BIGINT,
     cache_write_tokens BIGINT,
     usage             JSONB,
+    translation       JSONB,
     record_gap        TEXT CHECK (record_gap IN ('request_too_large', 'response_too_large', 'undecodable_encoding', 'body_encoding_unparsed',
                                                  'unparsable_request', 'unparsable_stream', 'rejected_by_database')),
     body_sanitized    BOOLEAN NOT NULL DEFAULT FALSE,
@@ -303,6 +305,17 @@ async def _llm_requests_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _LLM_REQUESTS):
         return False
     return not await conn.fetchval("SELECT to_regclass('llm_requests') IS NOT NULL")
+
+
+async def _llm_requests_translation_pending(conn: asyncpg.Connection) -> bool:
+    """Older recorder tables need this nullable column; marked upgrades never repair DDL."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _LLM_REQUESTS_TRANSLATION):
+        return False
+    return await conn.fetchval(
+        "SELECT to_regclass('llm_requests') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('llm_requests') AND attname = 'translation' "
+        "AND attnum > 0 AND NOT attisdropped)")
 
 
 async def _project_activity_pending(conn: asyncpg.Connection) -> bool:
@@ -513,6 +526,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _llm_requests_pending(conn):
             await conn.execute(_LLM_REQUESTS_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS)
+        if await _llm_requests_translation_pending(conn):
+            await conn.execute("ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS translation JSONB")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS_TRANSLATION)
         if await _project_activity_pending(conn):
             await conn.execute(_PROJECT_ACTIVITY_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
@@ -560,5 +576,6 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _llm_requests_pending(conn)
+            or await _llm_requests_translation_pending(conn)
             or await _chat_binding_senders_pending(conn)
             or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)))

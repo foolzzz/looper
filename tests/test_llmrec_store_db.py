@@ -34,7 +34,7 @@ def capture(*, seq=1, record_id=None, after_record_id=None, route_id="a" * 22):
         skeleton=skeleton, parts=parts, request_bytes=len(raw), request_sha256=hashlib.sha256(raw).hexdigest(),
         response_body={"type": "message", "content": []}, response_raw=None, response_bytes=12,
         input_tokens=3, output_tokens=4, cache_read_tokens=5, cache_write_tokens=6, usage={"input_tokens": 3},
-        record_gap=None, original=request)
+        record_gap=None, translation=None, original=request)
 
 
 @pytest.mark.parametrize("raw_response", [False, True])
@@ -287,3 +287,58 @@ def test_writer_does_not_retry_programming_errors(monkeypatch):
             await sink.run()
         assert sink.write_errors == 1
     asyncio.run(asyncio.wait_for(body(), 2))
+
+
+def test_translation_metadata_roundtrip():
+    from looper.agents.llmrec.capture import Capture
+
+    async def body(pool):
+        item = Capture(**{key: value for key, value in vars(capture()).items() if key != "original"})
+        item.translation = {"api": "openai-chat", "dialect": "deepseek", "upstream_model": "upstream",
+                            "upstream_usage": {"prompt_cache_hit_tokens": 5}, "common_prefix_bytes": None,
+                            "notes": {"dropped": {}, "degraded": {}, "clamped": {}}, "usage_missing": False}
+        await llm_requests.write_batch([item], pool=pool)
+        row = (await llm_requests.list_requests(pool=pool))[0]
+        result = await llm_requests.get_request(row["id"], pool=pool)
+        assert result["translation"] == item.translation == row["translation"]
+        assert tuple(result[key] for key in ("input_tokens", "output_tokens", "cache_read_tokens",
+                                             "cache_write_tokens")) == (3, 4, 5, 6)
+    run_db(body, timeout=10)
+
+
+def test_translation_column_upgrade_preserves_rows_and_runs_once():
+    from tests.bridge_schema_support import structure, witness
+
+    async def body():
+        async with fresh_connection() as old, fresh_connection() as fresh:
+            await connection.ensure_schema(old)
+            await old.execute("ALTER TABLE llm_requests DROP COLUMN IF EXISTS translation")
+            await old.execute("""
+                INSERT INTO llm_request_routes (id, agent_id, runtime_type, upstream_host,
+                                                 created_at, last_request_at)
+                VALUES ('old-route', 'worker-test', 'claude-code', 'upstream.invalid', now(), now());
+                INSERT INTO llm_requests (route_id, proxy_instance, proxy_seq, agent_id, started_at,
+                                          method, path, kind, outcome, request_headers,
+                                          request_bytes, request_sha256)
+                VALUES ('old-route', 'previous', 1, 'worker-test', now(), 'POST', '/v1/messages',
+                        'model', 'completed', '{}', 2, 'old-hash');
+            """)
+            previous = dict(await old.fetchrow("SELECT * FROM llm_requests"))
+            before, shape = await witness(old), await structure(old)
+            assert await connection.schema_change_pending(old)
+            assert await witness(old) == before and await structure(old) == shape
+            await connection.ensure_schema(old)
+            await connection.ensure_schema(fresh)
+            assert await structure(old) == await structure(fresh)
+            assert dict(await old.fetchrow("SELECT * FROM llm_requests")) == previous | {"translation": None}
+            assert await old.fetchval("SELECT count(*) FROM schema_migrations "
+                                      "WHERE name='llm_requests_translation'") == 1
+            after, shape = await witness(old), await structure(old)
+            assert not await connection.schema_change_pending(old)
+            await connection.ensure_schema(old)
+            assert await witness(old) == after and await structure(old) == shape
+            assert not await fresh.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations "
+                                           "WHERE name='llm_requests_translation')")
+            await old.execute("ALTER TABLE llm_requests DROP COLUMN translation")
+            assert not await connection.schema_change_pending(old)
+    asyncio.run(asyncio.wait_for(body(), 30))
