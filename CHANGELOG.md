@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.95] - 2026-11-05
+
+### Fixed
+
+- **Project-scoped Managers: no out-of-scope task names, an empty scope survives export, honest project-delete impact.** Follow-ups of the projects task scope. (1) The workspace check of a new task (Manager `tasks.create` and the shared task-create path) no longer names tasks outside the Manager's scope: it takes the Manager's task filter (owner and projects), and an out-of-scope task running in the same repository is anonymous (no id, name or status), counted as "N other task(s) running in this directory" (Chinese: "另有 N 个范围外任务正在此目录运行"); before, only tasks of another Manager were anonymous and the wording said "of another Manager". (2) A Manager exported after all its projects were deleted (`scope_projects: []`) now imports: the importer lets that closed, empty scope through; every other path, including the API and the Manager tools, still requires 1 to 20 project ids. (3) Deleting a project names the Managers scoped to it in the answer, also to a scoped caller (before, a scoped caller saw "other Managers"), and the dashboard project-delete confirmation shows the server's impact text and confirms in the server's session instead of its fixed "and its N tasks" line. (4) The overview attributes running steps to the task's current project (read from the database), not the project at dispatch, so a moved task shows under the right project scope. (5) The Manager's per-message context no longer fails as a whole when the scope cannot be read: each section (projects, templates, ready tasks, open gates) reads the scope itself and degrades alone to its own "(could not be read)" line. No change for the all and own scopes, no schema change. ([#1131](https://github.com/foolzzz/looper/pull/1131))
+
 ## [2.14.94] - 2026-11-05
 
 ### Changed
