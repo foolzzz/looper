@@ -12,12 +12,19 @@ from looper.agents.llmrec.proxy import Proxy, _ProxyTransport, _upstream_proxy
 from tests.test_llmrec_proxy import Sink, captured, events, route
 
 
-def test_upstream_blank_lowercase_no_proxy_preserves_uppercase_allowlist(tmp_path):
+@pytest.mark.parametrize('lower,expected', [
+    (None, None),
+    ('', 'http://127.0.0.1:1'),
+    ('internal.example', None),
+])
+def test_upstream_lowercase_no_proxy_takes_precedence(tmp_path, lower, expected):
     fake_proxy = 'http://127.0.0.1:1'
-    value = replace(route(tmp_path, 'https://internal.example'), proxy_env={
-        'no_proxy': '', 'NO_PROXY': 'internal.example', 'HTTPS_PROXY': fake_proxy})
+    proxy_env = {'NO_PROXY': 'internal.example', 'HTTPS_PROXY': fake_proxy}
+    if lower is not None:
+        proxy_env['no_proxy'] = lower
+    value = replace(route(tmp_path, 'https://internal.example'), proxy_env=proxy_env)
     assert _upstream_proxy(value, 'https://external.example/v1/messages') == fake_proxy
-    assert _upstream_proxy(value, 'https://internal.example/v1/messages') is None
+    assert _upstream_proxy(value, 'https://internal.example/v1/messages') == expected
 
 
 @asynccontextmanager

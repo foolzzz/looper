@@ -14,12 +14,18 @@ from looper.agents.profile_registry import builtin_resolved_profile
 
 
 @pytest.mark.parametrize('lower,upper,expected', [
-    ('', 'internal.example,.corp.example', 'internal.example,.corp.example,127.0.0.1'),
+    (None, 'internal.example,.corp.example', 'internal.example,.corp.example,127.0.0.1'),
+    ('', 'internal.example,.corp.example', '127.0.0.1'),
     ('lower.example', 'upper.example', 'lower.example,127.0.0.1'),
-    ('', '*', '*'),
+    (None, '*', '*'),
+    ('', '*', '127.0.0.1'),
+    ('*', 'upper.example', '*'),
 ])
-def test_recording_preserves_the_first_nonempty_proxy_bypass(monkeypatch, lower, upper, expected):
-    monkeypatch.setenv('no_proxy', lower)
+def test_recording_preserves_lowercase_proxy_bypass_precedence(monkeypatch, lower, upper, expected):
+    if lower is None:
+        monkeypatch.delenv('no_proxy', raising=False)
+    else:
+        monkeypatch.setenv('no_proxy', lower)
     monkeypatch.setenv('NO_PROXY', upper)
     launch = Launch(AgentSettings(profile=builtin_resolved_profile()))
     recorded = replace(launch, llmrec=LlmrecRoute('a' * 22, 'http://127.0.0.1:1/r/' + 'a' * 22,

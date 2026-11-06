@@ -46,7 +46,6 @@ def _upstream_proxy(route, url):
     env = route.proxy_env if route.proxy_env is not None else os.environ
     proxies = {name: env.get(f'{name}_proxy', env.get(f'{name.upper()}_PROXY', ''))
                for name in ('http', 'https', 'all', 'no')}
-    proxies['no'] = env.get('no_proxy') or env.get('NO_PROXY', '')
     if proxy_bypass_environment(target.netloc, proxies):
         return None
     return proxies.get(target.scheme) or proxies['all'] or None
