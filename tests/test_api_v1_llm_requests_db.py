@@ -96,8 +96,8 @@ def test_recording_cli_uses_closed_operator_schemas():
         (['llm-requests', 'list', '--record-id', '7', '--between-turns'], '/api/v1/llm_requests/list',
          {'record_id': 7, 'between_turns': True}),
         (['llm-requests', 'get', '--request-id', '9'], '/api/v1/llm_requests/get', {'request_id': 9}),
-        (['llmrec-settings', 'update', '--retention-days', '365', '--max-total-mb', '102.4'],
-         '/api/v1/llmrec_settings/update', {'retention_days': 365, 'max_total_mb': 102.4}),
+        (['llmrec-settings', 'update', '--retention-days', '90', '--max-total-mb', '256'],
+         '/api/v1/llmrec_settings/update', {'retention_days': 90, 'max_total_mb': 256}),
         (['llm-requests', 'purge', '--all'], '/api/v1/llm_requests/purge', {'all': True})]
     for argv, path, expected in cases:
         args = loopercli.build_parser(api_v1.document()).parse_args(argv)
@@ -316,18 +316,18 @@ def test_recording_retention_settings_defaults_limits_and_reset(tmp_path, monkey
             result = reply['result']
             assert result['enabled'] is True and result['include_oauth'] is False
             assert result['retention_days'] == {'value': 7, 'built_in': 7, 'source': 'built-in',
-                                                'minimum': 1, 'maximum': 365}
+                                                'minimum': 1, 'maximum': 90}
             assert result['max_total_mb'] == {'value': 2048, 'built_in': 2048, 'source': 'built-in',
-                                              'minimum': 102.4, 'maximum': 102400}
-            assert result['stored_bytes'] > 0 and result['request_count'] == 0
-            for name, value, span in [('retention_days', 0, '1 to 365'), ('retention_days', 366, '1 to 365'),
-                                      ('max_total_mb', 102.3, '102.4 to 102400'),
-                                      ('max_total_mb', 102401, '102.4 to 102400')]:
+                                              'minimum': 256, 'maximum': 65536}
+            assert result['stored_bytes'] == 0 and result['request_count'] == 0
+            for name, value, span in [('retention_days', 0, '1 to 90'), ('retention_days', 91, '1 to 90'),
+                                      ('max_total_mb', 255, '256 to 65536'),
+                                      ('max_total_mb', 65537, '256 to 65536')]:
                 code, reply = await call('llmrec_settings.update', {name: value, 'enabled': True})
                 assert code == 400 and span in reply['error']['message'], reply
                 # A rejected update must not change any field, including the switch.
                 assert await system_settings.get_settings(['llmrec.enabled']) == {}
-            for days, size in [(1, 102.4), (365, 102400)]:
+            for days, size in [(1, 256), (90, 65536)]:
                 code, reply = await call('llmrec_settings.update', {'retention_days': days, 'max_total_mb': size})
                 assert code == 200, reply
                 assert reply['result']['retention_days']['value'] == days

@@ -30,19 +30,26 @@ VAULT_SETTINGS = _object({
 SCHEMAS = {"SchedulerSetting": SCHEDULER_SETTING, "SchedulerSettings": SCHEDULER_SETTINGS,
            "WaitSetting": WAIT_SETTING, "WaitSettings": WAIT_SETTINGS, "VaultSettings": VAULT_SETTINGS}
 
+LLMREC_LIMIT = _object({"value": {"type": "number"}, "built_in": {"type": "number"},
+                        "minimum": {"type": "number"}, "maximum": {"type": "number"},
+                        "source": {"type": "string", "enum": ["setting", "built-in"]}}, closed=True)
+LLMREC_LIMITS = _object({name: LLMREC_LIMIT for name in ("retention_days", "max_total_mb")}, closed=True)
+
 _COMPACT_VAULT = _object({name: schema for name, schema in VAULT_SETTINGS["properties"].items()
                           if name != "git"}, closed=True)
 RESULTS = {
     "settings.scheduler": _object({"changes": _array(_object({
         "setting": _STR, "before": _STR, "after": _STR}, closed=True))}, closed=True),
+    "settings.llmrec": _object({"changes": _array(_object({
+        "setting": _STR, "before": LLMREC_LIMIT, "after": LLMREC_LIMIT}, closed=True))}, closed=True),
     "settings.waits": _object({"changes": _array(_object({
         "setting": _STR, "before": WAIT_SETTING, "after": WAIT_SETTING}, closed=True))}, closed=True),
     "settings.knowledge_vault": _object({"knowledge_vault": VAULT_SETTINGS}, closed=True),
     "settings.view": {"oneOf": [
         _object({"scheduler": {"type": "object", "additionalProperties": _STR}, "waits": WAIT_SETTINGS,
-                 "shared_defaults": _OBJ, "roles": _OBJ, "knowledge_vault": _COMPACT_VAULT,
+                 "llmrec": LLMREC_LIMITS, "shared_defaults": _OBJ, "roles": _OBJ, "knowledge_vault": _COMPACT_VAULT,
                  "manager_session": _OBJ},
-                ["scheduler", "waits", "shared_defaults", "roles", "knowledge_vault"], closed=True),
+                ["scheduler", "waits", "llmrec", "shared_defaults", "roles", "knowledge_vault"], closed=True),
         _object({"project": _STR, "project_layer": _OBJ, "roles": _OBJ,
                  "allowed_profiles": _array(_STR), "allowed_profiles_note": _NULL_STR}, closed=True),
     ]},

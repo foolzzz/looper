@@ -11,8 +11,8 @@ afterEach(() => vi.unstubAllGlobals());
 function settingsOf(fields: Partial<LlmrecSettings> = {}): LlmrecSettings {
   return {
     enabled: true, include_oauth: false,
-    retention_days: { value: 7, built_in: 7, source: "built-in", minimum: 1, maximum: 365 },
-    max_total_mb: { value: 2048, built_in: 2048, source: "built-in", minimum: 102.4, maximum: 102400 },
+    retention_days: { value: 7, built_in: 7, source: "built-in", minimum: 1, maximum: 90 },
+    max_total_mb: { value: 2048, built_in: 2048, source: "built-in", minimum: 256, maximum: 65536 },
     stored_bytes: 3 * 1024 * 1024, request_count: 12,
     proxy: { state: "stopped", port: null, pid: null, requests: 0, recorded: 0, gaps: 0,
       gap_reasons: {}, dropped: 0, write_errors: 0 }, ...fields,
@@ -121,34 +121,34 @@ it("shows the built-in limits, validates their ranges and converts GiB to MiB", 
   const page = await mount();
   try {
     const [days, size] = Array.from(page.container.querySelectorAll<HTMLInputElement>('input[type="number"]'));
-    expect([days.value, days.min, days.max, days.step]).toEqual(["7", "1", "365", "1"]);
-    expect([size.value, size.min, size.max]).toEqual(["2", "0.1", "100"]);
+    expect([days.value, days.min, days.max, days.step]).toEqual(["7", "1", "90", "1"]);
+    expect([size.value, size.min, size.max]).toEqual(["2", "0.25", "64"]);
     expect(page.container.textContent).toContain("On by default");
-    expect(page.container.textContent).toContain("Built-in: 7 days. Range: 1–365 days.");
-    expect(page.container.textContent).toContain("Built-in: 2 GiB. Range: 0.1–100 GiB.");
+    expect(page.container.textContent).toContain("Built-in: 7 days. Range: 1–90 days.");
+    expect(page.container.textContent).toContain("Built-in: 2 GiB. Range: 0.25–64 GiB.");
     expect(page.container.textContent).toContain("3.0 MiB of 2048 MiB");
     expect(page.container.textContent).toContain("12 recorded requests");
     expect(page.button("Save limits").disabled).toBe(true);
-    for (const invalid of ["0", "366", "1.5", ""]) {
+    for (const invalid of ["0", "91", "1.5", ""]) {
       await enter(days, invalid);
       expect(page.button("Save limits").disabled).toBe(true);
     }
-    await enter(days, "365");
-    for (const invalid of ["0.09", "100.1", ""]) {
+    await enter(days, "90");
+    for (const invalid of ["0.24", "64.1", ""]) {
       await enter(size, invalid);
       expect(page.button("Save limits").disabled).toBe(true);
     }
-    await enter(size, "0.1");
+    await enter(size, "0.25");
     await act(async () => page.button("Save limits").click());
-    expect(writes).toEqual([{ retention_days: 365, max_total_mb: 102.4 }]);
+    expect(writes).toEqual([{ retention_days: 90, max_total_mb: 256 }]);
     expect(page.button("Save limits").disabled).toBe(true);
     await enter(days, "30");
-    await enter(size, "100");
+    await enter(size, "64");
     fail = true;
     await act(async () => page.button("Save limits").click());
     expect(page.container.querySelector('[role="alert"]')?.textContent).toContain("Save failed");
-    expect([days.value, size.value]).toEqual(["30", "100"]);
-    expect(page.container.textContent).toContain("3.0 MiB of 102.4 MiB");
+    expect([days.value, size.value]).toEqual(["30", "64"]);
+    expect(page.container.textContent).toContain("3.0 MiB of 256 MiB");
     fail = false;
     await act(async () => page.button("Restore built-in limits").click());
     expect(writes.at(-1)).toEqual({ retention_days: null, max_total_mb: null });

@@ -14,8 +14,8 @@ RETENTION_KEY = "llmrec.retention_days"
 MAX_TOTAL_KEY = "llmrec.max_total_mb"
 DEFAULT_RETENTION_DAYS = 7
 DEFAULT_MAX_TOTAL_MB = 2048
-RETENTION_RANGE = (1, 365)
-MAX_TOTAL_RANGE = (102.4, 102400)
+RETENTION_RANGE = (1, 90)
+MAX_TOTAL_RANGE = (256, 65536)
 FIELDS = ("retention_days", "max_total_mb")
 _KEYS = dict(zip(FIELDS, (RETENTION_KEY, MAX_TOTAL_KEY)))
 

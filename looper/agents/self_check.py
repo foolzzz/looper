@@ -332,7 +332,7 @@ async def _llmrec_storage(conn=None):
     from ..db import llm_requests
     from ..db.connection import get_pool
 
-    return await llm_requests.stored_bytes(conn if conn is not None else get_pool()), await settings.max_total_mb(conn)
+    return await llm_requests.logical_bytes(conn if conn is not None else get_pool()), await settings.max_total_mb(conn)
 
 
 async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = "") -> Check:
@@ -376,11 +376,11 @@ async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = 
                             f"write_errors={proxy.get('write_errors', 0)}, gaps={proxy.get('gaps', 0)} "
                             f"since proxy startup, most_common_gap={common}")
         stored, cap = storage if storage is not None else await _llmrec_storage()
-        if stored > 0.9 * cap * 1024 * 1024:
-            warnings.append(f"recorded requests use {stored / (1024 * 1024):.1f} MiB of {cap:g} MiB cap")
-        if warnings:
-            return Check("llmrec", "Model request recording", WARN, "; ".join(warnings))
-        return Check("llmrec", "Model request recording", OK if enabled else SKIP, "proxy running" if enabled else "off")
+        usage = f"recorded requests use {stored / (1024 * 1024):.1f} MiB of {cap:g} MiB cap"
+        if warnings or stored > 0.9 * cap * 1024 * 1024:
+            return Check("llmrec", "Model request recording", WARN, "; ".join([*warnings, usage]))
+        detail = ("proxy running" if enabled else "off") + "; " + usage
+        return Check("llmrec", "Model request recording", OK if enabled else SKIP, detail)
     except Exception:
         return Check("llmrec", "Model request recording", WARN, "recording status unavailable")
 

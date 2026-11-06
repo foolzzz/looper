@@ -199,7 +199,7 @@ async def _prune_llm_requests(report: Report, now: datetime) -> None:
     async with db_connection.transaction() as conn:
         retention = await llmrec_settings.settings_view(conn)
     before = now - timedelta(days=retention["retention_days"]["value"])
-    cap = retention["max_total_mb"]["value"] * MIB
+    cap = int(retention["max_total_mb"]["value"] * MIB)
     for prune, counter in ((lambda conn: llm_requests.prune_older(conn, before), "llm_requests"),
                            (llm_requests.prune_empty_routes, "llm_routes")):
         while True:
@@ -209,64 +209,27 @@ async def _prune_llm_requests(report: Report, now: datetime) -> None:
             if count == 0:
                 break
     async with db_connection.transaction() as conn:
-        size = await llm_requests.stored_bytes(conn)
-        logical_size = await llm_requests.logical_bytes(conn)
-    if size <= cap and logical_size <= cap:
+        size = await llm_requests.logical_bytes(conn)
+    if size <= cap:
         return
-    # DELETE leaves reusable heap/TOAST/index pages allocated. Reclaim that space before
-    # evicting retained requests. Only live content can justify eviction; physical bloat
-    # must never cause retained data to be deleted. Stop this pass if compaction fails.
-    with _step(report, "llm request compaction"):
-        await _compact_llm_requests()
-    if "llm request compaction" in report.failed_steps:
-        return
-    async with db_connection.transaction() as conn:
-        size = await llm_requests.stored_bytes(conn)
-        logical_size = await llm_requests.logical_bytes(conn)
-    if logical_size <= cap:
-        return
-    while True:
-        previous_size, previous_logical_size = size, logical_size
+    target = cap * 9 // 10
+    for _ in range(50):
         async with db_connection.transaction() as conn:
-            requests = await llm_requests.prune_oldest(conn)
+            requests = await llm_requests.prune_oldest(conn, byte_budget=size - target)
         report.llm_requests += requests
-        removed_routes = 0
         while True:
             async with db_connection.transaction() as conn:
-                routes = await llm_requests.prune_empty_routes(conn)
+                routes = await llm_requests.prune_empty_routes(conn, grace=False)
             report.llm_routes += routes
-            removed_routes += routes
             if routes == 0:
                 break
-        if requests or removed_routes:
-            with _step(report, "llm request compaction"):
-                await _compact_llm_requests()
-            if "llm request compaction" in report.failed_steps:
-                return
         async with db_connection.transaction() as conn:
-            size = await llm_requests.stored_bytes(conn)
-            logical_size = await llm_requests.logical_bytes(conn)
-        if logical_size <= cap * 0.9:
+            size = await llm_requests.logical_bytes(conn)
+        if size <= target:
             return
-        if not requests and not removed_routes:
-            logger.warning("housekeeping llm requests still above target with no evictable requests: "
-                           "logical_bytes=%d stored_bytes=%d cap_bytes=%d", logical_size, size, cap)
-            return
-        if size >= previous_size or logical_size >= previous_logical_size:
-            logger.warning("housekeeping llm request eviction stopped with no size decrease: "
-                           "logical_bytes=%d stored_bytes=%d cap_bytes=%d", logical_size, size, cap)
-            return
-
-
-async def _compact_llm_requests() -> None:
-    # VACUUM FULL needs a non-transaction connection and an exclusive table lock. The
-    # recorder queues asynchronously. Allow captures to commit and budget ten minutes
-    # per table for a rewrite at the default 2 GiB cap, rather than 30s for all three.
-    async with db_connection.get_pool().acquire() as conn:
-        await conn.execute("SET lock_timeout = '60s'")
-        await conn.execute("SET statement_timeout = '10min'")
-        for table in ("llm_requests", "llm_request_parts", "llm_request_routes"):
-            await conn.execute(f"VACUUM (FULL) {table}")
+        if not requests:
+            break
+    logger.warning("housekeeping llm request eviction stopped above target: logical_bytes=%d cap_bytes=%d", size, cap)
 
 
 async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | None,

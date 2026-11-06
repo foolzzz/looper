@@ -98,7 +98,7 @@ async def settings():
                       "requests": 0, "recorded": 0, "gaps": 0, "gap_reasons": {}, "dropped": 0, "write_errors": 0}}
     async with get_pool().acquire() as conn, conn.transaction():
         result.update(await retention.settings_view(conn))
-        result["stored_bytes"] = await llm_requests.stored_bytes(conn)
+        result["stored_bytes"] = await llm_requests.logical_bytes(conn)
         result["request_count"] = await llm_requests.count_requests(conn)
     return result
 
