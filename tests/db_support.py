@@ -12,13 +12,38 @@ import os
 from pathlib import Path
 import re
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 import pytest
 
 DSN = os.environ.get("LOOPER_TEST_DATABASE_URL")
+
+
+@contextmanager
+def fresh_database_without_recording(admin_url: str) -> Iterator[tuple[str, float]]:
+    """Keep unrelated serve/doctor tests free of the default-on detached recorder.
+
+    Seed the real setting before startup; callers keep their file, process and
+    health assertions. Recorder lifecycle tests use ``fresh_database`` directly.
+    """
+    import asyncpg
+
+    from evals.prompt_regression.runner import fresh_database
+    from looper.db.connection import ensure_schema
+
+    async def configure(url: str) -> None:
+        conn = await asyncpg.connect(url, timeout=10, command_timeout=30)
+        try:
+            await ensure_schema(conn)
+            await conn.execute("INSERT INTO system_settings (key, value) VALUES ('llmrec.enabled', 'false')")
+        finally:
+            await conn.close()
+
+    with fresh_database(admin_url) as database:
+        asyncio.run(configure(database[0]))
+        yield database
 
 
 @pytest.fixture

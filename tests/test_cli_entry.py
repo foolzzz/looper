@@ -372,7 +372,7 @@ def test_doctor_passes_unless_a_check_failed(tmp_path: Path, lark: str, lark_lin
 
     import asyncpg
 
-    from evals.prompt_regression.runner import fresh_database
+    from tests.db_support import fresh_database_without_recording
     from looper.db.connection import ensure_schema
 
     async def set_up(url: str) -> None:
@@ -384,7 +384,7 @@ def test_doctor_passes_unless_a_check_failed(tmp_path: Path, lark: str, lark_lin
         finally:
             await conn.close()
 
-    with fresh_database(os.environ["LOOPER_TEST_DATABASE_URL"]) as (database_url, _):
+    with fresh_database_without_recording(os.environ["LOOPER_TEST_DATABASE_URL"]) as (database_url, _):
         asyncio.run(set_up(database_url))
         env = _doctor_env(tmp_path, claude="logged_in", database_url=database_url)
         if lark == "on":
@@ -393,6 +393,7 @@ def test_doctor_passes_unless_a_check_failed(tmp_path: Path, lark: str, lark_lin
         result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
 
     assert result["code"] == code, output + stderr
+    assert "skip  Model request recording" in output
     assert [line[:5].strip() for line in _check_lines(output).values()] == ["ok", "ok", "ok", lark_line], output
     if lark_line == "warn":
         assert "install lark-cli" in output
@@ -487,7 +488,7 @@ def test_doctor_checks_git_and_the_directories_of_projects_with_step_worktrees(t
 
     import asyncpg
 
-    from evals.prompt_regression.runner import fresh_database
+    from tests.db_support import fresh_database_without_recording
     from looper.db.connection import ensure_schema
 
     checkout = tmp_path / "alarm"
@@ -509,12 +510,13 @@ def test_doctor_checks_git_and_the_directories_of_projects_with_step_worktrees(t
         finally:
             await conn.close()
 
-    with fresh_database(os.environ["LOOPER_TEST_DATABASE_URL"]) as (database_url, _):
+    with fresh_database_without_recording(os.environ["LOOPER_TEST_DATABASE_URL"]) as (database_url, _):
         asyncio.run(set_up(database_url))
         env = _doctor_env(tmp_path, claude="logged_in", database_url=database_url)
         result, output, stderr = _run_looper("doctor", cwd=tmp_path, env=env)
 
     assert result["code"] == 0, output + stderr
+    assert "skip  Model request recording" in output
     lines = {line[6:].split("  ")[0].strip(): line for line in output.splitlines() if line[:5].strip()}
     assert lines["git"].startswith("ok") and "git version 2." in lines["git"], output
     assert lines["Step worktrees"] == ("warn  Step worktrees           alarm: main, 9 B checkout, nothing to link at .env"), output
