@@ -44,6 +44,15 @@ async def started(control, kept=()):
     await wait_for(control._health)
 
 
+@pytest.fixture(autouse=True)
+def _gateway_settings(monkeypatch):
+    # These process-lifecycle cases supply a DSN without owning the application pool.
+    # Endpoint settings persistence is exercised with the shared schema fixture separately.
+    from looper.db import system_settings
+
+    monkeypatch.setattr(system_settings, "get_settings", AsyncMock(return_value={}))
+
+
 @pytest.fixture
 def short_checks(monkeypatch):
     boot = module.boot_argv

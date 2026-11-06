@@ -3476,6 +3476,34 @@ process on its next turn. Existing direct profiles and recording routes keep
 their behavior. The gateway owns the attribution-header, tool-search and
 experimental-beta settings needed for translated requests.
 
+Operators can also enable **Settings → Local gateway** for other Anthropic
+clients on the same machine. Configure aliases for API-key `openai-chat`
+models, then use the displayed `http://127.0.0.1:<port>/gw` URL, local key and
+alias as the client's base URL, token and model. The page manages aliases,
+reveals or rotates the key, and shows request counts and cache hit rates.
+`loopercli gateway-env --alias <alias> --operator-token-file <file>` prints
+shell environment assignments, including the default and small/fast model
+variables set to that alias. Translated agent runs likewise pin their model
+variables in private settings so project settings cannot redirect subagents
+to an unrouted model.
+
+The operator-only `gateway` v1 API exposes `get`, `update`, `alias_set`,
+`alias_delete`, `key_reveal` and `key_rotate`; the Manager tools, Telegram and
+Lark do not expose this configuration. Alias mappings travel with configuration
+exports; the local key, enable switch and port stay on the machine.
+
+The endpoint binds only to loopback, rejects browser `Origin` headers and
+unexpected `Host` values, and authenticates each request with the local key.
+Rotation invalidates the old key immediately. Upstream requests use the
+provider's key, never the local key. Its port stays fixed after enabling;
+an occupied port fails the self check instead of silently choosing another.
+Recording follows the recording switch and groups external requests under
+`gateway:<alias>`, with one route per alias per UTC day. These requests have
+no task cost record. A disabled provider returns `403 permission_error`,
+an unknown alias returns 404, and an unavailable database returns 503. Alias
+resolution is cached for up to ten seconds, including the account state.
+Port changes wait until active agent routes finish.
+
 ### Model request recording (`llmrec`)
 
 `looper/agents/llmrec` records the HTTP exchanges of newly launched Claude

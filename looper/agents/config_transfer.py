@@ -124,7 +124,7 @@ class Action(str, Enum):
     SKIPPED = "skipped"
 
 
-SECTIONS = ("runtimes", "providers", "models", "profiles", "settings.layers", "settings.roles", "settings.scheduler", "channels",
+SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "channels",
             "catalog", "installs",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
             "project.schedules", "project.installs", "managers", "manager.templates", "manager.installs")
@@ -500,6 +500,15 @@ async def export_chunks(
         "channels": channels,
         "installs": [install_entry(r) for r in installs if r["scope"] == "global"],
     }
+    from ..db import gateway as db_gateway
+
+    aliases = await db_gateway.list_aliases(pool=conn)
+    if aliases:
+        models_by_id = {row["id"]: row for row in await db.read_models(conn)}
+        head["gateway"] = {"aliases": [{"alias": row["alias"], "model": {
+            key: models_by_id[row["model_id"]][key] for key in ("provider", "name", "protocol")}}
+            for row in aliases]}
+        summary.counts["gateway.aliases"] = len(aliases)
     # The default exists on every install, even with a custom display name or description; carrying it would make
     # an otherwise client-importable export require operator identity.
     portable_managers = any(row["id"] != "manager" for row in managers) or any(
@@ -648,7 +657,7 @@ def validate_format(data: Any, *, label: str = "configuration") -> None:
 def validate_document(data: Any, *, label: str = "configuration") -> None:
     validate_format(data, label=label)
     unknown = set(data) - {"format", "looper_version", "exported_at", "secrets", "runtimes", "providers",
-                           "models", "profiles", "settings", "channels", "catalog", "installs", "projects", "managers"}
+                           "models", "profiles", "gateway", "settings", "channels", "catalog", "installs", "projects", "managers"}
     if unknown:
         raise ConfigFileError(f"unknown configuration field {sorted(unknown)[0]!r}")
     for section, kind in (("settings", dict), ("channels", list), ("installs", list), ("catalog", list),
@@ -666,6 +675,10 @@ def validate_document(data: Any, *, label: str = "configuration") -> None:
     for index, project in enumerate(data.get("projects", [])):
         if isinstance(project, Mapping):
             _check_retired_fields(project.get("layers", []), f"projects[{index}].layers", ("model", "effort"))
+    if "gateway" in data:
+        gateway = data["gateway"]
+        if not isinstance(gateway, dict) or set(gateway) - {"aliases"} or not isinstance(gateway.get("aliases", []), list):
+            raise ConfigFileError("gateway must contain only an aliases list")
     _check_channel_document(data)
 
 
@@ -975,6 +988,7 @@ class _Target:
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     models: dict[tuple[str, str, str], dict[str, Any]] = field(default_factory=dict)
+    gateway_aliases: dict[str, dict[str, Any]] = field(default_factory=dict)
     schedules: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: defaultdict(list))  # by project id
     managers: dict[str, dict[str, Any]] = field(default_factory=dict)  # immutable full id, including tombstones
     manager_templates: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
@@ -1003,6 +1017,9 @@ class _Target:
         target.runtimes = {row["name"]: row for row in await db.read_runtimes(conn)}
         target.providers = {row["name"]: row for row in await db.read_providers(conn)}
         target.models = {(row["provider"], row["name"], row["protocol"]): row for row in await db.read_models(conn)}
+        from ..db import gateway as db_gateway
+
+        target.gateway_aliases = {row["alias"]: row for row in await db_gateway.list_aliases(pool=conn)}
         target.profiles = {row["name"]: row for row in await db.read_profiles(conn)}
         target.managers = {row["id"]: row for row in await db.read_managers(conn, include_deleted=True)}
         target.manager_templates = {(row["manager_id"], row["key"]): row for row in
@@ -1317,6 +1334,35 @@ class _Importer:
         except (RegistryError, _Skip) as exc:
             self.blocked_models.add(key)
             self.record("models", label, Action.SKIPPED, reason=str(exc))
+
+    async def gateway_alias(self, entry: Any) -> None:
+        from ..db import gateway as db_gateway
+        from .runtimes import ApiProtocol, AuthKind
+
+        label = str(entry.get("alias")) if isinstance(entry, Mapping) else "None"
+        try:
+            entry = _mapping(entry, "a gateway alias")
+            if set(entry) != {"alias", "model"}:
+                raise _Skip("gateway alias needs alias and model")
+            db_gateway.check_alias(entry["alias"])
+            self._unique("gateway.aliases", label)
+            ref = _mapping(entry["model"], "model reference")
+            if set(ref) != {"provider", "name", "protocol"} or any(not isinstance(v, str) for v in ref.values()):
+                raise _Skip("model needs provider, exact name and protocol")
+            key = (ref["provider"], ref["name"], ref["protocol"])
+            if key not in self.models or key in self.blocked_models or key[0] in self.blocked_providers:
+                raise _Skip("no valid model here or in the file")
+            target = self.models[key]
+            if (target.model.protocol is not ApiProtocol.OPENAI_CHAT or target.provider.auth is not AuthKind.API_KEY
+                    or not target.provider.enabled or not target.provider.api_key):
+                raise _Skip("target must be an enabled openai-chat API-key model with a saved key")
+            current = self.target.gateway_aliases.get(label)
+            action = self.outcome("gateway.aliases", label, current,
+                                  ("model",) if current is None or current["model_id"] != target.model.id else ())
+            if self.apply and action in (Action.ADDED, Action.CHANGED):
+                await db_gateway.set_alias(label, target.model.id, pool=self.conn)
+        except (ValueError, _Skip) as exc:
+            self.record("gateway.aliases", label, Action.SKIPPED, reason=str(exc))
 
     async def profile(self, entry: Any) -> None:
         from .profile_registry import RegistryError, check_profile_model, entry_name, default_agent_teams
@@ -2452,6 +2498,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
         await importer.model(entry)
     for entry in data.get("profiles", []):
         await importer.profile(entry)
+    for entry in data.get("gateway", {}).get("aliases", []):
+        await importer.gateway_alias(entry)
     settings = data.get("settings", {})
     for entry in settings.get("layers", []):
         await importer.layer(entry, None)

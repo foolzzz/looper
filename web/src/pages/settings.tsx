@@ -1,4 +1,5 @@
 import { LlmrecSettingsSection } from "@/components/llmrec-settings";
+import { GatewaySettingsSection } from "@/components/gateway-settings";
 import { AgentProfilesSection } from "@/components/agent-profiles";
 import { ApiClientsSection } from "@/components/api-clients";
 import { CatalogCard } from "@/components/catalog-card";
@@ -46,6 +47,7 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "A local folder of Markdown notes, such as an Obsidian vault. The agents of projects that turn it on read every " +
     "note and write only in its writable folders; each write is a git commit in the vault.",
   recording: "Capture model requests and responses for analysis. Recording is on by default.",
+  gateway: "Let Anthropic clients on this machine use your OpenAI Chat Completions models through local aliases.",
   transfer:
     "One file with the role settings, the providers and Agent Profiles, the catalog with its files and MCP servers, " +
     "global installs, channels, scenario Managers, their task templates and the scheduler's settings.",
@@ -75,6 +77,7 @@ export function SettingsPage({ sub }: { sub: string }) {
       {page === "scheduler" && <SchedulerSection />}
       {page === "vault" && <VaultSettingsSection />}
       {page === "recording" && <LlmrecSettingsSection />}
+      {page === "gateway" && <GatewaySettingsSection />}
       {page === "transfer" && <ConfigTransferCard />}
     </div>
   );

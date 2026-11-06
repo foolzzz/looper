@@ -110,6 +110,12 @@ CREATE TABLE IF NOT EXISTS llm_models (
     FOREIGN KEY (provider_id, protocol) REFERENCES llm_provider_endpoints(provider_id, protocol) ON DELETE RESTRICT,
     UNIQUE (provider_id, name, protocol)
 );
+CREATE TABLE IF NOT EXISTS gateway_aliases (
+    alias TEXT PRIMARY KEY,
+    model_id TEXT NOT NULL REFERENCES llm_models(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS agent_profiles (
     id           TEXT PRIMARY KEY,
     name         TEXT NOT NULL UNIQUE,

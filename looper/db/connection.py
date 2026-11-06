@@ -105,6 +105,7 @@ _PROVIDER_ENABLED = "provider_enabled"
 _MANAGER_SCOPE_PROJECTS = "manager_scope_projects"
 _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
 _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
+_GATEWAY_ALIASES = "gateway_aliases"
 _PROJECT_ACTIVITY = "project_activity"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
@@ -195,6 +196,15 @@ _MANAGER_SCOPE_PROJECTS_DDL: tuple[str, ...] = (
     "AND (task_scope = 'projects' OR cardinality(scope_project_ids) = 0))",
     "ALTER TABLE managers ADD CONSTRAINT managers_scope_tools_check CHECK (task_scope <> 'projects' OR tools = 'tasks')",
 )
+
+_GATEWAY_ALIASES_DDL = """
+CREATE TABLE IF NOT EXISTS gateway_aliases (
+    alias TEXT PRIMARY KEY,
+    model_id TEXT NOT NULL REFERENCES llm_models(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+"""
 
 _PROJECT_ACTIVITY_DDL = """
 CREATE TABLE IF NOT EXISTS project_activity (
@@ -342,6 +352,12 @@ async def _llm_requests_stored_bytes_pending(conn: asyncpg.Connection) -> bool:
         WHERE to_regclass(name) IS NOT NULL AND NOT EXISTS (
             SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass(name)
             AND attname = 'stored_bytes' AND attnum > 0 AND NOT attisdropped))""")
+
+
+async def _gateway_aliases_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _GATEWAY_ALIASES):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('gateway_aliases') IS NOT NULL")
 
 
 async def _project_activity_pending(conn: asyncpg.Connection) -> bool:
@@ -567,6 +583,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                 await conn.execute(f"ALTER TABLE {table} ALTER COLUMN stored_bytes SET DEFAULT 0, "
                                    "ALTER COLUMN stored_bytes SET NOT NULL")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS_STORED_BYTES)
+        if await _gateway_aliases_pending(conn):
+            await conn.execute(_GATEWAY_ALIASES_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _GATEWAY_ALIASES)
         if await _project_activity_pending(conn):
             await conn.execute(_PROJECT_ACTIVITY_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)

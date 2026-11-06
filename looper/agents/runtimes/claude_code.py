@@ -184,6 +184,10 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         env = None
         if launch is not None and translated(launch):
             env = {**dict(TRANSLATED_ENV), AUTH_TOKEN: launch.profile.provider.api_key, API_KEY: ""}
+            binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
+            process_env = dict((*launch.env, *binding.env))
+            env.update({name: process_env[name] for name in ("ANTHROPIC_MODEL", *MAIN_MODEL_VARS,
+                                                            *BACKGROUND_MODEL_VARS)})
             # Commands are built before Runs records; environment() refuses missing routes at process startup.
             if isinstance(launch.llmrec, LlmrecRoute) and launch.llmrec.kind is RouteKind.TRANSLATE:
                 env[BASE_URL] = launch.llmrec.url
@@ -239,7 +243,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             raise RuntimeUnsupported("Claude Code requires one resolved model matching the launch model")
         background = provider.catalog[0].background_model or model
         return ProviderBinding(
-            env=((AUTH_TOKEN, provider.api_key), *((name, model) for name in MAIN_MODEL_VARS),
+            env=((AUTH_TOKEN, provider.api_key), ("ANTHROPIC_MODEL", model),
+                 *((name, model) for name in MAIN_MODEL_VARS),
                  *((name, background) for name in BACKGROUND_MODEL_VARS), *provider.env),
             unset=(API_KEY, BASE_URL))
 

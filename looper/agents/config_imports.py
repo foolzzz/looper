@@ -78,6 +78,9 @@ async def authorize(data: dict[str, Any], policy: Literal["client", "operator"] 
     """Check the staging policy, including at confirmation; exclude a client's unchanged default from execution."""
     if policy != "client":
         return data
+    if data.get("gateway", {}).get("aliases"):
+        raise OpError(ErrorCode.FORBIDDEN, "Gateway aliases require operator identity; "
+                      "upload this configuration with an operator token")
     added_bots = any(isinstance(entry, dict) and (
         entry.get("channel_id") not in (None, *BUILTIN_CHANNEL_IDS) or
         entry.get("manager_id", "manager") != "manager") for entry in data.get("channels", []))

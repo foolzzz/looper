@@ -1443,3 +1443,62 @@ def test_pipeline_json_and_errors_use_the_generic_answer(cli: Run, looper: FakeL
     looper.answers.append((404, {"status": "error", "error": {"code": "not_found", "message": "no task t1"}}))
     code, _, err = cli("pipeline", "t1")
     assert code == 1 and "not_found" in err
+
+
+def test_gateway_env_prints_selected_alias_and_transient_operator_credentials(tmp_path, capsys):
+    import shlex
+
+    token = tmp_path / 'operator-token'
+    token.write_text('operator-test-secret\n')
+    token.chmod(0o600)
+
+    def respond(handler, request):
+        assert request[2]['authorization'] == 'Bearer operator-test-secret'
+        assert request[3] == {}
+        if request[1] == '/api/v1/gateway/get':
+            result = {'enabled': True, 'url': 'http://127.0.0.1:19231/gw', 'aliases': [{'alias': 'local-chat'}]}
+        else:
+            assert request[1] == '/api/v1/gateway/key_reveal'
+            result = {'key': 'synthetic-gateway-key'}
+        _send(handler, 200, {'status': 'ok', 'result': result})
+
+    server = Server(respond)
+    try:
+        client_file = tmp_path / 'absent-client.json'
+        code = loopercli.main(['--client-file', str(client_file), 'gateway-env', '--alias', 'local-chat',
+                              '--url', server.url, '--operator-token-file', str(token)])
+        captured = capsys.readouterr()
+        assert code == 0 and captured.err == ''
+        assert dict(value.split('=', 1) for value in shlex.split(captured.out)) == {
+            'ANTHROPIC_BASE_URL': 'http://127.0.0.1:19231/gw', 'ANTHROPIC_AUTH_TOKEN': 'synthetic-gateway-key',
+            'ANTHROPIC_API_KEY': '', 'ANTHROPIC_MODEL': 'local-chat',
+            'ANTHROPIC_DEFAULT_OPUS_MODEL': 'local-chat', 'ANTHROPIC_DEFAULT_SONNET_MODEL': 'local-chat',
+            'ANTHROPIC_DEFAULT_HAIKU_MODEL': 'local-chat', 'ANTHROPIC_SMALL_FAST_MODEL': 'local-chat',
+            'CLAUDE_CODE_SUBAGENT_MODEL': 'local-chat', 'CLAUDE_CODE_ATTRIBUTION_HEADER': '0',
+            'ENABLE_TOOL_SEARCH': 'false', 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS': '1',
+        }
+        assert not client_file.exists()
+        assert [request[1] for request in server.requests] == ['/api/v1/gateway/get', '/api/v1/gateway/key_reveal']
+        assert 'operator-test-secret' not in captured.out
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize('settings,message', [
+    ({'enabled': False, 'url': None, 'aliases': []}, 'not enabled'),
+    ({'enabled': True, 'url': 'http://127.0.0.1:19231/gw', 'aliases': []}, 'alias'),
+])
+def test_gateway_env_refuses_unavailable_alias_without_revealing_key(tmp_path, monkeypatch, capsys, settings, message):
+    monkeypatch.setattr(sys, 'stdin', io.StringIO('operator-test-secret\n'))
+
+    def respond(handler, request):
+        assert request[1] == '/api/v1/gateway/get'
+        _send(handler, 200, {'status': 'ok', 'result': settings})
+
+    server = Server(respond)
+    try:
+        assert loopercli.main(['gateway-env', '--alias', 'missing', '--url', server.url]) == loopercli.EXIT_USAGE
+        captured = capsys.readouterr()
+        assert captured.out == '' and message in captured.err
+    finally:
+        server.close()

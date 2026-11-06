@@ -97,6 +97,9 @@ def test_backend_selection_settings_are_forced_only_for_translation(translated_l
         settings = json.loads(settings_file.read_text())
         # These explicit values win even when the CLI loads project env after process env.
         assert settings['env'] == {
+            'ANTHROPIC_MODEL': 'chat-main',
+            **dict.fromkeys(MAIN_MODEL_VARS, 'chat-main'),
+            **dict.fromkeys(BACKGROUND_MODEL_VARS, 'chat-small'),
             BASE_URL: route.url,
             AUTH_TOKEN: 'synthetic-key',
             API_KEY: '',
@@ -126,6 +129,25 @@ def test_backend_selection_settings_are_forced_only_for_translation(translated_l
         assert 'env' not in settings
 
 
+@pytest.mark.parametrize('resident', [False, True])
+def test_translated_private_settings_pin_models_over_project_settings(translated_launch, tmp_path, resident):
+    project = tmp_path / '.claude'
+    project.mkdir()
+    (project / 'settings.json').write_text(json.dumps({'env': {'ANTHROPIC_DEFAULT_HAIKU_MODEL': 'unrouted'}}))
+    route = LlmrecRoute('abcdefghijklmnopqrstuv', 'http://127.0.0.1:12345/r/abcdefghijklmnopqrstuv',
+                        'https://chat.example.invalid/v1', kind=RouteKind.TRANSLATE, record=False)
+    launch = replace(translated_launch, llmrec=route)
+    command = launch.runtime.resident_command if resident else launch.runtime.run_command
+    args = command('claude', cwd=tmp_path, prompt_file=tmp_path / 'prompt.md', launch=launch)
+    settings = json.loads(Path(args[args.index('--settings') + 1]).read_text())
+    process_env = launch.environment()
+    project_env = json.loads((project / 'settings.json').read_text())['env']
+    effective_env = {**process_env, **project_env, **settings['env']}
+    assert effective_env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] == 'chat-small'
+    for name in ('ANTHROPIC_MODEL', *MAIN_MODEL_VARS, *BACKGROUND_MODEL_VARS):
+        assert settings['env'][name] == process_env[name]
+
+
 @pytest.mark.parametrize('route,diagnostic', [
     (None, 'not installed in this process'),
     (LlmrecSkip(SkipReason.GATEWAY_UNAVAILABLE, 'startup failed'), 'could not start: startup failed'),
@@ -149,7 +171,9 @@ def test_gateway_refusal_is_deferred_until_process_environment(translated_launch
     # Tiers construct commands before creating the Runs record; validation belongs at process startup.
     args = command('claude', cwd=tmp_path, prompt_file=tmp_path / 'prompt.md', launch=launch)
     settings = json.loads(Path(args[args.index('--settings') + 1]).read_text())
-    assert settings['env'] == {**dict(TRANSLATED_ENV), AUTH_TOKEN: 'synthetic-key', API_KEY: ''}
+    assert settings['env'] == {**dict(TRANSLATED_ENV), AUTH_TOKEN: 'synthetic-key', API_KEY: '',
+        'ANTHROPIC_MODEL': 'chat-main', **dict.fromkeys(MAIN_MODEL_VARS, 'chat-main'),
+        **dict.fromkeys(BACKGROUND_MODEL_VARS, 'chat-small')}
     assert launch.record()['llmrec']['state'] == 'refused'
     with pytest.raises(RuntimeUnsupported, match='could not start: startup failed'):
         launch.environment()

@@ -91,6 +91,8 @@ class ProxyControl:
         self.dsn = dsn
         self.enabled = enabled
         self.include_oauth = include_oauth
+        self.gateway_enabled = False
+        self.gateway_port = None
         self._outdated = False
         self._health_cache = None
         self._failed_health = None
@@ -186,8 +188,9 @@ class ProxyControl:
 
     async def _start(self, *, port=None) -> bool:
         async with self._start_lock:
+            port = self.gateway_port if port is None and self.gateway_port is not None else port
             if await self._health():
-                return True
+                return port is None or self._state()["port"] == port
             self._start_attempted = True
             previous = self._state()
             port = port if port is not None else previous["port"] if previous else 0
@@ -230,22 +233,43 @@ class ProxyControl:
             return False
 
     async def at_start(self, kept_record_ids) -> None:
+        from looper.db import system_settings
+        from .gateway import GatewayConfig, GatewayKey
+
+        values = await system_settings.get_settings(["gateway.enabled", "gateway.port"])
+        self.gateway_enabled = values.get("gateway.enabled") == "true"
+        self.gateway_port = int(values["gateway.port"]) if values.get("gateway.port") else None
+        if self.gateway_enabled and not GatewayKey(self.runtime_root).exists():
+            GatewayKey(self.runtime_root).rotate()
+        GatewayConfig(self.runtime_root).write(enabled=self.gateway_enabled, record=self.enabled)
+        needed = self.enabled or self.gateway_enabled
         kept = set(kept_record_ids)
         state = self._state()
         health = await self._health()
+        if health and self.gateway_enabled and self.gateway_port is not None and state["port"] != self.gateway_port:
+            # An endpoint never silently moves to a different port. Active routes retain the old proxy.
+            if not kept:
+                await self._stop(state)
+                await self._start(port=self.gateway_port)
+                health = await self._health()
+                state = self._state()
         if health:
             current = code_sha256()
             mismatch = (state.get("code_sha256") != current
                         or state.get("config_sha256") != config_sha256(current, self.dsn))
-            if not kept and (not self.enabled or mismatch):
+            if not kept and (not needed or mismatch):
                 port = state["port"]
                 await self._stop(state)
-                if self.enabled:
+                if needed:
                     # Preserve the port through replacement without a stale process identity.
-                    await self._start(port=port)
+                    await self._start(port=self.gateway_port or port)
             self._outdated = bool(kept and health.get("route_format") != ROUTE_FORMAT)
-        elif self.enabled:
+        elif needed:
             await self._start()
+        state = self._state()
+        if self.gateway_enabled and self.gateway_port is None and state and await self._health():
+            self.gateway_port = state["port"]
+            await system_settings.put_settings({"gateway.port": str(self.gateway_port)})
         for path in (self.runtime_root / ROUTES_DIR).glob("*.json"):
             route = RouteFile.read(path)
             if route and route.record_id not in kept:
@@ -254,18 +278,52 @@ class ProxyControl:
                         ended_at=route.ended_at or _now()).write(path)
 
     async def tick(self) -> None:
-        if (self.runtime_root / STATE_FILE).exists() and not await self._health():
+        if (self.gateway_enabled or (self.runtime_root / STATE_FILE).exists()) and not await self._health():
             await self._start()
 
     async def set_enabled(self, enabled, *, include_oauth=None) -> None:
         self.enabled = enabled
         if include_oauth is not None:
             self.include_oauth = include_oauth
-        if enabled:
+        from .gateway import GatewayConfig
+
+        GatewayConfig(self.runtime_root).write(enabled=self.gateway_enabled, record=self.enabled)
+        if enabled or self.gateway_enabled:
             try:
                 await self._start()
             except (OSError, ValueError):
                 logger.warning("could not start request recording proxy")
+
+    async def set_gateway(self, enabled, *, port=None):
+        from looper.db import system_settings
+        from .gateway import GatewayConfig, GatewayKey
+
+        if type(enabled) is not bool or port is not None and (type(port) is not int or not 0 < port < 65536):
+            raise ValueError("gateway port must be an integer from 1 to 65535")
+        state = self._state()
+        selected = port if port is not None else self.gateway_port
+        if state and selected is not None and selected != state["port"] and await self._health():
+            active = any(route and not route.ended_at for route in (
+                RouteFile.read(path) for path in (self.runtime_root / ROUTES_DIR).glob("*.json")))
+            if active:
+                raise ValueError("gateway port cannot change while agent routes are active")
+            await self._stop(state)
+        self.gateway_enabled = enabled
+        self.gateway_port = selected
+        if enabled and not GatewayKey(self.runtime_root).exists():
+            GatewayKey(self.runtime_root).rotate()
+        await system_settings.put_settings({"gateway.enabled": str(enabled).lower(),
+            **({"gateway.port": str(selected)} if selected is not None else {})})
+        GatewayConfig(self.runtime_root).write(enabled=enabled, record=self.enabled)
+        if enabled:
+            try:
+                ready = await self._start()
+            except (OSError, ValueError):
+                ready = False
+            state = self._state()
+            if ready and selected is None and state:
+                self.gateway_port = state["port"]
+                await system_settings.put_settings({"gateway.port": str(self.gateway_port)})
 
     async def status(self) -> dict:
         health = await self._health()
@@ -273,11 +331,12 @@ class ProxyControl:
         counters = health or self._failed_health or {}
         return {"enabled": self.enabled, "include_oauth": self.include_oauth, "proxy": {
             "state": "outdated" if health and self._outdated else "running" if health else
-                     "unavailable" if self.enabled or state or self._start_attempted else "stopped",
+                     "unavailable" if self.enabled or self.gateway_enabled or state or self._start_attempted else "stopped",
             "port": state["port"] if state else None, "pid": state["pid"] if state else None,
             **{name: int(counters.get(name, 0)) for name in ("requests", "recorded", "gaps", "dropped", "write_errors")},
             "gap_reasons": counters.get("gap_reasons", {})},
-            "translate": counters.get("translate", {})}
+            "translate": counters.get("translate", {}),
+            "auth_failures": counters.get("auth_failures", 0), "alias_usage": counters.get("alias_usage", {})}
 
     async def attach(self, launch, *, agent_id, task_id, step_id=None, reuse=False, cwd=None):
         from ..runtimes import AuthKind, Launcher

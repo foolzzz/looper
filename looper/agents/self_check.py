@@ -397,6 +397,7 @@ async def _translated_profile_rows(*, pool=None):
 async def gateway_check(*, runtime_root: Path | None = None, database_url: str = "") -> Check:
     """A translated profile requires a gateway that can start on demand, even with recording disabled."""
     from .llmrec.control import controller, ProxyControl
+    from looper.db import system_settings
     from .runtimes import adapter, ApiProtocol, ModelPath, model_path
 
     try:
@@ -406,11 +407,14 @@ async def gateway_check(*, runtime_root: Path | None = None, database_url: str =
             conn = await asyncpg.connect(database_url, timeout=_DATABASE_TIMEOUT_SECONDS)
             try:
                 rows = await _translated_profile_rows(pool=conn)
+                values = await system_settings.get_settings(["gateway.enabled", "gateway.port"], pool=conn)
             finally:
                 await conn.close()
         else:
             rows = await _translated_profile_rows()
-        if not any(model_path(adapter(row["type"]), ApiProtocol(row["protocol"])) is ModelPath.TRANSLATED
+            values = await system_settings.get_settings(["gateway.enabled", "gateway.port"])
+        external = values.get("gateway.enabled") == "true"
+        if not external and not any(model_path(adapter(row["type"]), ApiProtocol(row["protocol"])) is ModelPath.TRANSLATED
                    for row in rows):
             return Check("gateway", "Local gateway", SKIP, "no Agent Profile requires translation")
         control = controller()
@@ -420,6 +424,8 @@ async def gateway_check(*, runtime_root: Path | None = None, database_url: str =
         proxy = status.get("proxy", {})
         if proxy.get("state") is None:
             return Check("gateway", "Local gateway", WARN, "gateway status unavailable")
+        if external and (proxy["state"] != "running" or str(proxy.get("port")) != values.get("gateway.port")):
+            return Check("gateway", "Local gateway", FAIL, "local gateway endpoint port unavailable")
         if proxy["state"] == "stopped":
             return Check("gateway", "Local gateway", OK, "gateway starts on the first translated run")
         if proxy["state"] == "unavailable":
@@ -428,6 +434,9 @@ async def gateway_check(*, runtime_root: Path | None = None, database_url: str =
             return Check("gateway", "Local gateway", FAIL,
                          "an older gateway is kept alive by running agents; translated runs cannot start; "
                          "it is replaced once they finish")
+        if status.get("auth_failures", 0):
+            return Check("gateway", "Local gateway", WARN,
+                         f"auth_failures={status['auth_failures']} since proxy startup; check client credentials")
         missing = status.get("translate", {}).get("usage_missing", 0)
         if missing:
             return Check("gateway", "Local gateway", WARN,

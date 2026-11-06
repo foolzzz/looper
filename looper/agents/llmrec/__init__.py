@@ -177,7 +177,7 @@ def no_proxy(env: dict[str, str]) -> dict[str, str]:
 
 def code_sha256() -> str:
     root = Path(__file__).resolve().parents[2]
-    files = list((root / 'agents' / 'llmrec').glob('*.py')) + [root / 'db' / 'llm_requests.py']
+    files = list((root / 'agents' / 'llmrec').glob('*.py')) + [root / 'db' / 'llm_requests.py', root / 'db' / 'gateway.py']
     digest = hashlib.sha256()
     for path in sorted(files, key=lambda p: str(p.relative_to(root))):
         digest.update(str(path.relative_to(root)).encode())

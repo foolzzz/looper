@@ -8,6 +8,13 @@ from looper.agents import self_check
 from looper.agents.llmrec import control
 
 
+@pytest.fixture(autouse=True)
+def _endpoint_disabled(monkeypatch):
+    from looper.db import system_settings
+
+    monkeypatch.setattr(system_settings, 'get_settings', AsyncMock(return_value={}))
+
+
 @pytest.mark.parametrize('profiles,state,missing,expected,detail', [
     ([], 'stopped', 0, self_check.SKIP, 'no Agent Profile'),
     ([{'type': 'codex', 'protocol': 'openai-chat'}], 'stopped', 0, self_check.SKIP, 'no Agent Profile'),
