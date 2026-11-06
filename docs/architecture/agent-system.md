@@ -3433,9 +3433,10 @@ So:
 ### Model request recording (`llmrec`)
 
 `looper/agents/llmrec` records the HTTP exchanges of newly launched Claude
-Code Workers and Reviewers, including their subagents and teammates, through
-a loopback reverse proxy. Manager and Planner turns, other runtimes and
-TTADK launches are not covered. API-key runs are eligible when recording is
+Code Workers, Reviewers, Planners, Managers and consults, including their
+subagents and teammates, through a loopback reverse proxy. The in-process
+API runtime is also recorded. Codex, OMP, Pi, DSH, Grok, Cursor and TTADK
+launches are not covered. API-key runs are eligible when recording is
 enabled; Claude subscription runs also require the OAuth opt-in. Runs started
 before a settings change keep their existing route.
 
@@ -3462,8 +3463,10 @@ before a settings change keep their existing route.
   `llmrec` after the same user confirmation as other system settings; null
   restores a built-in limit. Captures, recording switches, purge and exports
   remain operator-only: API-client tokens receive 403, these operations are
-  not agent tools. Telegram and Lark use the same Manager settings tool;
-  recorded bodies are never sent to those channels.
+  not agent tools. The dashboard asks for confirmation before calling
+  `llm_requests.purge`; an operator API or CLI call executes immediately,
+  as with other operator operations. Telegram and Lark use the same Manager
+  settings tool; recorded bodies are never sent to those channels.
 - **Dashboard viewer.** Open a run on the agent's history page, then expand
   **Model requests**. Rows show timing, model, outcome, token usage, byte sizes
   and capture gaps; requests received after a turn ended appear separately.

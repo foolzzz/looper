@@ -22,11 +22,12 @@ How the agent system works today is described in
   including upgrades that never explicitly set the recording switch. Explicit
   off settings remain off; Claude subscription (OAuth) recording remains off
   by default. Settings → Request recording now controls retention (default
-  7 days, range 1–365) and capacity (default 2 GiB, range 0.1–100), shows actual
-  database space, and offers confirmed deletion. Hourly cleanup expires the
-  oldest requests and unreferenced parts even when recording is disabled;
-  capacity pressure can briefly lock recording tables to reclaim physical
-  PostgreSQL space. Manager cleanup also removes its recorded requests.
+  7 days, range 1–90 days) and capacity (default 2048 MiB, range 256–65536 MiB),
+  shows recorded size, and offers confirmed deletion. Hourly cleanup expires
+  over-age requests and unreferenced parts even when recording is disabled,
+  then evicts requests oldest-first by recorded byte budget without locking
+  the recording tables or running `VACUUM FULL`. Manager cleanup also removes
+  its recorded requests.
 
 ## [2.14.103] - 2026-11-05
 
