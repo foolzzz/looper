@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from looper.agents.llmrec import ROUTES_DIR, RouteFile
-from looper.agents.llmrec.proxy import Proxy
+from looper.agents.llmrec.proxy import Proxy, _upstream_proxy
 from tests.fake_model_api import FakeModelAPI, ResponseScript
 
 
@@ -58,7 +58,7 @@ def private_ca(tmp_path_factory):
                     '-nodes', '-keyout', str(key), '-out', str(csr), '-subj', '/CN=localhost'],
                    check=True, capture_output=True, timeout=5)
     extensions = root / 'server.ext'
-    extensions.write_text('subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n'
+    extensions.write_text('subjectAltName=IP:127.0.0.1,DNS:model.example.invalid\nbasicConstraints=critical,CA:FALSE\n'
                           'keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n')
     subprocess.run(['openssl', 'x509', '-req', '-in', str(csr), '-CA', str(cert), '-CAkey', str(ca_key),
                     '-set_serial', '2', '-out', str(leaf), '-days', '1', '-extfile', str(extensions)],
@@ -216,7 +216,9 @@ def test_recording_preserves_launch_tls_trust(tmp_path, monkeypatch, private_ca,
                 monkeypatch.setattr(control, '_health', healthy)
                 monkeypatch.setattr(control, '_state', lambda: {'port': proxy.port})
                 profile = builtin_resolved_profile()
-                monkeypatch.setattr(type(Launch().runtime), 'llmrec_upstream', lambda self, launch: upstream.base_url)
+                target = upstream.base_url if network == 'direct' else upstream.base_url.replace(
+                    '127.0.0.1', 'model.example.invalid')
+                monkeypatch.setattr(type(Launch().runtime), 'llmrec_upstream', lambda self, launch: target)
                 network_env = {} if network == 'direct' else {
                     'HTTPS_PROXY': f'{network.split("-")[0]}://127.0.0.1:{server.sockets[0].getsockname()[1]}'}
                 launch_env = tuple({**network_env, variable: str(directory if variable == 'SSL_CERT_DIR' else cert)}.items())
@@ -242,7 +244,7 @@ def test_recording_preserves_launch_tls_trust(tmp_path, monkeypatch, private_ca,
                 assert [item.outcome for item in sink.items] == ['completed', 'upstream_error', 'completed']
                 assert len(upstream.requests) == 3
                 if network != 'direct':
-                    assert connected and all(line.startswith(b'CONNECT 127.0.0.1:') for line in connected)
+                    assert connected and all(line.startswith(b'CONNECT model.example.invalid:') for line in connected)
             finally:
                 await proxy.close(grace_s=0)
                 server.close()
@@ -293,7 +295,7 @@ def test_recording_uses_launch_proxy_not_server_proxy(tmp_path, monkeypatch, sou
                 resolved = profile.resolved_model
                 profile = replace(profile, resolved_model=replace(resolved, provider=replace(resolved.provider, env=proxy_env)))
             launch = Launch(AgentSettings(profile=profile, env=proxy_env if source == 'role' else ()))
-            monkeypatch.setattr(type(launch.runtime), 'llmrec_upstream', lambda self, launch: f'{scheme}://127.0.0.1:1')
+            monkeypatch.setattr(type(launch.runtime), 'llmrec_upstream', lambda self, launch: f'{scheme}://model.example.invalid:1')
             control = ProxyControl(tmp_path, '', enabled=True, include_oauth=True)
             async def healthy(**kwargs):
                 return proxy.stats
@@ -302,7 +304,7 @@ def test_recording_uses_launch_proxy_not_server_proxy(tmp_path, monkeypatch, sou
             attached = await control.attach(launch, agent_id='worker-test', task_id=None)
             async with httpx.AsyncClient(trust_env=False) as client:
                 response = await client.post(attached.llmrec.url + '/v1/messages', json={})
-            expected = b'POST http://127.0.0.1:1/v1/messages HTTP/1.1' if scheme == 'http' else b'CONNECT 127.0.0.1:1 HTTP/1.1'
+            expected = b'POST http://model.example.invalid:1/v1/messages HTTP/1.1' if scheme == 'http' else b'CONNECT model.example.invalid:1 HTTP/1.1'
             assert received == [expected]
             assert response.status_code == (200 if scheme == 'http' else 502)
         finally:
@@ -312,17 +314,40 @@ def test_recording_uses_launch_proxy_not_server_proxy(tmp_path, monkeypatch, sou
     asyncio.run(asyncio.wait_for(check(), 5))
 
 
-@pytest.mark.parametrize('proxy_env', [
-    {},
-    {'HTTP_PROXY': 'http://127.0.0.1:1', 'NO_PROXY': '127.0.0.1'},
-    {'HTTP_PROXY': 'http://127.0.0.1:1', 'no_proxy': '*'},
-    {'HTTP_PROXY': 'http://127.0.0.1:1', 'http_proxy': ''},
+@pytest.mark.parametrize('host,expected', [
+    ('localhost', None),
+    ('127.0.0.1', None),
+    ('127.255.255.254', None),
+    ('[::1]', None),
+    ('126.255.255.255', 'http://proxy.example:8080'),
+    ('128.0.0.1', 'http://proxy.example:8080'),
+    ('localhost.example', 'http://proxy.example:8080'),
+    ('[::2]', 'http://proxy.example:8080'),
 ])
-def test_route_proxy_bypass_and_explicit_empty_environment(tmp_path, monkeypatch, proxy_env):
+@pytest.mark.parametrize('inherited', [False, True])
+def test_loopback_upstream_always_bypasses_proxy(tmp_path, monkeypatch, host, expected, inherited):
+    env = {'HTTP_PROXY': 'http://proxy.example:8080', 'ALL_PROXY': 'http://proxy.example:8080',
+           'NO_PROXY': 'example.org'}
+    monkeypatch.setattr(os, 'environ', env)
+    value = replace(route(tmp_path, f'http://{host}:8317'), proxy_env=None if inherited else env)
+    assert _upstream_proxy(value, value.upstream) == expected
+
+
+@pytest.mark.parametrize('proxy_env,external_proxy', [
+    ({}, None),
+    ({'HTTP_PROXY': 'http://127.0.0.1:1', 'NO_PROXY': '127.0.0.1'}, 'http://127.0.0.1:1'),
+    ({'HTTP_PROXY': 'http://127.0.0.1:1', 'no_proxy': '*'}, None),
+    ({'HTTP_PROXY': 'http://127.0.0.1:1', 'http_proxy': ''}, None),
+    ({'HTTP_PROXY': 'http://127.0.0.1:1', 'NO_PROXY': 'example.org'}, 'http://127.0.0.1:1'),
+    ({'ALL_PROXY': 'http://127.0.0.1:1', 'NO_PROXY': 'example.org'}, 'http://127.0.0.1:1'),
+    (None, 'http://127.0.0.1:1'),
+])
+def test_route_proxy_bypass_and_explicit_empty_environment(tmp_path, monkeypatch, proxy_env, external_proxy):
     monkeypatch.setattr(os, 'environ', {'HTTP_PROXY': 'http://127.0.0.1:1'})
     async def check():
         async with FakeModelAPI([ResponseScript(events=events())]) as upstream:
             value = replace(route(tmp_path, upstream.base_url), proxy_env=proxy_env)
+            assert _upstream_proxy(value, 'http://model.example.invalid') == external_proxy
             value.write(tmp_path / ROUTES_DIR / f'{value.id}.json')
             proxy = Proxy(tmp_path, sink=Sink(), connect_s=0.2)
             await proxy.start()

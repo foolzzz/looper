@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from datetime import datetime, timezone
+from ipaddress import ip_address
 import json
 import logging
 import os
@@ -33,10 +34,18 @@ HOP = {'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 
 
 
 def _upstream_proxy(route, url):
+    target = urlsplit(url)
+    # Claude Code connects to loopback directly even when NO_PROXY omits it.
+    if target.hostname == 'localhost':
+        return None
+    try:
+        if ip_address(target.hostname).is_loopback:
+            return None
+    except ValueError:
+        pass
     env = route.proxy_env if route.proxy_env is not None else os.environ
     proxies = {name: env.get(f'{name}_proxy', env.get(f'{name.upper()}_PROXY', ''))
                for name in ('http', 'https', 'all', 'no')}
-    target = urlsplit(url)
     if proxy_bypass_environment(target.netloc, proxies):
         return None
     return proxies.get(target.scheme) or proxies['all'] or None
