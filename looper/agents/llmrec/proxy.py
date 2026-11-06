@@ -175,6 +175,37 @@ class _PrefixHistory:
         return common
 
 
+class _PromptHistory:
+    """Bounded per-route usage anchors, without retaining another prompt copy."""
+    def __init__(self, limit=1024):
+        self.limit = limit
+        self.items = OrderedDict()
+
+    def estimate(self, route_id, body):
+        previous = self.items.get(route_id)
+        if previous is not None:
+            count, digest, tokens = previous
+            request = json.loads(body)
+            prefix = {key: request[key] for key in ('model', 'messages', 'tools') if key in request}
+            if len(prefix['messages']) >= count:
+                size = len(json.dumps(prefix, ensure_ascii=False, separators=(',', ':')).encode())
+                prefix['messages'] = prefix['messages'][:count]
+                encoded = json.dumps(prefix, ensure_ascii=False, separators=(',', ':')).encode()
+                # A compacted/edited history or changed model/tools needs a fresh estimate.
+                if hashlib.sha256(encoded).digest() == digest:
+                    return tokens + (size - len(encoded) + 3) // 4
+        return (len(body) + 3) // 4
+
+    def remember(self, route_id, body, tokens):
+        request = json.loads(body)
+        prompt = {key: request[key] for key in ('model', 'messages', 'tools') if key in request}
+        encoded = json.dumps(prompt, ensure_ascii=False, separators=(',', ':')).encode()
+        self.items.pop(route_id, None)
+        self.items[route_id] = (len(prompt['messages']), hashlib.sha256(encoded).digest(), tokens)
+        while len(self.items) > self.limit:
+            self.items.popitem(last=False)
+
+
 class Proxy:
     def __init__(self, runtime_root, *, sink, port=0, instance=None, connect_s=10, read_idle_s=None):
         self.root = Path(runtime_root)
@@ -185,6 +216,7 @@ class Proxy:
         self._stats = dict(requests=0, recorded=0, gaps=0, dropped=0)
         self._gap_reasons = Counter()
         self._prefix_history = _PrefixHistory()
+        self._prompt_history = _PromptHistory()
         self._translate_stats = dict(requests=0, errors_by_type=Counter(), stream_errors=0,
             pings=0, usage_missing=0, cache_fields_missing=0, tool_args_invalid=0,
             dropped=Counter(), degraded=Counter(), clamped=Counter(), input_tokens=0,
@@ -588,8 +620,11 @@ class Proxy:
                     count_error(json.loads(data)['error']['type'])
                     await send_response(status, fields, data)
                 elif chat.stream:
+                    start_input_tokens = self._prompt_history.estimate(route.id, chat.body)
+                    translation.update(start_usage_estimated=True, start_input_tokens=start_input_tokens)
                     translator = StreamTranslator(dialect, parsed['model'],
-                        'msg_lgw_' + hashlib.sha256(f'{self.instance}:{seq}'.encode()).hexdigest()[:24])
+                        'msg_lgw_' + hashlib.sha256(f'{self.instance}:{seq}'.encode()).hexdigest()[:24],
+                        start_input_tokens=start_input_tokens)
                     fields = [(b'content-type', b'text/event-stream'), (b'cache-control', b'no-cache'),
                               (b'transfer-encoding', b'chunked')]
                     writer.write(connection.send(h11.Response(status_code=200, headers=fields)))
@@ -672,7 +707,13 @@ class Proxy:
                     stats['usage_missing'] += int(translation['usage_missing'])
                     if isinstance(raw_usage, dict) and 'prompt_tokens' in raw_usage and not cache_fields_present(raw_usage, dialect):
                         stats['cache_fields_missing'] += 1
-                    for key, value in anthropic_usage(raw_usage, dialect).items():
+                    usage = anthropic_usage(raw_usage, dialect)
+                    prompt_tokens = raw_usage.get('prompt_tokens') if isinstance(raw_usage, dict) else None
+                    if type(prompt_tokens) is int and prompt_tokens >= 0:
+                        self._prompt_history.remember(route.id, chat.body,
+                            sum(usage[key] for key in ('input_tokens', 'cache_read_input_tokens',
+                                                       'cache_creation_input_tokens')))
+                    for key, value in usage.items():
                         stats[key] += value
                 if response is not None:
                     await response.aclose()

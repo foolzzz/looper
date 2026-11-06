@@ -3455,6 +3455,18 @@ upstream URL containing credentials, refuses the run with a specific reason.
 Startup checks report gateway availability and warn when upstream usage is
 missing, since spend would be understated.
 
+Context sizes during translated streams are estimates: `message_start` puts
+the estimate in `input_tokens`, with both cache counts zero. The gateway uses
+the previous request's exact total prompt tokens on the same route (input +
+cache read + cache write), plus appended message bytes at four UTF-8 bytes per
+token, rounded up. A route without a usage anchor, or a changed prompt prefix,
+uses the whole translated request's JSON byte size instead. Anchors live only
+in proxy memory (up to 1,024 routes); a restart or eviction loses them. This
+lets Claude Code account for context and Looper apply its context-full switch.
+Billing still uses the upstream's exact cumulative `message_delta` usage.
+Captures identify the initial estimate in `translation.start_usage_estimated`
+and `translation.start_input_tokens`.
+
 Resident Manager and Planner sessions reuse their translation route. A model,
 provider or dialect change changes the binding hash and restarts the resident
 process on its next turn. Existing direct profiles and recording routes keep

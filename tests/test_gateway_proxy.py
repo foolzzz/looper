@@ -1,6 +1,7 @@
 """Exercise translated routes over HTTP with a disposable local Chat upstream."""
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 import json
@@ -34,7 +35,8 @@ async def gateway(tmp_path, *, stream=False, record=True, status=200, headers=No
             fields = dict(line.split(b':', 1) for line in head.split(b'\r\n')[1:] if b':' in line)
             raw = await reader.readexactly(int(fields[b'Content-Length']))
             received.append((head, json.loads(raw)))
-            if stream:
+            streaming = stream and received[-1][1].get('stream')
+            if streaming:
                 chunks = [{'id': 'chat-1', 'choices': [{'delta': {'content': 'hello'}, 'finish_reason': 'stop'}]},
                           {'choices': [], 'usage': usage}]
                 data = b''.join(b'data: ' + json.dumps(chunk).encode() + b'\n\n' for chunk in chunks)
@@ -46,7 +48,7 @@ async def gateway(tmp_path, *, stream=False, record=True, status=200, headers=No
             if status != 200:
                 data = b'{"error":{"message":"limited"}}'
             extra = headers or {}
-            kind = 'text/event-stream' if stream else 'application/json'
+            kind = 'text/event-stream' if streaming else 'application/json'
             writer.write(f'HTTP/1.1 {status} Response\r\nContent-Type: {kind}\r\nConnection: close\r\n'.encode())
             for key, value in extra.items():
                 writer.write(f'{key}: {value}\r\n'.encode())
@@ -202,6 +204,65 @@ def test_successive_requests_measure_identical_prefix(tmp_path):
                 while len(sink.items) < 2:
                     await asyncio.sleep(.01)
             assert sink.items[1].translation['common_prefix_bytes'] == sink.items[1].translation['upstream_request_bytes']
+    run(check)
+
+
+@pytest.mark.parametrize('record', [False, True])
+@pytest.mark.parametrize('first_stream', [False, True])
+def test_stream_start_estimates_context_from_route_prompt_usage(tmp_path, record, first_stream):
+    async def check():
+        async with gateway(tmp_path, stream=True, record=record) as (client, base, proxy, sink, received):
+            messages = [{'role': 'user', 'content': '你好'}]
+            previous_bytes = None
+            for follow_up in (False, True, True):
+                result = await client.post(base + '/v1/messages', json={
+                    'model': 'client', 'messages': messages, 'max_tokens': 200 if follow_up else 100,
+                    'stream': first_stream or follow_up})
+                assert result.status_code == 200
+                upstream = received[-1][1]
+                body_bytes = len(json.dumps(upstream, ensure_ascii=False, separators=(',', ':')).encode())
+                message_bytes = len(json.dumps(upstream['messages'], ensure_ascii=False, separators=(',', ':')).encode())
+                expected = 100 + (message_bytes - previous_bytes + 3) // 4 if follow_up else (body_bytes + 3) // 4
+                if first_stream or follow_up:
+                    frames = [json.loads(line[6:]) for line in result.text.splitlines() if line.startswith('data: ')]
+                    assert frames[0]['message']['usage'] == {
+                        'input_tokens': expected, 'cache_read_input_tokens': 0,
+                        'cache_creation_input_tokens': 0, 'output_tokens': 0}
+                    assert expected > 0
+                    usage = frames[-2]['usage']
+                else:
+                    usage = result.json()['usage']
+                assert usage == {
+                    'input_tokens': 50, 'cache_read_input_tokens': 40,
+                    'cache_creation_input_tokens': 10, 'output_tokens': 7}
+                if record:
+                    async with asyncio.timeout(2):
+                        while len(sink.items) < len(received):
+                            await asyncio.sleep(.01)
+                    if first_stream or follow_up:
+                        assert sink.items[-1].translation['start_usage_estimated'] is True
+                        assert sink.items[-1].translation['start_input_tokens'] == expected
+                previous_bytes = message_bytes
+                if not follow_up:
+                    messages += [{'role': 'assistant', 'content': 'hello'},
+                                 {'role': 'user', 'content': '继续' * 11}]
+
+            # Compaction or editing history must not reuse the larger prompt.
+            messages = [{'role': 'user', 'content': 'short replacement'}]
+            result = await client.post(base + '/v1/messages', json={
+                'model': 'client', 'messages': messages, 'max_tokens': 100, 'stream': True})
+            start = json.loads(result.text.split('data: ', 1)[1].split('\n', 1)[0])
+            body_bytes = len(json.dumps(received[-1][1], ensure_ascii=False, separators=(',', ':')).encode())
+            assert start['message']['usage']['input_tokens'] == (body_bytes + 3) // 4
+
+            # Another route starts cold even if it serves the same upstream.
+            route = RouteFile.read(tmp_path / ROUTES_DIR / ('g' * 22 + '.json'))
+            other = replace(route, id='h' * 22)
+            other.write(tmp_path / ROUTES_DIR / f'{other.id}.json')
+            result = await client.post(base.replace(route.id, other.id) + '/v1/messages', json={
+                'model': 'client', 'messages': messages, 'max_tokens': 100, 'stream': True})
+            start = json.loads(result.text.split('data: ', 1)[1].split('\n', 1)[0])
+            assert start['message']['usage']['input_tokens'] == (body_bytes + 3) // 4
     run(check)
 
 

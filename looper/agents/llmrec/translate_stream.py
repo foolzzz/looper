@@ -63,10 +63,11 @@ def _validate_chunk(event, dialect):
 
 
 class StreamTranslator:
-    def __init__(self, dialect: Dialect, client_model: str, message_id: str):
+    def __init__(self, dialect: Dialect, client_model: str, message_id: str, *, start_input_tokens: int = 0):
         self.dialect = dialect
         self.client_model = client_model
         self.message_id = message_id
+        self.start_input_tokens = start_input_tokens
         self.index = 0
         self.open: str | None = None
         self.tools: dict[int, dict[str, Any]] = {}
@@ -96,7 +97,8 @@ class StreamTranslator:
         return [_event('message_start', message={
             'id': self.message_id, 'type': 'message', 'role': 'assistant',
             'model': self.client_model, 'content': [], 'stop_reason': None,
-            'stop_sequence': None, 'usage': anthropic_usage(None, self.dialect),
+            'stop_sequence': None, 'usage': {**anthropic_usage(None, self.dialect),
+                                            'input_tokens': self.start_input_tokens},
         }), self.ping()]
 
     def ping(self) -> bytes:
