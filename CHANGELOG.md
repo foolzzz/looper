@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.96] - 2026-11-05
+
+### Fixed
+
+- **Disabled providers: a config import no longer switches an Agent Profile to one, and the disable warning stays in the caller's scope.** Follow-ups of provider enable/disable (issue #1116). (1) A config import now refuses to create an Agent Profile on, or switch one to, a model of a disabled provider (the same check as creating or updating a profile, now one shared helper); an edit that keeps the profile's current model stays allowed. (2) Disabling a provider as a scoped (own-scope) Manager now lists only that Manager's own usage of the affected Agent Profiles in the warnings, not other Managers' tasks, sessions or templates. (3) Disabling the provider of the built-in profile `claude-code/opus` also reports explicit selections of it, joined to the fallback warning in one line. (4) Dashboard: the profile list in the role editor marks a profile whose provider is disabled with "· provider disabled". No change while every provider is enabled, no schema change. ([#1130](https://github.com/foolzzz/looper/pull/1130))
+
 ## [2.14.95] - 2026-11-05
 
 ### Fixed
