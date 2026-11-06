@@ -11,6 +11,7 @@ import pytest
 
 from looper.agents.llmrec import ROUTES_DIR, RouteFile
 from looper.agents.llmrec.proxy import Proxy
+from tests.db_support import DSN, run_db
 
 
 class Sink:
@@ -23,9 +24,9 @@ class Sink:
 
 
 @asynccontextmanager
-async def gateway(tmp_path, *, stream=False, record=True, status=200, headers=None, interrupt=False):
+async def gateway(tmp_path, *, stream=False, record=True, status=200, headers=None, interrupt=False, usage=None):
     received, handlers = [], set()
-    usage = {'prompt_tokens': 100, 'completion_tokens': 7,
+    usage = usage if usage is not None else {'prompt_tokens': 100, 'completion_tokens': 7,
              'prompt_tokens_details': {'cached_tokens': 40, 'cache_write_tokens': 10}}
     async def upstream(reader, writer):
         task = asyncio.current_task()
@@ -79,6 +80,33 @@ async def gateway(tmp_path, *, stream=False, record=True, status=200, headers=No
 
 def run(check):
     asyncio.run(asyncio.wait_for(check(), 10))
+
+
+@pytest.mark.skipif(not DSN, reason='requires disposable LOOPER_TEST_DATABASE_URL')
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('reported', [False, True])
+def test_translated_cache_counts_preserve_missing_and_reported_zero(tmp_path, stream, reported):
+    from looper.db import llm_requests
+
+    async def check(pool):
+        usage = {'prompt_tokens': 100, 'completion_tokens': 7}
+        if reported:
+            usage['prompt_tokens_details'] = {'cached_tokens': 0}
+        async with gateway(tmp_path, stream=stream, usage=usage) as (client, base, proxy, sink, received):
+            response = await client.post(base + '/v1/messages', json={
+                'model': 'client', 'messages': [], 'stream': stream})
+            assert response.status_code == 200
+            for field in ('cache_read_input_tokens', 'cache_creation_input_tokens'):
+                assert (field in response.text) is reported
+            async with asyncio.timeout(2):
+                while not sink.items:
+                    await asyncio.sleep(.01)
+            assert len(sink.items) == 1
+            await llm_requests.write_batch(sink.items, pool=pool)
+            row = await pool.fetchrow('SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens FROM llm_requests')
+            assert tuple(row) == (100, 7, 0 if reported else None, 0 if reported else None)
+            assert proxy.stats['translate']['cache_fields_missing'] == int(not reported)
+    run_db(check, timeout=10)
 
 
 @pytest.mark.parametrize('stream', [False, True])
@@ -181,29 +209,64 @@ def test_rejection_does_not_contact_upstream(tmp_path, body, status):
 
 def test_prefix_lru_eviction_only_loses_observation():
     from looper.agents.llmrec.proxy import _PrefixHistory
-    history = _PrefixHistory(limit=12)
-    assert history.remember('a', b'abcdef') is None
-    assert history.remember('b', b'12345') is None
-    assert history.remember('a', b'abcXYZ') == 3
-    assert history.remember('c', b'longbody') is None
-    assert history.size <= 12
-    assert history.remember('b', b'12345') is None
-    assert history.remember('b', b'12345') == 5
-    assert history.remember('large', b'x' * 13) is None
-    assert history.size <= 12
-    assert history.remember('large', b'x' * 13) is None
+    body = b'{"model":"a","messages":[]}'
+    history = _PrefixHistory(limit=2 * len(body))
+    assert history.remember('a', body) == (None, None, None)
+    assert history.remember('b', body) == (None, None, None)
+    assert history.remember('a', body) == (len(body), 0, 0)
+    assert history.remember('c', body) == (None, None, None)
+    assert history.size <= history.limit
+    assert history.remember('b', body) == (None, None, None)
+    assert history.remember('large', body * 3) == (None, None, None)
+    assert history.size <= history.limit
+    assert history.remember('large', body * 3) == (None, None, None)
 
 
-def test_successive_requests_measure_identical_prefix(tmp_path):
+@pytest.mark.parametrize('change', ['append', 'history', 'tools', 'system', 'model', 'session'])
+def test_successive_requests_measure_prompt_prefix_reuse(tmp_path, change):
     async def check():
         async with gateway(tmp_path) as (client, base, proxy, sink, received):
-            for _ in range(2):
-                response = await client.post(base + '/v1/messages', json={'model': 'client', 'messages': []})
+            body = {'model': 'client', 'system': 'Stable instructions', 'messages': [
+                {'role': 'user', 'content': 'Earlier question ' * 1000}], 'tools': [
+                {'name': 'lookup', 'description': 'Tool documentation ' * 4000,
+                 'input_schema': {'type': 'object'}}]}
+            for turn in range(2):
+                if turn:
+                    if change == 'history':
+                        body['messages'][0]['content'] = 'Rewritten history'
+                    elif change == 'tools':
+                        body['tools'][0]['description'] = 'Changed tool'
+                    elif change == 'system':
+                        body['system'] = 'Changed instructions'
+                    elif change == 'model':
+                        route = proxy._route('g' * 22)
+                        replace(route, models={'client': 'another-model'}).write(tmp_path / ROUTES_DIR / f'{route.id}.json')
+                    body['messages'].extend([{'role': 'assistant', 'content': 'Answer'},
+                                             {'role': 'user', 'content': 'Next question'}])
+                response = await client.post(base + '/v1/messages', json=body, headers={
+                    'x-claude-code-session-id': 'other' if turn and change == 'session' else 'same'})
                 assert response.status_code == 200
             async with asyncio.timeout(2):
                 while len(sink.items) < 2:
                     await asyncio.sleep(.01)
-            assert sink.items[1].translation['common_prefix_bytes'] == sink.items[1].translation['upstream_request_bytes']
+            first, second = [item.translation for item in sink.items]
+            assert first['common_prefix_tokens'] is None
+            assert first['previous_prompt_tokens'] is None
+            if change == 'session':
+                assert second['common_prefix_tokens'] is None
+                assert second['previous_prompt_tokens'] is None
+                return
+            reuse = second['common_prefix_tokens'] / second['previous_prompt_tokens']
+            if change == 'append':
+                assert reuse >= .9
+                # Tools follow messages in the wire JSON and must still count.
+                assert second['common_prefix_bytes'] / second['upstream_request_bytes'] < .4
+            elif change == 'history':
+                assert .5 < reuse < 1  # unchanged system + tools, rewritten messages
+            elif change == 'tools':
+                assert 0 < reuse < .1  # only the unchanged system precedes the break
+            else:
+                assert reuse == 0
     run(check)
 
 
@@ -226,8 +289,7 @@ def test_stream_start_estimates_context_from_route_prompt_usage(tmp_path, record
                 if first_stream or follow_up:
                     frames = [json.loads(line[6:]) for line in result.text.splitlines() if line.startswith('data: ')]
                     assert frames[0]['message']['usage'] == {
-                        'input_tokens': expected, 'cache_read_input_tokens': 0,
-                        'cache_creation_input_tokens': 0, 'output_tokens': 0}
+                        'input_tokens': expected, 'output_tokens': 0}
                     assert expected > 0
                     usage = frames[-2]['usage']
                 else:

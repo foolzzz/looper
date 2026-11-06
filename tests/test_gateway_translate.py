@@ -321,14 +321,23 @@ def test_insufficient_system_resource():
                'completion_tokens': 12}, (30, 20, 50, 12)),
     ('moonshot', {'prompt_tokens': 100, 'prompt_tokens_details': {'cached_tokens': 50, 'cache_write_tokens': 10},
                  'completion_tokens': 12}, (40, 10, 50, 12)),
-    ('generic', {'prompt_tokens': 100, 'completion_tokens': 12}, (100, 0, 0, 12)),
+    ('generic', {'prompt_tokens': 100, 'completion_tokens': 12}, (100, None, None, 12)),
+    ('openai', {'prompt_tokens': 100, 'completion_tokens': 12}, (100, None, None, 12)),
+    ('openai', {'prompt_tokens': 100, 'prompt_tokens_details': {}}, (100, None, None, 0)),
+    ('openai', {'prompt_tokens': 100, 'prompt_tokens_details': {'cached_tokens': 0}}, (100, 0, 0, 0)),
+    ('openai', {'prompt_tokens': 100, 'prompt_cache_hit_tokens': 70}, (100, None, None, 0)),
     ('deepseek', {'prompt_tokens': 20, 'prompt_cache_hit_tokens': 0,
                   'prompt_tokens_details': {'cached_tokens': 10}}, (20, 0, 0, 0)),
-    ('generic', None, (0, 0, 0, 0)),
+    ('generic', None, (0, None, None, 0)),
 ])
 def test_usage_mapping(dialect, usage, expected):
-    result = anthropic_usage(usage, DIALECTS[ChatDialect(dialect)])
-    assert tuple(result[field] for field in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens')) == expected
+    result, cache_reported = anthropic_usage(usage, DIALECTS[ChatDialect(dialect)])
+    assert cache_reported is (expected[2] is not None)
+    for field, value in zip(('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens'), expected):
+        if value is None:
+            assert field not in result
+        else:
+            assert result[field] == value
 
 
 @pytest.mark.parametrize('upstream,code,status,error_type', [
@@ -436,6 +445,7 @@ def test_response_preserves_refusal_text(finish):
 def test_usage_cache_split_preserves_prompt_total():
     usage = {'prompt_tokens': 100, 'completion_tokens': 7,
              'prompt_tokens_details': {'cached_tokens': 40, 'cache_write_tokens': 10}}
-    result = anthropic_usage(usage, DIALECTS[ChatDialect.OPENAI])
+    result, cache_reported = anthropic_usage(usage, DIALECTS[ChatDialect.OPENAI])
+    assert cache_reported
     assert (result['input_tokens'], result['cache_read_input_tokens'], result['cache_creation_input_tokens']) == (50, 40, 10)
     assert result['input_tokens'] + result['cache_read_input_tokens'] + result['cache_creation_input_tokens'] == usage['prompt_tokens']

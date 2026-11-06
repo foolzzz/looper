@@ -3470,6 +3470,18 @@ Billing still uses the upstream's exact cumulative `message_delta` usage.
 Captures identify the initial estimate in `translation.start_usage_estimated`
 and `translation.start_input_tokens`.
 
+Run cards, per-model task costs and recorded request rows show cache hit as
+`cache_read / (input + cache_read + cache_write)`; missing counts or an empty
+prompt have no percentage. Translated request rows also show **prefix reuse**:
+the unchanged prefix of the previous prompt divided by that previous prompt's
+total, estimated at four UTF-8 bytes per token. The proxy compares system,
+tools, then whole messages, stopping at the first change, independently of JSON
+key order; a model change invalidates the prefix. History is scoped to route
+and session and uses the existing bounded in-memory LRU. First requests,
+evictions and older recordings without this measure have no prefix percentage.
+The original raw-body byte fields remain diagnostic data, not a cache signal.
+A red **no usage** badge identifies translated requests without upstream usage.
+
 Resident Manager and Planner sessions reuse their translation route. A model,
 provider or dialect change changes the binding hash and restarts the resident
 process on its next turn. Existing direct profiles and recording routes keep
