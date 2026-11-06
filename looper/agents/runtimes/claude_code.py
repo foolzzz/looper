@@ -175,18 +175,19 @@ class ClaudeCodeRuntime(RuntimeAdapter):
                                                   + (f": {first}" if first else ""))
         return Probe(first[:200], self.capabilities_for(first))
 
-    def isolation_args(self, cwd: str | Path, *, launch: Launch | None = None) -> list[str]:
+    def isolation_args(self, cwd: str | Path, *, launch: Launch | None = None,
+                       settings_dir: Path | None = None) -> list[str]:
         from ..llmrec import LlmrecRoute, RouteKind
         from ..llmrec.gateway import translated
 
         # Project settings load after process env; pin the attached route and all translation safeguards here too.
         env = None
         if launch is not None and translated(launch):
-            env = dict(TRANSLATED_ENV)
+            env = {**dict(TRANSLATED_ENV), AUTH_TOKEN: launch.profile.provider.api_key, API_KEY: ""}
             # Commands are built before Runs records; environment() refuses missing routes at process startup.
             if isinstance(launch.llmrec, LlmrecRoute) and launch.llmrec.kind is RouteKind.TRANSLATE:
                 env[BASE_URL] = launch.llmrec.url
-        return claude_cli.isolation_args(cwd, env=env)
+        return claude_cli.isolation_args(cwd, env=env, settings_dir=settings_dir)
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
         if provider.protocols == self.translated_protocols and not provider.base_url.strip():
@@ -331,7 +332,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
             # permissions every agent shares and the plugins and skills installed for it come with the launch
             # args.
-            *self.isolation_args(cwd, launch=launch),
+            *self.isolation_args(cwd, launch=launch, settings_dir=prompt_file.parent / "claude-settings"),
             *_prompt_input(launch, prompt_file=prompt_file)[0],
             *self.launch_args(launch, cwd=cwd),
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
@@ -359,7 +360,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # non-zero). Built-in tools are unaffected; the permissions every
             # agent shares and the plugins and skills installed for this run
             # come with the launch args.
-            *self.isolation_args(cwd, launch=launch),
+            *self.isolation_args(cwd, launch=launch, settings_dir=prompt_file.parent / "claude-settings"),
             *_prompt_input(launch, prompt_file=prompt_file)[0],
             *self.launch_args(launch, cwd=cwd),
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),

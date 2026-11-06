@@ -24,7 +24,8 @@ def chat_upstream():
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
-            requests.append((self.path, json.loads(self.rfile.read(int(self.headers['Content-Length'])))))
+            requests.append((self.path, json.loads(self.rfile.read(int(self.headers['Content-Length']))),
+                             {name.lower(): value for name, value in self.headers.items()}))
             chunks = [
                 {'id': 'chat-test', 'choices': [{'delta': {'content': 'ok'}, 'finish_reason': None}]},
                 {'id': 'chat-test', 'choices': [{'delta': {}, 'finish_reason': 'stop'}]},
@@ -62,7 +63,24 @@ def test_serve_translated_manager_works_without_recording(short_root, cli_entry)
         "import json, os, sys, urllib.request\n"
         "if '--version' in sys.argv:\n    print('2.1.285 (Claude Code)'); sys.exit(0)\n"
         "if '--print' not in sys.argv:\n    sys.exit(1)")
+    # Claude Code applies project settings after process env, then explicit --settings last.
+    script = script.replace('argv = sys.argv[1:]',
+        "argv = sys.argv[1:]\n"
+        "project = json.load(open('.claude/settings.json'))\n"
+        "setting = argv[argv.index('--settings') + 1]\n"
+        "explicit = json.loads(setting) if setting.startswith('{') else json.load(open(setting))\n"
+        "os.environ.update(project['env'])\n"
+        "os.environ.update(explicit.get('env', {}))\n"
+        "assert os.environ.get('ANTHROPIC_API_KEY') == '', 'project API key escaped settings'")
+    script = script.replace("with urllib.request.urlopen(req, timeout=10) as response:",
+        "if os.environ.get('ANTHROPIC_API_KEY'):\n"
+        "        req.add_header('x-api-key', os.environ['ANTHROPIC_API_KEY'])\n"
+        "    with urllib.request.urlopen(req, timeout=10) as response:")
     executable.write_text(script)
+    project_settings = runtime / '.claude' / 'settings.json'
+    project_settings.parent.mkdir(parents=True)
+    project_settings.write_text(json.dumps({'env': {'ANTHROPIC_AUTH_TOKEN': 'project-token',
+                                                   'ANTHROPIC_API_KEY': 'project-key'}}))
     environment = {'CLAUDE_CONFIG_DIR': str(home / '.claude'), 'CODEX_HOME': str(home / '.codex'),
         'GROK_HOME': str(home / '.grok'), 'CURSOR_CONFIG_DIR': str(home / '.cursor-config'),
         'CURSOR_DATA_DIR': str(home / '.cursor-data'), 'LOOPER_TELEGRAM_BOT_TOKEN': ''}
@@ -85,11 +103,14 @@ def test_serve_translated_manager_works_without_recording(short_root, cli_entry)
                 assert _ask(api, 'gateway-test', 'Reply again.', timeout=20)
                 records = api.post('/api/v1/runs/list', {'agent_id': 'manager'})['result']['records']
                 assert len(records) == 2 and all(row['status'] == 'completed' for row in records)
+                assert 'synthetic-key' not in json.dumps(records)
                 routes = [row['metadata']['llmrec'] for row in records]
                 assert all(row['state'] == 'translating' and not row['recording'] for row in routes)
                 assert routes[0]['route'] == routes[1]['route']
-                assert len(requests) == 2 and all(path == '/v1/chat/completions' for path, _ in requests)
-                assert all(body['model'] == 'haiku' for _, body in requests)
+                assert len(requests) == 2 and all(path == '/v1/chat/completions' for path, _, _ in requests)
+                assert all(body['model'] == 'haiku' for _, body, _ in requests)
+                assert all(headers.get('authorization') == 'Bearer synthetic-key' for _, _, headers in requests)
+                assert all('x-api-key' not in headers for _, _, headers in requests)
                 status = api.post('/api/v1/llmrec_settings/get', {})['result']
                 assert status['proxy']['state'] == 'running' and status['translate']['requests'] == 2
                 assert api.post('/api/v1/llm_requests/list', {})['result']['requests'] == []

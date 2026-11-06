@@ -2,6 +2,8 @@
 from dataclasses import replace
 import asyncio
 import json
+from pathlib import Path
+import stat
 from unittest.mock import AsyncMock
 
 import pytest
@@ -87,11 +89,17 @@ def test_backend_selection_settings_are_forced_only_for_translation(translated_l
     command = launch.runtime.resident_command if resident else launch.runtime.run_command
     args = command('claude', cwd=tmp_path, prompt_file=tmp_path / 'prompt.md', launch=launch)
     assert args.count('--settings') == 1
-    settings = json.loads(args[args.index('--settings') + 1])
+    settings_arg = args[args.index('--settings') + 1]
     if translated:
-        # These inline values win even when the CLI loads project env after process env.
+        settings_file = Path(settings_arg)
+        assert settings_file.is_absolute()
+        assert stat.S_IMODE(settings_file.stat().st_mode) == 0o600
+        settings = json.loads(settings_file.read_text())
+        # These explicit values win even when the CLI loads project env after process env.
         assert settings['env'] == {
             BASE_URL: route.url,
+            AUTH_TOKEN: 'synthetic-key',
+            API_KEY: '',
             'CLAUDE_CODE_USE_BEDROCK': '0',
             'CLAUDE_CODE_USE_VERTEX': '0',
             'CLAUDE_CODE_USE_FOUNDRY': '0',
@@ -103,7 +111,18 @@ def test_backend_selection_settings_are_forced_only_for_translation(translated_l
             'ENABLE_TOOL_SEARCH': 'false',
             'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS': '1',
         }
+        assert settings['autoMemoryEnabled'] is False
+        assert settings['crossSessionInbound'] == 'refuse'
+        assert settings['claudeMdExcludes']
+        assert 'synthetic-key' not in json.dumps([args, launch.record()])
+        # Residents compare commands between turns; reuse the path, including after file damage.
+        settings_file.write_text('{}')
+        settings_file.chmod(0o644)
+        assert command('claude', cwd=tmp_path, prompt_file=tmp_path / 'prompt.md', launch=launch) == args
+        assert json.loads(settings_file.read_text()) == settings
+        assert stat.S_IMODE(settings_file.stat().st_mode) == 0o600
     else:
+        settings = json.loads(settings_arg)
         assert 'env' not in settings
 
 
@@ -129,8 +148,8 @@ def test_gateway_refusal_is_deferred_until_process_environment(translated_launch
     command = launch.runtime.resident_command if resident else launch.runtime.run_command
     # Tiers construct commands before creating the Runs record; validation belongs at process startup.
     args = command('claude', cwd=tmp_path, prompt_file=tmp_path / 'prompt.md', launch=launch)
-    settings = json.loads(args[args.index('--settings') + 1])
-    assert settings['env'] == dict(TRANSLATED_ENV)
+    settings = json.loads(Path(args[args.index('--settings') + 1]).read_text())
+    assert settings['env'] == {**dict(TRANSLATED_ENV), AUTH_TOKEN: 'synthetic-key', API_KEY: ''}
     assert launch.record()['llmrec']['state'] == 'refused'
     with pytest.raises(RuntimeUnsupported, match='could not start: startup failed'):
         launch.environment()
