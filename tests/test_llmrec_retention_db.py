@@ -112,7 +112,7 @@ def test_housekeeping_expires_when_recording_disabled_and_isolates_failure(monke
     run_db(check, monkeypatch, timeout=15)
 
 
-def test_physical_size_cap_bounds_rounds_without_faking_size_query(monkeypatch, caplog):
+def test_physical_size_cap_stops_when_no_rows_remain_without_faking_size_query(monkeypatch, caplog):
     async def check(pool):
         items = [_capture(seq)[0] for seq in range(1, 4)]
         await llm_requests.write_batch(items, pool=pool)
@@ -122,7 +122,7 @@ def test_physical_size_cap_bounds_rounds_without_faking_size_query(monkeypatch, 
                 "FROM unnest(ARRAY['llm_requests','llm_request_parts','llm_request_routes']) name")
             assert size == expected and size > 0
         # An intentionally tiny unit makes the cap smaller than even PostgreSQL's empty indexes.
-        # DELETE does not shrink those relations: the real query must hit the bounded warning path.
+        # The real query must hit the warning path once there is nothing left to evict.
         monkeypatch.setattr(housekeeping, "MIB", 1)
         original = llm_requests.prune_oldest
         calls, deleted = [], []
@@ -136,9 +136,9 @@ def test_physical_size_cap_bounds_rounds_without_faking_size_query(monkeypatch, 
         monkeypatch.setattr(llm_requests, "prune_oldest", prune)
         report = housekeeping.Report()
         await housekeeping._prune_llm_requests(report, datetime.now(timezone.utc))
-        assert len(calls) == 50 and deleted == sorted(deleted) and len(deleted) == 3
+        assert len(calls) == 4 and deleted == sorted(deleted) and len(deleted) == 3
         assert report.llm_requests == 3
-        assert "after 50 rounds" in caplog.text
+        assert "no evictable requests" in caplog.text
         assert "allocated PostgreSQL pages" in caplog.text
     run_db(check, monkeypatch, timeout=15)
 
@@ -267,7 +267,7 @@ def test_compaction_failure_keeps_eviction_and_later_cleanup_running(monkeypatch
         os.utime(old_runner, ((now - timedelta(days=40)).timestamp(),) * 2)
         report = await housekeeping.run_once(tmp_path, now, current_runner=None, commands=None)
         assert report.failed_steps == {"llm request compaction": "TimeoutError: lock busy"}
-        assert "lock busy" in caplog.text and "after 50 rounds" in caplog.text
+        assert "lock busy" in caplog.text and "no evictable requests" in caplog.text
         assert report.runner_files == 1 and not old_runner.exists()
         assert report.llm_requests == 1
         assert await pool.fetchval("SELECT count(*) FROM llm_requests") == 0
@@ -314,6 +314,92 @@ def test_compaction_timeout_still_evicts_oldest_to_physical_target(monkeypatch, 
         for row in remaining:
             request = await llm_requests.get_request(row['id'], pool=pool)
             assert request['response_body'] == items[row['proxy_seq'] - 1].response_body
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_eviction_continues_past_fifty_batches_until_physical_target(monkeypatch):
+    async def check(pool):
+        await system_settings.put_settings({"llmrec.enabled": "true"}, pool=pool)
+        await pool.execute("ALTER TABLE llm_requests SET (fillfactor=10)")
+        items = [_capture(seq)[0] for seq in range(1, 65)]
+        for item in items:
+            item.response_body = {"content": "x" * 600}
+        await llm_requests.write_batch(items, pool=pool)
+        async with pool.acquire() as conn:
+            size = await llm_requests.stored_bytes(conn)
+        await pool.execute("ALTER TABLE llm_requests SET (fillfactor=100)")
+        monkeypatch.setattr(housekeeping, "MIB", size * 0.95 / 2048)
+        compact, prune = housekeeping._compact_llm_requests, llm_requests.prune_oldest
+        calls = 0
+        async def recovering_compact():
+            nonlocal calls
+            calls += 1
+            if calls <= 51:
+                raise TimeoutError("lock busy")
+            await compact()
+        async def prune_one(conn):
+            return await prune(conn, batch=1)
+        monkeypatch.setattr(housekeeping, "_compact_llm_requests", recovering_compact)
+        monkeypatch.setattr(llm_requests, "prune_oldest", prune_one)
+        report = housekeeping.Report()
+        await housekeeping._prune_llm_requests(report, datetime.now(timezone.utc))
+        assert calls == 52 and report.llm_requests == 51
+        async with pool.acquire() as conn:
+            assert await llm_requests.stored_bytes(conn) <= 0.9 * 2048 * housekeeping.MIB
+        remaining = await pool.fetch("SELECT id, proxy_seq FROM llm_requests ORDER BY id")
+        assert [row["proxy_seq"] for row in remaining] == list(range(52, 65))
+        for row in remaining:
+            request = await llm_requests.get_request(row["id"], pool=pool)
+            assert request["response_body"] == items[row["proxy_seq"] - 1].response_body
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_compaction_waits_for_capture_and_gives_each_table_time_to_finish(monkeypatch):
+    import asyncpg
+
+    async def check(pool):
+        await pool.execute("ALTER TABLE llm_requests SET (fillfactor=10)")
+        items = [_capture(seq)[0] for seq in range(1, 21)]
+        for item in items:
+            item.response_body = {"content": "x" * 600}
+        await llm_requests.write_batch(items, pool=pool)
+        async with pool.acquire() as conn:
+            size = await llm_requests.stored_bytes(conn)
+        await pool.execute("ALTER TABLE llm_requests SET (fillfactor=100)")
+        execute = asyncpg.Connection.execute
+        waiting, budgets = asyncio.Event(), []
+        async def observed(conn, query, *args, **kwargs):
+            if query.startswith("VACUUM (FULL)"):
+                budgets.append((query, dict(await conn.fetch(
+                    "SELECT name, setting::int FROM pg_settings "
+                    "WHERE name IN ('lock_timeout', 'statement_timeout')"))))
+                if "llm_request_routes" in query:
+                    waiting.set()
+            return await execute(conn, query, *args, **kwargs)
+        monkeypatch.setattr(asyncpg.Connection, "execute", observed)
+        async with pool.acquire() as capture:
+            transaction = capture.transaction()
+            await transaction.start()
+            task = None
+            try:
+                await capture.execute("LOCK TABLE llm_request_routes IN ROW EXCLUSIVE MODE")
+                task = asyncio.create_task(housekeeping._compact_llm_requests())
+                await asyncio.wait_for(waiting.wait(), 3)
+                # A real capture lock lasts longer than the former one-second budget.
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(task), 1.2)
+            finally:
+                await transaction.rollback()
+                if task is not None:
+                    await asyncio.gather(task)
+        assert {query for query, _ in budgets} == {
+            f"VACUUM (FULL) {table}" for table in ("llm_requests", "llm_request_parts", "llm_request_routes")}
+        for _, settings in budgets:
+            assert settings["lock_timeout"] >= 60_000
+            assert settings["statement_timeout"] >= 600_000
+        async with pool.acquire() as conn:
+            assert await llm_requests.stored_bytes(conn) < size
+        assert await pool.fetchval("SELECT count(*) FROM llm_requests") == len(items)
     run_db(check, monkeypatch, timeout=20)
 
 

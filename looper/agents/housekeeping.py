@@ -31,7 +31,6 @@ ROTATE_KEEP = 5
 RUNNER_FILE_MAX_AGE = timedelta(days=31)
 ROTATED = ("serve.log", "probe.log")
 MIB = 1024**2
-LLM_PRUNE_ROUNDS = 50
 
 
 @dataclass
@@ -222,7 +221,7 @@ async def _prune_llm_requests(report: Report, now: datetime) -> None:
         size = await llm_requests.stored_bytes(conn)
     if size <= cap * 0.9:
         return
-    for _ in range(LLM_PRUNE_ROUNDS):
+    while True:
         async with db_connection.transaction() as conn:
             requests = await llm_requests.prune_oldest(conn)
         report.llm_requests += requests
@@ -241,17 +240,24 @@ async def _prune_llm_requests(report: Report, now: datetime) -> None:
             size = await llm_requests.stored_bytes(conn)
         if size <= cap * 0.9:
             return
-    logger.warning("housekeeping llm requests still above target after %d rounds: stored_bytes=%d cap_bytes=%d; "
-                   "live routes or allocated PostgreSQL pages may retain space", LLM_PRUNE_ROUNDS, size, cap)
+        # Physical size can stay unchanged across committed DELETEs. Stop only when
+        # there is nothing left to evict, rather than imposing a request-count cap.
+        if not requests and not removed_routes:
+            logger.warning("housekeeping llm requests still above target with no evictable requests: "
+                           "stored_bytes=%d cap_bytes=%d; live routes or allocated PostgreSQL pages "
+                           "may retain space", size, cap)
+            return
 
 
 async def _compact_llm_requests() -> None:
     # VACUUM FULL needs a non-transaction connection and an exclusive table lock. The
-    # recorder queues asynchronously; bound both lock waits and execution during pressure.
+    # recorder queues asynchronously. Allow captures to commit and budget ten minutes
+    # per table for a rewrite at the default 2 GiB cap, rather than 30s for all three.
     async with db_connection.get_pool().acquire() as conn:
-        await conn.execute("SET lock_timeout = '1s'")
-        await conn.execute("SET statement_timeout = '30s'")
-        await conn.execute("VACUUM (FULL) llm_requests, llm_request_parts, llm_request_routes")
+        await conn.execute("SET lock_timeout = '60s'")
+        await conn.execute("SET statement_timeout = '10min'")
+        for table in ("llm_requests", "llm_request_parts", "llm_request_routes"):
+            await conn.execute(f"VACUUM (FULL) {table}")
 
 
 async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | None,
