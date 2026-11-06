@@ -4806,9 +4806,13 @@ time as `prepare_seconds` from the service's `gap_seconds`. Wheel installs keep
 their existing behavior.
 
 A `CONTROL_PLANE` upgrade begins a turns drain with `--drain-timeout` as the
-server deadline. While any run is not keepable, that deadline applies; once
-only turns block, the CLI enforces `--turns-timeout`, measured from the start
-of the drain. `--no-force` cancels deployment at the applicable deadline.
+server deadline and the cap on the whole drain. The CLI measures
+`--turns-timeout` from the first drain status with no non-keepable runs waiting,
+when only turns block. A non-keepable run reappearing resets this clock;
+it starts again once only turns block. `--no-force` cancels deployment when
+either the total drain timeout or the turns timeout passes.
+The report's `turns_wait_seconds` is the time since that turns clock started,
+or 0 while it is unset.
 The report counts keepable runs in the final drain status as `kept_before`;
 only non-keepable runs interrupted at the deadline are listed in `interrupted`,
 with reason `not_keepable`. `cut_turns` lists each Manager or Planner turn cut

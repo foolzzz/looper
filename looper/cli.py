@@ -140,7 +140,8 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     upgrade.add_argument("--timeout", type=float, default=120.0,
                          help="Seconds to wait for the restarted service to answer (default 120).")
     upgrade.add_argument("--turns-timeout", type=float, default=180.0,
-                         help="Seconds to drain turns for a control-plane upgrade (default 180).")
+                         help="Seconds to wait once only turns block a control-plane upgrade; "
+                              "resets if a non-keepable run reappears (default 180, capped by --drain-timeout).")
     restart.add_argument("--drain", action="store_true", help="Drain active runs before restarting.")
     for command in (upgrade, restart):
         command.add_argument("--drain-timeout", type=float, default=1200.0,
