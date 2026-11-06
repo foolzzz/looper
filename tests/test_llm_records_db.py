@@ -18,6 +18,32 @@ from tests.db_support import DSN, run_db
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
+def test_run_events_escape_nul_and_mark_sanitized_without_mutating_input():
+    from copy import deepcopy
+    from looper.db import llm_records
+
+    async def body(pool):
+        record_id = await llm_records.start_record(agent_id="worker-nul", pool=pool)
+        event = {"type": "user", "message": {"content": [{"type": "tool_result", "content": "a\0b\\u0000"}]},
+                 "extra": ["nested\0text", {"value": "another\0value"}]}
+        original = deepcopy(event)
+        plain = {"type": "result", "text": "unchanged\\u0000"}
+        await llm_records.append_events(record_id, [(1, event), (2, plain)], pool=pool)
+        first, second = await llm_records.list_events(record_id, pool=pool)
+        assert first["event"]["message"]["content"][0]["content"] == "a\\u0000b\\u0000"
+        assert first["event"]["extra"] == ["nested\\u0000text", {"value": "another\\u0000value"}]
+        assert first["event"]["body_sanitized"] is True
+        assert second["event"] == plain
+        assert event == original
+
+        await llm_records.update_event(record_id, 2, event, pool=pool)
+        updated = await llm_records.list_events(record_id, after_seq=1, pool=pool)
+        assert updated[0]["event"] == first["event"]
+        assert event == original
+
+    run_db(body, timeout=10)
+
+
 @pytest.mark.parametrize("canonical", [False, True])
 def test_record_presentation_preserves_only_evidenced_values(canonical):
     import copy

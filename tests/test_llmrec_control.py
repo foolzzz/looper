@@ -2,12 +2,16 @@
 
 import asyncio
 import logging
+import signal
+import sys
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from looper.agents.agent_settings import AgentSettings, Launch
-from looper.agents.llmrec import TLS_ENV, LlmrecSkip, RouteFile, SkipReason
+from looper.agents.keeper import write_json
+from looper.agents.llmrec import STATE_FILE, TLS_ENV, LlmrecSkip, RouteFile, SkipReason
 from looper.agents.llmrec import control
 from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec
 from looper.agents.runtimes import ApiProtocol, AuthKind
@@ -23,6 +27,65 @@ def launch():
     profile = resolved_profile('test-agent', 'Test agent', RuntimeSpec('test-runtime', 'Claude Code', 'claude-code'),
                                provider, 'haiku')
     return Launch(AgentSettings(profile=profile))
+
+
+@pytest.mark.parametrize('foreign', ['instance', 'pid'])
+def test_failed_health_requires_matching_instance_and_pid(tmp_path, monkeypatch, foreign):
+    owner = control.ProxyControl(tmp_path, '', enabled=True)
+    state = {'pid': 1234, 'instance': 'owned', 'start_time': 'owned-start', 'port': 12345}
+    (tmp_path / STATE_FILE).parent.mkdir(parents=True)
+    write_json(tmp_path / STATE_FILE, state)
+    monkeypatch.setattr(owner, '_running', AsyncMock(return_value=True))
+    data = {**state, foreign: 'foreign' if foreign == 'instance' else 4321, 'write_errors': 7}
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: client(**kwargs,
+        transport=httpx.MockTransport(lambda request: httpx.Response(503, json=data))))
+
+    async def run():
+        assert await owner._health() is None
+        assert owner._failed_health is None
+        assert (await owner.status())['proxy']['write_errors'] == 0
+        stop = AsyncMock()
+        monkeypatch.setattr(owner, '_stop', stop)
+        monkeypatch.setattr(asyncio, 'create_subprocess_exec', AsyncMock(side_effect=OSError('no spawn')))
+        with pytest.raises(OSError, match='no spawn'):
+            await owner._start()
+        stop.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('identity', ['matching', 'changed_instance', 'changed_start_time'])
+def test_stop_escalates_only_for_owned_process(tmp_path, identity):
+    async def run():
+        owner = control.ProxyControl(tmp_path, '', enabled=True)
+        child = await asyncio.create_subprocess_exec(sys.executable, '-c',
+            "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); signal.pause()",
+            stdout=asyncio.subprocess.PIPE)
+        try:
+            assert await asyncio.wait_for(child.stdout.readline(), 3) == b'ready\n'
+            state = {'pid': child.pid, 'instance': 'owned', 'port': 12345,
+                     'start_time': await asyncio.to_thread(control.proc_tree._start_time, child.pid)}
+            current = {**state}
+            if identity == 'changed_instance':
+                current['instance'] = 'replacement'
+            elif identity == 'changed_start_time':
+                state['start_time'] = 'previous-process'
+            (tmp_path / STATE_FILE).parent.mkdir(parents=True)
+            write_json(tmp_path / STATE_FILE, current)
+            await owner._stop(state, grace_s=.05)
+            if identity == 'matching':
+                assert await asyncio.wait_for(child.wait(), 2) == -signal.SIGKILL
+                assert owner._state() is None
+            else:
+                assert child.returncode is None
+                assert owner._state() == current
+        finally:
+            if child.returncode is None:
+                child.kill()
+            await child.wait()
+
+    asyncio.run(asyncio.wait_for(run(), 10))
 
 
 def test_proxy_process_leaves_tls_overrides_to_routes(tmp_path, monkeypatch):
@@ -210,13 +273,20 @@ def test_consult_routes_are_separate_and_end_with_their_records(tmp_path, monkey
 
 
 @pytest.mark.parametrize('source', ['settings', 'provider'])
-def test_reused_route_refreshes_proxy_and_tls_without_losing_binding(tmp_path, monkeypatch, source, launch):
+@pytest.mark.parametrize('cwd', [None, 'worker-alias'])
+def test_reused_route_refreshes_proxy_and_tls_without_losing_binding(tmp_path, monkeypatch, source, cwd, launch):
     from dataclasses import replace
     from looper.agents.llmrec import ROUTES_DIR
 
     owner = control.ProxyControl(tmp_path, '', enabled=True)
     monkeypatch.setattr(owner, '_health', AsyncMock(return_value=True))
     monkeypatch.setattr(owner, '_state', lambda: {'port': 1234})
+    worker = tmp_path / 'worker'
+    worker.mkdir()
+    alias = tmp_path / 'worker-alias'
+    alias.symlink_to(worker, target_is_directory=True)
+    cwd = str(tmp_path / cwd) if cwd else None
+    monkeypatch.chdir(tmp_path)
     changes = (('HTTPS_PROXY', 'http://proxy.example.invalid:8080'),
                ('NO_PROXY', 'model.example.invalid'), ('SSL_CERT_FILE', 'updated-ca.pem'))
     settings = launch.settings
@@ -230,14 +300,16 @@ def test_reused_route_refreshes_proxy_and_tls_without_losing_binding(tmp_path, m
     updated = replace(launch, settings=settings)
 
     async def body():
-        one = await owner.attach(launch, agent_id='manager-test', task_id=None, reuse=True)
+        one = await owner.attach(launch, agent_id='manager-test', task_id=None, reuse=True, cwd=cwd)
         owner.bind(one.llmrec.id, 11)
-        two = await owner.attach(updated, agent_id='manager-test', task_id=None, reuse=True)
+        two = await owner.attach(updated, agent_id='manager-test', task_id=None, reuse=True, cwd=cwd)
         assert two.llmrec == one.llmrec
         route = RouteFile.read(tmp_path / ROUTES_DIR / f'{two.llmrec.id}.json')
         assert route.proxy_env['HTTPS_PROXY'] == dict(changes)['HTTPS_PROXY']
         assert route.proxy_env['NO_PROXY'] == dict(changes)['NO_PROXY']
-        assert route.tls_env == {'SSL_CERT_FILE': 'updated-ca.pem'}
+        assert route.tls_env == {'SSL_CERT_FILE': str((worker if cwd else tmp_path) / 'updated-ca.pem')}
         assert route.record_id == 11 and route.last_record_id is None and route.ended_at is None
+        fresh = await owner.attach(updated, agent_id='worker-test', task_id=None, cwd=cwd)
+        assert RouteFile.read(tmp_path / ROUTES_DIR / f'{fresh.llmrec.id}.json').tls_env == route.tls_env
 
     asyncio.run(body())

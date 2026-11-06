@@ -109,12 +109,16 @@ def test_api_routed_environment_keeps_the_binding(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("initial,expected", [
-    ({}, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}),
-    ({"NO_PROXY": "example.invalid"}, {"NO_PROXY": "example.invalid,127.0.0.1", "no_proxy": "example.invalid,127.0.0.1"}),
-    ({"no_proxy": "127.0.0.1,lower.invalid"}, {"NO_PROXY": "127.0.0.1,lower.invalid", "no_proxy": "127.0.0.1,lower.invalid"}),
-    ({"NO_PROXY": "*"}, {"NO_PROXY": "*", "no_proxy": "*"}),
+    ({}, "127.0.0.1,localhost,::1"),
+    ({"NO_PROXY": "example.invalid"}, "example.invalid,127.0.0.1,localhost,::1"),
+    ({"no_proxy": "127.0.0.1,lower.invalid"}, "127.0.0.1,lower.invalid,localhost,::1"),
+    ({"NO_PROXY": "*"}, "*"),
+    ({"NO_PROXY": "upper.invalid", "no_proxy": "lower.invalid"}, "lower.invalid,127.0.0.1,localhost,::1"),
+    ({"NO_PROXY": "*", "no_proxy": ""}, "127.0.0.1,localhost,::1"),
+    ({"no_proxy": " lower.invalid ,lower.invalid,127.0.0.1"}, "lower.invalid,127.0.0.1,localhost,::1"),
 ])
 def test_loopback_bypass_preserves_inheritance_and_is_idempotent(initial, expected):
+    expected = {"NO_PROXY": expected, "no_proxy": expected}
     assert no_proxy(initial) == expected
     assert no_proxy(initial) == expected
 

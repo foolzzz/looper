@@ -1344,7 +1344,7 @@ class ManagerAgent:
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER)
         launch = await token.step("llmrec_attach", llmrec.attach(
-            launch, agent_id=self.agent_id, task_id=None, reuse=True))
+            launch, agent_id=self.agent_id, task_id=None, reuse=True, cwd=self._config.work_dir))
         if ask.turn is not None:
             ask.turn.runtime = launch.runtime.type  # named in what the turn binding logs
         try:

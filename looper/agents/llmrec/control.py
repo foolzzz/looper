@@ -78,6 +78,7 @@ class ProxyControl:
         self.include_oauth = include_oauth
         self._outdated = False
         self._health_cache = None
+        self._failed_health = None
         self._health_at = 0.0
         self._start_lock = asyncio.Lock()
         self._children: dict[int, asyncio.subprocess.Process] = {}
@@ -100,14 +101,23 @@ class ProxyControl:
             return self._health_cache
         result = None
         state = self._state()
+        if self._failed_health and (not state or any(
+                self._failed_health.get(key) != state[key] for key in ("instance", "pid"))):
+            self._failed_health = None
         if await self._running(state):
             try:
                 async with httpx.AsyncClient(trust_env=False, timeout=2) as client:
                     response = await client.get(f"http://127.0.0.1:{state['port']}/llmrec/health")
-                    response.raise_for_status()
+                    if response.status_code not in (200, 503):
+                        response.raise_for_status()
                     data = response.json()
-                    if isinstance(data, dict) and data.get("instance") == state["instance"]:
-                        result = data
+                    if (isinstance(data, dict) and data.get("instance") == state["instance"]
+                            and data.get("pid") == state["pid"]):
+                        if response.status_code == 503:
+                            self._failed_health = data
+                        elif response.status_code == 200:
+                            result = data
+                            self._failed_health = None
             except (httpx.HTTPError, ValueError):
                 pass
         self._health_cache, self._health_at = result, time.monotonic()
@@ -115,24 +125,46 @@ class ProxyControl:
             self._outdated = result.get("route_format") != ROUTE_FORMAT
         return result
 
-    async def _stop(self, state) -> None:
-        if await self._running(state):
+    async def _owns_process(self, state) -> bool:
+        current = self._state()
+        return bool(current and all(current[key] == state[key] for key in ("instance", "pid", "start_time"))
+                    and await self._running(state))
+
+    async def _stop(self, state, *, grace_s=35, preserve_state=False) -> None:
+        running = await self._running(state)
+        if running and not await self._owns_process(state):
+            return
+        if running:
             try:
                 os.kill(state["pid"], signal.SIGTERM)
             except ProcessLookupError:
                 pass
-            deadline = time.monotonic() + 35
+            deadline = time.monotonic() + grace_s
             while await self._running(state) and time.monotonic() < deadline:
                 await asyncio.sleep(0.05)
             if await self._running(state):
-                raise TimeoutError("request recording proxy did not stop")
+                # Recheck state and process birth time before escalating: the
+                # port or PID may now belong to a different instance.
+                if await self._owns_process(state):
+                    try:
+                        os.kill(state["pid"], signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                deadline = time.monotonic() + 5
+                while await self._running(state) and time.monotonic() < deadline:
+                    await asyncio.sleep(0.05)
+                if await self._running(state):
+                    raise TimeoutError("request recording proxy did not stop")
         child = self._children.pop(state["pid"], None)
         if child is not None:
             await child.wait()
         current = self._state()
-        if current is None or current.get("instance") == state["instance"]:
+        if not preserve_state and (current is None or all(
+                current[key] == state[key] for key in ("instance", "pid", "start_time"))):
             (self.runtime_root / STATE_FILE).unlink(missing_ok=True)
         self._health_cache, self._health_at = None, 0.0
+        if not preserve_state:
+            self._failed_health = None
 
     async def _start(self, *, port=None) -> bool:
         async with self._start_lock:
@@ -140,6 +172,13 @@ class ProxyControl:
                 return True
             previous = self._state()
             port = port if port is not None else previous["port"] if previous else 0
+            if previous and self._failed_health and all(
+                    self._failed_health.get(key) == previous[key] for key in ("instance", "pid")):
+                # Keep the pinned port and failure counters until a replacement
+                # publishes its state, including when its first boot fails.
+                await self._stop(previous, grace_s=2, preserve_state=True)
+                if await self._health():
+                    return True
             log = self.runtime_root / LOG_FILE
             log.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -212,14 +251,15 @@ class ProxyControl:
     async def status(self) -> dict:
         health = await self._health()
         state = self._state()
+        counters = health or self._failed_health or {}
         return {"enabled": self.enabled, "include_oauth": self.include_oauth, "proxy": {
             "state": "outdated" if health and self._outdated else "running" if health else
                      "unavailable" if self.enabled or state else "stopped",
             "port": state["port"] if state else None, "pid": state["pid"] if state else None,
-            **{name: int((health or {}).get(name, 0)) for name in ("requests", "recorded", "gaps", "dropped", "write_errors")},
-            "gap_reasons": (health or {}).get("gap_reasons", {})}}
+            **{name: int(counters.get(name, 0)) for name in ("requests", "recorded", "gaps", "dropped", "write_errors")},
+            "gap_reasons": counters.get("gap_reasons", {})}}
 
-    async def attach(self, launch, *, agent_id, task_id, step_id=None, reuse=False):
+    async def attach(self, launch, *, agent_id, task_id, step_id=None, reuse=False, cwd=None):
         from ..runtimes import AuthKind, Launcher
 
         if not self.enabled:
@@ -258,7 +298,10 @@ class ProxyControl:
             return await _bypass(launch, agent_id=agent_id, task_id=task_id)
         env = replace(launch, llmrec=None).environment()
         proxy_env = {name: value for name, value in env.items() if name in PROXY_ENV}
-        tls_env = {name: value for name, value in env.items() if name in TLS_ENV}
+        # The proxy has its own cwd; relative trust paths belong
+        # to the agent process that would have loaded them.
+        tls_env = {name: os.path.realpath(os.path.join(cwd or os.getcwd(), value)) if value else value
+                   for name, value in env.items() if name in TLS_ENV}
         previous = self._resident.get(agent_id) if reuse else None
         if previous is not None:
             path = self.runtime_root / ROUTES_DIR / f"{previous.id}.json"
