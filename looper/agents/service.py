@@ -1291,7 +1291,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
         owner = f" (pid {answer['pid']})" if answer.get("pid") is not None else ""
         return ServiceError(f"port {port} is served by another process{owner}; not starting a second server")
 
-    report = {"plan": plan.kind.value, "reasons": list(plan.reasons), "drain_seconds": 0.0,
+    report = {"plan": plan.kind.value, "reasons": list(plan.reasons), "drain_seconds": 0.0, "turns_wait_seconds": 0.0,
               "prepare_seconds": 0.0, "gap_seconds": 0.0, "interrupted": [], "kept_before": 0, "adopted": 0,
               "running_code_fingerprint": running.components["control_plane"],
               "installed_package_version": running.version, "status": "failed"}
@@ -1312,6 +1312,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 report["prepare_seconds"] = round(host.clock() - started, 3)
         if plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE):
             started = host.clock()
+            turns_started = None
             # Mark the attempt first: a lost response may still have begun draining.
             draining = True
             status = host.system_operation(port, token, "drain", {
@@ -1322,13 +1323,18 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 if phase not in ("draining", "drained"):
                     raise ServiceError("drain was cancelled; deployment stopped")
                 runs = status.get("waiting", {}).get("runs", [])
-                deadline = drain_timeout
+                now = host.clock()
+                passed = now - started >= drain_timeout or (not control_plane and status.get("deadline_passed"))
                 if control_plane:
                     report["kept_before"] = sum(row.get("keepable") is True for row in runs)
-                    if not any(row.get("keepable") is False for row in runs):
-                        deadline = turns_timeout
-                passed = host.clock() - started >= deadline or (not control_plane and status.get("deadline_passed"))
-                report["drain_seconds"] = round(host.clock() - started, 3)
+                    if any(row.get("keepable") is False for row in runs):
+                        turns_started = None
+                    elif turns_started is None:
+                        turns_started = now
+                    turns_wait = now - turns_started if turns_started is not None else 0.0
+                    report["turns_wait_seconds"] = round(turns_wait, 3)
+                    passed = passed or (turns_started is not None and turns_wait >= turns_timeout)
+                report["drain_seconds"] = round(now - started, 3)
                 if passed and phase != "drained":
                     if no_force:
                         raise ServiceError("drain deadline passed; --no-force cancelled deployment")
