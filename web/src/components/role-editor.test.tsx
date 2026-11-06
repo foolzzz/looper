@@ -20,10 +20,16 @@ it("marks disabled providers in both task-role and project-role template profile
     profile_id: profile.profile_id, name: profile.name, runtime: profile.runtime_type, model: profile.model.name,
     effort: profile.effort, roles: profile.roles as AllowedProfile["roles"], usd_per_million_tokens: { input: null, output: null },
   };
-  const role = {
+  const role: PlannerRole = {
     id: "tester", kind: "work", version: 1, profile: { profile_id: profile.profile_id, name: profile.name, allowed: true },
     role_prompt: "Test the change.", harness: null, items: [],
-  } as PlannerRole;
+    reason: "Verify the change.", created_at: "2026-11-05T00:00:00Z", via: "planner", template: null,
+    versions: [], steps: [],
+    stats: {
+      runs: 0, running: 0, cost_usd: 0, contract_violations: 0, contract_violation_rate: null,
+      steps: 0, accepted: 0, failed: 0, retries: 0, reviews: { passed: 0, not_passed: 0 }, review_pass_rate: null,
+    },
+  };
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     if (input === "/api/v1/registry/view") {
       return Response.json({ status: "ok", result: { profiles: [profile], providers: [] } });
