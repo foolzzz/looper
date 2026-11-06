@@ -87,7 +87,8 @@ def test_routed_config_and_environment_keep_the_binding(case, role, tmp_path, mo
     assert configuration(case, skipped, tmp_path) == off
     assert skipped.environment() == launch.environment()
     assert routed.binding_sha256 == launch.binding_sha256
-    assert routed.runtime.llmrec_upstream(routed) == UPSTREAM
+    expected_upstream = "https://model.example.invalid" if case.startswith("dsh") else UPSTREAM
+    assert routed.runtime.llmrec_upstream(routed) == expected_upstream
     env = routed.environment()
     for name in ("NO_PROXY", "no_proxy"):
         assert "127.0.0.1" in env[name].split(",")
@@ -103,6 +104,74 @@ def test_runtime_default_upstream_is_preserved(case, expected, monkeypatch, tmp_
     assert launch.runtime.llmrec_upstream(launch) == expected
     assert expected in configuration(case, launch, tmp_path)
     assert expected not in configuration(case, replace(launch, llmrec=ROUTE), tmp_path)
+
+
+@pytest.mark.parametrize("case", ["dsh", "dsh-runner"])
+@pytest.mark.parametrize("role", [AgentType.MANAGER, AgentType.PLANNER])
+@pytest.mark.parametrize("base_path,expected_path", [
+    ("/anthropic", "/anthropic/v1/messages"),
+    ("/anthropic/v1", "/anthropic/v1/messages"),
+    ("/anthropic/v1/", "/anthropic/v1/messages"),
+    ("/v1/", "/v1/messages"),
+    ("/anthropic/v10/", "/anthropic/v10/v1/messages"),
+])
+def test_dsh_recording_preserves_messages_endpoint(case, role, base_path, expected_path, tmp_path, monkeypatch):
+    import httpx
+    from looper.agents.llmrec.proxy import Proxy
+    from tests.fake_model_api import FakeModelAPI, ResponseScript
+    from tests.test_llmrec_proxy import Sink, captured, events
+
+    # Isolate both direct requests and route transport from the operator's proxy settings.
+    monkeypatch.setattr(child_env, "inherited", lambda: {})
+
+    def messages_url(launch):
+        if case == "dsh":
+            config = next(row["config"] for row in _launch_patch(launch, tmp_path) if row["id"] == "llm-deepseek")
+            base = config["baseURL"]
+        else:
+            base = launch.runtime._descriptor(launch, tmp_path / "prompt.md").base_url
+        # DSH's messagesApiRoot adds /v1 only when the configured root lacks it.
+        base = base.rstrip("/")
+        return base + ("" if base.endswith("/v1") else "/v1") + "/messages"
+
+    async def check():
+        async with FakeModelAPI([ResponseScript(events=events()) for _ in range(2)],
+                                api_key="test-model-key") as upstream:
+            launch = launch_for(case, monkeypatch, role=role,
+                                base_url=upstream.base_url.removesuffix("/v1") + base_path)
+            if case == "dsh":
+                mcp = tmp_path / "mcp.json"
+                mcp.write_text(json.dumps({"mcpServers": {"looper": {"command": "test-bridge", "env": {
+                    "LOOPER_AGENT_URL": "http://127.0.0.1:12346", "LOOPER_AGENT_TOKEN": "test-token"}}}}))
+                launch = replace(launch, library=AgentLibrary(mcp_config=str(mcp)))
+            direct_url = messages_url(launch)
+            sink = Sink()
+            proxy = Proxy(tmp_path, sink=sink)
+            port = await proxy.start()
+            owner = control.ProxyControl(tmp_path, "", enabled=True)
+            monkeypatch.setattr(owner, "_health", AsyncMock(return_value=True))
+            monkeypatch.setattr(owner, "_state", lambda: {"port": port})
+            try:
+                routed = await owner.attach(launch, agent_id=role.value, task_id=None, reuse=True)
+                assert isinstance(routed.llmrec, LlmrecRoute)
+                assert routed.binding_sha256 == launch.binding_sha256
+                body = {"model": launch.model, "messages": [{"role": "user", "content": "Hello"}]}
+                async with httpx.AsyncClient(trust_env=False, timeout=3) as client:
+                    for url in (direct_url, messages_url(routed)):
+                        response = await client.post(url, json=body,
+                                                     headers={"Authorization": "Bearer test-model-key"})
+                        assert response.status_code == 200
+                capture = await captured(sink)
+                assert [request.path for request in upstream.requests] == [expected_path, expected_path]
+                assert all(request.body == body for request in upstream.requests)
+                assert capture.path == expected_path
+                assert capture.record_gap is None
+                assert messages_url(launch) == direct_url
+                assert await owner.attach(launch, agent_id=role.value, task_id=None, reuse=True) == routed
+            finally:
+                await proxy.close(grace_s=0)
+
+    asyncio.run(asyncio.wait_for(check(), timeout=10))
 
 
 @pytest.mark.parametrize("initial,expected", [

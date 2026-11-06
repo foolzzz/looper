@@ -354,7 +354,9 @@ class DshRuntime(RuntimeAdapter):
         return bind_provider(provider, model, effort)
 
     def llmrec_upstream(self, launch: Launch) -> str | None:
-        return validate_provider(launch.profile.provider, launch.model, launch.effort).base_url
+        base_url = validate_provider(launch.profile.provider, launch.model, launch.effort).base_url
+        # DSH adds /v1 to the recording route URL; keep it only once upstream.
+        return base_url.rstrip("/").removesuffix("/v1")
 
     def isolation_args(self, cwd: str | Path) -> list[str]:
         return []  # Isolation is the command's private paths and immutable patch.
