@@ -1,7 +1,6 @@
 """Gateway contracts at the pure codec boundary; no provider or account is used."""
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
-from email.utils import format_datetime
+from datetime import datetime
 import hashlib
 import json
 
@@ -354,11 +353,22 @@ def test_error_mapping(upstream, code, status, error_type):
         if code == 'context_length_exceeded' else 'provider message')
 
 
-@pytest.mark.parametrize('retry', ['7', format_datetime(datetime.now(timezone.utc) + timedelta(seconds=45), usegmt=True)])
-def test_retry_after_seconds(retry):
+@pytest.mark.parametrize('retry,expected', [
+    ('7', 7),
+    ('Thu, 01 Jan 2026 00:00:45 GMT', 45),
+    ('Thu, 01 Jan 2026 00:00:00 GMT', 0),
+    ('Wed, 31 Dec 2025 23:59:59 GMT', 0),
+])
+def test_retry_after_seconds(retry, expected, monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 1, 1, microsecond=250000, tzinfo=tz)
+
+    monkeypatch.setattr('looper.agents.llmrec.translate.datetime', FixedDatetime)
     _, headers, _ = error_response(429, b'not json', {'Retry-After': retry}, DIALECTS[ChatDialect.GENERIC])
     assert headers['retry-after'].isdigit()
-    assert int(headers['retry-after']) == 7 if retry == '7' else 0 < int(headers['retry-after']) <= 45
+    assert int(headers['retry-after']) == expected
 
 
 def test_unknown_model_and_invalid_body():
