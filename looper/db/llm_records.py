@@ -485,6 +485,10 @@ EQUIVALENT = ("COALESCE(metadata->>'accounting_basis' = 'subscription_equivalent
               "COALESCE(metadata->'profile', metadata->'agent')->'provider'->>'auth' = 'oauth', false)")
 
 
+# A hit ratio needs the whole prompt denominator from the same runs as its cache reads.
+_CACHE_USAGE_REPORTED = "(input_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL AND cache_creation_tokens IS NOT NULL)"
+
+
 async def task_costs(
     task_ids: list[str],
     *,
@@ -500,6 +504,8 @@ async def task_costs(
     (``EQUIVALENT``), and ``provider_price_runs`` the others Looper priced at
     their provider's prices.
     ``by_model`` splits those runs and tokens by model, with costs adding up to ``cost_usd``.
+    ``cache_reported_runs`` and ``cache_missing_runs`` count complete and incomplete prompt usage;
+    ``cache_hit_read_tokens`` / ``cache_hit_prompt_tokens`` uses only the complete runs, unlike token totals.
     ``manager_by_model`` splits the Manager's turns about the task by model, not in its cost or its spend cap.
     Money is rounded to a millionth of a dollar per group and summed exactly, so the totals, the roles and the
     models agree.
@@ -521,6 +527,11 @@ async def task_costs(
                COALESCE(sum(output_tokens), 0)::bigint AS output_tokens,
                COALESCE(sum(cache_read_tokens), 0)::bigint AS cache_read_tokens,
                COALESCE(sum(cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
+               count(*) FILTER (WHERE {_CACHE_USAGE_REPORTED}) AS cache_reported_runs,
+               count(*) FILTER (WHERE NOT {_CACHE_USAGE_REPORTED}) AS cache_missing_runs,
+               COALESCE(sum(input_tokens::bigint + cache_read_tokens + cache_creation_tokens)
+                   FILTER (WHERE {_CACHE_USAGE_REPORTED}), 0)::bigint AS cache_hit_prompt_tokens,
+               COALESCE(sum(cache_read_tokens) FILTER (WHERE {_CACHE_USAGE_REPORTED}), 0)::bigint AS cache_hit_read_tokens,
                round(sum(cost_usd::numeric), 6) AS cost_usd
         FROM llm_records
         WHERE task_id = ANY($1::text[]) AND ({_TASK_ROLE} IS NOT NULL OR {_ROLE_FILTERS['manager']})
@@ -547,7 +558,8 @@ async def task_costs(
             role["runs"] += row["runs"]
         models = cost["manager_by_model" if manager else "by_model"]
         counts = ("runs", "running", "unpriced_runs", "interrupted_runs", "input_tokens", "output_tokens",
-                  "cache_read_tokens", "cache_creation_tokens")
+                  "cache_read_tokens", "cache_creation_tokens", "cache_reported_runs", "cache_missing_runs",
+                  "cache_hit_prompt_tokens", "cache_hit_read_tokens")
         model = models.setdefault(row["model"], {"model": row["model"], "cost_usd": None,
                                                 **dict.fromkeys(counts, 0)})
         for key in counts:

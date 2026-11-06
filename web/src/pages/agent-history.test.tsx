@@ -18,14 +18,12 @@ function render(mode?: "append" | "replace", metadata: object = {}, extra: objec
 
 describe("run system prompt mode", () => {
   it.each([
-    [100, 80, 20, "40%"], [100, 0, 0, "0%"], [0, 0, 0, null], [100, null, 20, null],
+    [100, 80, 20, "40%"], [100, 0, 0, "0%"], [0, 0, 0, "–"], [100, null, 20, "–"], [100, undefined, undefined, "–"],
   ])("shows run cache hits from recorded prompt tokens", (input_tokens, cache_read_tokens, cache_creation_tokens, hit) => {
     const html = render(undefined, {}, { input_tokens, cache_read_tokens, cache_creation_tokens });
-    if (hit === null) expect(html).not.toContain("cache hit");
-    else {
-      expect(html).toContain(`cache hit ${hit}`);
-      expect(html).toContain('title="cache_read / (input + cache_read + cache_write)"');
-    }
+    expect(html).toContain(`cache hit ${hit}`);
+    expect(html).toContain(hit === "–" && input_tokens !== 0
+      ? "this runtime does not report cache usage" : "cache_read / (input + cache_read + cache_write)");
   });
 
   it("shows a replaced default badge with an explanation for replace runs", () => {

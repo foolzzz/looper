@@ -92,6 +92,12 @@ export interface TaskModelCost {
   output_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+  /** Complete prompt usage vs runs missing any prompt token count. */
+  cache_reported_runs: number;
+  cache_missing_runs: number;
+  /** Cache hit numerator and denominator, summed only over complete runs. */
+  cache_hit_read_tokens: number;
+  cache_hit_prompt_tokens: number;
   /** Null when none of the model's runs has a cost. */
   cost_usd: number | null;
 }

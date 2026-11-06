@@ -23,7 +23,7 @@ import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
 import { ContextUsagePanel } from "@/components/context-usage";
 import { LlmRequestExport } from "@/components/llm-request-export";
-import { cacheHit, formatHit, CACHE_HIT_TITLE } from "@/lib/cache-hit";
+import { cacheHit, formatHit, cacheHitTitle, CACHE_HIT_TITLE } from "@/lib/cache-hit";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { cn, formatBytes } from "@/lib/utils";
 import { compactionChange, formatTokens, formatUsd, runCostLabel } from "@/lib/usage";
@@ -954,7 +954,9 @@ function RunUsage({ record }: { record: LlmRecord }) {
           ))}
         </span>
       )}
-      {hit !== null && <span className="font-mono text-muted-foreground" title={CACHE_HIT_TITLE}>cache hit {formatHit(hit)}</span>}
+      <span className="font-mono text-muted-foreground" title={cacheHitTitle(
+        record.input_tokens != null && record.cache_read_tokens != null && record.cache_creation_tokens != null ? 1 : 0,
+      )}>cache hit {formatHit(hit)}</span>
       {record.context_tokens != null && (
         <span
           className="font-mono text-muted-foreground"

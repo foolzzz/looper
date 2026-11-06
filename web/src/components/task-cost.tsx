@@ -1,4 +1,4 @@
-import { cacheHit, formatHit, CACHE_HIT_TITLE } from "@/lib/cache-hit";
+import { formatHit, cacheHitTitle } from "@/lib/cache-hit";
 import type { TaskCost, TaskRole } from "@/lib/api";
 import { costBasis, costCaveats, formatTokens, formatUsd, modelRunCaveats } from "@/lib/usage";
 
@@ -66,6 +66,8 @@ export function TaskCostBreakdown({ cost }: { cost: TaskCost }) {
                   <tbody key={group} className={group ? "border-t border-border" : undefined}>
                     {rows.map((row, i) => {
                       const caveats = modelRunCaveats(row);
+                      const hit = row.cache_reported_runs > 0 && row.cache_hit_prompt_tokens > 0
+                        ? row.cache_hit_read_tokens / row.cache_hit_prompt_tokens : null;
                       return (
                         <tr key={i}>
                           <td className="py-1 pr-3">
@@ -84,8 +86,8 @@ export function TaskCostBreakdown({ cost }: { cost: TaskCost }) {
                               {formatTokens(value)}
                             </td>
                           ))}
-                          <td className="py-1 pr-3 text-right font-mono tabular-nums" title={CACHE_HIT_TITLE}>
-                            {formatHit(cacheHit(row.input_tokens, row.cache_read_tokens, row.cache_creation_tokens))}
+                          <td className="py-1 pr-3 text-right font-mono tabular-nums" title={cacheHitTitle(row.cache_reported_runs, row.cache_missing_runs)}>
+                            {formatHit(hit)}
                           </td>
                           <td className="py-1 pr-3 text-right font-mono tabular-nums">{formatUsd(row.cost_usd)}</td>
                         </tr>

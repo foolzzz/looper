@@ -6,6 +6,7 @@ import { modelRunCaveats } from "@/lib/usage";
 
 const MODEL: TaskModelCost = {
   model: "claude-opus-4-1", runs: 2, running: 0, unpriced_runs: 0, interrupted_runs: 0,
+  cache_reported_runs: 2, cache_missing_runs: 0, cache_hit_prompt_tokens: 1_235_617, cache_hit_read_tokens: 1000,
   input_tokens: 1_234_567, output_tokens: 20, cache_read_tokens: 1000, cache_creation_tokens: 50, cost_usd: 0.75,
 };
 const COST: TaskCost = {
@@ -16,7 +17,8 @@ const COST: TaskCost = {
              { ...MODEL, model: "deepseek-flash", runs: 1, input_tokens: 7, cost_usd: null,
                      unpriced_runs: 1, interrupted_runs: 1 }],
   manager_by_model: [{ ...MODEL, model: "claude-haiku-4-5", runs: 1, input_tokens: 30, output_tokens: 4,
-                       cache_read_tokens: 50, cache_creation_tokens: 6, cost_usd: 0.02 }],
+                       cache_read_tokens: 50, cache_creation_tokens: 6, cache_reported_runs: 1,
+                       cache_hit_prompt_tokens: 86, cache_hit_read_tokens: 50, cost_usd: 0.02 }],
 };
 
 const text = (html: string) => html.replace(/<[^>]+>/g, "").replace(/&#x27;/g, "'");
@@ -44,13 +46,32 @@ describe("TaskCostBreakdown", () => {
     expect(managerCells.slice(1)).toEqual(["1", "30", "4", "50", "6", "58%", "$0.0200"]);
   });
 
-  it.each([[10, 80, 10, "80%"], [0, 0, 0, "–"]])(
+  it.each([[10, 80, 10, "80%"], [100, 0, 0, "0%"], [0, 0, 0, "–"]])(
     "adds model cache hits with the same prompt-token denominator", (input_tokens, cache_read_tokens, cache_creation_tokens, expected) => {
       const html = renderToStaticMarkup(<TaskCostBreakdown cost={{ ...COST, manager_by_model: [],
-        by_model: [{ ...MODEL, input_tokens, cache_read_tokens, cache_creation_tokens }] }} />);
+        by_model: [{ ...MODEL, input_tokens, cache_read_tokens, cache_creation_tokens,
+          cache_hit_prompt_tokens: input_tokens + cache_read_tokens + cache_creation_tokens,
+          cache_hit_read_tokens: cache_read_tokens }] }} />);
       const cells = [...html.matchAll(/<td[^>]*>(.*?)<\/td>/g)].map((m) => text(m[1]));
       expect(cells.at(-2)).toBe(expected);
     });
+
+  it.each([false, true])("shows missing and partial cache usage for each model group (Manager: %s)", (manager) => {
+    const rows = [
+      { ...MODEL, model: "no-cache", input_tokens: 900, cache_read_tokens: 0, cache_creation_tokens: 0,
+        cache_reported_runs: 0, cache_missing_runs: 2, cache_hit_prompt_tokens: 0, cache_hit_read_tokens: 0 },
+      { ...MODEL, model: "partial-cache", input_tokens: 910, cache_read_tokens: 580, cache_creation_tokens: 10,
+        cache_reported_runs: 1, cache_missing_runs: 1, cache_hit_prompt_tokens: 100, cache_hit_read_tokens: 80 },
+    ];
+    const html = renderToStaticMarkup(<TaskCostBreakdown cost={{ ...COST,
+      by_model: manager ? [] : rows, manager_by_model: manager ? rows : [] }} />);
+    const hits = [...html.matchAll(/<td([^>]*)>(.*?)<\/td>/g)].filter((_, i) => i % 8 === 6);
+    expect(text(hits[0][2])).toBe("–");
+    expect(hits[0][1]).toContain("this runtime does not report cache usage");
+    expect(text(hits[1][2])).toBe("80%");
+    expect(hits[1][1]).toContain("partial");
+    expect(hits[1][1]).toContain("1 of 2 runs");
+  });
 
   it("omits Manager rows when none of its turns belongs to the task", () => {
     expect(text(renderToStaticMarkup(<TaskCostBreakdown cost={{ ...COST, manager_by_model: [] }} />)))

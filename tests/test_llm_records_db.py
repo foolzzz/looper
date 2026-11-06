@@ -227,6 +227,8 @@ def test_a_tasks_cost_is_the_sum_of_its_planner_worker_and_reviewer_runs() -> No
         assert t1["manager_by_model"] == [
             {"model": None, "runs": 1, "running": 0, "unpriced_runs": 0, "interrupted_runs": 0,
              "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+             "cache_reported_runs": 0, "cache_missing_runs": 1,
+             "cache_hit_prompt_tokens": 0, "cache_hit_read_tokens": 0,
              "cost_usd": 9.0},
         ]
         assert sum(r["runs"] for r in t1["by_model"]) == t1["runs"]
@@ -280,15 +282,23 @@ def test_a_tasks_cost_by_model_counts_its_runs_tokens_and_the_managers_turns_abo
         assert t1["by_model"] == [
             {"model": "claude-opus-4-1", "runs": 2, "running": 0, "unpriced_runs": 0, "interrupted_runs": 0,
              "input_tokens": 110, "output_tokens": 25, "cache_read_tokens": 1000, "cache_creation_tokens": 50,
+             "cache_reported_runs": 2, "cache_missing_runs": 0,
+             "cache_hit_prompt_tokens": 1160, "cache_hit_read_tokens": 1000,
              "cost_usd": 0.75},
             {"model": "claude-haiku-4-5", "runs": 2, "running": 0, "unpriced_runs": 1, "interrupted_runs": 1,
              "input_tokens": 8, "output_tokens": 1, "cache_read_tokens": 1, "cache_creation_tokens": 1,
+             "cache_reported_runs": 2, "cache_missing_runs": 0,
+             "cache_hit_prompt_tokens": 10, "cache_hit_read_tokens": 1,
              "cost_usd": 0.01},
             {"model": "deepseek-flash", "runs": 2, "running": 0, "unpriced_runs": 2, "interrupted_runs": 0,
              "input_tokens": 4_000_000_000, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+             "cache_reported_runs": 2, "cache_missing_runs": 0,
+             "cache_hit_prompt_tokens": 4_000_000_000, "cache_hit_read_tokens": 0,
              "cost_usd": None},
             {"model": None, "runs": 1, "running": 1, "unpriced_runs": 0, "interrupted_runs": 0,
              "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+             "cache_reported_runs": 0, "cache_missing_runs": 1,
+             "cache_hit_prompt_tokens": 0, "cache_hit_read_tokens": 0,
              "cost_usd": None},
         ]
         assert all(isinstance(row[key], int) for row in t1["by_model"] for key in (
@@ -296,6 +306,8 @@ def test_a_tasks_cost_by_model_counts_its_runs_tokens_and_the_managers_turns_abo
         assert t1["manager_by_model"] == [
             {"model": "claude-haiku-4-5", "runs": 1, "running": 0, "unpriced_runs": 0, "interrupted_runs": 0,
              "input_tokens": 30, "output_tokens": 4, "cache_read_tokens": 50, "cache_creation_tokens": 6,
+             "cache_reported_runs": 1, "cache_missing_runs": 0,
+             "cache_hit_prompt_tokens": 86, "cache_hit_read_tokens": 50,
              "cost_usd": 0.02},
         ]
         assert t1["cost_usd"] == 0.76
@@ -305,10 +317,44 @@ def test_a_tasks_cost_by_model_counts_its_runs_tokens_and_the_managers_turns_abo
         assert costs["t2"]["by_model"] == [
             {"model": "claude-opus-4-1", "runs": 1, "running": 0, "unpriced_runs": 0, "interrupted_runs": 0,
              "input_tokens": 42, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0,
+             "cache_reported_runs": 0, "cache_missing_runs": 1,
+             "cache_hit_prompt_tokens": 0, "cache_hit_read_tokens": 0,
              "cost_usd": 1.0},
         ]
 
     run_db(test, max_size=2)
+
+
+@pytest.mark.parametrize("tokens, reported, prompt, read", [
+    ([(100, None, None)], 0, 0, 0),
+    ([(10, 80, 10), (900, None, None)], 1, 100, 80),
+    ([(10, 80, 10), (100, 0, 0)], 2, 200, 80),
+    ([(10, 80, 10), (900, 500, None), (900, None, 500)], 1, 100, 80),
+    ([(None, 80, 10)], 0, 0, 0),
+    ([(0, 0, 0)], 1, 0, 0),
+])
+def test_model_cache_hit_counts_only_runs_with_complete_usage(tokens, reported, prompt, read):
+    from looper.db import llm_records
+
+    async def test(pool):
+        for agent in ("planner-cache", "worker-cache", "reviewer-cache", "manager"):
+            for input_tokens, cache_read_tokens, cache_creation_tokens in tokens:
+                record_id = await llm_records.start_record(agent_id=agent, task_id="cache-task", pool=pool)
+                await llm_records.finish_record(record_id, model="cache-model", status="completed",
+                    input_tokens=input_tokens, cache_read_tokens=cache_read_tokens,
+                    cache_creation_tokens=cache_creation_tokens, pool=pool)
+        cost = (await llm_records.task_costs(["cache-task"], pool=pool))["cache-task"]
+        for group, multiplier in (("by_model", 3), ("manager_by_model", 1)):
+            row, = cost[group]
+            assert row["cache_reported_runs"] == reported * multiplier
+            assert row["cache_missing_runs"] == (len(tokens) - reported) * multiplier
+            assert row["cache_hit_prompt_tokens"] == prompt * multiplier
+            assert row["cache_hit_read_tokens"] == read * multiplier
+            # Totals still include the runs excluded from the hit ratio.
+            for key, index in (("input_tokens", 0), ("cache_read_tokens", 1), ("cache_creation_tokens", 2)):
+                assert row[key] == sum(counts[index] or 0 for counts in tokens) * multiplier
+
+    run_db(test, timeout=15, max_size=2)
 
 
 def test_task_cost_dialog_seed_stays_fixed_when_the_manager_replies() -> None:
