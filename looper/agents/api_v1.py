@@ -28,6 +28,7 @@ OK = "200 OK"
 ACCEPTED = "202 Accepted"
 
 STATUS: dict[ErrorCode, str] = {
+    ErrorCode.INTERNAL: "500 Internal Server Error",
     ErrorCode.INVALID: "400 Bad Request",
     ErrorCode.UNAUTHORIZED: "401 Unauthorized",
     ErrorCode.FORBIDDEN: "403 Forbidden",

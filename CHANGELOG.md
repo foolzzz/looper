@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.98] - 2026-11-06
+
+### Added
+
+- **Dashboard viewer and JSONL export for recorded model requests.** Each run card on an agent's history page gets a "Model requests" section with a request viewer (system prompt, tools, messages with a divider at the first new message, parameters, headers with redacted values marked, assembled response, gaps and outcomes); requests after the turn ended appear under the run they follow. Settings → Request recording asks for confirmation before recording is turned on and shows the proxy port and counters. New operator-only `llm_requests.export` (at most 50 full requests per page, `after_id`/`next_after_id` cursors; task, agent, record or `since` scope) and `loopercli llm-requests export --out FILE`, which writes a header line and one request per line as JSONL (mode 0600, never overwrites a file); the dashboard offers the same export per run, agent and task. `llm_requests.get` gains `new_from_index` and `route`. No database change. ([#1139](https://github.com/foolzzz/looper/pull/1139))
+
+### Changed
+
+- A model request whose stored body part is missing now fails with `internal` (HTTP 500) naming the request, instead of returning a partial body. ([#1139](https://github.com/foolzzz/looper/pull/1139))
+
 ## [2.14.97] - 2026-11-06
 
 ### Added

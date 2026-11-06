@@ -168,7 +168,8 @@ async def v1_api(tmp_path, pool):
     server._client_ops = ClientOps(Platform(bus=bus, task_router=router, runtime_root=tmp_path))
     await server.start()
     try:
-        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{server._port}", timeout=10) as transport:
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{server._port}", timeout=10,
+                                     limits=httpx.Limits(max_keepalive_connections=0)) as transport:
             async def call(action, body=None, *, client=False):
                 path = action if action.startswith("/") else "/api/v1/" + action.replace(".", "/")
                 response = await transport.post(path, json=body or {}, headers={

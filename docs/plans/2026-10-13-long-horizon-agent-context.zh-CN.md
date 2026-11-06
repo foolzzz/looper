@@ -556,7 +556,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
-| 2026-11-05 | 模型请求录制扩展（本分支）：仅录制原生 Claude Code 的 Manager、Planner、Worker、Reviewer、consult（含自主轮次与 handoff）和进程内 API 运行时；常驻 agent 复用路由、逐轮绑定，consult 独立收尾，间隙请求保留 `after_record_id`。Codex、OMP、Pi CLI/runner、DSH CLI/runner 根据 endpoint URL 决定请求细节，代理改写会改变请求，因此保留原始启动配置与环境并标记 `skipped/not_covered`；Grok、Cursor Agent 与 TTADK 启动器也不录制，各附明确原因。真实 Claude 订阅 Manager 的 teammate 请求与跨轮 PID 尚未验证；控制台、Telegram、Lark 和 CLI 沿用现有录制设置与查询入口。 |
+| 2026-11-05 | 模型请求查看与 JSONL 导出（本分支未合入）：扩展录制设置确认和代理状态，历史页完整查看请求与响应，服务端计算新增消息位置，支持 run、agent、task 三级导出且维持 operator-only。定向 pytest 272 项、Vitest 58 项与前端构建通过；独立数据库、真实代理与服务的浏览器回读完成，1280/768 px 截图及 CLI/看板 4 行 JSONL 逐条对照通过。真实订阅 Worker 与 Codex 管家、规划者任务因隔离环境无可用登录未运行。 |
 | 2026-11-05 | Agent Profile 表单先选模型名和协议，再选提供该模型的启用 Provider，最后选择兼容 Runtime；显示不兼容原因并在需要时自动切换，保留编辑中的停用 Provider 模型及原有保存契约。 |
 | 2026-11-04 | Provider 保存后与按需获取模型列表，以已存密钥按格式和 URL 去重请求；控制台逐项确认后原子批量添加，未设置且无内置价格的字段默认 0，仅作用于 `models.add_many`。 |
 | 2026-11-04 | 聊天绑定可配置最多 100 个额外发送者，仅在精确 bot/chat 对中准入，与路由共用已提交快照；同 Manager 省略名单保留，移动时省略则清空，支持 Settings → Managers 与生成式 CLI。 |

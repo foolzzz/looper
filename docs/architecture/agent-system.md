@@ -1991,8 +1991,7 @@ record of its own. Known gaps: a teammate's model requests are not in the
 stream (its assistant messages are, with a `parent_tool_use_id`), so the soft
 per-run cap below does not see its tokens before a result reports them.
 [Model request recording](#model-request-recording-llmrec) captures those
-requests individually for covered launches of every role when enabled; a request
-that outlives its lead's turn keeps `after_record_id` instead of a turn binding.
+requests individually for covered Worker and Reviewer launches when enabled.
 A teammate does not get the agent's
 `--append-system-prompt-file` (the harness, role, project, task and contract
 layers).
@@ -3430,70 +3429,82 @@ So:
 
 ### Model request recording (`llmrec`)
 
-`looper/agents/llmrec` records model HTTP exchanges through a loopback reverse
-proxy for native Claude Code launches of every role: Manager, Planner, Worker,
-Reviewer and consult, including autonomous and handoff turns. The in-process
-API runtime is also recorded. Claude Code API-key runs and API-runtime runs
-are eligible when recording is enabled; Claude subscription runs also require
-the OAuth opt-in.
-
-| Runtime | API key | Login | Endpoint and coverage |
-|---|---|---|---|
-| Claude Code | Yes, official and compatible providers | Yes, with the Claude subscription opt-in | `ANTHROPIC_BASE_URL`; subagents, in-process teammates, background models and compaction requests share the route. |
-| Codex | No | No | Picks request details from the endpoint URL; proxy routing would change its requests. |
-| OMP | No | Not applicable | Picks request details from the endpoint URL; proxy routing would change its requests. |
-| Pi CLI / runner | No | Not applicable | Picks request details from the endpoint URL; proxy routing would change its requests. |
-| DSH CLI / runner | No | Not applicable | Picks request details from the endpoint URL; proxy routing would change its requests. |
-| API runtime | Yes | Not applicable | `LOOPER_LLMREC_BASE_URL` overrides the session target; descriptor and recorded provider host retain the real upstream. |
-| Grok | Not applicable | No | No known endpoint override. |
-| Cursor Agent | Not applicable | No | Cursor's servers make the model requests. |
-
-Codex, OMP, Pi and DSH keep their original launch configuration and environment
-with recording on or off. Their URL-based provider detection controls request
-fields such as `store`, token limits and reasoning formats, as well as `/v1`
-handling and Azure detection; replacing the URL with loopback would break
-compatible providers. Their runs are marked `skipped/not_covered` with detail
-`<runtime> picks request details from the endpoint URL; recording through the
-proxy would change its requests` (`pi` and `dsh` also identify their runners).
-
-TTADK launchers are excluded because TTADK manages its own provider. When
-recording is enabled, every excluded launch has `llmrec.state=skipped`,
-`reason=not_covered` and a detail explaining its runtime/authentication
-limitation. This does not prevent the run.
+`looper/agents/llmrec` records the HTTP exchanges of newly launched Claude
+Code Workers and Reviewers, including their subagents and teammates, through
+a loopback reverse proxy. Manager and Planner turns, other runtimes and
+TTADK launches are not covered. API-key runs are eligible when recording is
+enabled; Claude subscription runs also require the OAuth opt-in. Runs started
+before a settings change keep their existing route.
 
 - **Settings and access.** `llmrec.enabled` and `llmrec.include_oauth` are
   both off by default. Settings → Request recording and the operator-only
   `llmrec_settings.get` / `llmrec_settings.update` operations control them.
-  Until the viewer is available, read captured exchanges with
-  `loopercli llm-requests list/get` or the operator API's `llm_requests.list` /
-  `llm_requests.get`; the list contains metadata and the detail reconstructs the body.
-  These operations use `POST /api/v1/<domain>/<action>` and are not agent tools.
-- **Resident routes and turn attribution.** A Manager or Planner keeps one route
-  while its upstream, runtime type, provider id and model remain unchanged.
-  Changing any of them ends the old route and creates a new one; after a
-  control-plane restart the in-memory route cache starts fresh. Stable route
-  URLs keep generated configuration, command signatures and resident processes
-  stable across turns, including an API-runtime Manager restarted in process.
-  The recorder binds each turn's record id before submitting its input, and
-  unbinds when the turn closes. The proxy stamps the binding when it receives
-  the request. Consults each have their own route, ended with their whole-process
-  record, so concurrent consults stay separate.
-  Requests **between turns**, including a teammate still running after the lead
-  finishes or an autonomous turn's first request before binding, have no
-  `record_id` and retain the preceding `after_record_id`; they are never silently
-  assigned to the following turn. Routing is kept out of provider bindings,
-  so `binding_sha256` still describes the actual provider. Every routed child bypasses environment proxies for `127.0.0.1`.
-- **Subagents and teammates.** Covered launches pass the route through their
-  shared environment, including Claude Code's in-process teammates and subagents;
-  their model requests are recorded under the lead's currently bound turn or
-  with `after_record_id` between turns. The real Claude subscription CLI path
-  has confirmed loopback forwarding. A resident Manager teammate request with
-  a distinct system prompt has not yet been verified on the real path; the
-  environment propagation alone is not that evidence. Tests with a local
-  synthetic provider cover Claude Code Manager and Planner route reuse and turn
-  binding, Worker and Reviewer requests, consults, and API-runtime Manager
-  requests, handoffs and autonomous turns. Disabling recording leaves subsequent
-  runs without an `llmrec` metadata key.
+  Turning recording on requires confirmation that prompts, code, tool output
+  and model replies will be stored. Turning it off keeps existing captures;
+  either change applies to future launches, and running agents keep their
+  existing route until restart. The page also shows the proxy state
+  (`running`, `stopped`, `unavailable` or `outdated`), port, requests, recorded
+  requests, dropped requests and write errors. Captures, settings and exports
+  remain operator-only: API-client tokens receive 403, these operations are
+  not agent tools, and nothing is sent to Telegram or Lark.
+- **Dashboard viewer.** Open a run on the agent's history page, then expand
+  **Model requests**. Rows show timing, model, outcome, token usage, byte sizes
+  and capture gaps; requests received after a turn ended appear separately.
+  Running records refresh every two seconds and stop polling when they end.
+  A skipped recording shows its reason. Selecting a row opens an inline
+  viewer for system text, tools, messages, parameters and headers, followed
+  by the assembled response, raw response when retained, and route and capture
+  facts. Redacted header values stay visibly marked; capture gaps explain
+  what was not stored. The server computes `new_from_index` from request-part
+  hashes against the previous request on the same route, ordered by
+  `started_at` then `id`. It marks the first changed or appended message in
+  `messages` (Anthropic or Chat) or `input` (Responses); it is null for the
+  first request or an unsplit body. The dashboard and export use this same
+  comparison. A missing stored part fails the request with its id instead of
+  returning a partial body.
+- **Export.** Use **Export JSONL** on a run, or **Export model requests** on
+  an agent's history or a task's Agents tab. Dashboard exports show progress
+  and can be cancelled before download. The CLI streams pages with constant
+  memory and creates a file readable only by its owner (mode 0600):
+
+  ```sh
+  loopercli llm-requests export --record 123 --out run.jsonl \
+    --operator-token-file operator-token --url http://127.0.0.1:8798
+  ```
+
+  Choose one of `--record`, `--agent` or `--task`, optionally bounded by
+  `--since` and `--until`; `--since` can also select a time window without a
+  scope. `--out -` writes JSONL to stdout; the request count goes to stderr.
+  The operator API's `llm_requests.export` uses ascending request ids and
+  pages of at most 50 rows, with `after_id` / `next_after_id` cursors. At
+  least one scope or `since` is required. List and detail remain available
+  through `llm_requests.list` / `llm_requests.get`. All use
+  `POST /api/v1/<domain>/<action>`.
+
+  The first JSONL line is a header: `type=llmrec_export` identifies the file,
+  `format=1` versions its layout, `exported_at` is the export timestamp,
+  `filter` contains the scope and time bounds, and `redaction` states that
+  header values outside the allowlist were never stored and bodies are
+  complete unless `record_gap` says otherwise. Every subsequent line is one
+  complete detail result with these fields:
+
+  | Fields | Meaning |
+  | --- | --- |
+  | `id`, `route_id`, `proxy_instance`, `proxy_seq` | Capture identity and its originating proxy sequence. |
+  | `record_id`, `after_record_id`, `agent_id`, `task_id` | Run and owner attribution; `after_record_id` identifies the previous turn for requests received between turns. |
+  | `started_at`, `method`, `path`, `kind`, `model`, `stream` | Request time, endpoint, request category, model and streaming mode. |
+  | `request_headers`, `response_headers` | Stored headers, with absent credential and non-allowlisted values explicitly represented as redacted. |
+  | `request_body`, `response_body`, `response_raw` | Reconstructed request JSON, assembled response and retained raw response text when present. |
+  | `new_from_index` | First differing message index, computed by the server as described above. |
+  | `request_bytes`, `response_bytes`, `request_sha256`, `body_sanitized` | Original byte counts and request hash; the flag identifies body normalization. |
+  | `status`, `outcome`, `error`, `record_gap` | HTTP status, completion or failure, diagnostic error and explicit capture omission. |
+  | `ttfb_ms`, `duration_ms` | Time to first response byte and total duration in milliseconds. |
+  | `input_tokens`, `cache_read_tokens`, `cache_write_tokens`, `output_tokens`, `usage` | Token counters and the provider's usage object. |
+  | `route` | Route `id`, `agent_id`, `task_id`, `step_id`, `role`, `runtime_type`, `provider_id`, `protocol`, `model`, `upstream_host` and `upstream_path`. |
+
+  Bodies are exported without additional filtering. The header and each
+  request's `outcome` / `record_gap` expose omissions; no content is silently
+  removed during export.
 - **Recorded content.** Each exchange includes its method, path with redacted
   query parameters, redacted headers, request JSON (system prompt, messages, tools and tool results),
   assembled JSON/SSE response, usage, status, timing and failure or capture
@@ -3530,10 +3541,6 @@ limitation. This does not prevent the run.
   URLs and incompatible retained proxy route formats are marked `skipped`
   with their reason. A proxy lost during an already routed run can interrupt
   its request until recovery; launch-time bypass does not reroute it mid-run.
-  A failed health check between turns gives the next launch a bypass marker.
-  Runtimes whose command names the generated configuration restart when that
-  command changes; an existing Claude Code resident keeps its old URL and
-  relies on the proxy recovering on the same port.
 - **Redaction boundary.** Credential headers, cookies, unknown header values
   and sensitive query parameters are redacted before storage. Credentials in
   upstream URLs are refused for recording. Bodies are not secret-scrubbed:
