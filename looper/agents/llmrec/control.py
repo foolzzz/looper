@@ -147,7 +147,7 @@ class ProxyControl:
 
     def _has_active_routes(self) -> bool:
         return any(route and not route.ended_at for route in (
-            RouteFile.read(path) for path in (self.runtime_root / ROUTES_DIR).glob("*.json")))
+            RouteFile.read(path, allow_legacy=True) for path in (self.runtime_root / ROUTES_DIR).glob("*.json")))
 
     async def _owns_process(self, state) -> bool:
         current = self._state()
@@ -285,7 +285,7 @@ class ProxyControl:
             self.gateway_port = state["port"]
             await system_settings.put_settings({"gateway.port": str(self.gateway_port)})
         for path in (self.runtime_root / ROUTES_DIR).glob("*.json"):
-            route = RouteFile.read(path)
+            route = RouteFile.read(path, allow_legacy=True)
             if route and route.record_id not in kept:
                 replace(route, last_record_id=route.record_id if route.record_id is not None else route.last_record_id,
                         record_id=None,
@@ -507,7 +507,7 @@ class ProxyControl:
         if not ROUTE_ID.fullmatch(route_id):
             raise ValueError("invalid request recording route")
         path = self.runtime_root / ROUTES_DIR / f"{route_id}.json"
-        route = RouteFile.read(path)
+        route = RouteFile.read(path, allow_legacy=True)
         if route is None:
             raise ValueError("request recording route is missing")
         # A replaced resident route may still serve its final handoff turn.
@@ -515,7 +515,7 @@ class ProxyControl:
 
     def release(self, record_id, *, end_route):
         for path in (self.runtime_root / ROUTES_DIR).glob("*.json"):
-            route = RouteFile.read(path)
+            route = RouteFile.read(path, allow_legacy=True)
             if route and route.record_id == record_id:
                 replace(route, last_record_id=record_id, record_id=None,
                         ended_at=(_now() if end_route else route.ended_at)).write(path)

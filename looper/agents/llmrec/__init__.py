@@ -83,10 +83,12 @@ class RouteFile:
     tls_env: dict[str, str] | None = None
 
     @classmethod
-    def read(cls, path) -> RouteFile | None:
+    def read(cls, path, *, allow_legacy=False) -> RouteFile | None:
         try:
             data = json.loads(Path(path).read_text())
-            if not isinstance(data, dict) or data.get('format') != ROUTE_FORMAT:
+            # Keep lifecycle ownership across upgrades without accepting old routes for new requests.
+            if (not isinstance(data, dict)
+                    or data.get('format') not in ((3, ROUTE_FORMAT) if allow_legacy else (ROUTE_FORMAT,))):
                 return None
             route = cls(**data)
             if route.kind not in (RouteKind.RECORD, RouteKind.TRANSLATE) or not isinstance(route.record, bool):
@@ -130,6 +132,11 @@ class RouteFile:
             return None
 
     def write(self, path):
+        data = asdict(self)
+        if self.format == 3:
+            # The v2.14.99 proxy must still be able to read a kept route after bind/release.
+            for field in ('kind', 'record', 'api', 'dialect', 'models'):
+                data.pop(field)
         path = Path(path)
         missing = []
         directory = path.parent
@@ -143,7 +150,7 @@ class RouteFile:
         fd, temporary = tempfile.mkstemp(prefix=f'.{path.name}.', dir=path.parent)
         try:
             with os.fdopen(fd, 'w') as file:
-                json.dump(asdict(self), file, ensure_ascii=True)
+                json.dump(data, file, ensure_ascii=True)
                 file.flush()
                 os.fsync(file.fileno())
             os.replace(temporary, path)

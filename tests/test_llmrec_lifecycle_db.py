@@ -1,6 +1,8 @@
 """Exercise recorder ownership through its actual isolated subprocess boot."""
 
 import asyncio
+from dataclasses import asdict
+import json
 import os
 import signal
 import socket
@@ -92,7 +94,8 @@ def test_boot_reuse_and_upgrade(tmp_path, short_checks, kept):
 
 
 @pytest.mark.parametrize("replacement", ["tick", "start"])
-def test_kept_outdated_proxy_replaced_with_gateway_disabled(tmp_path, monkeypatch, short_checks, replacement):
+@pytest.mark.parametrize("route_format", [3, 4])
+def test_kept_outdated_proxy_replaced_with_gateway_disabled(tmp_path, monkeypatch, short_checks, replacement, route_format):
     from looper.agents.agent_settings import AgentSettings, Launch
     from looper.agents.llmrec import LlmrecRoute
     from looper.agents.profile_registry import builtin_resolved_profile
@@ -108,7 +111,9 @@ def test_kept_outdated_proxy_replaced_with_gateway_disabled(tmp_path, monkeypatc
         def legacy_boot(*args):
             argv = boot(*args)
             argv[3] = argv[3].replace("from looper.agents.llmrec.__main__ import main;",
+                f"from looper.agents import llmrec; llmrec.ROUTE_FORMAT = {route_format}; "
                 "from looper.agents.llmrec import proxy; proxy.code_sha256 = lambda: 'old-code'; "
+                f"proxy.ROUTE_FORMAT = {route_format}; "
                 "from looper.agents.llmrec.__main__ import main;")
             return argv
 
@@ -121,19 +126,50 @@ def test_kept_outdated_proxy_replaced_with_gateway_disabled(tmp_path, monkeypatc
                               created_at="2026-01-01T00:00:00+00:00", record_id=42)
             path = tmp_path / ROUTES_DIR / f"{route.id}.json"
             route.write(path)
+            payload = {**asdict(route), "format": route_format}
+            if route_format == 3:
+                # v2.14.99 rejects fields introduced with gateway routes.
+                for field in ("kind", "record", "api", "dialect", "models"):
+                    payload.pop(field)
+            write_json(path, payload)
+            orphan = {**payload, "id": "d" * 22, "record_id": 41}
+            orphan_path = path.with_name(f"{orphan['id']}.json")
+            write_json(orphan_path, orphan)
             await adopted.at_start([42])
+            retired = json.loads(orphan_path.read_text())
+            assert retired["ended_at"]
+            assert retired == {**orphan, "record_id": None, "last_record_id": 41, "ended_at": retired["ended_at"]}
             assert not adopted.gateway_enabled
             assert (await adopted.status())["proxy"]["state"] == "outdated"
             await adopted.tick()
             assert not await adopted._start()
             assert adopted._state()["pid"] == initial["pid"]
-            assert RouteFile.read(path) == route
+            assert json.loads(path.read_text()) == payload
+            if route_format == 3:
+                assert RouteFile.read(path) is None
+            # The kept Worker's next model request still goes through the old route.
+            async with FakeModelAPI([ResponseScript(events=[{"type": "message_stop"}])]) as upstream:
+                payload["upstream"] = upstream.base_url
+                write_json(path, payload)
+                await pool.execute("INSERT INTO llm_records(id, agent_id, status) VALUES (42, 'kept-worker', 'running')")
+                async with httpx.AsyncClient(trust_env=False, timeout=3) as client:
+                    response = await client.post(f"http://127.0.0.1:{initial['port']}/r/{route.id}/messages",
+                        json={"model": "kept-worker", "messages": [], "stream": True},
+                        headers={"authorization": "Bearer test-key"})
+                    assert response.status_code == 200 and b"message_stop" in response.content
+                assert len(upstream.requests) == 1
             # A resident route pins the proxy even between turns.
             adopted.release(42, end_route=False)
+            idle = json.loads(path.read_text())
+            assert idle == {**payload, "record_id": None, "last_record_id": 42}
             await adopted.tick()
             assert adopted._state()["pid"] == initial["pid"]
             adopted.bind(route.id, 43)
+            assert json.loads(path.read_text()) == {**idle, "record_id": 43}
             adopted.release(43, end_route=True)
+            ended = json.loads(path.read_text())
+            assert ended["ended_at"]
+            assert ended == {**idle, "last_record_id": 43, "ended_at": ended["ended_at"]}
             if replacement == "tick":
                 await adopted.tick()
             else:
