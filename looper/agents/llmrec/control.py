@@ -46,6 +46,19 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+async def _bypass(launch, *, agent_id, task_id):
+    logger.warning("Model request recording bypassed for %s: %s", agent_id, SkipReason.PROXY_UNAVAILABLE.value)
+    if task_id:
+        from looper.db import activity
+
+        try:
+            await activity.insert_activity(task_id=task_id, worker=agent_id, kind="error",
+                summary="Model requests of this run are not recorded: the recording proxy was unavailable.")
+        except Exception:
+            logger.debug("could not insert request recording bypass activity")
+    return replace(launch, llmrec=LlmrecSkip(SkipReason.PROXY_UNAVAILABLE))
+
+
 class ProxyControl:
     def __init__(self, runtime_root, dsn, *, enabled, include_oauth=False):
         self.runtime_root = Path(runtime_root)
@@ -122,7 +135,8 @@ class ProxyControl:
                 process = await asyncio.create_subprocess_exec(
                     *boot_argv(sys.executable, Path(looper.__file__).resolve().parent.parent, self.runtime_root, port),
                     stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=descriptor,
-                    start_new_session=True, env=child_env.inherited())
+                    # TLS overrides belong to routes; truststore also reads process-level OpenSSL overrides.
+                    start_new_session=True, env={k: v for k, v in child_env.inherited().items() if k not in TLS_ENV})
             finally:
                 os.close(descriptor)
             self._children[process.pid] = process
@@ -218,14 +232,13 @@ class ProxyControl:
                 ready = await self._start()
             except (OSError, ValueError):
                 ready = False
-                logger.warning("could not start request recording proxy")
             if not ready:
-                return replace(launch, llmrec=LlmrecSkip(SkipReason.PROXY_UNAVAILABLE))
+                return await _bypass(launch, agent_id=agent_id, task_id=task_id)
         if self._outdated:
             return replace(launch, llmrec=LlmrecSkip(SkipReason.PROXY_OUTDATED))
         state = self._state()
         if state is None:
-            return replace(launch, llmrec=LlmrecSkip(SkipReason.PROXY_UNAVAILABLE))
+            return await _bypass(launch, agent_id=agent_id, task_id=task_id)
         identifier = secrets.token_urlsafe(16)
         resolved = getattr(launch.profile, "resolved_model", None)
         protocol = resolved.model.protocol.value if resolved else next(iter(provider.protocols)).value
@@ -264,8 +277,7 @@ async def attach(launch, **kwargs):
     try:
         return await _control.attach(launch, **kwargs)
     except (OSError, ValueError):
-        logger.warning("could not attach request recording route")
-        return replace(launch, llmrec=LlmrecSkip(SkipReason.PROXY_UNAVAILABLE))
+        return await _bypass(launch, agent_id=kwargs["agent_id"], task_id=kwargs["task_id"])
 
 
 def bind(route_id, record_id):

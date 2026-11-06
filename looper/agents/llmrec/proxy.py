@@ -18,6 +18,11 @@ import h11
 import httpx
 import certifi
 
+try:
+    import truststore
+except ImportError:
+    truststore = None
+
 from . import ROUTE_FORMAT, ROUTE_ID, ROUTES_DIR, TLS_ENV, RouteFile, code_sha256
 from .capture import MIB, build_capture, kind_of, redact_headers, redact_query
 
@@ -60,8 +65,9 @@ class _ProxyTransport(httpx.AsyncBaseTransport):
 
 
 def _tls_context(env):
-    # Custom roots supplement the public bundle, including when TLS terminates at a proxy.
-    context = ssl.create_default_context(cafile=certifi.where())
+    # Keep OS roots (including managed enterprise CAs) and supplement them per route.
+    context = (truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT) if truststore is not None else
+               ssl.create_default_context(cafile=certifi.where()))
     for name in sorted(TLS_ENV):
         if value := env.get(name):
             context.load_verify_locations(**{'capath' if name == 'SSL_CERT_DIR' else 'cafile': value})
@@ -353,10 +359,11 @@ class Proxy:
                 capture = await asyncio.to_thread(build_capture, request_body=body,
                     response_data=bytes(response_buffer.raw), decoded_response=bytes(response_buffer.decoded),
                     encoding_gap=response_buffer.failed, **values)
-                if self.sink.offer(capture):
-                    self._stats['recorded'] += 1
-                else:
-                    self._stats['dropped'] += 1
+                if capture is not None:
+                    if self.sink.offer(capture):
+                        self._stats['recorded'] += 1
+                    else:
+                        self._stats['dropped'] += 1
             except Exception:
                 self._stats['dropped'] += 1
                 log.exception('Recording capture failed route=%s', route.id)

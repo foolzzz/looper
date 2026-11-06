@@ -148,3 +148,19 @@ def test_other_large_request_has_explicit_gap():
     assert capture.parts == {}
     assert capture.request_bytes == len(body)
     assert capture.record_gap == 'request_too_large'
+
+
+@pytest.mark.parametrize('method', ['HEAD', 'GET'])
+def test_bodyless_non_model_request_is_skipped(method):
+    from looper.agents.llmrec import RouteFile
+
+    route = RouteFile(model='sonnet')
+    assert build_capture(request_body=b'', response_data=b'', route=route,
+                         method=method, path='/api/hello', kind='other') is None
+    assert route.model == 'sonnet'
+
+
+@pytest.mark.parametrize('path', ['/v1/messages', '/v1/messages/count_tokens', '/v1/responses'])
+def test_empty_model_request_still_records_gap(path):
+    capture = build_capture(request_body=b'', response_data=b'{}', path=path)
+    assert capture.record_gap == 'unparsable_request'

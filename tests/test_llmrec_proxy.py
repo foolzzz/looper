@@ -48,10 +48,20 @@ def events():
 @pytest.fixture(scope='module')
 def private_ca(tmp_path_factory):
     root = tmp_path_factory.mktemp('llmrec-ca')
-    cert, key = root / 'cert.pem', root / 'key.pem'
+    cert, ca_key = root / 'cert.pem', root / 'ca-key.pem'
     subprocess.run(['openssl', 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256',
-                    '-nodes', '-keyout', str(key), '-out', str(cert), '-days', '1', '-subj', '/CN=localhost',
-                    '-addext', 'subjectAltName=IP:127.0.0.1', '-addext', 'basicConstraints=critical,CA:TRUE'],
+                    '-nodes', '-keyout', str(ca_key), '-out', str(cert), '-days', '1', '-subj', '/CN=Test CA',
+                    '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign'],
+                   check=True, capture_output=True, timeout=5)
+    key, csr, leaf = root / 'key.pem', root / 'server.csr', root / 'server.pem'
+    subprocess.run(['openssl', 'req', '-new', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256',
+                    '-nodes', '-keyout', str(key), '-out', str(csr), '-subj', '/CN=localhost'],
+                   check=True, capture_output=True, timeout=5)
+    extensions = root / 'server.ext'
+    extensions.write_text('subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n'
+                          'keyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n')
+    subprocess.run(['openssl', 'x509', '-req', '-in', str(csr), '-CA', str(cert), '-CAkey', str(ca_key),
+                    '-set_serial', '2', '-out', str(leaf), '-days', '1', '-extfile', str(extensions)],
                    check=True, capture_output=True, timeout=5)
     directory = root / 'certs'
     directory.mkdir()
@@ -59,20 +69,80 @@ def private_ca(tmp_path_factory):
                             check=True, capture_output=True, text=True, timeout=5).stdout.strip()
     (directory / f'{digest}.0').write_bytes(cert.read_bytes())
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(cert, key)
+    context.load_cert_chain(leaf, key)
     return cert, directory, context
 
 
-def test_custom_ca_supplements_public_trust(private_ca):
+def test_custom_ca_supplements_public_trust(private_ca, monkeypatch):
     import certifi
+    from looper.agents.llmrec import proxy as module
     from looper.agents.llmrec.proxy import _tls_context
 
+    monkeypatch.setattr(module, 'truststore', None)
     cert, _, _ = private_ca
     default = ssl.create_default_context(cafile=certifi.where())
     custom = _tls_context({'NODE_EXTRA_CA_CERTS': str(cert)})
     assert set(default.get_ca_certs(binary_form=True)) < set(custom.get_ca_certs(binary_form=True))
     assert custom.verify_mode == ssl.CERT_REQUIRED
     assert custom.check_hostname
+
+
+def test_tls_context_uses_system_trust_and_route_certificates(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock, call
+    from looper.agents.llmrec import proxy as module
+
+    factory = Mock()
+    monkeypatch.setattr(module, 'truststore', SimpleNamespace(SSLContext=factory))
+    context = module._tls_context({'SSL_CERT_FILE': 'route.pem', 'NODE_EXTRA_CA_CERTS': 'node.pem',
+                                  'REQUESTS_CA_BUNDLE': 'requests.pem'})
+    factory.assert_called_once_with(ssl.PROTOCOL_TLS_CLIENT)
+    assert context is factory.return_value
+    assert context.load_verify_locations.call_args_list == [
+        call(cafile='node.pem'), call(cafile='requests.pem'), call(cafile='route.pem')]
+
+
+def test_bodyless_probe_is_forwarded_without_recording_a_gap(tmp_path):
+    async def check():
+        received = []
+        async def upstream(reader, writer):
+            try:
+                head = await reader.readuntil(b'\r\n\r\n')
+                received.append(head.split(b'\r\n')[0])
+                if head.startswith(b'HEAD '):
+                    writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+                else:
+                    headers = dict(line.lower().split(b':', 1) for line in head.split(b'\r\n')[1:] if b':' in line)
+                    await reader.readexactly(int(headers[b'content-length']))
+                    writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}')
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(upstream, '127.0.0.1', 0)
+        sink = Sink()
+        value = route(tmp_path, f'http://127.0.0.1:{server.sockets[0].getsockname()[1]}')
+        replace(value, model='sonnet').write(tmp_path / ROUTES_DIR / f'{value.id}.json')
+        proxy = Proxy(tmp_path, sink=sink)
+        await proxy.start()
+        try:
+            async with httpx.AsyncClient(trust_env=False) as client:
+                base = f'http://127.0.0.1:{proxy.port}/r/{value.id}'
+                assert (await client.head(base + '/api/hello')).status_code == 200
+                assert (await client.post(base + '/v1/messages', json={'model': 'claude-sonnet-test'})).status_code == 200
+            capture = await captured(sink)
+            assert capture.path == '/v1/messages'
+            assert capture.model == 'claude-sonnet-test'
+            assert capture.record_gap is None
+        finally:
+            await proxy.close(grace_s=0)
+            server.close()
+            await server.wait_closed()
+        assert received == [b'HEAD /api/hello HTTP/1.1', b'POST /v1/messages HTTP/1.1']
+        assert len(sink.items) == 1
+        assert proxy.stats['dropped'] == 0
+    asyncio.run(asyncio.wait_for(check(), 10))
 
 
 @pytest.mark.parametrize('source', ['provider', 'role'])
@@ -168,7 +238,6 @@ def test_recording_preserves_launch_tls_trust(tmp_path, monkeypatch, private_ca,
                         assert response.status_code == status, response.text
                         if status == 200:
                             assert b'message_stop' in response.content
-                            monkeypatch.setenv('SSL_CERT_FILE', str(cert))
                 await captured(sink, 3)
                 assert [item.outcome for item in sink.items] == ['completed', 'upstream_error', 'completed']
                 assert len(upstream.requests) == 3

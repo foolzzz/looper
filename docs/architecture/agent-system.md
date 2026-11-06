@@ -1989,8 +1989,10 @@ of its own ([below](#turns-claude-runs-on-its-own)) count them at the
 provider's prices: a teammate's spend lands in its agent's run total, not in a
 record of its own. Known gaps: a teammate's model requests are not in the
 stream (its assistant messages are, with a `parent_tool_use_id`), so the soft
-per-run cap below does not see its tokens before a result reports them, and
-nothing records its requests one by one; a teammate does not get the agent's
+per-run cap below does not see its tokens before a result reports them.
+[Model request recording](#model-request-recording-llmrec) captures those
+requests individually for covered Worker and Reviewer launches when enabled.
+A teammate does not get the agent's
 `--append-system-prompt-file` (the harness, role, project, task and contract
 layers).
 
@@ -3424,6 +3426,57 @@ So:
   by session and by UTC day, and its latest turns (oldest first) with each
   turn's context, cost and compactions. That is the Manager's and the
   Planners' context over time.
+
+### Model request recording (`llmrec`)
+
+`looper/agents/llmrec` records the HTTP exchanges of newly launched Claude
+Code Workers and Reviewers, including their subagents and teammates, through
+a loopback reverse proxy. Manager and Planner turns, other runtimes and
+TTADK launches are not covered. API-key runs are eligible when recording is
+enabled; Claude subscription runs also require the OAuth opt-in. Runs started
+before a settings change keep their existing route.
+
+- **Settings and access.** `llmrec.enabled` and `llmrec.include_oauth` are
+  both off by default. Settings → Request recording and the operator-only
+  `llmrec_settings.get` / `llmrec_settings.update` operations control them.
+  The Runs view and `llm_requests.list` / `llm_requests.get` expose captured
+  exchanges; the list contains metadata and the detail reconstructs the body.
+  These operations use `POST /api/v1/<domain>/<action>` and are not agent tools.
+- **Recorded content.** Each exchange includes its method, path with redacted
+  query parameters, redacted headers, request JSON (system prompt, messages, tools and tool results),
+  assembled JSON/SSE response, usage, status, timing and failure or capture
+  gap. Shared request parts are deduplicated per route in PostgreSQL.
+  Requests are attributed to the route's agent, task, step and current run;
+  requests between runs keep `after_record_id` instead of being assigned to
+  the next run. Token-count requests are separate from model calls. Bodyless
+  non-model probes such as `HEAD /api/hello` are forwarded but skipped by the
+  recorder, so they neither create a capture gap nor supply a model alias.
+- **Proxy and trust.** `serve` starts an independent process bound to
+  `127.0.0.1`. Private route files and process identity live under the runtime
+  root's `.local/llmrec`; the log is `logs/llmrec-proxy.log`. The process can
+  survive a control-plane restart and is adopted or replaced when safe;
+  `serve` checks its health every five seconds. Forwarding does not wait for
+  database writes: a bounded asynchronous sink retries writes and reports
+  dropped requests or write errors in proxy status. Upstream TLS uses the OS
+  trust store through `truststore` (the certifi bundle if unavailable), plus
+  each route's configured CA files/directories. Upstream proxy and TLS
+  settings stay isolated per route; the proxy process does not inherit
+  route-specific TLS environment overrides. For `api.anthropic.com`, routed
+  Claude Code runs get `ENABLE_TOOL_SEARCH=true` to preserve first-party tool search;
+  an explicit settings/provider value wins. Other upstreams get no override.
+- **Bypass.** If the proxy cannot be made available at launch, the run uses
+  its original endpoint. Its metadata says `bypassed` with reason
+  `proxy_unavailable`, one warning is logged for that run, and its task's
+  activity says “Model requests of this run are not recorded: the recording
+  proxy was unavailable.” Unsupported launches, credential-bearing upstream
+  URLs and incompatible retained proxy route formats are marked `skipped`
+  with their reason. A proxy lost during an already routed run can interrupt
+  its request until recovery; launch-time bypass does not reroute it mid-run.
+- **Redaction boundary.** Credential headers, cookies, unknown header values
+  and sensitive query parameters are redacted before storage. Credentials in
+  upstream URLs are refused for recording. Bodies are not secret-scrubbed:
+  prompts, code and tool output can contain sensitive data. Recording is an
+  explicit operator choice; OAuth runs remain excluded without their opt-in.
 
 ### The Manager's platform tools
 

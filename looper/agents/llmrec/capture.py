@@ -301,6 +301,9 @@ class Capture:
 
 def build_capture(*, request_body, response_data, decoded_response=None, encoding_gap=False, **values):
     capture = Capture(**values)
+    # Connectivity probes have no JSON body and are not model exchanges.
+    if not request_body and kind_of(capture.path) == 'other':
+        return None
     capture.model = capture.route.model
     capture.request_bytes = len(request_body)
     capture.request_sha256 = hashlib.sha256(request_body).hexdigest()

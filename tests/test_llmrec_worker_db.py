@@ -36,7 +36,7 @@ def _standin(path: Path, seen: Path, *, reviewer=False):
         "sys.stdin.readline()\n"
         f"seen = {str(seen)!r}\n"
         "env = {key: os.environ.get(key) for key in ('ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', "
-        "'ANTHROPIC_AUTH_TOKEN', 'NO_PROXY', 'no_proxy')}\n"
+        "'ANTHROPIC_AUTH_TOKEN', 'NO_PROXY', 'no_proxy', 'ENABLE_TOOL_SEARCH')}\n"
         "with open(seen, 'w') as out: json.dump(env, out)\n"
         + "body = json.dumps({'model': 'haiku', 'system': [{'type': 'text', 'text': 'test system'}], "
            "'tools': [{'name': 'read', 'input_schema': {'type': 'object'}}], "
@@ -50,7 +50,7 @@ def _standin(path: Path, seen: Path, *, reviewer=False):
 
 @pytest.mark.parametrize("case,recorded", [("third-party", True), ("reviewer", True), ("official", True),
     ("oauth-off", False), ("oauth-on", True), ("off", False), ("unavailable", False)])
-def test_worker_recording_binding_and_bypass(monkeypatch, tmp_path, case, recorded):
+def test_worker_recording_binding_and_bypass(monkeypatch, tmp_path, caplog, case, recorded):
     from looper.agents.llmrec import LlmrecRoute, ROUTES_DIR, RouteFile
     from looper.agents.llmrec import control
     from looper.agents.llmrec.proxy import Proxy
@@ -129,12 +129,20 @@ def test_worker_recording_binding_and_bypass(monkeypatch, tmp_path, case, record
                     assert outcome['status'] == 'completed', outcome
                 await proxy.close()
                 await sink.close(timeout=5)
-                row = await pool.fetchrow('SELECT id, metadata FROM llm_records WHERE task_id=$1', task)
+                row = await pool.fetchrow('SELECT id, agent_id, metadata FROM llm_records WHERE task_id=$1', task)
                 assert row is not None
                 metadata = json.loads(row['metadata'])
                 rows = await llm_requests.list_requests(record_id=row['id'], pool=pool)
                 assert len(rows) == int(recorded)
                 environment = json.loads(seen.read_text())
+                notice = 'Model requests of this run are not recorded: the recording proxy was unavailable.'
+                assert await pool.fetchval('SELECT count(*) FROM activity WHERE task_id=$1 AND summary=$2',
+                                           task, notice) == int(case == 'unavailable')
+                warnings = [entry.message for entry in caplog.records if entry.name == control.__name__]
+                assert len(warnings) == int(case == 'unavailable')
+                if warnings:
+                    assert row['agent_id'] in warnings[0] and 'proxy_unavailable' in warnings[0]
+                assert environment['ENABLE_TOOL_SEARCH'] == ('true' if case == 'official' else None)
                 before, after = launches[0]
                 if recorded:
                     assert isinstance(after.llmrec, LlmrecRoute)
