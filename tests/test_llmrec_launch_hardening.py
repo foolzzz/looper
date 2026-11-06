@@ -15,14 +15,15 @@ from looper.agents.profile_registry import builtin_resolved_profile
 
 @pytest.mark.parametrize('lower,upper,expected', [
     (None, 'internal.example,.corp.example', 'internal.example,.corp.example,127.0.0.1,localhost,::1'),
-    ('', 'internal.example', 'internal.example,127.0.0.1,localhost,::1'),
+    ('', 'internal.example', '127.0.0.1,localhost,::1'),
     ('lower.example', 'upper.example', 'lower.example,127.0.0.1,localhost,::1'),
     (None, None, '127.0.0.1,localhost,::1'),
-    ('', '*', '*'),
+    ('', '*', '127.0.0.1,localhost,::1'),
+    (None, '*', '*'),
     ('*', 'upper.example', '*'),
     ('localhost,127.0.0.1,localhost,::1', '', 'localhost,127.0.0.1,::1'),
 ])
-def test_recording_preserves_nonempty_proxy_bypass(monkeypatch, lower, upper, expected):
+def test_recording_preserves_effective_proxy_bypass(monkeypatch, lower, upper, expected):
     for name, value in [('no_proxy', lower), ('NO_PROXY', upper)]:
         if value is None:
             monkeypatch.delenv(name, raising=False)

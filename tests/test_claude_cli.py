@@ -48,6 +48,7 @@ def _builtin_launch(**fields: Any) -> Any:
     {"NO_PROXY": "upper.example", "no_proxy": "lower.example"},
     {"NO_PROXY": "internal.example", "no_proxy": ""},
     {"NO_PROXY": "*"},
+    {"NO_PROXY": "*", "no_proxy": ""},
     {},
 ])
 def test_recording_preserves_effective_proxy_bypass(monkeypatch, bypass):
