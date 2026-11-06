@@ -6,7 +6,6 @@ import argparse
 import asyncio
 import contextlib
 from datetime import datetime, timezone
-import errno
 import fcntl
 import logging
 from logging.handlers import RotatingFileHandler
@@ -34,14 +33,9 @@ async def _serve(args, dsn):
     sink = writer.DbSink(None)
     instance = secrets.token_urlsafe(16)
     server = proxy.Proxy(root, sink=sink, port=args.port, instance=instance)
-    try:
-        port = await server.start()
-    except OSError as error:
-        if error.errno != errno.EADDRINUSE or not args.port:
-            raise
-        logger.error("request recording proxy port unavailable; selecting another port")
-        server = proxy.Proxy(root, sink=sink, port=0, instance=instance)
-        port = await server.start()
+    # Routes held by running agents pin this endpoint. A bind failure must leave
+    # the state intact so the controller can retry the same port on its next tick.
+    port = await server.start()
     code = code_sha256()
     write_json(state_path, {"instance": instance, "pid": os.getpid(),
                            "start_time": proc_tree._start_time(os.getpid()), "port": port,

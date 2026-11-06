@@ -240,11 +240,11 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # The loopback endpoint hides first-party tool search support from Claude Code.
             if official_endpoint(launch.llmrec.upstream):
                 env.setdefault("ENABLE_TOOL_SEARCH", "true")
-            bypass = env.get("no_proxy", env.get("NO_PROXY", ""))
+            bypass = env.get("no_proxy") or env.get("NO_PROXY") or ""
+            values = [value.strip() for value in bypass.split(",") if value.strip()]
+            if values != ["*"] and "127.0.0.1" not in values:
+                values.append("127.0.0.1")
             for name in ("NO_PROXY", "no_proxy"):
-                values = [value.strip() for value in env.get(name, bypass).split(",") if value.strip()]
-                if values != ["*"] and "127.0.0.1" not in values:
-                    values.append("127.0.0.1")
                 env[name] = ",".join(values)
         return env
 

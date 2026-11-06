@@ -26,6 +26,7 @@ class DbSink:
         self.gaps = 0
         self.gap_reasons: Counter[str] = Counter()
         self.write_errors = 0
+        self.healthy = True
         self._pending_bytes = 0
         self._queue: asyncio.Queue[tuple[Capture, int]] = asyncio.Queue()
         self._closing = asyncio.Event()
@@ -33,7 +34,7 @@ class DbSink:
 
     def offer(self, capture: Capture) -> bool:
         size = capture.size()
-        if self._closing.is_set() or self._pending_bytes + size > self.max_pending_bytes:
+        if not self.healthy or self._closing.is_set() or self._pending_bytes + size > self.max_pending_bytes:
             return False
         self._pending_bytes += size
         self.pending += 1
@@ -91,6 +92,7 @@ class DbSink:
                 batch.clear()
                 backoff = 1
         finally:
+            self.healthy = False
             self._task = None
 
     async def close(self, timeout: float = 10) -> None:

@@ -327,7 +327,7 @@ async def ttadk_check() -> Check:
     return await check_ttadk(runtimes, wait=False)
 
 
-async def llmrec_check(*, runtime_root: Path | None = None) -> Check:
+async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = "") -> Check:
     """Request recording is advisory; forwarding and writer counters expose missing captures."""
     from .llmrec.control import controller
     from ..db import system_settings
@@ -335,7 +335,16 @@ async def llmrec_check(*, runtime_root: Path | None = None) -> Check:
     control = controller()
     try:
         if control is None:
-            values = await system_settings.get_settings(["llmrec.enabled"])
+            if database_url:
+                import asyncpg
+
+                conn = await asyncpg.connect(database_url, timeout=_DATABASE_TIMEOUT_SECONDS)
+                try:
+                    values = await system_settings.get_settings(["llmrec.enabled"], pool=conn)
+                finally:
+                    await conn.close()
+            else:
+                values = await system_settings.get_settings(["llmrec.enabled"])
             enabled = values.get("llmrec.enabled") == "true"
             proxy = {"state": "unavailable"}
             if enabled and runtime_root is not None:
@@ -588,7 +597,8 @@ async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Chec
     pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending, ops)
     git = await asyncio.to_thread(check_git)
     return [database, *claude, codex, grok, cursor, await check_ttadk(facts.ttadk_runtimes),
-            await llmrec_check(runtime_root=ops.runtime_root), check_lark_cli(facts.lark_enabled),
+            await llmrec_check(runtime_root=ops.runtime_root, database_url=ops.database_url),
+            check_lark_cli(facts.lark_enabled),
             pg_dump, git, check_projects_root(ops.projects_root),
             await check_step_worktrees(facts.worktree_projects)]
 

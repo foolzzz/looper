@@ -12,7 +12,7 @@ from pathlib import Path
 import secrets
 import ssl
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.request import proxy_bypass_environment
 import zlib
 
@@ -46,6 +46,7 @@ def _upstream_proxy(route, url):
     env = route.proxy_env if route.proxy_env is not None else os.environ
     proxies = {name: env.get(f'{name}_proxy', env.get(f'{name.upper()}_PROXY', ''))
                for name in ('http', 'https', 'all', 'no')}
+    proxies['no'] = env.get('no_proxy') or env.get('NO_PROXY', '')
     if proxy_bypass_environment(target.netloc, proxies):
         return None
     return proxies.get(target.scheme) or proxies['all'] or None
@@ -115,11 +116,15 @@ class _ResponseBuffer:
         if self.failed or self.too_large:
             return
         try:
-            data = self.decoder.decompress(chunk, 16 * MIB + 1 - len(self.decoded)) if self.decoder else chunk
-            if len(self.decoded) + len(data) > 16 * MIB:
-                self.too_large = True
-            else:
+            while chunk:
+                if self.decoder and self.decoder.eof:
+                    self.decoder = zlib.decompressobj(47)
+                data = self.decoder.decompress(chunk, 16 * MIB + 1 - len(self.decoded)) if self.decoder else chunk
+                if len(self.decoded) + len(data) > 16 * MIB:
+                    self.too_large = True
+                    return
                 self.decoded.extend(data)
+                chunk = self.decoder.unused_data if self.decoder else b''
         except zlib.error:
             self.failed = True
 
@@ -133,7 +138,7 @@ class _ResponseBuffer:
 
 
 class Proxy:
-    def __init__(self, runtime_root, *, sink, port=0, instance=None, connect_s=10, read_idle_s=600):
+    def __init__(self, runtime_root, *, sink, port=0, instance=None, connect_s=10, read_idle_s=None):
         self.root = Path(runtime_root)
         self.sink = sink
         self.port = port
@@ -223,7 +228,7 @@ class Proxy:
                     request, body = event, bytearray()
                     parsed = urlsplit(event.target.decode('ascii', errors='surrogateescape'))
                     prefix = parsed.path.split('/', 3)
-                    route = self._route(prefix[2]) if len(prefix) >= 3 and prefix[1] == 'r' else None
+                    route = self._route(prefix[2]) if len(prefix) >= 3 and prefix[1] in ('r', 'r-origin') else None
                     stamped = None
                     if route is not None and not any(k.lower() == b'upgrade' for k, _ in event.headers):
                         self._stats['requests'] += 1
@@ -261,7 +266,9 @@ class Proxy:
         target = request.target.decode('ascii', errors='surrogateescape')
         path = urlsplit(target)
         if request.method == b'GET' and path.path == '/llmrec/health':
-            await self._json(connection, writer, 200, dict(instance=self.instance, pid=os.getpid(), port=self.port,
+            healthy = getattr(self.sink, 'healthy', True)
+            await self._json(connection, writer, 200 if healthy else 503,
+                dict(instance=self.instance, pid=os.getpid(), port=self.port, writer_healthy=healthy,
                 code_sha256=self._code_sha256, route_format=ROUTE_FORMAT, **self.stats))
             return b''
         prefix = path.path.split('/', 3)
@@ -275,7 +282,11 @@ class Proxy:
                 'type': 'llmrec_unknown_route', 'message': 'Unknown recording route'}})
             return b''
         rest = '/' + prefix[3] if len(prefix) == 4 else ''
-        url = route.upstream.rstrip('/') + rest + ('?' + path.query if path.query else '')
+        upstream = urlsplit(route.upstream)
+        # Redirect targets already include the complete path and query at the upstream origin.
+        origin_root = prefix[1] == 'r-origin'
+        url = urlunsplit((upstream.scheme, upstream.netloc, rest if origin_root else upstream.path.rstrip('/') + rest,
+                         path.query if origin_root else '&'.join(query for query in (upstream.query, path.query) if query), ''))
         upstream_path = urlsplit(url)
         record_path = upstream_path.path + ('?' + upstream_path.query if upstream_path.query else '')
         _, seq, started_at, started = stamped
@@ -312,6 +323,19 @@ class Proxy:
                 values['status'] = response.status_code
                 values['response_headers'] = redact_headers(response.headers.raw, response=True)
                 headers = _headers(response.headers.raw)
+                for index, (name, value) in enumerate(headers):
+                    if name.lower() != b'location':
+                        continue
+                    try:
+                        location = urlsplit(urljoin(url, value.decode('latin-1')))
+                        default_ports = {'http': 80, 'https': 443}
+                        same_origin = (location.scheme, location.hostname, location.port or default_ports.get(location.scheme)) == (
+                            upstream.scheme, upstream.hostname, upstream.port or default_ports.get(upstream.scheme))
+                    except ValueError:
+                        continue
+                    if same_origin:
+                        headers[index] = name, urlunsplit(('', '', f'/r-origin/{route.id}' + (location.path or '/'),
+                                                         location.query, location.fragment)).encode('latin-1')
                 if not any(k.lower() == b'content-length' for k, _ in headers):
                     headers.append((b'transfer-encoding', b'chunked'))
                 response_buffer = _ResponseBuffer(response.headers.get('content-encoding'))

@@ -142,6 +142,8 @@ def _anthropic(events):
                 block[key] = block.get(key, '') + delta.get(key, '')
             elif dtype == 'citations_delta':
                 block.setdefault('citations', []).append(delta['citation'])
+            else:
+                raise ValueError('unknown content-block delta')
         elif kind == 'message_delta' and message is not None:
             message.update(event.get('delta', {}))
             message.setdefault('usage', {}).update(event.get('usage', {}))

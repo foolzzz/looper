@@ -3464,9 +3464,15 @@ before a settings change keep their existing route.
   database writes: a bounded asynchronous sink retries writes and reports
   dropped requests or write errors in proxy status. Complete recordings and
   gaps have separate counters; self-check warns about gaps since proxy startup,
-  including their count and most common reason. Upstream TLS uses the OS
+  including their count and most common reason. A stopped writer makes health
+  fail. A pinned port is never replaced by an ephemeral port when binding fails.
+  Upstream reads have no proxy idle deadline; the caller controls its timeout.
+  Same-origin redirects use `/r-origin/<route_id>/` to preserve the complete
+  target path and query, including targets outside the provider's base path.
+  Upstream TLS uses the OS
   trust store through `truststore` (the certifi bundle if unavailable), plus
-  each route's configured CA files/directories. Upstream proxy and TLS
+  each route's configured CA files/directories, resolved against the Worker's
+  working directory. Upstream proxy and TLS
   settings stay isolated per route; the proxy process does not inherit
   route-specific TLS environment overrides. For `api.anthropic.com`, routed
   Claude Code runs get `ENABLE_TOOL_SEARCH=true` to preserve first-party tool search;

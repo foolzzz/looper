@@ -207,7 +207,7 @@ class ProxyControl:
             **{name: int((health or {}).get(name, 0)) for name in ("requests", "recorded", "gaps", "dropped", "write_errors")},
             "gap_reasons": (health or {}).get("gap_reasons", {})}}
 
-    async def attach(self, launch, *, agent_id, task_id, step_id=None, reuse=False):
+    async def attach(self, launch, *, agent_id, task_id, step_id=None, reuse=False, cwd=None):
         from ..runtimes import AuthKind
 
         if not self.enabled:
@@ -250,7 +250,10 @@ class ProxyControl:
                           role=getattr(launch.role, "value", launch.role), created_at=_now(),
                           record_id=None, last_record_id=None, ended_at=None,
                           proxy_env={name: value for name, value in env.items() if name in PROXY_ENV},
-                          tls_env={name: value for name, value in env.items() if name in TLS_ENV})
+                          # The proxy has its own cwd; relative trust paths belong
+                          # to the agent process that would have loaded them.
+                          tls_env={name: os.path.realpath(os.path.join(cwd or os.getcwd(), value)) if value else value
+                                   for name, value in env.items() if name in TLS_ENV})
         route.write(self.runtime_root / ROUTES_DIR / f"{identifier}.json")
         port = state["port"]
         return replace(launch, llmrec=LlmrecRoute(identifier, f"http://127.0.0.1:{port}/r/{identifier}", upstream))

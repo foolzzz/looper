@@ -171,7 +171,19 @@ async def get_request(request_id: int, *, pool: asyncpg.Pool | None = None) -> d
         if row is None:
             return None
         result = _row(row)
-        parts = await conn.fetch("SELECT sha256, body FROM llm_request_parts WHERE route_id = $1", row["route_id"])
+        references, pending = set(), [result["request_body"]]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                if set(value) == {"$llmrec_part"}:
+                    references.add(value["$llmrec_part"])
+                else:
+                    pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+        parts = await conn.fetch(
+            "SELECT sha256, body FROM llm_request_parts WHERE route_id = $1 AND sha256 = ANY($2::text[])",
+            row["route_id"], list(references)) if references else []
         result["request_body"] = join_request(result["request_body"],
             {part["sha256"]: json.loads(part["body"]) for part in parts}, result["path"])
         return result
