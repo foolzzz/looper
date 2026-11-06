@@ -7,7 +7,7 @@ import pytest
 from tests.api_manager_support import USAGE, _manager, _message, _replies
 from tests.db_support import DSN, run_db
 from tests.fake_model_api import ResponseScript, text_events
-from tests.test_llmrec_resident_db import _recording
+from tests.test_llmrec_resident_db import _change_recording, _recording
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
 
@@ -123,3 +123,45 @@ def test_manager_autonomous_turn_keeps_early_request_between_turns(monkeypatch, 
                 assert {row["route_id"] for row in requests} == {route.id}
 
     run_db(body, monkeypatch, timeout=40)
+
+
+@pytest.mark.parametrize("transition", ["enable", "disable", "bypass", "port"])
+def test_api_manager_restarts_once_when_recording_route_changes(monkeypatch, tmp_path, transition):
+    from looper.agents.llmrec import LlmrecRoute
+
+    async def body(pool):
+        scripts = [ResponseScript(events=text_events("ok", usage=USAGE)) for _ in range(3)]
+        async with _manager(pool, tmp_path, monkeypatch, scripts) as chat:
+            async with _recording(pool, tmp_path, enabled=transition != "enable") as (proxy, sink):
+                await chat.manager._handle(_message("Reply briefly.", 0))
+                initial_target = chat.manager._claude._target
+                initial_signature = chat.manager._process.signature
+                initial_route = chat.manager._process.launch.llmrec
+                async with _change_recording(tmp_path, sink, transition, monkeypatch):
+                    await chat.manager._handle(_message("Reply briefly.", 1))
+                    changed_target = chat.manager._claude._target
+                    changed_signature = chat.manager._process.signature
+                    assert changed_target is not initial_target
+                    assert changed_signature != initial_signature
+                    route = chat.manager._process.launch.llmrec
+                    assert isinstance(route, LlmrecRoute) == (transition in {"enable", "port"})
+                    if transition == "port":
+                        assert route.id == initial_route.id and route.url != initial_route.url
+                    await chat.manager._handle(_message("Reply briefly.", 2))
+                    assert chat.manager._claude._target is changed_target
+                    assert chat.manager._process.signature == changed_signature
+                assert [reply.payload["text"] for reply in _replies(chat.bus)] == ["ok"] * 3
+                await proxy.close()
+                await sink.close(timeout=5)
+                records = await pool.fetch("SELECT id, metadata FROM llm_records WHERE agent_id='manager' ORDER BY id")
+                assert len(records) == len(chat.model.requests) == 3
+                expected = [transition != "enable", transition in {"enable", "port"},
+                            transition in {"enable", "port"}]
+                requests = await pool.fetch("SELECT record_id, after_record_id FROM llm_requests ORDER BY id")
+                assert [(row["record_id"], row["after_record_id"]) for row in requests] == [
+                    (row["id"], None) for row, recorded in zip(records, expected, strict=True) if recorded]
+                for row, recorded in zip(records, expected, strict=True):
+                    metadata = json.loads(row["metadata"])
+                    assert (metadata.get("llmrec", {}).get("state") == "recording") == recorded
+
+    run_db(body, monkeypatch, timeout=60)

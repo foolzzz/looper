@@ -184,6 +184,106 @@ def test_resident_turns_keep_the_route_signature_and_between_turn_attribution(
     run_db(body, monkeypatch, timeout=50)
 
 
+@asynccontextmanager
+async def _change_recording(root, sink, transition, monkeypatch):
+    from looper.agents.llmrec import control
+    from looper.agents.llmrec.proxy import Proxy
+
+    controller = control.controller()
+    replacement = None
+    try:
+        if transition in {"enable", "disable"}:
+            await controller.set_enabled(transition == "enable")
+        elif transition == "bypass":
+            async def unavailable(*args, **kwargs):
+                return None
+
+            monkeypatch.setattr(controller, "_health", unavailable)
+            monkeypatch.setattr(controller, "_start", unavailable)
+        else:
+            replacement = Proxy(root, sink=sink)
+            port = await replacement.start()
+            monkeypatch.setattr(controller, "_state", lambda: {
+                "port": port, "pid": os.getpid(), "instance": replacement.instance})
+        yield
+    finally:
+        if replacement is not None:
+            await replacement.close()
+
+
+@pytest.mark.parametrize("role", ["manager", "planner"])
+@pytest.mark.parametrize("transition", ["enable", "disable", "bypass", "port"])
+def test_claude_resident_restarts_once_when_recording_route_changes(monkeypatch, tmp_path, role, transition):
+    from looper.agents.bus import MessageBus
+    from looper.agents.llmrec import LlmrecRoute
+    from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+    from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
+    from looper.agents.tiers.planner import PlannerAgent, TaskPlan
+
+    async def body(pool):
+        async with FakeModelAPI([ResponseScript(events=_EVENTS) for _ in range(3)], api_key=KEY) as upstream:
+            executable = _resident_executable(tmp_path, "claude-code")
+            provider = await _provider(base_url=upstream.base_url.removesuffix("/v1"))
+            profile = (await _profile(provider, "haiku"))["profile"]["profile_id"]
+            await _ok("PUT", f"/api/agent-settings/roles/{role}", {"profile_id": profile})
+            task = await _task(tmp_path)
+            work = tmp_path / "w"
+            work.mkdir(exist_ok=True)
+            root = tmp_path / "runtime"
+            bus = MessageBus(root)
+            if role == "manager":
+                agent = ManagerAgent(config=ManagerConfig(claude_bin=executable, work_dir=work), runtime_root=root)
+                agent._bus, agent._clean_start = bus, True
+
+                async def turn():
+                    envelope = MessageEnvelope.create(source=channel_address("web"), target=MANAGER_ADDRESS,
+                        message_type=MessageType.USER_MESSAGE, payload={"text": "Reply briefly."})
+                    return await agent._run_turn("Reply briefly.", envelope)
+            else:
+                agent = PlannerAgent(task_id=task, runtime_root=root, claude_bin=executable)
+                agent._plan = TaskPlan(plan_id="recording-toggle-plan", goal_id="", requirement="Reply briefly.",
+                                      work_dir=str(work), project_id=await _project_of(task))
+
+                async def turn():
+                    return await agent._run_turn("Reply briefly.")
+
+            try:
+                async with _recording(pool, root, enabled=transition != "enable") as (proxy, sink):
+                    assert await asyncio.wait_for(turn(), 15)
+                    initial_pid, initial_signature = agent._claude.pid, agent._process.signature
+                    initial_route = agent._process.launch.llmrec
+                    async with _change_recording(root, sink, transition, monkeypatch):
+                        assert await asyncio.wait_for(turn(), 15)
+                        changed_pid, changed_signature = agent._claude.pid, agent._process.signature
+                        assert changed_pid is not None and changed_pid != initial_pid
+                        assert changed_signature != initial_signature
+                        route = agent._process.launch.llmrec
+                        assert isinstance(route, LlmrecRoute) == (transition in {"enable", "port"})
+                        if transition == "port":
+                            assert route.id == initial_route.id and route.url != initial_route.url
+                        assert await asyncio.wait_for(turn(), 15)
+                        assert agent._claude.pid == changed_pid
+                        assert agent._process.signature == changed_signature
+                    await proxy.close()
+                    await sink.close(timeout=5)
+                    records = await pool.fetch("SELECT id, metadata FROM llm_records WHERE agent_id=$1 ORDER BY id",
+                                               agent.agent_id)
+                    assert len(records) == len(upstream.requests) == 3
+                    expected = [transition != "enable", transition in {"enable", "port"},
+                                transition in {"enable", "port"}]
+                    requests = await pool.fetch("SELECT record_id, after_record_id FROM llm_requests ORDER BY id")
+                    assert [(row["record_id"], row["after_record_id"]) for row in requests] == [
+                        (row["id"], None) for row, recorded in zip(records, expected, strict=True) if recorded]
+                    for row, recorded in zip(records, expected, strict=True):
+                        metadata = json.loads(row["metadata"])
+                        assert (metadata.get("llmrec", {}).get("state") == "recording") == recorded
+            finally:
+                await agent._claude.stop()
+                await bus.shutdown()
+
+    run_db(body, monkeypatch, timeout=60)
+
+
 @pytest.mark.parametrize("execution", ["process", "hosted"])
 def test_consult_request_belongs_to_its_record_and_closes_the_route(monkeypatch, tmp_path, execution):
     from looper import child_env
