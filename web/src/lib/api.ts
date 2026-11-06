@@ -1010,7 +1010,7 @@ export async function moveProjectDirectory(projectId: string, fields: ProjectMov
   return result;
 }
 
-/** Ask for the deletion impact; only an explicit confirmation applies it, using the original session. */
+/** Delete after UI confirmation; if the server requires confirmation too, keep its original session. */
 export async function deleteProject(projectId: string, confirmation?: V1PendingConfirmation): Promise<void | V1PendingConfirmation> {
   const result = confirmation
     ? await confirmV1<{ deleted: string }>(confirmation.confirmation_id, confirmation.session)

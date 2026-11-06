@@ -33,6 +33,35 @@ describe("project deletion", () => {
   const button = (text: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === text)!;
   const section = () => container.querySelector('section[aria-labelledby$="-delete"]')!;
 
+  it("requires local confirmation before an authenticated operator can delete, and cancels without a request", async () => {
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ status: "ok", result: { deleted: "project-example" } }));
+    vi.stubGlobal("fetch", fetcher);
+    const onDeleted = vi.fn();
+    const changed = vi.fn();
+    window.addEventListener(PROJECTS_CHANGED_EVENT, changed);
+    try {
+      await act(async () => root.render(<ProjectSettingsForm project={project({ task_count: 4, active_count: 1, schedule_count: 2 })} onDeleted={onDeleted} />));
+      await act(async () => button("Delete project").click());
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(onDeleted).not.toHaveBeenCalled();
+      expect(changed).not.toHaveBeenCalled();
+      expect(section().textContent).toContain("Delete Example? This cannot be undone.");
+      expect(section().textContent).toContain("its 4 tasks");
+      expect(section().textContent).toContain("its 2 schedules");
+      await act(async () => button("Cancel").click());
+      expect(button("Delete")).toBeUndefined();
+      expect(fetcher).not.toHaveBeenCalled();
+      await act(async () => button("Delete project").click());
+      expect(fetcher).not.toHaveBeenCalled();
+      await act(async () => button("Delete").click());
+      expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/v1/project_admin/delete", expect.objectContaining({
+        method: "POST", body: JSON.stringify({ project_id: "project-example" }),
+      }));
+      expect(onDeleted).toHaveBeenCalledOnce();
+      expect(changed).toHaveBeenCalledOnce();
+    } finally { window.removeEventListener(PROJECTS_CHANGED_EVENT, changed); }
+  });
+
   it("shows the API deletion impact before confirming in the same session", async () => {
     const impact = "它在管家「Review」、「Release」的项目范围里；删除后范围变空的管家看不到也建不了任务。";
     const fetcher = vi.fn().mockResolvedValueOnce(Response.json({
@@ -42,6 +71,7 @@ describe("project deletion", () => {
     const onDeleted = vi.fn();
     await act(async () => root.render(<ProjectSettingsForm project={project()} onDeleted={onDeleted} />));
     await act(async () => button("Delete project").click());
+    await act(async () => button("Delete").click());
     expect(section().textContent).toContain(impact);
     expect(onDeleted).not.toHaveBeenCalled();
     expect(fetcher).toHaveBeenCalledOnce();
@@ -65,6 +95,7 @@ describe("project deletion", () => {
     expect(section().querySelector("p")?.textContent).toBe(hint);
     expect(button("Delete project")).toBeDefined();
     await act(async () => button("Delete project").click());
+    await act(async () => button("Delete").click());
     expect(section().textContent).toContain(confirmation);
   });
 
@@ -80,6 +111,7 @@ describe("project deletion", () => {
     try {
       await act(async () => root.render(<ProjectSettingsForm project={project({ task_count: 4, active_count: 1 })} onDeleted={onDeleted} />));
       await act(async () => button("Delete project").click());
+      await act(async () => button("Delete").click());
       expect(fetcher).toHaveBeenCalledOnce();
       expect(fetcher).toHaveBeenCalledWith("/api/v1/project_admin/delete", expect.objectContaining({
         method: "POST", body: JSON.stringify({ project_id: "project-example" }),
@@ -110,10 +142,12 @@ describe("project deletion", () => {
     await act(async () => root.render(<ProjectSettingsForm project={project({ task_count: 4, active_count: 1, schedule_count: 2 })} onDeleted={onDeleted} />));
     await act(async () => button("Delete project").click());
     await act(async () => button("Delete").click());
+    await act(async () => button("Delete").click());
     expect(container.querySelector("[role=alert]")?.textContent).toBe(message);
     expect(button("Delete project").disabled).toBe(false);
     expect(onDeleted).not.toHaveBeenCalled();
     await act(async () => button("Delete project").click());
+    await act(async () => button("Delete").click());
     await act(async () => button("Delete").click());
     expect(fetcher).toHaveBeenCalledTimes(4);
     expect(onDeleted).toHaveBeenCalledOnce();
