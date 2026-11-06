@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.101] - 2026-11-05
+
+### Fixed
+
+- **A control-plane upgrade measures `--turns-timeout` from when only turns block.** Behavior change in `looper service upgrade`. ([#1148](https://github.com/foolzzz/looper/pull/1148))
+  - The turns timeout used to run from the start of the drain, so a non-keepable run that finished after more than `--turns-timeout` made `--no-force` cancel the deployment at once while any Manager or Planner turn was still running. It now runs from the first drain status with no non-keepable run waiting, resets if one reappears, and is capped by `--drain-timeout` overall.
+  - The upgrade report gains `turns_wait_seconds`.
+
 ## [2.14.100] - 2026-11-05
 
 ### Added
