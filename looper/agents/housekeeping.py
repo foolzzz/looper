@@ -215,7 +215,9 @@ async def _prune_llm_requests(report: Report, now: datetime) -> None:
         return
     # DELETE leaves reusable heap/TOAST/index pages allocated. Reclaim that space before
     # evicting retained requests, then compact committed batches to measure actual progress.
-    await _compact_llm_requests()
+    # Compaction is best-effort: lock contention must not prevent committed eviction.
+    with _step(report, "llm request compaction"):
+        await _compact_llm_requests()
     async with db_connection.transaction() as conn:
         size = await llm_requests.stored_bytes(conn)
     if size <= cap * 0.9:
@@ -233,7 +235,8 @@ async def _prune_llm_requests(report: Report, now: datetime) -> None:
             if routes == 0:
                 break
         if requests or removed_routes:
-            await _compact_llm_requests()
+            with _step(report, "llm request compaction"):
+                await _compact_llm_requests()
         async with db_connection.transaction() as conn:
             size = await llm_requests.stored_bytes(conn)
         if size <= cap * 0.9:

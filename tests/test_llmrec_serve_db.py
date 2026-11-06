@@ -114,6 +114,10 @@ def test_serve_proxy_switch_restart_recovery_and_shutdown(short_root, cli_entry)
         try:
             with running_server(**server, log_path=tmp_path / 'first.log') as api:
                 settings = api.post('/api/v1/llmrec_settings/get', {})['result']
+                assert not settings['enabled'] and not settings['include_oauth']
+                assert settings['proxy']['state'] == 'stopped'
+                assert not state_path.exists()
+                settings = api.post('/api/v1/llmrec_settings/update', {'enabled': True})['result']
                 assert settings['enabled'] and not settings['include_oauth']
                 assert settings['proxy']['state'] == 'running'
                 first = _until(lambda: (value := _state(state_path)) and _health(value) and value, timeout=20)

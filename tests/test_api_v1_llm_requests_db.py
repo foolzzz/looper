@@ -9,6 +9,25 @@ import pytest
 from tests.db_support import run_db, v1_api
 
 
+@pytest.mark.parametrize('enabled', [None, 'false', 'true'])
+def test_recording_settings_without_controller_require_explicit_opt_in(tmp_path, monkeypatch, enabled):
+    from looper.agents.llmrec import control
+    from looper.db import system_settings
+
+    async def check(pool):
+        monkeypatch.setattr(control, '_control', None)
+        if enabled is not None:
+            await system_settings.put_settings({'llmrec.enabled': enabled}, pool=pool)
+        async with v1_api(tmp_path, pool) as call:
+            code, reply = await call('llmrec_settings.get')
+            assert code == 200, reply
+            result = reply['result']
+            assert result['enabled'] is (enabled == 'true')
+            assert result['include_oauth'] is False
+            assert result['proxy']['state'] == ('unavailable' if enabled == 'true' else 'stopped')
+    run_db(check, monkeypatch, timeout=15)
+
+
 def test_recording_operations_are_operator_only_and_validate_shapes(tmp_path, monkeypatch):
     from looper.agents import api_v1
     from looper.agents.llmrec import RouteFile
@@ -280,7 +299,7 @@ def test_recording_retention_settings_defaults_limits_and_reset(tmp_path, monkey
             code, reply = await call('llmrec_settings.get')
             assert code == 200, reply
             result = reply['result']
-            assert result['enabled'] is True and result['include_oauth'] is False
+            assert result['enabled'] is False and result['include_oauth'] is False
             assert result['retention_days'] == {'value': 7, 'built_in': 7, 'source': 'built-in',
                                                 'minimum': 1, 'maximum': 365}
             assert result['max_total_mb'] == {'value': 2048, 'built_in': 2048, 'source': 'built-in',
@@ -289,7 +308,7 @@ def test_recording_retention_settings_defaults_limits_and_reset(tmp_path, monkey
             for name, value, span in [('retention_days', 0, '1 to 365'), ('retention_days', 366, '1 to 365'),
                                       ('max_total_mb', 102.3, '102.4 to 102400'),
                                       ('max_total_mb', 102401, '102.4 to 102400')]:
-                code, reply = await call('llmrec_settings.update', {name: value, 'enabled': False})
+                code, reply = await call('llmrec_settings.update', {name: value, 'enabled': True})
                 assert code == 400 and span in reply['error']['message'], reply
                 # A rejected update must not change any field, including the switch.
                 assert await system_settings.get_settings(['llmrec.enabled']) == {}

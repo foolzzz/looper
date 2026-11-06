@@ -22,6 +22,19 @@ def launch():
     return Launch(AgentSettings(profile=builtin_resolved_profile()))
 
 
+@pytest.mark.parametrize('enabled', [None, 'false', 'true'])
+def test_self_check_without_controller_requires_explicit_recording_opt_in(monkeypatch, enabled):
+    from looper.agents import self_check
+    from looper.db import system_settings
+
+    monkeypatch.setattr(control, '_control', None)
+    monkeypatch.setattr(system_settings, 'get_settings', AsyncMock(
+        return_value={} if enabled is None else {'llmrec.enabled': enabled}))
+    monkeypatch.setattr(self_check, '_llmrec_storage', AsyncMock(return_value=(0, 2048)))
+    check = asyncio.run(self_check.llmrec_check())
+    assert check.status == (self_check.FAIL if enabled == 'true' else self_check.SKIP)
+
+
 @pytest.mark.parametrize('foreign', ['instance', 'pid'])
 def test_failed_health_requires_matching_instance_and_pid(tmp_path, monkeypatch, foreign):
     owner = control.ProxyControl(tmp_path, '', enabled=True)
