@@ -10,7 +10,7 @@ from tests.db_support import run_db, v1_api
 
 
 @pytest.mark.parametrize('enabled', [None, 'false', 'true'])
-def test_recording_settings_without_controller_require_explicit_opt_in(tmp_path, monkeypatch, enabled):
+def test_recording_settings_without_controller_default_on(tmp_path, monkeypatch, enabled):
     from looper.agents.llmrec import control
     from looper.db import system_settings
 
@@ -22,9 +22,9 @@ def test_recording_settings_without_controller_require_explicit_opt_in(tmp_path,
             code, reply = await call('llmrec_settings.get')
             assert code == 200, reply
             result = reply['result']
-            assert result['enabled'] is (enabled == 'true')
+            assert result['enabled'] is (enabled != 'false')
             assert result['include_oauth'] is False
-            assert result['proxy']['state'] == ('unavailable' if enabled == 'true' else 'stopped')
+            assert result['proxy']['state'] == ('stopped' if enabled == 'false' else 'unavailable')
     run_db(check, monkeypatch, timeout=15)
 
 
@@ -87,6 +87,12 @@ def test_recording_cli_uses_closed_operator_schemas():
     cases = [(['llmrec-settings', 'get'], '/api/v1/llmrec_settings/get', {}),
         (['llmrec-settings', 'update', '--enabled', '--include-oauth'], '/api/v1/llmrec_settings/update',
          {'enabled': True, 'include_oauth': True}),
+        (['llmrec-settings', 'update', '--enabled', 'false'], '/api/v1/llmrec_settings/update',
+         {'enabled': False}),
+        (['llmrec-settings', 'update', '--enabled', 'true'], '/api/v1/llmrec_settings/update',
+         {'enabled': True}),
+        (['llmrec-settings', 'update', '--no-enabled'], '/api/v1/llmrec_settings/update',
+         {'enabled': False}),
         (['llm-requests', 'list', '--record-id', '7', '--between-turns'], '/api/v1/llm_requests/list',
          {'record_id': 7, 'between_turns': True}),
         (['llm-requests', 'get', '--request-id', '9'], '/api/v1/llm_requests/get', {'request_id': 9}),
@@ -101,6 +107,15 @@ def test_recording_cli_uses_closed_operator_schemas():
         assert calls == [('POST', path, expected)]
         operation = api_v1.find('POST', path)
         assert operation.operator_only and operation.request['additionalProperties'] is False
+
+
+@pytest.mark.parametrize('value', ['1', 'null', 'off'])
+def test_recording_cli_rejects_non_boolean_enabled(value):
+    from looper import loopercli
+    from looper.agents import api_v1
+
+    with pytest.raises(loopercli.UsageError):
+        loopercli.build_parser(api_v1.document()).parse_args(['llmrec-settings', 'update', '--enabled', value])
 
 
 def test_recording_self_check_statuses(monkeypatch):
@@ -299,7 +314,7 @@ def test_recording_retention_settings_defaults_limits_and_reset(tmp_path, monkey
             code, reply = await call('llmrec_settings.get')
             assert code == 200, reply
             result = reply['result']
-            assert result['enabled'] is False and result['include_oauth'] is False
+            assert result['enabled'] is True and result['include_oauth'] is False
             assert result['retention_days'] == {'value': 7, 'built_in': 7, 'source': 'built-in',
                                                 'minimum': 1, 'maximum': 365}
             assert result['max_total_mb'] == {'value': 2048, 'built_in': 2048, 'source': 'built-in',

@@ -94,16 +94,18 @@ def test_relative_trust_paths_follow_symlinked_worker_cwd(tmp_path, monkeypatch)
     assert os.path.samefile(route.tls_env['SSL_CERT_DIR'], cert_dir)
 
 
-def test_standalone_doctor_reads_recording_settings_from_ops_dsn(tmp_path, monkeypatch):
+@pytest.mark.parametrize('enabled', [None, 'true'])
+def test_standalone_doctor_reads_recording_settings_from_ops_dsn(tmp_path, monkeypatch, enabled):
     import asyncpg
     from looper.agents import self_check
     from looper.agents.llmrec import control
-    from looper.db import connection
+    from looper.db import connection, system_settings
     from looper.ops_config import OpsConfig
     from tests.db_support import DSN, run_db
 
     async def body(pool):
-        await pool.execute("INSERT INTO system_settings (key, value) VALUES ('llmrec.enabled', 'true')")
+        if enabled is not None:
+            await system_settings.put_settings({'llmrec.enabled': enabled}, pool=pool)
         schema = await pool.fetchval('SELECT current_schema()')
         connect = asyncpg.connect
 
@@ -127,7 +129,7 @@ def test_standalone_doctor_reads_recording_settings_from_ops_dsn(tmp_path, monke
         checks = await self_check.run_checks(ops)
         check = next(check for check in checks if check is not None and check.id == 'llmrec')
         assert (check.status, check.detail) == (self_check.OK, 'proxy running')
-        await pool.execute("UPDATE system_settings SET value='false' WHERE key='llmrec.enabled'")
+        await system_settings.put_settings({'llmrec.enabled': 'false'}, pool=pool)
         checks = await self_check.run_checks(ops)
         check = next(check for check in checks if check is not None and check.id == 'llmrec')
         assert (check.status, check.detail) == (self_check.SKIP, 'off')

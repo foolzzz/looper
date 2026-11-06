@@ -30,7 +30,7 @@ def launch():
 
 
 @pytest.mark.parametrize('enabled', [None, 'false', 'true'])
-def test_self_check_without_controller_requires_explicit_recording_opt_in(monkeypatch, enabled):
+def test_self_check_without_controller_defaults_recording_on(monkeypatch, enabled):
     from looper.agents import self_check
     from looper.db import system_settings
 
@@ -39,7 +39,7 @@ def test_self_check_without_controller_requires_explicit_recording_opt_in(monkey
         return_value={} if enabled is None else {'llmrec.enabled': enabled}))
     monkeypatch.setattr(self_check, '_llmrec_storage', AsyncMock(return_value=(0, 2048)))
     check = asyncio.run(self_check.llmrec_check())
-    assert check.status == (self_check.FAIL if enabled == 'true' else self_check.SKIP)
+    assert check.status == (self_check.SKIP if enabled == 'false' else self_check.FAIL)
 
 
 @pytest.mark.parametrize('foreign', ['instance', 'pid'])

@@ -355,7 +355,7 @@ async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = 
                     await conn.close()
             else:
                 values = await system_settings.get_settings(["llmrec.enabled"])
-            enabled = values.get("llmrec.enabled") == "true"
+            enabled = values.get("llmrec.enabled", "true") == "true"
             proxy = {"state": "unavailable"}
             if enabled and runtime_root is not None:
                 from .llmrec.control import ProxyControl

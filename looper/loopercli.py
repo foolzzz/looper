@@ -1166,6 +1166,12 @@ def _json_value(text: str) -> Any:
         raise argparse.ArgumentTypeError(f"not valid JSON ({exc})") from None
 
 
+def _boolean_value(text: str) -> bool:
+    if text not in ("true", "false"):
+        raise argparse.ArgumentTypeError("expected true or false")
+    return text == "true"
+
+
 def _add_property(parser: Parser, name: str, schema: Mapping[str, Any]) -> None:
     flag = "--" + name.replace("_", "-")
     help_text = _escape(str(schema.get("description") or ""))
@@ -1204,7 +1210,14 @@ def _add_operation(parser: Parser, operation: Generated) -> None:
                         help="a JSON object (file, or '-' for stdin) used as the base; options override its keys")
     for name, schema in operation.properties.items():
         if name not in ("body", "help"):
-            _add_property(parser, name, schema if isinstance(schema, Mapping) else {})
+            if operation.path == API_PREFIX + "/llmrec_settings/update" and name == "enabled":
+                # Accept the documented explicit value while keeping the existing switch forms.
+                parser.add_argument("--enabled", type=_boolean_value, nargs="?", const=True,
+                                    default=argparse.SUPPRESS)
+                parser.add_argument("--no-enabled", dest="enabled", action="store_false",
+                                    default=argparse.SUPPRESS)
+            else:
+                _add_property(parser, name, schema if isinstance(schema, Mapping) else {})
 
 
 def _read_text(source: str, what: str) -> str:

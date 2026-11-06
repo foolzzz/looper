@@ -92,7 +92,7 @@ async def settings():
         result = await control.status()
     else:
         values = await system_settings.get_settings(["llmrec.enabled", "llmrec.include_oauth"])
-        enabled = values.get("llmrec.enabled") == "true"
+        enabled = values.get("llmrec.enabled", "true") == "true"
         result = {"enabled": enabled, "include_oauth": values.get("llmrec.include_oauth") == "true",
             "proxy": {"state": "unavailable" if enabled else "stopped", "port": None, "pid": None,
                       "requests": 0, "recorded": 0, "gaps": 0, "gap_reasons": {}, "dropped": 0, "write_errors": 0}}

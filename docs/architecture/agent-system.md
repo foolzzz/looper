@@ -3436,11 +3436,15 @@ TTADK launches are not covered. API-key runs are eligible when recording is
 enabled; Claude subscription runs also require the OAuth opt-in. Runs started
 before a settings change keep their existing route.
 
-- **Settings and access.** `llmrec.enabled` and `llmrec.include_oauth` are
-  both off by default. Settings → Request recording and the operator-only
-  `llmrec_settings.get` / `llmrec_settings.update` operations control them.
-  Turning recording on requires confirmation that prompts, code, tool output
-  and model replies will be stored. Turning it off keeps existing captures;
+- **Settings and access.** Recording (`llmrec.enabled`) is on by default,
+  including after an upgrade when the operator has never set it. An explicitly
+  stored `false` keeps it off. Turn it off in Settings → Request recording or
+  with `loopercli llmrec-settings update --enabled false`. Claude subscription
+  runs need the separate `llmrec.include_oauth` setting, which is off by default.
+  The operator-only `llmrec_settings.get` / `llmrec_settings.update` operations
+  control these settings. Turning recording on by hand in the dashboard
+  requires confirmation that prompts, code, tool output and model replies
+  will be stored. Turning it off keeps existing captures;
   either change applies to future launches, and running agents keep their
   existing route until restart. The page also shows the proxy state
   (`running`, `stopped`, `unavailable` or `outdated`), port, requests, recorded
