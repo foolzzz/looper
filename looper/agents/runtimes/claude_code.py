@@ -100,6 +100,10 @@ TRANSLATED_BACKEND_ENV = (
     ("CLAUDE_CODE_USE_BEDROCK", "0"),
     ("CLAUDE_CODE_USE_VERTEX", "0"),
     ("CLAUDE_CODE_USE_FOUNDRY", "0"),
+    ("CLAUDE_CODE_USE_ANTHROPIC_AWS", "0"),
+    ("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "0"),
+    ("CLAUDE_CODE_USE_MANTLE", "0"),
+    ("CLAUDE_CODE_USE_GATEWAY", "0"),
 )
 TRANSLATED_ENV = (
     *TRANSLATED_BACKEND_ENV,
@@ -172,10 +176,16 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         return Probe(first[:200], self.capabilities_for(first))
 
     def isolation_args(self, cwd: str | Path, *, launch: Launch | None = None) -> list[str]:
+        from ..llmrec import LlmrecRoute, RouteKind
         from ..llmrec.gateway import translated
 
-        # Inline settings also prevent project settings from selecting a non-gateway SDK.
-        env = dict(TRANSLATED_BACKEND_ENV) if launch is not None and translated(launch) else None
+        # Project settings load after process env; pin the attached route and all translation safeguards here too.
+        env = None
+        if launch is not None and translated(launch):
+            env = dict(TRANSLATED_ENV)
+            # Commands are built before Runs records; environment() refuses missing routes at process startup.
+            if isinstance(launch.llmrec, LlmrecRoute) and launch.llmrec.kind is RouteKind.TRANSLATE:
+                env[BASE_URL] = launch.llmrec.url
         return claude_cli.isolation_args(cwd, env=env)
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:

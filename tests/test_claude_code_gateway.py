@@ -57,7 +57,11 @@ def test_translated_environment_enforces_gateway_and_preserves_model_binding(tra
 
 @pytest.mark.parametrize('source', ['inherited', 'shared', 'provider'])
 def test_translated_environment_disables_other_backends(translated_launch, monkeypatch, source):
-    selectors = dict.fromkeys(('CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'), '1')
+    selectors = dict.fromkeys((
+        'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+        'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+        'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_GATEWAY',
+    ), '1')
     monkeypatch.setattr(child_env, 'inherited', lambda: selectors if source == 'inherited' else {})
     settings = translated_launch.settings
     if source == 'shared':
@@ -77,16 +81,28 @@ def test_translated_environment_disables_other_backends(translated_launch, monke
 @pytest.mark.parametrize('resident', [False, True])
 @pytest.mark.parametrize('translated', [False, True])
 def test_backend_selection_settings_are_forced_only_for_translation(translated_launch, tmp_path, resident, translated):
-    launch = translated_launch if translated else builtin_launch()
+    route = LlmrecRoute('abcdefghijklmnopqrstuv', 'http://127.0.0.1:12345/r/abcdefghijklmnopqrstuv',
+                        'https://chat.example.invalid/v1', kind=RouteKind.TRANSLATE, record=False)
+    launch = replace(translated_launch, llmrec=route) if translated else builtin_launch()
     command = launch.runtime.resident_command if resident else launch.runtime.run_command
     args = command('claude', cwd=tmp_path, prompt_file=tmp_path / 'prompt.md', launch=launch)
     assert args.count('--settings') == 1
     settings = json.loads(args[args.index('--settings') + 1])
     if translated:
-        # Inline settings must override a project's env even after the CLI loads it.
-        assert {name: settings.get('env', {}).get(name) for name in (
-            'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
-        )} == {'CLAUDE_CODE_USE_BEDROCK': '0', 'CLAUDE_CODE_USE_VERTEX': '0', 'CLAUDE_CODE_USE_FOUNDRY': '0'}
+        # These inline values win even when the CLI loads project env after process env.
+        assert settings['env'] == {
+            BASE_URL: route.url,
+            'CLAUDE_CODE_USE_BEDROCK': '0',
+            'CLAUDE_CODE_USE_VERTEX': '0',
+            'CLAUDE_CODE_USE_FOUNDRY': '0',
+            'CLAUDE_CODE_USE_ANTHROPIC_AWS': '0',
+            'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD': '0',
+            'CLAUDE_CODE_USE_MANTLE': '0',
+            'CLAUDE_CODE_USE_GATEWAY': '0',
+            'CLAUDE_CODE_ATTRIBUTION_HEADER': '0',
+            'ENABLE_TOOL_SEARCH': 'false',
+            'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS': '1',
+        }
     else:
         assert 'env' not in settings
 
@@ -105,6 +121,19 @@ def test_translated_launch_refuses_missing_translation_route(translated_launch, 
         launch.environment()
     assert launch.record()['llmrec']['state'] == 'refused'
     assert diagnostic in launch.record()['llmrec']['detail']
+
+
+@pytest.mark.parametrize('resident', [False, True])
+def test_gateway_refusal_is_deferred_until_process_environment(translated_launch, tmp_path, resident):
+    launch = replace(translated_launch, llmrec=LlmrecSkip(SkipReason.GATEWAY_UNAVAILABLE, 'startup failed'))
+    command = launch.runtime.resident_command if resident else launch.runtime.run_command
+    # Tiers construct commands before creating the Runs record; validation belongs at process startup.
+    args = command('claude', cwd=tmp_path, prompt_file=tmp_path / 'prompt.md', launch=launch)
+    settings = json.loads(args[args.index('--settings') + 1])
+    assert settings['env'] == dict(TRANSLATED_ENV)
+    assert launch.record()['llmrec']['state'] == 'refused'
+    with pytest.raises(RuntimeUnsupported, match='could not start: startup failed'):
+        launch.environment()
 
 
 def test_translated_launch_refuses_empty_upstream_before_starting_route(translated_launch, tmp_path, monkeypatch):
