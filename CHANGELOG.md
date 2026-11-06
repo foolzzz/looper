@@ -18,6 +18,24 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.103] - 2026-11-05
+
+### Added
+
+- **The local model proxy has a translating route kind: Anthropic Messages in, OpenAI Chat Completions upstream.** No user-visible entry point yet; routes come from the next change, and existing recording routes are not translated. ([#1147](https://github.com/foolzzz/looper/pull/1147))
+  - Streaming and non-streaming requests are translated and the responses translated back. Requests are byte-stable across turns so automatic prefix caching keeps hitting; upstream cached-token usage is mapped to the Anthropic cache-read fields.
+  - A typed per-model chat dialect table covers provider differences (reasoning field and replay, max-token field, rejected parameters, usage fields).
+  - The proxy answers the Claude Code probe and the model list locally; `count_tokens` answers 404 `not_found_error`.
+  - Recorded translated requests carry a new nullable `translation` column in `llm_requests`, added by `ensure_schema` to existing databases.
+
+### Changed
+
+- The recorder route format is now 4, so a running recorder that reports format 3 is treated as outdated. Chat Completions usage on existing recording routes now reads `cache_write_tokens` from the prompt-token details when present (it was always 0).
+
+### Fixed
+
+- Ending a kept run no longer returns early when the child's state file says it exited; it waits for the keeper process itself to finish shutting down (up to 10 seconds).
+
 ## [2.14.102] - 2026-11-05
 
 ### Added
