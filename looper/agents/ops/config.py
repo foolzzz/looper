@@ -185,7 +185,7 @@ async def _deleting_project(call: Call) -> str | None:
     scoped_managers = await db_managers.managers_scoped_to(project["id"])
     scope_note = ""
     if scoped_managers:
-        names = "其他管家" if call.scoped else "管家" + "、".join(f"「{m['name']}」" for m in scoped_managers)
+        names = "管家" + "、".join(f"「{m['name']}」" for m in scoped_managers)
         scope_note = (f"它在{names}的项目范围里：删除后会从它们的范围里去掉；范围变空的管家看不到也建不了任务，"
                       "要在设置 → 管家里重新选择项目。")
     return (f"要删除项目「{project['name']}」（默认目录：{project['work_dir'] or '没有'}）吗？{effects}它的 "

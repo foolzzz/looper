@@ -264,7 +264,7 @@ async def active_workspaces(*, besides: str | None = None,
     for a task from before workspaces), but ``besides``."""
     pool = pool or get_pool()
     rows = await pool.fetch(
-        "SELECT id, title, goal_id, requirement, status, workspace_mode, manager_id, "
+        "SELECT id, title, goal_id, requirement, status, workspace_mode, manager_id, project_id, "
         "COALESCE(NULLIF(workspace_dir, ''), work_dir) AS workspace FROM tasks "
         "WHERE status = ANY($1::text[]) AND id <> COALESCE($2, '') ORDER BY created_at",
         list(ACTIVE_STATUSES), besides,
@@ -279,6 +279,15 @@ async def manager_of(task_ids: Collection[str], *, pool: asyncpg.Pool | asyncpg.
     pool = pool or get_pool()
     rows = await pool.fetch("SELECT id, manager_id FROM tasks WHERE id = ANY($1::text[])", list(task_ids))
     return {row["id"]: row["manager_id"] for row in rows}
+
+
+async def project_of(task_ids: Collection[str], *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> dict[str, str]:
+    """The current project of each task (a task that does not exist is left out)."""
+    if not task_ids:
+        return {}
+    pool = pool or get_pool()
+    rows = await pool.fetch("SELECT id, project_id FROM tasks WHERE id = ANY($1::text[])", list(task_ids))
+    return {row["id"]: row["project_id"] for row in rows}
 
 
 async def update_task_status(

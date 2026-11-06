@@ -38,6 +38,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from ..db.tasks import TaskFilter
 from . import step_workspaces as ws
 from .operator_notes import notes_key, notes_view
 from .project_execution import TaskWorkspaces
@@ -208,13 +209,14 @@ def _files(paths: Sequence[str]) -> str:
     return shown + (f" (+{len(paths) - FILES_SHOWN} more)" if len(paths) > FILES_SHOWN else "")
 
 
-FOREIGN_TASK = "a task of another Manager"
+FOREIGN_TASK = "another task is running in this directory"
 
 
 async def _shared(workspace: str, besides: str | None, visible_to: str | None = None,
-                  *, pool: Any = None) -> list[dict[str, Any]]:
+                  *, task_filter: TaskFilter | None = None, pool: Any = None) -> list[dict[str, Any]]:
     """The tasks in progress whose workspace is on the same repository (its main checkout) as ``workspace``. With
-    ``visible_to``, a task of another Manager is anonymous: no id, name or status, and ``foreign`` is true."""
+    ``visible_to`` or ``task_filter``, an out-of-scope task is anonymous: no id, name or status,
+    and ``foreign`` is true."""
     from ..db import tasks as db_tasks
 
     key = await asyncio.to_thread(notes_key, workspace)
@@ -222,7 +224,8 @@ async def _shared(workspace: str, besides: str | None, visible_to: str | None = 
     for task in await db_tasks.active_workspaces(besides=besides, **({"pool": pool} if pool is not None else {})):
         if task["workspace"] and await asyncio.to_thread(notes_key, task["workspace"]) == key:
             mode = task.get("workspace_mode") or TaskWorkspaces.IN_PLACE.value
-            if visible_to is not None and task.get("manager_id") != visible_to:
+            if ((visible_to is not None and task.get("manager_id") != visible_to)
+                    or (task_filter is not None and not task_filter.admits(task))):
                 shared.append({"task_id": None, "name": FOREIGN_TASK, "status": None, "mode": mode, "foreign": True})
             else:
                 shared.append({"task_id": task["id"], "name": task["name"], "status": task["status"], "mode": mode})
@@ -230,13 +233,12 @@ async def _shared(workspace: str, besides: str | None, visible_to: str | None = 
 
 
 def shared_names(shared: Sequence[Mapping[str, Any]]) -> str:
-    """The shared tasks as a warning names them: the first 5 of the caller's own, then how many belong to another
-    Manager (no name, status or id)."""
+    """The shared tasks as a warning names them: the first 5 in scope, then an anonymous conflict count."""
     own = [task for task in shared if not task.get("foreign")]
     foreign = len(shared) - len(own)
     names = ", ".join(f"{task['name']} ({task['status']})" for task in own[:5])
     if foreign:
-        names += (", " if names else "") + f"{foreign} task(s) of another Manager"
+        names += (", " if names else "") + f"{foreign} other task(s) running in this directory"
     return names
 
 
@@ -247,7 +249,8 @@ def overwrites(mode: TaskWorkspaces | str, shared: Sequence[Mapping[str, Any]]) 
 
 
 async def check(workspace: str, *, mode: TaskWorkspaces, base: str = "", besides: str | None = None,
-                asked: bool = True, visible_to: str | None = None, pool: Any = None) -> dict[str, Any]:
+                asked: bool = True, visible_to: str | None = None, task_filter: TaskFilter | None = None,
+                pool: Any = None) -> dict[str, Any]:
     """What a task in ``workspace`` would run in, and the warnings (the RFC's W5); outside git a worktree task runs
     in place, said only when the worktree was ``asked`` for (not when it is just the project's default). Raises
     ``TaskWorkspaceError`` for a base the repository does not have."""
@@ -283,7 +286,8 @@ async def check(workspace: str, *, mode: TaskWorkspaces, base: str = "", besides
                 warnings.append({"kind": WarningKind.LARGE_CHECKOUT.value, "bytes": size,
                                  "text": f"The checkout is {ws._size_text(size)}: the task's worktree is a copy of "
                                          "it."})
-    shared = await _shared(workspace, besides, visible_to, **({"pool": pool} if pool is not None else {}))
+    shared = await _shared(workspace, besides, visible_to, task_filter=task_filter,
+                           **({"pool": pool} if pool is not None else {}))
     if shared:
         names = shared_names(shared)
         if overwrites(effective, shared):

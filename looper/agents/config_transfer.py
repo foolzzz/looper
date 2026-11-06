@@ -1961,13 +1961,13 @@ class _Importer:
                             raise ConfigFileError(f"Manager {identity}: no project {project_name!r} in scope_projects; "
                                                   "include projects or create it first")
                         scope_ids.append(project_id)
-                    # Preserve the scope-specific error for an exported emptied Manager.
-                    if not scope_ids:
-                        managers_api.final_scope(row, {**values, "scope_project_ids": []})
                     values["scope_project_ids"] = scope_ids
+                # Deleting the last project leaves a valid, closed scope that exports must round-trip.
+                allow_empty_scope = entry.get("scope_projects") == []
                 values = await managers_api.checked_values(values, own_id=identity, conn=self.conn if self.apply else None,
-                                                            check_references=self.apply)
-                managers_api.final_scope(row, values)
+                                                            check_references=self.apply,
+                                                            allow_empty_scope=allow_empty_scope)
+                managers_api.final_scope(row, values, allow_empty_scope=allow_empty_scope)
                 name_key = values["name"].casefold()
                 if name_key in names:
                     raise ConfigFileError(f"managers: duplicate name {values['name']!r}")

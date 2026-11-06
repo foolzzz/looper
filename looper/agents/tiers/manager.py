@@ -2557,18 +2557,10 @@ class ManagerAgent:
 
     async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "",
                                   envelope: MessageEnvelope | None = None) -> str:
-        try:
-            listed = await self._listed()
-        except Exception:
-            logger.warning("%s could not read the Manager's scope", self._log, exc_info=True)
-            parts = ["Projects: (could not be read)", ""]
-            parts += await self._templates_section()
-            parts += ["Ready tasks: (could not be read)", "", "Open gates: (could not be read)", ""]
-        else:
-            parts = await self._projects_section(listed)
-            parts += await self._templates_section()
-            parts += await self._ready_tasks_section(listed)
-            parts += await self._open_gates_section(envelope, listed)
+        parts = await self._projects_section()
+        parts += await self._templates_section()
+        parts += await self._ready_tasks_section()
+        parts += await self._open_gates_section(envelope)
 
         if self._goal_snapshots:
             parts.append("当前活跃目标:")
