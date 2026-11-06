@@ -27,6 +27,18 @@ async def stored_bytes(conn) -> int:
     """))
 
 
+async def logical_bytes(conn) -> int:
+    """Live row content as text bytes, counting shared parts once, without dead/index pages.
+
+    Row text expands TOAST values, so compression and external pointers cannot hide bodies.
+    """
+    return int(await conn.fetchval("""
+        SELECT (SELECT COALESCE(sum(octet_length(request::text)), 0) FROM llm_requests request)
+             + (SELECT COALESCE(sum(octet_length(part::text)), 0) FROM llm_request_parts part)
+             + (SELECT COALESCE(sum(octet_length(route::text)), 0) FROM llm_request_routes route)
+    """))
+
+
 async def count_requests(conn, *, task_id: str | None = None, agent_id: str | None = None) -> int:
     if task_id is not None:
         return await conn.fetchval("SELECT count(*) FROM llm_requests WHERE task_id = $1", task_id)

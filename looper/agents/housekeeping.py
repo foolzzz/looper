@@ -210,18 +210,23 @@ async def _prune_llm_requests(report: Report, now: datetime) -> None:
                 break
     async with db_connection.transaction() as conn:
         size = await llm_requests.stored_bytes(conn)
-    if size <= cap:
+        logical_size = await llm_requests.logical_bytes(conn)
+    if size <= cap and logical_size <= cap:
         return
     # DELETE leaves reusable heap/TOAST/index pages allocated. Reclaim that space before
-    # evicting retained requests, then compact committed batches to measure actual progress.
-    # Compaction is best-effort: lock contention must not prevent committed eviction.
+    # evicting retained requests. Only live content can justify eviction; physical bloat
+    # must never cause retained data to be deleted. Stop this pass if compaction fails.
     with _step(report, "llm request compaction"):
         await _compact_llm_requests()
+    if "llm request compaction" in report.failed_steps:
+        return
     async with db_connection.transaction() as conn:
         size = await llm_requests.stored_bytes(conn)
-    if size <= cap * 0.9:
+        logical_size = await llm_requests.logical_bytes(conn)
+    if logical_size <= cap:
         return
     while True:
+        previous_size, previous_logical_size = size, logical_size
         async with db_connection.transaction() as conn:
             requests = await llm_requests.prune_oldest(conn)
         report.llm_requests += requests
@@ -236,16 +241,20 @@ async def _prune_llm_requests(report: Report, now: datetime) -> None:
         if requests or removed_routes:
             with _step(report, "llm request compaction"):
                 await _compact_llm_requests()
+            if "llm request compaction" in report.failed_steps:
+                return
         async with db_connection.transaction() as conn:
             size = await llm_requests.stored_bytes(conn)
-        if size <= cap * 0.9:
+            logical_size = await llm_requests.logical_bytes(conn)
+        if logical_size <= cap * 0.9:
             return
-        # Physical size can stay unchanged across committed DELETEs. Stop only when
-        # there is nothing left to evict, rather than imposing a request-count cap.
         if not requests and not removed_routes:
             logger.warning("housekeeping llm requests still above target with no evictable requests: "
-                           "stored_bytes=%d cap_bytes=%d; live routes or allocated PostgreSQL pages "
-                           "may retain space", size, cap)
+                           "logical_bytes=%d stored_bytes=%d cap_bytes=%d", logical_size, size, cap)
+            return
+        if size >= previous_size or logical_size >= previous_logical_size:
+            logger.warning("housekeeping llm request eviction stopped with no size decrease: "
+                           "logical_bytes=%d stored_bytes=%d cap_bytes=%d", logical_size, size, cap)
             return
 
 
