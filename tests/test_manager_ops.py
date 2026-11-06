@@ -708,7 +708,7 @@ def test_profile_crud_resolves_models_and_keeps_runtime_options(recorded, monkey
                "name": "sonnet", "protocol": "openai-chat"}]
     profile = {"profile_id": "agent-test", "name": "recipe", "runtime_name": "Claude", "provider": provider,
                "model_id": "model-sonnet", "model": {k: v for k, v in models[0].items() if k != "provider_name"},
-               "effort": "high", "agent_teams": False, "custom_prompt": "Be concise.",
+               "effort": "high", "model_path": "direct", "agent_teams": False, "custom_prompt": "Be concise.",
                "roles": ["manager", "planner", "worker", "reviewer"], "builtin": False,
                "used_by": {"layers": [{"scope": "role", "role": "worker"}], "task_count": 0}}
     monkeypatch.setattr(config, "_registry", AsyncMock(return_value={"profiles": [profile], "models": models,
@@ -736,6 +736,7 @@ def test_profile_crud_resolves_models_and_keeps_runtime_options(recorded, monkey
         assert answer["status"] == "ok", answer
         assert answer["result"]["profile"]["provider"] == provider
         assert answer["result"]["profile"]["model_id"] == "model-sonnet"
+        assert answer["result"]["profile"]["model_path"] == "direct"
         assert answer["result"]["profile"]["used_by"] == "the worker role"
         assert answer["result"]["warnings"] == ["missing key"]
         create.assert_awaited_once_with({"name": "recipe", "runtime_id": "rt-test", "model_id": "model-sonnet",
@@ -743,11 +744,13 @@ def test_profile_crud_resolves_models_and_keeps_runtime_options(recorded, monkey
                                        manager_id=None)
         changed = await ops.call("looper_agent_profiles", {"action": "update", "profile": "recipe", "effort": None})
         assert changed["result"]["profile"]["effort"] is None
+        assert changed["result"]["profile"]["model_path"] == "direct"
         assert changed["result"]["profile"]["custom_prompt"] == "Be concise."
         update.assert_awaited_once_with("agent-test", {"effort": None}, manager_id=None)
         listed = await ops.call("looper_agent_profiles", {"action": "list"})
         assert listed["result"]["models"] == models
         assert listed["result"]["profiles"][0]["model_id"] == "model-sonnet"
+        assert listed["result"]["profiles"][0]["model_path"] == "direct"
         asked = await ops.call("looper_agent_profiles", {"action": "delete", "profile": "agent-test"})
         assert asked["status"] == "needs_confirmation", asked
         assert "Claude account · sonnet · anthropic-messages · effort high" in turn.blocks[-1]

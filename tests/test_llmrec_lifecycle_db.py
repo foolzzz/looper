@@ -3,7 +3,7 @@
 import asyncio
 import os
 import signal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
@@ -239,8 +239,10 @@ def test_switch_off_preserves_running_proxy_until_safe_start(tmp_path, short_che
             assert await control._health()
             await control.at_start([42])
             assert control._state()["pid"] == first["pid"]
+            assert (await control.status())["proxy"]["state"] == "running"
             await control.at_start([])
             assert control._state() is None
+            assert not await control._running(first)
             assert (await control.status())["proxy"]["state"] == "stopped"
         finally:
             await cleanup(control)
@@ -338,9 +340,10 @@ def test_kept_proxy_route_format_mismatch_skips_new_launch(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("failure", ["missing_state", "route_write"])
 def test_attach_filesystem_races_bypass_without_affecting_launch(tmp_path, monkeypatch, caplog, failure):
-    from looper.agents.agent_settings import Launch
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.profile_registry import builtin_resolved_profile
 
-    launch = Launch()
+    launch = Launch(AgentSettings(profile=builtin_resolved_profile()))
     control = ProxyControl(tmp_path, DSN, enabled=True, include_oauth=True)
     monkeypatch.setattr(module, "_control", control)
     monkeypatch.setattr(type(launch.runtime), "llmrec_upstream", lambda self, launch: "https://model.invalid")
@@ -348,14 +351,14 @@ def test_attach_filesystem_races_bypass_without_affecting_launch(tmp_path, monke
         return {"instance": "test", "route_format": 1}
     monkeypatch.setattr(control, "_health", healthy)
     monkeypatch.setattr(control, "_state", lambda: None if failure == "missing_state" else {"port": 1234})
-    def denied(self, path):
-        raise OSError("sensitive filesystem error")
+    denied = Mock(side_effect=OSError("sensitive filesystem error"))
     monkeypatch.setattr(RouteFile, "write", denied)
     async def run():
         attached = await module.attach(launch, agent_id="worker", task_id=None)
         assert attached.llmrec.reason is SkipReason.PROXY_UNAVAILABLE
         assert attached.settings is launch.settings
         assert "sensitive filesystem error" not in caplog.text
+        assert denied.call_count == int(failure == "route_write")
     asyncio.run(run())
 
 

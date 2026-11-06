@@ -179,6 +179,7 @@ class ProxyControl:
         if not preserve_state and (current is None or all(
                 current[key] == state[key] for key in ("instance", "pid", "start_time"))):
             (self.runtime_root / STATE_FILE).unlink(missing_ok=True)
+            self._start_attempted = False
         self._health_cache, self._health_at = None, 0.0
         if not preserve_state:
             self._failed_health = None
