@@ -11,6 +11,7 @@ import pytest
 
 from looper.agents.llmrec import ROUTES_DIR, RouteFile
 from looper.agents.llmrec.proxy import Proxy
+from tests.db_support import DSN, run_db
 
 
 class Sink:
@@ -23,9 +24,9 @@ class Sink:
 
 
 @asynccontextmanager
-async def gateway(tmp_path, *, stream=False, record=True, status=200, headers=None, interrupt=False):
+async def gateway(tmp_path, *, stream=False, record=True, status=200, headers=None, interrupt=False, usage=None):
     received, handlers = [], set()
-    usage = {'prompt_tokens': 100, 'completion_tokens': 7,
+    usage = usage if usage is not None else {'prompt_tokens': 100, 'completion_tokens': 7,
              'prompt_tokens_details': {'cached_tokens': 40, 'cache_write_tokens': 10}}
     async def upstream(reader, writer):
         task = asyncio.current_task()
@@ -79,6 +80,33 @@ async def gateway(tmp_path, *, stream=False, record=True, status=200, headers=No
 
 def run(check):
     asyncio.run(asyncio.wait_for(check(), 10))
+
+
+@pytest.mark.skipif(not DSN, reason='requires disposable LOOPER_TEST_DATABASE_URL')
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('reported', [False, True])
+def test_translated_cache_counts_preserve_missing_and_reported_zero(tmp_path, stream, reported):
+    from looper.db import llm_requests
+
+    async def check(pool):
+        usage = {'prompt_tokens': 100, 'completion_tokens': 7}
+        if reported:
+            usage['prompt_tokens_details'] = {'cached_tokens': 0}
+        async with gateway(tmp_path, stream=stream, usage=usage) as (client, base, proxy, sink, received):
+            response = await client.post(base + '/v1/messages', json={
+                'model': 'client', 'messages': [], 'stream': stream})
+            assert response.status_code == 200
+            for field in ('cache_read_input_tokens', 'cache_creation_input_tokens'):
+                assert (field in response.text) is reported
+            async with asyncio.timeout(2):
+                while not sink.items:
+                    await asyncio.sleep(.01)
+            assert len(sink.items) == 1
+            await llm_requests.write_batch(sink.items, pool=pool)
+            row = await pool.fetchrow('SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens FROM llm_requests')
+            assert tuple(row) == (100, 7, 0 if reported else None, 0 if reported else None)
+            assert proxy.stats['translate']['cache_fields_missing'] == int(not reported)
+    run_db(check, timeout=10)
 
 
 @pytest.mark.parametrize('stream', [False, True])
@@ -261,8 +289,7 @@ def test_stream_start_estimates_context_from_route_prompt_usage(tmp_path, record
                 if first_stream or follow_up:
                     frames = [json.loads(line[6:]) for line in result.text.splitlines() if line.startswith('data: ')]
                     assert frames[0]['message']['usage'] == {
-                        'input_tokens': expected, 'cache_read_input_tokens': 0,
-                        'cache_creation_input_tokens': 0, 'output_tokens': 0}
+                        'input_tokens': expected, 'output_tokens': 0}
                     assert expected > 0
                     usage = frames[-2]['usage']
                 else:

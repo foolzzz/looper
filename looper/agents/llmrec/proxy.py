@@ -31,7 +31,7 @@ from looper import __version__
 from . import ROUTE_FORMAT, ROUTE_ID, ROUTES_DIR, TLS_ENV, RouteFile, code_sha256
 from .capture import MIB, build_capture, kind_of, redact_headers, redact_query
 from .dialects import DIALECTS, ChatDialect
-from .translate import Rejection, RejectionCode, to_chat, from_chat, local_response, error_response, anthropic_usage, cache_fields_present
+from .translate import Rejection, RejectionCode, to_chat, from_chat, local_response, error_response, anthropic_usage
 from .translate_stream import StreamTranslator, sse_events
 
 log = logging.getLogger(__name__)
@@ -729,13 +729,13 @@ class Proxy:
                     raw_usage = translation['upstream_usage']
                     translation['usage_missing'] = not isinstance(raw_usage, dict) or not raw_usage
                     stats['usage_missing'] += int(translation['usage_missing'])
-                    if isinstance(raw_usage, dict) and 'prompt_tokens' in raw_usage and not cache_fields_present(raw_usage, dialect):
+                    usage, cache_reported = anthropic_usage(raw_usage, dialect)
+                    if isinstance(raw_usage, dict) and 'prompt_tokens' in raw_usage and not cache_reported:
                         stats['cache_fields_missing'] += 1
-                    usage = anthropic_usage(raw_usage, dialect)
                     prompt_tokens = raw_usage.get('prompt_tokens') if isinstance(raw_usage, dict) else None
                     if type(prompt_tokens) is int and prompt_tokens >= 0:
                         self._prompt_history.remember(route.id, chat.body,
-                            sum(usage[key] for key in ('input_tokens', 'cache_read_input_tokens',
+                            sum(usage.get(key, 0) for key in ('input_tokens', 'cache_read_input_tokens',
                                                        'cache_creation_input_tokens')))
                     for key, value in usage.items():
                         stats[key] += value
@@ -773,13 +773,13 @@ class Proxy:
                 except Exception:
                     self._stats['dropped'] += 1
                     log.error('Gateway capture failed route=%s', route.id)
-            usage = anthropic_usage(translation['upstream_usage'], dialect)
+            usage, _ = anthropic_usage(translation['upstream_usage'], dialect)
             previous_tokens = translation['previous_prompt_tokens']
             prefix = translation['common_prefix_tokens']
             log.info('route=%s kind=translate upstream_host=%s upstream_model=%s status=%s finish=%s '
                      'ttfb_ms=%s duration_ms=%s prompt=%s cached=%s out=%s prefix_pct=%s', route.id,
                      urlsplit(route.upstream).hostname, translation['upstream_model'], values['status'],
                      translation['finish_reason'], values.get('ttfb_ms'), values['duration_ms'],
-                     usage['input_tokens'], usage['cache_read_input_tokens'], usage['output_tokens'],
+                     usage['input_tokens'], usage.get('cache_read_input_tokens'), usage['output_tokens'],
                      round(100 * prefix / previous_tokens, 2) if prefix is not None and previous_tokens else None)
         return bytes(buffered)

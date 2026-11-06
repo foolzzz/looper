@@ -97,7 +97,7 @@ class StreamTranslator:
         return [_event('message_start', message={
             'id': self.message_id, 'type': 'message', 'role': 'assistant',
             'model': self.client_model, 'content': [], 'stop_reason': None,
-            'stop_sequence': None, 'usage': {**anthropic_usage(None, self.dialect),
+            'stop_sequence': None, 'usage': {**anthropic_usage(None, self.dialect)[0],
                                             'input_tokens': self.start_input_tokens},
         }), self.ping()]
 

@@ -954,9 +954,9 @@ function RunUsage({ record }: { record: LlmRecord }) {
           ))}
         </span>
       )}
-      <span className="font-mono text-muted-foreground" title={cacheHitTitle(
+      {record.status !== "running" && <span className="font-mono text-muted-foreground" title={cacheHitTitle(
         record.input_tokens != null && record.cache_read_tokens != null && record.cache_creation_tokens != null ? 1 : 0,
-      )}>cache hit {formatHit(hit)}</span>
+      )}>cache hit {formatHit(hit)}</span>}
       {record.context_tokens != null && (
         <span
           className="font-mono text-muted-foreground"

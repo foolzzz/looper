@@ -17,6 +17,14 @@ function render(mode?: "append" | "replace", metadata: object = {}, extra: objec
 }
 
 describe("run system prompt mode", () => {
+  it.each([{}, { input_tokens: 100, cache_read_tokens: 0, cache_creation_tokens: 0 }])(
+    "hides cache hits while the run is still running", (usage) => {
+      const html = render(undefined, {}, { status: "running", ...usage });
+      expect(html).toContain("Waiting for the first event");
+      expect(html).not.toContain("cache hit");
+      expect(html).not.toContain("this runtime does not report cache usage");
+    });
+
   it.each([
     [100, 80, 20, "40%"], [100, 0, 0, "0%"], [0, 0, 0, "–"], [100, null, 20, "–"], [100, undefined, undefined, "–"],
   ])("shows run cache hits from recorded prompt tokens", (input_tokens, cache_read_tokens, cache_creation_tokens, hit) => {

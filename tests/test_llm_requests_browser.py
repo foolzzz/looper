@@ -76,6 +76,7 @@ def test_recorded_requests_viewer_and_jsonl_download(recording_server, tmp_path,
                 metadata={"llmrec": {"state": "recording"}}, pool=pool)
             missing = await llm_records.start_record(agent_id="worker-no-cache", pool=pool)
             await llm_records.finish_record(missing, status="completed", input_tokens=100, output_tokens=8, pool=pool)
+            await llm_records.start_record(agent_id="worker-running-cache", pool=pool)
             return record
         finally:
             await pool.close()
@@ -200,6 +201,11 @@ def test_recorded_requests_viewer_and_jsonl_download(recording_server, tmp_path,
             for width in (1280, 768):
                 page.set_viewport_size({"width": width, "height": 1000})
                 page.screenshot(path=str(artifacts / f"cache-hit-missing-{width}.png"), full_page=True)
+            page.goto(f"{api.base_url}/#history/worker-running-cache")
+            pw.expect(page.get_by_text("Waiting for the first event…", exact=True)).to_be_visible()
+            pw.expect(page.get_by_text("cache hit", exact=False)).to_have_count(0)
+            pw.expect(page.locator('[title="this runtime does not report cache usage"]')).to_have_count(0)
+            page.screenshot(path=str(artifacts / "cache-hit-running.png"), full_page=True)
             page.goto(f"{api.base_url}/#settings/recording")
             switch = page.get_by_role("switch", name="Record model requests", exact=True)
             pw.expect(switch).to_have_attribute("aria-checked", "true")
