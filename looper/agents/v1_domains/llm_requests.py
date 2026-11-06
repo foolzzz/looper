@@ -41,7 +41,7 @@ _FIELDS = {
     "request_headers": {"type": "object"}, "response_headers": _NULL_OBJECT,
     "request_bytes": _INT, "request_sha256": _STR, "response_bytes": _NULL_INT,
     **dict.fromkeys(("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"), _NULL_INT),
-    "usage": _NULL_OBJECT, "record_gap": _NULL_STR, "body_sanitized": _BOOL,
+    "usage": _NULL_OBJECT, "translation": _NULL_OBJECT, "record_gap": _NULL_STR, "body_sanitized": _BOOL,
 }
 ROW = _object(_FIELDS, closed=True)
 ROUTE = _object({"id": _STR, "agent_id": _STR, "task_id": _NULL_STR, "step_id": _NULL_STR,

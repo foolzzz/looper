@@ -128,6 +128,7 @@ from ..claude_cli import (
 )
 from .. import knowledge as project_knowledge
 from .. import session_switch
+from ..llmrec import LlmrecRoute, control as llmrec
 from ..scheduler import continuing_run_preface
 from .. import vault
 from ..vault import VaultConfig
@@ -3417,6 +3418,8 @@ class PlannerAgent:
         launch = Launch(agent_settings, library, knowledge, role=AgentType.PLANNER,
                         read_dirs=tuple(step.workspace.path for step in plan.steps
                                         if step.isolated and step.workspace is not None))  # never with agent teams
+        launch = await llmrec.attach(launch, agent_id=self.agent_id, task_id=self._task_id,
+                                   reuse=True, cwd=plan.work_dir)
         # Compose the shared role guidance after resolving the launch; its runtime keeps its reading tools
         # and read-only controls, and a saved custom role prompt is still loaded unchanged.
         settings = await load_settings()
@@ -3439,9 +3442,11 @@ class PlannerAgent:
         # The command carries the model, the effort, the installed items' directories (each named by its
         # content's hash) and the knowledge's; the file is named by its content's hash (the knowledge
         # index included), kept beside it all the same; the environment and the installed items are
-        # compared by their hashes, the mounted directories as such.
+        # compared by their hashes, the mounted directories as such. Include the environment's
+        # recording URL so toggles, bypass and port changes restart the resident once.
         signature = (tuple(base), system_prompt.sha256, launch.env_sha256, launch.library.sha256,
-                     launch.knowledge.add_dirs, launch.binding_sha256)
+                     launch.knowledge.add_dirs, launch.binding_sha256,
+                     launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None)
         switch = session_switch.profile_switch(plan.session_id, plan.session_runtime, plan.session_profile, launch,
                                                session_provider=plan.session_provider, command=base,
                                                label=self._directory_label(plan))

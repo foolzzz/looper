@@ -28,6 +28,49 @@ How the agent system works today is described in
   capacity pressure can briefly lock recording tables to reclaim physical
   PostgreSQL space. Manager cleanup also removes its recorded requests.
 
+## [2.14.103] - 2026-11-05
+
+### Added
+
+- **The local model proxy has a translating route kind: Anthropic Messages in, OpenAI Chat Completions upstream.** No user-visible entry point yet; routes come from the next change, and existing recording routes are not translated. ([#1147](https://github.com/foolzzz/looper/pull/1147))
+  - Streaming and non-streaming requests are translated and the responses translated back. Requests are byte-stable across turns so automatic prefix caching keeps hitting; upstream cached-token usage is mapped to the Anthropic cache-read fields.
+  - A typed per-model chat dialect table covers provider differences (reasoning field and replay, max-token field, rejected parameters, usage fields).
+  - The proxy answers the Claude Code probe and the model list locally; `count_tokens` answers 404 `not_found_error`.
+  - Recorded translated requests carry a new nullable `translation` column in `llm_requests`, added by `ensure_schema` to existing databases.
+
+### Changed
+
+- The recorder route format is now 4, so a running recorder that reports format 3 is treated as outdated. Chat Completions usage on existing recording routes now reads `cache_write_tokens` from the prompt-token details when present (it was always 0).
+
+### Fixed
+
+- Ending a kept run no longer returns early when the child's state file says it exited; it waits for the keeper process itself to finish shutting down (up to 10 seconds).
+
+## [2.14.102] - 2026-11-05
+
+### Added
+
+- **`looper serve` logs how long each startup step takes.** Observability only; no change to the startup order. ([#1149](https://github.com/foolzzz/looper/pull/1149))
+  - One INFO line, `startup steps: name=seconds ... total=seconds`, follows "HTTP server listening". Steps that are skipped are not listed.
+  - The server status gains an optional `startup_steps` object, and `looper service upgrade` copies it into the upgrade report when present.
+
+## [2.14.101] - 2026-11-05
+
+### Fixed
+
+- **A control-plane upgrade measures `--turns-timeout` from when only turns block.** Behavior change in `looper service upgrade`. ([#1148](https://github.com/foolzzz/looper/pull/1148))
+  - The turns timeout used to run from the start of the drain, so a non-keepable run that finished after more than `--turns-timeout` made `--no-force` cancel the deployment at once while any Manager or Planner turn was still running. It now runs from the first drain status with no non-keepable run waiting, resets if one reappears, and is capped by `--drain-timeout` overall.
+  - The upgrade report gains `turns_wait_seconds`.
+
+## [2.14.100] - 2026-11-05
+
+### Added
+
+- **Request recording now covers resident agents and the in-process API runtime.** No change while recording is off. ([#1137](https://github.com/foolzzz/looper/pull/1137))
+  - The Manager, a task's Planner and consults attach a recording route when they run on Claude Code. The Manager and the Planner reuse one route per agent while its upstream, runtime type, provider and model stay the same, so the resident process does not restart from turn to turn; requests made while no turn is bound keep `record_id` NULL and carry `after_record_id`.
+  - The in-process API runtime records through the session's model target.
+  - Codex, OMP, Pi and DSH are not routed, because a loopback URL would change the requests they send; they, Grok, Cursor and the TTADK runtimes stay `skipped`/`not_covered` with a stated reason.
+
 ## [2.14.99] - 2026-11-05
 
 ### Fixed

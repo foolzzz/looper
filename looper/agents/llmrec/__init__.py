@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import tempfile
 
-ROUTE_FORMAT = 3
+ROUTE_FORMAT = 4
 PROXY_ENV = frozenset(('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
                        'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'))
 TLS_ENV = frozenset(('SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS',
@@ -36,11 +36,18 @@ class SkipReason(StrEnum):
     CREDENTIALS_IN_URL = 'credentials_in_url'
 
 
+class RouteKind(StrEnum):
+    RECORD = 'record'
+    TRANSLATE = 'translate'
+
+
 @dataclass(frozen=True)
 class LlmrecRoute:
     id: str
     url: str
     upstream: str
+    kind: RouteKind = RouteKind.RECORD
+    record: bool = True
 
 
 @dataclass(frozen=True)
@@ -54,6 +61,11 @@ class RouteFile:
     format: int = ROUTE_FORMAT
     id: str = ''
     upstream: str = ''
+    kind: str = 'record'
+    record: bool = True
+    api: str | None = None
+    dialect: str | None = None
+    models: dict[str, str] | None = None
     protocol: str | None = None
     runtime_type: str = 'claude-code'
     provider_id: str | None = None
@@ -76,6 +88,18 @@ class RouteFile:
             if not isinstance(data, dict) or data.get('format') != ROUTE_FORMAT:
                 return None
             route = cls(**data)
+            if route.kind not in (RouteKind.RECORD, RouteKind.TRANSLATE) or not isinstance(route.record, bool):
+                return None
+            if route.kind == RouteKind.TRANSLATE:
+                from .dialects import ChatDialect
+                if (route.api != 'openai-chat' or not isinstance(route.dialect, str)
+                        or route.dialect not in tuple(ChatDialect)
+                        or not isinstance(route.models, dict) or not route.models
+                        or any(not isinstance(key, str) or not key or not isinstance(value, str) or not value
+                               for key, value in route.models.items())):
+                    return None
+            elif any(value is not None for value in (route.api, route.dialect, route.models)):
+                return None
             for env, allowed in ((route.proxy_env, PROXY_ENV), (route.tls_env, TLS_ENV)):
                 if env is not None and (not isinstance(env, dict) or any(
                         key not in allowed or not isinstance(value, str) for key, value in env.items())):
@@ -132,6 +156,22 @@ class RouteFile:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
+
+
+def no_proxy(env: dict[str, str]) -> dict[str, str]:
+    """Keep loopback model requests out of inherited HTTP proxies."""
+    # An explicitly empty lowercase value overrides the uppercase one too.
+    bypass = env.get("no_proxy", env.get("NO_PROXY", ""))
+    values = list(dict.fromkeys(value.strip() for value in bypass.split(",") if value.strip()))
+    # A standalone wildcard already includes loopback. Some clients
+    # recognize it only as the entire bypass value.
+    if values != ["*"]:
+        for value in ("127.0.0.1", "localhost", "::1"):
+            if value not in values:
+                values.append(value)
+    for name in ("NO_PROXY", "no_proxy"):
+        env[name] = ",".join(values)
+    return env
 
 
 def code_sha256() -> str:

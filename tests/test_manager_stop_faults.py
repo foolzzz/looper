@@ -123,6 +123,44 @@ def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: 
     asyncio.run(run())
 
 
+def test_a_stop_while_request_recording_attaches_ends_preparation(
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        session = _Session(hold=False)
+        manager, bus, queue = _manager(tmp_path, session)
+        attaching, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def attach(launch: Any, **kwargs: Any) -> Any:
+            attaching.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(manager_module.llmrec, "attach", attach)
+        envelope = _web("你好")
+        handling = asyncio.create_task(manager._handle(envelope))
+        try:
+            await asyncio.wait_for(attaching.wait(), 5)
+            token = manager.turn_for(envelope.message_id)
+            assert token is not None and token.phase is TurnPhase.PREPARING
+            assert await manager.stop_turn(envelope.message_id, via="web") is StopResult.STOPPING
+            await asyncio.wait_for(asyncio.shield(handling), 2)
+            assert cancelled.is_set()
+            assert not session.started and session.turns == []
+            (reply,) = _replies(queue)
+            assert reply["outcome"] == "stopped" and "error" not in reply
+            assert not token.live and manager.turn_for(envelope.message_id) is None
+        finally:
+            if not handling.done():
+                handling.cancel()
+            await asyncio.gather(handling, return_exceptions=True)
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
 def test_a_stop_after_a_resident_result_while_persistence_is_blocked_ends_the_turn_and_signals_nothing(
     tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

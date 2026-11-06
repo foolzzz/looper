@@ -71,6 +71,7 @@ from ..claude_cli import (
     user_stop_result,
 )
 from .. import chat_commands, chat_settings, gate_commands
+from ..llmrec import LlmrecRoute, control as llmrec
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
 from ..library import load_installed
@@ -362,7 +363,7 @@ STOP_DRAIN_SEC = 10.0
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
     "persist_user_message", "route_to_gate", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
-    "load_session_state", "agent_settings", "templates", "library", "library_server", "build_user_message",
+    "load_session_state", "agent_settings", "templates", "library", "library_server", "llmrec_attach", "build_user_message",
     "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
 )
@@ -1342,6 +1343,8 @@ class ManagerAgent:
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER)
+        launch = await token.step("llmrec_attach", llmrec.attach(
+            launch, agent_id=self.agent_id, task_id=None, reuse=True, cwd=self._config.work_dir))
         if ask.turn is not None:
             ask.turn.runtime = launch.runtime.type  # named in what the turn binding logs
         try:
@@ -1350,10 +1353,12 @@ class ManagerAgent:
             raise RuntimeError(f"无法写入 system prompt 文件：{exc}") from None
         # The command carries the model, the effort and the library's directories; the file is named by
         # its content's hash, kept beside it all the same; the environment and the library are compared
-        # by their hashes.
+        # by their hashes. The recording URL lives in the environment: toggles, bypass and port
+        # changes must restart the resident, while a reused route keeps its process.
         signature = (
             tuple(self._claude_command(prompt_file, launch, resume=False)), system_prompt.sha256, launch.env_sha256,
             launch.library.sha256, launch.binding_sha256,
+            launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None,
         )
         if self._has_templates or self.agent_id != DEFAULT_MANAGER_ID:
             # The MCP tool list is read when the process starts: a changed one restarts it.

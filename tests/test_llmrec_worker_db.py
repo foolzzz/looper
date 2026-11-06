@@ -190,7 +190,7 @@ def test_worker_recording_binding_and_bypass(monkeypatch, tmp_path, caplog, case
     run_db(body, monkeypatch, timeout=35)
 
 
-def test_codex_api_key_worker_is_not_covered(monkeypatch, tmp_path):
+def test_codex_worker_is_not_covered(monkeypatch, tmp_path):
     from looper.agents.llmrec import control
     from tests.test_profile_registry_db import _runtime
 
@@ -220,6 +220,8 @@ def test_codex_api_key_worker_is_not_covered(monkeypatch, tmp_path):
             metadata = json.loads(await pool.fetchval('SELECT metadata FROM llm_records WHERE task_id=$1', task))
             assert metadata['llmrec']['state'] == 'skipped'
             assert metadata['llmrec']['reason'] == 'not_covered'
+            assert metadata['llmrec']['detail'] == (
+                'codex picks request details from the endpoint URL; recording through the proxy would change its requests')
             assert await pool.fetchval('SELECT count(*) FROM llm_requests') == 0
         finally:
             control.install(None)

@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .. import child_env
+from .llmrec import control as llmrec
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
 from ..db import tasks as db_tasks
 from .agent_settings import AgentType, Launch, load_agent_settings
@@ -344,6 +345,7 @@ class ConsultService:
                                                          "provider than its session")
         budget = min(limits.consult_budget_usd, settings.max_budget_usd or limits.consult_budget_usd)
         launch = Launch(replace(settings, max_budget_usd=budget), role=agent, consult=True)
+        launch = await llmrec.attach(launch, agent_id=run_id, task_id=task_id)
         from .profile_registry import cost_basis
 
         basis = cost_basis(launch.profile)
@@ -487,7 +489,8 @@ class ConsultService:
 
         runtime = launch.runtime
         recorder = ClaudeRunRecorder(agent_id=run_id, task_id=task_id, command=command, cwd=cwd, input_text=prompt,
-                                     step_id=str(step["id"]), system_prompt=system_prompt, launch=launch)
+                                     step_id=str(step["id"]), system_prompt=system_prompt, launch=launch,
+                                     whole_process=True)
         await recorder.start()
         try:
             process = await proc_tree.spawn(*command, cwd=cwd, env=launch.environment(),
@@ -577,7 +580,7 @@ class ConsultService:
 
         recorder = ClaudeRunRecorder(agent_id=run_id, task_id=task_id, command=handle.command, cwd=cwd,
                                      input_text=prompt, step_id=str(step["id"]), system_prompt=system_prompt,
-                                     launch=launch)
+                                     launch=launch, whole_process=True)
         await recorder.start()
         result: dict[str, Any] | None = None
         started, ended = False, False

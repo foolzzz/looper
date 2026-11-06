@@ -145,6 +145,19 @@ def report(deployment):
     return json.loads((deployment.root / "logs/serve.log").read_text().splitlines()[-1])
 
 
+@pytest.mark.parametrize("startup_steps", [None, {"imports": 1.3, "pool": 0.1, "total": 2.6}])
+def test_upgrade_report_copies_startup_steps_when_available(deployment, startup_steps):
+    if startup_steps is not None:
+        deployment.responses.status["startup_steps"] = startup_steps
+    assert cli.main(["service", "upgrade"]) == 0
+    data = report(deployment)
+    assert data["status"] == "ok"
+    if startup_steps is None:
+        assert "startup_steps" not in data
+    else:
+        assert data["startup_steps"] == startup_steps
+
+
 @pytest.mark.parametrize("name,value", [
     ("PYTHONPATH", "other"), ("GIT_DIR", "other"),
     *((name, "") for name in service._GIT_REPOSITORY_OVERRIDES),
@@ -1412,7 +1425,52 @@ def test_turns_deadline_applies_when_non_keepable_runs_finish(deployment):
         log_path=deployment.root / "logs/serve.log", plan=UpgradePlan(UpgradeKind.CONTROL_PLANE, (), ()),
         running=manifest(), target=None, installer=None, timeout=120, drain_timeout=8, turns_timeout=2, no_force=False)
     data = report(deployment)
-    assert data["drain_seconds"] == 2 and data["kept_before"] == 1 and data["interrupted"] == []
+    assert data["drain_seconds"] == 2.5 and data["kept_before"] == 1 and data["interrupted"] == []
+    assert data["turns_wait_seconds"] == 2
+
+
+@pytest.mark.parametrize("run_states,drained_at,drain_timeout,exit_code,drain_seconds,turns_seconds", [
+    ([(0, True), (450, False)], 510, 1200, 0, 510, 60),
+    ([(0, False)], None, 1200, 1, 180, 180),
+    ([(0, True), (450, False)], None, 500, 1, 500, 50),
+    ([(0, False), (120, True), (450, False)], 570, 1200, 0, 570, 120),
+    ([(0, False), (120, True)], None, 200, 1, 200, 0),
+], ids=["slow_run_then_turn", "turns_timeout", "total_timeout", "turns_clock_reset", "run_reappears"])
+def test_control_plane_times_only_turns_waiting(
+        deployment, run_states, drained_at, drain_timeout, exit_code, drain_seconds, turns_seconds):
+    deployment.responses.status["keepers"] = {"mode": "on", "pending": 0, "adopted_at_start": 1}
+    operation = deployment.host.system_operation
+
+    def drain_status(port, token, name, args):
+        if name not in ("drain", "drain_status"):
+            return operation(port, token, name, args)
+        deployment.events.append(name)
+        now = deployment.elapsed[0]
+        non_keepable = next(value for since, value in reversed(run_states) if now >= since)
+        runs = [{"worker_id": "kept-worker", "role": "worker", "keepable": True}]
+        if non_keepable:
+            runs.append({"worker_id": "plain-worker", "role": "worker", "keepable": False})
+        drained = drained_at is not None and now >= drained_at
+        return {"phase": "drained" if drained else "draining",
+                "waiting": {"runs": runs, "manager_turns": [] if drained else ["manager"]}}
+
+    deployment.host.system_operation = drain_status
+    assert cli.main(["service", "upgrade", "--no-force", "--turns-timeout", "180",
+                     "--drain-timeout", str(drain_timeout)]) == exit_code
+    data = report(deployment)
+    assert data["plan"] == "CONTROL_PLANE"
+    assert data["drain_seconds"] == pytest.approx(drain_seconds)
+    assert data["turns_wait_seconds"] == pytest.approx(turns_seconds)
+    assert data["interrupted"] == data["cut_turns"] == []
+    if exit_code == 0:
+        assert data["status"] == "ok"
+        assert deployment.events[-3:] == ["stop", "install", "start"]
+        assert "drain_cancel" not in deployment.events
+    else:
+        assert data["status"] == "failed"
+        assert "drain deadline passed" in data["error"]
+        assert "drain_cancel" in deployment.events
+        assert not {"stop", "install", "start"}.intersection(deployment.events)
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])

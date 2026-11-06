@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import datetime, timezone
 from ipaddress import ip_address
 import json
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -25,10 +26,16 @@ try:
 except ImportError:
     truststore = None
 
+from looper import __version__
+
 from . import ROUTE_FORMAT, ROUTE_ID, ROUTES_DIR, TLS_ENV, RouteFile, code_sha256
 from .capture import MIB, build_capture, kind_of, redact_headers, redact_query
+from .dialects import DIALECTS, ChatDialect
+from .translate import Rejection, RejectionCode, to_chat, from_chat, local_response, error_response, anthropic_usage, cache_fields_present
+from .translate_stream import StreamTranslator, sse_events
 
 log = logging.getLogger(__name__)
+PING_INTERVAL_S = 15
 HOP = {'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer',
        'transfer-encoding', 'upgrade'}
 
@@ -143,6 +150,31 @@ class _ResponseBuffer:
                 self.failed = True
 
 
+class _PrefixHistory:
+    """Observational state only: eviction never changes translated request bytes."""
+    def __init__(self, limit=256 * MIB):
+        self.limit, self.size = limit, 0
+        self.items = OrderedDict()
+
+    def remember(self, route_id, body):
+        previous = self.items.pop(route_id, None)
+        common = None
+        if previous is not None:
+            self.size -= len(previous)
+            common = 0
+            for left, right in zip(previous, body):
+                if left != right:
+                    break
+                common += 1
+        if len(body) <= self.limit:
+            self.items[route_id] = body
+            self.size += len(body)
+        while self.size > self.limit:
+            _, evicted = self.items.popitem(last=False)
+            self.size -= len(evicted)
+        return common
+
+
 class Proxy:
     def __init__(self, runtime_root, *, sink, port=0, instance=None, connect_s=10, read_idle_s=None):
         self.root = Path(runtime_root)
@@ -152,6 +184,11 @@ class Proxy:
         self.connect_s, self.read_idle_s = connect_s, read_idle_s
         self._stats = dict(requests=0, recorded=0, gaps=0, dropped=0)
         self._gap_reasons = Counter()
+        self._prefix_history = _PrefixHistory()
+        self._translate_stats = dict(requests=0, errors_by_type=Counter(), stream_errors=0,
+            pings=0, usage_missing=0, cache_fields_missing=0, tool_args_invalid=0,
+            dropped=Counter(), degraded=Counter(), clamped=Counter(), input_tokens=0,
+            cache_read_input_tokens=0, cache_creation_input_tokens=0, output_tokens=0)
         self._routes = {}
         self._handlers = set()
         self._server = None
@@ -160,7 +197,7 @@ class Proxy:
 
     @property
     def stats(self):
-        return {**self._stats, 'recorded': getattr(self.sink, 'recorded', self._stats['recorded']),
+        return {**self._stats, 'translate': self._translate_stats, 'recorded': getattr(self.sink, 'recorded', self._stats['recorded']),
                 'gaps': getattr(self.sink, 'gaps', self._stats['gaps']),
                 'gap_reasons': dict(getattr(self.sink, 'gap_reasons', self._gap_reasons)),
                 'write_errors': getattr(self.sink, 'write_errors', 0),
@@ -275,7 +312,7 @@ class Proxy:
             healthy = getattr(self.sink, 'healthy', True)
             await self._json(connection, writer, 200 if healthy else 503,
                 dict(instance=self.instance, pid=os.getpid(), port=self.port, writer_healthy=healthy,
-                code_sha256=self._code_sha256, route_format=ROUTE_FORMAT, **self.stats))
+                code_sha256=self._code_sha256, route_format=ROUTE_FORMAT, features={'translate': 1}, **self.stats))
             return b''
         prefix = path.path.split('/', 3)
         route = stamped[0] if stamped else None
@@ -288,6 +325,8 @@ class Proxy:
                 'type': 'llmrec_unknown_route', 'message': 'Unknown recording route'}})
             return b''
         rest = '/' + prefix[3] if len(prefix) == 4 else ''
+        if route.kind == 'translate':
+            return await self._translated(connection, reader, writer, request, body, stamped, rest)
         upstream = urlsplit(route.upstream)
         # Redirect targets already include the complete path and query at the upstream origin.
         origin_root = prefix[1] == 'r-origin'
@@ -417,4 +456,262 @@ class Proxy:
                 log.exception('Recording capture failed route=%s', route.id)
             log.info('route=%s path=%s status=%s duration_ms=%s bytes=%s', route.id, upstream_path.path,
                      values['status'], values['duration_ms'], response_bytes)
+        return bytes(buffered)
+
+    async def _translated(self, connection, reader, writer, request, body, stamped, path):
+        route, seq, started_at, started = stamped
+        stats = self._translate_stats
+        stats['requests'] += 1
+        dialect = DIALECTS[ChatDialect(route.dialect)]
+        values = dict(route=route, instance=self.instance, seq=seq, record_id=route.record_id,
+            after_record_id=route.last_record_id if route.record_id is None else None,
+            started_at=started_at, method=request.method.decode(), path=path, kind=kind_of(path),
+            request_headers=redact_headers(request.headers), status=None, outcome='completed',
+            response_headers={})
+        translation = dict(api='openai-chat', dialect=route.dialect, upstream_model=None,
+            upstream_path='/chat/completions', upstream_status=None, upstream_request_id=None,
+            finish_reason=None, upstream_usage=None, upstream_request_bytes=None,
+            upstream_request_sha256=None, common_prefix_bytes=None,
+            notes={'dropped': {}, 'degraded': {}, 'clamped': {}}, usage_missing=False)
+        buffer = _ResponseBuffer('')
+        buffered = bytearray()
+        response = None
+        response_sent = False
+        translator = None
+        last_sent = time.monotonic()
+        response_bytes = 0
+        capture_request = path in ('/v1/messages', '/v1/messages/count_tokens') and request.method == b'POST'
+
+        async def send_bytes(data):
+            nonlocal last_sent, response_bytes
+            if not data:
+                return
+            writer.write(connection.send(h11.Data(data=data)))
+            # Tee the actual client-side body, including pings and errors.
+            buffer.append(data)
+            response_bytes += len(data)
+            last_sent = time.monotonic()
+            if values.get('ttfb_ms') is None:
+                values['ttfb_ms'] = round((time.monotonic() - started) * 1000)
+            await writer.drain()
+
+        async def send_response(status, headers, data):
+            nonlocal response_sent
+            fields = [(key.encode('ascii'), value.encode('latin-1')) for key, value in headers.items()
+                      if key.lower() not in ('content-length', 'transfer-encoding')]
+            fields.append((b'content-length', str(len(data)).encode()))
+            writer.write(connection.send(h11.Response(status_code=status, headers=fields)))
+            response_sent = True
+            values.update(status=status, response_headers=redact_headers(fields, response=True))
+            if request.method != b'HEAD':
+                await send_bytes(data)
+            writer.write(connection.send(h11.EndOfMessage()))
+            await writer.drain()
+
+        def count_error(error_type):
+            stats['errors_by_type'][error_type] += 1
+
+        async def reject(error):
+            count_error(error.error_type)
+            if error.code is RejectionCode.TOOL_ARGS_INVALID:
+                stats['tool_args_invalid'] += 1
+            await send_response(error.status, {'content-type': 'application/json'}, json.dumps({
+                'type': 'error', 'error': {'type': error.error_type, 'message': error.message}}).encode())
+
+        async def events(data):
+            for chunk in data:
+                if chunk.startswith(b'event: ping'):
+                    stats['pings'] += 1
+                await send_bytes(chunk)
+
+        async def watch_client():
+            while True:
+                data = await reader.read(65536)
+                if not data or len(buffered) + len(data) > 256 * MIB:
+                    return
+                buffered.extend(data)
+
+        async def exchange():
+            nonlocal response, response_sent, translator
+            try:
+                local = local_response(request.method.decode(), path, route)
+                if local is not None:
+                    status, headers, data = local
+                    if status >= 400:
+                        count_error('not_found_error')
+                    await send_response(status, headers, data)
+                    return
+                try:
+                    parsed = json.loads(body)
+                except (ValueError, UnicodeError):
+                    raise Rejection(400, 'invalid_request_error', 'Invalid JSON through the Looper gateway')
+                if not isinstance(parsed, dict):
+                    raise Rejection(400, 'invalid_request_error', 'Expected an object through the Looper gateway')
+                request_headers = dict(request.headers)
+                session = request_headers.get(b'x-claude-code-session-id')
+                chat = to_chat(parsed, dialect, route.models,
+                               session_id=session.decode('utf-8', errors='replace') if session else None)
+                translation.update(upstream_model=chat.upstream_model, notes=chat.notes,
+                    upstream_request_bytes=len(chat.body), upstream_request_sha256=hashlib.sha256(chat.body).hexdigest(),
+                    common_prefix_bytes=self._prefix_history.remember(route.id, chat.body))
+                for category in ('dropped', 'degraded', 'clamped'):
+                    stats[category].update(chat.notes.get(category, {}))
+                url = route.upstream.rstrip('/') + '/chat/completions'
+                headers = {'content-type': 'application/json',
+                    'accept': 'text/event-stream' if chat.stream else 'application/json',
+                    'accept-encoding': 'gzip, deflate', 'user-agent': 'looper-gateway/' + __version__}
+                if authorization := request_headers.get(b'authorization'):
+                    headers['authorization'] = authorization.decode('latin-1')
+                upstream_request = self._client.build_request('POST', url, headers=headers, content=chat.body,
+                    timeout=httpx.Timeout(self.read_idle_s if self.read_idle_s is not None else 600,
+                                          connect=self.connect_s, write=60, pool=10),
+                    extensions={'llmrec_proxy': _upstream_proxy(route, url),
+                        'llmrec_tls': route.tls_env if route.tls_env is not None else
+                            {name: os.environ[name] for name in TLS_ENV if name in os.environ}})
+                # Only failures while establishing the connection are safe to retry.
+                for attempt in range(2):
+                    try:
+                        response = await self._client.send(upstream_request, stream=True, follow_redirects=False)
+                        break
+                    except (httpx.ConnectError, httpx.ConnectTimeout):
+                        if attempt:
+                            raise
+                translation.update(upstream_status=response.status_code,
+                    upstream_request_id=response.headers.get('x-request-id') or response.headers.get('request-id'))
+                if not 200 <= response.status_code < 300:
+                    raw = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        raw.extend(chunk[:max(0, MIB - len(raw))])
+                        if len(raw) >= MIB:
+                            break
+                    status, fields, data = error_response(response.status_code, bytes(raw), response.headers, dialect)
+                    count_error(json.loads(data)['error']['type'])
+                    await send_response(status, fields, data)
+                elif chat.stream:
+                    translator = StreamTranslator(dialect, parsed['model'],
+                        'msg_lgw_' + hashlib.sha256(f'{self.instance}:{seq}'.encode()).hexdigest()[:24])
+                    fields = [(b'content-type', b'text/event-stream'), (b'cache-control', b'no-cache'),
+                              (b'transfer-encoding', b'chunked')]
+                    writer.write(connection.send(h11.Response(status_code=200, headers=fields)))
+                    response_sent = True
+                    values.update(status=200, response_headers=redact_headers(fields, response=True))
+                    await events(translator.start())
+                    iterator = sse_events(response.aiter_bytes()).__aiter__()
+                    pending = None
+                    try:
+                        while not translator.done:
+                            if pending is None:
+                                pending = asyncio.create_task(iterator.__anext__())
+                            ready, _ = await asyncio.wait({pending}, timeout=max(0, PING_INTERVAL_S - (time.monotonic() - last_sent)))
+                            if not ready:
+                                await events([translator.ping()])
+                                continue
+                            try:
+                                event = pending.result()
+                            except StopAsyncIteration:
+                                break
+                            finally:
+                                pending = None
+                            if event is not None:
+                                await events(translator.feed(event))
+                        await events(translator.finish())
+                    finally:
+                        if pending is not None:
+                            pending.cancel()
+                            await asyncio.gather(pending, return_exceptions=True)
+                        await iterator.aclose()
+                    translation.update(upstream_usage=translator.usage,
+                                       finish_reason=translator.finish_reason)
+                    if translator.error_type:
+                        stats['stream_errors'] += 1
+                        count_error(translator.error_type)
+                        stats['tool_args_invalid'] += int(translator.tool_args_invalid)
+                    writer.write(connection.send(h11.EndOfMessage()))
+                    await writer.drain()
+                else:
+                    data = json.loads(await response.aread())
+                    if isinstance(data, dict):
+                        translation['upstream_usage'] = data.get('usage')
+                        choices = data.get('choices')
+                        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                            translation['finish_reason'] = choices[0].get('finish_reason')
+                    result = from_chat(data, client_model=parsed['model'], dialect=dialect)
+                    await send_response(200, {'content-type': 'application/json'},
+                                        json.dumps(result, ensure_ascii=False).encode())
+            except Rejection as error:
+                if response_sent and translator is not None:
+                    stats['stream_errors'] += 1
+                    count_error(error.error_type)
+                    await events(translator.fail(error.error_type, error.message))
+                    writer.write(connection.send(h11.EndOfMessage()))
+                    await writer.drain()
+                else:
+                    await reject(error)
+            except asyncio.CancelledError:
+                values['outcome'] = 'client_closed'
+                raise
+            except (httpx.HTTPError, OSError, ValueError, TypeError, KeyError):
+                values.update(outcome='upstream_error', error='Gateway upstream exchange failed')
+                if response_sent and translator is not None:
+                    stats['stream_errors'] += 1
+                    count_error('api_error')
+                    await events(translator.fail('api_error', 'upstream stream interrupted'))
+                    writer.write(connection.send(h11.EndOfMessage()))
+                    await writer.drain()
+                elif not response_sent:
+                    await reject(Rejection(502, 'api_error', 'gateway could not reach upstream'))
+            finally:
+                if translator is not None:
+                    translation.update(upstream_usage=translator.usage, finish_reason=translator.finish_reason)
+                if response is not None and 200 <= response.status_code < 300:
+                    raw_usage = translation['upstream_usage']
+                    translation['usage_missing'] = not isinstance(raw_usage, dict) or not raw_usage
+                    stats['usage_missing'] += int(translation['usage_missing'])
+                    if isinstance(raw_usage, dict) and 'prompt_tokens' in raw_usage and not cache_fields_present(raw_usage, dialect):
+                        stats['cache_fields_missing'] += 1
+                    for key, value in anthropic_usage(raw_usage, dialect).items():
+                        stats[key] += value
+                if response is not None:
+                    await response.aclose()
+
+        forwarding, disconnected = asyncio.create_task(exchange()), asyncio.create_task(watch_client())
+        try:
+            done, _ = await asyncio.wait({forwarding, disconnected}, return_when=asyncio.FIRST_COMPLETED)
+            if disconnected in done and not forwarding.done():
+                forwarding.cancel()
+            await asyncio.gather(forwarding, return_exceptions=True)
+        finally:
+            disconnected.cancel()
+            if not forwarding.done():
+                forwarding.cancel()
+            await asyncio.gather(forwarding, disconnected, return_exceptions=True)
+            values.update(duration_ms=round((time.monotonic() - started) * 1000),
+                          response_bytes=response_bytes, translation=translation)
+            buffer.finish()
+            if buffer.too_large:
+                values['record_gap'] = 'response_too_large'
+            if route.record and capture_request:
+                try:
+                    capture = await asyncio.to_thread(build_capture, request_body=body,
+                        response_data=bytes(buffer.raw), decoded_response=bytes(buffer.decoded), **values)
+                    if capture is not None:
+                        if not self.sink.offer(capture):
+                            self._stats['dropped'] += 1
+                        elif capture.record_gap:
+                            self._stats['gaps'] += 1
+                            self._gap_reasons[capture.record_gap] += 1
+                        else:
+                            self._stats['recorded'] += 1
+                except Exception:
+                    self._stats['dropped'] += 1
+                    log.error('Gateway capture failed route=%s', route.id)
+            usage = anthropic_usage(translation['upstream_usage'], dialect)
+            request_bytes = translation['upstream_request_bytes']
+            prefix = translation['common_prefix_bytes']
+            log.info('route=%s kind=translate upstream_host=%s upstream_model=%s status=%s finish=%s '
+                     'ttfb_ms=%s duration_ms=%s prompt=%s cached=%s out=%s prefix_pct=%s', route.id,
+                     urlsplit(route.upstream).hostname, translation['upstream_model'], values['status'],
+                     translation['finish_reason'], values.get('ttfb_ms'), values['duration_ms'],
+                     usage['input_tokens'], usage['cache_read_input_tokens'], usage['output_tokens'],
+                     round(100 * prefix / request_bytes, 2) if prefix is not None and request_bytes else None)
         return bytes(buffered)

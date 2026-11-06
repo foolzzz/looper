@@ -1381,6 +1381,7 @@ CREATE TABLE IF NOT EXISTS llm_requests (
     cache_read_tokens BIGINT,
     cache_write_tokens BIGINT,
     usage             JSONB,
+    translation       JSONB,
     record_gap        TEXT CHECK (record_gap IN ('request_too_large', 'response_too_large', 'undecodable_encoding', 'body_encoding_unparsed',
                                                  'unparsable_request', 'unparsable_stream', 'rejected_by_database')),
     body_sanitized    BOOLEAN NOT NULL DEFAULT FALSE,

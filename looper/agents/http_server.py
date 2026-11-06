@@ -171,8 +171,10 @@ class AgentHTTPServer:
         ops_config: OpsConfig | None = None,
         channels: ChannelRegistry | None = None,
         drain: DrainState | None = None,
+        startup_steps: dict[str, float] | None = None,
     ) -> None:
         self._drain = drain or DrainState()
+        self._startup_steps = startup_steps
         self._started_at = datetime.now(timezone.utc)
         self._host = host
         self._port = port
@@ -1062,6 +1064,8 @@ class AgentHTTPServer:
             "checks": await self._checks_now(),
             "can_sign_out": self._can_sign_out(headers),
         }
+        if getattr(self, "_startup_steps", None) is not None:
+            status["startup_steps"] = dict(self._startup_steps)
         if self._worker_pool is not None and (keepers := self._worker_pool.keeper_status()):
             status["keepers"] = keepers
         if self._managers is not None:

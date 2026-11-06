@@ -233,24 +233,14 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         if launch.agent_teams:
             added[AGENT_TEAMS] = "1"
         env = {**{k: v for k, v in child_env.inherited().items() if k not in binding.unset and k != AGENT_TEAMS}, **added}
-        from ..llmrec import LlmrecRoute
+        from ..llmrec import LlmrecRoute, no_proxy
 
         if isinstance(launch.llmrec, LlmrecRoute):
             env[BASE_URL] = launch.llmrec.url
             # The loopback endpoint hides first-party tool search support from Claude Code.
             if official_endpoint(launch.llmrec.upstream):
                 env.setdefault("ENABLE_TOOL_SEARCH", "true")
-            # An explicitly empty lowercase value overrides the uppercase one too.
-            bypass = env.get("no_proxy", env.get("NO_PROXY", ""))
-            values = list(dict.fromkeys(value.strip() for value in bypass.split(",") if value.strip()))
-            # A standalone wildcard already includes loopback. Some clients
-            # recognize it only as the entire bypass value.
-            if values != ["*"]:
-                for value in ("127.0.0.1", "localhost", "::1"):
-                    if value not in values:
-                        values.append(value)
-            for name in ("NO_PROXY", "no_proxy"):
-                env[name] = ",".join(values)
+            no_proxy(env)
         return env
 
     def llmrec_upstream(self, launch: Launch) -> str | None:

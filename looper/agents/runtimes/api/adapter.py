@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+from ...llmrec import LlmrecRoute, no_proxy
 from .. import (
     ApiProtocol, AuthKind, Capability, CostSource, Probe, PromptBlock, ProviderBinding,
     RunCost, RuntimeAdapter, RuntimeUnsupported, runtime_prompt_text,
@@ -116,7 +117,14 @@ class ApiRuntime(RuntimeAdapter):
         return []
 
     def environment(self, launch: Launch) -> dict[str, str]:
-        return dict(self.bind_provider(launch.profile.provider, launch.model, launch.effort).env)
+        env = dict(self.bind_provider(launch.profile.provider, launch.model, launch.effort).env)
+        if isinstance(launch.llmrec, LlmrecRoute):
+            env["LOOPER_LLMREC_BASE_URL"] = launch.llmrec.url
+            no_proxy(env)
+        return env
+
+    def llmrec_upstream(self, launch: Launch) -> str | None:
+        return launch.profile.provider.base_url
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
