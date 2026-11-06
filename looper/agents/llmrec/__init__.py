@@ -134,6 +134,22 @@ class RouteFile:
                 pass
 
 
+def no_proxy(env: dict[str, str]) -> dict[str, str]:
+    """Keep loopback model requests out of inherited HTTP proxies."""
+    # An explicitly empty lowercase value overrides the uppercase one too.
+    bypass = env.get("no_proxy", env.get("NO_PROXY", ""))
+    values = list(dict.fromkeys(value.strip() for value in bypass.split(",") if value.strip()))
+    # A standalone wildcard already includes loopback. Some clients
+    # recognize it only as the entire bypass value.
+    if values != ["*"]:
+        for value in ("127.0.0.1", "localhost", "::1"):
+            if value not in values:
+                values.append(value)
+    for name in ("NO_PROXY", "no_proxy"):
+        env[name] = ",".join(values)
+    return env
+
+
 def code_sha256() -> str:
     root = Path(__file__).resolve().parents[2]
     files = list((root / 'agents' / 'llmrec').glob('*.py')) + [root / 'db' / 'llm_requests.py']

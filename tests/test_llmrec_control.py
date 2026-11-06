@@ -13,13 +13,20 @@ from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.keeper import write_json
 from looper.agents.llmrec import STATE_FILE, TLS_ENV, LlmrecSkip, RouteFile, SkipReason
 from looper.agents.llmrec import control
-from looper.agents.profile_registry import builtin_resolved_profile
+from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec
+from looper.agents.runtimes import ApiProtocol, AuthKind
 from looper.db import activity
+from tests.runtime_model_helpers import resolved_profile
 
 
 @pytest.fixture
 def launch():
-    return Launch(AgentSettings(profile=builtin_resolved_profile()))
+    provider = LegacyProviderSpec('test-provider', 'Test provider', AuthKind.API_KEY,
+                                  frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
+                                  base_url='https://model.example.invalid', api_key='test-key')
+    profile = resolved_profile('test-agent', 'Test agent', RuntimeSpec('test-runtime', 'Claude Code', 'claude-code'),
+                               provider, 'haiku')
+    return Launch(AgentSettings(profile=profile))
 
 
 @pytest.mark.parametrize('foreign', ['instance', 'pid'])
@@ -161,3 +168,148 @@ def test_bypass_activity_failure_does_not_block_launch(tmp_path, monkeypatch, ca
     assert attached.llmrec.reason is SkipReason.PROXY_UNAVAILABLE
     assert insert.await_count == int(task_id is not None)
     assert 'sensitive database error' not in caplog.text
+
+
+@pytest.mark.parametrize('change', ['upstream', 'runtime', 'provider', 'model', 'missing_file'])
+def test_resident_route_reuses_binding_and_retires_changed_route(tmp_path, monkeypatch, change, launch):
+    from dataclasses import replace
+    from looper.agents.llmrec import LlmrecRoute, ROUTES_DIR
+
+    original = launch
+    owner = control.ProxyControl(tmp_path, '', enabled=True)
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value=True))
+    monkeypatch.setattr(owner, '_state', lambda: {'port': 1234})
+
+    async def body():
+        one = await owner.attach(original, agent_id='manager-test', task_id=None, reuse=True)
+        assert isinstance(one.llmrec, LlmrecRoute)
+        path = tmp_path / ROUTES_DIR / f'{one.llmrec.id}.json'
+        owner.bind(one.llmrec.id, 11)
+        owner.release(11, end_route=False)
+        two = await owner.attach(original, agent_id='manager-test', task_id=None, reuse=True)
+        assert two.llmrec == one.llmrec
+        assert two.binding_sha256 == original.binding_sha256
+        assert RouteFile.read(path).last_record_id == 11
+        assert RouteFile.read(path).ended_at is None
+
+        profile = original.profile
+        resolved = profile.resolved_model
+        if change == 'upstream':
+            resolved = replace(resolved, endpoint=replace(resolved.endpoint, base_url='http://127.0.0.1:2/v1'))
+        elif change == 'runtime':
+            profile = replace(profile, runtime=replace(profile.runtime, type='api'))
+            resolved = replace(resolved, model=replace(resolved.model, protocol=ApiProtocol.OPENAI_RESPONSES),
+                               endpoint=replace(resolved.endpoint, protocol=ApiProtocol.OPENAI_RESPONSES))
+        elif change == 'provider':
+            resolved = replace(resolved, provider=replace(resolved.provider, id='prov-other'),
+                               endpoint=replace(resolved.endpoint, provider_id='prov-other'),
+                               model=replace(resolved.model, provider_id='prov-other'))
+        elif change == 'model':
+            resolved = replace(resolved, model=replace(resolved.model, name='gpt-other'))
+        else:
+            path.unlink()
+        changed = replace(original, settings=replace(original.settings,
+                          profile=replace(profile, resolved_model=resolved)))
+        three = await owner.attach(changed, agent_id='manager-test', task_id=None, reuse=True)
+        assert isinstance(three.llmrec, LlmrecRoute)
+        assert three.llmrec.id != one.llmrec.id
+        if change != 'missing_file':
+            assert RouteFile.read(path).ended_at is not None
+            assert RouteFile.read(path).last_record_id == 11
+            # The old resident can write a last handoff after its replacement was prepared.
+            owner.bind(one.llmrec.id, 12)
+            owner.release(12, end_route=False)
+            assert RouteFile.read(path).ended_at is not None
+            assert RouteFile.read(path).last_record_id == 12
+        again = await owner.attach(changed, agent_id='manager-test', task_id=None, reuse=True)
+        assert again.llmrec == three.llmrec
+
+    asyncio.run(body())
+
+
+def test_resident_attach_checks_proxy_before_reusing_route(tmp_path, monkeypatch, launch):
+    from looper.agents.llmrec import LlmrecRoute
+
+    owner = control.ProxyControl(tmp_path, '', enabled=True)
+    health = AsyncMock(return_value=True)
+    monkeypatch.setattr(owner, '_health', health)
+    monkeypatch.setattr(owner, '_state', lambda: {'port': 1234})
+    monkeypatch.setattr(owner, '_start', AsyncMock(return_value=False))
+
+    async def body():
+        one = await owner.attach(launch, agent_id='manager-test', task_id=None, reuse=True)
+        health.return_value = None
+        bypass = await owner.attach(launch, agent_id='manager-test', task_id=None, reuse=True)
+        assert bypass.llmrec == LlmrecSkip(SkipReason.PROXY_UNAVAILABLE)
+        assert health.await_args.kwargs == {'cached': False}
+        health.return_value = True
+        recovered = await owner.attach(launch, agent_id='manager-test', task_id=None, reuse=True)
+        assert isinstance(recovered.llmrec, LlmrecRoute)
+        assert recovered.llmrec == one.llmrec
+
+    asyncio.run(body())
+
+
+def test_consult_routes_are_separate_and_end_with_their_records(tmp_path, monkeypatch, launch):
+    from looper.agents.llmrec import ROUTES_DIR
+
+    owner = control.ProxyControl(tmp_path, '', enabled=True, include_oauth=True)
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value=True))
+    monkeypatch.setattr(owner, '_state', lambda: {'port': 1234})
+
+    async def body():
+        one, two = await asyncio.gather(*(
+            owner.attach(launch, agent_id=agent, task_id='task-test') for agent in ('consult-one', 'consult-two')))
+        assert one.llmrec.id != two.llmrec.id
+        owner.bind(one.llmrec.id, 11)
+        owner.bind(two.llmrec.id, 12)
+        owner.release(11, end_route=True)
+        first = RouteFile.read(tmp_path / ROUTES_DIR / f'{one.llmrec.id}.json')
+        second = RouteFile.read(tmp_path / ROUTES_DIR / f'{two.llmrec.id}.json')
+        assert first.ended_at and first.record_id is None and first.last_record_id == 11
+        assert second.ended_at is None and second.record_id == 12
+
+    asyncio.run(body())
+
+
+@pytest.mark.parametrize('source', ['settings', 'provider'])
+@pytest.mark.parametrize('cwd', [None, 'worker-alias'])
+def test_reused_route_refreshes_proxy_and_tls_without_losing_binding(tmp_path, monkeypatch, source, cwd, launch):
+    from dataclasses import replace
+    from looper.agents.llmrec import ROUTES_DIR
+
+    owner = control.ProxyControl(tmp_path, '', enabled=True)
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value=True))
+    monkeypatch.setattr(owner, '_state', lambda: {'port': 1234})
+    worker = tmp_path / 'worker'
+    worker.mkdir()
+    alias = tmp_path / 'worker-alias'
+    alias.symlink_to(worker, target_is_directory=True)
+    cwd = str(tmp_path / cwd) if cwd else None
+    monkeypatch.chdir(tmp_path)
+    changes = (('HTTPS_PROXY', 'http://proxy.example.invalid:8080'),
+               ('NO_PROXY', 'model.example.invalid'), ('SSL_CERT_FILE', 'updated-ca.pem'))
+    settings = launch.settings
+    if source == 'settings':
+        settings = replace(settings, env=changes)
+    else:
+        profile = settings.profile
+        resolved = profile.resolved_model
+        settings = replace(settings, profile=replace(profile, resolved_model=replace(
+            resolved, provider=replace(resolved.provider, env=changes))))
+    updated = replace(launch, settings=settings)
+
+    async def body():
+        one = await owner.attach(launch, agent_id='manager-test', task_id=None, reuse=True, cwd=cwd)
+        owner.bind(one.llmrec.id, 11)
+        two = await owner.attach(updated, agent_id='manager-test', task_id=None, reuse=True, cwd=cwd)
+        assert two.llmrec == one.llmrec
+        route = RouteFile.read(tmp_path / ROUTES_DIR / f'{two.llmrec.id}.json')
+        assert route.proxy_env['HTTPS_PROXY'] == dict(changes)['HTTPS_PROXY']
+        assert route.proxy_env['NO_PROXY'] == dict(changes)['NO_PROXY']
+        assert route.tls_env == {'SSL_CERT_FILE': str((worker if cwd else tmp_path) / 'updated-ca.pem')}
+        assert route.record_id == 11 and route.last_record_id is None and route.ended_at is None
+        fresh = await owner.attach(updated, agent_id='worker-test', task_id=None, cwd=cwd)
+        assert RouteFile.read(tmp_path / ROUTES_DIR / f'{fresh.llmrec.id}.json').tls_env == route.tls_env
+
+    asyncio.run(body())

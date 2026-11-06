@@ -142,7 +142,8 @@ class ApiSession:
         for name in ("openai", "httpx2"):
             logging.getLogger(name).setLevel(logging.WARNING)
         self._loop = loop_for(descriptor.protocol)
-        self._target = ModelTarget(descriptor.protocol, descriptor.base_url, descriptor.model,
+        base_url = (env or {}).get("LOOPER_LLMREC_BASE_URL") or descriptor.base_url
+        self._target = ModelTarget(descriptor.protocol, base_url, descriptor.model,
                                    descriptor.effort, descriptor.context_window, key)
         self._prompt = prompt
         self._signature, self._totals, self._price = signature, totals or Usage(), price

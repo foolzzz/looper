@@ -27,6 +27,17 @@ from ..keeper import read_json
 logger = logging.getLogger(__name__)
 _control: ProxyControl | None = None
 _SECRET_MARKERS = ("token", "secret", "key", "auth", "cookie")
+# Stable explanations for run metadata and the recording viewer.
+NOT_COVERED_DETAILS = {
+    **{(runtime, auth): f"{runtime} picks request details from the endpoint URL; "
+                        "recording through the proxy would change its requests"
+       for runtime in ("codex", "omp", "pi", "dsh") for auth in ("oauth", "api_key")},
+    ("grok", "oauth"): "Grok has no known endpoint override",
+    ("cursor-agent", "oauth"): "Cursor's servers make the model requests",
+    **{(runtime, auth): "TTADK manages its own provider"
+       for runtime in ("ttadk-claude-code", "ttadk-codex", "ttadk-cursor-agent")
+       for auth in ("oauth", "api_key")},
+}
 
 
 def install(control: ProxyControl | None) -> None:
@@ -71,6 +82,7 @@ class ProxyControl:
         self._health_at = 0.0
         self._start_lock = asyncio.Lock()
         self._children: dict[int, asyncio.subprocess.Process] = {}
+        self._resident: dict[str, RouteFile] = {}
 
     def _state(self) -> dict | None:
         state = read_json(self.runtime_root / STATE_FILE)
@@ -248,17 +260,21 @@ class ProxyControl:
             "gap_reasons": counters.get("gap_reasons", {})}}
 
     async def attach(self, launch, *, agent_id, task_id, step_id=None, reuse=False, cwd=None):
-        from ..runtimes import AuthKind
+        from ..runtimes import AuthKind, Launcher
 
         if not self.enabled:
             return launch
         provider = launch.profile.provider
         runtime_type = launch.profile.runtime.type
-        if provider.auth == AuthKind.OAUTH and not (self.include_oauth and runtime_type == "claude-code"):
+        if (provider.auth == AuthKind.OAUTH and runtime_type == "claude-code"
+                and launch.profile.runtime.launcher is not Launcher.TTADK and not self.include_oauth):
             return launch
         upstream = launch.runtime.llmrec_upstream(launch)
         if upstream is None:
-            return replace(launch, llmrec=LlmrecSkip(SkipReason.NOT_COVERED, runtime_type))
+            coverage_type = f"ttadk-{runtime_type}" if launch.profile.runtime.launcher is Launcher.TTADK else runtime_type
+            detail = NOT_COVERED_DETAILS.get((coverage_type, provider.auth.value),
+                                             f"{runtime_type} has no model endpoint override")
+            return replace(launch, llmrec=LlmrecSkip(SkipReason.NOT_COVERED, detail))
         try:
             url = urlsplit(upstream)
             credentials = url.username is not None or url.password is not None or any(
@@ -268,7 +284,7 @@ class ProxyControl:
             credentials = True
         if credentials:
             return replace(launch, llmrec=LlmrecSkip(SkipReason.CREDENTIALS_IN_URL))
-        if not await self._health(cached=True):
+        if not await self._health(cached=not reuse):
             try:
                 ready = await self._start()
             except (OSError, ValueError):
@@ -280,21 +296,37 @@ class ProxyControl:
         state = self._state()
         if state is None:
             return await _bypass(launch, agent_id=agent_id, task_id=task_id)
+        env = replace(launch, llmrec=None).environment()
+        proxy_env = {name: value for name, value in env.items() if name in PROXY_ENV}
+        # The proxy has its own cwd; relative trust paths belong
+        # to the agent process that would have loaded them.
+        tls_env = {name: os.path.realpath(os.path.join(cwd or os.getcwd(), value)) if value else value
+                   for name, value in env.items() if name in TLS_ENV}
+        previous = self._resident.get(agent_id) if reuse else None
+        if previous is not None:
+            path = self.runtime_root / ROUTES_DIR / f"{previous.id}.json"
+            previous = RouteFile.read(path)
+            if previous is not None and not previous.ended_at and (
+                    previous.upstream, previous.runtime_type, previous.provider_id, previous.model
+            ) == (upstream, runtime_type, provider.id, launch.model):
+                if (previous.proxy_env, previous.tls_env) != (proxy_env, tls_env):
+                    replace(previous, proxy_env=proxy_env, tls_env=tls_env).write(path)
+                return replace(launch, llmrec=LlmrecRoute(
+                    previous.id, f"http://127.0.0.1:{state['port']}/r/{previous.id}", upstream))
+            if previous is not None:
+                replace(previous, ended_at=previous.ended_at or _now()).write(path)
         identifier = secrets.token_urlsafe(16)
         resolved = getattr(launch.profile, "resolved_model", None)
         protocol = resolved.model.protocol.value if resolved else next(iter(provider.protocols)).value
-        env = replace(launch, llmrec=None).environment()
         route = RouteFile(format=ROUTE_FORMAT, id=identifier, upstream=upstream, protocol=protocol,
                           runtime_type=runtime_type, provider_id=provider.id, model=launch.model,
                           agent_id=agent_id, task_id=task_id, step_id=step_id,
                           role=getattr(launch.role, "value", launch.role), created_at=_now(),
                           record_id=None, last_record_id=None, ended_at=None,
-                          proxy_env={name: value for name, value in env.items() if name in PROXY_ENV},
-                          # The proxy has its own cwd; relative trust paths belong
-                          # to the agent process that would have loaded them.
-                          tls_env={name: os.path.realpath(os.path.join(cwd or os.getcwd(), value)) if value else value
-                                   for name, value in env.items() if name in TLS_ENV})
+                          proxy_env=proxy_env, tls_env=tls_env)
         route.write(self.runtime_root / ROUTES_DIR / f"{identifier}.json")
+        if reuse:
+            self._resident[agent_id] = route
         port = state["port"]
         return replace(launch, llmrec=LlmrecRoute(identifier, f"http://127.0.0.1:{port}/r/{identifier}", upstream))
 
@@ -305,7 +337,8 @@ class ProxyControl:
         route = RouteFile.read(path)
         if route is None:
             raise ValueError("request recording route is missing")
-        replace(route, record_id=record_id, ended_at=None).write(path)
+        # A replaced resident route may still serve its final handoff turn.
+        replace(route, record_id=record_id).write(path)
 
     def release(self, record_id, *, end_route):
         for path in (self.runtime_root / ROUTES_DIR).glob("*.json"):
