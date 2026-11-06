@@ -4,8 +4,10 @@ import logging
 from datetime import datetime, timezone
 
 from looper.db import llm_requests, system_settings
+from looper.db.connection import get_pool
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT
 from ..llmrec.control import controller
+from ..llmrec import settings as retention
 from ..ops import ErrorCode, OpError
 from ..ops.service import _plain
 
@@ -18,7 +20,16 @@ PROXY = _object({"state": {"type": "string", "enum": ["running", "stopped", "una
     "port": _NULL_INT, "pid": _NULL_INT,
     **dict.fromkeys(("requests", "recorded", "gaps", "dropped", "write_errors"), _INT),
     "gap_reasons": {"type": "object", "additionalProperties": _INT}}, closed=True)
-SETTINGS = _object({"enabled": _BOOL, "include_oauth": _BOOL, "proxy": PROXY, "translate": {"type": "object"}}, closed=True)
+
+
+def _setting(value):
+    return _object({"value": value, "source": {"type": "string", "enum": ["setting", "built-in"]},
+                    "built_in": value, "minimum": value, "maximum": value}, closed=True)
+
+
+SETTINGS = _object({"enabled": _BOOL, "include_oauth": _BOOL, "proxy": PROXY,
+    "retention_days": _setting(_INT), "max_total_mb": _setting({"type": "number"}),
+    "stored_bytes": _INT, "request_count": _INT, "translate": {"type": "object"}}, closed=True)
 _FIELDS = {
     "id": _INT, "route_id": _STR, "proxy_instance": _STR, "proxy_seq": _INT,
     "record_id": _NULL_INT, "after_record_id": _NULL_INT, "agent_id": _STR, "task_id": _NULL_STR,
@@ -42,19 +53,25 @@ SCHEMAS = {"LlmRequest": FULL, "LlmRequestRow": ROW, "LlmrecSettings": SETTINGS}
 RESULTS = {}
 
 
-def _op(name, fields, result, required=None, risk="read", hand=False):
+def _op(name, fields, result, required=None, risk="read", hand=False, confirms=False):
     description = {"llmrec_settings.get": "Read model request recording settings and proxy health.",
         "llmrec_settings.update": "Set recording for future launches. Bodies can contain prompts, code and tool output.",
         "llm_requests.list": "List captured request metadata without bodies.",
         "llm_requests.get": "Read a captured exchange with the complete reconstructed request.",
-        "llm_requests.export": "Export complete captured exchanges in id-ordered pages."}[name]
+        "llm_requests.export": "Export complete captured exchanges in id-ordered pages.",
+        "llm_requests.purge": "Permanently delete recorded model requests in one scope."}[name]
     return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), description, description,
-                     _object(fields, required, closed=True), result, risk=risk, operator_only=True, hand=hand)
+                     _object(fields, required, closed=True), result, risk=risk, operator_only=True, hand=hand, confirms=confirms)
 
 
 OPERATIONS = (
     _op("llmrec_settings.get", {}, SETTINGS),
-    _op("llmrec_settings.update", {"enabled": _BOOL, "include_oauth": _BOOL}, SETTINGS, [], risk="write"),
+    _op("llmrec_settings.update", {"enabled": _BOOL, "include_oauth": _BOOL,
+        "retention_days": {"type": ["integer", "null"]},
+        "max_total_mb": {"type": ["number", "null"]}}, SETTINGS, [], risk="write"),
+    _op("llm_requests.purge", {"task_id": {"type": "string", "minLength": 1},
+        "agent_id": {"type": "string", "minLength": 1}, "all": {"type": "boolean", "const": True}},
+        _object({"requests": _INT, "routes": _INT}, closed=True), [], risk="high", confirms=True),
     _op("llm_requests.list", {"record_id": {"type": "integer", "minimum": 1},
         "agent_id": _STR, "task_id": _STR, "route_id": _STR, "between_turns": _BOOL,
         "before_id": {"type": "integer", "minimum": 1},
@@ -72,12 +89,36 @@ OPERATIONS = (
 
 async def settings():
     if (control := controller()) is not None:
-        return await control.status()
-    values = await system_settings.get_settings(["llmrec.enabled", "llmrec.include_oauth"])
-    enabled = values.get("llmrec.enabled") == "true"
-    return {"enabled": enabled, "include_oauth": values.get("llmrec.include_oauth") == "true",
-        "proxy": {"state": "unavailable" if enabled else "stopped", "port": None, "pid": None,
-                  "requests": 0, "recorded": 0, "gaps": 0, "gap_reasons": {}, "dropped": 0, "write_errors": 0}, "translate": {}}
+        result = await control.status()
+    else:
+        values = await system_settings.get_settings(["llmrec.enabled", "llmrec.include_oauth"])
+        enabled = values.get("llmrec.enabled", "true") == "true"
+        result = {"enabled": enabled, "include_oauth": values.get("llmrec.include_oauth") == "true",
+            "proxy": {"state": "unavailable" if enabled else "stopped", "port": None, "pid": None,
+                      "requests": 0, "recorded": 0, "gaps": 0, "gap_reasons": {}, "dropped": 0, "write_errors": 0}, "translate": {}}
+    async with get_pool().acquire() as conn, conn.transaction():
+        result.update(await retention.settings_view(conn))
+        result["stored_bytes"] = await llm_requests.logical_bytes(conn)
+        result["request_count"] = await llm_requests.count_requests(conn)
+    return result
+
+
+def _purge_scope(arguments):
+    if len(arguments) != 1 or not (arguments.get("task_id") or arguments.get("agent_id") or arguments.get("all") is True):
+        raise OpError(ErrorCode.INVALID, "provide exactly one of task_id, agent_id or all: true")
+    return {"everything" if key == "all" else key: value for key, value in arguments.items()}
+
+
+async def impact(server, operation, arguments, principal, headers):
+    if operation.operation_id != "llm_requests.purge":
+        return None
+    scope = _purge_scope(arguments)
+    async with get_pool().acquire() as conn, conn.transaction():
+        count = await llm_requests.count_requests(conn, **{key: value for key, value in scope.items()
+                                                          if key != "everything"})
+    label = (f"task {arguments['task_id']}" if "task_id" in arguments else
+             f"agent {arguments['agent_id']}" if "agent_id" in arguments else "all agents and tasks")
+    return f"Permanently delete {count} recorded model requests for {label}? This cannot be undone."
 
 
 async def run(server, operation, arguments, principal, headers):
@@ -87,13 +128,21 @@ async def run(server, operation, arguments, principal, headers):
                 result = await settings()
             case "llmrec_settings.update":
                 if not arguments:
-                    raise OpError(ErrorCode.INVALID, "provide enabled or include_oauth")
-                await system_settings.put_settings({"llmrec." + key: str(value).lower()
+                    raise OpError(ErrorCode.INVALID, "provide enabled, include_oauth, retention_days or max_total_mb")
+                try:
+                    retention.checked({key: value for key, value in arguments.items() if key in retention.FIELDS})
+                except ValueError as error:
+                    raise OpError(ErrorCode.INVALID, str(error)) from None
+                await system_settings.put_settings({"llmrec." + key: None if value is None else str(value).lower()
                                                     for key, value in arguments.items()})
                 if (control := controller()) is not None:
                     await control.set_enabled(arguments.get("enabled", control.enabled),
                                               include_oauth=arguments.get("include_oauth"))
                 result = await settings()
+            case "llm_requests.purge":
+                scope = _purge_scope(arguments)
+                async with get_pool().acquire() as conn, conn.transaction():
+                    result = await llm_requests.purge(conn, **scope)
             case "llm_requests.list":
                 if arguments.get("between_turns") and not arguments.get("record_id"):
                     raise OpError(ErrorCode.INVALID, "between_turns requires record_id")

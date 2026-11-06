@@ -260,7 +260,7 @@ def test_compact_settings_view_validates_actual_global_and_project_variants(tmp_
             result = body["result"]
             assert status == 200 and result["roles"]
             expected = {"project", "project_layer", "roles", "allowed_profiles", "allowed_profiles_note"} if project else {
-                "scheduler", "waits", "shared_defaults", "roles", "knowledge_vault"}
+                "scheduler", "waits", "llmrec", "shared_defaults", "roles", "knowledge_vault"}
             if role:
                 expected.add("manager_session")
             assert set(result) == expected

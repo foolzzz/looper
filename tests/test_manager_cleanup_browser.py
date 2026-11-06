@@ -14,7 +14,7 @@ def cleanup_result(target="manager-retired", *, purged=False, eligible=True):
     return {"manager_id": target, "deleted_at": "2026-01-01T00:00:00Z", "retention_days": 30,
             "eligible": eligible, "blockers": [] if eligible else ["Manager 仍有运行记录"],
             "counts": {"threads": 2, "chat_messages": 4, "llm_records": 3,
-                       "llm_record_events": 6, "manager_actions": 1}, "purged": purged}
+                       "llm_record_events": 6, "manager_actions": 1, "llm_requests": 5}, "purged": purged}
 
 
 @pytest.fixture
@@ -120,7 +120,7 @@ def test_preview_explains_retention_and_retained_thread_ownership(dashboard, wid
     expect(page.get_by_role("status")).to_contain_text("保留期 30 天")
     expect(page.get_by_text("保留会话归属记录：2 条（不删除）", exact=True)).to_be_visible()
     counts = page.get_by_role("definition")
-    expect(counts).to_have_text(["4", "3", "6", "1"])
+    expect(counts).to_have_text(["4", "3", "5", "6", "1"])
     expect(page.get_by_text("聊天消息正文、模型运行记录及其事件", exact=False).first).to_be_visible()
     assert not state["purged"]
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
@@ -159,7 +159,7 @@ def test_confirmed_purge_has_actual_counts_and_preview_readback(dashboard):
     expect(page.get_by_text("已删除聊天消息", exact=True)).to_be_visible()
     assert purges(state) == [{"manager_id": "manager-retired", "retention_days": 30}]
     preview(page)
-    expect(page.get_by_role("definition")).to_have_text(["0", "0", "0", "0"])
+    expect(page.get_by_role("definition")).to_have_text(["0", "0", "0", "0", "0"])
     expect(page.get_by_text("保留会话归属记录：2 条（不删除）", exact=True)).to_be_visible()
 
 

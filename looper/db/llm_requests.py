@@ -19,16 +19,148 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def stored_bytes(conn) -> int:
+    """Physical table, TOAST and index space, including reusable/dead pages."""
+    return int(await conn.fetchval("""
+        SELECT pg_total_relation_size('llm_requests') + pg_total_relation_size('llm_request_parts')
+             + pg_total_relation_size('llm_request_routes')
+    """))
+
+
+async def logical_bytes(conn) -> int:
+    """Recorded content bytes, counting shared parts once and excluding reusable pages."""
+    return int(await conn.fetchval("""
+        SELECT (SELECT COALESCE(sum(stored_bytes), 0) FROM llm_requests)
+             + (SELECT COALESCE(sum(stored_bytes), 0) FROM llm_request_parts)
+    """))
+
+
+async def count_requests(conn, *, task_id: str | None = None, agent_id: str | None = None) -> int:
+    if task_id is not None:
+        return await conn.fetchval("SELECT count(*) FROM llm_requests WHERE task_id = $1", task_id)
+    if agent_id is not None:
+        return await conn.fetchval("""SELECT count(*) FROM llm_requests request
+            JOIN llm_request_routes route ON route.id = request.route_id WHERE route.agent_id = $1""", agent_id)
+    return await conn.fetchval("SELECT count(*) FROM llm_requests")
+
+
+async def _prune_unused_parts(conn, route_ids: list[str]) -> None:
+    if not route_ids:
+        return
+    # Writers upsert the route before inserting its parts and requests. Hold the same row lock,
+    # then take a fresh READ COMMITTED snapshot so GC cannot remove an in-flight capture's parts.
+    await conn.fetch("SELECT id FROM llm_request_routes WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE",
+                     route_ids)
+    await conn.execute("""
+        DELETE FROM llm_request_parts part WHERE part.route_id = ANY($1::text[])
+        AND NOT EXISTS (
+            SELECT 1 FROM llm_requests request,
+                LATERAL jsonb_path_query(request.request_body, '$.**."$llmrec_part"') reference
+            WHERE request.route_id = part.route_id AND reference #>> '{}' = part.sha256
+        )
+    """, route_ids)
+
+
+async def _lock_request_routes(conn, rows) -> list[int]:
+    # Keep the writer's route -> request -> parts lock order, including idempotent retries.
+    await conn.fetch("SELECT id FROM llm_request_routes WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE",
+                     sorted({row["route_id"] for row in rows}))
+    return [row["id"] for row in rows]
+
+
+async def prune_older(conn, before: datetime, batch: int = 2000) -> int:
+    candidates = await conn.fetch("SELECT id, route_id FROM llm_requests WHERE started_at < $1 ORDER BY id LIMIT $2",
+                                  before, batch)
+    ids = await _lock_request_routes(conn, candidates)
+    rows = await conn.fetch("DELETE FROM llm_requests WHERE id = ANY($1::bigint[]) RETURNING route_id", ids)
+    await _prune_unused_parts(conn, sorted({row["route_id"] for row in rows}))
+    return len(rows)
+
+
+async def prune_oldest(conn, batch: int = 2000, *, byte_budget: int | None = None) -> int:
+    # Charge each part to its last referencing request: newer requests keep shared parts.
+    # Bound the window before summing so each statement considers at most 2000 candidates.
+    candidates = await conn.fetch("""
+        WITH oldest AS MATERIALIZED (
+            SELECT id, route_id, stored_bytes FROM llm_requests ORDER BY id LIMIT $1
+        ), refs AS (
+            SELECT request.id, request.route_id, reference #>> '{}' AS sha256
+            FROM llm_requests request,
+                LATERAL jsonb_path_query(request.request_body, '$.**."$llmrec_part"') reference
+            WHERE request.route_id IN (SELECT route_id FROM oldest)
+        ), part_owners AS (
+            SELECT part.route_id, part.sha256, part.stored_bytes,
+                COALESCE(max(refs.id), (SELECT min(id) FROM oldest WHERE route_id = part.route_id)) AS last_id
+            FROM llm_request_parts part LEFT JOIN refs
+                ON refs.route_id = part.route_id AND refs.sha256 = part.sha256
+            WHERE part.route_id IN (SELECT route_id FROM oldest)
+            GROUP BY part.route_id, part.sha256, part.stored_bytes
+        ), sized AS (
+            SELECT oldest.*, stored_bytes + (SELECT COALESCE(sum(part.stored_bytes), 0)
+                FROM part_owners part WHERE part.last_id = oldest.id) AS evicted_bytes
+            FROM oldest
+        ), budgeted AS (
+            SELECT *, sum(evicted_bytes) OVER (ORDER BY id) AS cumulative_bytes FROM sized
+        )
+        SELECT id, route_id FROM budgeted
+        WHERE $2::bigint IS NULL OR cumulative_bytes - evicted_bytes < $2 ORDER BY id
+        """, min(batch, 2000), byte_budget)
+    ids = await _lock_request_routes(conn, candidates)
+    rows = await conn.fetch("DELETE FROM llm_requests WHERE id = ANY($1::bigint[]) RETURNING route_id", ids)
+    await _prune_unused_parts(conn, sorted({row["route_id"] for row in rows}))
+    return len(rows)
+
+
+async def prune_empty_routes(conn, batch: int = 500, *, grace: bool = True) -> int:
+    # Lock before checking emptiness in the DELETE's fresh snapshot. A writer may have held
+    # the route lock when candidates were read; its committed first request must survive.
+    routes = await conn.fetch("""SELECT id FROM llm_request_routes route
+        WHERE NOT EXISTS (SELECT 1 FROM llm_requests WHERE route_id = route.id)
+        AND (NOT $2::boolean OR last_request_at < now() - interval '10 minutes')
+        ORDER BY id LIMIT $1 FOR UPDATE OF route""", batch, grace)
+    result = await conn.execute("""DELETE FROM llm_request_routes route WHERE id = ANY($1::text[])
+        AND NOT EXISTS (SELECT 1 FROM llm_requests WHERE route_id = route.id)""",
+        [row["id"] for row in routes])
+    return int(result.split()[-1])
+
+
+async def purge(conn, *, task_id: str | None = None, agent_id: str | None = None,
+                everything: bool = False) -> dict[str, int]:
+    """Remove exactly one scope in the caller's transaction; future captures can recreate it."""
+    if sum((task_id is not None, agent_id is not None, everything)) != 1:
+        raise ValueError("provide exactly one of task_id, agent_id or all: true")
+    if everything:
+        # Serialize with writers before counting so the reported impact equals what is removed.
+        await conn.execute("LOCK TABLE llm_request_routes, llm_request_parts, llm_requests IN ACCESS EXCLUSIVE MODE")
+        requests = await count_requests(conn)
+        routes = await conn.fetchval("SELECT count(*) FROM llm_request_routes")
+        await conn.execute("TRUNCATE llm_request_parts, llm_requests, llm_request_routes")
+        return {"requests": requests, "routes": routes}
+    if agent_id is not None:
+        candidates = await conn.fetch("""SELECT request.id, request.route_id FROM llm_requests request
+            JOIN llm_request_routes route ON route.id = request.route_id WHERE route.agent_id = $1""", agent_id)
+    else:
+        candidates = await conn.fetch("SELECT id, route_id FROM llm_requests WHERE task_id = $1", task_id)
+    ids = await _lock_request_routes(conn, candidates)
+    rows = await conn.fetch("DELETE FROM llm_requests WHERE id = ANY($1::bigint[]) RETURNING route_id", ids)
+    affected = sorted({row["route_id"] for row in rows})
+    await _prune_unused_parts(conn, affected)
+    result = await conn.execute("""DELETE FROM llm_request_routes route WHERE id = ANY($1::text[])
+        AND NOT EXISTS (SELECT 1 FROM llm_requests WHERE route_id = route.id)""", affected)
+    requests, routes = len(rows), int(result.split()[-1])
+    return {"requests": requests, "routes": routes}
+
+
 _COLUMNS = (
     "route_id", "proxy_instance", "proxy_seq", "record_id", "after_record_id", "agent_id", "task_id",
     "started_at", "method", "path", "kind", "model", "stream", "status", "outcome", "error", "ttfb_ms",
     "duration_ms", "request_headers", "response_headers", "request_body", "request_bytes", "request_sha256",
     "response_body", "response_raw", "response_bytes", "input_tokens", "output_tokens", "cache_read_tokens",
-    "cache_write_tokens", "usage", "translation", "record_gap", "body_sanitized",
+    "cache_write_tokens", "usage", "translation", "record_gap", "body_sanitized", "stored_bytes",
 )
 _JSON_COLUMNS = {"request_headers", "response_headers", "request_body", "response_body", "usage",
                  "route", "previous_body", "translation"}
-_LIST_COLUMNS = ", ".join(["id", *(c for c in _COLUMNS if c not in {"request_body", "response_body", "response_raw"})])
+_LIST_COLUMNS = ", ".join(["id", *(c for c in _COLUMNS if c not in {"request_body", "response_body", "response_raw", "stored_bytes"})])
 
 
 def _sanitize(value: Any, capture: Capture) -> Any:
@@ -55,6 +187,7 @@ def _time(value: datetime | str) -> datetime:
 
 def _row(row: asyncpg.Record) -> dict[str, Any]:
     result = dict(row)
+    result.pop("stored_bytes", None)
     for name, value in result.items():
         if isinstance(value, datetime):
             result[name] = value.isoformat()
@@ -88,11 +221,13 @@ async def write_batch(captures: list[Capture], *, pool: asyncpg.Pool) -> None:
                 route.provider_id, route.protocol, route.model, upstream.hostname or "", upstream.path,
                 _time(route.created_at), _time(capture.started_at))
             if capture.parts:
+                parts = [(sha, _json(body, capture), len(_json(body).encode("utf-8")))
+                         for sha, body in capture.parts.items()]
                 await conn.executemany("""
-                    INSERT INTO llm_request_parts (route_id, sha256, body, bytes) VALUES ($1,$2,$3::jsonb,$4)
-                    ON CONFLICT DO NOTHING
-                    """, [(route.id, sha, _json(body, capture), len(_json(body).encode("utf-8")))
-                          for sha, body in capture.parts.items()])
+                    INSERT INTO llm_request_parts (route_id, sha256, body, bytes, stored_bytes)
+                    VALUES ($1,$2,$3::jsonb,$4,$5) ON CONFLICT DO NOTHING
+                    """, [(route.id, sha, body, original_bytes, len(body.encode("utf-8")))
+                          for sha, body, original_bytes in parts])
             args = []
             for name in _COLUMNS:
                 if name == "route_id":
@@ -105,6 +240,9 @@ async def write_batch(captures: list[Capture], *, pool: asyncpg.Pool) -> None:
                     value = getattr(route, name)
                 elif name == "request_body":
                     value = capture.skeleton
+                elif name == "stored_bytes":
+                    # Count the actual serialized/sanitized JSON and text inserted above.
+                    value = sum(len(arg.encode("utf-8")) for arg in args if isinstance(arg, str))
                 else:
                     value = getattr(capture, name)
                 if name in _JSON_COLUMNS:

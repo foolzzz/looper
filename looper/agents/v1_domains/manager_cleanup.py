@@ -13,7 +13,7 @@ REQUEST = _object({
 }, ["manager_id"], closed=True)
 COUNTS = _object({
     "threads": {**_INT, "description": "Retained ownership tombstones; these threads are never deleted."},
-    "chat_messages": _INT, "llm_records": _INT, "llm_record_events": _INT, "manager_actions": _INT,
+    "chat_messages": _INT, "llm_records": _INT, "llm_requests": _INT, "llm_record_events": _INT, "manager_actions": _INT,
 }, closed=True)
 RESULT = _object({
     "manager_id": _STR, "deleted_at": _NULL_STR, "retention_days": _INT,
@@ -35,7 +35,8 @@ async def impact(server, operation, arguments, principal, headers):
     counts = result["counts"]
     return (f"Permanently purge history for {result['manager_id']} after {result['retention_days']} days retention? "
             f"Remove {counts['chat_messages']} chat message bodies, {counts['llm_records']} run records, "
-            f"{counts['llm_record_events']} run events and {counts['manager_actions']} actions. "
+            f"{counts['llm_record_events']} run events, {counts['llm_requests']} recorded model requests "
+            f"and {counts['manager_actions']} actions. "
             f"Retain {counts['threads']} thread ownership tombstones and the Manager identity; its key stays reserved. "
             "This loss of bodies, run and action history is irreversible. Eligibility is checked again on execution. "
             + ("Currently eligible." if result["eligible"] else "Blocked: " + "; ".join(result["blockers"])))

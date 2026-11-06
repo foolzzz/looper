@@ -109,6 +109,7 @@ _PROJECT_ACTIVITY = "project_activity"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
+_LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -133,6 +134,7 @@ CREATE TABLE IF NOT EXISTS llm_request_parts (
     sha256   TEXT NOT NULL,
     body     JSONB NOT NULL,
     bytes    INTEGER NOT NULL,
+    stored_bytes BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (route_id, sha256)
 );
 
@@ -173,6 +175,7 @@ CREATE TABLE IF NOT EXISTS llm_requests (
     record_gap        TEXT CHECK (record_gap IN ('request_too_large', 'response_too_large', 'undecodable_encoding', 'body_encoding_unparsed',
                                                  'unparsable_request', 'unparsable_stream', 'rejected_by_database')),
     body_sanitized    BOOLEAN NOT NULL DEFAULT FALSE,
+    stored_bytes      BIGINT NOT NULL DEFAULT 0,
     UNIQUE (proxy_instance, proxy_seq)
 );
 CREATE INDEX IF NOT EXISTS idx_llm_requests_record ON llm_requests (record_id, started_at);
@@ -327,6 +330,18 @@ async def _llm_models_chat_dialect_pending(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('llm_models') AND attname = 'chat_dialect' "
         "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _llm_requests_stored_bytes_pending(conn: asyncpg.Connection) -> bool:
+    """Backfill recorded byte counts once; current schemas already have both columns."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _LLM_REQUESTS_STORED_BYTES):
+        return False
+    return await conn.fetchval("""SELECT EXISTS (
+        SELECT 1 FROM unnest(ARRAY['llm_requests', 'llm_request_parts']) AS name
+        WHERE to_regclass(name) IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass(name)
+            AND attname = 'stored_bytes' AND attnum > 0 AND NOT attisdropped))""")
 
 
 async def _project_activity_pending(conn: asyncpg.Connection) -> bool:
@@ -544,6 +559,14 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE llm_models ADD COLUMN chat_dialect TEXT "
                                "CHECK (chat_dialect IS NULL OR protocol = 'openai-chat')")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_MODELS_CHAT_DIALECT)
+        if await _llm_requests_stored_bytes_pending(conn):
+            for table in ("llm_requests", "llm_request_parts"):
+                await conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS stored_bytes BIGINT")
+                await conn.execute(f"UPDATE {table} AS row SET stored_bytes = octet_length(row::text) "
+                                   "WHERE stored_bytes IS NULL")
+                await conn.execute(f"ALTER TABLE {table} ALTER COLUMN stored_bytes SET DEFAULT 0, "
+                                   "ALTER COLUMN stored_bytes SET NOT NULL")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS_STORED_BYTES)
         if await _project_activity_pending(conn):
             await conn.execute(_PROJECT_ACTIVITY_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
@@ -592,5 +615,6 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _llm_requests_pending(conn)
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
+            or await _llm_requests_stored_bytes_pending(conn)
             or await _chat_binding_senders_pending(conn)
             or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)))

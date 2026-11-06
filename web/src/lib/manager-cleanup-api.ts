@@ -16,6 +16,7 @@ export interface ManagerCleanupResult {
     threads: number;
     chat_messages: number;
     llm_records: number;
+    llm_requests: number;
     llm_record_events: number;
     manager_actions: number;
   };

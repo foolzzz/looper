@@ -1346,6 +1346,7 @@ CREATE TABLE IF NOT EXISTS llm_request_parts (
     sha256   TEXT NOT NULL,
     body     JSONB NOT NULL,
     bytes    INTEGER NOT NULL,
+    stored_bytes BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (route_id, sha256)
 );
 
@@ -1386,6 +1387,7 @@ CREATE TABLE IF NOT EXISTS llm_requests (
     record_gap        TEXT CHECK (record_gap IN ('request_too_large', 'response_too_large', 'undecodable_encoding', 'body_encoding_unparsed',
                                                  'unparsable_request', 'unparsable_stream', 'rejected_by_database')),
     body_sanitized    BOOLEAN NOT NULL DEFAULT FALSE,
+    stored_bytes      BIGINT NOT NULL DEFAULT 0,
     UNIQUE (proxy_instance, proxy_seq)
 );
 CREATE INDEX IF NOT EXISTS idx_llm_requests_record ON llm_requests (record_id, started_at);

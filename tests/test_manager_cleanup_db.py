@@ -112,7 +112,7 @@ def test_exact_owner_cleanup_preserves_neighbors_and_identity_tombstones() -> No
         metadata = {name: await pool.fetch(f"SELECT * FROM {name}") for name in metadata_tables}
         preview = await cleanup.preview(TARGET, pool=pool)
         assert preview["counts"] == {"threads": 1, "chat_messages": 1, "llm_records": 1,
-                                     "llm_record_events": 1, "manager_actions": 1}
+                                     "llm_record_events": 1, "manager_actions": 1, "llm_requests": 0}
         assert not preview["purged"] and await _contents(pool) == before
         purged = await cleanup.purge(TARGET, pool=pool)
         assert purged == {**preview, "purged": True}
@@ -230,7 +230,7 @@ def test_concurrent_purges_serialize_under_manager_row_lock() -> None:
             one, two = await asyncio.gather(first, second)
             assert one["counts"]["chat_messages"] == 1
             assert two["counts"] == {"threads": 1, "chat_messages": 0, "llm_records": 0,
-                                     "llm_record_events": 0, "manager_actions": 0}
+                                     "llm_record_events": 0, "manager_actions": 0, "llm_requests": 0}
         finally:
             release.set()
             await asyncio.gather(*(task for task in (first, second) if task is not None), return_exceptions=True)

@@ -2813,6 +2813,10 @@ export async function fetchLlmRecordEvents(recordId: number, after = 0): Promise
 export interface LlmrecSettings {
   enabled: boolean;
   include_oauth: boolean;
+  retention_days: LlmrecLimit;
+  max_total_mb: LlmrecLimit;
+  stored_bytes: number;
+  request_count: number;
   proxy: {
     state: "running" | "stopped" | "unavailable" | "outdated";
     port: number | null;
@@ -2826,15 +2830,38 @@ export interface LlmrecSettings {
   };
 }
 
+export interface LlmrecLimit {
+  value: number;
+  source: "setting" | "built-in";
+  built_in: number;
+  minimum: number;
+  maximum: number;
+}
+
+export interface LlmrecSettingsUpdate {
+  enabled?: boolean;
+  include_oauth?: boolean;
+  retention_days?: number | null;
+  max_total_mb?: number | null;
+}
+
 export async function fetchLlmrecSettings(): Promise<LlmrecSettings> {
   const result = await callV1<LlmrecSettings>("/api/v1/llmrec_settings/get", {});
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
 }
 
-export async function updateLlmrecSettings(fields: Partial<Pick<LlmrecSettings, "enabled" | "include_oauth">>): Promise<LlmrecSettings> {
+export async function updateLlmrecSettings(fields: LlmrecSettingsUpdate): Promise<LlmrecSettings> {
   const result = await callV1<LlmrecSettings>("/api/v1/llmrec_settings/update", fields);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export interface LlmRequestsPurgeResult { requests: number; routes: number }
+
+export async function purgeLlmRequests(): Promise<LlmRequestsPurgeResult> {
+  const result = await callV1<LlmRequestsPurgeResult>("/api/v1/llm_requests/purge", { all: true });
+  if ("status" in result) throw new V1Error(202, "needs_confirmation", result.impact);
   return result;
 }
 

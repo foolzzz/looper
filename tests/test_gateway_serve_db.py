@@ -9,9 +9,9 @@ import threading
 import pytest
 
 from evals.prompt_regression.dialogs import _ask
-from evals.prompt_regression.runner import fresh_database, running_server
+from evals.prompt_regression.runner import running_server
 from looper.agents.llmrec.control import ProxyControl
-from tests.db_support import DSN
+from tests.db_support import DSN, fresh_database_without_recording
 from tests.test_llmrec_resident_db import _resident_executable
 from tests.test_llmrec_serve_db import _install_stubs, short_root, cli_entry
 
@@ -66,7 +66,7 @@ def test_serve_translated_manager_works_without_recording(short_root, cli_entry)
     environment = {'CLAUDE_CONFIG_DIR': str(home / '.claude'), 'CODEX_HOME': str(home / '.codex'),
         'GROK_HOME': str(home / '.grok'), 'CURSOR_CONFIG_DIR': str(home / '.cursor-config'),
         'CURSOR_DATA_DIR': str(home / '.cursor-data'), 'LOOPER_TELEGRAM_BOT_TOKEN': ''}
-    with fresh_database(str(DSN)) as (url, _), chat_upstream() as (upstream, requests):
+    with fresh_database_without_recording(str(DSN)) as (url, _), chat_upstream() as (upstream, requests):
         try:
             with running_server(database_url=url, runtime_root=runtime, bin_dir=bin_dir, home=home,
                     notes_root=home / 'notes', log_path=root / 'gateway.log', env=environment) as api:
