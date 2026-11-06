@@ -106,7 +106,9 @@ def test_task_cost_matches_db_and_keeps_manager_out_of_cap_spend(tmp_path, monke
             assert await planner._cap_reached() == 1.75
             assert cost["by_model"][-1] == {"model": None, "cost_usd": None, "runs": 1, "running": 0,
                 "unpriced_runs": 1, "interrupted_runs": 1, "input_tokens": 1, "output_tokens": 2,
-                "cache_read_tokens": 3, "cache_creation_tokens": 4}
+                "cache_read_tokens": 3, "cache_creation_tokens": 4,
+                "cache_reported_runs": 1, "cache_missing_runs": 0,
+                "cache_hit_prompt_tokens": 8, "cache_hit_read_tokens": 3}
     run_db(run, monkeypatch, timeout=30)
 
 

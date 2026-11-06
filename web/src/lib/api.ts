@@ -92,6 +92,12 @@ export interface TaskModelCost {
   output_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
+  /** Complete prompt usage vs runs missing any prompt token count. */
+  cache_reported_runs: number;
+  cache_missing_runs: number;
+  /** Cache hit numerator and denominator, summed only over complete runs. */
+  cache_hit_read_tokens: number;
+  cache_hit_prompt_tokens: number;
   /** Null when none of the model's runs has a cost. */
   cost_usd: number | null;
 }
@@ -2907,6 +2913,25 @@ export async function purgeLlmRequests(): Promise<LlmRequestsPurgeResult> {
   return result;
 }
 
+export interface LlmRequestTranslation {
+  api: "openai-chat";
+  dialect: string;
+  upstream_model: string | null;
+  upstream_path: string;
+  upstream_status: number | null;
+  upstream_request_id: string | null;
+  finish_reason: string | null;
+  upstream_usage: Record<string, unknown> | null;
+  upstream_request_bytes: number | null;
+  upstream_request_sha256: string | null;
+  common_prefix_bytes: number | null;
+  // Absent on recordings made before prompt-based prefix reuse was introduced.
+  common_prefix_tokens?: number | null;
+  previous_prompt_tokens?: number | null;
+  notes: Record<string, Record<string, number>>;
+  usage_missing: boolean;
+}
+
 export interface LlmRequestRow {
   id: number;
   route_id: string;
@@ -2939,6 +2964,7 @@ export interface LlmRequestRow {
   usage: Record<string, unknown> | null;
   record_gap: string | null;
   body_sanitized: boolean;
+  translation?: LlmRequestTranslation | null;
 }
 
 export interface LlmRequest extends LlmRequestRow {

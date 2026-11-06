@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.106] - 2026-11-06
+
+### Added
+
+- **The dashboard shows cache hit rates for model requests.** ([#1159](https://github.com/foolzzz/looper/pull/1159))
+  - Run cards, the per-model task cost table and recorded request rows show cache hit (`cache_read / (input + cache_read + cache_write)`); translated request rows also show **prefix reuse**, the unchanged share of the previous prompt, so a broken prefix can be told apart from a provider cache miss.
+  - The per-model task costs gain four fields (`cache_reported_runs`, `cache_missing_runs`, `cache_hit_prompt_tokens`, `cache_hit_read_tokens`), summed over runs with complete prompt usage only.
+
+### Changed
+
+- Translated responses omit the cache token counts of `usage` when the upstream did not report cache fields (they were reported as `0`), and the gateway log's `prefix_pct` is now based on estimated prompt tokens of the previous prompt. ([#1159](https://github.com/foolzzz/looper/pull/1159))
+
 ## [2.14.105] - 2026-11-06
 
 ### Added

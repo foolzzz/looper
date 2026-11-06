@@ -40,8 +40,7 @@ def test_start_immediately_announces_message_and_ping():
     assert start[0]['message'] == {
         'id': 'msg-test', 'type': 'message', 'role': 'assistant', 'model': 'client-model',
         'content': [], 'stop_reason': None, 'stop_sequence': None,
-        'usage': {'input_tokens': 123, 'cache_creation_input_tokens': 0,
-                  'cache_read_input_tokens': 0, 'output_tokens': 0}}
+        'usage': {'input_tokens': 123, 'output_tokens': 0}}
     assert events([stream.ping()]) == [{'type': 'ping'}]
 
 
@@ -163,11 +162,11 @@ def test_interruption_does_not_emit_message_stop():
 def test_usage_missing_and_cache_fields_missing_are_observable():
     missing, result = translated([chunk(finish='stop')])
     assert missing.usage_missing
-    assert _anthropic(result)['usage'] == {'input_tokens': 0, 'cache_creation_input_tokens': 0,
-        'cache_read_input_tokens': 0, 'output_tokens': 0}
-    cache_missing, _ = translated([chunk(finish='stop', usage={'prompt_tokens': 12, 'completion_tokens': 3})])
+    assert _anthropic(result)['usage'] == {'input_tokens': 0, 'output_tokens': 0}
+    cache_missing, result = translated([chunk(finish='stop', usage={'prompt_tokens': 12, 'completion_tokens': 3})])
     assert not cache_missing.usage_missing
     assert cache_missing.cache_fields_missing
+    assert _anthropic(result)['usage'] == {'input_tokens': 12, 'output_tokens': 3}
 
 
 def test_ignores_nonzero_choices():

@@ -7,7 +7,8 @@ _NUMBER = {"type": "number"}
 TASK_MODEL_COST = _object({
     "model": _NULL_STR, "cost_usd": {"type": ["number", "null"]},
     **{key: _INT for key in ("runs", "running", "unpriced_runs", "interrupted_runs", "input_tokens",
-                             "output_tokens", "cache_read_tokens", "cache_creation_tokens")}}, closed=True)
+                             "output_tokens", "cache_read_tokens", "cache_creation_tokens", "cache_reported_runs",
+                             "cache_missing_runs", "cache_hit_prompt_tokens", "cache_hit_read_tokens")}}, closed=True)
 
 TASK_COST = _object({
     "cost_usd": _NUMBER, "runs": _INT, "running": _INT, "unpriced_runs": _INT,

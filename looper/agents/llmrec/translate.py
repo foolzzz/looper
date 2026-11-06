@@ -380,7 +380,8 @@ def cache_fields_present(raw: dict | None, dialect: Dialect) -> bool:
         or _usage_value(raw, 'prompt_tokens_details.cache_write_tokens') is not None)
 
 
-def anthropic_usage(raw: dict | None, dialect: Dialect) -> dict:
+def anthropic_usage(raw: dict | None, dialect: Dialect) -> tuple[dict, bool]:
+    """Return client usage and whether the upstream reported cache counts."""
     raw = raw if isinstance(raw, dict) else {}
     dialect = _dialect(dialect)
     cached = next((value for field in dialect.usage_fields if (value := _usage_value(raw, field.value)) is not None), 0)
@@ -388,9 +389,12 @@ def anthropic_usage(raw: dict | None, dialect: Dialect) -> dict:
     def tokens(value):
         return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
     cached, written = tokens(cached), tokens(written)
-    return {'input_tokens': max(0, tokens(raw.get('prompt_tokens')) - cached - written),
-        'cache_creation_input_tokens': written, 'cache_read_input_tokens': cached,
+    usage = {'input_tokens': max(0, tokens(raw.get('prompt_tokens')) - cached - written),
         'output_tokens': tokens(raw.get('completion_tokens'))}
+    reported = cache_fields_present(raw, dialect)
+    if reported:
+        usage.update(cache_creation_input_tokens=written, cache_read_input_tokens=cached)
+    return usage, reported
 
 
 def _invalid_json_constant(value: str):
@@ -445,7 +449,7 @@ def from_chat(response_json: dict, *, client_model: str, dialect: Dialect) -> di
         return {'id': 'msg_lgw_' + hashlib.sha256(response_id.encode()).hexdigest()[:24],
             'type': 'message', 'role': 'assistant', 'model': client_model, 'content': content,
             'stop_reason': 'tool_use' if tools else stops[finish], 'stop_sequence': None,
-            'usage': anthropic_usage(response_json.get('usage'), dialect)}
+            'usage': anthropic_usage(response_json.get('usage'), dialect)[0]}
     except (KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
         raise Rejection(502, 'api_error', 'upstream returned an invalid chat response') from exc
 
