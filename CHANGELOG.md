@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.97] - 2026-11-06
+
+### Added
+
+- **Opt-in recording of the model requests of Claude Code Workers and Reviewers through a local recording proxy.** Off by default: the global switch `llmrec.enabled` (and `llmrec.include_oauth` for Claude subscription runs) applies to runs launched afterwards. A long-lived Looper process per runtime root listens on 127.0.0.1, forwards each request unchanged to the real upstream through a per-process route (`ANTHROPIC_BASE_URL` is the only binding value rewritten; `127.0.0.1` is added to `NO_PROXY`, and `ENABLE_TOOL_SEARCH=true` is set for `api.anthropic.com` unless already set) and records the exchange off the forwarding path into three new tables (`llm_request_routes`, `llm_request_parts`, `llm_requests`; one additive upgrade named `llm_requests`). Credential headers and cookies are never stored; bodies are stored as sent. Recording failures never fail a request; they are marked `record_gap`, counted and shown by a new `llmrec` self-check. If the proxy is unavailable at launch the run goes direct and is marked `bypassed`; other runtimes, Managers, Planners and TTADK are `skipped` (`not_covered`). Operator-only API and CLI: `llmrec_settings.get/update`, `llm_requests.list/get`; the dashboard gains Settings → Request recording. New dependencies `h11` and `truststore`. With recording off, records, commands and environments are unchanged. ([#1120](https://github.com/foolzzz/looper/pull/1120))
+
 ## [2.14.96] - 2026-11-05
 
 ### Fixed
