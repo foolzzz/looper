@@ -14,7 +14,7 @@ from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported
 from looper.agents.runtimes.claude_code import (
     API_KEY, AUTH_TOKEN, BASE_URL, MAIN_MODEL_VARS, BACKGROUND_MODEL_VARS, TRANSLATED_ENV,
 )
-from tests.runtime_model_helpers import resolved_profile
+from tests.runtime_model_helpers import builtin_launch, resolved_profile
 
 
 @pytest.fixture
@@ -53,6 +53,42 @@ def test_translated_environment_enforces_gateway_and_preserves_model_binding(tra
     assert record['llmrec'] == {'state': 'translating', 'route': route.id, 'recording': False,
         'upstream_host': 'chat.example.invalid', 'dialect': 'generic'}
     assert 'synthetic-key' not in json.dumps(record)
+
+
+@pytest.mark.parametrize('source', ['inherited', 'shared', 'provider'])
+def test_translated_environment_disables_other_backends(translated_launch, monkeypatch, source):
+    selectors = dict.fromkeys(('CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'), '1')
+    monkeypatch.setattr(child_env, 'inherited', lambda: selectors if source == 'inherited' else {})
+    settings = translated_launch.settings
+    if source == 'shared':
+        settings = replace(settings, env=(*settings.env, *selectors.items()))
+    elif source == 'provider':
+        resolved = settings.profile.resolved_model
+        provider = replace(resolved.provider, env=(*resolved.provider.env, *selectors.items()))
+        profile = replace(settings.profile, resolved_model=replace(resolved, provider=provider))
+        settings = replace(settings, profile=profile)
+    route = LlmrecRoute('abcdefghijklmnopqrstuv', 'http://127.0.0.1:12345/r/abcdefghijklmnopqrstuv',
+                        'https://chat.example.invalid/v1', kind=RouteKind.TRANSLATE, record=False)
+    env = replace(translated_launch, settings=settings, llmrec=route).environment()
+    assert env[BASE_URL] == route.url
+    assert {name: env.get(name) for name in selectors} == dict.fromkeys(selectors, '0')
+
+
+@pytest.mark.parametrize('resident', [False, True])
+@pytest.mark.parametrize('translated', [False, True])
+def test_backend_selection_settings_are_forced_only_for_translation(translated_launch, tmp_path, resident, translated):
+    launch = translated_launch if translated else builtin_launch()
+    command = launch.runtime.resident_command if resident else launch.runtime.run_command
+    args = command('claude', cwd=tmp_path, prompt_file=tmp_path / 'prompt.md', launch=launch)
+    assert args.count('--settings') == 1
+    settings = json.loads(args[args.index('--settings') + 1])
+    if translated:
+        # Inline settings must override a project's env even after the CLI loads it.
+        assert {name: settings.get('env', {}).get(name) for name in (
+            'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+        )} == {'CLAUDE_CODE_USE_BEDROCK': '0', 'CLAUDE_CODE_USE_VERTEX': '0', 'CLAUDE_CODE_USE_FOUNDRY': '0'}
+    else:
+        assert 'env' not in settings
 
 
 @pytest.mark.parametrize('route,diagnostic', [

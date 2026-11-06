@@ -96,7 +96,13 @@ BACKGROUND_MODEL_VARS = ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_
 AGENT_TEAMS = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
 TEAMMATE_MODE_ARGS = ("--teammate-mode", "in-process")
 # Gateway safeguards override settings and provider environment variables.
+TRANSLATED_BACKEND_ENV = (
+    ("CLAUDE_CODE_USE_BEDROCK", "0"),
+    ("CLAUDE_CODE_USE_VERTEX", "0"),
+    ("CLAUDE_CODE_USE_FOUNDRY", "0"),
+)
 TRANSLATED_ENV = (
+    *TRANSLATED_BACKEND_ENV,
     ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
     ("ENABLE_TOOL_SEARCH", "false"),
     ("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1"),
@@ -165,8 +171,12 @@ class ClaudeCodeRuntime(RuntimeAdapter):
                                                   + (f": {first}" if first else ""))
         return Probe(first[:200], self.capabilities_for(first))
 
-    def isolation_args(self, cwd: str | Path) -> list[str]:
-        return claude_cli.isolation_args(cwd)
+    def isolation_args(self, cwd: str | Path, *, launch: Launch | None = None) -> list[str]:
+        from ..llmrec.gateway import translated
+
+        # Inline settings also prevent project settings from selecting a non-gateway SDK.
+        env = dict(TRANSLATED_BACKEND_ENV) if launch is not None and translated(launch) else None
+        return claude_cli.isolation_args(cwd, env=env)
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
         if provider.protocols == self.translated_protocols and not provider.base_url.strip():
@@ -311,7 +321,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # None of the operator's personal settings, memory, hooks, plugins or MCP servers; the
             # permissions every agent shares and the plugins and skills installed for it come with the launch
             # args.
-            *claude_cli.isolation_args(cwd),
+            *self.isolation_args(cwd, launch=launch),
             *_prompt_input(launch, prompt_file=prompt_file)[0],
             *self.launch_args(launch, cwd=cwd),
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),
@@ -339,7 +349,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # non-zero). Built-in tools are unaffected; the permissions every
             # agent shares and the plugins and skills installed for this run
             # come with the launch args.
-            *claude_cli.isolation_args(cwd),
+            *self.isolation_args(cwd, launch=launch),
             *_prompt_input(launch, prompt_file=prompt_file)[0],
             *self.launch_args(launch, cwd=cwd),
             *(["--max-turns", str(max_turns)] if max_turns > 0 else []),

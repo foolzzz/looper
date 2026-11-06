@@ -124,15 +124,18 @@ def _outside_memory(cwd: Path) -> list[str]:
     return patterns
 
 
-def isolation_args(cwd: str | os.PathLike[str]) -> list[str]:
+def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = None) -> list[str]:
     """The flags that keep the operator's personal Claude Code configuration out of an agent run in ``cwd``.
 
-    Every agent's command carries them, so the agents cannot diverge. The
-    result depends only on ``cwd`` (and where the operator's configuration
-    lives), so a resident agent's command stays the same between turns.
+    Every agent's command carries them, so the agents cannot diverge.
+    The explicit ``env`` pins runtime-owned variables over project settings.
+    The result depends only on those values, ``cwd`` and where the operator's
+    configuration lives, so a resident agent's command stays the same between turns.
     """
     settings = {"autoMemoryEnabled": False, "claudeMdExcludes": _outside_memory(Path(cwd)),
                 "crossSessionInbound": "refuse"}
+    if env is not None:
+        settings["env"] = env
     return [
         "--setting-sources", "project",
         "--strict-mcp-config",
