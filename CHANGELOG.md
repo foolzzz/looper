@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.105] - 2026-11-06
+
+### Added
+
+- **Claude Code roles can use OpenAI-protocol (chat) models through the local gateway.** ([#1153](https://github.com/foolzzz/looper/pull/1153))
+  - An Agent Profile may pair the native Claude Code runtime with an `openai-chat` model (API-key providers, native launcher only). Manager, Planner, Worker, Reviewer and consult runs go through a translating route of the local proxy, with request recording on or off; when the gateway is unavailable the run is refused with a reason, with no direct fallback.
+  - Models get an optional `chat_dialect` (`generic`, `openai`, `deepseek`, `moonshot`, `zhipu`, `qwen`, `vllm`, `minimax`, `ark`, `openrouter`), defaulting by vendor. `ensure_schema` adds a nullable `chat_dialect` column to `llm_models` once.
+  - Translated runs pin the route and gateway safeguards in a private settings file; translated streams report an estimated input size at `message_start`.
+  - The dashboard shows **via local gateway** and a Chat dialect selector; the Manager's model tools gain `chat_dialect`; a new `gateway` self-check covers the local gateway.
+
 ## [2.14.104] - 2026-11-06
 
 ### Changed
