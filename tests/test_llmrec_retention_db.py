@@ -172,6 +172,7 @@ def test_route_file_gc_ended_stale_fresh_unreadable_and_replaced(tmp_path, monke
     directory = tmp_path / ROUTES_DIR
     paths = {}
     for name, ended, age in (("ended", now - timedelta(days=2), 0), ("stale", None, 8),
+                              ("stale_ended", now - timedelta(hours=1), 8),
                               ("fresh", None, 0), ("recent_end", now - timedelta(hours=1), 0)):
         route = replace(_capture(1)[0].route, ended_at=ended.isoformat() if ended else None)
         path = directory / f"{name}.json"
@@ -183,10 +184,11 @@ def test_route_file_gc_ended_stale_fresh_unreadable_and_replaced(tmp_path, monke
     broken.write_text("{")
     os.utime(broken, ((now - timedelta(days=8)).timestamp(),) * 2)
     assert housekeeping.prune_route_files(directory, now) == 2
-    assert not paths["ended"].exists() and not paths["stale"].exists()
+    assert paths["stale"].exists()
+    assert not paths["ended"].exists() and not paths["stale_ended"].exists()
     assert paths["fresh"].exists() and paths["recent_end"].exists() and broken.exists()
     assert "skipped unreadable" in caplog.text
-    stale = paths["fresh"]
+    stale = paths["recent_end"]
     os.utime(stale, ((now - timedelta(days=8)).timestamp(),) * 2)
     read = RouteFile.read
     def concurrent_write(path):

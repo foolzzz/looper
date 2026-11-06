@@ -182,7 +182,7 @@ def prune_route_files(directory: Path, now: datetime) -> int:
                     logger.warning("housekeeping skipped unreadable llmrec route file %s", path.name)
                 continue
             ended = datetime.fromisoformat(route.ended_at) if route.ended_at else None
-            if (ended is not None and ended < now - timedelta(days=1)
+            if ended is not None and (ended < now - timedelta(days=1)
                     or stat.st_mtime < (now - timedelta(days=7)).timestamp()):
                 # RouteFile.write atomically replaces the file. Recheck its identity so a fresh
                 # bind/release that happened during the read is kept for the next pass.
