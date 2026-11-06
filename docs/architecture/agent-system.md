@@ -1991,7 +1991,8 @@ record of its own. Known gaps: a teammate's model requests are not in the
 stream (its assistant messages are, with a `parent_tool_use_id`), so the soft
 per-run cap below does not see its tokens before a result reports them.
 [Model request recording](#model-request-recording-llmrec) captures those
-requests individually for covered Worker and Reviewer launches when enabled.
+requests individually for covered launches of every role when enabled; a request
+that outlives its lead's turn keeps `after_record_id` instead of a turn binding.
 A teammate does not get the agent's
 `--append-system-prompt-file` (the harness, role, project, task and contract
 layers).
@@ -3429,12 +3430,25 @@ So:
 
 ### Model request recording (`llmrec`)
 
-`looper/agents/llmrec` records the HTTP exchanges of newly launched Claude
-Code Workers and Reviewers, including their subagents and teammates, through
-a loopback reverse proxy. Manager and Planner turns, other runtimes and
-TTADK launches are not covered. API-key runs are eligible when recording is
-enabled; Claude subscription runs also require the OAuth opt-in. Runs started
-before a settings change keep their existing route.
+`looper/agents/llmrec` records model HTTP exchanges through a loopback reverse
+proxy for covered launches of every role: Manager, Planner, Worker, Reviewer
+and consult. API-key runs are eligible when recording is enabled; Claude
+subscription runs also require the OAuth opt-in.
+
+| Runtime | API key | Login | Endpoint and coverage |
+|---|---|---|---|
+| Claude Code | Yes, official and compatible providers | Yes, with the Claude subscription opt-in | `ANTHROPIC_BASE_URL`; subagents, in-process teammates, background models and compaction requests share the route. |
+| Codex | Yes | No | Generated provider `base_url`; ChatGPT login requires an HTTPS origin and refuses the loopback HTTP workspace origin (verified on the real CLI path). |
+| OMP | Yes | Not applicable | Generated `models.yml` provider `baseUrl`. |
+| Pi CLI / runner | Yes | Not applicable | Generated `models.json` provider `baseUrl` or runner descriptor `base_url`. |
+| DSH CLI / runner | Yes | Not applicable | Generated provider `baseURL` or runner descriptor `base_url`. |
+| API runtime | Yes | Not applicable | `LOOPER_LLMREC_BASE_URL` overrides the session target; descriptor and recorded provider host retain the real upstream. |
+| Grok | Not applicable | No | No known endpoint override. |
+| Cursor Agent | Not applicable | No | Cursor's servers make the model requests. |
+
+TTADK launchers are excluded because TTADK manages its own provider. Every
+excluded launch has `llmrec.state=skipped`, `reason=not_covered` and a detail
+explaining its runtime/authentication limitation. This does not prevent the run.
 
 - **Settings and access.** `llmrec.enabled` and `llmrec.include_oauth` are
   both off by default. Settings → Request recording and the operator-only
@@ -3443,6 +3457,36 @@ before a settings change keep their existing route.
   `loopercli llm-requests list/get` or the operator API's `llm_requests.list` /
   `llm_requests.get`; the list contains metadata and the detail reconstructs the body.
   These operations use `POST /api/v1/<domain>/<action>` and are not agent tools.
+- **Resident routes and turn attribution.** A Manager or Planner keeps one route
+  while its upstream, runtime type, provider id and model remain unchanged.
+  Changing any of them ends the old route and creates a new one; after a
+  control-plane restart the in-memory route cache starts fresh. Stable route
+  URLs keep generated configuration, command signatures and resident processes
+  stable across turns, including an API-runtime Manager restarted in process.
+  The recorder binds each turn's record id before submitting its input, and
+  unbinds when the turn closes. The proxy stamps the binding when it receives
+  the request. Consults each have their own route, ended with their whole-process
+  record, so concurrent consults stay separate.
+  Requests **between turns**, including a teammate still running after the lead
+  finishes or an autonomous turn's first request before binding, have no
+  `record_id` and retain the preceding `after_record_id`; they are never silently
+  assigned to the following turn. Content-addressed Codex, OMP and Pi homes are
+  generated per route and reclaimed by their existing idle cleanup. Routing is
+  kept out of provider bindings, so `binding_sha256` still describes the actual
+  provider. Every routed child bypasses environment proxies for `127.0.0.1`.
+- **Subagents and teammates.** Covered launches pass the route through their
+  shared environment, including Claude Code's in-process teammates and subagents;
+  their model requests are recorded under the lead's currently bound turn or
+  with `after_record_id` between turns. The real Claude subscription CLI path
+  has confirmed loopback forwarding. A resident Manager teammate request with
+  a distinct system prompt has not yet been verified on the real path; the
+  environment propagation alone is not that evidence. Installed Codex, OMP and Pi
+  Workers have each recorded their real CLI request through the proxy to a local
+  synthetic Responses provider. On isolated real `serve` paths with Codex, OMP
+  and Pi CLI, two Manager turns and two Planner turns each reused their role's
+  route, a Worker used its own route, and three generated run homes matched those
+  three routes. Disabling
+  recording left the following Manager record without an `llmrec` metadata key.
 - **Recorded content.** Each exchange includes its method, path with redacted
   query parameters, redacted headers, request JSON (system prompt, messages, tools and tool results),
   assembled JSON/SSE response, usage, status, timing and failure or capture
@@ -3479,6 +3523,10 @@ before a settings change keep their existing route.
   URLs and incompatible retained proxy route formats are marked `skipped`
   with their reason. A proxy lost during an already routed run can interrupt
   its request until recovery; launch-time bypass does not reroute it mid-run.
+  A failed health check between turns gives the next launch a bypass marker.
+  Runtimes whose command names the generated configuration restart when that
+  command changes; an existing Claude Code resident keeps its old URL and
+  relies on the proxy recovering on the same port.
 - **Redaction boundary.** Credential headers, cookies, unknown header values
   and sensitive query parameters are redacted before storage. Credentials in
   upstream URLs are refused for recording. Bodies are not secret-scrubbed:

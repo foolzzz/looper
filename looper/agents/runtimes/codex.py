@@ -71,6 +71,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ... import child_env
+from ..llmrec import LlmrecRoute, no_proxy
 from ..run_usage import Usage, reported_totals, run_usage
 from ..reported_files import prompt_name
 from ..system_prompt_mode import SystemPromptMode
@@ -230,7 +231,14 @@ class CodexRuntime(RuntimeAdapter):
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         env = {**{k: v for k, v in child_env.inherited().items() if k not in binding.unset}, **dict(launch.env),
                **dict(binding.env)}
+        if isinstance(launch.llmrec, LlmrecRoute):
+            no_proxy(env)
         return ttadk.environment(env) if launch.profile.runtime.launcher is Launcher.TTADK else env
+
+    def llmrec_upstream(self, launch: Launch) -> str | None:
+        if launch.profile.provider.auth is AuthKind.OAUTH or launch.profile.runtime.launcher is Launcher.TTADK:
+            return None
+        return launch.profile.provider.base_url or DEFAULT_BASE_URL
 
     def _program(self, executable: str, launch: Launch) -> list[str]:
         return ttadk.prefix(executable, "codex") if launch.profile.runtime.launcher is Launcher.TTADK else [executable]
@@ -483,6 +491,7 @@ def config_toml(launch: Launch, *, shell_home: Path | None = None,
                          f"model_instructions_file = {_toml_value(str(model_instructions_file))}")
         return _with_mcp(lines, launch)
     provider = launch.profile.provider
+    base_url = launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else provider.base_url or DEFAULT_BASE_URL
     lines = [
         "# Written by Looper for its Codex runs. Only this file and AGENTS.md come from Looper.",
         f"model_provider = {_toml_value(PROVIDER_ID)}",
@@ -504,7 +513,7 @@ def config_toml(launch: Launch, *, shell_home: Path | None = None,
         "",
         f"[model_providers.{PROVIDER_ID}]",
         f"name = {_toml_value(provider.name)}",
-        f"base_url = {_toml_value(provider.base_url or DEFAULT_BASE_URL)}",
+        f"base_url = {_toml_value(base_url)}",
         f"env_key = {_toml_value(KEY_ENV)}",
         'wire_api = "responses"',
     ]

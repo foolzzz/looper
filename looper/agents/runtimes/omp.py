@@ -83,6 +83,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ... import child_env
+from ..llmrec import LlmrecRoute, no_proxy
 from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
@@ -247,8 +248,13 @@ class OmpRuntime(RuntimeAdapter):
         provider's binding and the shell prefix that gives the agent's shell commands back what was removed."""
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         visible = {**child_env.inherited(), **dict(launch.env)}
-        return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
-                SHELL_PREFIX_VAR: shell_prefix(visible)}
+        env = {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
+               SHELL_PREFIX_VAR: shell_prefix(visible)}
+        return no_proxy(env) if isinstance(launch.llmrec, LlmrecRoute) else env
+
+    def llmrec_upstream(self, launch: Launch) -> str | None:
+        resolved = launch.settings.resolved_model
+        return resolved.endpoint.base_url or DEFAULT_BASE_URLS[_api(resolved.model.protocol)]
 
     def _command(self, executable: str, cwd: str | Path, prompt_file: Path, launch: Launch, *,
                  mode: tuple[str, ...] = ("-p", "--mode", "json")) -> list[str]:
@@ -421,7 +427,9 @@ def models_yml(launch: Launch) -> dict[str, Any]:
         # makes up a value for each optional one. Saying the endpoint takes them makes omp send the MCP tools as
         # strict: false, and its own tools strict, converted by omp as for api.openai.com.
         model["compat"] = {"supportsStrictMode": True}
-    return {"providers": {PROVIDER_ID: {"baseUrl": resolved.endpoint.base_url or DEFAULT_BASE_URLS[api], "apiKey": KEY_ENV,
+    base_url = (launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute)
+                else resolved.endpoint.base_url or DEFAULT_BASE_URLS[api])
+    return {"providers": {PROVIDER_ID: {"baseUrl": base_url, "apiKey": KEY_ENV,
                                         "api": api, "models": [model]}}}
 
 

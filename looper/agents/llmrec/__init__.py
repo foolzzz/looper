@@ -134,6 +134,17 @@ class RouteFile:
                 pass
 
 
+def no_proxy(env: dict[str, str]) -> dict[str, str]:
+    """Keep loopback model requests out of inherited HTTP proxies."""
+    bypass = env.get("no_proxy", env.get("NO_PROXY", ""))
+    for name in ("NO_PROXY", "no_proxy"):
+        values = [value.strip() for value in env.get(name, bypass).split(",") if value.strip()]
+        if values != ["*"] and "127.0.0.1" not in values:
+            values.append("127.0.0.1")
+        env[name] = ",".join(values)
+    return env
+
+
 def code_sha256() -> str:
     root = Path(__file__).resolve().parents[2]
     files = list((root / 'agents' / 'llmrec').glob('*.py')) + [root / 'db' / 'llm_requests.py']

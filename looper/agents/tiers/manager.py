@@ -71,6 +71,7 @@ from ..claude_cli import (
     user_stop_result,
 )
 from .. import chat_commands, chat_settings, gate_commands
+from ..llmrec import control as llmrec
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
 from ..library import load_installed
@@ -1342,6 +1343,7 @@ class ManagerAgent:
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER)
+        launch = await llmrec.attach(launch, agent_id=self.agent_id, task_id=None, reuse=True)
         if ask.turn is not None:
             ask.turn.runtime = launch.runtime.type  # named in what the turn binding logs
         try:

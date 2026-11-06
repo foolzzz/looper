@@ -233,19 +233,14 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         if launch.agent_teams:
             added[AGENT_TEAMS] = "1"
         env = {**{k: v for k, v in child_env.inherited().items() if k not in binding.unset and k != AGENT_TEAMS}, **added}
-        from ..llmrec import LlmrecRoute
+        from ..llmrec import LlmrecRoute, no_proxy
 
         if isinstance(launch.llmrec, LlmrecRoute):
             env[BASE_URL] = launch.llmrec.url
             # The loopback endpoint hides first-party tool search support from Claude Code.
             if official_endpoint(launch.llmrec.upstream):
                 env.setdefault("ENABLE_TOOL_SEARCH", "true")
-            bypass = env.get("no_proxy", env.get("NO_PROXY", ""))
-            for name in ("NO_PROXY", "no_proxy"):
-                values = [value.strip() for value in env.get(name, bypass).split(",") if value.strip()]
-                if values != ["*"] and "127.0.0.1" not in values:
-                    values.append("127.0.0.1")
-                env[name] = ",".join(values)
+            no_proxy(env)
         return env
 
     def llmrec_upstream(self, launch: Launch) -> str | None:

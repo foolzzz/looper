@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlsplit
 
 from ... import child_env
+from ..llmrec import LlmrecRoute, no_proxy
 from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
@@ -221,8 +222,12 @@ class PiRuntime(RuntimeAdapter):
         _check_explicit_env(launch.env)
         visible = {**child_env.inherited(), **dict(launch.env), **dict(binding.env)}
         # HOME and the two directory bindings need the prompt/session paths; run_command sets them via env.
-        return {**_isolated_env(visible), KEY_ENV: dict(binding.env)[KEY_ENV], **_PI_ENV,
-                **bridge_env(launch.library)}
+        env = {**_isolated_env(visible), KEY_ENV: dict(binding.env)[KEY_ENV], **_PI_ENV,
+               **bridge_env(launch.library)}
+        return no_proxy(env) if isinstance(launch.llmrec, LlmrecRoute) else env
+
+    def llmrec_upstream(self, launch: Launch) -> str | None:
+        return launch.profile.provider.base_url
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
@@ -758,7 +763,8 @@ def models_json(launch: Launch) -> dict[str, Any]:
         # pi 1.3's openai-responses getCompat/convertResponsesTools (also checked in request serialization):
         # the default omits strict; this sends strict:false without making optional parameters required.
         model["compat"] = {"supportsStrictMode": True}
-    return {"providers": {PROVIDER_ID: {"baseUrl": provider.base_url, "apiKey": f"${KEY_ENV}",
+    base_url = launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else provider.base_url
+    return {"providers": {PROVIDER_ID: {"baseUrl": base_url, "apiKey": f"${KEY_ENV}",
                                         "api": api, "models": [model]}}}
 
 

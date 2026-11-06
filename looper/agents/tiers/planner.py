@@ -128,6 +128,7 @@ from ..claude_cli import (
 )
 from .. import knowledge as project_knowledge
 from .. import session_switch
+from ..llmrec import control as llmrec
 from ..scheduler import continuing_run_preface
 from .. import vault
 from ..vault import VaultConfig
@@ -3417,6 +3418,7 @@ class PlannerAgent:
         launch = Launch(agent_settings, library, knowledge, role=AgentType.PLANNER,
                         read_dirs=tuple(step.workspace.path for step in plan.steps
                                         if step.isolated and step.workspace is not None))  # never with agent teams
+        launch = await llmrec.attach(launch, agent_id=self.agent_id, task_id=self._task_id, reuse=True)
         # Compose the shared role guidance after resolving the launch; its runtime keeps its reading tools
         # and read-only controls, and a saved custom role prompt is still loaded unchanged.
         settings = await load_settings()

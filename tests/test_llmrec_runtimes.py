@@ -1,0 +1,188 @@
+"""Recording changes the transport endpoint, preserving provider binding and off-mode launches."""
+
+import asyncio
+import json
+import shutil
+import subprocess
+from dataclasses import asdict, replace
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+
+from looper import child_env
+from looper.agents import runtimes
+from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+from looper.agents.library import AgentLibrary
+from looper.agents.llmrec import LlmrecRoute, LlmrecSkip, SkipReason, no_proxy
+from looper.agents.llmrec import control
+from looper.agents.profile_registry import CatalogModel, LegacyProviderSpec, RuntimeSpec
+from looper.agents.runtimes import ApiProtocol, AuthKind, Launcher
+from looper.agents.runtimes.api.adapter import ApiRuntime, Descriptor as ApiDescriptor
+from looper.agents.runtimes.api.session import ApiSession, FORBIDDEN_ENV
+from looper.agents.runtimes.codex import CodexRuntime, config_toml
+from looper.agents.runtimes.dsh import DshRuntime, _launch_patch
+from looper.agents.runtimes.dsh_runner import DshRunnerRuntime
+from looper.agents.runtimes.omp import OmpRuntime, models_yml
+from looper.agents.runtimes.pi import PiRuntime, models_json
+from looper.agents.runtimes.pi_runner import PiRunnerRuntime
+from looper.agents.runtimes.runner import protocol
+from tests.runtime_model_helpers import resolved_profile
+
+UPSTREAM = "https://model.example.invalid/v1"
+ROUTE = LlmrecRoute("abcdefghijklmnopqrstuv", "http://127.0.0.1:12345/r/abcdefghijklmnopqrstuv", UPSTREAM)
+CASES = ("codex", "omp", "pi", "pi-runner", "dsh", "dsh-runner", "api")
+
+
+def launch_for(case, monkeypatch, *, role=AgentType.MANAGER, base_url=UPSTREAM):
+    runtime = {"codex": CodexRuntime, "omp": OmpRuntime, "pi": PiRuntime, "dsh": DshRuntime,
+               "api": ApiRuntime, "pi-runner": lambda: PiRunnerRuntime(None, pi=None),
+               "dsh-runner": lambda: DshRunnerRuntime(None, dsh=None)}[case]()
+    monkeypatch.setitem(runtimes.ADAPTERS, runtime.type, runtime)
+    model = "deepseek-flash" if case.startswith("dsh") else "test-model"
+    api = ApiProtocol.ANTHROPIC_MESSAGES if case.startswith("dsh") else ApiProtocol.OPENAI_RESPONSES
+    provider = LegacyProviderSpec("test-provider", "Test provider", AuthKind.API_KEY, frozenset({api}),
+                                  base_url=base_url, api_key="test-model-key",
+                                  catalog=(CatalogModel(model, context_window=128000),))
+    profile = resolved_profile("test-agent", "Test agent", RuntimeSpec("test-runtime", runtime.label, runtime.type),
+                               provider, model, "high")
+    return Launch(AgentSettings(profile=profile), role=role)
+
+
+def configuration(case, launch, tmp_path):
+    if case == "codex":
+        return config_toml(launch)
+    if case == "omp":
+        value = models_yml(launch)
+    elif case == "pi":
+        value = models_json(launch)
+    elif case.endswith("-runner"):
+        value = asdict(launch.runtime._descriptor(launch, tmp_path / "prompt.md"))
+    elif case == "dsh":
+        value = _launch_patch(launch, tmp_path)
+    else:
+        value = launch.environment()
+    return json.dumps(value, sort_keys=True)
+
+
+@pytest.mark.parametrize("case,role", [(case, role) for case in CASES for role in AgentType
+                                       if role in (AgentType.MANAGER, AgentType.PLANNER,
+                                                   AgentType.WORKER, AgentType.REVIEWER)
+                                       and (case != "api" or role is AgentType.MANAGER)])
+def test_routed_config_and_environment_keep_the_binding(case, role, tmp_path, monkeypatch):
+    monkeypatch.setattr(child_env, "inherited", lambda: {"NO_PROXY": "upper.invalid", "no_proxy": "lower.invalid"})
+    launch = launch_for(case, monkeypatch, role=role)
+    if case == "dsh" and role in (AgentType.MANAGER, AgentType.PLANNER):
+        mcp = tmp_path / "mcp.json"
+        mcp.write_text(json.dumps({"mcpServers": {"looper": {"command": "test-bridge", "env": {
+            "LOOPER_AGENT_URL": "http://127.0.0.1:12346", "LOOPER_AGENT_TOKEN": "test-token"}}}}))
+        launch = replace(launch, library=AgentLibrary(mcp_config=str(mcp)))
+    routed = replace(launch, llmrec=ROUTE)
+    off = configuration(case, launch, tmp_path)
+    recorded = configuration(case, routed, tmp_path)
+    assert ROUTE.url in recorded and UPSTREAM not in recorded
+    if case != "api":
+        assert recorded.replace(ROUTE.url, UPSTREAM) == off
+    skipped = replace(launch, llmrec=LlmrecSkip(SkipReason.PROXY_UNAVAILABLE))
+    assert configuration(case, skipped, tmp_path) == off
+    assert skipped.environment() == launch.environment()
+    assert routed.binding_sha256 == launch.binding_sha256
+    assert routed.runtime.llmrec_upstream(routed) == UPSTREAM
+    env = routed.environment()
+    for name in ("NO_PROXY", "no_proxy"):
+        assert "127.0.0.1" in env[name].split(",")
+        if case != "api":
+            assert launch.environment()[name] in env[name].split(",")
+    assert "LOOPER_LLMREC_BASE_URL" not in launch.environment()
+
+
+@pytest.mark.parametrize("case,expected", [("codex", "https://api.openai.com/v1"),
+                                           ("omp", "https://api.openai.com/v1")])
+def test_runtime_default_upstream_is_preserved(case, expected, monkeypatch, tmp_path):
+    launch = launch_for(case, monkeypatch, base_url="")
+    assert launch.runtime.llmrec_upstream(launch) == expected
+    assert expected in configuration(case, launch, tmp_path)
+    assert expected not in configuration(case, replace(launch, llmrec=ROUTE), tmp_path)
+
+
+@pytest.mark.parametrize("initial,expected", [
+    ({}, {"NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"}),
+    ({"NO_PROXY": "example.invalid"}, {"NO_PROXY": "example.invalid,127.0.0.1", "no_proxy": "example.invalid,127.0.0.1"}),
+    ({"no_proxy": "127.0.0.1,lower.invalid"}, {"NO_PROXY": "127.0.0.1,lower.invalid", "no_proxy": "127.0.0.1,lower.invalid"}),
+    ({"NO_PROXY": "*"}, {"NO_PROXY": "*", "no_proxy": "*"}),
+])
+def test_loopback_bypass_preserves_inheritance_and_is_idempotent(initial, expected):
+    assert no_proxy(initial) == expected
+    assert no_proxy(initial) == expected
+
+
+@pytest.mark.parametrize("runtime_type,oauth,launcher,detail", [
+    ("codex", True, Launcher.NATIVE, "Codex's ChatGPT login requires an HTTPS origin"),
+    ("codex", True, Launcher.TTADK, "TTADK manages its own provider"),
+    ("claude-code", True, Launcher.TTADK, "TTADK manages its own provider"),
+    ("claude-code", False, Launcher.TTADK, "TTADK manages its own provider"),
+    ("grok", True, Launcher.NATIVE, "Grok has no known endpoint override"),
+    ("cursor-agent", True, Launcher.NATIVE, "Cursor's servers make the model requests"),
+])
+@pytest.mark.parametrize("include_oauth", [False, True])
+def test_not_covered_details(runtime_type, oauth, launcher, detail, include_oauth, tmp_path, monkeypatch):
+    api = ApiProtocol.ANTHROPIC_MESSAGES if runtime_type == "claude-code" else ApiProtocol.OPENAI_RESPONSES
+    provider = LegacyProviderSpec("test-login", "Test login", AuthKind.OAUTH if oauth else AuthKind.API_KEY,
+                                  frozenset({api}), oauth_runtime_type=runtime_type if oauth else None)
+    profile = resolved_profile("test-agent", "Test agent", RuntimeSpec("test-runtime", runtime_type, runtime_type,
+                               launcher=launcher), provider, "test-model")
+    launch = Launch(AgentSettings(profile=profile))
+    owner = control.ProxyControl(tmp_path, "", enabled=True, include_oauth=include_oauth)
+    monkeypatch.setattr(owner, "_health", AsyncMock(side_effect=AssertionError("not-covered must not need proxy")))
+    attached = asyncio.run(owner.attach(launch, agent_id="test-agent", task_id=None))
+    assert attached.llmrec == LlmrecSkip(SkipReason.NOT_COVERED, detail)
+    assert launch.runtime.llmrec_upstream(launch) is None
+
+
+def test_api_session_routes_the_target_but_preserves_its_descriptor(tmp_path, monkeypatch):
+    launch = launch_for("api", monkeypatch)
+    routed = replace(launch, llmrec=ROUTE)
+    prompt = tmp_path / ".local" / "prompts" / "prompt.md"
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text("Test instructions")
+    command = routed.runtime.resident_command("", cwd=tmp_path, prompt_file=prompt, launch=routed)
+    descriptor = ApiDescriptor.parse(command)
+    assert descriptor.base_url == UPSTREAM
+    for name in FORBIDDEN_ENV:
+        monkeypatch.delenv(name, raising=False)
+    session = ApiSession(label="test-manager")
+    asyncio.run(session.start(command, cwd=str(tmp_path), signature="test", env=routed.environment()))
+    assert session._target.base_url == ROUTE.url
+    assert session._descriptor == descriptor
+    assert routed.record()["api"]["base_url_host"] == "model.example.invalid"
+
+
+@pytest.mark.parametrize("kind", ["pi", "dsh"])
+def test_runner_protocol_accepts_route_url_in_python_and_node(kind, tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    case = next(case for case in json.loads((root / "runners/protocol/cases.json").read_text()) if case["name"] == "new")
+    params = case["message"]["params"]
+    params.update(cwd=str(tmp_path), home=str(tmp_path), state_dir=str(tmp_path))
+    params["provider"].update(base_url=ROUTE.url, protocol="anthropic-messages" if kind == "dsh" else "openai-responses")
+    params["system_prompt"]["mode"] = "append"
+    params["tools"]["builtin"] = ["read"]
+    assert protocol.decode_params("session/new", params)["provider"]["base_url"] == ROUTE.url
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is not installed; Python route URL validation passed")
+    module = root / "looper/agents/runtimes/runner" / ("pi_runner" if kind == "pi" else "dsh_runner") / "src/session.ts"
+    # A platform-tool refusal is after endpoint validation and before any SDK import/use.
+    script = """
+        const { newSession } = await import(process.argv[1]);
+        const params = JSON.parse(process.argv[2]);
+        const codes = [];
+        for (const url of [params.provider.base_url, '']) {
+          params.provider.base_url = url;
+          try { await newSession(params); codes.push('unexpected-success'); }
+          catch (error) { codes.push(error.code); }
+        }
+        process.stdout.write(JSON.stringify(codes));
+    """
+    result = subprocess.run([node, "--input-type=module", "-e", script, module.as_uri(), json.dumps(params)],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=15, check=True)
+    assert json.loads(result.stdout) == [-32007, -32602]
