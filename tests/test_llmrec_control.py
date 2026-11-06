@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import json
 import signal
 import sys
 from unittest.mock import AsyncMock
@@ -17,6 +18,7 @@ from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec
 from looper.agents.runtimes import ApiProtocol, AuthKind
 from looper.db import activity
 from tests.runtime_model_helpers import resolved_profile
+from tests.test_claude_code_gateway import translated_launch
 
 
 @pytest.fixture
@@ -313,3 +315,164 @@ def test_reused_route_refreshes_proxy_and_tls_without_losing_binding(tmp_path, m
         assert RouteFile.read(tmp_path / ROUTES_DIR / f'{fresh.llmrec.id}.json').tls_env == route.tls_env
 
     asyncio.run(body())
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_translation_route_exists_even_when_recording_is_off(tmp_path, monkeypatch, enabled, translated_launch):
+    from looper.agents.llmrec import ROUTES_DIR, ROUTE_FORMAT, RouteKind
+
+    launch = translated_launch
+    owner = control.ProxyControl(tmp_path, '', enabled=enabled)
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value={
+        'route_format': ROUTE_FORMAT, 'features': {'translate': 1}}))
+    monkeypatch.setattr(owner, '_state', lambda: {'port': 12345})
+    attached = asyncio.run(owner.attach(launch, agent_id='manager-test', task_id=None, reuse=True))
+    route = RouteFile.read(tmp_path / ROUTES_DIR / f'{attached.llmrec.id}.json')
+    assert route.kind == RouteKind.TRANSLATE
+    assert route.record is enabled
+    assert route.models == {'chat-main': 'chat-main', 'chat-small': 'chat-small'}
+    assert route.dialect == 'generic'
+    assert attached.environment()['ANTHROPIC_BASE_URL'] == attached.llmrec.url
+    assert attached.binding_sha256 == launch.binding_sha256
+    assert asyncio.run(owner.attach(launch, agent_id='manager-test', task_id=None, reuse=True)).llmrec == attached.llmrec
+
+
+@pytest.mark.parametrize('failure', ['start_false', 'start_error', 'missing_state', 'route_write'])
+def test_translation_failure_is_fail_closed_and_never_recording_bypass(tmp_path, monkeypatch, failure, translated_launch):
+    from looper.agents.llmrec import ROUTE_FORMAT
+    from looper.agents.runtimes import RuntimeUnsupported
+
+    launch = translated_launch
+    owner = control.ProxyControl(tmp_path, '', enabled=False)
+    monkeypatch.setattr(control, '_control', owner)
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value=None if failure.startswith('start') else {
+        'route_format': ROUTE_FORMAT, 'features': {'translate': 1}}))
+    monkeypatch.setattr(owner, '_start', AsyncMock(return_value=False,
+        side_effect=OSError('sensitive error') if failure == 'start_error' else None))
+    monkeypatch.setattr(owner, '_state', lambda: None if failure == 'missing_state' else {'port': 12345})
+    if failure == 'route_write':
+        monkeypatch.setattr(RouteFile, 'write', lambda *args: (_ for _ in ()).throw(OSError('sensitive error')))
+    insert = AsyncMock()
+    monkeypatch.setattr(activity, 'insert_activity', insert)
+    attached = asyncio.run(control.attach(launch, agent_id='worker-test', task_id='task-test'))
+    assert attached.llmrec.reason is SkipReason.GATEWAY_UNAVAILABLE
+    with pytest.raises(RuntimeUnsupported, match='gateway could not start'):
+        attached.environment()
+    insert.assert_awaited_once_with(task_id='task-test', worker='worker-test', kind='error',
+        summary='This run cannot start: the local gateway is unavailable.')
+
+
+@pytest.mark.parametrize('features,format', [({}, 4), ({'translate': 0}, 4), ({'translate': 1}, 3)])
+def test_translation_refuses_outdated_proxy(tmp_path, monkeypatch, features, format, translated_launch):
+
+    owner = control.ProxyControl(tmp_path, '', enabled=False)
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value={'route_format': format, 'features': features}))
+    attached = asyncio.run(owner.attach(translated_launch, agent_id='worker-test', task_id=None))
+    assert attached.llmrec.reason is SkipReason.PROXY_OUTDATED
+
+
+@pytest.mark.parametrize('change', ['dialect', 'background_model', 'provider', 'upstream', 'model'])
+def test_translated_resident_route_changes_with_effective_model(tmp_path, monkeypatch, change, translated_launch):
+    from dataclasses import replace
+    from looper.agents.llmrec import ROUTE_FORMAT, ROUTES_DIR
+
+    launch = translated_launch
+    owner = control.ProxyControl(tmp_path, '', enabled=False)
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value={
+        'route_format': ROUTE_FORMAT, 'features': {'translate': 1}}))
+    monkeypatch.setattr(owner, '_state', lambda: {'port': 12345})
+    first = asyncio.run(owner.attach(launch, agent_id='manager-test', task_id=None, reuse=True))
+    resolved = launch.profile.resolved_model
+    if change == 'dialect':
+        resolved = replace(resolved, model=replace(resolved.model, chat_dialect='deepseek'))
+    elif change == 'background_model':
+        resolved = replace(resolved, model=replace(resolved.model, background_model='other-small'))
+    elif change == 'provider':
+        provider = replace(resolved.provider, id='prov-other')
+        resolved = replace(resolved, provider=provider, model=replace(resolved.model, provider_id=provider.id),
+                           endpoint=replace(resolved.endpoint, provider_id=provider.id))
+    elif change == 'upstream':
+        resolved = replace(resolved, endpoint=replace(resolved.endpoint, base_url='https://other.example.invalid'))
+    else:
+        resolved = replace(resolved, model=replace(resolved.model, name='other-model'))
+    changed = replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, resolved_model=resolved)))
+    second = asyncio.run(owner.attach(changed, agent_id='manager-test', task_id=None, reuse=True))
+    assert second.llmrec.id != first.llmrec.id
+    assert second.binding_sha256 != first.binding_sha256
+    assert RouteFile.read(tmp_path / ROUTES_DIR / f'{first.llmrec.id}.json').ended_at
+
+
+def test_translation_starts_proxy_on_demand_with_recording_off(tmp_path, monkeypatch, translated_launch):
+    from looper.agents.llmrec import ROUTE_FORMAT
+
+    owner = control.ProxyControl(tmp_path, '', enabled=False)
+    health = {'route_format': ROUTE_FORMAT, 'features': {'translate': 1}}
+    monkeypatch.setattr(owner, '_health', AsyncMock(side_effect=[None, health]))
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(owner, '_start', start)
+    monkeypatch.setattr(owner, '_state', lambda: {'port': 12345})
+    attached = asyncio.run(owner.attach(translated_launch, agent_id='worker-test', task_id=None))
+    start.assert_awaited_once()
+    assert attached.llmrec.record is False
+    assert attached.record()['llmrec']['state'] == 'translating'
+
+
+@pytest.mark.parametrize('upstream', ['https://user:password@chat.example.invalid/v1',
+    'https://chat.example.invalid/v1?api_key=secret', 'https://chat.example.invalid/v1?token=secret'])
+def test_translation_rejects_url_credentials_before_proxy_start(tmp_path, monkeypatch, translated_launch, upstream):
+    from dataclasses import replace
+
+    launch = translated_launch
+    monkeypatch.setattr(type(launch.runtime), 'llmrec_upstream', lambda self, launch: upstream)
+    owner = control.ProxyControl(tmp_path, '', enabled=False)
+    start = AsyncMock(side_effect=AssertionError('credentials must be rejected before startup'))
+    monkeypatch.setattr(owner, '_start', start)
+    attached = asyncio.run(owner.attach(launch, agent_id='worker-test', task_id=None))
+    assert attached.llmrec.reason is SkipReason.CREDENTIALS_IN_URL
+    start.assert_not_awaited()
+    assert 'secret' not in attached.record()['llmrec']['detail']
+
+
+def test_translated_resident_record_toggle_updates_existing_route(tmp_path, monkeypatch, translated_launch):
+    from looper.agents.llmrec import ROUTE_FORMAT, ROUTES_DIR
+
+    owner = control.ProxyControl(tmp_path, '', enabled=False)
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value={
+        'route_format': ROUTE_FORMAT, 'features': {'translate': 1}}))
+    monkeypatch.setattr(owner, '_state', lambda: {'port': 12345})
+    first = asyncio.run(owner.attach(translated_launch, agent_id='manager-test', task_id=None, reuse=True))
+    owner.enabled = True
+    second = asyncio.run(owner.attach(translated_launch, agent_id='manager-test', task_id=None, reuse=True))
+    assert second.llmrec.id == first.llmrec.id
+    assert second.llmrec.record is True
+    assert RouteFile.read(tmp_path / ROUTES_DIR / f'{first.llmrec.id}.json').record is True
+
+
+def test_translation_proxy_dies_after_start_is_unavailable(tmp_path, monkeypatch, translated_launch):
+    owner = control.ProxyControl(tmp_path, '', enabled=False)
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value=None))
+    monkeypatch.setattr(owner, '_start', AsyncMock(return_value=True))
+    attached = asyncio.run(owner.attach(translated_launch, agent_id='worker-test', task_id=None))
+    assert attached.llmrec.reason is SkipReason.GATEWAY_UNAVAILABLE
+
+
+def test_translation_routes_context_suffixed_main_and_background_models(tmp_path, monkeypatch, translated_launch):
+    from dataclasses import replace
+    from looper.agents.llmrec import ROUTE_FORMAT, ROUTES_DIR
+    from looper.agents.llmrec.dialects import DIALECTS, ChatDialect
+    from looper.agents.llmrec.translate import to_chat
+
+    resolved = translated_launch.profile.resolved_model
+    profile = replace(translated_launch.profile, resolved_model=replace(resolved,
+        model=replace(resolved.model, name='chat-main[1m]', background_model='chat-small[1m]')))
+    launch = replace(translated_launch, settings=replace(translated_launch.settings, profile=profile))
+    owner = control.ProxyControl(tmp_path, '', enabled=False)
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value={
+        'route_format': ROUTE_FORMAT, 'features': {'translate': 1}}))
+    monkeypatch.setattr(owner, '_state', lambda: {'port': 12345})
+    attached = asyncio.run(owner.attach(launch, agent_id='worker-test', task_id=None))
+    route = RouteFile.read(tmp_path / ROUTES_DIR / f'{attached.llmrec.id}.json')
+    for name in ('chat-main', 'chat-small'):
+        request = to_chat({'model': name, 'messages': [{'role': 'user', 'content': 'hello'}]},
+                          DIALECTS[ChatDialect.GENERIC], route.models, session_id=None)
+        assert json.loads(request.body)['model'] == name

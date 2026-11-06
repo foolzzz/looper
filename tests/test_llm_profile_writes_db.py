@@ -92,7 +92,7 @@ def test_selection_uses_target_profile_and_checks_role_capabilities(role, monkey
 # Each runtime is checked against API-key models of all three exact protocols,
 # plus all three built-in login owners. No provider protocol intersection fallback.
 @pytest.mark.parametrize("runtime_type,accepted", [
-    ("claude-code", {"messages", "claude-subscription"}),
+    ("claude-code", {"messages", "chat", "claude-subscription"}),
     ("codex", {"responses", "codex-login"}),
     ("omp", {"messages", "chat", "responses"}),
     ("grok", {"grok-login"}),

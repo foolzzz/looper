@@ -267,7 +267,7 @@ async def insert_model(conn: asyncpg.Connection, fields: Mapping[str, Any]) -> s
     model_id = f"model-{uuid.uuid4()}"
     columns = [c for c in ("provider_id", "name", "protocol", "context_window", "input_usd_per_mtok",
                            "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok",
-                           "efforts", "background_model", "catalog_order") if c in fields]
+                           "efforts", "background_model", "chat_dialect", "catalog_order") if c in fields]
     values = ", ".join(f"${i}" for i in range(2, len(columns) + 2))
     await conn.execute(f"INSERT INTO llm_models (id, {', '.join(columns)}) VALUES ($1, {values})",
                        model_id, *[fields[c] for c in columns])
@@ -279,7 +279,7 @@ async def update_model(conn: asyncpg.Connection, model_id: str, fields: Mapping[
     await lock_model(conn, model_id)
     columns = [c for c in ("context_window", "input_usd_per_mtok", "output_usd_per_mtok",
                            "cache_read_usd_per_mtok", "cache_write_usd_per_mtok", "efforts",
-                           "background_model") if c in fields]
+                           "background_model", "chat_dialect") if c in fields]
     sets = [f"{c} = ${i}" for i, c in enumerate(columns, start=2)]
     await conn.execute(f"UPDATE llm_models SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",
                        model_id, *[fields[c] for c in columns])

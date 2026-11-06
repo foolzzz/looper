@@ -332,8 +332,16 @@ def _to_chat(body: dict, dialect: Dialect, models: Mapping[str, str], session_id
     if 'effort' in output:
         if dialect.effort_field:
             effort = output['effort']
+            if not isinstance(effort, str):
+                raise _bad('effort must be a string')
             if dialect.name in (ChatDialect.DEEPSEEK, ChatDialect.MOONSHOT):
                 effort = {'minimal': 'low', 'medium': 'high', 'xhigh': 'high'}.get(effort, effort)
+            elif dialect.name is ChatDialect.OPENAI:
+                effort = {'xhigh': 'high', 'max': 'high'}.get(effort, effort)
+            if effort not in dialect.effort_values:
+                raise _bad('effort is not supported by the chat dialect')
+            if effort != output['effort']:
+                _count(notes, 'clamped', 'effort')
             result[dialect.effort_field] = effort
         else:
             _count(notes, 'dropped', 'effort')
@@ -410,6 +418,11 @@ def from_chat(response_json: dict, *, client_model: str, dialect: Dialect) -> di
             if not isinstance(text, str):
                 raise ValueError('invalid content')
             content.append({'type': 'text', 'text': text})
+        refusal = message.get('refusal')
+        if refusal:
+            if not isinstance(refusal, str):
+                raise ValueError('invalid refusal')
+            content.append({'type': 'text', 'text': refusal})
         response_id = str(response_json.get('id', ''))
         tools = message.get('tool_calls') or []
         for index, call in enumerate(tools):

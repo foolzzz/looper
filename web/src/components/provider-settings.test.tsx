@@ -131,7 +131,7 @@ it("offers custom and built-in vendors together and starts a blank custom accoun
 
 it("prefills all vendor endpoints once, saves their own URLs and never submits suggested models", async () => {
   data.models = [{ model_id: "model-1", provider_id: "account-1", provider_name: "Saved account", provider_enabled: true,
-    name: "separate-model", protocol: "openai-chat", context_window: 100000, efforts: null, background_model: null,
+    name: "separate-model", protocol: "openai-chat", chat_dialect: null, effective_chat_dialect: "generic", context_window: 100000, efforts: null, background_model: null,
     input_usd_per_mtok: 2, output_usd_per_mtok: null, cache_read_usd_per_mtok: null, cache_write_usd_per_mtok: null,
     catalog_order: 0, builtin: false, profile_count: 1, endpoint: endpoint("openai-chat", "https://saved.invalid/v2"),
     prices: {

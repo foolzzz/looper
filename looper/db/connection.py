@@ -108,6 +108,7 @@ _SCHEDULE_DEFERRED_BY_DRAIN = "schedule_deferred_by_drain"
 _PROJECT_ACTIVITY = "project_activity"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
+_LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
 
 _LLM_REQUESTS_DDL = """
 CREATE TABLE IF NOT EXISTS llm_request_routes (
@@ -315,6 +316,16 @@ async def _llm_requests_translation_pending(conn: asyncpg.Connection) -> bool:
     return await conn.fetchval(
         "SELECT to_regclass('llm_requests') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('llm_requests') AND attname = 'translation' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _llm_models_chat_dialect_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _LLM_MODELS_CHAT_DIALECT):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('llm_models') AND attname = 'chat_dialect' "
         "AND attnum > 0 AND NOT attisdropped)")
 
 
@@ -529,6 +540,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _llm_requests_translation_pending(conn):
             await conn.execute("ALTER TABLE llm_requests ADD COLUMN IF NOT EXISTS translation JSONB")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_REQUESTS_TRANSLATION)
+        if await _llm_models_chat_dialect_pending(conn):
+            await conn.execute("ALTER TABLE llm_models ADD COLUMN chat_dialect TEXT "
+                               "CHECK (chat_dialect IS NULL OR protocol = 'openai-chat')")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _LLM_MODELS_CHAT_DIALECT)
         if await _project_activity_pending(conn):
             await conn.execute(_PROJECT_ACTIVITY_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROJECT_ACTIVITY)
@@ -576,6 +591,6 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _llm_requests_pending(conn)
-            or await _llm_requests_translation_pending(conn)
+            or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
             or await _chat_binding_senders_pending(conn)
             or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)))

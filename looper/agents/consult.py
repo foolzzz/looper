@@ -386,6 +386,10 @@ class ConsultService:
             from .runtimes import RuntimeUnsupported
 
             try:
+                from .llmrec.gateway import translated
+
+                if translated(launch):
+                    launch.environment()
                 prompt_file = system_prompt.write_file(self.runtime_root)
                 handle = None
                 if runtime.hosts_runs:

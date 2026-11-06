@@ -32,6 +32,7 @@ def boot_argv(executable, package_root, runtime_root, port) -> list[str]:
 class SkipReason(StrEnum):
     NOT_COVERED = 'not_covered'
     PROXY_UNAVAILABLE = 'proxy_unavailable'
+    GATEWAY_UNAVAILABLE = 'gateway_unavailable'
     PROXY_OUTDATED = 'proxy_outdated'
     CREDENTIALS_IN_URL = 'credentials_in_url'
 

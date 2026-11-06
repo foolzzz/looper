@@ -42,7 +42,8 @@ def test_model_reference_schema_and_fixed_descriptions():
         "Never take or pass a key; the user enters it on the dashboard.")
     assert models.description == ("LLM models: list (optionally compatible with a runtime); create; update "
         "settings; delete an unused model with confirmation. A model is one provider, exact name and "
-        "protocol; use its id or full reference.")
+        "protocol; use its id or full reference. chat_dialect selects the openai-chat translation dialect; null uses "
+        "the provider vendor default.")
     assert models.schema["additionalProperties"] is False
     reference = models.schema["properties"]["model"]["oneOf"]
     assert reference[0]["type"] == "string"
@@ -140,7 +141,7 @@ def test_model_crud_filters_and_exact_reference_readback(monkeypatch, tmp_path):
             protocol="anthropic-messages"))["model"]
         assert len({m["model_id"] for m in (first, second, third)}) == 3
         listed = await _ok(chat, "looper_models", action="list", provider="Test account", runtime="claude-code")
-        assert [m["model_id"] for m in listed["models"]] == [first["model_id"]]
+        assert [m["model_id"] for m in listed["models"]] == [first["model_id"], second["model_id"]]
         assert len((await _ok(chat, "looper_models", action="list", provider="prov-test"))["models"]) == 2
         updated = (await _ok(chat, "looper_models", action="update", model={"provider": "Test account", "name": "same",
             "protocol": "openai-chat"}, context_window=42, efforts=[], background_model="helper"))["model"]
@@ -220,4 +221,22 @@ def test_writes_stay_in_user_turn_and_confirmation_rechecks_references(monkeypat
             "context_window": 10}))["error"]["code"] == "needs_user_turn"
         assert (await chat.ops.call("looper_providers", {"action": "register", "name": "background",
             "vendor_type": "deepseek"}))["error"]["code"] == "needs_user_turn"
+    _run(test, monkeypatch)
+
+
+@needs_db
+def test_manager_model_chat_dialect_roundtrip(monkeypatch, tmp_path):
+    async def test(pool):
+        chat = _Chat(tmp_path)
+        model = (await _ok(chat, 'looper_models', action='create', provider='prov-test', name='chat-dialect',
+                          protocol='openai-chat', chat_dialect='deepseek'))['model']
+        assert model['chat_dialect'] == model['effective_chat_dialect'] == 'deepseek'
+        updated = (await _ok(chat, 'looper_models', action='update', model=model['model_id'],
+                            chat_dialect='moonshot'))['model']
+        assert updated['effective_chat_dialect'] == 'moonshot'
+        status, readback = await _call('POST', '/api/v1/models/get', {'model': model['model_id']})
+        assert status == 200 and readback['model']['chat_dialect'] == 'moonshot'
+        cleared = (await _ok(chat, 'looper_models', action='update', model=model['model_id'],
+                            chat_dialect=None))['model']
+        assert cleared['chat_dialect'] is None and cleared['effective_chat_dialect'] == 'generic'
     _run(test, monkeypatch)

@@ -48,9 +48,12 @@ function pairProblem(registry: Registry, runtime: Runtime | undefined, model: Mo
   const type = runtimeType(registry, runtime);
   const provider = registry.providers.find((p) => p.provider_id === model.provider_id);
   if (!runtime || !type || !provider) return "not available";
-  if (!type.protocols.includes(model.protocol)) {
+  const translated = !type.protocols.includes(model.protocol) && type.translated_protocols.includes(model.protocol);
+  if (!type.protocols.includes(model.protocol) && !translated) {
     return `speaks ${type.protocols.map((protocol) => protocolLabel(registry, protocol as Model["protocol"])).join(", ")}`;
   }
+  if (translated && provider.auth !== "api_key") return "login providers cannot be translated";
+  if (translated && runtime.launcher === "ttadk") return "TTADK manages its own provider; use the native launcher";
   if (type.supported_models && !type.supported_models.includes(model.name)) {
     return `runs only ${type.supported_models.join(", ")}`;
   }
@@ -179,6 +182,9 @@ export function AgentProfileForm({
   const offering = usable.filter((m) => m.name === draft.modelName && m.protocol === draft.protocol);
   const model = offering.find((m) => m.model_id === draft.model_id);
   const provider = registry.providers.find((p) => p.provider_id === model?.provider_id);
+  const translated = model && !type?.protocols.includes(model.protocol) && type?.translated_protocols.includes(model.protocol);
+  const nativeRuntimes = registry.runtime_types.filter((t) => t.protocols.includes(draft.protocol)).map((t) => t.label);
+  const gatewayRuntimes = registry.runtime_types.filter((t) => t.translated_protocols.includes(draft.protocol)).map((t) => t.label);
   const noRuntime = model && !selectable.some((r) => !pairProblem(registry, r, model));
   const typeLabel = type?.label ?? runtime?.type_label ?? "";
   const effortLevels = type?.effort_levels ?? registry.limits.effort_levels;
@@ -270,7 +276,8 @@ export function AgentProfileForm({
             <option value="">Choose a protocol</option>
             {protocols.map((p) => <option key={p.protocol} value={p.protocol}>{p.label} ({p.protocol})</option>)}
           </select>
-          {draft.protocol && <p className="text-[11px] text-muted-foreground">Runtimes that speak it: {registry.runtime_types.filter((t) => t.protocols.includes(draft.protocol as Model["protocol"])).map((t) => t.label).join(", ")}</p>}
+          {nativeRuntimes.length > 0 && <p className="text-[11px] text-muted-foreground">Runtimes that speak it: {nativeRuntimes.join(", ")}</p>}
+          {gatewayRuntimes.length > 0 && <p className="text-[11px] text-muted-foreground">Runtimes that reach it through the local gateway: {gatewayRuntimes.join(", ")}</p>}
         </div>
         <div className="space-y-1">
           <label htmlFor={`${id}-provider`} className={LABEL}>Provider *</label>
@@ -296,7 +303,7 @@ export function AgentProfileForm({
             {selectable.map((r) => {
               const reason = model ? pairProblem(registry, r, model) : null;
               return <option key={r.runtime_id} value={r.runtime_id} disabled={r.builtin && !!reason}>
-                {runtimeTitle(r)}{reason ? ` — ${reason}` : ""}
+                {runtimeTitle(r)}{reason ? ` — ${reason}` : model && !runtimeType(registry, r)?.protocols.includes(model.protocol) && runtimeType(registry, r)?.translated_protocols.includes(model.protocol) ? " · via local gateway" : ""}
               </option>;
             })}
             {undetected.map((t) => {
@@ -311,6 +318,7 @@ export function AgentProfileForm({
               <option key={p.title} value="" disabled>{p.title} (planned)</option>
             ))}
           </select>
+          {translated && !pairProblem(registry, runtime, model) && <p className="text-[11px] text-muted-foreground">Requests are translated to OpenAI Chat Completions through Looper’s local gateway. Runs are refused when the gateway is unavailable.</p>}
           {runtimeNote && <p className="text-[11px] text-muted-foreground">{runtimeNote}</p>}
           {noRuntime && <p role="alert" className="text-xs text-destructive">No runtime here can run this model.</p>}
         </div>
@@ -529,7 +537,7 @@ function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registr
   return (
     <Row
       ref={ref}
-      title={<RowName name={profile.name} builtin={profile.builtin} />}
+      title={<><RowName name={profile.name} builtin={profile.builtin} />{profile.model_path === "translated" && <Badge variant="outline">via local gateway</Badge>}</>}
       actions={
         !profile.builtin && (
           <EditDelete

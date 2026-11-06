@@ -379,3 +379,46 @@ def test_usage_diagnostics_are_observable_without_recording(tmp_path, monkeypatc
             assert stats['input_tokens'] == input_tokens
             assert not sink.items
     run(check)
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('error_type', [BrokenPipeError, ConnectionResetError])
+def test_broken_client_write_is_recorded_without_another_write(tmp_path, monkeypatch, stream, error_type):
+    writes_after_disconnect = []
+    original = Proxy._translated
+
+    class DisconnectedWriter:
+        def __init__(self, writer):
+            self.writer = writer
+            self.failed = False
+
+        def __getattr__(self, name):
+            return getattr(self.writer, name)
+
+        def write(self, data):
+            if self.failed:
+                writes_after_disconnect.append(data)
+            self.writer.write(data)
+
+        async def drain(self):
+            self.failed = True
+            raise error_type('client disconnected')
+
+    async def broken_client(self, connection, reader, writer, *args):
+        return await original(self, connection, reader, DisconnectedWriter(writer), *args)
+
+    monkeypatch.setattr(Proxy, '_translated', broken_client)
+
+    async def check():
+        async with gateway(tmp_path, stream=stream) as (client, base, proxy, sink, received):
+            try:
+                await client.post(base + '/v1/messages', json={'model': 'client', 'messages': [], 'stream': stream})
+            except httpx.HTTPError:
+                pass
+            async with asyncio.timeout(2):
+                while not sink.items:
+                    await asyncio.sleep(.01)
+            assert sink.items[0].outcome == 'client_closed'
+            assert not writes_after_disconnect
+            assert proxy.stats['translate']['stream_errors'] == 0
+    run(check)

@@ -95,6 +95,12 @@ BACKGROUND_MODEL_VARS = ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_
 # Agent teams (the module's notes): the variable that enables them, and where their teammates run.
 AGENT_TEAMS = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
 TEAMMATE_MODE_ARGS = ("--teammate-mode", "in-process")
+# Gateway safeguards override settings and provider environment variables.
+TRANSLATED_ENV = (
+    ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
+    ("ENABLE_TOOL_SEARCH", "false"),
+    ("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", "1"),
+)
 # Anthropic's own API: the endpoint Claude Code uses without a base URL.
 ANTHROPIC_HOSTS = frozenset({"api.anthropic.com"})
 
@@ -130,6 +136,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     keepable = True
     can_interrupt = True  # its resident session's control request ``interrupt``
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
+    translated_protocols = frozenset({ApiProtocol.OPENAI_CHAT})
     # Its own login (the Claude subscription), and an API key for Anthropic's API or an Anthropic-format endpoint.
     auth_kinds = frozenset({AuthKind.OAUTH, AuthKind.API_KEY})
     isolation_id = claude_cli.ISOLATION_ID
@@ -171,6 +178,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         ``base_url`` of any other endpoint, whose binding also maps every Claude
         model alias to the provider's models.
         """
+        if provider.protocols == self.translated_protocols:
+            return self._translated_binding(provider, model)
         if provider.protocols != self.protocols:
             raise RuntimeUnsupported(f"Claude Code speaks anthropic-messages; provider {provider.name!r} "
                                      "must supply that exact protocol")
@@ -196,6 +205,17 @@ class ClaudeCodeRuntime(RuntimeAdapter):
                  *((name, model) for name in MAIN_MODEL_VARS), *((name, background) for name in BACKGROUND_MODEL_VARS),
                  *own),
             unset=(API_KEY,))
+
+    def _translated_binding(self, provider: ProviderSpec, model: str) -> ProviderBinding:
+        if provider.auth is not AuthKind.API_KEY or not provider.api_key:
+            raise RuntimeUnsupported("Claude Code translated models require a provider API key")
+        if len(provider.catalog) != 1 or provider.catalog[0].name != model:
+            raise RuntimeUnsupported("Claude Code requires one resolved model matching the launch model")
+        background = provider.catalog[0].background_model or model
+        return ProviderBinding(
+            env=((AUTH_TOKEN, provider.api_key), *((name, model) for name in MAIN_MODEL_VARS),
+                 *((name, background) for name in BACKGROUND_MODEL_VARS), *provider.env),
+            unset=(API_KEY, BASE_URL))
 
     def launch_args(self, launch: Launch, *, cwd: str | Path | None = None) -> list[str]:
         """The Claude Code flags every agent starts with: the permissions (read-only for a run that must not
@@ -233,8 +253,19 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         if launch.agent_teams:
             added[AGENT_TEAMS] = "1"
         env = {**{k: v for k, v in child_env.inherited().items() if k not in binding.unset and k != AGENT_TEAMS}, **added}
-        from ..llmrec import LlmrecRoute, no_proxy
+        from ..llmrec import LlmrecRoute, RouteKind, no_proxy
+        from ..llmrec.gateway import gateway_refusal, translated
 
+        if translated(launch):
+            route = launch.llmrec
+            if not (isinstance(route, LlmrecRoute) and route.kind is RouteKind.TRANSLATE):
+                raise RuntimeUnsupported(gateway_refusal(route, launch.model))
+            # Settings cannot reintroduce the direct Anthropic credential or override gateway safeguards.
+            env.pop(API_KEY, None)
+            env[BASE_URL] = route.url
+            env.update(TRANSLATED_ENV)
+            no_proxy(env)
+            return env
         if isinstance(launch.llmrec, LlmrecRoute):
             env[BASE_URL] = launch.llmrec.url
             # The loopback endpoint hides first-party tool search support from Claude Code.
@@ -248,6 +279,10 @@ class ClaudeCodeRuntime(RuntimeAdapter):
 
         if launch.profile.runtime.launcher is Launcher.TTADK:
             return None
+        from ..llmrec.gateway import translated
+
+        if translated(launch):
+            return launch.profile.provider.base_url
         return self.environment(replace(launch, llmrec=None)).get(BASE_URL) or "https://api.anthropic.com"
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:

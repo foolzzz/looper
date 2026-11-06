@@ -413,3 +413,29 @@ def test_error_message_drops_url_query(url):
         {}, DIALECTS[ChatDialect.GENERIC])
     assert json.loads(raw)['error']['message'] == 'Failed at ' + url.split('?')[0]
     assert b'private' not in raw
+
+
+@pytest.mark.parametrize('dialect', ['openai', 'deepseek', 'moonshot'])
+@pytest.mark.parametrize('effort', ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+def test_effort_is_clamped_to_dialect_values(dialect, effort):
+    aliases = ({'xhigh': 'high', 'max': 'high'} if dialect == 'openai' else
+               {'minimal': 'low', 'medium': 'high', 'xhigh': 'high'})
+    expected = aliases.get(effort, effort)
+    body, result = request(dialect, output_config={'effort': effort})
+    assert body['reasoning_effort'] == expected
+    assert result.notes['clamped'].get('effort', 0) == int(effort != expected)
+
+
+@pytest.mark.parametrize('finish', ['stop', 'content_filter'])
+def test_response_preserves_refusal_text(finish):
+    result = from_chat(chat_response({'content': None, 'refusal': 'Cannot help with that.'}, reason=finish),
+                       client_model='client', dialect=DIALECTS[ChatDialect.OPENAI])
+    assert result['content'] == [{'type': 'text', 'text': 'Cannot help with that.'}]
+
+
+def test_usage_cache_split_preserves_prompt_total():
+    usage = {'prompt_tokens': 100, 'completion_tokens': 7,
+             'prompt_tokens_details': {'cached_tokens': 40, 'cache_write_tokens': 10}}
+    result = anthropic_usage(usage, DIALECTS[ChatDialect.OPENAI])
+    assert (result['input_tokens'], result['cache_read_input_tokens'], result['cache_creation_input_tokens']) == (50, 40, 10)
+    assert result['input_tokens'] + result['cache_read_input_tokens'] + result['cache_creation_input_tokens'] == usage['prompt_tokens']

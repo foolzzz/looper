@@ -264,9 +264,10 @@ def tokens(path, body):
     cached = count(usage.get('prompt_cache_hit_tokens', details.get('cached_tokens')))
     incoming = count(usage.get('prompt_cache_miss_tokens'))
     prompt = count(usage.get('prompt_tokens'))
+    written = count(details.get('cache_write_tokens', 0))
     if incoming is None and prompt is not None and cached is not None:
         incoming = max(0, prompt - cached)
-    written = count(details.get('cache_write_tokens', 0))
+    incoming = max(0, incoming - written) if incoming is not None and written is not None else None
     return incoming, count(usage.get('completion_tokens')), cached, written, usage
 
 

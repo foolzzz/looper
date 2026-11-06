@@ -508,9 +508,9 @@ def test_a_profile_pairs_a_runtime_and_a_provider_that_can_run_together(
         assert status == 201 and payload["profile"]["runtime_name"] == "claude-code"
         assert (await profile(standin, key))[0] == 201  # an adapter that takes API keys
 
-        # Protocols must intersect.
+        # Claude Code reaches Chat models through the local gateway.
         status, payload = await profile("rt-claude-code", chat)
-        assert status == 400 and "exact protocol" in payload["error"]
+        assert status == 201 and payload["profile"]["model_path"] == "translated"
         # An OAuth provider pairs only with the runtime type whose login it is, either way round.
         status, payload = await profile(standin, "prov-claude-subscription", "sonnet")
         assert status == 400 and "only use its own runtime" in payload["error"]

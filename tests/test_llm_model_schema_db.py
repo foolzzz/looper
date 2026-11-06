@@ -242,3 +242,21 @@ def test_pre_bridge_database_is_refused_without_mutation(version: int | None, en
         assert await conn.fetchval("SELECT to_regclass('registry_schema_version') IS NOT NULL") == (version is not None)
 
     _run(test, initialize=False)
+
+
+def test_chat_dialect_additive_upgrade_and_protocol_constraint():
+    async def test(conn):
+        await conn.execute("ALTER TABLE llm_models DROP COLUMN chat_dialect")
+        assert await connection.schema_change_pending(conn)
+        await connection.ensure_schema(conn)
+        assert await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations "
+                                   "WHERE name = 'llm_models_chat_dialect')")
+        await _model(conn)
+        await conn.execute("UPDATE llm_models SET chat_dialect = 'deepseek' WHERE id = 'model-test'")
+        assert await conn.fetchval("SELECT chat_dialect FROM llm_models WHERE id = 'model-test'") == 'deepseek'
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute("UPDATE llm_models SET chat_dialect = 'openai' "
+                               "WHERE provider_id = 'prov-claude-subscription'")
+        await connection.ensure_schema(conn)
+        assert not await connection.schema_change_pending(conn)
+    _run(test)

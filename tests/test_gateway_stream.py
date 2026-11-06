@@ -266,3 +266,11 @@ def test_delta_checks_text_before_opening_a_block():
         stream._delta('thinking', [1])
     assert stream.open is None
     assert stream.index == 0
+
+
+@pytest.mark.parametrize('finish', ['stop', 'content_filter'])
+def test_refusal_deltas_are_preserved_as_text(finish):
+    _, result = translated([chunk({'refusal': 'Cannot help '}), chunk({'refusal': 'with that.'}, finish)])
+    message = _anthropic(result)
+    assert message['content'] == [{'type': 'text', 'text': 'Cannot help with that.'}]
+    assert message['stop_reason'] == ('refusal' if finish == 'content_filter' else 'end_turn')

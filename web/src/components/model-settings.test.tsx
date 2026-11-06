@@ -22,7 +22,7 @@ const provider = (changes: Partial<Provider> = {}): Provider => ({
 });
 const model = (changes: Partial<Model> = {}): Model => ({
   model_id: "model-1", provider_id: "provider-1", provider_name: "Account", provider_enabled: true, name: "exact[1m]", protocol: "openai-chat",
-  context_window: null, efforts: null, background_model: null, input_usd_per_mtok: null, output_usd_per_mtok: null,
+  chat_dialect: null, effective_chat_dialect: "deepseek", context_window: null, efforts: null, background_model: null, input_usd_per_mtok: null, output_usd_per_mtok: null,
   cache_read_usd_per_mtok: null, cache_write_usd_per_mtok: null, catalog_order: 0, builtin: false, profile_count: 0,
   endpoint: endpoint("openai-chat"), prices: Object.fromEntries(PRICE_FIELDS.map((key) => [key,
     { override: null, effective: null, source: "unknown" }])) as Model["prices"], warnings: [], created_at: "", updated_at: "", ...changes,
@@ -185,7 +185,7 @@ it("explains create price defaults and labels protocols while preserving edit ov
   expect(container.textContent).toContain("Empty clears the override and uses a built-in price if known. 0 means explicitly free.");
   await submit();
   expect(writes).toEqual([{ url: "/api/v1/ops/models/update", method: "POST", body: {
-    model: "model-1", context_window: null, efforts: null, background_model: null,
+    model: "model-1", chat_dialect: null, context_window: null, efforts: null, background_model: null,
     input_usd_per_mtok: null, output_usd_per_mtok: null, cache_read_usd_per_mtok: null, cache_write_usd_per_mtok: null,
   } }]);
 });
@@ -335,4 +335,21 @@ it("allows inspecting built-in providers and models without offering built-in mu
   expect(container.textContent).toContain("exact[1m]");
   expect(container.querySelector('[aria-label="Edit model exact[1m] (openai-chat)"]')).toBeNull();
   expect(container.querySelector('[aria-label="Delete model exact[1m] (openai-chat)"]')).toBeNull();
+});
+
+
+it("selects a model-specific chat dialect, persists it and clears it back to the provider default", async () => {
+  data.models = [model()]; await open(); await edit();
+  const dialect = field("Chat dialect") as HTMLSelectElement;
+  expect(dialect.options[0].text).toBe("Auto (from provider: deepseek)");
+  expect([...dialect.options].map((option) => option.value)).toEqual([
+    "", "generic", "openai", "deepseek", "moonshot", "zhipu", "qwen", "vllm", "minimax", "ark", "openrouter",
+  ]);
+  await fill("Chat dialect", "moonshot"); await submit();
+  expect(writes[0].body.chat_dialect).toBe("moonshot");
+  await edit(); expect(field("Chat dialect").value).toBe("moonshot");
+  await fill("Chat dialect", ""); await submit();
+  expect(writes[1].body.chat_dialect).toBeNull();
+  await add("anthropic-messages");
+  expect([...container.querySelectorAll("label")].some((label) => label.textContent === "Chat dialect")).toBe(false);
 });

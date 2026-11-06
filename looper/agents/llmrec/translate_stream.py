@@ -45,6 +45,7 @@ def _validate_chunk(event, dialect):
         delta = choice.get('delta')
         delta = _stream_container({} if delta is None else delta, dict)
         _optional_text(delta.get('content'))
+        _optional_text(delta.get('refusal'))
         if dialect.reasoning_field:
             _optional_text(delta.get(dialect.reasoning_field))
         calls = delta.get('tool_calls')
@@ -155,6 +156,8 @@ class StreamTranslator:
                 frames.extend(self._delta('thinking', reasoning))
             if delta.get('content'):
                 frames.extend(self._delta('text', delta['content']))
+            if delta.get('refusal'):
+                frames.extend(self._delta('text', delta['refusal']))
             for call in delta.get('tool_calls') or []:
                 index = call.get('index', 0)
                 if index not in self.tools:

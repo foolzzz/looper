@@ -164,3 +164,15 @@ def test_bodyless_non_model_request_is_skipped(method):
 def test_empty_model_request_still_records_gap(path):
     capture = build_capture(request_body=b'', response_data=b'{}', path=path)
     assert capture.record_gap == 'unparsable_request'
+
+
+@pytest.mark.parametrize('explicit_miss', [False, True])
+def test_chat_cache_split_preserves_prompt_total(explicit_miss):
+    usage = {'prompt_tokens': 100, 'completion_tokens': 7,
+             'prompt_tokens_details': {'cached_tokens': 40, 'cache_write_tokens': 10}}
+    if explicit_miss:
+        usage['prompt_cache_miss_tokens'] = 60
+    capture = build_capture(request_body=b'{"model":"client","messages":[]}',
+                            response_data=json.dumps({'usage': usage}).encode(), path='/v1/chat/completions')
+    assert (capture.input_tokens, capture.cache_read_tokens, capture.cache_write_tokens) == (50, 40, 10)
+    assert capture.input_tokens + capture.cache_read_tokens + capture.cache_write_tokens == usage['prompt_tokens']

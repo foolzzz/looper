@@ -18,7 +18,7 @@ PROXY = _object({"state": {"type": "string", "enum": ["running", "stopped", "una
     "port": _NULL_INT, "pid": _NULL_INT,
     **dict.fromkeys(("requests", "recorded", "gaps", "dropped", "write_errors"), _INT),
     "gap_reasons": {"type": "object", "additionalProperties": _INT}}, closed=True)
-SETTINGS = _object({"enabled": _BOOL, "include_oauth": _BOOL, "proxy": PROXY}, closed=True)
+SETTINGS = _object({"enabled": _BOOL, "include_oauth": _BOOL, "proxy": PROXY, "translate": {"type": "object"}}, closed=True)
 _FIELDS = {
     "id": _INT, "route_id": _STR, "proxy_instance": _STR, "proxy_seq": _INT,
     "record_id": _NULL_INT, "after_record_id": _NULL_INT, "agent_id": _STR, "task_id": _NULL_STR,
@@ -77,7 +77,7 @@ async def settings():
     enabled = values.get("llmrec.enabled") == "true"
     return {"enabled": enabled, "include_oauth": values.get("llmrec.include_oauth") == "true",
         "proxy": {"state": "unavailable" if enabled else "stopped", "port": None, "pid": None,
-                  "requests": 0, "recorded": 0, "gaps": 0, "gap_reasons": {}, "dropped": 0, "write_errors": 0}}
+                  "requests": 0, "recorded": 0, "gaps": 0, "gap_reasons": {}, "dropped": 0, "write_errors": 0}, "translate": {}}
 
 
 async def run(server, operation, arguments, principal, headers):

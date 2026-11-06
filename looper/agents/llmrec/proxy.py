@@ -650,6 +650,9 @@ class Proxy:
             except asyncio.CancelledError:
                 values['outcome'] = 'client_closed'
                 raise
+            except (BrokenPipeError, ConnectionResetError) as error:
+                values.update(outcome='client_closed', error=type(error).__name__)
+                writer.transport.abort()
             except (httpx.HTTPError, OSError, ValueError, TypeError, KeyError):
                 values.update(outcome='upstream_error', error='Gateway upstream exchange failed')
                 if response_sent and translator is not None:
