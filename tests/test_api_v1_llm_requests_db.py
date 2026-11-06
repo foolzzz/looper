@@ -30,7 +30,8 @@ def test_recording_operations_are_operator_only_and_validate_shapes(tmp_path, mo
         async with v1_api(tmp_path, pool) as call:
             operations = [("llmrec_settings.get", {}), ("llmrec_settings.update", {"enabled": True}),
                 ("llm_requests.list", {}), ("llm_requests.get", {"request_id": identifier}),
-                ("llm_requests.export", {"agent_id": route.agent_id})]
+                ("llm_requests.export", {"agent_id": route.agent_id}),
+                ("llm_requests.purge", {"all": True})]
             for name, arguments in operations:
                 code, _ = await call(name, arguments, client=True)
                 assert code == 403
@@ -41,7 +42,7 @@ def test_recording_operations_are_operator_only_and_validate_shapes(tmp_path, mo
                 assert reply["result"]["include_oauth"] is include_oauth
                 code, current = await call("llmrec_settings.get")
                 assert current["result"] == reply["result"]
-            for name, arguments in (operations[0], *operations[2:]):
+            for name, arguments in (operations[0], *operations[2:-1]):
                 code, reply = await call(name, arguments)
                 assert code == 200, reply
                 operation = api_v1.find("POST", "/api/v1/" + name.replace(".", "/"))
@@ -69,7 +70,10 @@ def test_recording_cli_uses_closed_operator_schemas():
          {'enabled': True, 'include_oauth': True}),
         (['llm-requests', 'list', '--record-id', '7', '--between-turns'], '/api/v1/llm_requests/list',
          {'record_id': 7, 'between_turns': True}),
-        (['llm-requests', 'get', '--request-id', '9'], '/api/v1/llm_requests/get', {'request_id': 9})]
+        (['llm-requests', 'get', '--request-id', '9'], '/api/v1/llm_requests/get', {'request_id': 9}),
+        (['llmrec-settings', 'update', '--retention-days', '365', '--max-total-mb', '102.4'],
+         '/api/v1/llmrec_settings/update', {'retention_days': 365, 'max_total_mb': 102.4}),
+        (['llm-requests', 'purge', '--all'], '/api/v1/llm_requests/purge', {'all': True})]
     for argv, path, expected in cases:
         args = loopercli.build_parser(api_v1.document()).parse_args(argv)
         calls = []
@@ -93,6 +97,8 @@ def test_recording_self_check_statuses(monkeypatch):
         async def status(self):
             return self.value
 
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(self_check, '_llmrec_storage', AsyncMock(return_value=(0, 2048)))
     for arguments, expected in [((False, 'stopped'), self_check.SKIP),
         ((True, 'unavailable'), self_check.FAIL), ((True, 'outdated'), self_check.WARN),
         ((True, 'running', 1, 0), self_check.WARN), ((True, 'running', 0, 1), self_check.WARN),
@@ -262,3 +268,101 @@ def test_missing_request_part_fails_without_partial_body(tmp_path, monkeypatch):
                 assert str(identifier) in reply["error"]["message"]
                 assert "private" not in str(reply) and "request_body" not in reply
     run_db(check, monkeypatch, timeout=30)
+
+
+def test_recording_retention_settings_defaults_limits_and_reset(tmp_path, monkeypatch):
+    from looper.agents.llmrec import control
+    from looper.db import system_settings
+
+    async def check(pool):
+        monkeypatch.setattr(control, '_control', None)
+        async with v1_api(tmp_path, pool) as call:
+            code, reply = await call('llmrec_settings.get')
+            assert code == 200, reply
+            result = reply['result']
+            assert result['enabled'] is True and result['include_oauth'] is False
+            assert result['retention_days'] == {'value': 7, 'built_in': 7, 'source': 'built-in',
+                                                'minimum': 1, 'maximum': 365}
+            assert result['max_total_mb'] == {'value': 2048, 'built_in': 2048, 'source': 'built-in',
+                                              'minimum': 102.4, 'maximum': 102400}
+            assert result['stored_bytes'] > 0 and result['request_count'] == 0
+            for name, value, span in [('retention_days', 0, '1 to 365'), ('retention_days', 366, '1 to 365'),
+                                      ('max_total_mb', 102.3, '102.4 to 102400'),
+                                      ('max_total_mb', 102401, '102.4 to 102400')]:
+                code, reply = await call('llmrec_settings.update', {name: value, 'enabled': False})
+                assert code == 400 and span in reply['error']['message'], reply
+                # A rejected update must not change any field, including the switch.
+                assert await system_settings.get_settings(['llmrec.enabled']) == {}
+            for days, size in [(1, 102.4), (365, 102400)]:
+                code, reply = await call('llmrec_settings.update', {'retention_days': days, 'max_total_mb': size})
+                assert code == 200, reply
+                assert reply['result']['retention_days']['value'] == days
+                assert reply['result']['max_total_mb']['value'] == size
+                assert reply['result']['max_total_mb']['source'] == 'setting'
+            code, reply = await call('llmrec_settings.update', {'retention_days': None, 'max_total_mb': None})
+            assert code == 200, reply
+            assert reply['result']['retention_days'] == result['retention_days']
+            assert reply['result']['max_total_mb'] == result['max_total_mb']
+            assert await system_settings.get_settings(['llmrec.retention_days', 'llmrec.max_total_mb']) == {}
+    run_db(check, monkeypatch, timeout=20)
+
+
+@pytest.mark.parametrize('scope', ['task', 'agent', 'all'])
+def test_request_purge_confirms_exact_scope_and_reads_back(tmp_path, monkeypatch, scope):
+    from looper.agents import api_v1
+    from looper.agents.llmrec import RouteFile, control
+    from looper.agents.v1_domains import llm_requests as domain
+    from looper.db import llm_requests
+
+    async def check(pool):
+        monkeypatch.setattr(control, '_control', None)
+        routes = [RouteFile(id=secrets.token_urlsafe(16), upstream='https://example.invalid',
+                            agent_id=agent, task_id=task)
+                  for agent, task in [('worker-selected', 'task-selected'), ('worker-other', 'task-other')]]
+        await llm_requests.write_batch([_capture(route, index + 1, {'system': 'shared', 'messages': []})
+                                        for index, route in enumerate(routes)], pool=pool)
+        arguments = {'task_id': 'task-selected'} if scope == 'task' else (
+            {'agent_id': 'worker-selected'} if scope == 'agent' else {'all': True})
+        async with v1_api(tmp_path, pool) as call:
+            code, reply = await call('llm_requests.purge', arguments, client=True)
+            assert code == 403, reply
+            for invalid in [{}, {'task_id': 'task-selected', 'all': True}, {'agent_id': 'worker-selected', 'all': True},
+                            {'task_id': 'task-selected', 'agent_id': 'worker-selected'}, {'all': False}]:
+                code, reply = await call('llm_requests.purge', invalid)
+                assert code == 400, reply
+            operation = api_v1.find('POST', '/api/v1/llm_requests/purge')
+            assert operation.operator_only and operation.confirms and operation.risk == 'high'
+            impact = await domain.impact(None, operation, arguments, api_v1.OPERATOR, {})
+            expected = 2 if scope == 'all' else 1
+            assert str(expected) in impact
+            assert ('task-selected' if scope == 'task' else 'worker-selected' if scope == 'agent'
+                    else 'all agents and tasks') in impact
+            assert await pool.fetchval('SELECT count(*) FROM llm_requests') == 2
+            # The operator confirms in the dashboard; server-side pending gates are for API clients.
+            code, answer = await call('llm_requests.purge', arguments)
+            assert code == 200, answer
+            assert answer['result'] == {'requests': expected, 'routes': expected}
+            assert await pool.fetchval('SELECT count(*) FROM llm_requests') == 2 - expected
+            assert await pool.fetchval('SELECT count(*) FROM llm_request_routes') == 2 - expected
+            if scope != 'all':
+                remaining = await pool.fetchval('SELECT id FROM llm_requests')
+                assert (await llm_requests.get_request(remaining))['request_body'] == {'system': 'shared', 'messages': []}
+    run_db(check, monkeypatch, timeout=20)
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_recording_self_check_warns_near_storage_cap(monkeypatch, enabled):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from looper.agents import self_check
+    from looper.agents.llmrec import control
+
+    monkeypatch.setattr(control, '_control', SimpleNamespace(status=AsyncMock(return_value={
+        'enabled': enabled, 'proxy': {'state': 'running' if enabled else 'stopped'}})))
+    monkeypatch.setattr(self_check, '_llmrec_storage', AsyncMock(return_value=(1900 * 1024 * 1024, 2048)))
+    result = asyncio.run(self_check.llmrec_check())
+    assert result.status == self_check.WARN
+    assert '1900.0 MiB' in result.detail and '2048 MiB' in result.detail
+    monkeypatch.setattr(self_check, '_llmrec_storage', AsyncMock(return_value=(int(0.9 * 2048 * 1024 * 1024), 2048)))
+    assert asyncio.run(self_check.llmrec_check()).status == (self_check.OK if enabled else self_check.SKIP)

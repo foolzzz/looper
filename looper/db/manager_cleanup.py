@@ -74,7 +74,9 @@ async def _preview(conn: asyncpg.Connection, manager_id: str, retention_days: in
         "(SELECT count(*) FROM chat_messages m JOIN chat_threads t USING (session_id) WHERE t.manager_id = $1) "
         "AS chat_messages, (SELECT count(*) FROM llm_records WHERE agent_id = $1) AS llm_records, "
         "(SELECT count(*) FROM llm_record_events e JOIN llm_records r ON r.id = e.record_id WHERE r.agent_id = $1) "
-        "AS llm_record_events, (SELECT count(*) FROM manager_actions WHERE manager_id = $1) AS manager_actions",
+        "AS llm_record_events, (SELECT count(*) FROM manager_actions WHERE manager_id = $1) AS manager_actions, "
+        "(SELECT count(*) FROM llm_requests q JOIN llm_request_routes r ON r.id = q.route_id "
+        "WHERE r.agent_id = $1) AS llm_requests",
         manager_id))
     return {"manager_id": manager_id, "deleted_at": row["deleted_at"].isoformat() if row and row["deleted_at"] else None,
             "retention_days": retention_days, "eligible": not blockers, "blockers": blockers,
@@ -109,6 +111,10 @@ async def purge(manager_id: str, retention_days: int = 30, *,
             "WITH removed AS (DELETE FROM chat_messages m USING chat_threads t "
             "WHERE m.session_id = t.session_id AND t.manager_id = $1 RETURNING m.id) SELECT count(*) FROM removed",
             manager_id)
+        result["counts"]["llm_requests"] = await conn.fetchval(
+            "SELECT count(*) FROM llm_requests q JOIN llm_request_routes r ON r.id = q.route_id WHERE r.agent_id = $1",
+            manager_id)
+        await conn.execute("DELETE FROM llm_request_routes WHERE agent_id = $1", manager_id)
         result["counts"]["llm_records"] = await conn.fetchval(
             "WITH removed AS (DELETE FROM llm_records WHERE agent_id = $1 RETURNING id) SELECT count(*) FROM removed",
             manager_id)

@@ -110,8 +110,10 @@ def test_self_check_reports_gaps_through_proxy_status(tmp_path, monkeypatch):
     monkeypatch.setattr(owner, '_health', AsyncMock(return_value=proxy.stats))
     monkeypatch.setattr(owner, '_state', lambda: {'port': 1234, 'pid': 1})
     monkeypatch.setattr(control, '_control', owner)
+    monkeypatch.setattr(self_check, '_llmrec_storage', AsyncMock(return_value=(0, 2048)))
     status = asyncio.run(owner.status())
-    api_v1.validate_arguments(api_v1.find('POST', '/api/v1/llmrec_settings/get').result, status)
+    api_v1.validate_arguments(api_v1.find('POST', '/api/v1/llmrec_settings/get').result['properties']['proxy'],
+                              status['proxy'])
     assert status['proxy']['recorded'] == 4 and status['proxy']['gaps'] == 3
     check = asyncio.run(self_check.llmrec_check())
     assert check.status == self_check.WARN

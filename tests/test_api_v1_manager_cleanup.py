@@ -21,7 +21,7 @@ from tests.test_operator_auth import TOKEN
 
 TARGET = "manager-retired"
 THREAD = "retired-thread"
-COUNTS = {"threads": 1, "chat_messages": 1, "llm_records": 1, "llm_record_events": 1, "manager_actions": 1}
+COUNTS = {"threads": 1, "chat_messages": 1, "llm_records": 1, "llm_record_events": 1, "manager_actions": 1, "llm_requests": 0}
 
 
 def _operation(action):

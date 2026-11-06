@@ -1188,7 +1188,8 @@ Housekeeping never touches `.local/runs`: it prunes `.local/command-runs`,
 `logs/schedules` and `.local/command-runner`, and rotates `serve.log` and
 `probe.log`. `scheduler_settings.run_retention_days` prunes only closed
 schedule runs and notifications. No automatic retention pass deletes
-`llm_records`.
+`llm_records`. Model requests (`llm_requests`) have their own hourly retention
+and capacity pass, including unreferenced request parts and empty routes.
 
 Two cases are not covered:
 
@@ -3436,10 +3437,13 @@ TTADK launches are not covered. API-key runs are eligible when recording is
 enabled; Claude subscription runs also require the OAuth opt-in. Runs started
 before a settings change keep their existing route.
 
-- **Settings and access.** `llmrec.enabled` and `llmrec.include_oauth` are
-  both off by default. Settings → Request recording and the operator-only
+- **Settings and access.** `llmrec.enabled` is on by default; `llmrec.include_oauth` stays off.
+  Fresh installations record eligible API-key runs. Upgrading an installation
+  that never explicitly set `llmrec.enabled` also starts recording eligible
+  new runs; an explicit off setting is preserved. Settings → Request recording
+  and the operator-only
   `llmrec_settings.get` / `llmrec_settings.update` operations control them.
-  Turning recording on requires confirmation that prompts, code, tool output
+  The dashboard asks for confirmation when turning recording on: prompts, code, tool output
   and model replies will be stored. Turning it off keeps existing captures;
   either change applies to future launches, and running agents keep their
   existing route until restart. The page also shows the proxy state
@@ -3447,6 +3451,44 @@ before a settings change keep their existing route.
   requests, dropped requests and write errors. Captures, settings and exports
   remain operator-only: API-client tokens receive 403, these operations are
   not agent tools, and nothing is sent to Telegram or Lark.
+- **Retention and capacity.** Settings → Request recording has **Keep recorded
+  requests for** (7 days by default, 1–365) and **Keep at most** (2 GiB by
+  default, 0.1–100). The operator API uses `retention_days` and `max_total_mb`
+  (MiB, including fractional values); null restores the built-in value. The
+  page shows the current size and request count. Limits apply at the next
+  hourly housekeeping pass, whether recording is on or off. The pass removes
+  expired requests first, then the oldest request ids when over the size cap,
+  targeting 90% of the cap with at most 50 eviction batches.
+
+  Size is the sum of `pg_total_relation_size` for `llm_requests`,
+  `llm_request_parts` and `llm_request_routes`, including indexes and TOAST.
+  Since deleting rows does not release allocated PostgreSQL pages, capacity
+  pressure triggers `VACUUM FULL` before eviction and after each deleted batch.
+  This briefly takes exclusive locks on the recording tables and can delay
+  recording writes; lock waits are limited to one second and each compression
+  statement to 30 seconds. A timeout is reported in `failed_steps` and retried
+  next pass. The proxy's forwarding path remains independent of capture writes.
+  Long-lived PostgreSQL snapshots can also delay physical reclamation.
+  Storage that cannot reach the target within 50 batches raises a warning;
+  near-capacity storage (over 90%) also warns in self-check.
+
+  Parts are deduplicated within a route. Cleanup removes a part only when no
+  surviving request references it, including obsolete system prompts and tool
+  definitions on resident routes. It locks the route against concurrent capture
+  writes first, so remaining requests can still be fully reconstructed. Empty
+  routes and their parts are removed after a ten-minute grace period. Route
+  files are removed after ending for a day or remaining unchanged for seven
+  days; unreadable files are skipped and old unreadable files raise a warning.
+- **Purge and Manager cleanup.** **Delete recorded requests** previews the count
+  and asks for confirmation. The high-risk operator operation
+  `llm_requests.purge` accepts exactly one of `{task_id}`, `{agent_id}` or
+  `{all: true}` and returns deleted `requests` and `routes` counts. Agent purge
+  removes its routes, task purge removes its requests, and all-scope purge
+  truncates the three recording tables. Unreferenced parts and empty routes
+  are also reclaimed. A concurrent later capture may recreate a route: purge
+  covers the rows present when it runs. Manager cleanup previews its model
+  request count and removes its routes before deleting its run records.
+  Turning recording off never deletes stored requests.
 - **Dashboard viewer.** Open a run on the agent's history page, then expand
   **Model requests**. Rows show timing, model, outcome, token usage, byte sizes
   and capture gaps; requests received after a turn ended appear separately.

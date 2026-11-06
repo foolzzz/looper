@@ -14,9 +14,11 @@ from pathlib import Path
 import shutil
 from typing import Any
 
-from ..db import connection as db_connection, schedules as db_schedules
+from ..db import connection as db_connection, schedules as db_schedules, llm_requests
 from . import scheduler_settings
 from .command_runs import CommandRuns, Finished, Lost, LOGS_DIR, RUNNER_DIR, RUNS_DIR
+from .llmrec import ROUTES_DIR, RouteFile
+from .llmrec import settings as llmrec_settings
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,8 @@ ROTATE_AT_BYTES = 20 * 1024**2
 ROTATE_KEEP = 5
 RUNNER_FILE_MAX_AGE = timedelta(days=31)
 ROTATED = ("serve.log", "probe.log")
+MIB = 1024**2
+LLM_PRUNE_ROUNDS = 50
 
 
 @dataclass
@@ -38,6 +42,9 @@ class Report:
     log_bytes: int = 0
     run_dirs: int = 0
     runner_files: int = 0
+    llm_requests: int = 0
+    llm_routes: int = 0
+    llm_route_files: int = 0
     rotated: list[str] = field(default_factory=list)
     failed_steps: dict[str, str] = field(default_factory=dict)
 
@@ -164,6 +171,86 @@ def _prune_run_directories(commands: CommandRuns, runs: list[dict[str, Any]], no
     return deleted
 
 
+def prune_route_files(directory: Path, now: datetime) -> int:
+    deleted = 0
+    for path in directory.glob("*.json"):
+        try:
+            stat = path.stat()
+            route = RouteFile.read(path)
+            if route is None:
+                if stat.st_mtime < (now - timedelta(days=7)).timestamp():
+                    logger.warning("housekeeping skipped unreadable llmrec route file %s", path.name)
+                continue
+            ended = datetime.fromisoformat(route.ended_at) if route.ended_at else None
+            if (ended is not None and ended < now - timedelta(days=1)
+                    or stat.st_mtime < (now - timedelta(days=7)).timestamp()):
+                # RouteFile.write atomically replaces the file. Recheck its identity so a fresh
+                # bind/release that happened during the read is kept for the next pass.
+                current = path.stat()
+                if (stat.st_ino, stat.st_mtime_ns) != (current.st_ino, current.st_mtime_ns):
+                    continue
+                path.unlink()
+                deleted += 1
+        except FileNotFoundError:
+            pass
+    return deleted
+
+
+async def _prune_llm_requests(report: Report, now: datetime) -> None:
+    async with db_connection.transaction() as conn:
+        retention = await llmrec_settings.settings_view(conn)
+    before = now - timedelta(days=retention["retention_days"]["value"])
+    cap = retention["max_total_mb"]["value"] * MIB
+    for prune, counter in ((lambda conn: llm_requests.prune_older(conn, before), "llm_requests"),
+                           (llm_requests.prune_empty_routes, "llm_routes")):
+        while True:
+            async with db_connection.transaction() as conn:
+                count = await prune(conn)
+            setattr(report, counter, getattr(report, counter) + count)
+            if count == 0:
+                break
+    async with db_connection.transaction() as conn:
+        size = await llm_requests.stored_bytes(conn)
+    if size <= cap:
+        return
+    # DELETE leaves reusable heap/TOAST/index pages allocated. Reclaim that space before
+    # evicting retained requests, then compact committed batches to measure actual progress.
+    await _compact_llm_requests()
+    async with db_connection.transaction() as conn:
+        size = await llm_requests.stored_bytes(conn)
+    if size <= cap * 0.9:
+        return
+    for _ in range(LLM_PRUNE_ROUNDS):
+        async with db_connection.transaction() as conn:
+            requests = await llm_requests.prune_oldest(conn)
+        report.llm_requests += requests
+        removed_routes = 0
+        while True:
+            async with db_connection.transaction() as conn:
+                routes = await llm_requests.prune_empty_routes(conn)
+            report.llm_routes += routes
+            removed_routes += routes
+            if routes == 0:
+                break
+        if requests or removed_routes:
+            await _compact_llm_requests()
+        async with db_connection.transaction() as conn:
+            size = await llm_requests.stored_bytes(conn)
+        if size <= cap * 0.9:
+            return
+    logger.warning("housekeeping llm requests still above target after %d rounds: stored_bytes=%d cap_bytes=%d; "
+                   "live routes or allocated PostgreSQL pages may retain space", LLM_PRUNE_ROUNDS, size, cap)
+
+
+async def _compact_llm_requests() -> None:
+    # VACUUM FULL needs a non-transaction connection and an exclusive table lock. The
+    # recorder queues asynchronously; bound both lock waits and execution during pressure.
+    async with db_connection.get_pool().acquire() as conn:
+        await conn.execute("SET lock_timeout = '1s'")
+        await conn.execute("SET statement_timeout = '30s'")
+        await conn.execute("VACUUM (FULL) llm_requests, llm_request_parts, llm_request_routes")
+
+
 async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | None,
                    commands: CommandRuns | None) -> Report:
     report = Report()
@@ -182,6 +269,11 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
                     setattr(report, counter, getattr(report, counter) + count)
                     if count == 0:
                         break
+
+    with _step(report, "llm requests"):
+        await _prune_llm_requests(report, now)
+    with _step(report, "llm route files"):
+        report.llm_route_files = await asyncio.to_thread(prune_route_files, runtime_root / ROUTES_DIR, now)
 
     with _step(report, "command logs"):
         # A run commits its open row before creating its log. Snapshot files first so runs starting
@@ -207,6 +299,7 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             if await asyncio.to_thread(rotate, runtime_root / "logs" / name, at_bytes=ROTATE_AT_BYTES, keep=ROTATE_KEEP):
                 report.rotated.append(name)
     logger.info("housekeeping runs_deleted=%d notifications_deleted=%d logs_deleted=%d log_bytes=%d "
-                "run_dirs=%d runner_files=%d rotated=%s failed_steps=%s", report.runs, report.notifications, report.logs,
-                report.log_bytes, report.run_dirs, report.runner_files, ",".join(report.rotated), report.failed_steps)
+                "run_dirs=%d runner_files=%d llm_requests=%d llm_routes=%d llm_route_files=%d rotated=%s failed_steps=%s",
+                report.runs, report.notifications, report.logs, report.log_bytes, report.run_dirs, report.runner_files,
+                report.llm_requests, report.llm_routes, report.llm_route_files, ",".join(report.rotated), report.failed_steps)
     return report

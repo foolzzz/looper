@@ -19,6 +19,107 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def stored_bytes(conn) -> int:
+    """Physical table, TOAST and index space, including reusable/dead pages."""
+    return int(await conn.fetchval("""
+        SELECT pg_total_relation_size('llm_requests') + pg_total_relation_size('llm_request_parts')
+             + pg_total_relation_size('llm_request_routes')
+    """))
+
+
+async def count_requests(conn, *, task_id: str | None = None, agent_id: str | None = None) -> int:
+    if task_id is not None:
+        return await conn.fetchval("SELECT count(*) FROM llm_requests WHERE task_id = $1", task_id)
+    if agent_id is not None:
+        return await conn.fetchval("""SELECT count(*) FROM llm_requests request
+            JOIN llm_request_routes route ON route.id = request.route_id WHERE route.agent_id = $1""", agent_id)
+    return await conn.fetchval("SELECT count(*) FROM llm_requests")
+
+
+async def _prune_unused_parts(conn, route_ids: list[str]) -> None:
+    if not route_ids:
+        return
+    # Writers upsert the route before inserting its parts and requests. Hold the same row lock,
+    # then take a fresh READ COMMITTED snapshot so GC cannot remove an in-flight capture's parts.
+    await conn.fetch("SELECT id FROM llm_request_routes WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE",
+                     route_ids)
+    await conn.execute("""
+        DELETE FROM llm_request_parts part WHERE part.route_id = ANY($1::text[])
+        AND NOT EXISTS (
+            SELECT 1 FROM llm_requests request,
+                LATERAL jsonb_path_query(request.request_body, '$.**."$llmrec_part"') reference
+            WHERE request.route_id = part.route_id AND reference #>> '{}' = part.sha256
+        )
+    """, route_ids)
+
+
+async def _lock_request_routes(conn, rows) -> list[int]:
+    # Keep the writer's route -> request -> parts lock order, including idempotent retries.
+    await conn.fetch("SELECT id FROM llm_request_routes WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE",
+                     sorted({row["route_id"] for row in rows}))
+    return [row["id"] for row in rows]
+
+
+async def prune_older(conn, before: datetime, batch: int = 2000) -> int:
+    candidates = await conn.fetch("SELECT id, route_id FROM llm_requests WHERE started_at < $1 ORDER BY id LIMIT $2",
+                                  before, batch)
+    ids = await _lock_request_routes(conn, candidates)
+    rows = await conn.fetch("DELETE FROM llm_requests WHERE id = ANY($1::bigint[]) RETURNING route_id", ids)
+    await _prune_unused_parts(conn, sorted({row["route_id"] for row in rows}))
+    return len(rows)
+
+
+async def prune_oldest(conn, batch: int = 2000) -> int:
+    candidates = await conn.fetch("SELECT id, route_id FROM llm_requests ORDER BY id LIMIT $1", batch)
+    ids = await _lock_request_routes(conn, candidates)
+    rows = await conn.fetch("DELETE FROM llm_requests WHERE id = ANY($1::bigint[]) RETURNING route_id", ids)
+    await _prune_unused_parts(conn, sorted({row["route_id"] for row in rows}))
+    return len(rows)
+
+
+async def prune_empty_routes(conn, batch: int = 500, *, grace: bool = True) -> int:
+    # Lock before checking emptiness in the DELETE's fresh snapshot. A writer may have held
+    # the route lock when candidates were read; its committed first request must survive.
+    routes = await conn.fetch("""SELECT id FROM llm_request_routes route
+        WHERE NOT EXISTS (SELECT 1 FROM llm_requests WHERE route_id = route.id)
+        AND (NOT $2::boolean OR last_request_at < now() - interval '10 minutes')
+        ORDER BY id LIMIT $1 FOR UPDATE OF route""", batch, grace)
+    result = await conn.execute("""DELETE FROM llm_request_routes route WHERE id = ANY($1::text[])
+        AND NOT EXISTS (SELECT 1 FROM llm_requests WHERE route_id = route.id)""",
+        [row["id"] for row in routes])
+    return int(result.split()[-1])
+
+
+async def purge(conn, *, task_id: str | None = None, agent_id: str | None = None,
+                everything: bool = False) -> dict[str, int]:
+    """Remove exactly one scope in the caller's transaction; future captures can recreate it."""
+    if sum((task_id is not None, agent_id is not None, everything)) != 1:
+        raise ValueError("provide exactly one of task_id, agent_id or all: true")
+    if everything:
+        # Serialize with writers before counting so the reported impact equals what is removed.
+        await conn.execute("LOCK TABLE llm_request_routes, llm_request_parts, llm_requests IN ACCESS EXCLUSIVE MODE")
+        requests = await count_requests(conn)
+        routes = await conn.fetchval("SELECT count(*) FROM llm_request_routes")
+        await conn.execute("TRUNCATE llm_request_parts, llm_requests, llm_request_routes")
+        return {"requests": requests, "routes": routes}
+    if agent_id is not None:
+        owned = await conn.fetch("SELECT id FROM llm_request_routes WHERE agent_id = $1 ORDER BY id FOR UPDATE", agent_id)
+        requests = await conn.fetchval("SELECT count(*) FROM llm_requests WHERE route_id = ANY($1::text[])",
+                                       [row["id"] for row in owned])
+        result = await conn.execute("DELETE FROM llm_request_routes WHERE id = ANY($1::text[])",
+                                    [row["id"] for row in owned])
+        routes = int(result.split()[-1])
+    else:
+        candidates = await conn.fetch("SELECT id, route_id FROM llm_requests WHERE task_id = $1", task_id)
+        ids = await _lock_request_routes(conn, candidates)
+        rows = await conn.fetch("DELETE FROM llm_requests WHERE id = ANY($1::bigint[]) RETURNING route_id", ids)
+        requests, routes = len(rows), 0
+        await _prune_unused_parts(conn, sorted({row["route_id"] for row in rows}))
+    while count := await prune_empty_routes(conn, grace=False):
+        routes += count
+    return {"requests": requests, "routes": routes}
+
+
 _COLUMNS = (
     "route_id", "proxy_instance", "proxy_seq", "record_id", "after_record_id", "agent_id", "task_id",
     "started_at", "method", "path", "kind", "model", "stream", "status", "outcome", "error", "ttfb_ms",

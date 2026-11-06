@@ -45,7 +45,7 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
   vault:
     "A local folder of Markdown notes, such as an Obsidian vault. The agents of projects that turn it on read every " +
     "note and write only in its writable folders; each write is a git commit in the vault.",
-  recording: "Capture model requests and responses for analysis. Recording is off by default.",
+  recording: "Capture model requests and responses for analysis. Recording is on by default.",
   transfer:
     "One file with the role settings, the providers and Agent Profiles, the catalog with its files and MCP servers, " +
     "global installs, channels, scenario Managers, their task templates and the scheduler's settings.",
