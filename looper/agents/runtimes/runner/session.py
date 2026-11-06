@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, fields
+import json
 import logging
 from pathlib import Path
 import re
@@ -17,7 +18,7 @@ from ..api.adapter import KEY_ENV
 from ..api.loop import TurnTools
 from ..cancel import TurnCancel, TurnCancelled
 from .bridge import ConnectionLost, RpcFailure, _value
-from .protocol import ErrorCode, ProtocolError
+from .protocol import ErrorCode, PiModelCompat, ProtocolError
 from .supervisor import RunnerSupervisor, _joined
 if TYPE_CHECKING:
     from .turn import RunnerTurn, TurnLimits
@@ -48,6 +49,7 @@ class Descriptor:
     builtin: tuple[str, ...] = ()
     tool_timeout_s: int = 120
     fork_from: str | None = None
+    model_compat: PiModelCompat | None = None
 
     def __post_init__(self) -> None:
         if self.session is not None and self.fork_from is not None:
@@ -57,11 +59,13 @@ class Descriptor:
         argv = ["looper-runner"]
         for f in fields(self):
             value = getattr(self, f.name)
-            if f.name in {"session", "fork_from", "add_dirs", "builtin"}:
+            if f.name in {"session", "fork_from", "add_dirs", "builtin", "model_compat"}:
                 continue
             argv.extend(["--" + f.name.replace("_", "-"),
                          value.value if isinstance(value, ApiProtocol) else
                          "" if value is None else str(value)])
+        if self.model_compat is not None:
+            argv.extend(["--model-compat", json.dumps(self.model_compat, sort_keys=True)])
         for name in self.builtin:
             argv.extend(["--builtin", name])
         for directory in self.add_dirs:
@@ -73,7 +77,8 @@ class Descriptor:
     @classmethod
     def parse(cls, argv: list[str]) -> Descriptor:
         try:
-            names = [f.name for f in fields(cls) if f.name not in {"session", "fork_from", "add_dirs", "builtin"}]
+            names = [f.name for f in fields(cls)
+                     if f.name not in {"session", "fork_from", "add_dirs", "builtin", "model_compat"}]
             size = 1 + 2 * len(names)
             if (not all(isinstance(v, str) for v in argv) or len(argv) < size or argv[0] != "looper-runner"
                     or argv[1:size:2] != ["--" + n.replace("_", "-") for n in names]):
@@ -96,6 +101,11 @@ class Descriptor:
             builtin = []
             directories = []
             tail = argv[size:]
+            if len(tail) >= 2 and tail[0] == "--model-compat":
+                values["model_compat"] = json.loads(tail[1])
+                if not isinstance(values["model_compat"], dict):
+                    raise ValueError
+                tail = tail[2:]
             while len(tail) >= 2 and tail[0] == "--builtin":
                 if not re.fullmatch(r"[a-z][a-z_]*", tail[1]):
                     raise ValueError
@@ -188,6 +198,8 @@ class RunnerSession:
             "tools": {"builtin": list(descriptor.builtin), "platform": [], "read_only": descriptor.read_only},
             "limits": {"max_requests_per_turn": descriptor.max_requests,
                 "tool_timeout_s": descriptor.tool_timeout_s, "tool_output_bytes": 102400}}
+        if descriptor.model_compat is not None:
+            params["provider"]["model_compat"] = descriptor.model_compat
         try:
             if descriptor.session is not None:
                 await lease.load_session({**params, "session_id": descriptor.session})

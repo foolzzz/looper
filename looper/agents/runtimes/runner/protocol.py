@@ -34,9 +34,14 @@ RunnerIdentity = TypedDict("RunnerIdentity", {"kind": Name, "version": Name})
 SdkIdentity = TypedDict("SdkIdentity", {"name": Name, "version": Name})
 InitializeResult = TypedDict("InitializeResult", {
     "protocol_version": Version, "runner": RunnerIdentity, "sdk": SdkIdentity, "capabilities": NotRequired[Capabilities]})
+PiModelCompat = TypedDict("PiModelCompat", {
+    "supportsStore": bool, "supportsDeveloperRole": bool, "supportsReasoningEffort": bool,
+    "maxTokensField": Literal["max_tokens"], "thinkingFormat": Literal["deepseek", "openai"],
+    "requiresReasoningContentOnAssistantMessages": bool})
 Provider = TypedDict("Provider", {
     "account_id": Name, "reasoning": bool,
-    "protocol": Name, "base_url": Name, "model": Name, "api_key": str, "effort": str | None, "context_window": Count | None})
+    "protocol": Name, "base_url": Name, "model": Name, "api_key": str, "effort": str | None, "context_window": Count | None,
+    "model_compat": NotRequired[PiModelCompat]})
 SystemPrompt = TypedDict("SystemPrompt", {"mode": Name, "text": str})
 PlatformTool = TypedDict("PlatformTool", {"name": Name, "description": str, "inputSchema": dict[str, Any]})
 Tools = TypedDict("Tools", {"builtin": list[Name], "read_only": bool, "platform": list[PlatformTool]})

@@ -113,7 +113,8 @@ async function compose(params: Record<string, any>, resumed: boolean): Promise<o
       models: [{ id: provider.model, name: provider.model, api, input: ['text'], reasoning: provider.reasoning,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         ...(provider.context_window ? { contextWindow: provider.context_window } : {}),
-        ...(api === 'openai-responses' ? { compat: { supportsStrictMode: true } } : {}) }],
+        ...(api === 'openai-responses' ? { compat: { supportsStrictMode: true } }
+          : provider.model_compat ? { compat: provider.model_compat } : {}) }],
       streamSimple: (model: any, context: any, options: any) => authorizingStream(record, model, context, options),
     });
     // Config apiKey values are executable references; literal keys belong only in runtime credentials.

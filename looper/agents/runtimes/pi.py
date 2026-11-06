@@ -46,6 +46,7 @@ from .channel import RunChannel
 from .instructions import Delivery, InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
+from .runner.protocol import PiModelCompat
 
 if TYPE_CHECKING:
     from ..agent_settings import Launch
@@ -743,6 +744,22 @@ def _check_provider(provider: ProviderSpec, model: str) -> str:
     return api
 
 
+def recording_chat_compat(launch: Launch) -> PiModelCompat | None:
+    """Freeze Pi 1.3's DeepSeek/Moonshot URL detection before routing through loopback."""
+    if not isinstance(launch.llmrec, LlmrecRoute) or provider_api(launch.profile.provider) != "openai-completions":
+        return None
+    # Match Pi's detectCompat: provider is always "looper", so only the original URL identifies these APIs.
+    base_url = launch.profile.provider.base_url
+    deepseek = "deepseek.com" in base_url.lower()
+    moonshot = "api.moonshot." in base_url
+    if not deepseek and not moonshot:
+        return None
+    return {"supportsStore": False, "supportsDeveloperRole": False,
+            "supportsReasoningEffort": not moonshot, "maxTokensField": "max_tokens",
+            "thinkingFormat": "deepseek" if deepseek else "openai",
+            "requiresReasoningContentOnAssistantMessages": deepseek}
+
+
 def models_json(launch: Launch) -> dict[str, Any]:
     """The private models.json, containing only the chosen model and an interpolated key reference.
 
@@ -763,6 +780,8 @@ def models_json(launch: Launch) -> dict[str, Any]:
         # pi 1.3's openai-responses getCompat/convertResponsesTools (also checked in request serialization):
         # the default omits strict; this sends strict:false without making optional parameters required.
         model["compat"] = {"supportsStrictMode": True}
+    elif (compat := recording_chat_compat(launch)) is not None:
+        model["compat"] = compat
     base_url = launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else provider.base_url
     return {"providers": {PROVIDER_ID: {"baseUrl": base_url, "apiKey": f"${KEY_ENV}",
                                         "api": api, "models": [model]}}}
