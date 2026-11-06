@@ -17,6 +17,17 @@ function render(mode?: "append" | "replace", metadata: object = {}, extra: objec
 }
 
 describe("run system prompt mode", () => {
+  it.each([
+    [100, 80, 20, "40%"], [100, 0, 0, "0%"], [0, 0, 0, null], [100, null, 20, null],
+  ])("shows run cache hits from recorded prompt tokens", (input_tokens, cache_read_tokens, cache_creation_tokens, hit) => {
+    const html = render(undefined, {}, { input_tokens, cache_read_tokens, cache_creation_tokens });
+    if (hit === null) expect(html).not.toContain("cache hit");
+    else {
+      expect(html).toContain(`cache hit ${hit}`);
+      expect(html).toContain('title="cache_read / (input + cache_read + cache_write)"');
+    }
+  });
+
   it("shows a replaced default badge with an explanation for replace runs", () => {
     const html = render("replace");
     expect(html).toContain("replaced default");
@@ -149,6 +160,34 @@ describe("recorded model requests", () => {
     expect(text.indexOf("After the turn ended")).toBeLessThan(text.indexOf("after-turn-model"));
     expect(listCalls().map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
       { record_id: 7, limit: 500 }, { record_id: 7, between_turns: true, limit: 500 }]);
+  });
+
+  it.each([
+    [null, false, false],
+    [{ common_prefix_bytes: 300, upstream_request_bytes: 1000 }, false, false],
+    [{ common_prefix_tokens: 950, previous_prompt_tokens: 1000 }, true, false],
+    [{ common_prefix_tokens: 0, previous_prompt_tokens: 1000 }, true, false],
+    [{ common_prefix_tokens: null, previous_prompt_tokens: 1000 }, false, false],
+    [{ common_prefix_tokens: 0, previous_prompt_tokens: 0 }, false, false],
+    [{ usage_missing: true }, false, true],
+  ])("distinguishes provider cache hits, prompt reuse and missing usage", async (translation, prefix, missing) => {
+    row = capturedRequest(1, { translation: translation as LlmRequest["translation"] });
+    await show();
+    await click("Model requests · 2");
+    const request = button("recorded-model");
+    expect(request.textContent).toContain("hit 40%");
+    expect(request.textContent?.includes("prefix reuse")).toBe(prefix);
+    if (prefix) expect(request.textContent).toContain(`prefix reuse ${row.translation?.common_prefix_tokens ? "95%" : "0%"}`);
+    expect(request.textContent?.includes("no usage")).toBe(missing);
+    if (missing) expect([...request.querySelectorAll("span")].find((span) => span.textContent === "no usage")?.className)
+      .toContain("text-destructive");
+  });
+
+  it.each([0, null])("omits request hits for empty or incomplete usage", async (input_tokens) => {
+    row = capturedRequest(1, { input_tokens, cache_read_tokens: 0, cache_write_tokens: 0 });
+    await show();
+    await click("Model requests · 2");
+    expect(button("recorded-model").textContent).not.toContain("hit ");
   });
 
   it("orders whole seconds and microsecond timestamps chronologically, breaking equal times by id", async () => {

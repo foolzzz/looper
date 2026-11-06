@@ -23,6 +23,7 @@ import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
 import { ContextUsagePanel } from "@/components/context-usage";
 import { LlmRequestExport } from "@/components/llm-request-export";
+import { cacheHit, formatHit, CACHE_HIT_TITLE } from "@/lib/cache-hit";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { cn, formatBytes } from "@/lib/utils";
 import { compactionChange, formatTokens, formatUsd, runCostLabel } from "@/lib/usage";
@@ -268,6 +269,10 @@ function RequestViewer({ id }: { id: number }) {
 }
 
 function RequestRow({ row, selected, onSelect }: { row: LlmRequestRow; selected: boolean; onSelect: () => void }) {
+  const hit = cacheHit(row.input_tokens, row.cache_read_tokens, row.cache_write_tokens);
+  const reused = row.translation?.common_prefix_tokens;
+  const previous = row.translation?.previous_prompt_tokens;
+  const prefix = reused != null && previous != null && previous > 0 ? reused / previous : null;
   const ms = (value: number | null) => value === null ? "—" : `${value} ms`;
   return <button type="button" aria-expanded={selected} onClick={onSelect}
     className="flex min-h-11 w-full flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-border px-3 py-2 text-left text-xs hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
@@ -276,6 +281,9 @@ function RequestRow({ row, selected, onSelect }: { row: LlmRequestRow; selected:
     <Badge variant={row.outcome === "completed" && (row.status === null || row.status < 400) ? "success" : "destructive"}>{row.status ?? "—"} · {row.outcome}</Badge>
     <span>TTFB {ms(row.ttfb_ms)}</span><span>Duration {ms(row.duration_ms)}</span>
     <span className="font-mono" title="in / cache read / cache write / out">{[row.input_tokens, row.cache_read_tokens, row.cache_write_tokens, row.output_tokens].map((n) => n ?? "—").join(" / ")}</span>
+    {hit !== null && <span title={CACHE_HIT_TITLE}>hit {formatHit(hit)}</span>}
+    {prefix !== null && <span title="Unchanged prefix of the previous prompt (system, tools, messages), estimated at 4 bytes per token">prefix reuse {formatHit(prefix)}</span>}
+    {row.translation?.usage_missing && <Badge variant="destructive">no usage</Badge>}
     {row.record_gap && <Badge variant="destructive">{row.record_gap}</Badge>}
     <span className="text-muted-foreground">Request {formatBytes(row.request_bytes)} · Response {row.response_bytes === null ? "—" : formatBytes(row.response_bytes)}</span>
   </button>;
@@ -925,6 +933,7 @@ function EventView({ item, startedAt, live }: { item: LlmRecordEvent; startedAt?
 
 /** The run's own tokens (cache included), its context at the end, its compactions and its own cost. */
 function RunUsage({ record }: { record: LlmRecord }) {
+  const hit = cacheHit(record.input_tokens, record.cache_read_tokens, record.cache_creation_tokens);
   const tokens: [string, number | null | undefined, string][] = [
     ["in", record.input_tokens, "Uncached input tokens"],
     ["cache read", record.cache_read_tokens, "Prompt tokens read from the cache"],
@@ -945,6 +954,7 @@ function RunUsage({ record }: { record: LlmRecord }) {
           ))}
         </span>
       )}
+      {hit !== null && <span className="font-mono text-muted-foreground" title={CACHE_HIT_TITLE}>cache hit {formatHit(hit)}</span>}
       {record.context_tokens != null && (
         <span
           className="font-mono text-muted-foreground"

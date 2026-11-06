@@ -156,9 +156,22 @@ class _PrefixHistory:
         self.limit, self.size = limit, 0
         self.items = OrderedDict()
 
+    @staticmethod
+    def _prompt(body):
+        request = json.loads(body)
+        messages = list(request['messages'])
+        system = []
+        while messages and messages[0].get('role') in ('system', 'developer'):
+            system.append(messages.pop(0))
+        # Prompt order is independent of the order of keys in the wire JSON.
+        parts = [system, request.get('tools') or [], *messages]
+        parts = [json.dumps(part, ensure_ascii=False, separators=(',', ':')).encode()
+                 if part else b'' for part in parts]
+        return request['model'], parts
+
     def remember(self, route_id, body):
         previous = self.items.pop(route_id, None)
-        common = None
+        common = reused = total = None
         if previous is not None:
             self.size -= len(previous)
             common = 0
@@ -166,13 +179,22 @@ class _PrefixHistory:
                 if left != right:
                     break
                 common += 1
+            model, parts = self._prompt(previous)
+            current_model, current_parts = self._prompt(body)
+            total = sum((len(part) + 3) // 4 for part in parts)
+            reused = 0
+            if model == current_model:
+                for left, right in zip(parts, current_parts):
+                    if left != right:
+                        break
+                    reused += (len(left) + 3) // 4
         if len(body) <= self.limit:
             self.items[route_id] = body
             self.size += len(body)
         while self.size > self.limit:
             _, evicted = self.items.popitem(last=False)
             self.size -= len(evicted)
-        return common
+        return common, reused, total
 
 
 class _PromptHistory:
@@ -504,6 +526,7 @@ class Proxy:
             upstream_path='/chat/completions', upstream_status=None, upstream_request_id=None,
             finish_reason=None, upstream_usage=None, upstream_request_bytes=None,
             upstream_request_sha256=None, common_prefix_bytes=None,
+            common_prefix_tokens=None, previous_prompt_tokens=None,
             notes={'dropped': {}, 'degraded': {}, 'clamped': {}}, usage_missing=False)
         buffer = _ResponseBuffer('')
         buffered = bytearray()
@@ -583,9 +606,10 @@ class Proxy:
                 session = request_headers.get(b'x-claude-code-session-id')
                 chat = to_chat(parsed, dialect, route.models,
                                session_id=session.decode('utf-8', errors='replace') if session else None)
+                common, reused, previous = self._prefix_history.remember((route.id, session), chat.body)
                 translation.update(upstream_model=chat.upstream_model, notes=chat.notes,
                     upstream_request_bytes=len(chat.body), upstream_request_sha256=hashlib.sha256(chat.body).hexdigest(),
-                    common_prefix_bytes=self._prefix_history.remember(route.id, chat.body))
+                    common_prefix_bytes=common, common_prefix_tokens=reused, previous_prompt_tokens=previous)
                 for category in ('dropped', 'degraded', 'clamped'):
                     stats[category].update(chat.notes.get(category, {}))
                 url = route.upstream.rstrip('/') + '/chat/completions'
@@ -750,12 +774,12 @@ class Proxy:
                     self._stats['dropped'] += 1
                     log.error('Gateway capture failed route=%s', route.id)
             usage = anthropic_usage(translation['upstream_usage'], dialect)
-            request_bytes = translation['upstream_request_bytes']
-            prefix = translation['common_prefix_bytes']
+            previous_tokens = translation['previous_prompt_tokens']
+            prefix = translation['common_prefix_tokens']
             log.info('route=%s kind=translate upstream_host=%s upstream_model=%s status=%s finish=%s '
                      'ttfb_ms=%s duration_ms=%s prompt=%s cached=%s out=%s prefix_pct=%s', route.id,
                      urlsplit(route.upstream).hostname, translation['upstream_model'], values['status'],
                      translation['finish_reason'], values.get('ttfb_ms'), values['duration_ms'],
                      usage['input_tokens'], usage['cache_read_input_tokens'], usage['output_tokens'],
-                     round(100 * prefix / request_bytes, 2) if prefix is not None and request_bytes else None)
+                     round(100 * prefix / previous_tokens, 2) if prefix is not None and previous_tokens else None)
         return bytes(buffered)

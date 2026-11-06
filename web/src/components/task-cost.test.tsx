@@ -27,7 +27,7 @@ describe("TaskCostBreakdown", () => {
     const shown = text(html);
     expect(html).toContain("<table");
     for (const part of [
-      "By model", "ModelRunsInputOutputCache readCache writeCost", "claude-opus-4-1", "deepseek-flash",
+      "By model", "ModelRunsInputOutputCache readCache writeCache hitCost", "claude-opus-4-1", "deepseek-flash",
       "1.23M", "$0.7500", "–", "1 without a cost, 1 interrupted",
       "Manager · claude-haiku-4-5", "Not counted in the task's cost or spend cap",
     ]) expect(shown).toContain(part);
@@ -41,8 +41,16 @@ describe("TaskCostBreakdown", () => {
     expect(total).toBeCloseTo(COST.cost_usd);
     expect(shown).toContain(`$${total.toFixed(4)} · 4 runs`);
     const managerCells = [...bodies[1].matchAll(/<td[^>]*>(.*?)<\/td>/g)].map((m) => text(m[1]));
-    expect(managerCells.slice(1)).toEqual(["1", "30", "4", "50", "6", "$0.0200"]);
+    expect(managerCells.slice(1)).toEqual(["1", "30", "4", "50", "6", "58%", "$0.0200"]);
   });
+
+  it.each([[10, 80, 10, "80%"], [0, 0, 0, "–"]])(
+    "adds model cache hits with the same prompt-token denominator", (input_tokens, cache_read_tokens, cache_creation_tokens, expected) => {
+      const html = renderToStaticMarkup(<TaskCostBreakdown cost={{ ...COST, manager_by_model: [],
+        by_model: [{ ...MODEL, input_tokens, cache_read_tokens, cache_creation_tokens }] }} />);
+      const cells = [...html.matchAll(/<td[^>]*>(.*?)<\/td>/g)].map((m) => text(m[1]));
+      expect(cells.at(-2)).toBe(expected);
+    });
 
   it("omits Manager rows when none of its turns belongs to the task", () => {
     expect(text(renderToStaticMarkup(<TaskCostBreakdown cost={{ ...COST, manager_by_model: [] }} />)))

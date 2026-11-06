@@ -181,29 +181,64 @@ def test_rejection_does_not_contact_upstream(tmp_path, body, status):
 
 def test_prefix_lru_eviction_only_loses_observation():
     from looper.agents.llmrec.proxy import _PrefixHistory
-    history = _PrefixHistory(limit=12)
-    assert history.remember('a', b'abcdef') is None
-    assert history.remember('b', b'12345') is None
-    assert history.remember('a', b'abcXYZ') == 3
-    assert history.remember('c', b'longbody') is None
-    assert history.size <= 12
-    assert history.remember('b', b'12345') is None
-    assert history.remember('b', b'12345') == 5
-    assert history.remember('large', b'x' * 13) is None
-    assert history.size <= 12
-    assert history.remember('large', b'x' * 13) is None
+    body = b'{"model":"a","messages":[]}'
+    history = _PrefixHistory(limit=2 * len(body))
+    assert history.remember('a', body) == (None, None, None)
+    assert history.remember('b', body) == (None, None, None)
+    assert history.remember('a', body) == (len(body), 0, 0)
+    assert history.remember('c', body) == (None, None, None)
+    assert history.size <= history.limit
+    assert history.remember('b', body) == (None, None, None)
+    assert history.remember('large', body * 3) == (None, None, None)
+    assert history.size <= history.limit
+    assert history.remember('large', body * 3) == (None, None, None)
 
 
-def test_successive_requests_measure_identical_prefix(tmp_path):
+@pytest.mark.parametrize('change', ['append', 'history', 'tools', 'system', 'model', 'session'])
+def test_successive_requests_measure_prompt_prefix_reuse(tmp_path, change):
     async def check():
         async with gateway(tmp_path) as (client, base, proxy, sink, received):
-            for _ in range(2):
-                response = await client.post(base + '/v1/messages', json={'model': 'client', 'messages': []})
+            body = {'model': 'client', 'system': 'Stable instructions', 'messages': [
+                {'role': 'user', 'content': 'Earlier question ' * 1000}], 'tools': [
+                {'name': 'lookup', 'description': 'Tool documentation ' * 4000,
+                 'input_schema': {'type': 'object'}}]}
+            for turn in range(2):
+                if turn:
+                    if change == 'history':
+                        body['messages'][0]['content'] = 'Rewritten history'
+                    elif change == 'tools':
+                        body['tools'][0]['description'] = 'Changed tool'
+                    elif change == 'system':
+                        body['system'] = 'Changed instructions'
+                    elif change == 'model':
+                        route = proxy._route('g' * 22)
+                        replace(route, models={'client': 'another-model'}).write(tmp_path / ROUTES_DIR / f'{route.id}.json')
+                    body['messages'].extend([{'role': 'assistant', 'content': 'Answer'},
+                                             {'role': 'user', 'content': 'Next question'}])
+                response = await client.post(base + '/v1/messages', json=body, headers={
+                    'x-claude-code-session-id': 'other' if turn and change == 'session' else 'same'})
                 assert response.status_code == 200
             async with asyncio.timeout(2):
                 while len(sink.items) < 2:
                     await asyncio.sleep(.01)
-            assert sink.items[1].translation['common_prefix_bytes'] == sink.items[1].translation['upstream_request_bytes']
+            first, second = [item.translation for item in sink.items]
+            assert first['common_prefix_tokens'] is None
+            assert first['previous_prompt_tokens'] is None
+            if change == 'session':
+                assert second['common_prefix_tokens'] is None
+                assert second['previous_prompt_tokens'] is None
+                return
+            reuse = second['common_prefix_tokens'] / second['previous_prompt_tokens']
+            if change == 'append':
+                assert reuse >= .9
+                # Tools follow messages in the wire JSON and must still count.
+                assert second['common_prefix_bytes'] / second['upstream_request_bytes'] < .4
+            elif change == 'history':
+                assert .5 < reuse < 1  # unchanged system + tools, rewritten messages
+            elif change == 'tools':
+                assert 0 < reuse < .1  # only the unchanged system precedes the break
+            else:
+                assert reuse == 0
     run(check)
 
 

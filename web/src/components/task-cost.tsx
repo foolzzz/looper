@@ -1,3 +1,4 @@
+import { cacheHit, formatHit, CACHE_HIT_TITLE } from "@/lib/cache-hit";
 import type { TaskCost, TaskRole } from "@/lib/api";
 import { costBasis, costCaveats, formatTokens, formatUsd, modelRunCaveats } from "@/lib/usage";
 
@@ -56,7 +57,7 @@ export function TaskCostBreakdown({ cost }: { cost: TaskCost }) {
               <table className="w-full whitespace-nowrap text-left text-xs">
                 <thead className="text-muted-foreground">
                   <tr>
-                    {["Model", "Runs", "Input", "Output", "Cache read", "Cache write", "Cost"].map((label, i) => (
+                    {["Model", "Runs", "Input", "Output", "Cache read", "Cache write", "Cache hit", "Cost"].map((label, i) => (
                       <th key={label} scope="col" className={`pb-1 pr-3 font-medium ${i ? "text-right" : ""}`}>{label}</th>
                     ))}
                   </tr>
@@ -83,6 +84,9 @@ export function TaskCostBreakdown({ cost }: { cost: TaskCost }) {
                               {formatTokens(value)}
                             </td>
                           ))}
+                          <td className="py-1 pr-3 text-right font-mono tabular-nums" title={CACHE_HIT_TITLE}>
+                            {formatHit(cacheHit(row.input_tokens, row.cache_read_tokens, row.cache_creation_tokens))}
+                          </td>
                           <td className="py-1 pr-3 text-right font-mono tabular-nums">{formatUsd(row.cost_usd)}</td>
                         </tr>
                       );

@@ -39,7 +39,6 @@ def recording_server(tmp_path, monkeypatch, staged_dashboard_dir):
                         "if '--version' in sys.argv: print('2.1.285 (synthetic runtime)'); sys.exit(0)\n"
                         "print('No runtime login in this fixture', file=sys.stderr)\nsys.exit(1)\n")
         path.chmod(0o755)
-    monkeypatch.setattr(runner, "free_port", lambda: 8798)
     monkeypatch.setattr(runner, "_SERVE", "import sys\nfrom looper.cli import main\n"
         "sys.exit(main(['serve', '--host', '127.0.0.1', '--port', sys.argv[1], '--runtime-root', sys.argv[2]]))\n")
     environment = {"CLAUDE_CONFIG_DIR": str(home / ".claude"), "CODEX_HOME": str(home / ".codex"),
@@ -61,7 +60,8 @@ def recording_server(tmp_path, monkeypatch, staged_dashboard_dir):
             asyncio.run(stop_proxy())
 
 
-def test_recorded_requests_viewer_and_jsonl_download(recording_server, tmp_path):
+@pytest.mark.parametrize("translated", [False, True])
+def test_recorded_requests_viewer_and_jsonl_download(recording_server, tmp_path, translated):
     pw = pytest.importorskip("playwright.sync_api")
     api, url, runtime, port = recording_server
     agent_id = "worker-recording-example"
@@ -88,6 +88,14 @@ def test_recorded_requests_viewer_and_jsonl_download(recording_server, tmp_path)
             json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             payload = json.dumps({"role": "assistant", "content": [{"type": "text", "text": "The result is 4."}],
                 "stop_reason": "end_turn", "usage": {"input_tokens": 14, "output_tokens": 8}}).encode()
+            if translated:
+                payload = json.dumps({"choices": [{"message": {"content": "The result is 4."},
+                    "finish_reason": "stop"}], "usage": {"prompt_tokens": 200, "completion_tokens": 8,
+                    "prompt_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 20}}}).encode()
+            else:
+                reply = json.loads(payload)
+                reply["usage"].update(input_tokens=100, cache_read_input_tokens=80, cache_creation_input_tokens=20)
+                payload = json.dumps(reply).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -101,9 +109,13 @@ def test_recorded_requests_viewer_and_jsonl_download(recording_server, tmp_path)
         route = RouteFile(id=secrets.token_urlsafe(16), agent_id=agent_id, role="worker",
             upstream=f"http://127.0.0.1:{upstream.server_port}", protocol="anthropic-messages", model="example-model",
             created_at=datetime.now(timezone.utc).isoformat(), record_id=record_id)
+        if translated:
+            route = replace(route, kind="translate", record=True, api="openai-chat", dialect="openai",
+                            models={"example-model": "upstream-model"})
         route_path = runtime / ROUTES_DIR / f"{route.id}.json"
         body = {"model": "example-model", "system": [{"type": "text", "text": "Explain calculations clearly."}],
-            "tools": [{"name": "calculator", "input_schema": {"type": "object"}}], "max_tokens": 64,
+            "tools": [{"name": "calculator", "description": "Calculator documentation " * 3000,
+                       "input_schema": {"type": "object"}}], "max_tokens": 64,
             "messages": [{"role": "user", "content": [{"type": "text", "text": "What is 2 + 2?"}]}]}
         for index in range(3):
             if index == 2:
@@ -124,7 +136,8 @@ def test_recorded_requests_viewer_and_jsonl_download(recording_server, tmp_path)
         import asyncpg
         conn = await asyncpg.connect(url)
         try:
-            await conn.execute("UPDATE llm_records SET status='completed', finished_at=now(), duration_ms=1000 WHERE id=$1", record_id)
+            await conn.execute("UPDATE llm_records SET status='completed', finished_at=now(), duration_ms=1000, "
+                               "input_tokens=100, cache_read_tokens=80, cache_creation_tokens=20, output_tokens=8 WHERE id=$1", record_id)
         finally:
             await conn.close()
     asyncio.run(finish_run())
@@ -143,6 +156,12 @@ def test_recorded_requests_viewer_and_jsonl_download(recording_server, tmp_path)
             pw.expect(toggle).to_be_visible(timeout=15000)
             toggle.click()
             pw.expect(section.get_by_text("After the turn ended", exact=True)).to_be_visible()
+            pw.expect(page.get_by_text("cache hit 40%", exact=True)).to_be_visible()
+            pw.expect(section.get_by_text("hit 40%", exact=True)).to_have_count(3)
+            pw.expect(section.get_by_text("prefix reuse 100%", exact=True)).to_have_count(2 if translated else 0)
+            if translated:
+                page.set_viewport_size({"width": 1440, "height": 1000})
+                page.screenshot(path=str(artifacts / "cache-hit-1440.png"), full_page=True)
             for width in (1280, 768):
                 page.set_viewport_size({"width": width, "height": 1000})
                 section.screenshot(path=str(artifacts / f"requests-{width}.png"))
