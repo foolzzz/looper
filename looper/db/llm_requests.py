@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from copy import copy
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -26,7 +26,8 @@ _COLUMNS = (
     "response_body", "response_raw", "response_bytes", "input_tokens", "output_tokens", "cache_read_tokens",
     "cache_write_tokens", "usage", "record_gap", "body_sanitized",
 )
-_JSON_COLUMNS = {"request_headers", "response_headers", "request_body", "response_body", "usage"}
+_JSON_COLUMNS = {"request_headers", "response_headers", "request_body", "response_body", "usage",
+                 "route", "previous_body"}
 _LIST_COLUMNS = ", ".join(["id", *(c for c in _COLUMNS if c not in {"request_body", "response_body", "response_raw"})])
 
 
@@ -161,29 +162,123 @@ async def list_requests(*, record_id: int | None = None, agent_id: str | None = 
     return [_row(row) for row in rows]
 
 
-async def get_request(request_id: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
-    """Read one complete exchange and restore its request's shared JSON parts."""
+class MissingRequestPart(Exception):
+    """A captured request cannot be reconstructed; never serve a partial body."""
+
+    def __init__(self, request_id: int):
+        super().__init__(f"model request {request_id} has a missing body part")
+
+
+# The predecessor is independent of the export filter and its id cursor: insert order can differ from capture time.
+_FULL_SELECT = """
+    SELECT request.*, json_build_object(
+        'id', route.id, 'agent_id', route.agent_id, 'task_id', route.task_id, 'step_id', route.step_id,
+        'role', route.role, 'runtime_type', route.runtime_type, 'provider_id', route.provider_id,
+        'protocol', route.protocol, 'model', route.model,
+        'upstream_host', route.upstream_host, 'upstream_path', route.upstream_path) AS route,
+        previous.request_body AS previous_body
+    FROM llm_requests request JOIN llm_request_routes route ON route.id = request.route_id
+    LEFT JOIN LATERAL (
+        SELECT request_body FROM llm_requests
+        WHERE route_id = request.route_id AND (started_at, id) < (request.started_at, request.id)
+        ORDER BY started_at DESC, id DESC LIMIT 1
+    ) previous ON true
+"""
+
+
+def _new_from_index(skeleton: Any, previous: Any, path: str) -> int | None:
+    """Compare only message references, without reading their deduplicated bodies."""
+    key = "input" if urlsplit(path).path.endswith("/responses") else "messages"
+    def hashes(body):
+        if not isinstance(body, dict) or not isinstance(body.get(key), list):
+            return None
+        messages = body[key]
+        if not all(isinstance(part, dict) and set(part) == {"$llmrec_part"} for part in messages):
+            return None
+        return [part["$llmrec_part"] for part in messages]
+    current, before = hashes(skeleton), hashes(previous)
+    if current is None or before is None:
+        return None
+    return next((index for index, sha in enumerate(current)
+                 if index >= len(before) or sha != before[index]), None)
+
+
+async def _restore(rows, conn) -> list[dict[str, Any]]:
     from looper.agents.llmrec.capture import join_request
 
-    pool = pool or get_pool()
-    async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
-        row = await conn.fetchrow("SELECT * FROM llm_requests WHERE id = $1", request_id)
-        if row is None:
-            return None
-        result = _row(row)
-        references, pending = set(), [result["request_body"]]
+    if not rows:
+        return []
+    items = [_row(row) for row in rows]
+    references = set()
+    for item in items:
+        pending = [item["request_body"]]
         while pending:
             value = pending.pop()
             if isinstance(value, dict):
                 if set(value) == {"$llmrec_part"}:
-                    references.add(value["$llmrec_part"])
+                    references.add((item["route_id"], value["$llmrec_part"]))
                 else:
                     pending.extend(value.values())
             elif isinstance(value, list):
                 pending.extend(value)
-        parts = await conn.fetch(
-            "SELECT sha256, body FROM llm_request_parts WHERE route_id = $1 AND sha256 = ANY($2::text[])",
-            row["route_id"], list(references)) if references else []
-        result["request_body"] = join_request(result["request_body"],
-            {part["sha256"]: json.loads(part["body"]) for part in parts}, result["path"])
-        return result
+    parts = await conn.fetch(
+        "SELECT route_id, sha256, body FROM llm_request_parts WHERE (route_id, sha256) IN "
+        "(SELECT * FROM unnest($1::text[], $2::text[]))",
+        [route_id for route_id, _ in references], [sha for _, sha in references]) if references else []
+    by_route: dict[str, dict[str, Any]] = {}
+    for part in parts:
+        by_route.setdefault(part["route_id"], {})[part["sha256"]] = (json.loads(part["body"])
+            if isinstance(part["body"], str) else part["body"])
+    result = []
+    for item in items:
+        skeleton = item["request_body"]
+        item["new_from_index"] = _new_from_index(skeleton, item.pop("previous_body"), item["path"])
+        try:
+            item["request_body"] = join_request(skeleton, by_route.get(item["route_id"], {}), item["path"])
+        except KeyError:
+            raise MissingRequestPart(item["id"]) from None
+        result.append(item)
+    return result
+
+
+async def get_request(request_id: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
+    """Read one complete exchange, its route and the first message changed since its predecessor."""
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+        rows = await conn.fetch(_FULL_SELECT + " WHERE request.id = $1", request_id)
+        restored = await _restore(rows, conn)
+        return restored[0] if restored else None
+
+
+async def export_page(*, task_id: str | None = None, agent_id: str | None = None,
+                      record_id: int | None = None, since: str | None = None, until: str | None = None,
+                      after_id: int | None = None, limit: int = 50,
+                      pool: asyncpg.Pool | None = None) -> dict[str, Any]:
+    """Restore an id-ordered page with one rows query and one route-parts query."""
+    if sum(value is not None for value in (task_id, agent_id, record_id)) > 1:
+        raise ValueError("provide only one of task_id, agent_id or record_id")
+    if all(value is None for value in (task_id, agent_id, record_id, since)):
+        raise ValueError("provide task_id, agent_id, record_id or since")
+    clauses, args = [], []
+    for column, value in (("task_id", task_id), ("agent_id", agent_id), ("record_id", record_id),
+                          ("started_at >=", since), ("started_at <", until), ("id >", after_id)):
+        if value is not None:
+            if column.startswith("started_at"):
+                value = _time(value)
+                if value.tzinfo is None:
+                    value = value.replace(tzinfo=timezone.utc)
+            args.append(value)
+            if column == "record_id":
+                clauses.append(f"(request.record_id = ${len(args)} OR "
+                               f"(request.record_id IS NULL AND request.after_record_id = ${len(args)}))")
+                continue
+            operator = "" if column.endswith((">=", "<", ">")) else " ="
+            clauses.append(f"request.{column}{operator} ${len(args)}")
+    limit = max(1, min(limit, 50))
+    args.append(limit + 1)
+    pool = pool or get_pool()
+    async with pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+        rows = await conn.fetch(_FULL_SELECT + " WHERE " + " AND ".join(clauses)
+                                + f" ORDER BY request.id ASC LIMIT ${len(args)}", *args)
+        page = await _restore(rows[:limit], conn)
+    return {"requests": page, "next_after_id": page[-1]["id"] if len(rows) > limit else None}

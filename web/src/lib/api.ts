@@ -2679,6 +2679,7 @@ export interface LlmRecord {
   model: string | null;
   error: string | null;
   metadata: {
+    llmrec?: { state: string; reason?: string; detail?: string; route_id?: string };
     command?: string[];
     cwd?: string;
     /** The task step a Worker or Reviewer ran. */
@@ -2807,6 +2808,137 @@ export async function fetchLlmRecordEvents(recordId: number, after = 0): Promise
   const result = await callV1<{ events: LlmRecordEvent[] }>("/api/v1/runs/events", { record_id: recordId, after });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result.events;
+}
+
+export interface LlmrecSettings {
+  enabled: boolean;
+  include_oauth: boolean;
+  proxy: {
+    state: "running" | "stopped" | "unavailable" | "outdated";
+    port: number | null;
+    pid: number | null;
+    requests: number;
+    recorded: number;
+    gaps: number;
+    gap_reasons: Record<string, number>;
+    dropped: number;
+    write_errors: number;
+  };
+}
+
+export async function fetchLlmrecSettings(): Promise<LlmrecSettings> {
+  const result = await callV1<LlmrecSettings>("/api/v1/llmrec_settings/get", {});
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export async function updateLlmrecSettings(fields: Partial<Pick<LlmrecSettings, "enabled" | "include_oauth">>): Promise<LlmrecSettings> {
+  const result = await callV1<LlmrecSettings>("/api/v1/llmrec_settings/update", fields);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export interface LlmRequestRow {
+  id: number;
+  route_id: string;
+  proxy_instance: string;
+  proxy_seq: number;
+  record_id: number | null;
+  after_record_id: number | null;
+  agent_id: string;
+  task_id: string | null;
+  started_at: string;
+  method: string;
+  path: string;
+  kind: "model" | "count_tokens" | "other";
+  model: string | null;
+  stream: boolean | null;
+  status: number | null;
+  outcome: "completed" | "upstream_error" | "client_closed" | "proxy_error";
+  error: string | null;
+  ttfb_ms: number | null;
+  duration_ms: number | null;
+  request_headers: Record<string, string>;
+  response_headers: Record<string, string> | null;
+  request_bytes: number;
+  response_bytes: number | null;
+  request_sha256: string;
+  input_tokens: number | null;
+  cache_read_tokens: number | null;
+  cache_write_tokens: number | null;
+  output_tokens: number | null;
+  usage: Record<string, unknown> | null;
+  record_gap: string | null;
+  body_sanitized: boolean;
+}
+
+export interface LlmRequest extends LlmRequestRow {
+  request_body: unknown;
+  response_body: unknown;
+  response_raw: string | null;
+  new_from_index: number | null;
+  route: { id: string; agent_id: string; task_id: string | null; step_id: string | null;
+    role: string | null; runtime_type: string; provider_id: string | null; protocol: string | null; model: string | null;
+    upstream_host: string; upstream_path: string };
+}
+
+export interface LlmRequestFilter {
+  task_id?: string;
+  agent_id?: string;
+  record_id?: number;
+  since?: string;
+  until?: string;
+}
+
+export async function fetchLlmRequests(params: LlmRequestFilter & {
+  route_id?: string; between_turns?: boolean; before_id?: number; limit?: number;
+}, signal?: AbortSignal): Promise<LlmRequestRow[]> {
+  const result = await callV1<{ requests: LlmRequestRow[] }>("/api/v1/llm_requests/list", params, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.requests;
+}
+
+export async function fetchLlmRequest(id: number, signal?: AbortSignal): Promise<LlmRequest> {
+  const result = await callV1<{ request: LlmRequest }>("/api/v1/llm_requests/get", { request_id: id }, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result.request;
+}
+
+/** Complete stored content, including explicit gaps; cancellation never downloads a partial file. */
+export async function exportLlmRequests(filter: LlmRequestFilter, options: {
+  signal?: AbortSignal; onProgress?: (count: number) => void;
+} = {}): Promise<number> {
+  const chunks: BlobPart[] = [JSON.stringify({ type: "llmrec_export", format: 1,
+    exported_at: new Date().toISOString(), filter,
+    redaction: "header values outside the allowlist are never stored; bodies are complete unless record_gap says otherwise" }) + "\n"];
+  let after: number | undefined, count = 0;
+  do {
+    options.signal?.throwIfAborted();
+    const page = await callV1<{ requests: LlmRequest[]; next_after_id: number | null }>(
+      "/api/v1/llm_requests/export", { ...filter, ...(after === undefined ? {} : { after_id: after }), limit: 50 },
+      { signal: options.signal });
+    if ("status" in page) throw new V1Error(202, "unavailable", page.impact);
+    options.signal?.throwIfAborted();
+    chunks.push(page.requests.map((request) => JSON.stringify(request) + "\n").join(""));
+    count += page.requests.length;
+    options.onProgress?.(count);
+    if (page.next_after_id !== null && (page.next_after_id <= (after ?? 0) || !page.requests.length))
+      throw new Error("The export cursor did not advance.");
+    after = page.next_after_id ?? undefined;
+  } while (after !== undefined);
+  options.signal?.throwIfAborted();
+  const scope = filter.record_id !== undefined ? "record" : filter.agent_id ? "agent" : filter.task_id ? "task" : "since";
+  const id = String(filter.record_id ?? filter.agent_id ?? filter.task_id ?? filter.since).replace(/[^\w.-]/g, "_");
+  const url = URL.createObjectURL(new Blob(chunks, { type: "application/x-ndjson" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `llm-requests-${scope}-${id}.jsonl`;
+  document.body.appendChild(link);
+  try { link.click(); } finally {
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  return count;
 }
 
 // --- The registry: runtimes, LLM providers and the Agent Profiles made of them ---
