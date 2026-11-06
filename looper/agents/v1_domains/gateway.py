@@ -72,13 +72,16 @@ async def settings(root):
     values = await system_settings.get_settings(["gateway.enabled", "gateway.port"])
     port = int(values["gateway.port"]) if values.get("gateway.port") else None
     status = await controller().status() if controller() is not None else {}
+    proxy = status.get("proxy", {"state": "stopped"})
+    ready = (values.get("gateway.enabled") == "true" and proxy.get("state") == "running"
+             and proxy.get("port") == port)
     return {
         "enabled": values.get("gateway.enabled") == "true",
         "port": port,
-        "url": f"http://127.0.0.1:{port}/gw" if port else None,
+        "url": f"http://127.0.0.1:{port}/gw" if port and ready else None,
         "key_exists": GatewayKey(root).exists(),
         "aliases": await db.list_aliases(),
-        "proxy": status.get("proxy", {"state": "stopped"}),
+        "proxy": proxy,
         "translate": status.get("translate", {}),
         "auth_failures": status.get("auth_failures", 0),
         "alias_usage": status.get("alias_usage", {}),

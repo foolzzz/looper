@@ -140,9 +140,14 @@ class ProxyControl:
                 pass
         self._health_cache, self._health_at = result, time.monotonic()
         if result is not None:
-            self._outdated = (result.get("route_format") != ROUTE_FORMAT
+            self._outdated = (result.get("code_sha256") != code_sha256()
+                              or result.get("route_format") != ROUTE_FORMAT
                               or result.get("features", {}).get("translate", 0) < 1)
         return result
+
+    def _has_active_routes(self) -> bool:
+        return any(route and not route.ended_at for route in (
+            RouteFile.read(path) for path in (self.runtime_root / ROUTES_DIR).glob("*.json")))
 
     async def _owns_process(self, state) -> bool:
         current = self._state()
@@ -191,7 +196,15 @@ class ProxyControl:
             if port is None and self.gateway_enabled:
                 port = self.gateway_port
             if await self._health():
-                return port is None or self._state()["port"] == port
+                if not self.gateway_enabled or not self._outdated:
+                    return port is None or self._state()["port"] == port
+                # Kept agents still use this process, including idle resident routes.
+                # Defer replacement until every route has ended; never advertise it as ready.
+                if self._has_active_routes():
+                    return False
+                state = self._state()
+                port = port if port is not None else state["port"]
+                await self._stop(state)
             self._start_attempted = True
             previous = self._state()
             port = port if port is not None else previous["port"] if previous else 0
@@ -201,7 +214,7 @@ class ProxyControl:
                 # publishes its state, including when its first boot fails.
                 await self._stop(previous, grace_s=2, preserve_state=True)
                 if await self._health():
-                    return True
+                    return not (self.gateway_enabled and self._outdated)
             log = self.runtime_root / LOG_FILE
             log.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -225,11 +238,11 @@ class ProxyControl:
             while time.monotonic() < deadline:
                 state = self._state()
                 if state and state["pid"] == process.pid and await self._health():
-                    return True
+                    return not (self.gateway_enabled and self._outdated)
                 if process.returncode is not None:
                     self._children.pop(process.pid, None)
                     # A concurrent controller may have won the lock.
-                    return bool(await self._health())
+                    return bool(await self._health()) and not (self.gateway_enabled and self._outdated)
                 await asyncio.sleep(0.05)
             return False
 
@@ -257,6 +270,7 @@ class ProxyControl:
         if health:
             current = code_sha256()
             mismatch = (state.get("code_sha256") != current
+                        or health.get("code_sha256") != current
                         or state.get("config_sha256") != config_sha256(current, self.dsn))
             if not kept and (not needed or mismatch):
                 port = state["port"]
@@ -264,7 +278,6 @@ class ProxyControl:
                 if needed:
                     # Preserve the port through replacement without a stale process identity.
                     await self._start(port=(self.gateway_port or port) if self.gateway_enabled else port)
-            self._outdated = bool(kept and health.get("route_format") != ROUTE_FORMAT)
         elif needed:
             await self._start()
         state = self._state()
@@ -279,8 +292,10 @@ class ProxyControl:
                         ended_at=route.ended_at or _now()).write(path)
 
     async def tick(self) -> None:
-        if (self.gateway_enabled or (self.runtime_root / STATE_FILE).exists()) and not await self._health():
-            await self._start()
+        if self.gateway_enabled or (self.runtime_root / STATE_FILE).exists():
+            health = await self._health()
+            if not health or (self.gateway_enabled and self._outdated):
+                await self._start()
 
     async def set_enabled(self, enabled, *, include_oauth=None) -> None:
         self.enabled = enabled
@@ -303,10 +318,11 @@ class ProxyControl:
             raise ValueError("gateway port must be an integer from 1 to 65535")
         state = self._state()
         selected = port if port is not None else self.gateway_port
+        if enabled and selected is None and state and await self._health():
+            # Pin the existing endpoint even when kept routes defer its upgrade.
+            selected = state["port"]
         if enabled and state and selected is not None and selected != state["port"] and await self._health():
-            active = any(route and not route.ended_at for route in (
-                RouteFile.read(path) for path in (self.runtime_root / ROUTES_DIR).glob("*.json")))
-            if active:
+            if self._has_active_routes():
                 raise ValueError("gateway port cannot change while agent routes are active")
             await self._stop(state)
         self.gateway_enabled = enabled

@@ -89,13 +89,14 @@ def test_gateway_toggle_pins_port_and_tracks_recording(monkeypatch, tmp_path):
         control = ProxyControl(tmp_path, "", enabled=False)
         monkeypatch.setattr(control, "_start", AsyncMock(return_value=True))
         monkeypatch.setattr(control, "_state", lambda: {"port": 32123, "pid": 123})
-        monkeypatch.setattr(control, "_health", AsyncMock(return_value=None))
+        monkeypatch.setattr(control, "_health", AsyncMock(return_value={"pid": 123}))
         install(control)
         try:
             async with v1_api(tmp_path, pool) as call:
                 status, answer = await call("gateway.update", {"enabled": True})
                 assert status == 200, answer
                 assert answer["result"]["port"] == 32123
+                assert answer["result"]["proxy"]["state"] == "running"
                 assert answer["result"]["url"] == "http://127.0.0.1:32123/gw"
                 assert GatewayConfig(tmp_path).read() == {"format": 1, "enabled": True, "record": False}
                 await control.set_enabled(True)
@@ -107,6 +108,100 @@ def test_gateway_toggle_pins_port_and_tracks_recording(monkeypatch, tmp_path):
             install(None)
 
     run_db(check, monkeypatch, timeout=20)
+
+
+@pytest.mark.parametrize("enable_at_start", [False, True])
+def test_retained_legacy_proxy_defers_gateway_until_routes_end(monkeypatch, tmp_path, enable_at_start):
+    from dataclasses import replace
+    import httpx
+    from looper.agents import self_check
+    from looper.agents.llmrec import ROUTES_DIR, ROUTE_FORMAT, RouteFile
+    from looper.agents.llmrec import control as module
+    from looper.agents.llmrec.control import ProxyControl, install
+    from looper.agents.llmrec.gateway import GatewayKey
+    from looper.db import system_settings
+
+    async def check(pool):
+        control = ProxyControl(tmp_path, DSN, enabled=True)
+        install(control)
+        boot = module.boot_argv
+
+        def legacy_boot(*args):
+            argv = boot(*args)
+            # Emulate the previous process: translation works, but /gw does not exist.
+            # Its state file still has the current hash, so only live health can detect it.
+            patch = ("from looper.agents.llmrec import proxy; "
+                     "proxy.code_sha256 = lambda: 'before-local-endpoint'; "
+                     "exec(\"async def legacy_gateway(self, connection, reader, writer, request, body, path):\\n"
+                     "    await self._json(connection, writer, 404, {'error': 'Unknown recording route'})\\n"
+                     "    return b''\\n\"); "
+                     "proxy.Proxy._gateway_request = legacy_gateway; ")
+            argv[3] = argv[3].replace("from looper.agents.llmrec.__main__ import main;", patch +
+                                    "from looper.agents.llmrec.__main__ import main;")
+            return argv
+
+        try:
+            with monkeypatch.context() as old:
+                old.setattr(module, "boot_argv", legacy_boot)
+                assert await control._start()
+            initial = control._state()
+            route = RouteFile(id="a" * 22, upstream="https://api.example.invalid", agent_id="worker",
+                              created_at="2026-01-01T00:00:00+00:00", record_id=42)
+            path = tmp_path / ROUTES_DIR / f"{route.id}.json"
+            route.write(path)
+            if enable_at_start:
+                await system_settings.put_settings({"gateway.enabled": "true", "gateway.port": str(initial["port"])})
+            await control.at_start([42])
+            assert control._outdated
+            health = await control._health()
+            assert health["route_format"] == ROUTE_FORMAT and health["features"]["translate"] == 1
+            assert health["code_sha256"] != module.code_sha256()
+            assert control._state()["code_sha256"] == module.code_sha256()
+            assert (await control.status())["proxy"]["state"] == "outdated"
+            async with httpx.AsyncClient(trust_env=False, timeout=3, headers={"Connection": "close"}) as client:
+                base = f"http://127.0.0.1:{initial['port']}/gw"
+                assert (await client.get(base + "/v1/models")).status_code == 404
+                async with v1_api(tmp_path, pool) as call:
+                    status, answer = await call("gateway.update", {"enabled": True})
+                    assert status == 200, answer
+                    assert answer["result"]["proxy"]["state"] == "outdated"
+                    assert answer["result"]["url"] is None
+                    assert control._state()["pid"] == initial["pid"]
+                    assert RouteFile.read(path) == route
+                    assert not await control._start()
+                    # An idle resident route still pins the old proxy after its turn ends.
+                    control.release(42, end_route=False)
+                    await control.tick()
+                    assert control._state()["pid"] == initial["pid"]
+                    assert (await self_check.gateway_check(runtime_root=tmp_path)).status == self_check.FAIL
+                    # Doctor without the in-process controller must check the live hash too.
+                    with monkeypatch.context() as doctor:
+                        doctor.setattr(module, "_control", None)
+                        assert (await self_check.gateway_check(runtime_root=tmp_path)).status == self_check.FAIL
+                    replace(RouteFile.read(path), ended_at="2026-01-01T00:01:00+00:00").write(path)
+                    await control.tick()
+                    current = control._state()
+                    assert current["pid"] != initial["pid"] and current["port"] == initial["port"]
+                    _, answer = await call("gateway.get")
+                    assert answer["result"]["proxy"]["state"] == "running"
+                    assert answer["result"]["url"] == base
+                    assert (await self_check.gateway_check(runtime_root=tmp_path)).status == self_check.OK
+                    key = GatewayKey(tmp_path).reveal()
+                    # Authentication is handled by /gw before database-backed alias resolution.
+                    assert (await client.get(base + "/v1/models", headers={"x-api-key": "wrong"})).status_code == 401
+                    assert (await client.head(base + "/api/hello", headers={"x-api-key": key})).status_code == 200
+                    assert (await self_check.gateway_check(runtime_root=tmp_path)).status == self_check.WARN
+        finally:
+            state = control._state()
+            if state:
+                await control._stop(state, grace_s=2)
+            for child in list(control._children.values()):
+                if child.returncode is None:
+                    child.terminate()
+                await child.wait()
+            install(None)
+
+    run_db(check, monkeypatch, timeout=30)
 
 
 @pytest.mark.parametrize("active", [False, True])
