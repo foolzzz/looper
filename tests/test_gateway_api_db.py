@@ -109,6 +109,51 @@ def test_gateway_toggle_pins_port_and_tracks_recording(monkeypatch, tmp_path):
     run_db(check, monkeypatch, timeout=20)
 
 
+@pytest.mark.parametrize("active", [False, True])
+def test_saving_disabled_gateway_port_preserves_recorder(monkeypatch, tmp_path, active):
+    import socket
+    from looper.agents import self_check
+    from looper.agents.llmrec import ROUTES_DIR, RouteFile
+    from looper.agents.llmrec.control import ProxyControl, install
+    from looper.db import system_settings
+
+    async def check(pool):
+        control = ProxyControl(tmp_path, DSN, enabled=True)
+        install(control)
+        try:
+            assert await control._start()
+            initial = control._state()
+            if active:
+                route = RouteFile(id="a" * 22, upstream="https://api.example.invalid", agent_id="worker",
+                                  created_at="2026-01-01T00:00:00+00:00")
+                route.write(tmp_path / ROUTES_DIR / f"{route.id}.json")
+            with socket.socket() as occupied:
+                occupied.bind(("127.0.0.1", 0))
+                occupied.listen()
+                port = occupied.getsockname()[1]
+                async with v1_api(tmp_path, pool) as call:
+                    status, answer = await call("gateway.update", {"enabled": False, "port": port})
+                assert status == 200, answer
+                assert await system_settings.get_settings(["gateway.enabled", "gateway.port"], pool=pool) == {
+                    "gateway.enabled": "false", "gateway.port": str(port)}
+                assert control._state() == initial
+                assert (await self_check.llmrec_check()).status == "ok"
+                await control.tick()
+                assert await control._start()
+                assert control._state() == initial
+        finally:
+            state = control._state()
+            if state:
+                await control._stop(state, grace_s=5)
+            for process in list(control._children.values()):
+                if process.returncode is None:
+                    process.terminate()
+                await process.wait()
+            install(None)
+
+    run_db(check, monkeypatch, timeout=25)
+
+
 def test_alias_configuration_export_round_trip(monkeypatch, tmp_path):
     from looper.db import gateway
 

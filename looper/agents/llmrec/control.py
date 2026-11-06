@@ -188,7 +188,8 @@ class ProxyControl:
 
     async def _start(self, *, port=None) -> bool:
         async with self._start_lock:
-            port = self.gateway_port if port is None and self.gateway_port is not None else port
+            if port is None and self.gateway_enabled:
+                port = self.gateway_port
             if await self._health():
                 return port is None or self._state()["port"] == port
             self._start_attempted = True
@@ -262,7 +263,7 @@ class ProxyControl:
                 await self._stop(state)
                 if needed:
                     # Preserve the port through replacement without a stale process identity.
-                    await self._start(port=self.gateway_port or port)
+                    await self._start(port=(self.gateway_port or port) if self.gateway_enabled else port)
             self._outdated = bool(kept and health.get("route_format") != ROUTE_FORMAT)
         elif needed:
             await self._start()
@@ -302,7 +303,7 @@ class ProxyControl:
             raise ValueError("gateway port must be an integer from 1 to 65535")
         state = self._state()
         selected = port if port is not None else self.gateway_port
-        if state and selected is not None and selected != state["port"] and await self._health():
+        if enabled and state and selected is not None and selected != state["port"] and await self._health():
             active = any(route and not route.ended_at for route in (
                 RouteFile.read(path) for path in (self.runtime_root / ROUTES_DIR).glob("*.json")))
             if active:

@@ -3,6 +3,7 @@
 import asyncio
 import os
 import signal
+import socket
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -109,6 +110,41 @@ def test_crash_restarts_on_original_port(tmp_path, short_checks):
         finally:
             await cleanup(control)
     asyncio.run(asyncio.wait_for(run(), 20))
+
+
+@pytest.mark.parametrize("restart", ["cold", "crash", "upgrade"])
+def test_disabled_gateway_port_does_not_pin_recorder(tmp_path, short_checks, monkeypatch, restart):
+    from looper.db import system_settings
+
+    async def run():
+        control = ProxyControl(tmp_path, DSN, enabled=True)
+        initial = None
+        try:
+            if restart != "cold":
+                await started(control)
+                initial = control._state()
+                if restart == "crash":
+                    os.kill(initial["pid"], signal.SIGKILL)
+                    await control._children[initial["pid"]].wait()
+                else:
+                    write_json(tmp_path / STATE_FILE, {**initial, "code_sha256": "old-code"})
+            with socket.socket() as occupied:
+                occupied.bind(("127.0.0.1", 0))
+                occupied.listen()
+                port = occupied.getsockname()[1]
+                monkeypatch.setattr(system_settings, "get_settings", AsyncMock(return_value={
+                    "gateway.enabled": "false", "gateway.port": str(port)}))
+                await started(control)
+                final = control._state()
+                assert control.gateway_port == port
+                assert final["port"] != port
+                if initial:
+                    assert final["port"] == initial["port"]
+                    assert final["pid"] != initial["pid"]
+        finally:
+            await cleanup(control)
+
+    asyncio.run(asyncio.wait_for(run(), 25))
 
 
 @pytest.mark.parametrize('replacement_fails', [False, True])
