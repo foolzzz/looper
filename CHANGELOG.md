@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.100] - 2026-11-05
+
+### Added
+
+- **Request recording now covers resident agents and the in-process API runtime.** No change while recording is off. ([#1137](https://github.com/foolzzz/looper/pull/1137))
+  - The Manager, a task's Planner and consults attach a recording route when they run on Claude Code. The Manager and the Planner reuse one route per agent while its upstream, runtime type, provider and model stay the same, so the resident process does not restart from turn to turn; requests made while no turn is bound keep `record_id` NULL and carry `after_record_id`.
+  - The in-process API runtime records through the session's model target.
+  - Codex, OMP, Pi and DSH are not routed, because a loopback URL would change the requests they send; they, Grok, Cursor and the TTADK runtimes stay `skipped`/`not_covered` with a stated reason.
+
 ## [2.14.99] - 2026-11-05
 
 ### Fixed
