@@ -35,10 +35,10 @@ def test_the_server_listens_before_recovering_consults_and_starting_agents_or_ta
     # The entry point owns cleanup; the owned startup performs recovery and starts the services.
     run = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
                and node.name == "_run_agent_system_owned")
-    # Startup cleanup guards keep their normal execution order; exception handlers are not startup.
+    # Cleanup guards and timing contexts preserve startup order; exception handlers are not startup.
     def startup_body(body: list[ast.stmt]) -> list[ast.stmt]:
         return [statement for node in body
-                for statement in (startup_body(node.body) if isinstance(node, ast.Try) else [node])]
+                for statement in (startup_body(node.body) if isinstance(node, (ast.Try, ast.With)) else [node])]
 
     body = startup_body(run.body)
     calls = [node.value.value.func for node in body if isinstance(node, ast.Expr)

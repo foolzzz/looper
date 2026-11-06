@@ -18,6 +18,7 @@ _BINDING = _object({
                          ["reason", "runtime", "tool", "count"])),
     "matches": _array(_object({"by": _STR, "when": _STR, "count": _INT}))}, ["enforced", "mismatches", "by"])
 _STATUS = _object({
+    "startup_steps": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}},
     "drain": DRAIN,
     "keepers": _object({"mode": {"const": "on"}, "attached": _INT, "candidates_at_start": _INT,
                         "adopted_at_start": _INT, "pending": _INT,
