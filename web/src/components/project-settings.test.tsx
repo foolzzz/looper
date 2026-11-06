@@ -18,6 +18,8 @@ describe("project deletion", () => {
   let root: Root;
   beforeEach(() => {
     resetSessionGuard();
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "needs_confirmation",
+      confirmation_id: "delete-project", expires_in_seconds: 60, impact: "Delete Example?" }, { status: 202 })));
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -31,22 +33,77 @@ describe("project deletion", () => {
   const button = (text: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === text)!;
   const section = () => container.querySelector('section[aria-labelledby$="-delete"]')!;
 
+  it("requires local confirmation before an authenticated operator can delete, and cancels without a request", async () => {
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ status: "ok", result: { deleted: "project-example" } }));
+    vi.stubGlobal("fetch", fetcher);
+    const onDeleted = vi.fn();
+    const changed = vi.fn();
+    window.addEventListener(PROJECTS_CHANGED_EVENT, changed);
+    try {
+      await act(async () => root.render(<ProjectSettingsForm project={project({ task_count: 4, active_count: 1, schedule_count: 2 })} onDeleted={onDeleted} />));
+      await act(async () => button("Delete project").click());
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(onDeleted).not.toHaveBeenCalled();
+      expect(changed).not.toHaveBeenCalled();
+      expect(section().textContent).toContain("Delete Example? This cannot be undone.");
+      expect(section().textContent).toContain("its 4 tasks");
+      expect(section().textContent).toContain("its 2 schedules");
+      await act(async () => button("Cancel").click());
+      expect(button("Delete")).toBeUndefined();
+      expect(fetcher).not.toHaveBeenCalled();
+      await act(async () => button("Delete project").click());
+      expect(fetcher).not.toHaveBeenCalled();
+      await act(async () => button("Delete").click());
+      expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/v1/project_admin/delete", expect.objectContaining({
+        method: "POST", body: JSON.stringify({ project_id: "project-example" }),
+      }));
+      expect(onDeleted).toHaveBeenCalledOnce();
+      expect(changed).toHaveBeenCalledOnce();
+    } finally { window.removeEventListener(PROJECTS_CHANGED_EVENT, changed); }
+  });
+
+  it("shows the API deletion impact before confirming in the same session", async () => {
+    const impact = "它在管家「Review」、「Release」的项目范围里；删除后范围变空的管家看不到也建不了任务。";
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({
+      status: "needs_confirmation", confirmation_id: "delete-project", expires_in_seconds: 60, impact,
+    }, { status: 202 })).mockResolvedValueOnce(Response.json({ status: "ok", result: { deleted: "project-example" } }));
+    vi.stubGlobal("fetch", fetcher);
+    const onDeleted = vi.fn();
+    await act(async () => root.render(<ProjectSettingsForm project={project()} onDeleted={onDeleted} />));
+    await act(async () => button("Delete project").click());
+    await act(async () => button("Delete").click());
+    expect(section().textContent).toContain(impact);
+    expect(onDeleted).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalledOnce();
+    await act(async () => button("Delete").click());
+    expect(fetcher).toHaveBeenLastCalledWith("/api/v1/confirm", expect.objectContaining({
+      body: JSON.stringify({ confirmation_id: "delete-project" }),
+      headers: expect.objectContaining({ "X-Looper-Session": fetcher.mock.calls[0][1].headers["X-Looper-Session"] }),
+    }));
+    expect(onDeleted).toHaveBeenCalledOnce();
+  });
+
   it.each([
     { counts: {}, hint: "Removes the project with its knowledge and skills.", confirmation: "Delete Example?" },
     { counts: { task_count: 4, active_count: 1, schedule_count: 2 }, hint: "Removes the project with its knowledge and skills, its 4 tasks (the 1 running ones are stopped first; result branches stay), and its 2 schedules with their run history.", confirmation: "Delete Example and its 4 tasks?" },
     { counts: { task_count: 3 }, hint: "Removes the project with its knowledge and skills, its 3 tasks (result branches stay).", confirmation: "Delete Example and its 3 tasks?" },
     { counts: { schedule_count: 2 }, hint: "Removes the project with its knowledge and skills, and its 2 schedules with their run history.", confirmation: "Delete Example?" },
   ])("offers deletion and only nonzero impact clauses: $counts", async ({ counts, hint, confirmation }) => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "needs_confirmation",
+      confirmation_id: "delete-project", expires_in_seconds: 60, impact: confirmation }, { status: 202 })));
     await act(async () => root.render(<ProjectSettingsForm project={project(counts)} onDeleted={() => {}} />));
     expect(section().querySelector("p")?.textContent).toBe(hint);
     expect(button("Delete project")).toBeDefined();
     await act(async () => button("Delete project").click());
+    await act(async () => button("Delete").click());
     expect(section().textContent).toContain(confirmation);
   });
 
   it("confirms through deleteProject, shows its pending state, then refreshes selectors and navigates", async () => {
     let complete!: (response: Response) => void;
-    const fetcher = vi.fn(() => new Promise<Response>((resolve) => { complete = resolve; }));
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ status: "needs_confirmation",
+      confirmation_id: "delete-project", expires_in_seconds: 60, impact: "Delete Example and its 4 tasks?" }, { status: 202 }))
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { complete = resolve; }));
     vi.stubGlobal("fetch", fetcher);
     const changed = vi.fn();
     const onDeleted = vi.fn();
@@ -54,10 +111,14 @@ describe("project deletion", () => {
     try {
       await act(async () => root.render(<ProjectSettingsForm project={project({ task_count: 4, active_count: 1 })} onDeleted={onDeleted} />));
       await act(async () => button("Delete project").click());
-      expect(fetcher).not.toHaveBeenCalled();
       await act(async () => button("Delete").click());
-      expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/v1/project_admin/delete", expect.objectContaining({
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(fetcher).toHaveBeenCalledWith("/api/v1/project_admin/delete", expect.objectContaining({
         method: "POST", body: JSON.stringify({ project_id: "project-example" }),
+      }));
+      await act(async () => button("Delete").click());
+      expect(fetcher).toHaveBeenLastCalledWith("/api/v1/confirm", expect.objectContaining({
+        method: "POST", body: JSON.stringify({ confirmation_id: "delete-project" }),
       }));
       expect(button("Stopping and deleting…").disabled).toBe(true);
       expect(button("Stopping and deleting…").querySelector(".animate-spin")).not.toBeNull();
@@ -70,20 +131,25 @@ describe("project deletion", () => {
 
   it("shows a 409's reason, keeps deletion available, and lets the operator finish on retry", async () => {
     const message = "1 task(s) of project 'Example' are still stopping (task-a): delete the project again to finish";
-    const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ status: "error", error: {
+    const pending = () => Response.json({ status: "needs_confirmation", confirmation_id: "delete-project",
+      expires_in_seconds: 60, impact: "Delete Example and its 4 tasks?" }, { status: 202 });
+    const fetcher = vi.fn().mockResolvedValueOnce(pending()).mockResolvedValueOnce(Response.json({ status: "error", error: {
       code: "conflict", message,
-    } }, { status: 409 })).mockResolvedValueOnce(Response.json({ status: "ok", result: { deleted: "project-example" } }));
+    } }, { status: 409 })).mockResolvedValueOnce(pending())
+      .mockResolvedValueOnce(Response.json({ status: "ok", result: { deleted: "project-example" } }));
     vi.stubGlobal("fetch", fetcher);
     const onDeleted = vi.fn();
     await act(async () => root.render(<ProjectSettingsForm project={project({ task_count: 4, active_count: 1, schedule_count: 2 })} onDeleted={onDeleted} />));
     await act(async () => button("Delete project").click());
     await act(async () => button("Delete").click());
-    expect(container.querySelector("[role=alert]")?.textContent).toBe(message);
-    expect(section().textContent).toContain("Delete Example and its 4 tasks?");
-    expect(button("Delete").disabled).toBe(false);
-    expect(onDeleted).not.toHaveBeenCalled();
     await act(async () => button("Delete").click());
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(container.querySelector("[role=alert]")?.textContent).toBe(message);
+    expect(button("Delete project").disabled).toBe(false);
+    expect(onDeleted).not.toHaveBeenCalled();
+    await act(async () => button("Delete project").click());
+    await act(async () => button("Delete").click());
+    await act(async () => button("Delete").click());
+    expect(fetcher).toHaveBeenCalledTimes(4);
     expect(onDeleted).toHaveBeenCalledOnce();
   });
 

@@ -492,3 +492,38 @@ def test_project_overview_keeps_cross_creator_planners_runs_and_own_health(monke
         assert [entry["name"] for entry in overview["health"]["unhealthy"]] == ["manager-review"]
         assert overview["schedules"]["total"] == 0
     run_db(test, monkeypatch, timeout=20)
+
+
+def test_project_overview_moves_live_runs_with_the_tasks_current_project(monkeypatch):
+    from looper.agents.overview import build_overview
+    from looper.db import projects, tasks
+
+    async def test(pool):
+        a = await projects.create_project(name="A", pool=pool)
+        b = await projects.create_project(name="B", pool=pool)
+        await tasks.create_task(task_id="moving-task", requirement="work", project_id=a["id"],
+                                status="running", pool=pool)
+        runs = [{"agent_id": f"{role}-moving", "task_id": "moving-task", "project_id": a["id"],
+                 "role": role, "state": state, "since": datetime.now(timezone.utc),
+                 "step": "work", "instruction": "work"}
+                for role, state in (("worker", "running"), ("reviewer", "waiting"))]
+        await tasks.set_task_project("moving-task", b["id"], pool=pool)
+
+        async def overview(project):
+            return await build_overview(task_router=SimpleNamespace(running_planners=lambda: []),
+                worker_pool=SimpleNamespace(runs=lambda: runs), manager=None,
+                supervisor=SimpleNamespace(agent_status=lambda: {}), manager_id="manager",
+                project_ids=[project["id"]])
+
+        old = await overview(a)
+        assert old["agents"]["workers"] == [] and old["agents"]["reviewers"] == []
+        assert old["projects"] == []
+        current = await overview(b)
+        for role in ("workers", "reviewers"):
+            assert [(r["task_id"], r["project_id"], r["project_name"]) for r in current["agents"][role]] == [
+                ("moving-task", b["id"], "B")]
+        assert current["projects"][0]["workers"] == {"running": 1, "waiting": 0}
+        assert current["projects"][0]["reviewers"] == {"running": 0, "waiting": 1}
+        assert all(r["project_id"] == a["id"] for r in runs)  # the pool's cached records stay untouched
+
+    run_db(test, monkeypatch, timeout=20)

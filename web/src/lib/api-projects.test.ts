@@ -64,14 +64,15 @@ it.each(calls)("project $action preserves typed errors without refreshing select
   } finally { window.removeEventListener(PROJECTS_CHANGED_EVENT, changed); }
 });
 
-it.each(calls)("project $action never completes or confirms a pending operation", async ({ run }) => {
+it.each(calls)("project $action never completes or confirms a pending operation", async ({ action, run }) => {
   const fetcher = vi.fn(async () => Response.json({ status: "needs_confirmation", confirmation_id: "pending",
     expires_in_seconds: 60, impact: "Remove the empty project." }, { status: 202 }));
   vi.stubGlobal("fetch", fetcher);
   const changed = vi.fn();
   window.addEventListener(PROJECTS_CHANGED_EVENT, changed);
   try {
-    await expect(run()).rejects.toMatchObject({ name: "V1Error", status: 202, message: "Remove the empty project." });
+    if (action === "delete") await expect(run()).resolves.toMatchObject({ status: "needs_confirmation", impact: "Remove the empty project." });
+    else await expect(run()).rejects.toMatchObject({ name: "V1Error", status: 202, message: "Remove the empty project." });
     expect(fetcher).toHaveBeenCalledOnce();
     expect(changed).not.toHaveBeenCalled();
   } finally { window.removeEventListener(PROJECTS_CHANGED_EVENT, changed); }

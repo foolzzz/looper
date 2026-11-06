@@ -1,5 +1,5 @@
 import { isSessionEnded, SessionEndedError } from "@/lib/session";
-import { callV1, streamV1, V1Error } from "@/lib/v1";
+import { callV1, confirmV1, streamV1, V1Error, type V1PendingConfirmation } from "@/lib/v1";
 
 export interface SystemStatus {
   status: "running";
@@ -1010,10 +1010,12 @@ export async function moveProjectDirectory(projectId: string, fields: ProjectMov
   return result;
 }
 
-/** Delete a project with its tasks and schedules, stopping running tasks first. */
-export async function deleteProject(projectId: string): Promise<void> {
-  const result = await callV1<{ deleted: string }>("/api/v1/project_admin/delete", { project_id: projectId });
-  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+/** Delete after UI confirmation; if the server requires confirmation too, keep its original session. */
+export async function deleteProject(projectId: string, confirmation?: V1PendingConfirmation): Promise<void | V1PendingConfirmation> {
+  const result = confirmation
+    ? await confirmV1<{ deleted: string }>(confirmation.confirmation_id, confirmation.session)
+    : await callV1<{ deleted: string }>("/api/v1/project_admin/delete", { project_id: projectId });
+  if ("status" in result) return result;
   notifyProjectsChanged();
 }
 

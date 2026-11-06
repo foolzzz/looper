@@ -414,7 +414,8 @@ async def _create(call: Call) -> dict[str, Any]:
         result = await create_task_core(
             data, task_fields=row, profiles=profiles, roles=roles,
             template_name=template.name if template is not None else None,
-            lock_manager=True, named=placement.named, visible_to=call.manager_id if call.scope.tasks.bounded else None,
+            lock_manager=True, named=placement.named, visible_to=call.scope.tasks.manager_id,
+            task_filter=call.scope.tasks,
             show_configuration=True, template_display=used)
     except ProjectNameTaken:
         raise OpError(ErrorCode.CONFLICT, f"a project named {name!r} was created meanwhile: call again to use "

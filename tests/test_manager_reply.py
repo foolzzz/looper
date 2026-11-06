@@ -737,6 +737,39 @@ class TestManagerTurnSections:
         assert "  - task-aaaaaaaaaaaa (project tetris, goal old): an older one" in lines
         assert lines[-1] == "确认"
 
+    @pytest.mark.parametrize("scope", ["all", "own", "projects"])
+    @pytest.mark.parametrize("failed_section", [0, 1, 2])
+    def test_scope_read_failure_keeps_each_turn_sections_own_result(
+        self, agent_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scope: str, failed_section: int,
+    ) -> None:
+        from dataclasses import replace
+        from unittest.mock import AsyncMock
+
+        from looper.agents.ops.service import ManagerOps, Platform, scope_for
+        from looper.agents.tiers.manager import default_definition
+        from looper.agents.managers_api import ManagerTools, TaskScope
+
+        definition = default_definition()
+        definition = replace(definition, tools=ManagerTools.TASKS,
+            task_scope=TaskScope(scope), scope_project_ids=("proj-test",) if scope == "projects" else ())
+        agent = ManagerAgent(config=ManagerConfig(claude_bin="claude", work_dir=tmp_path),
+                             runtime_root=tmp_path, definition=definition)
+        configured_scope = scope_for(definition)
+        ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9", scope=configured_scope)
+        agent.ops = ops
+        results = [configured_scope] * 3
+        results[failed_section] = RuntimeError("scope temporarily unavailable")
+        monkeypatch.setattr(ops, "current_scope", AsyncMock(side_effect=results))
+        agent_db.list_projects.return_value = [_project("readable project")]
+        agent_db.list_tasks.return_value = [{"id": "readable-task", "project_name": "readable project",
+                                             "requirement": "ready work"}]
+        text = asyncio.run(agent._build_user_message("hi"))
+        labels = ["Projects", "Ready tasks", "Open gates"]
+        for index, label in enumerate(labels):
+            assert (f"{label}: (could not be read)" in text) == (index == failed_section)
+        assert ("readable project" in text.split("\n\n")[0]) == (failed_section != 0)
+        assert ("readable-task" in text) == (failed_section != 1)
+
 
 LARK = channel_address("lark", "channel-lark")
 TELEGRAM = channel_address("telegram", "channel-telegram")

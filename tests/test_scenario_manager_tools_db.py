@@ -486,6 +486,58 @@ def test_the_costs_of_a_scoped_manager_name_only_its_own_tasks(monkeypatch: pyte
 # --- Workspaces ---
 
 
+def test_project_scope_workspace_warning_hides_tasks_in_other_projects(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import projects, tasks
+
+        directory = tmp_path / "shared"
+        directory.mkdir()
+        a = await projects.create_project(name="allowed", work_dir=str(directory), pool=pool)
+        b = await projects.create_project(name="outside", work_dir=str(directory), pool=pool)
+        chat, default = await _review(pool, tmp_path, task_scope="projects", scope_project_ids=[a["id"]])
+        await tasks.create_task(task_id="task-secret", requirement="secret requirement", title="secret title",
+                                project_id=b["id"], work_dir=str(directory), workspace_dir=str(directory),
+                                status="executing", manager_id=REVIEW, pool=pool)
+        arguments = {"requirement": "new work", "title": "new task", "project": "allowed",
+                     "workspace_mode": "in_place"}
+        # Positive control: the same real workspace conflict is named for an unrestricted caller.
+        _ok((await default.say("create", ("looper_task_create", arguments)))[0])
+        assert "secret title" in default.turns[-1].blocks[0]
+
+        answer = await chat.say("create", ("looper_task_create", arguments))
+        _ok(answer[0])
+        block = chat.turns[-1].blocks[0]
+        shown = json.dumps(answer) + block
+        for secret in ("task-secret", "secret title", "secret requirement", "executing"):
+            assert secret not in shown
+        assert "范围外任务" in block
+        assert "互相覆盖" in block  # The conflict still warns about overwriting files.
+
+    run_db(test, monkeypatch)
+
+
+def test_project_scope_workspace_warning_names_other_managers_tasks_in_scope(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(pool: Any) -> None:
+        from looper.db import projects, tasks
+
+        directory = tmp_path / "shared"
+        directory.mkdir()
+        project = await projects.create_project(name="allowed", work_dir=str(directory), pool=pool)
+        chat, _ = await _review(pool, tmp_path, task_scope="projects", scope_project_ids=[project["id"]])
+        await tasks.create_task(task_id="task-colleague", requirement="work", title="visible colleague work",
+                                project_id=project["id"], work_dir=str(directory), workspace_dir=str(directory),
+                                status="executing", manager_id="manager", pool=pool)
+        _ok((await chat.say("create", ("looper_task_create", {
+            "requirement": "new work", "title": "new task", "project": "allowed",
+            "workspace_mode": "in_place"})))[0])
+        block = chat.turns[-1].blocks[0]
+        assert "visible colleague work" in block and "executing" in block
+
+    run_db(test, monkeypatch)
+
+
 def test_a_workspace_warning_does_not_name_another_managers_task(monkeypatch: pytest.MonkeyPatch,
                                                                  tmp_path: Path) -> None:
     from tests.test_task_workspaces_db import _repo
@@ -505,14 +557,14 @@ def test_a_workspace_warning_does_not_name_another_managers_task(monkeypatch: py
         result = _ok(answer[0])
         block = chat.turns[-1].blocks[0]
         assert "secret title task-a" not in json.dumps(answer) + block
-        assert "另有 1 个其他管家的任务" in block and "secret title task-b" in block
+        assert "另有 1 个范围外任务" in block and "secret title task-b" in block
         from looper.agents import task_workspaces
 
         check = await task_workspaces.check(str(repo), mode=task_workspaces.TaskWorkspaces.IN_PLACE,
                                             visible_to=REVIEW)
         (warning,) = [w for w in check["warnings"] if w["kind"] == "shared"]
         foreign = [t for t in warning["tasks"] if t.get("foreign")]
-        assert foreign == [{"task_id": None, "name": "a task of another Manager", "status": None,
+        assert foreign == [{"task_id": None, "name": "another task is running in this directory", "status": None,
                             "mode": "in_place", "foreign": True}]
         assert "secret title task-a" not in json.dumps(check)
         assert result["task_id"]

@@ -8,6 +8,7 @@ import {
   type Project, type ProjectMovePreview, type ProjectMoveResult, type ProjectUpdate,
 } from "@/lib/api";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
+import type { V1PendingConfirmation } from "@/lib/v1";
 import {
   ProjectExecutionFields,
   executionChanges,
@@ -131,7 +132,7 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<"local" | V1PendingConfirmation | null>(null);
 
   const set = <K extends keyof Draft>(key: K) => (value: Draft[K]) => {
     setDraft((d) => ({ ...d, [key]: value }));
@@ -158,14 +159,18 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
   };
 
   const remove = async () => {
+    if (!confirmDelete) return;
     setBusy(true);
     setDeleting(true);
     setError("");
     try {
-      await deleteProject(project.project_id);
-      onDeleted();
+      const pending = await deleteProject(project.project_id, confirmDelete === "local" ? undefined : confirmDelete);
+      if (pending) setConfirmDelete(pending);
+      else onDeleted();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      setConfirmDelete(null);
+    } finally {
       setBusy(false);
       setDeleting(false);
     }
@@ -243,14 +248,14 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
           </p>
           {confirmDelete ? (
             <>
-              <span className="text-xs text-muted-foreground">
-                Delete {project.name}{project.task_count > 0 && <> and its {project.task_count} tasks</>}?
-              </span>
+              <p className="w-full whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                {confirmDelete === "local" ? `Delete ${project.name}? This cannot be undone.` : confirmDelete.impact}
+              </p>
               <Button type="button" variant="destructive" size="sm" onClick={remove} disabled={busy}>
                 {deleting && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
                 {deleting ? "Stopping and deleting…" : "Delete"}
               </Button>
-              <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmDelete(false)} disabled={busy}>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmDelete(null)} disabled={busy}>
                 Cancel
               </Button>
             </>
@@ -259,7 +264,7 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => setConfirmDelete(true)}
+              onClick={() => setConfirmDelete("local")}
               disabled={busy}
               className="text-destructive hover:bg-destructive/10 hover:text-destructive"
             >

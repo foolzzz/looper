@@ -518,7 +518,7 @@ async def create_task_core(
     data: dict[str, Any], *, task_fields: dict[str, Any] | None = None,
     profiles: dict[str, str | None] | None = None, roles: Sequence[dict[str, Any]] = (),
     template_name: str | None = None, lock_manager: bool = False, named: bool | None = None,
-    visible_to: str | None = None, show_configuration: bool = False,
+    visible_to: str | None = None, task_filter: db_tasks.TaskFilter | None = None, show_configuration: bool = False,
     template_display: tuple[str, Sequence[tuple[str, str]]] | None = None,
 ) -> dict[str, Any]:
     """Place, check and store a ready task for either entry point. Adapters supply channel/template metadata;
@@ -563,6 +563,7 @@ async def create_task_core(
         work_dir = _task_work_dir(data.get("work_dir"), project["work_dir"])
         workspace = await task_workspace(data, work_dir=work_dir, named=named, project_dir=project["work_dir"],
                                          project_mode=ProjectExecution.from_row(project).task_mode, visible_to=visible_to,
+                                         task_filter=task_filter,
                                          **({"pool": conn} if conn is not None else {}))
         task = {
             "task_id": f"task-{uuid.uuid4().hex[:12]}",
@@ -625,10 +626,11 @@ async def create_task_core(
 
 async def task_workspace(data: dict[str, Any], *, work_dir: str, named: bool, project_dir: str,
                          project_mode: TaskWorkspaces, visible_to: str | None = None,
+                         task_filter: db_tasks.TaskFilter | None = None,
                          pool: Any = None) -> dict[str, Any]:
     """A new task's ``workspace_mode`` (as ``data`` asks, else by ``task_workspaces.resolve_mode``) and ``base``,
-    checked: the mode, the base and the workspace check, or a 400. ``visible_to``: the Manager the check's
-    warnings name tasks to; another Manager's tasks stay anonymous."""
+    checked: the mode, the base and the workspace check, or a 400. Tasks outside ``task_filter`` or owned by
+    another Manager when ``visible_to`` is set stay anonymous in the check's warnings."""
     from . import task_workspaces
 
     requested, base = data.get("workspace_mode"), data.get("base")
@@ -646,7 +648,8 @@ async def task_workspace(data: dict[str, Any], *, work_dir: str, named: bool, pr
         raise RequestError(HTTP_400, "base is where a task's worktree starts: give it with workspace_mode worktree")
     try:
         check = await task_workspaces.check(work_dir, mode=mode, base=base, asked=bool(requested),
-                                            visible_to=visible_to, **({"pool": pool} if pool is not None else {}))
+                                            visible_to=visible_to, task_filter=task_filter,
+                                            **({"pool": pool} if pool is not None else {}))
     except task_workspaces.TaskWorkspaceError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
     return {"mode": mode.value, "base": base, "check": check}
@@ -1409,7 +1412,7 @@ def _workspace_lines(task_id: str, check: Mapping[str, Any]) -> list[str]:
             own = [t for t in shared if not t.get("foreign")]
             names = "、".join(f"{t['name']}（{t['status']}）" for t in own[:5])
             if foreign := len(shared) - len(own):
-                names += ("、" if names else "") + f"另有 {foreign} 个其他管家的任务"
+                names += ("、" if names else "") + f"另有 {foreign} 个范围外任务正在此目录运行"
             effect = ("原地运行的任务会互相覆盖文件" if overwrites(check.get("mode") or "in_place", shared)
                       else "worktree 里的任务各在自己的分支上，不会互相干扰，合并时可能冲突")
             lines.append(f"- 提醒：这个仓库上还有进行中的任务：{names}；{effect}")

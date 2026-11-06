@@ -165,9 +165,9 @@ async def _unique_name(name: str, *, own_id: str | None, conn: asyncpg.Connectio
 
 async def checked_values(data: Mapping[str, Any], *, own_id: str | None,
                          conn: asyncpg.Connection | None = None,
-                         check_references: bool = True) -> dict[str, Any]:
+                         check_references: bool = True, allow_empty_scope: bool = False) -> dict[str, Any]:
     """Checked columns (not ``key``). Import previews check references in their projected graph; writes use
-    ``conn`` so profiles created in the same transaction are visible."""
+    ``conn`` so profiles created in the same transaction are visible. Only imports may restore an empty scope."""
     values: dict[str, Any] = {}
     if "name" in data:
         name = data["name"]
@@ -206,7 +206,7 @@ async def checked_values(data: Mapping[str, Any], *, own_id: str | None,
                 raise _refuse(_enum_text(field, help_text)) from None
     if "scope_project_ids" in data:
         ids = data["scope_project_ids"]
-        if (not isinstance(ids, list) or not 1 <= len(ids) <= 20
+        if (not isinstance(ids, list) or not (0 if allow_empty_scope else 1) <= len(ids) <= 20
                 or any(not isinstance(item, str) or not item.strip() for item in ids)):
             raise _refuse("scope_project_ids must list 1 to 20 project ids")
         values["scope_project_ids"] = sorted({item.strip() for item in ids})
@@ -224,7 +224,8 @@ async def checked_values(data: Mapping[str, Any], *, own_id: str | None,
     return values
 
 
-def final_scope(current: Mapping[str, Any] | None, values: dict[str, Any]) -> tuple[TaskScope, tuple[str, ...]]:
+def final_scope(current: Mapping[str, Any] | None, values: dict[str, Any], *,
+                allow_empty_scope: bool = False) -> tuple[TaskScope, tuple[str, ...]]:
     """Validate the resulting scope, including partial updates and scopes emptied by deletion."""
     stored = current or {}
     scope = TaskScope(values.get("task_scope", stored.get("task_scope", "own")))
@@ -237,7 +238,7 @@ def final_scope(current: Mapping[str, Any] | None, values: dict[str, Any]) -> tu
         if "task_scope" in values or "scope_project_ids" in values:
             if "scope_project_ids" not in values and stored.get("task_scope") != "projects":
                 ids = ()
-            if not ids:
+            if not ids and not allow_empty_scope:
                 raise _refuse("task_scope projects needs scope_project_ids: the projects this Manager works in")
         if values.get("tools", stored.get("tools", "tasks")) != "tasks":
             raise _refuse("task_scope projects works only with tools tasks: a Manager with every tool would reach "

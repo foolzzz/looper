@@ -174,6 +174,32 @@ def test_a_project_with_tasks_is_confirmed_then_deleted(monkeypatch: pytest.Monk
     run_db(test, monkeypatch)
 
 
+@pytest.mark.parametrize("scope", ["own", "all"])
+def test_project_delete_names_affected_managers_without_their_tasks(monkeypatch, tmp_path, scope):
+    from tests.test_managers_schema_db import _manager
+    from tests.test_scenario_manager_tools_db import _definition, _scoped_chat, _task as manager_task
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool, "scratch")
+        other = await _project(pool, "private")
+        await _manager(pool, "caller", tools="all", task_scope=scope)
+        for key in ("review", "release"):
+            made = await _manager(pool, key, task_scope="projects", scope_project_ids=[project["id"]])
+            await manager_task(pool, f"secret-{key}", made["id"], other)
+        chat = _scoped_chat(tmp_path, await _definition(pool, "manager-caller"))
+        (asked,) = await chat.say("Delete scratch", ("looper_projects", {"action": "delete", "project": "scratch"}))
+        assert asked["status"] == "needs_confirmation", asked
+        (impact,) = chat.turns[-1].blocks
+        assert "「Review」" in impact and "「Release」" in impact
+        assert "范围变空的管家看不到也建不了任务" in impact
+        assert "secret-" not in impact and "private" not in impact
+        assert "它没有任务和定时任务" in impact
+        assert await pool.fetchval("SELECT count(*) FROM tasks") == 2
+        assert await pool.fetchval("SELECT count(*) FROM projects") == 2
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 # --- looper_agent_profiles and looper_providers ---
 
 

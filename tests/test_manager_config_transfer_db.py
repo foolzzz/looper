@@ -692,9 +692,8 @@ def test_unbounded_manager_export_has_no_scope_projects(scope: str, monkeypatch:
 @pytest.mark.parametrize("apply", [False, True])
 @pytest.mark.parametrize("scope_names,reason", [
     (["Missing"], "no project 'Missing' in scope_projects; include projects or create it first"),
-    ([], "task_scope projects needs scope_project_ids"),
 ])
-def test_project_scope_import_refuses_missing_or_empty_projects(
+def test_project_scope_import_refuses_missing_projects(
     apply: bool, scope_names: list[str], reason: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def test(pool: Any) -> None:
@@ -703,6 +702,45 @@ def test_project_scope_import_refuses_missing_or_empty_projects(
         assert await managers.get_manager("manager-review", pool=pool) is None
 
     run_db(test, monkeypatch, timeout=15)
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_exported_empty_project_scope_imports_without_granting_task_access(
+    existing: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async def test(pool: Any) -> None:
+        from looper.agents.managers_api import ManagerDefinition
+        from looper.db import projects, tasks
+        from tests.test_scenario_manager_tools_db import _scoped_chat
+
+        await _run(pool, _document(_manager(task_scope="projects", scope_projects=["Example"], enabled=True),
+                                  projects=[{"name": "Example"}, {"name": "Other"}]))
+        project_id = await pool.fetchval("SELECT id FROM projects WHERE name = 'Example'")
+        assert await projects.delete_project(project_id, pool=pool)
+        exported = next(entry for entry in (await _export(pool))["managers"] if entry["id"] == "manager-review")
+        assert exported["scope_projects"] == []
+        if not existing:
+            await pool.execute("DELETE FROM managers WHERE id = 'manager-review'")
+        document = _document(exported)
+        preview = await _run(pool, document, apply=False)
+        assert (await managers.get_manager("manager-review", pool=pool) is not None) is existing
+        assert (await _run(pool, document)).view() == {**preview.view(), "applied": True}
+        stored = await managers.get_manager("manager-review", pool=pool)
+        assert stored["task_scope"] == "projects" and stored["scope_project_ids"] == []
+        other = await projects.find_project_by_name("Other", pool=pool)
+        await tasks.create_task(task_id="task-other", requirement="Other work", project_id=other["id"],
+                                work_dir="/w", status="ready", pool=pool)
+        assert len(await tasks.list_tasks(pool=pool)) == 1
+        chat = _scoped_chat(tmp_path, ManagerDefinition.from_row(stored))
+        (listed,) = await chat.say("list", ("looper_tasks", {"action": "list"}))
+        assert listed["status"] == "ok" and listed["result"]["tasks"] == []
+        (created,) = await chat.say("create", ("looper_task_create", {"project": "Other", "work_dir": "/w",
+                                                                     "title": "Blocked", "requirement": "work"}))
+        assert created["error"]["code"] == "forbidden" and "no projects left" in created["error"]["message"]
+        assert len(await tasks.list_tasks(pool=pool)) == 1
+        assert (await _run(pool, document)).writes == 0
+
+    run_db(test, monkeypatch, timeout=20)
 
 
 @pytest.mark.parametrize("apply", [False, True])
