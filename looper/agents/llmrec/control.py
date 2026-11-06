@@ -29,7 +29,9 @@ _control: ProxyControl | None = None
 _SECRET_MARKERS = ("token", "secret", "key", "auth", "cookie")
 # Stable explanations for run metadata and the recording viewer.
 NOT_COVERED_DETAILS = {
-    ("codex", "oauth"): "Codex's ChatGPT login requires an HTTPS origin",
+    **{(runtime, auth): f"{runtime} picks request details from the endpoint URL; "
+                        "recording through the proxy would change its requests"
+       for runtime in ("codex", "omp", "pi", "dsh") for auth in ("oauth", "api_key")},
     ("grok", "oauth"): "Grok has no known endpoint override",
     ("cursor-agent", "oauth"): "Cursor's servers make the model requests",
     **{(runtime, auth): "TTADK manages its own provider"

@@ -9,13 +9,20 @@ import pytest
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.llmrec import TLS_ENV, LlmrecSkip, RouteFile, SkipReason
 from looper.agents.llmrec import control
-from looper.agents.profile_registry import builtin_resolved_profile
+from looper.agents.profile_registry import LegacyProviderSpec, RuntimeSpec
+from looper.agents.runtimes import ApiProtocol, AuthKind
 from looper.db import activity
+from tests.runtime_model_helpers import resolved_profile
 
 
 @pytest.fixture
 def launch():
-    return Launch(AgentSettings(profile=builtin_resolved_profile()))
+    provider = LegacyProviderSpec('test-provider', 'Test provider', AuthKind.API_KEY,
+                                  frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
+                                  base_url='https://model.example.invalid', api_key='test-key')
+    profile = resolved_profile('test-agent', 'Test agent', RuntimeSpec('test-runtime', 'Claude Code', 'claude-code'),
+                               provider, 'haiku')
+    return Launch(AgentSettings(profile=profile))
 
 
 def test_proxy_process_leaves_tls_overrides_to_routes(tmp_path, monkeypatch):
@@ -101,12 +108,11 @@ def test_bypass_activity_failure_does_not_block_launch(tmp_path, monkeypatch, ca
 
 
 @pytest.mark.parametrize('change', ['upstream', 'runtime', 'provider', 'model', 'missing_file'])
-def test_resident_route_reuses_binding_and_retires_changed_route(tmp_path, monkeypatch, change):
+def test_resident_route_reuses_binding_and_retires_changed_route(tmp_path, monkeypatch, change, launch):
     from dataclasses import replace
     from looper.agents.llmrec import LlmrecRoute, ROUTES_DIR
-    from tests.test_codex_runtime import _launch
 
-    original = _launch()
+    original = launch
     owner = control.ProxyControl(tmp_path, '', enabled=True)
     monkeypatch.setattr(owner, '_health', AsyncMock(return_value=True))
     monkeypatch.setattr(owner, '_state', lambda: {'port': 1234})
@@ -128,7 +134,9 @@ def test_resident_route_reuses_binding_and_retires_changed_route(tmp_path, monke
         if change == 'upstream':
             resolved = replace(resolved, endpoint=replace(resolved.endpoint, base_url='http://127.0.0.1:2/v1'))
         elif change == 'runtime':
-            profile = replace(profile, runtime=replace(profile.runtime, type='omp'))
+            profile = replace(profile, runtime=replace(profile.runtime, type='api'))
+            resolved = replace(resolved, model=replace(resolved.model, protocol=ApiProtocol.OPENAI_RESPONSES),
+                               endpoint=replace(resolved.endpoint, protocol=ApiProtocol.OPENAI_RESPONSES))
         elif change == 'provider':
             resolved = replace(resolved, provider=replace(resolved.provider, id='prov-other'),
                                endpoint=replace(resolved.endpoint, provider_id='prov-other'),
@@ -156,11 +164,9 @@ def test_resident_route_reuses_binding_and_retires_changed_route(tmp_path, monke
     asyncio.run(body())
 
 
-def test_resident_attach_checks_proxy_before_reusing_route(tmp_path, monkeypatch):
+def test_resident_attach_checks_proxy_before_reusing_route(tmp_path, monkeypatch, launch):
     from looper.agents.llmrec import LlmrecRoute
-    from tests.test_codex_runtime import _launch
 
-    launch = _launch()
     owner = control.ProxyControl(tmp_path, '', enabled=True)
     health = AsyncMock(return_value=True)
     monkeypatch.setattr(owner, '_health', health)
@@ -204,12 +210,10 @@ def test_consult_routes_are_separate_and_end_with_their_records(tmp_path, monkey
 
 
 @pytest.mark.parametrize('source', ['settings', 'provider'])
-def test_reused_route_refreshes_proxy_and_tls_without_losing_binding(tmp_path, monkeypatch, source):
+def test_reused_route_refreshes_proxy_and_tls_without_losing_binding(tmp_path, monkeypatch, source, launch):
     from dataclasses import replace
     from looper.agents.llmrec import ROUTES_DIR
-    from tests.test_codex_runtime import _launch
 
-    launch = _launch()
     owner = control.ProxyControl(tmp_path, '', enabled=True)
     monkeypatch.setattr(owner, '_health', AsyncMock(return_value=True))
     monkeypatch.setattr(owner, '_state', lambda: {'port': 1234})

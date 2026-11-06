@@ -13,9 +13,9 @@ import pytest
 
 from fake_claude import fake_claude
 from tests.db_support import DSN, run_db
-from tests.fake_model_api import FakeModelAPI, ResponseScript, text_events
+from tests.fake_model_api import FakeModelAPI, ResponseScript
 from tests.test_llmrec_worker_db import _EVENTS
-from tests.test_profile_registry_db import _ok, _project_of, _runtime
+from tests.test_profile_registry_db import _ok, _project_of
 from tests.test_provider_binding_db import KEY, _profile, _provider, _task
 
 pytestmark = pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
@@ -50,13 +50,12 @@ async def _recording(pool, root, *, enabled=True, include_oauth=False):
         await asyncio.gather(writer, return_exceptions=True)
 
 
-def _resident_executable(root: Path, runtime_type: str) -> str:
-    if runtime_type == "claude-code":
-        from tests.agent_launch_parity import _CLAUDE
+def _resident_executable(root: Path) -> str:
+    from tests.agent_launch_parity import _CLAUDE
 
-        body = _CLAUDE.format(out=str(root / "launch.json"))
-        body = body.replace("import json, os, sys", "import json, os, sys, urllib.request")
-        request = """
+    body = _CLAUDE.format(out=str(root / "launch.json"))
+    body = body.replace("import json, os, sys", "import json, os, sys, urllib.request")
+    request = """
     body = json.dumps({'model': 'haiku', 'system': 'resident test system',
                        'messages': [{'role': 'user', 'content': message['message']['content']}],
                        'stream': True}).encode()
@@ -65,34 +64,13 @@ def _resident_executable(root: Path, runtime_type: str) -> str:
     with urllib.request.urlopen(req, timeout=10) as response:
         response.read()
 """
-        body = body.replace("    mid = message.get('uuid')", request + "    mid = message.get('uuid')")
-        return fake_claude(root / "claude", body)
-    return fake_claude(root / "codex", """
-import json, os, pathlib, sys, tomllib, urllib.request
-if '--version' in sys.argv:
-    print('codex-cli 0.162.0')
-    sys.exit(0)
-prompt = sys.stdin.read()
-config = tomllib.loads((pathlib.Path(os.environ['CODEX_HOME']) / 'config.toml').read_text())
-base = config['model_providers']['looper']['base_url']
-body = json.dumps({'model': 'test-model', 'input': prompt, 'stream': True}).encode()
-req = urllib.request.Request(base.rstrip('/') + '/responses', body,
-    {'content-type': 'application/json', 'authorization': 'Bearer ' + os.environ['LOOPER_PROVIDER_API_KEY']})
-with urllib.request.urlopen(req, timeout=10) as response:
-    response.read()
-for event in [
-    {'type': 'thread.started', 'thread_id': 'resident-test-session'},
-    {'type': 'item.completed', 'item': {'id': 'answer', 'type': 'agent_message', 'text': 'ok'}},
-    {'type': 'turn.completed', 'usage': {'input_tokens': 3, 'output_tokens': 2}},
-]:
-    print(json.dumps(event), flush=True)
-""")
+    body = body.replace("    mid = message.get('uuid')", request + "    mid = message.get('uuid')")
+    return fake_claude(root / "claude", body)
 
 
 @pytest.mark.parametrize("role", ["manager", "planner"])
-@pytest.mark.parametrize("runtime_type", ["claude-code", "codex"])
 def test_resident_turns_keep_the_route_signature_and_between_turn_attribution(
-    monkeypatch, tmp_path, role, runtime_type,
+    monkeypatch, tmp_path, role,
 ):
     from looper.agents.bus import MessageBus
     from looper.agents.llmrec import LlmrecRoute, ROUTES_DIR, RouteFile
@@ -102,17 +80,12 @@ def test_resident_turns_keep_the_route_signature_and_between_turn_attribution(
     from looper.db import llm_requests
 
     async def body(pool):
-        events = _EVENTS if runtime_type == "claude-code" else text_events("ok")
-        scripts = [ResponseScript(events=events) for _ in range(3)]
+        scripts = [ResponseScript(events=_EVENTS) for _ in range(3)]
         async with FakeModelAPI(scripts, api_key=KEY) as upstream:
-            base = upstream.base_url.removesuffix("/v1") if runtime_type == "claude-code" else upstream.base_url
-            executable = _resident_executable(tmp_path, runtime_type)
-            runtime_id = "rt-claude-code" if runtime_type == "claude-code" else await _runtime(
-                runtime_type, executable=executable)
-            protocol = "anthropic-messages" if runtime_type == "claude-code" else "openai-responses"
-            provider = await _provider(base_url=base, protocol=protocol)
-            profile = (await _profile(provider, "haiku" if runtime_type == "claude-code" else "test-model",
-                                      protocol=protocol, runtime_id=runtime_id))["profile"]["profile_id"]
+            base = upstream.base_url.removesuffix("/v1")
+            executable = _resident_executable(tmp_path)
+            provider = await _provider(base_url=base)
+            profile = (await _profile(provider, "haiku"))["profile"]["profile_id"]
             await _ok("PUT", f"/api/agent-settings/roles/{role}", {"profile_id": profile})
             task = await _task(tmp_path)
             work = tmp_path / "w"
@@ -151,17 +124,15 @@ def test_resident_turns_keep_the_route_signature_and_between_turn_attribution(
                             route = RouteFile.read(route_path)
                             assert route.record_id is None and route.last_record_id is not None
                             assert route.ended_at is None
-                            endpoint = "/v1/messages" if runtime_type == "claude-code" else "/responses"
                             async with httpx.AsyncClient(trust_env=False, timeout=10) as client:
-                                response = await client.post(routes[0].url + endpoint,
+                                response = await client.post(routes[0].url + "/v1/messages",
                                     headers={"authorization": f"Bearer {KEY}"},
                                     json={"model": "haiku", "messages": [{"role": "user", "content": "between"}],
                                           "stream": True})
                                 response.raise_for_status()
                     assert signatures[0] == signatures[1]
                     assert routes[0] == routes[1]
-                    if runtime_type == "claude-code":
-                        assert pids[0] is not None and pids[0] == pids[1]
+                    assert pids[0] is not None and pids[0] == pids[1]
                     await proxy.close()
                     await sink.close(timeout=5)
                     records = await pool.fetch("SELECT id, metadata FROM llm_records WHERE agent_id=$1 ORDER BY id",
@@ -222,7 +193,7 @@ def test_claude_resident_restarts_once_when_recording_route_changes(monkeypatch,
 
     async def body(pool):
         async with FakeModelAPI([ResponseScript(events=_EVENTS) for _ in range(3)], api_key=KEY) as upstream:
-            executable = _resident_executable(tmp_path, "claude-code")
+            executable = _resident_executable(tmp_path)
             provider = await _provider(base_url=upstream.base_url.removesuffix("/v1"))
             profile = (await _profile(provider, "haiku"))["profile"]["profile_id"]
             await _ok("PUT", f"/api/agent-settings/roles/{role}", {"profile_id": profile})

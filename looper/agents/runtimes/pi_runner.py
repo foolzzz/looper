@@ -12,13 +12,12 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from ... import child_env
-from ..llmrec import LlmrecRoute, no_proxy
 from ..agent_settings import AgentType
 from ..system_prompt_mode import SystemPromptMode
 from . import ADAPTERS, PromptBlock, RuntimeUnsupported, instructions, runtime_prompt_text
 from .pi import (
     API_NAMES, KEY_ENV, PiRuntime, _isolated_env, _private_dir, _write_private,
-    _session_file, provider_api, recording_chat_compat, runtime_notes,
+    _session_file, provider_api, runtime_notes,
 )
 from .channel import Fork
 from .runner.channel import RunnerChannel
@@ -69,9 +68,8 @@ class PiRunnerRuntime(PiRuntime):
         if launch.profile.provider.env:
             raise RuntimeUnsupported(_PROVIDER_ENV)
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
-        env = {**_isolated_env({**child_env.inherited(), **dict(launch.env)}),
-               KEY_ENV: dict(binding.env)[KEY_ENV]}
-        return no_proxy(env) if isinstance(launch.llmrec, LlmrecRoute) else env
+        return {**_isolated_env({**child_env.inherited(), **dict(launch.env)}),
+                KEY_ENV: dict(binding.env)[KEY_ENV]}
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         if launch.role not in _ROLES:
@@ -103,11 +101,9 @@ class PiRunnerRuntime(PiRuntime):
         protocol = next(protocol for protocol, name in API_NAMES if name == provider_api(provider))
         return Descriptor(
             kind="pi", role=launch.role.value, provider_id=provider.id, protocol=protocol,
-            base_url=launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else provider.base_url,
-            model=launch.model, effort=launch.effort,
+            base_url=provider.base_url, model=launch.model, effort=launch.effort,
             context_window=model.context_window, system_prompt_file=str(prompt_path),
             reasoning=model.efforts != (),
-            model_compat=recording_chat_compat(launch),
             system_prompt_mode="replace" if launch.system_prompt_mode is SystemPromptMode.REPLACE else "append",
             builtin=("read", "grep", "find", "ls") if launch.read_only else ("read", "bash", "edit", "write"),
             add_dirs=(*launch.knowledge.add_dirs, *launch.read_dirs), read_only=launch.read_only,

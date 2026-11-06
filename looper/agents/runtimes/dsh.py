@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import uuid4
 
 from ... import child_env
-from ..llmrec import LlmrecRoute, no_proxy
 from ..run_usage import Usage
 from . import (
     ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ResidentTransport, RunCost,
@@ -352,11 +351,6 @@ class DshRuntime(RuntimeAdapter):
 
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
         return bind_provider(provider, model, effort)
-
-    def llmrec_upstream(self, launch: Launch) -> str | None:
-        base_url = validate_provider(launch.profile.provider, launch.model, launch.effort).base_url
-        # DSH adds /v1 to the recording route URL; keep it only once upstream.
-        return base_url.rstrip("/").removesuffix("/v1")
 
     def isolation_args(self, cwd: str | Path) -> list[str]:
         return []  # Isolation is the command's private paths and immutable patch.
@@ -754,7 +748,6 @@ def _root_only_consult(launch: Launch) -> bool:
 def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
     """Complete rc.2 configs: a patch replaces each config, rather than merging its fields."""
     policy = validate_provider(launch.profile.provider, launch.model, launch.effort)
-    base_url = launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else policy.base_url
     search = _web_search(launch) and not _root_only_consult(launch)
     catalog = materialize(launch.library, launch.profile.runtime.executable or "dsh")
     disabled = ("hmr", "settings", "config-editor", "plugin-manager", "tool-plugin-manager", "credentials",
@@ -762,7 +755,7 @@ def _launch_patch(launch: Launch, cwd: str | Path) -> list[dict[str, Any]]:
                 "session-log-deepseek", "plugin-package-inventory-deepseek", "session-title-llm", "agent-instructions")
     config = {
         "agent-default-model": {"provider": policy.route, "model": policy.model},
-        "llm-deepseek": {"apiKeyEnv": KEY_ENV, "baseURL": base_url, "reasoningEffort": policy.effort,
+        "llm-deepseek": {"apiKeyEnv": KEY_ENV, "baseURL": policy.base_url, "reasoningEffort": policy.effort,
                          "models": [{"id": policy.model}]},
         "tools": {"mode": "native"},
         "sandbox-policy": {"mode": "danger-full-access", "workspaceRoot": str(Path(cwd).absolute())},
@@ -1094,9 +1087,8 @@ def _launch_environment(launch: Launch) -> dict[str, str]:
     visible = _external_environment({**child_env.inherited(), **dict(launch.env)})
     mcp = mcp_config(launch.library, role=launch.role.value if launch.role else None,
                      read_only=launch.read_only, consult=launch.consult)
-    env = {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
-           **(mcp.env if mcp else {})}
-    return no_proxy(env) if isinstance(launch.llmrec, LlmrecRoute) else env
+    return {**{k: v for k, v in visible.items() if k not in binding.unset}, **dict(binding.env),
+            **(mcp.env if mcp else {})}
 
 
 def _private_dir(directory: Path, *, root: Path) -> None:

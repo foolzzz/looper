@@ -12,7 +12,6 @@ import subprocess
 from typing import TYPE_CHECKING, Any
 
 from ... import child_env
-from ..llmrec import LlmrecRoute, no_proxy
 from ..agent_settings import AgentType
 from ..library import ItemKind
 from ..profile_registry import RegistryError
@@ -76,10 +75,9 @@ class DshRunnerRuntime(DshRuntime):
         if dsh._web_search(launch):
             raise RuntimeUnsupported("the DSH runner has no web search; unset DSH_ALLOW_WEB_SEARCH or use the CLI path")
         dsh.bind_provider(provider, launch.model, launch.effort)
-        env = {**{k: v for k, v in dsh._external_environment(
+        return {**{k: v for k, v in dsh._external_environment(
                     {**child_env.inherited(), **dict(launch.env)}).items()
-                  if not k.startswith(("LOOPER_", "LOOPX_"))}, KEY_ENV: provider.api_key}
-        return no_proxy(env) if isinstance(launch.llmrec, LlmrecRoute) else env
+                   if not k.startswith(("LOOPER_", "LOOPX_"))}, KEY_ENV: provider.api_key}
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         if launch.role not in _ROLES:
@@ -108,8 +106,7 @@ class DshRunnerRuntime(DshRuntime):
         policy = dsh.validate_provider(provider, launch.model, launch.effort)
         return Descriptor(
             kind="dsh", role=launch.role.value, provider_id=provider.id, protocol=ApiProtocol.ANTHROPIC_MESSAGES,
-            base_url=launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else policy.base_url,
-            model=launch.model, effort=policy.effort,
+            base_url=policy.base_url, model=launch.model, effort=policy.effort,
             context_window=launch.settings.resolved_model.model.context_window, system_prompt_file=str(prompt_path),
             reasoning=True, system_prompt_mode="append",
             builtin=READ_ONLY_TOOLS if launch.read_only else RUN_TOOLS,

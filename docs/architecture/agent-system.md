@@ -3431,24 +3431,35 @@ So:
 ### Model request recording (`llmrec`)
 
 `looper/agents/llmrec` records model HTTP exchanges through a loopback reverse
-proxy for covered launches of every role: Manager, Planner, Worker, Reviewer
-and consult. API-key runs are eligible when recording is enabled; Claude
-subscription runs also require the OAuth opt-in.
+proxy for native Claude Code launches of every role: Manager, Planner, Worker,
+Reviewer and consult, including autonomous and handoff turns. The in-process
+API runtime is also recorded. Claude Code API-key runs and API-runtime runs
+are eligible when recording is enabled; Claude subscription runs also require
+the OAuth opt-in.
 
 | Runtime | API key | Login | Endpoint and coverage |
 |---|---|---|---|
 | Claude Code | Yes, official and compatible providers | Yes, with the Claude subscription opt-in | `ANTHROPIC_BASE_URL`; subagents, in-process teammates, background models and compaction requests share the route. |
-| Codex | Yes | No | Generated provider `base_url`; ChatGPT login requires an HTTPS origin and refuses the loopback HTTP workspace origin (verified on the real CLI path). |
-| OMP | Yes | Not applicable | Generated `models.yml` provider `baseUrl`. |
-| Pi CLI / runner | Yes | Not applicable | Generated `models.json` provider `baseUrl` or runner descriptor `base_url`. |
-| DSH CLI / runner | Yes | Not applicable | Generated provider `baseURL` or runner descriptor `base_url`. |
+| Codex | No | No | Picks request details from the endpoint URL; proxy routing would change its requests. |
+| OMP | No | Not applicable | Picks request details from the endpoint URL; proxy routing would change its requests. |
+| Pi CLI / runner | No | Not applicable | Picks request details from the endpoint URL; proxy routing would change its requests. |
+| DSH CLI / runner | No | Not applicable | Picks request details from the endpoint URL; proxy routing would change its requests. |
 | API runtime | Yes | Not applicable | `LOOPER_LLMREC_BASE_URL` overrides the session target; descriptor and recorded provider host retain the real upstream. |
 | Grok | Not applicable | No | No known endpoint override. |
 | Cursor Agent | Not applicable | No | Cursor's servers make the model requests. |
 
-TTADK launchers are excluded because TTADK manages its own provider. Every
-excluded launch has `llmrec.state=skipped`, `reason=not_covered` and a detail
-explaining its runtime/authentication limitation. This does not prevent the run.
+Codex, OMP, Pi and DSH keep their original launch configuration and environment
+with recording on or off. Their URL-based provider detection controls request
+fields such as `store`, token limits and reasoning formats, as well as `/v1`
+handling and Azure detection; replacing the URL with loopback would break
+compatible providers. Their runs are marked `skipped/not_covered` with detail
+`<runtime> picks request details from the endpoint URL; recording through the
+proxy would change its requests` (`pi` and `dsh` also identify their runners).
+
+TTADK launchers are excluded because TTADK manages its own provider. When
+recording is enabled, every excluded launch has `llmrec.state=skipped`,
+`reason=not_covered` and a detail explaining its runtime/authentication
+limitation. This does not prevent the run.
 
 - **Settings and access.** `llmrec.enabled` and `llmrec.include_oauth` are
   both off by default. Settings → Request recording and the operator-only
@@ -3470,23 +3481,19 @@ explaining its runtime/authentication limitation. This does not prevent the run.
   Requests **between turns**, including a teammate still running after the lead
   finishes or an autonomous turn's first request before binding, have no
   `record_id` and retain the preceding `after_record_id`; they are never silently
-  assigned to the following turn. Content-addressed Codex, OMP and Pi homes are
-  generated per route and reclaimed by their existing idle cleanup. Routing is
-  kept out of provider bindings, so `binding_sha256` still describes the actual
-  provider. Every routed child bypasses environment proxies for `127.0.0.1`.
+  assigned to the following turn. Routing is kept out of provider bindings,
+  so `binding_sha256` still describes the actual provider. Every routed child bypasses environment proxies for `127.0.0.1`.
 - **Subagents and teammates.** Covered launches pass the route through their
   shared environment, including Claude Code's in-process teammates and subagents;
   their model requests are recorded under the lead's currently bound turn or
   with `after_record_id` between turns. The real Claude subscription CLI path
   has confirmed loopback forwarding. A resident Manager teammate request with
   a distinct system prompt has not yet been verified on the real path; the
-  environment propagation alone is not that evidence. Installed Codex, OMP and Pi
-  Workers have each recorded their real CLI request through the proxy to a local
-  synthetic Responses provider. On isolated real `serve` paths with Codex, OMP
-  and Pi CLI, two Manager turns and two Planner turns each reused their role's
-  route, a Worker used its own route, and three generated run homes matched those
-  three routes. Disabling
-  recording left the following Manager record without an `llmrec` metadata key.
+  environment propagation alone is not that evidence. Tests with a local
+  synthetic provider cover Claude Code Manager and Planner route reuse and turn
+  binding, Worker and Reviewer requests, consults, and API-runtime Manager
+  requests, handoffs and autonomous turns. Disabling recording leaves subsequent
+  runs without an `llmrec` metadata key.
 - **Recorded content.** Each exchange includes its method, path with redacted
   query parameters, redacted headers, request JSON (system prompt, messages, tools and tool results),
   assembled JSON/SSE response, usage, status, timing and failure or capture

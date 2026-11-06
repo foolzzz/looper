@@ -35,7 +35,6 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlsplit
 
 from ... import child_env
-from ..llmrec import LlmrecRoute, no_proxy
 from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
@@ -46,7 +45,6 @@ from .channel import RunChannel
 from .instructions import Delivery, InstructionFile
 from .per_turn import PerTurnSession, session_dir_name
 from .pricing import usage_event
-from .runner.protocol import PiModelCompat
 
 if TYPE_CHECKING:
     from ..agent_settings import Launch
@@ -223,12 +221,8 @@ class PiRuntime(RuntimeAdapter):
         _check_explicit_env(launch.env)
         visible = {**child_env.inherited(), **dict(launch.env), **dict(binding.env)}
         # HOME and the two directory bindings need the prompt/session paths; run_command sets them via env.
-        env = {**_isolated_env(visible), KEY_ENV: dict(binding.env)[KEY_ENV], **_PI_ENV,
-               **bridge_env(launch.library)}
-        return no_proxy(env) if isinstance(launch.llmrec, LlmrecRoute) else env
-
-    def llmrec_upstream(self, launch: Launch) -> str | None:
-        return launch.profile.provider.base_url
+        return {**_isolated_env(visible), KEY_ENV: dict(binding.env)[KEY_ENV], **_PI_ENV,
+                **bridge_env(launch.library)}
 
     def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                          max_turns: int = 0) -> list[str]:
@@ -744,22 +738,6 @@ def _check_provider(provider: ProviderSpec, model: str) -> str:
     return api
 
 
-def recording_chat_compat(launch: Launch) -> PiModelCompat | None:
-    """Freeze Pi 1.3's DeepSeek/Moonshot URL detection before routing through loopback."""
-    if not isinstance(launch.llmrec, LlmrecRoute) or provider_api(launch.profile.provider) != "openai-completions":
-        return None
-    # Match Pi's detectCompat: provider is always "looper", so only the original URL identifies these APIs.
-    base_url = launch.profile.provider.base_url
-    deepseek = "deepseek.com" in base_url.lower()
-    moonshot = "api.moonshot." in base_url
-    if not deepseek and not moonshot:
-        return None
-    return {"supportsStore": False, "supportsDeveloperRole": False,
-            "supportsReasoningEffort": not moonshot, "maxTokensField": "max_tokens",
-            "thinkingFormat": "deepseek" if deepseek else "openai",
-            "requiresReasoningContentOnAssistantMessages": deepseek}
-
-
 def models_json(launch: Launch) -> dict[str, Any]:
     """The private models.json, containing only the chosen model and an interpolated key reference.
 
@@ -780,10 +758,7 @@ def models_json(launch: Launch) -> dict[str, Any]:
         # pi 1.3's openai-responses getCompat/convertResponsesTools (also checked in request serialization):
         # the default omits strict; this sends strict:false without making optional parameters required.
         model["compat"] = {"supportsStrictMode": True}
-    elif (compat := recording_chat_compat(launch)) is not None:
-        model["compat"] = compat
-    base_url = launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else provider.base_url
-    return {"providers": {PROVIDER_ID: {"baseUrl": base_url, "apiKey": f"${KEY_ENV}",
+    return {"providers": {PROVIDER_ID: {"baseUrl": provider.base_url, "apiKey": f"${KEY_ENV}",
                                         "api": api, "models": [model]}}}
 
 
