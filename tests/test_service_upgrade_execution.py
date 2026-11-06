@@ -145,6 +145,19 @@ def report(deployment):
     return json.loads((deployment.root / "logs/serve.log").read_text().splitlines()[-1])
 
 
+@pytest.mark.parametrize("startup_steps", [None, {"imports": 1.3, "pool": 0.1, "total": 2.6}])
+def test_upgrade_report_copies_startup_steps_when_available(deployment, startup_steps):
+    if startup_steps is not None:
+        deployment.responses.status["startup_steps"] = startup_steps
+    assert cli.main(["service", "upgrade"]) == 0
+    data = report(deployment)
+    assert data["status"] == "ok"
+    if startup_steps is None:
+        assert "startup_steps" not in data
+    else:
+        assert data["startup_steps"] == startup_steps
+
+
 @pytest.mark.parametrize("name,value", [
     ("PYTHONPATH", "other"), ("GIT_DIR", "other"),
     *((name, "") for name in service._GIT_REPOSITORY_OVERRIDES),

@@ -27,7 +27,7 @@ import logging
 import os
 import signal
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -63,6 +63,26 @@ from .tiers.task import TaskRouter
 from .tiers.worker import WorkerConfig, WorkerPool
 
 logger = logging.getLogger(__name__)
+
+
+class _StartupSteps:
+    """Elapsed seconds in execution order; only entered steps are recorded."""
+
+    def __init__(self, started_at: float) -> None:
+        self.started_at = started_at
+        self.steps: dict[str, float] = {"imports": time.monotonic() - started_at}
+
+    @contextlib.contextmanager
+    def measure(self, name: str) -> Iterator[None]:
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            self.steps[name] = time.monotonic() - started
+
+    def finish(self) -> str:
+        self.steps["total"] = time.monotonic() - self.started_at
+        return " ".join(f"{name}={seconds:.1f}" for name, seconds in self.steps.items())
 
 
 class StartupCheckFailed(RuntimeError):
@@ -193,7 +213,7 @@ async def _enabled_bot_rows() -> list[dict[str, Any]]:
 
 async def _register_bots(registry: ChannelRegistry, rows: list[dict[str, Any]], runtime_root: Path,
                          manager_running: Callable[[str], bool], channel_types: tuple[str, ...],
-                         *, stop_chat: ChatStop | None = None) -> None:
+                         *, stop_chat: ChatStop | None = None, startup: _StartupSteps | None = None) -> None:
     """Build and register the adapter of each row of ``channel_types``; one that fails to start leaves the rest.
 
     A lark-cli row's app is known for sure only once its adapter asks lark-cli (``_enabled_bot_rows`` may not have
@@ -206,26 +226,27 @@ async def _register_bots(registry: ChannelRegistry, rows: list[dict[str, Any]], 
     for row in rows:
         if row["channel_type"] not in channel_types:
             continue
-        kwargs: dict[str, Any] = {"channel_id": row["channel_id"], "manager_id": row.get("manager_id") or "manager",
-                                  "manager_running": manager_running, "resolve_chat": registry.resolve_chat,
-                                  "stop_chat": stop_chat}
-        adapter: ChannelAdapter | None
-        found: list[str] = []
-        if row["channel_type"] == "lark":
-            def lark_same_bot_as(app_id: str, row: dict[str, Any] = row) -> str | None:
-                found.append(app_id)
-                return same_bot_as(row, app_id)
+        with startup.measure(f"channel:{row['channel_id']}") if startup else contextlib.nullcontext():
+            kwargs: dict[str, Any] = {"channel_id": row["channel_id"], "manager_id": row.get("manager_id") or "manager",
+                                      "manager_running": manager_running, "resolve_chat": registry.resolve_chat,
+                                      "stop_chat": stop_chat}
+            adapter: ChannelAdapter | None
+            found: list[str] = []
+            if row["channel_type"] == "lark":
+                def lark_same_bot_as(app_id: str, row: dict[str, Any] = row) -> str | None:
+                    found.append(app_id)
+                    return same_bot_as(row, app_id)
 
-            adapter = await _lark_adapter(row["config"], runtime_root, same_bot_as=lark_same_bot_as, **kwargs)
-        elif (earlier := same_bot_as(row, row.get("app_id"))) is not None:
-            logger.error("%s not started: it is the same bot as %s", row["channel_id"], earlier)
-            continue
-        elif row["channel_type"] == "telegram":
-            adapter = _telegram_adapter_from_config(row["config"], row["secret"], **kwargs)
-        else:
-            adapter = await _lark_bot_adapter(row["config"], row["secret"], runtime_root, **kwargs)
-        if adapter is not None and await _register_optional_channel(registry, adapter):
-            started.append({**row, "app_id": found[0] if found else row.get("app_id")})
+                adapter = await _lark_adapter(row["config"], runtime_root, same_bot_as=lark_same_bot_as, **kwargs)
+            elif (earlier := same_bot_as(row, row.get("app_id"))) is not None:
+                logger.error("%s not started: it is the same bot as %s", row["channel_id"], earlier)
+                continue
+            elif row["channel_type"] == "telegram":
+                adapter = _telegram_adapter_from_config(row["config"], row["secret"], **kwargs)
+            else:
+                adapter = await _lark_bot_adapter(row["config"], row["secret"], runtime_root, **kwargs)
+            if adapter is not None and await _register_optional_channel(registry, adapter):
+                started.append({**row, "app_id": found[0] if found else row.get("app_id")})
 
 
 async def seed_channel_configs(pool: Any = None) -> None:
@@ -571,31 +592,36 @@ async def _run_agent_system_owned(
     dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
     operator_notes.configure_root(ops.operator_notes_root)
     projects.configure_root(ops.projects_root)
+    from .. import _PROCESS_STARTED_AT
+    startup = _StartupSteps(_PROCESS_STARTED_AT)
     if ops.projects_root:
         logger.info("projects root=%s", ops.projects_root)
     else:
         logger.info("projects root unset")
 
-    from . import operator_auth
-    try:
-        operator_token = operator_auth.ensure_token(runtime_root)
-    except operator_auth.OperatorTokenError as exc:
-        raise StartupCheckFailed(str(exc)) from None
+    with startup.measure("operator_token"):
+        from . import operator_auth
+        try:
+            operator_token = operator_auth.ensure_token(runtime_root)
+        except operator_auth.OperatorTokenError as exc:
+            raise StartupCheckFailed(str(exc)) from None
 
     dsn = ops.database_url
-    database_check = await self_check.check_database(dsn)
+    with startup.measure("database_check"):
+        database_check = await self_check.check_database(dsn)
     if database_check.status != self_check.OK:
         raise StartupCheckFailed(self_check.format_checks([database_check]))
     fence = Fence(exit_now=exit_now)
     lease = None
     advisory_checks: asyncio.Task[None] | None = None
     if ops.keeper_mode is KeeperMode.ON:
-        try:
-            lease = await ControlPlaneLease.acquire(dsn, on_lost=fence.lost)
-        except LockHeld as exc:
-            raise StartupCheckFailed(
-                f"another looper serve already runs on this database: {exc.holder.describe()}. "
-                "Stop it first: one database runs one control plane.") from None
+        with startup.measure("lease"):
+            try:
+                lease = await ControlPlaneLease.acquire(dsn, on_lost=fence.lost)
+            except LockHeld as exc:
+                raise StartupCheckFailed(
+                    f"another looper serve already runs on this database: {exc.holder.describe()}. "
+                    "Stop it first: one database runs one control plane.") from None
     try:
         if ops.keeper_mode is KeeperMode.ON:
             n = len(str(runtime_root / keeper.RUNS_DIR / ("reviewer-" + "0" * 12) / keeper.SOCKET).encode())
@@ -603,231 +629,256 @@ async def _run_agent_system_owned(
                 raise StartupCheckFailed(
                     f"the runtime root is too long for keeper sockets ({n} > 103 bytes): "
                     'use a shorter --runtime-root, or set [agent_host] keeper = "off"')
-        pool = await init_pool(dsn)
-        await _back_up_before_schema_change(pool, ops, runtime_root, skip_backup=skip_backup)
-        await ensure_schema(pool)
+        with startup.measure("pool"):
+            pool = await init_pool(dsn)
+        with startup.measure("schema"):
+            await _back_up_before_schema_change(pool, ops, runtime_root, skip_backup=skip_backup)
+            await ensure_schema(pool)
         if lease is not None:
-            epoch = await lease.bump_epoch()
+            with startup.measure("epoch"):
+                epoch = await lease.bump_epoch()
             logger.info("control plane epoch=%d", epoch)
-        try:
-            await scheduler_settings.load()
-            await waits.load()
-            await chat_settings.load()
-        except ValueError as exc:
-            raise StartupCheckFailed(str(exc)) from None
+        with startup.measure("settings"):
+            try:
+                await scheduler_settings.load()
+                await waits.load()
+                await chat_settings.load()
+            except ValueError as exc:
+                raise StartupCheckFailed(str(exc)) from None
 
-        await seed_role_configs(pool)
-        await seed_channel_configs(pool)
+        with startup.measure("seed_configs"):
+            await seed_role_configs(pool)
+            await seed_channel_configs(pool)
 
         # A built-in runtime for each other runtime type this machine has (Codex or OMP, when on PATH).
-        from .profile_registry import register_found_runtimes
-        try:
-            if found := await register_found_runtimes():
-                logger.info("registered the built-in runtime(s) %s", ", ".join(found))
-        except Exception:
-            logger.warning("could not register the runtimes found on PATH", exc_info=True)
+        with startup.measure("runtimes"):
+            from .profile_registry import register_found_runtimes
+            try:
+                if found := await register_found_runtimes():
+                    logger.info("registered the built-in runtime(s) %s", ", ".join(found))
+            except Exception:
+                logger.warning("could not register the runtimes found on PATH", exc_info=True)
 
         # Before any task resumes or agent launches: end the agents a previous server that crashed or was killed
         # left running, then record this server's.
-        from . import proc_tree
-        try:
-            await proc_tree.sweep(runtime_root)
-        except Exception:
-            logger.exception("could not sweep the agents a previous server left running")
+        with startup.measure("process_sweep"):
+            from . import proc_tree
+            try:
+                await proc_tree.sweep(runtime_root)
+            except Exception:
+                logger.exception("could not sweep the agents a previous server left running")
 
         # The tasks the previous server was running: they carry on once the agents are up, or are stopped now.
-        left_running = await tasks_left_running(pool)
-        from . import kept_dirs
-        try:
-            scan = await kept_dirs.scan_at_start(runtime_root, epoch=epoch if lease is not None else None,
-                                                 resumable=left_running.resumable, pool=pool)
-        except OSError as exc:
-            raise StartupCheckFailed(f"cannot tell whether kept runs are still running: {exc}") from exc
+        with startup.measure("kept_scan"):
+            left_running = await tasks_left_running(pool)
+            from . import kept_dirs
+            try:
+                scan = await kept_dirs.scan_at_start(runtime_root, epoch=epoch if lease is not None else None,
+                                                     resumable=left_running.resumable, pool=pool)
+            except OSError as exc:
+                raise StartupCheckFailed(f"cannot tell whether kept runs are still running: {exc}") from exc
         # The runs the previous server did not see end: nothing runs yet, so every record still running is one.
-        from ..db.llm_records import end_unfinished_records
-        if unfinished := await end_unfinished_records(pool=pool, keep=scan.record_ids):
-            logger.info("ended %d run record(s) a previous server left running as interrupted", unfinished)
+        with startup.measure("end_unfinished_records"):
+            from ..db.llm_records import end_unfinished_records
+            if unfinished := await end_unfinished_records(pool=pool, keep=scan.record_ids):
+                logger.info("ended %d run record(s) a previous server left running as interrupted", unfinished)
 
-        from .llmrec.control import ProxyControl, install
-        control = None
-        try:
-            from ..db import system_settings
-            values = await system_settings.get_settings(["llmrec.enabled", "llmrec.include_oauth"], pool=pool)
-            control = ProxyControl(runtime_root, dsn, enabled=values.get("llmrec.enabled") == "true",
-                                   include_oauth=values.get("llmrec.include_oauth") == "true")
-            install(control)
-            await control.at_start(scan.record_ids)
-        except Exception:
-            logger.warning("request recording could not initialize", exc_info=True)
+        with startup.measure("llmrec"):
+            from .llmrec.control import ProxyControl, install
+            control = None
+            try:
+                from ..db import system_settings
+                values = await system_settings.get_settings(["llmrec.enabled", "llmrec.include_oauth"], pool=pool)
+                control = ProxyControl(runtime_root, dsn, enabled=values.get("llmrec.enabled") == "true",
+                                       include_oauth=values.get("llmrec.include_oauth") == "true")
+                install(control)
+                await control.at_start(scan.record_ids)
+            except Exception:
+                logger.warning("request recording could not initialize", exc_info=True)
 
         # The step worktrees no task keeps any more (after the orphaned tasks stopped: those keep their unmerged ones).
-        from . import step_workspaces
-        try:
-            if swept := await step_workspaces.sweep(runtime_root):
-                logger.info("removed %d step worktree(s) no task keeps", swept)
-        except Exception:
-            logger.exception("could not sweep the step worktrees")
+        with startup.measure("step_worktrees"):
+            from . import step_workspaces
+            try:
+                if swept := await step_workspaces.sweep(runtime_root):
+                    logger.info("removed %d step worktree(s) no task keeps", swept)
+            except Exception:
+                logger.exception("could not sweep the step worktrees")
         # Then the tasks' own worktrees (the step worktrees are of them): those of completed or deleted tasks go, their
         # branches stay.
-        from . import task_workspaces
-        try:
-            if swept := await task_workspaces.sweep(runtime_root):
-                logger.info("removed %d task worktree(s) of tasks that ended", swept)
-        except Exception:
-            logger.exception("could not sweep the task worktrees")
+        with startup.measure("task_worktrees"):
+            from . import task_workspaces
+            try:
+                if swept := await task_workspaces.sweep(runtime_root):
+                    logger.info("removed %d task worktree(s) of tasks that ended", swept)
+            except Exception:
+                logger.exception("could not sweep the task worktrees")
 
         # A Codex or Grok login that forked in a run the previous server did not see end (before the session
         # directories it may be in are reclaimed).
         from .runtimes import codex_login, grok_login
         for login, label in ((codex_login, "Codex"), (grok_login, "Grok")):
-            try:
-                if problem := await login.inspect_at_start(runtime_root):
-                    logger.warning("%s", problem)
-            except Exception:
-                logger.warning("could not inspect the %s homes for a forked login", label, exc_info=True)
+            with startup.measure(f"{label.lower()}_login"):
+                try:
+                    if problem := await login.inspect_at_start(runtime_root):
+                        logger.warning("%s", problem)
+                except Exception:
+                    logger.warning("could not inspect the %s homes for a forked login", label, exc_info=True)
 
         # Before any agent launches: remove the read-only copies of replaced or
         # deleted content that no running process mounts.
-        from .read_only_copies import reclaim_unused
-        await reclaim_unused(runtime_root)
+        with startup.measure("reclaim_unused"):
+            from .read_only_copies import reclaim_unused
+            await reclaim_unused(runtime_root)
         # The sessions the agent room's runs kept (Codex, OMP) of tasks gone or ended over a week ago.
-        from .room import RUN_SESSIONS_KEPT_DAYS, sweep_run_sessions
-        try:
-            from ..db import room as db_room
-            sweep_run_sessions(runtime_root, await db_room.tasks_keeping_sessions(days=RUN_SESSIONS_KEPT_DAYS))
-        except Exception:
-            logger.warning("could not remove the kept sessions of ended tasks", exc_info=True)
+        with startup.measure("run_sessions"):
+            from .room import RUN_SESSIONS_KEPT_DAYS, sweep_run_sessions
+            try:
+                from ..db import room as db_room
+                sweep_run_sessions(runtime_root, await db_room.tasks_keeping_sessions(days=RUN_SESSIONS_KEPT_DAYS))
+            except Exception:
+                logger.warning("could not remove the kept sessions of ended tasks", exc_info=True)
 
         logger.info("database initialised")
 
-        broadcaster = Broadcaster()
+        with startup.measure("agent_setup"):
+            broadcaster = Broadcaster()
 
-        bus = MessageBus(runtime_root=runtime_root)
-        supervisor = AgentSupervisor(bus=bus, runtime_root=runtime_root)
-        if ownership is not None:
-            ownership.push_async_callback(supervisor.stop_all)
-        registry = ChannelRegistry(bus=bus)
+            bus = MessageBus(runtime_root=runtime_root)
+            supervisor = AgentSupervisor(bus=bus, runtime_root=runtime_root)
+            if ownership is not None:
+                ownership.push_async_callback(supervisor.stop_all)
+            registry = ChannelRegistry(bus=bus)
 
         # --- Channel Adapters ---
 
-        web_adapter = WebChannelAdapter(host=host, port=port)
-        await registry.register(web_adapter)
+        with startup.measure("channel:web"):
+            web_adapter = WebChannelAdapter(host=host, port=port)
+            await registry.register(web_adapter)
 
         # Every enabled bot runs as its own adapter (RFC §9.1), read once at startup.
-        bot_rows = await _enabled_bot_rows()
-        lark_enabled = any(r["channel_type"] == "lark" for r in bot_rows)
+        with startup.measure("channel_configs"):
+            bot_rows = await _enabled_bot_rows()
+            lark_enabled = any(r["channel_type"] == "lark" for r in bot_rows)
 
         # --- Agent Tiers ---
 
-        manager_config = ManagerConfig(
-            claude_bin=claude_bin,
-            work_dir=work_dir,
-            http_ready=asyncio.Event(),
-        )
+        with startup.measure("agent_tiers"):
+            manager_config = ManagerConfig(
+                claude_bin=claude_bin,
+                work_dir=work_dir,
+                http_ready=asyncio.Event(),
+            )
 
-        # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
-        # task ends, to record a scheduled run's outcome.
-        drain = DrainState()  # A new control plane always starts serving; drain is never stored.
-        scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url,
-                              runtime_root=runtime_root, drain=drain)
-        # It notes the user gates that have waited for the user for their project's reminder interval; the courier
-        # posts what the gates' discussions say to the chats their tasks came from.
-        gate_reminders = GateReminders()
-        gate_courier = GateCourier(registry.post, dashboard_url=dashboard_url)
-        task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
-                                 on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
-        wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url, drain=drain)
-        supervisor.register(task_router)
+            # It fires the schedules once the agents and the HTTP server are up, and hears from the TaskRouter when a
+            # task ends, to record a scheduled run's outcome.
+            drain = DrainState()  # A new control plane always starts serving; drain is never stored.
+            scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url,
+                                  runtime_root=runtime_root, drain=drain)
+            # It notes the user gates that have waited for the user for their project's reminder interval; the courier
+            # posts what the gates' discussions say to the chats their tasks came from.
+            gate_reminders = GateReminders()
+            gate_courier = GateCourier(registry.post, dashboard_url=dashboard_url)
+            task_router = TaskRouter(runtime_root=runtime_root, broadcaster=broadcaster, claude_bin=claude_bin,
+                                     on_task_end=scheduler.task_ended, dashboard_url=dashboard_url)
+            wait_service = WaitService(bus=bus, has_planner=task_router.has_planner, dashboard_url=dashboard_url, drain=drain)
+            supervisor.register(task_router)
 
-        worker_config = WorkerConfig(claude_bin=claude_bin)
-        worker_pool = WorkerPool(config=worker_config, runtime_root=runtime_root, drain=drain,
-                                 keeper=KeeperSettings(epoch) if lease is not None else None,
-                                 on_stale=lease.lose if lease is not None else None)
-        worker_pool.set_candidates(scan.candidates)
-        worker_pool._ended_at_start.update(scan.ended)
-        if lease is not None:
-            task_router.adopter = worker_pool.adopt
-        fence.worker_pool = worker_pool
-        supervisor.register(worker_pool)
+            worker_config = WorkerConfig(claude_bin=claude_bin)
+            worker_pool = WorkerPool(config=worker_config, runtime_root=runtime_root, drain=drain,
+                                     keeper=KeeperSettings(epoch) if lease is not None else None,
+                                     on_stale=lease.lose if lease is not None else None)
+            worker_pool.set_candidates(scan.candidates)
+            worker_pool._ended_at_start.update(scan.ended)
+            if lease is not None:
+                task_router.adopter = worker_pool.adopt
+            fence.worker_pool = worker_pool
+            supervisor.register(worker_pool)
 
-        # The Manager's platform tools: its MCP server reaches this server with a token made now. Each task's Planner
-        # has its own, with a token for its task made when it starts.
-        from .ops.planner import PlannerOps
-        from .ops.service import Platform
-        from . import managers_api
-        from .managers import ManagerFleet
-        platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=None,
-                            supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
-        tools_ready = asyncio.Event()
-        fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
-                             url=_local_url(host, port), config=manager_config, broadcaster=broadcaster, drain=drain,
-                             tools_ready=tools_ready)
-        if ownership is not None:
-            ownership.push_async_callback(fleet.stop)
-        task_router.manager_running = fleet.is_running
-        await fleet.load()
+            # The Manager's platform tools: its MCP server reaches this server with a token made now. Each task's Planner
+            # has its own, with a token for its task made when it starts.
+            from .ops.planner import PlannerOps
+            from .ops.service import Platform
+            from . import managers_api
+            from .managers import ManagerFleet
+            platform = Platform(bus=bus, task_router=task_router, worker_pool=worker_pool, manager=None,
+                                supervisor=supervisor, scheduler=scheduler, runtime_root=runtime_root)
+            tools_ready = asyncio.Event()
+            fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
+                                 url=_local_url(host, port), config=manager_config, broadcaster=broadcaster, drain=drain,
+                                 tools_ready=tools_ready)
+            if ownership is not None:
+                ownership.push_async_callback(fleet.stop)
+            task_router.manager_running = fleet.is_running
+            await fleet.load()
         # Start receiving only once every enabled Manager is known, so backlog is not lost or sent to a disabled one.
-        await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("telegram",), stop_chat=fleet.stop_chat)
-        await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("lark", "lark_bot"), stop_chat=fleet.stop_chat)
+        await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("telegram",),
+                             stop_chat=fleet.stop_chat, startup=startup)
+        await _register_bots(registry, bot_rows, runtime_root, fleet.is_running, ("lark", "lark_bot"),
+                             stop_chat=fleet.stop_chat, startup=startup)
 
         # Receive and persist backlog before listening. Managers wait for HTTP readiness;
         # advisory checks run afterwards and only warn here and on system/status.
-        checks = [database_check.to_dict(), *(check.to_dict() for group in _pending_advisory_checks() for check in group)]
+        with startup.measure("http_setup"):
+            checks = [database_check.to_dict(), *(check.to_dict() for group in _pending_advisory_checks() for check in group)]
 
-        manager = fleet.default
-        manager_ops = fleet.ops("manager")
-        managers_api.set_change_listener(fleet.apply)
-        platform = dataclasses.replace(platform, manager=manager, managers=fleet)
-        from .ops.clients import ClientOps
-        client_ops = ClientOps(platform)
-        planner_ops = PlannerOps(platform, url=_local_url(host, port), dashboard_url=dashboard_url)
-        task_router.planner_ops = planner_ops
-        # Each task's agent room: its Planner's tools (with its token) and its runs' (each with a token of its own).
-        from .ops.room import RoomOps
-        from .room import RoomService
-        room = RoomService(bus=bus, worker_pool=worker_pool)
-        from .consult import ConsultService
-        consults = ConsultService(room=room, worker_pool=worker_pool, runtime_root=runtime_root, claude_bin=claude_bin,
-                                  drain=drain)
-        drain.add_source(lambda: task_router.drain_waiting())
-        drain.add_source(lambda: scheduler.drain_waiting())
-        drain.add_source(lambda: {"waits": wait_service.drain_waiting(), "consults": consults.drain_waiting()})
-        room.consults = consults
-        planner_ops.room = room
-        room_ops = RoomOps(room, url=_local_url(host, port))
-        worker_pool.room_ops = room_ops
-        for candidate in scan.candidates:
-            if candidate.grant:
-                room_ops.import_pending(candidate.grant)
+            manager = fleet.default
+            manager_ops = fleet.ops("manager")
+            managers_api.set_change_listener(fleet.apply)
+            platform = dataclasses.replace(platform, manager=manager, managers=fleet)
+            from .ops.clients import ClientOps
+            client_ops = ClientOps(platform)
+            planner_ops = PlannerOps(platform, url=_local_url(host, port), dashboard_url=dashboard_url)
+            task_router.planner_ops = planner_ops
+            # Each task's agent room: its Planner's tools (with its token) and its runs' (each with a token of its own).
+            from .ops.room import RoomOps
+            from .room import RoomService
+            room = RoomService(bus=bus, worker_pool=worker_pool)
+            from .consult import ConsultService
+            consults = ConsultService(room=room, worker_pool=worker_pool, runtime_root=runtime_root, claude_bin=claude_bin,
+                                      drain=drain)
+            drain.add_source(lambda: task_router.drain_waiting())
+            drain.add_source(lambda: scheduler.drain_waiting())
+            drain.add_source(lambda: {"waits": wait_service.drain_waiting(), "consults": consults.drain_waiting()})
+            room.consults = consults
+            planner_ops.room = room
+            room_ops = RoomOps(room, url=_local_url(host, port))
+            worker_pool.room_ops = room_ops
+            for candidate in scan.candidates:
+                if candidate.grant:
+                    room_ops.import_pending(candidate.grant)
 
-        # --- HTTP Server ---
+            # --- HTTP Server ---
 
-        http_server = AgentHTTPServer(
-            drain=drain,
-            host=host,
-            port=port,
-            web_adapter=web_adapter,
-            task_router=task_router,
-            supervisor=supervisor,
-            worker_pool=worker_pool,
-            manager=manager,
-            broadcaster=broadcaster,
-            runtime_root=runtime_root,
-            operator_token=operator_token,
-            dashboard_url=dashboard_url,
-            self_checks=checks,
-            claude_bin=claude_bin,
-            scheduler=scheduler,
-            manager_ops=manager_ops,
-            managers=fleet,
-            planner_ops=planner_ops,
-            room_ops=room_ops,
-            client_ops=client_ops,
-            ops_config=ops,
-            channels=registry,
-        )
+            http_server = AgentHTTPServer(
+                drain=drain,
+                host=host,
+                port=port,
+                web_adapter=web_adapter,
+                task_router=task_router,
+                supervisor=supervisor,
+                worker_pool=worker_pool,
+                manager=manager,
+                broadcaster=broadcaster,
+                runtime_root=runtime_root,
+                operator_token=operator_token,
+                dashboard_url=dashboard_url,
+                self_checks=checks,
+                claude_bin=claude_bin,
+                scheduler=scheduler,
+                manager_ops=manager_ops,
+                managers=fleet,
+                planner_ops=planner_ops,
+                room_ops=room_ops,
+                client_ops=client_ops,
+                ops_config=ops,
+                channels=registry,
+                startup_steps=startup.steps,
+            )
         fence.http_server = http_server
-        await http_server.start()
+        with startup.measure("http"):
+            await http_server.start()
+        logger.info("startup steps: %s", startup.finish())
         advisory_checks = asyncio.create_task(_advisory_startup_checks(
             checks, database_check, claude_bin=claude_bin, lark_enabled=lark_enabled,
             projects_root=ops.projects_root), name="advisory-startup-checks")

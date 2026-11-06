@@ -1353,8 +1353,10 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 expected = installer()
                 report["installed_package_version"] = target.version
             start_attempted = True
-            _start_and_wait(mgr, port, log_path, timeout, root)
+            serving = _start_and_wait(mgr, port, log_path, timeout, root)
             restart_started = True
+            if isinstance(serving.status.get("startup_steps"), dict):
+                report["startup_steps"] = serving.status["startup_steps"]
             report["gap_seconds"] = round(host.clock() - gap_started, 3)
             if control_plane:
                 adoption_deadline = host.clock() + 330
