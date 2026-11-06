@@ -22,7 +22,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from urllib.parse import urlsplit
 
@@ -120,7 +119,7 @@ def _running_dashboard(tmp_path, admin_url, *, port=None):
                GROK_HOME=str(home / ".grok"), XDG_CONFIG_HOME=str(home / ".config"))
     with fresh_database(admin_url) as (url, _):
         _seed(url, work)
-        port = port or free_port()
+        port = free_port() if port is None else port
         ops = ops_config.OpsConfig(runtime_root=root, path=root / ops_config.FILE,
                                    database_url=url, port=port, operator_notes_root=str(home / "notes"))
         ops_config.write_private(ops.path, ops_config.render(ops))
@@ -147,14 +146,20 @@ def _running_dashboard(tmp_path, admin_url, *, port=None):
 
 
 @pytest.fixture
-def dashboard_server(tmp_path, database_admin_url, staged_dashboard_dir, request):
-    port = None
+def dashboard_port():
+    port = os.environ.get("LOOPER_DASHBOARD_SMOKE_PORT")
+    return int(port) if port else None
+
+
+@pytest.fixture
+def dashboard_server(tmp_path, database_admin_url, staged_dashboard_dir, dashboard_port, request):
+    port = dashboard_port
     if request.node.originalname == "test_disabled_provider_refuses_manager_turn_and_can_be_enabled_again":
         configured = os.environ.get("LOOPER_PROVIDER_ENABLED_SMOKE_PORT")
-        port = int(configured) if configured else None
+        port = int(configured) if configured else port
     if request.node.originalname == "test_profile_form_chooses_model_protocol_and_enabled_provider":
         configured = os.environ.get("LOOPER_PROFILE_FORM_SMOKE_PORT")
-        port = int(configured) if configured else None
+        port = int(configured) if configured else port
     with _running_dashboard(tmp_path, database_admin_url, port=port) as server:
         yield server
 
@@ -365,7 +370,9 @@ def listing_gateway():
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            status = 200 if self.path == "/v1/models" and self.headers.get("Authorization") == "Bearer test-key" else 401
+            authenticated = (self.headers.get("Authorization") == "Bearer test-key"
+                             or self.headers.get("x-api-key") == "test-key")
+            status = 200 if urlsplit(self.path).path == "/v1/models" and authenticated else 401
             body = json.dumps({"data": [{"id": name} for name in names]}).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -390,6 +397,106 @@ def listing_gateway():
 
 @pytest.mark.installed
 @pytest.mark.parametrize("width", [1280, 768])
+def test_custom_openai_form_and_manual_model_price_defaults(dashboard_page, dashboard_server, listing_gateway, width):
+    from looper.agents.runtimes.pricing import BUILTIN_PRICES, PRICE_FIELDS
+
+    expect = pytest.importorskip("playwright.sync_api").expect
+    page, server = dashboard_page, dashboard_server
+    url, names = listing_gateway
+    account_name = "Custom OpenAI account"
+    page.set_viewport_size({"width": width, "height": 900})
+    _settings(page, server, "providers/new")
+    form = page.get_by_role("form", name="Add a provider", exact=True)
+    form.get_by_label("Name *", exact=True).fill(account_name)
+    form.get_by_role("radio", name="OpenAI", exact=True).check()
+    expect(form.get_by_label("OpenAI APIs it serves", exact=True)).to_have_value("both")
+    form.get_by_label("Base URL *", exact=True).fill(url)
+    form.get_by_label("API key", exact=True).fill("test-key")
+    for selected, path in (("openai-responses", "responses"), ("openai-chat", "chat/completions")):
+        form.get_by_label("OpenAI APIs it serves", exact=True).select_option(selected)
+        expect(form.get_by_text(f"Runs call {url}/{path}; the model list is {url}/models.", exact=True)).to_be_visible()
+        form.get_by_role("button", name="Set a URL per protocol instead", exact=True).click()
+        form.get_by_role("button", name="Describe it by API format instead", exact=True).click()
+        expect(form.get_by_label("OpenAI APIs it serves", exact=True)).to_have_value(selected)
+        expect(form.get_by_label("Base URL *", exact=True)).to_have_value(url)
+    form.get_by_label("OpenAI APIs it serves", exact=True).select_option("both")
+    form.get_by_role("button", name="Set a URL per protocol instead", exact=True).click()
+    form.get_by_label("openai-chat URL", exact=True).fill(url + "/different")
+    form.get_by_role("button", name="Describe it by API format instead", exact=True).click()
+    expect(form.get_by_role("alert")).to_have_text(
+        "This provider uses different URLs per protocol; keep editing it per protocol.")
+    form.get_by_label("openai-chat URL", exact=True).fill(url)
+    form.get_by_role("button", name="Describe it by API format instead", exact=True).click()
+    expect(form.get_by_label("OpenAI APIs it serves", exact=True)).to_have_value("both")
+    form.get_by_role("radio", name="Anthropic", exact=True).check()
+    root = url.removesuffix("/v1")
+    expect(form.get_by_text(f"Runs call {root}/v1/messages; the model list is {root}/v1/models.", exact=True)).to_be_visible()
+    form.get_by_role("radio", name="OpenAI", exact=True).check()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    screenshot = os.environ.get("LOOPER_DASHBOARD_SMOKE_SCREENSHOT")
+    if screenshot:
+        destination = Path(screenshot).resolve()
+        assert destination.is_relative_to(REPO_ROOT / ".local")
+        form.screenshot(path=str(destination.with_stem(f"{destination.stem}-simple-openai-{width}")))
+    with page.expect_response(lambda response: response.url.endswith("/api/v1/provider_accounts/create")) as created:
+        with page.expect_response(lambda response: response.url.endswith("/api/v1/provider_accounts/fetch_models")) as listing:
+            form.get_by_role("button", name="Add provider", exact=True).click()
+    assert created.value.status == 200
+    assert listing.value.status == 200
+    for name in names:
+        expect(form.get_by_role("checkbox", name=name, exact=True)).to_be_visible()
+    registry = server.api.post("/api/v1/registry/view", {})["result"]
+    provider = next(provider for provider in registry["providers"] if provider["name"] == account_name)
+    openai_format = next(format_ for format_ in registry["limits"]["api_formats"] if format_["family"] == "openai")
+    expected_protocols = [entry["protocol"] for entry in openai_format["protocols"]]
+    assert [endpoint["protocol"] for endpoint in created.value.request.post_data_json["endpoints"]] == expected_protocols
+    assert {endpoint["protocol"] for endpoint in provider["endpoints"]} == {"openai-responses", "openai-chat"}
+    assert all(endpoint["base_url"] == url for endpoint in provider["endpoints"])
+    form.get_by_role("button", name="Done", exact=True).click()
+    expect(form).not_to_be_visible()
+    account = _row(page, account_name)
+    account.get_by_role("button", name=f"Models for provider {account_name}", exact=True).click()
+    builtin_name = next(name for name in BUILTIN_PRICES if name.startswith("gpt-") and BUILTIN_PRICES[name].complete)
+    unknown_name = "smoke-unpriced-custom-model"
+    price_labels = ("Input", "Output", "Cache read", "Cache write")
+    for model_name in (unknown_name, builtin_name):
+        account.get_by_role("button", name="Add model", exact=True).click()
+        model_form = page.get_by_role("form", name=f"Add model to {account_name}", exact=True)
+        model_form.get_by_label("Protocol *", exact=True).select_option("openai-chat")
+        model_form.get_by_label("Exact model name *", exact=True).fill(model_name)
+        for label in price_labels:
+            expect(model_form.get_by_label(f"{label} price", exact=True)).to_have_value("")
+        if screenshot and model_name == unknown_name:
+            model_form.screenshot(path=str(destination.with_stem(f"{destination.stem}-add-model-{width}")))
+        with page.expect_response(lambda response: response.url.endswith("/api/v1/models/add_many")) as added:
+            model_form.get_by_role("button", name="Add model", exact=True).click()
+        assert added.value.status == 200
+        result = added.value.json()["result"]
+        assert result["skipped"] == [] and result["warnings"] == []
+        [model] = result["models"]
+        assert model["warnings"] == []
+        expect(model_form).not_to_be_visible()
+        model_row = account.get_by_role("listitem").filter(has=page.get_by_text(model_name, exact=True))
+        for field, label in zip(PRICE_FIELDS, price_labels, strict=True):
+            price = model["prices"][field]
+            if model_name == unknown_name:
+                assert price["effective"] == 0
+                expect(model_row).to_contain_text(f"{label}: 0 (free)")
+            else:
+                expected = getattr(BUILTIN_PRICES[builtin_name], field)
+                assert price["effective"] == expected and price["source"] == "builtin"
+                expect(model_row).to_contain_text(f"{label}: {expected:g} (builtin)")
+        expect(model_row).not_to_contain_text("no full price")
+    stored = server.api.post("/api/v1/registry/view", {})["result"]["models"]
+    stored = {model["name"]: model for model in stored if model["provider_id"] == provider["provider_id"]}
+    assert set(stored) == {unknown_name, builtin_name}
+    assert all(stored[unknown_name]["prices"][field]["effective"] == 0 for field in PRICE_FIELDS)
+    assert all(stored[builtin_name]["prices"][field]["source"] == "builtin" for field in PRICE_FIELDS)
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("width", [1280, 768])
 def test_provider_model_checklist_and_stored_key_failure(dashboard_page, dashboard_server, listing_gateway, width):
     expect = pytest.importorskip("playwright.sync_api").expect
     page, server = dashboard_page, dashboard_server
@@ -398,6 +505,7 @@ def test_provider_model_checklist_and_stored_key_failure(dashboard_page, dashboa
     _settings(page, server, "providers/new")
     form = page.get_by_role("form", name="Add a provider", exact=True)
     form.get_by_label("Name *", exact=True).fill("Gateway account")
+    form.get_by_role("button", name="Set a URL per protocol instead", exact=True).click()
     form.get_by_role("checkbox", name="openai-chat", exact=True).check()
     form.get_by_label("openai-chat URL", exact=True).fill(url)
     form.get_by_label("API key", exact=True).fill("test-key")
@@ -430,7 +538,7 @@ def test_provider_model_checklist_and_stored_key_failure(dashboard_page, dashboa
     for name in names[:2]:
         model_row = account.get_by_role("listitem").filter(has=page.get_by_text(name, exact=True))
         for field in ("Input", "Output", "Cache read", "Cache write"):
-            expect(model_row).to_contain_text(f"{field}: 0 (override)")
+            expect(model_row).to_contain_text(f"{field}: 0 (free)")
     before = server.api.post("/api/v1/ops/models/list", {"provider": provider["provider_id"]})["result"]["models"]
     assert {model["name"] for model in before} == set(names[:2])
     account.get_by_role("button", name="Edit provider Gateway account", exact=True).click()
@@ -452,15 +560,99 @@ def test_provider_model_checklist_and_stored_key_failure(dashboard_page, dashboa
 
 @pytest.mark.installed
 @pytest.mark.parametrize("width", [1280, 768])
-def test_provider_account_actions_preserve_mask_and_refresh(dashboard_page, dashboard_server, width):
+def test_anthropic_provider_edits_preserve_unchanged_url(dashboard_page, dashboard_server, tmp_path, width):
+    expect = pytest.importorskip("playwright.sync_api").expect
+    page, server = dashboard_page, dashboard_server
+    stored_url = "https://example.invalid/v1/"
+
+    async def seed():
+        import asyncpg
+
+        conn = await asyncpg.connect(server.database_url, timeout=5)
+        try:
+            await conn.execute("INSERT INTO llm_providers (id, name, vendor_type, auth) "
+                               "VALUES ('prov-legacy', 'Legacy account', 'custom', 'api_key'); "
+                               "INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url) "
+                               "VALUES ('prov-legacy', 'anthropic-messages', 'https://example.invalid/v1/')")
+            await conn.execute("INSERT INTO llm_provider_secrets (provider_id, api_key) VALUES ('prov-legacy', $1)",
+                               SECRET + "-old")
+        finally:
+            await conn.close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(asyncio.run, seed()).result(timeout=15)
+
+    page.set_viewport_size({"width": width, "height": 900})
+    _settings(page, server, "providers")
+    for name, changes, expected_url in (
+        ("Legacy account", {"Name *": "Renamed account"}, stored_url),
+        ("Renamed account", {"API key": SECRET}, stored_url),
+        ("Renamed account", {"anthropic-messages URL": "https://api.example.com/v1/"}, "https://api.example.com/v1/"),
+    ):
+        _row(page, name).get_by_role("button", name=f"Edit provider {name}", exact=True).click()
+        form = page.get_by_role("form", name=f"Edit provider {name}", exact=True)
+        expect(form.get_by_label("anthropic-messages URL", exact=True)).to_have_attribute(
+            "placeholder", "https://api.example.com")
+        for label, value in changes.items():
+            form.get_by_label(label, exact=True).fill(value)
+        _finish_form(form, "Save")
+        endpoint = next(e for e in _registry_state(server)["endpoints"] if e["provider_id"] == "prov-legacy")
+        assert endpoint["base_url"] == expected_url
+    _row(page, "Renamed account").get_by_role("button", name="Edit provider Renamed account", exact=True).click()
+    form = page.get_by_role("form", name="Edit provider Renamed account", exact=True)
+    expect(form.get_by_label("anthropic-messages URL", exact=True)).to_have_value("https://api.example.com/v1/")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    assert SECRET not in page.content()
+    form.screenshot(path=str(tmp_path / f"anthropic-provider-{width}.png"))
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("width", [1280, 768])
+def test_simple_anthropic_form_normalizes_before_submit(dashboard_page, dashboard_server, listing_gateway, tmp_path, width):
+    expect = pytest.importorskip("playwright.sync_api").expect
+    page, server = dashboard_page, dashboard_server
+    url, _ = listing_gateway
+    root = url.removesuffix("/v1")
+    page.set_viewport_size({"width": width, "height": 900})
+    _settings(page, server, "providers")
+    page.get_by_role("button", name="Add provider", exact=True).click()
+    form = page.get_by_role("form", name="Add a provider")
+    form.get_by_label("Name *", exact=True).fill("Anthropic gateway")
+    form.get_by_label("Base URL *", exact=True).fill(url + "/")
+    form.get_by_role("button", name="Set a URL per protocol instead", exact=True).click()
+    for protocol in ("anthropic-messages", "openai-responses", "openai-chat"):
+        expect(form.get_by_label(f"{protocol} URL", exact=True)).to_have_value(url + "/")
+    for protocol in ("openai-responses", "openai-chat"):
+        form.get_by_role("checkbox", name=protocol, exact=True).uncheck()
+    form.get_by_role("button", name="Describe it by API format instead", exact=True).click()
+    expect(form.get_by_role("radio", name="Anthropic", exact=True)).to_be_checked()
+    expect(form.get_by_text(f"Looper adds /v1/messages itself, so this is saved as {root}.", exact=True)).to_be_visible()
+    form.get_by_label("API key", exact=True).fill("test-key")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    form.screenshot(path=str(tmp_path / f"simple-anthropic-{width}.png"))
+    with page.expect_response(lambda response: response.url.endswith("/api/v1/provider_accounts/create")) as created:
+        form.get_by_role("button", name="Add provider", exact=True).click()
+    assert created.value.status == 200
+    assert created.value.request.post_data_json["endpoints"] == [
+        {"protocol": "anthropic-messages", "base_url": root, "use_runtime_default": False}]
+    provider = next(provider for provider in server.api.post("/api/v1/registry/view", {})["result"]["providers"]
+                    if provider["name"] == "Anthropic gateway")
+    assert provider["endpoints"][0]["base_url"] == root
+    expect(form.get_by_role("checkbox", name="gateway-alpha", exact=True)).to_be_visible()
+
+
+@pytest.mark.installed
+@pytest.mark.parametrize("width", [1280, 768])
+def test_provider_account_actions_preserve_mask_and_refresh(dashboard_page, dashboard_server, listing_gateway, width):
     expect = pytest.importorskip("playwright.sync_api").expect
     page, server = dashboard_page, dashboard_server
     page.set_viewport_size({"width": width, "height": 900})
     _settings(page, server, "providers/new")
     form = page.get_by_role("form", name="Add a provider")
     form.get_by_label("Name *", exact=True).fill(ACCOUNT)
+    form.get_by_role("button", name="Set a URL per protocol instead", exact=True).click()
     form.get_by_role("checkbox", name="openai-chat", exact=True).check()
-    form.get_by_label("openai-chat URL", exact=True).fill("https://example.invalid/v1")
+    form.get_by_label("openai-chat URL", exact=True).fill(listing_gateway[0])
     form.get_by_label("API key", exact=True).fill(SECRET)
     _finish_form(form, "Add provider")
     account = _row(page, ACCOUNT)
@@ -514,10 +706,11 @@ def test_provider_account_actions_preserve_mask_and_refresh(dashboard_page, dash
 
 @pytest.mark.installed
 @pytest.mark.parametrize("width", [1280, 768])
-def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server, tmp_path, width):
+def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server, listing_gateway, tmp_path, width):
     expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
 
     page, server = dashboard_page, dashboard_server
+    gateway_root = listing_gateway[0].removesuffix("/v1")
     page.set_viewport_size({"width": width, "height": 900})
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
@@ -533,9 +726,10 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     name.press("Tab")
     expect(form.get_by_label("Vendor", exact=True)).to_be_focused()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    form.get_by_role("button", name="Set a URL per protocol instead", exact=True).click()
     for protocol in ("anthropic-messages", "openai-chat"):
         form.get_by_role("checkbox", name=protocol, exact=True).check()
-        form.get_by_label(f"{protocol} URL", exact=True).fill(f"https://example.invalid/{protocol}")
+        form.get_by_label(f"{protocol} URL", exact=True).fill(f"{gateway_root}/{protocol}")
     # An invalid endpoint is surfaced by the real HTTP handler; no account is saved.
     form.get_by_label("openai-chat URL", exact=True).fill("not-a-url")
     with page.expect_response(lambda r: r.url.endswith("/api/v1/provider_accounts/create") and r.request.method == "POST") as failed:
@@ -543,7 +737,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     assert failed.value.status == 400
     expect(form.get_by_role("alert")).to_be_visible()
     assert not any(p["name"] == ACCOUNT for p in _registry_state(server)["providers"])
-    form.get_by_label("openai-chat URL", exact=True).fill("https://example.invalid/openai-chat")
+    form.get_by_label("openai-chat URL", exact=True).fill(f"{gateway_root}/openai-chat")
     _finish_form(form, "Add provider")
     account = _row(page, ACCOUNT)
     expect(account).to_contain_text("API key: not set")
@@ -553,7 +747,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
     assert not next(p for p in _registry_state(server)["providers"] if p["id"] == pid)["key_set"]
     assert {(e["protocol"], e["base_url"]) for e in _registry_state(server)["endpoints"]
             if e["provider_id"] == pid} == {
-                (protocol, f"https://example.invalid/{protocol}") for protocol in ("anthropic-messages", "openai-chat")}
+                (protocol, f"{gateway_root}/{protocol}") for protocol in ("anthropic-messages", "openai-chat")}
     account.get_by_role("button", name=f"Models for provider {ACCOUNT}", exact=True).click()
     expect(account).to_contain_text("No models registered")
     assert server.api.post("/api/v1/ops/models/list", {"provider": pid})["result"]["models"] == []
@@ -736,7 +930,7 @@ def test_complete_dashboard_configuration_flow(dashboard_page, dashboard_server,
 
 
 @pytest.mark.installed
-def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboard_page, dashboard_server):
+def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboard_page, dashboard_server, listing_gateway):
     expect = pytest.importorskip("playwright.sync_api", reason="UNTESTED: optional Playwright package missing").expect
 
     page, server = dashboard_page, dashboard_server
@@ -747,8 +941,8 @@ def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboa
     vendor = next(v for v in server.api.post("/api/v1/registry/view", {})["result"]["vendor_types"] if v["vendor_type"] == "deepseek")
     for endpoint in vendor["endpoints"]:
         expect(form.get_by_label(f'{endpoint["protocol"]} URL', exact=True)).to_have_value(endpoint["base_url"])
-        # Saving now lists models; keep this suggestion smoke away from real providers.
-        form.get_by_label(f'{endpoint["protocol"]} URL', exact=True).fill("https://example.invalid/v1")
+        # Fail the automatic listing locally, without depending on external DNS.
+        form.get_by_label(f'{endpoint["protocol"]} URL', exact=True).fill(listing_gateway[0])
     _finish_form(form, "Add provider")
     provider = next(p for p in server.api.post("/api/v1/provider_accounts/list", {})["result"]["providers"] if p["name"] == "Smoke vendor account")
     assert provider["model_count"] == 0
@@ -767,7 +961,7 @@ def test_vendor_suggestions_are_explicit_and_invalid_inputs_do_not_write(dashboa
     before = _registry_state(server)
     for value in ("-1", "not-a-number"):
         form.get_by_label("Context window", exact=True).fill(value)
-        with page.expect_response(lambda r: r.url.endswith("/api/v1/ops/models/create") and r.request.method == "POST") as invalid:
+        with page.expect_response(lambda r: r.url.endswith("/api/v1/models/add_many") and r.request.method == "POST") as invalid:
             form.get_by_role("button", name="Add model", exact=True).click()
         assert invalid.value.status == 400
         expect(form.get_by_role("alert")).to_be_visible()

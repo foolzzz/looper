@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from datetime import datetime, timezone
 import json
@@ -190,7 +190,9 @@ async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None, rooms=False)
             await proc_tree.end_orphan(child, child_started, label='adoption test cleanup')
         pid, started = identity.get('keeper_pid'), identity.get('keeper_started')
         if pid and started and _live(pid) and proc_tree._start_time(pid) == started:
-            os.kill(pid, signal.SIGTERM)
+            # The keeper can finish after the identity check, before the signal.
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGTERM)
             await until(lambda: not _live(pid), 'keeper to exit', timeout=10)
         for handle in handles:
             if handle._keeper_process is not None:

@@ -89,7 +89,8 @@ async def list_models_at(family: ApiFamily, base_url: str, api_key: str | None, 
                          client: httpx.AsyncClient) -> Listing:
     """Read a bounded model list; never follow redirects or expose the response body."""
     anthropic = family is ApiFamily.ANTHROPIC
-    url = base_url.rstrip("/") + ("/v1/models" if anthropic else "/models")
+    root = base_url.rstrip("/")
+    url = root + ("/v1/models" if anthropic else "/models")
     headers = {"anthropic-version": ANTHROPIC_VERSION} if anthropic else {}
     if api_key:
         headers["x-api-key" if anthropic else "Authorization"] = api_key if anthropic else f"Bearer {api_key}"
@@ -137,7 +138,8 @@ async def list_models_at(family: ApiFamily, base_url: str, api_key: str | None, 
                     return Listing(tuple(sorted(models.values(), key=lambda item: item.name.casefold())),
                                    status=status, truncated=True)
             if answer.get("has_more") is not True or not isinstance(answer.get("last_id"), str):
-                return Listing(tuple(sorted(models.values(), key=lambda item: item.name.casefold())), status=status)
+                return Listing(tuple(sorted(models.values(), key=lambda item: item.name.casefold())), status=status,
+                               truncated=answer.get("has_more") is True)
             params["after_id" if anthropic else "after"] = answer["last_id"]
         return Listing(tuple(sorted(models.values(), key=lambda item: item.name.casefold())),
                        status=status, truncated=True)
@@ -145,6 +147,8 @@ async def list_models_at(family: ApiFamily, base_url: str, api_key: str | None, 
         return Listing(problem=ListingProblem.TIMEOUT)
     except httpx.TransportError:
         return Listing(problem=ListingProblem.UNREACHABLE)
+    except (httpx.HTTPError, httpx.InvalidURL):
+        return Listing(problem=ListingProblem.BAD_RESPONSE)
 
 
 async def fetch_provider_models(provider_id: str, *, client: httpx.AsyncClient | None = None) -> dict[str, Any]:
@@ -200,9 +204,19 @@ async def fetch_provider_models(provider_id: str, *, client: httpx.AsyncClient |
                 "truncated": listing.truncated, "models": models}
 
     async def fetch_all(http: httpx.AsyncClient) -> dict[str, Any]:
-        listings = await asyncio.gather(*(fetch(family, url, protocols, http)
-                                          for (family, url), protocols in groups.items()))
-        return {"provider_id": provider_id, "listings": list(listings)}
+        results = await asyncio.gather(*(fetch(family, url, protocols, http)
+                                        for (family, url), protocols in groups.items()), return_exceptions=True)
+        listings = []
+        for ((family, url), protocols), result in zip(groups.items(), results):
+            if isinstance(result, BaseException):
+                # Keep another endpoint usable, without exposing exception text or response bodies.
+                logger.warning("Provider model listing provider=%s family=%s result=%s error=%s", provider_id,
+                               family.value, ListingProblem.BAD_RESPONSE.value, type(result).__name__)
+                result = {"family": family.value, "base_url": url, "protocols": [p.value for p in protocols],
+                          "state": "failed", "problem": ListingProblem.BAD_RESPONSE.text(),
+                          "truncated": False, "models": []}
+            listings.append(result)
+        return {"provider_id": provider_id, "listings": listings}
 
     if client is not None:
         return await fetch_all(client)

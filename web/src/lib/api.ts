@@ -3156,7 +3156,7 @@ export async function updateProvider(
   const result = await callV1<{ provider: Provider; warnings: string[] }>("/api/v1/provider_accounts/update",
     { provider_id: providerId, fields });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
-  window.dispatchEvent(new Event(REGISTRY_CHANGED_EVENT));
+  window.dispatchEvent(new CustomEvent(REGISTRY_CHANGED_EVENT, { detail: { provider: result.provider } }));
   return result;
 }
 
