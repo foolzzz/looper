@@ -31,6 +31,7 @@ import urllib.request
 import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -618,6 +619,82 @@ def _config(args: argparse.Namespace, ctx: Context) -> int:
     return finish(status, {"status": "ok", "result": {"path": str(destination)}}, ctx.as_json, ctx.session)
 
 
+def _llm_requests_arguments(parser: Parser) -> Any:
+    commands = parser.add_subparsers(dest="llm_requests_command", required=True)
+    export = commands.add_parser("export", help="Export complete recorded model requests as JSONL")
+    scope = export.add_mutually_exclusive_group()
+    scope.add_argument("--task", dest="task_id", metavar="ID")
+    scope.add_argument("--agent", dest="agent_id", metavar="ID")
+    scope.add_argument("--record", dest="record_id", type=int, metavar="ID")
+    export.add_argument("--since", help="include requests started at or after this timestamp")
+    export.add_argument("--until", help="include requests started before this timestamp")
+    export.add_argument("--out", required=True, metavar="FILE", help="destination JSONL file ('-' writes stdout)")
+    _operator_arguments(export)
+    return commands
+
+
+def _llm_requests(args: argparse.Namespace, ctx: Context) -> int:
+    filters = {key: getattr(args, key) for key in ("task_id", "agent_id", "record_id", "since", "until")
+               if getattr(args, key) is not None}
+    if not any(key in filters for key in ("task_id", "agent_id", "record_id", "since")):
+        raise UsageError("provide --task, --agent, --record or --since")
+    _use_operator(args, ctx)
+    destination = None if args.out == "-" else Path(args.out)
+    handle = sys.stdout
+    if destination is not None:
+        try:
+            # Request bodies contain secrets. Never overwrite an existing file or follow a symlink.
+            fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                handle = os.fdopen(fd, "w", encoding="utf-8")
+            except OSError:
+                os.close(fd)
+                destination.unlink(missing_ok=True)
+                raise
+        except OSError as exc:
+            raise UsageError(f"cannot write the export file: {exc.strerror}") from None
+    completed = False
+    try:
+        header = {"type": "llmrec_export", "format": 1,
+                  "exported_at": datetime.now(timezone.utc).isoformat(), "filter": filters,
+                  "redaction": "header values outside the allowlist are never stored; "
+                               "bodies are complete unless record_gap says otherwise"}
+        handle.write(json.dumps(header, ensure_ascii=False, separators=(",", ":")) + "\n")
+        count, after_id = 0, None
+        while True:
+            body = {**filters, "limit": 50, **({"after_id": after_id} if after_id is not None else {})}
+            status, answer = ctx.api().call("POST", f"{API_PREFIX}/llm_requests/export", body)
+            if status != 200 or answer.get("status") != "ok":
+                # Keep stdout valid JSONL even when the caller requested --json.
+                return finish(status, answer, False, ctx.session)
+            result = answer.get("result")
+            requests = result.get("requests") if isinstance(result, dict) else None
+            if not isinstance(requests, list) or not all(isinstance(row, dict) for row in requests):
+                raise Unreachable("Looper returned an invalid model request export page")
+            for request in requests:
+                handle.write(json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n")
+                count += 1
+            cursor = result.get("next_after_id")
+            if cursor is None:
+                break
+            if type(cursor) is not int or cursor <= (after_id or 0):
+                raise Unreachable("Looper returned an invalid model request export cursor")
+            after_id = cursor
+        handle.flush()
+        completed = True
+        print(f"Exported {count} model requests", file=sys.stderr)
+        return EXIT_OK
+    except (OSError, UnicodeError) as exc:
+        raise UsageError(f"cannot write the export file: {getattr(exc, 'strerror', None) or exc}") from None
+    finally:
+        if destination is not None:
+            try:
+                handle.close()
+            finally:
+                if not completed:
+                    destination.unlink(missing_ok=True)
+
+
 # --- chat ---
 
 
@@ -1027,6 +1104,8 @@ HAND_COMMANDS: dict[str, HandCommand] = {command.name: command for command in (
     HandCommand("doctor", "Run the service's self checks, including pg_dump", _doctor_arguments, _doctor),
     HandCommand("config", "Export or preview and apply configuration through the running service",
                 _config_arguments, _config),
+    HandCommand("llm-requests", "Read and export recorded model requests using an operator token",
+                _llm_requests_arguments, _llm_requests),
     HandCommand("login", "Save an API client's token (read from stdin or a prompt) after checking it with Looper",
                 _login_arguments, _login),
     HandCommand("confirm", "Run the call that answered needs_confirmation", _confirm_arguments, _confirm),

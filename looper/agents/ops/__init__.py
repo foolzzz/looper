@@ -49,6 +49,7 @@ class RetrySafety(str, Enum):
 
 
 class ErrorCode(str, Enum):
+    INTERNAL = "internal"  # a stored exchange cannot be reconstructed completely
     NOT_FOUND = "not_found"
     INVALID = "invalid"
     NEEDS_USER_TURN = "needs_user_turn"  # a change outside a turn that answers the user

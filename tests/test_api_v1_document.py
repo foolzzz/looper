@@ -11,7 +11,7 @@ from looper.agents import api_v1
 from looper.agents.ops import ErrorCode, OpError, check_arguments
 from looper.agents.ops.clients import CLIENT_TOOLS
 
-HAND = {"chat.send", "chat.messages", "chat.conversations", "confirm", "openapi"}
+HAND = {"chat.send", "chat.messages", "chat.conversations", "confirm", "openapi", "llm_requests.export"}
 
 
 def _actions(tool) -> list[str] | None:

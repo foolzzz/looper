@@ -62,7 +62,7 @@ def test_skill_errors_and_successful_readback(tmp_path, monkeypatch, fields, sta
     ("catalog_items.update", {"item_id": "skill-example", "fields": {"description": "Changed"}},
      catalog_sources, "update_item"),
 ])
-@pytest.mark.parametrize("failure", ["parser", "schema", "op", "wrapped", "unexpected", "mcp", "ok"])
+@pytest.mark.parametrize("failure", ["parser", "schema", "op", "wrapped", "wrapped_invalid", "unexpected", "mcp", "ok"])
 def test_credential_failures_are_private_and_unaudited(
         tmp_path, monkeypatch, caplog, operation, body, module, service, failure):
     audit = AsyncMock()
@@ -72,6 +72,7 @@ def test_credential_failures_are_private_and_unaudited(
     monkeypatch.setattr(catalog, "_item", AsyncMock(return_value={"kind": kind}))
     error = {"op": OpError(ErrorCode.INVALID, SECRET, details={"manager_id": SECRET}),
              "wrapped": projects.RequestError("500 Internal Server Error", SECRET),
+             "wrapped_invalid": projects.RequestError("400 Bad Request", SECRET),
              "unexpected": RuntimeError(SECRET), "mcp": catalog.CatalogError(SECRET)}
     if kind == "skill":
         error["mcp"] = RuntimeError(SECRET)  # arbitrary skill service failures are private too
@@ -85,13 +86,19 @@ def test_credential_failures_are_private_and_unaudited(
                        json.dumps({**body, SECRET: SECRET} if failure == "schema" else body))
             status, headers, answer = await _send(server, "POST /api/v1/" + operation.replace(".", "/"),
                                                   _bearer(TOKEN), payload)
-            expected = 200 if failure == "ok" else 503 if (
-                failure == "unexpected" or (failure == "mcp" and kind == "skill")
+            if failure == "ok":
+                expected = 200
+            elif failure == "wrapped":
                 # Channel saves preserve wrapped service failures as unavailable.
-                or (failure == "wrapped" and module is bot_api)) else 400
+                # Other domains preserve the mapped internal service error.
+                expected = 503 if module is bot_api else 500
+            elif failure == "unexpected" or (failure == "mcp" and kind == "skill"):
+                expected = 503
+            else:
+                expected = 400
             assert status == expected, answer
             if failure != "ok":
-                assert answer["error"]["code"] == ("unavailable" if expected == 503 else "invalid")
+                assert answer["error"]["code"] == {400: "invalid", 500: "internal", 503: "unavailable"}[expected]
             assert headers["cache-control"] == "no-store" and SECRET not in json.dumps(answer)
             assert "details" not in answer.get("error", {})
             assert work.await_count == (0 if failure in ("parser", "schema") else 1)
