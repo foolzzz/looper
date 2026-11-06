@@ -1454,6 +1454,11 @@ class ClaudeRunRecorder:
                     **({"autonomous": True} if self._autonomous else {}),
                 },
             )
+            from .llmrec import LlmrecRoute
+            from .llmrec.control import bind
+
+            if self._launch is not None and isinstance(self._launch.llmrec, LlmrecRoute):
+                bind(self._launch.llmrec.id, self._record_id)
         except Exception:
             logger.warning("could not open llm record for %s", self._agent_id, exc_info=True)
 
@@ -1676,6 +1681,9 @@ class ClaudeRunRecorder:
         if self._record_id is None or self._closed:
             return
         self._closed = True
+        from .llmrec.control import release
+
+        release(self._record_id, end_route=self._whole_process)
         try:
             cost = self._runtime().cost(usage, self._provider())
             usage = cost.usage

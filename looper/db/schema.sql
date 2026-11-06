@@ -1322,3 +1322,73 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_api_clients_active_name ON api_clients (lo
 
 ALTER TABLE tasks ADD CONSTRAINT tasks_schedule_id_fkey
     FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS llm_request_routes (
+    id              TEXT PRIMARY KEY,
+    agent_id        TEXT NOT NULL,
+    task_id         TEXT,
+    step_id         TEXT,
+    role            TEXT,
+    runtime_type    TEXT NOT NULL,
+    provider_id     TEXT,
+    protocol        TEXT,
+    model           TEXT,
+    upstream_host   TEXT NOT NULL,
+    upstream_path   TEXT NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ NOT NULL,
+    last_request_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_request_routes_agent ON llm_request_routes (agent_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS llm_request_parts (
+    route_id TEXT NOT NULL REFERENCES llm_request_routes(id) ON DELETE CASCADE,
+    sha256   TEXT NOT NULL,
+    body     JSONB NOT NULL,
+    bytes    INTEGER NOT NULL,
+    PRIMARY KEY (route_id, sha256)
+);
+
+CREATE TABLE IF NOT EXISTS llm_requests (
+    id                BIGSERIAL PRIMARY KEY,
+    route_id          TEXT NOT NULL REFERENCES llm_request_routes(id) ON DELETE CASCADE,
+    proxy_instance    TEXT NOT NULL,
+    proxy_seq         BIGINT NOT NULL,
+    record_id         BIGINT REFERENCES llm_records(id) ON DELETE CASCADE,
+    after_record_id   BIGINT,
+    agent_id          TEXT NOT NULL,
+    task_id           TEXT,
+    started_at        TIMESTAMPTZ NOT NULL,
+    method            TEXT NOT NULL,
+    path              TEXT NOT NULL,
+    kind              TEXT NOT NULL CHECK (kind IN ('model', 'count_tokens', 'other')),
+    model             TEXT,
+    stream            BOOLEAN,
+    status            INTEGER,
+    outcome           TEXT NOT NULL CHECK (outcome IN ('completed', 'upstream_error', 'client_closed', 'proxy_error')),
+    error             TEXT,
+    ttfb_ms           INTEGER,
+    duration_ms       INTEGER,
+    request_headers   JSONB NOT NULL,
+    response_headers  JSONB,
+    request_body      JSONB,
+    request_bytes     INTEGER NOT NULL,
+    request_sha256    TEXT NOT NULL,
+    response_body     JSONB,
+    response_raw      TEXT,
+    response_bytes    BIGINT,
+    input_tokens      BIGINT,
+    output_tokens     BIGINT,
+    cache_read_tokens BIGINT,
+    cache_write_tokens BIGINT,
+    usage             JSONB,
+    record_gap        TEXT CHECK (record_gap IN ('request_too_large', 'response_too_large', 'undecodable_encoding', 'body_encoding_unparsed',
+                                                 'unparsable_request', 'unparsable_stream', 'rejected_by_database')),
+    body_sanitized    BOOLEAN NOT NULL DEFAULT FALSE,
+    UNIQUE (proxy_instance, proxy_seq)
+);
+CREATE INDEX IF NOT EXISTS idx_llm_requests_record ON llm_requests (record_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_llm_requests_after ON llm_requests (after_record_id) WHERE record_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_llm_requests_route ON llm_requests (route_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_llm_requests_agent ON llm_requests (agent_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_llm_requests_task ON llm_requests (task_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_llm_requests_started ON llm_requests (started_at);

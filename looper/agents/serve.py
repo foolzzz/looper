@@ -648,6 +648,18 @@ async def _run_agent_system_owned(
         if unfinished := await end_unfinished_records(pool=pool, keep=scan.record_ids):
             logger.info("ended %d run record(s) a previous server left running as interrupted", unfinished)
 
+        from .llmrec.control import ProxyControl, install
+        control = None
+        try:
+            from ..db import system_settings
+            values = await system_settings.get_settings(["llmrec.enabled", "llmrec.include_oauth"], pool=pool)
+            control = ProxyControl(runtime_root, dsn, enabled=values.get("llmrec.enabled") == "true",
+                                   include_oauth=values.get("llmrec.include_oauth") == "true")
+            install(control)
+            await control.at_start(scan.record_ids)
+        except Exception:
+            logger.warning("request recording could not initialize", exc_info=True)
+
         # The step worktrees no task keeps any more (after the orphaned tasks stopped: those keep their unmerged ones).
         from . import step_workspaces
         try:
@@ -863,7 +875,22 @@ async def _run_agent_system_owned(
             loop.add_signal_handler(sig, stop_signal_handler(
                 stop_event, exit_now=fence.exit, prepare_stop=lambda sig=sig: prepare_stop(sig)))
 
-        await stop_event.wait()
+        async def check_recording_proxy() -> None:
+            while True:
+                await asyncio.sleep(5)
+                if control is not None:
+                    try:
+                        await control.tick()
+                    except Exception:
+                        logger.warning("request recording health check failed", exc_info=True)
+
+        proxy_checks = asyncio.create_task(check_recording_proxy(), name="llmrec-health")
+        try:
+            await stop_event.wait()
+        finally:
+            proxy_checks.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await proxy_checks
 
         # --- Shutdown ---
 
@@ -895,6 +922,9 @@ async def _run_agent_system_owned(
         await shut_down_within(shut_down(), exit_now=fence.exit)
 
     finally:
+        from .llmrec.control import install
+
+        install(None)
         if advisory_checks is not None:
             advisory_checks.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -912,6 +942,7 @@ def _pending_advisory_checks() -> list[list[self_check.Check]]:
         (("claude_cli", "Claude Code CLI"), ("claude_login", "Claude login")),
         (("codex_login", "Codex login"),), (("grok_login", "Grok login"),),
         (("cursor_login", "Cursor login"),), (("ttadk", "TTADK"),),
+        (("llmrec", "Model request recording"),),
         (("lark_cli", "Lark channel"),), (("git", "git"),), (("projects_root", "Projects root"),),
     )
     return [[self_check.Check(id, label, self_check.PENDING, "Startup check in progress") for id, label in group]
@@ -941,6 +972,7 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
             self_check.grok_login_check(),
             self_check.cursor_login_check(),
             self_check.ttadk_check(),
+            self_check.llmrec_check(),
             asyncio.to_thread(self_check.check_lark_cli, lark_enabled),
             asyncio.to_thread(self_check.check_git),
             asyncio.to_thread(self_check.check_projects_root, projects_root),

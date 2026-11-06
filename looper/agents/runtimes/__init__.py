@@ -418,6 +418,10 @@ class RuntimeAdapter(ABC):
 
     # --- The launch ---
 
+    def llmrec_upstream(self, launch: Launch) -> str | None:
+        """The real model base URL; None means this launch is not covered by request recording."""
+        return None
+
     def api_model(self, model: str) -> str:
         """The model name this runtime sends to the provider's API for ``model``; verbatim by default."""
         return model

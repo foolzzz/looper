@@ -51,7 +51,7 @@ def test_http_answers_before_slow_advisory_check_finishes(monkeypatch, tmp_path,
             result = response.json()["result"]
             assert {c["id"] for c in result["checks"] if c["status"] == "pending"} == {
                 "claude_cli", "claude_login", "codex_login", "grok_login", "cursor_login", "ttadk",
-                "lark_cli", "git", "projects_root",
+                "llmrec", "lark_cli", "git", "projects_root",
             }
             api_v1.validate_arguments(api_v1.find("POST", "/api/v1/system/status").result, result)
 
@@ -85,7 +85,7 @@ def test_http_answers_before_slow_advisory_check_finishes(monkeypatch, tmp_path,
         monkeypatch.setattr(serve.self_check, "check_database", AsyncMock(return_value=
                             serve.self_check.Check("database", "Database", "ok", "ready")))
         monkeypatch.setattr(serve.self_check, "check_claude", slow_claude)
-        for name in ("codex_login_check", "grok_login_check", "cursor_login_check", "ttadk_check"):
+        for name in ("codex_login_check", "grok_login_check", "cursor_login_check", "ttadk_check", "llmrec_check"):
             monkeypatch.setattr(serve.self_check, name, AsyncMock(return_value=ok))
         monkeypatch.setattr(serve.self_check, "check_git", lambda: ok)
         monkeypatch.setattr(serve.self_check, "check_lark_cli", lambda _: ok)
@@ -112,7 +112,7 @@ def test_advisory_checks_overlap_and_log_in_original_order(monkeypatch, caplog):
 
         async def check(name):
             started.append(name)
-            if len(started) == 8:
+            if len(started) == 9:
                 gate.set()
             await asyncio.wait_for(gate.wait(), 1)
             return serve.self_check.Check(name, name, "warn", name)
@@ -121,8 +121,8 @@ def test_advisory_checks_overlap_and_log_in_original_order(monkeypatch, caplog):
             return asyncio.run_coroutine_threadsafe(check(name), loop).result(timeout=2)
 
         monkeypatch.setattr(serve.self_check, "check_claude", lambda _: [sync_check("claude")])
-        for name in ("codex", "grok", "cursor", "ttadk"):
-            monkeypatch.setattr(serve.self_check, name + "_login_check" if name != "ttadk" else "ttadk_check",
+        for name in ("codex", "grok", "cursor", "ttadk", "llmrec"):
+            monkeypatch.setattr(serve.self_check, name + "_check" if name in ("ttadk", "llmrec") else name + "_login_check",
                                 lambda name=name: check(name))
         monkeypatch.setattr(serve.self_check, "check_lark_cli", lambda _: sync_check("lark"))
         monkeypatch.setattr(serve.self_check, "check_git", lambda: sync_check("git"))
@@ -130,7 +130,7 @@ def test_advisory_checks_overlap_and_log_in_original_order(monkeypatch, caplog):
         snapshot = []
         await serve._advisory_startup_checks(snapshot, serve.self_check.Check("database", "Database", "ok", ""),
                                             claude_bin="unused", lark_enabled=False, projects_root="")
-        expected = ["claude", "codex", "grok", "cursor", "ttadk", "lark", "git", "projects"]
+        expected = ["claude", "codex", "grok", "cursor", "ttadk", "llmrec", "lark", "git", "projects"]
         assert [c["id"] for c in snapshot] == ["database", *expected]
         assert [r.message.split(":")[0].split()[-1] for r in caplog.records if "SELF-CHECK" in r.message] == expected
 

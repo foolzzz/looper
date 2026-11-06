@@ -1,0 +1,101 @@
+"""Operator-only request recording settings and captured exchanges."""
+
+import logging
+
+from looper.db import llm_requests, system_settings
+from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT
+from ..llmrec.control import controller
+from ..ops import ErrorCode, OpError
+from ..ops.service import _plain
+
+logger = logging.getLogger(__name__)
+
+_NULL_INT = {"type": ["integer", "null"]}
+_NULL_OBJECT = {"type": ["object", "null"]}
+_BOOL = {"type": "boolean"}
+PROXY = _object({"state": {"type": "string", "enum": ["running", "stopped", "unavailable", "outdated"]},
+    "port": _NULL_INT, "pid": _NULL_INT,
+    **dict.fromkeys(("requests", "recorded", "gaps", "dropped", "write_errors"), _INT),
+    "gap_reasons": {"type": "object", "additionalProperties": _INT}}, closed=True)
+SETTINGS = _object({"enabled": _BOOL, "include_oauth": _BOOL, "proxy": PROXY}, closed=True)
+_FIELDS = {
+    "id": _INT, "route_id": _STR, "proxy_instance": _STR, "proxy_seq": _INT,
+    "record_id": _NULL_INT, "after_record_id": _NULL_INT, "agent_id": _STR, "task_id": _NULL_STR,
+    "started_at": _STR, "method": _STR, "path": _STR,
+    "kind": {"type": "string", "enum": ["model", "count_tokens", "other"]}, "model": _NULL_STR,
+    "stream": {"type": ["boolean", "null"]}, "status": _NULL_INT,
+    "outcome": {"type": "string", "enum": ["completed", "upstream_error", "client_closed", "proxy_error"]},
+    "error": _NULL_STR, "ttfb_ms": _NULL_INT, "duration_ms": _NULL_INT,
+    "request_headers": {"type": "object"}, "response_headers": _NULL_OBJECT,
+    "request_bytes": _INT, "request_sha256": _STR, "response_bytes": _NULL_INT,
+    **dict.fromkeys(("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"), _NULL_INT),
+    "usage": _NULL_OBJECT, "record_gap": _NULL_STR, "body_sanitized": _BOOL,
+}
+ROW = _object(_FIELDS, closed=True)
+FULL = _object({**_FIELDS, "request_body": {}, "response_body": {}, "response_raw": _NULL_STR}, closed=True)
+SCHEMAS = {"LlmRequest": FULL, "LlmRequestRow": ROW, "LlmrecSettings": SETTINGS}
+RESULTS = {}
+
+
+def _op(name, fields, result, required=None, risk="read"):
+    description = {"llmrec_settings.get": "Read model request recording settings and proxy health.",
+        "llmrec_settings.update": "Set recording for future launches. Bodies can contain prompts, code and tool output.",
+        "llm_requests.list": "List captured request metadata without bodies.",
+        "llm_requests.get": "Read a captured exchange with the complete reconstructed request."}[name]
+    return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), description, description,
+                     _object(fields, required, closed=True), result, risk=risk, operator_only=True)
+
+
+OPERATIONS = (
+    _op("llmrec_settings.get", {}, SETTINGS),
+    _op("llmrec_settings.update", {"enabled": _BOOL, "include_oauth": _BOOL}, SETTINGS, [], risk="write"),
+    _op("llm_requests.list", {"record_id": {"type": "integer", "minimum": 1},
+        "agent_id": _STR, "task_id": _STR, "route_id": _STR, "between_turns": _BOOL,
+        "before_id": {"type": "integer", "minimum": 1},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 500}},
+        _object({"requests": _array(ROW)}, closed=True), []),
+    _op("llm_requests.get", {"request_id": {"type": "integer", "minimum": 1}},
+        _object({"request": FULL}, closed=True)),
+)
+
+
+async def settings():
+    if (control := controller()) is not None:
+        return await control.status()
+    values = await system_settings.get_settings(["llmrec.enabled", "llmrec.include_oauth"])
+    enabled = values.get("llmrec.enabled") == "true"
+    return {"enabled": enabled, "include_oauth": values.get("llmrec.include_oauth") == "true",
+        "proxy": {"state": "unavailable" if enabled else "stopped", "port": None, "pid": None,
+                  "requests": 0, "recorded": 0, "gaps": 0, "gap_reasons": {}, "dropped": 0, "write_errors": 0}}
+
+
+async def run(server, operation, arguments, principal, headers):
+    try:
+        match operation.operation_id:
+            case "llmrec_settings.get":
+                result = await settings()
+            case "llmrec_settings.update":
+                if not arguments:
+                    raise OpError(ErrorCode.INVALID, "provide enabled or include_oauth")
+                await system_settings.put_settings({"llmrec." + key: str(value).lower()
+                                                    for key, value in arguments.items()})
+                if (control := controller()) is not None:
+                    await control.set_enabled(arguments.get("enabled", control.enabled),
+                                              include_oauth=arguments.get("include_oauth"))
+                result = await settings()
+            case "llm_requests.list":
+                if arguments.get("between_turns") and not arguments.get("record_id"):
+                    raise OpError(ErrorCode.INVALID, "between_turns requires record_id")
+                result = {"requests": await llm_requests.list_requests(**arguments)}
+            case _:
+                row = await llm_requests.get_request(arguments["request_id"])
+                if row is None:
+                    raise OpError(ErrorCode.NOT_FOUND, "model request not found")
+                result = {"request": row}
+    except OpError:
+        raise
+    except Exception as error:
+        logger.warning("request recording operation failed operation=%s error_type=%s",
+                       operation.operation_id, type(error).__name__)
+        raise OpError(ErrorCode.UNAVAILABLE, "request recording unavailable") from None
+    return _plain(result)

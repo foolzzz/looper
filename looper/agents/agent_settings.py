@@ -64,6 +64,9 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
+
+from .llmrec import LlmrecRoute, LlmrecSkip, SkipReason
 
 from .profile_registry import (
     BUILTIN_PROFILE, PRICE_FIELDS, AgentProfile, ModelSpec, ResolvedAgentProfile, ResolvedModel,
@@ -869,6 +872,7 @@ class Launch:
     consult: bool = False
     # Additional directories a read-only run may inspect, such as its steps' isolated worktrees.
     read_dirs: tuple[str, ...] = ()
+    llmrec: LlmrecRoute | LlmrecSkip | None = None
 
     @property
     def system_prompt_mode(self) -> SystemPromptMode:
@@ -1060,6 +1064,14 @@ class Launch:
             record["library"] = library
         if self.max_budget_usd is not None:
             record["max_budget_usd"] = self.max_budget_usd
+        if isinstance(self.llmrec, LlmrecRoute):
+            record["llmrec"] = {"state": "recording", "route": self.llmrec.id,
+                                "upstream_host": urlsplit(self.llmrec.upstream).hostname}
+        elif isinstance(self.llmrec, LlmrecSkip):
+            record["llmrec"] = {
+                "state": "bypassed" if self.llmrec.reason is SkipReason.PROXY_UNAVAILABLE else "skipped",
+                "reason": self.llmrec.reason.value, "detail": self.llmrec.detail,
+            }
         from .runtimes import Launcher, ttadk
 
         if self.profile.runtime.launcher is Launcher.TTADK and self.runtime.ttadk_tool is not None:

@@ -24,6 +24,7 @@ export const SETTINGS_PAGES = [
   { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "scheduler", label: "Scheduler", icon: CalendarClock },
   { id: "vault", label: "Knowledge vault", icon: Library },
+  { id: "recording", label: "Request recording", icon: Library },
   { id: "transfer", label: "Import / Export", icon: ArrowLeftRight },
 ] as const satisfies readonly { id: string; label: string; icon: LucideIcon }[];
 

@@ -1368,6 +1368,10 @@ class WorkerPool:
                                      f"Warning: {unavailable} is unavailable ({type(exc).__name__}: {exc}); this "
                                      "run goes without it"[:500])
         launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
+        from ..llmrec.control import attach
+
+        launch = await attach(launch, agent_id=worker_id, task_id=parent_task_id or None,
+                              step_id=payload.get("task_id") or None)
         background = str((project or {}).get("background") or "")
         if task_role is None:
             system_prompt = build_system_prompt(

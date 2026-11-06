@@ -42,6 +42,67 @@ def _builtin_launch(**fields: Any) -> Any:
     return Launch(AgentSettings(profile=builtin_resolved_profile()), **fields)
 
 
+@pytest.mark.parametrize("bypass", [
+    {"NO_PROXY": "internal.example,.private.example"},
+    {"no_proxy": "internal.example,.private.example"},
+    {"NO_PROXY": "upper.example", "no_proxy": "lower.example"},
+    {"NO_PROXY": "internal.example", "no_proxy": ""},
+    {"NO_PROXY": "*"},
+    {},
+])
+def test_recording_preserves_effective_proxy_bypass(monkeypatch, bypass):
+    import os
+    from dataclasses import replace
+    from urllib.request import getproxies_environment, proxy_bypass_environment
+    from looper.agents.llmrec import LlmrecRoute
+
+    launch = _builtin_launch()
+    monkeypatch.setattr(os, "environ", {"HTTPS_PROXY": "http://proxy.example:8080", **bypass})
+    before = getproxies_environment()
+    recording = replace(launch, llmrec=LlmrecRoute("a" * 22, "http://127.0.0.1:9999/r/test", "https://model.example"))
+    monkeypatch.setattr(os, "environ", recording.environment())
+    after = getproxies_environment()
+    for host in ("internal.example", "service.private.example", "upper.example", "lower.example", "external.example"):
+        assert proxy_bypass_environment(host, after) == proxy_bypass_environment(host, before)
+    assert proxy_bypass_environment("127.0.0.1", after)
+
+
+@pytest.mark.parametrize("upstream,expected", [
+    ("https://api.anthropic.com", "true"),
+    ("https://API.ANTHROPIC.COM/v1", "true"),
+    ("https://model.example", None),
+    ("https://api.anthropic.com.example", None),
+])
+def test_recording_preserves_first_party_tool_search(upstream, expected):
+    from dataclasses import replace
+    from looper.agents.llmrec import LlmrecRoute
+
+    launch = _builtin_launch()
+    assert "ENABLE_TOOL_SEARCH" not in launch.environment()
+    recording = replace(launch, llmrec=LlmrecRoute("a" * 22, "http://127.0.0.1:9999/r/test", upstream))
+    assert recording.environment().get("ENABLE_TOOL_SEARCH") == expected
+
+
+@pytest.mark.parametrize("source", ["settings", "provider"])
+@pytest.mark.parametrize("value", ["false", "auto:5", ""])
+def test_recording_respects_explicit_tool_search(source, value):
+    from dataclasses import replace
+    from looper.agents.llmrec import LlmrecRoute
+
+    launch = _builtin_launch()
+    env = (("ENABLE_TOOL_SEARCH", value),)
+    if source == "settings":
+        launch = replace(launch, settings=replace(launch.settings, env=env))
+    else:
+        resolved = launch.profile.resolved_model
+        profile = replace(launch.profile, resolved_model=replace(
+            resolved, provider=replace(resolved.provider, env=env)))
+        launch = replace(launch, settings=replace(launch.settings, profile=profile))
+    recording = replace(launch, llmrec=LlmrecRoute(
+        "a" * 22, "http://127.0.0.1:9999/r/test", "https://api.anthropic.com"))
+    assert recording.environment()["ENABLE_TOOL_SEARCH"] == value
+
+
 def _lines(*chunks: bytes) -> list[bytes]:
     async def _run() -> list[bytes]:
         reader = asyncio.StreamReader()
