@@ -17,7 +17,7 @@ import {
   type RoleTemplates,
 } from "@/lib/api";
 import { AGENT_PROFILE } from "@/lib/settings-pages";
-import { profileLabel, profileName, useRegistry } from "@/lib/use-registry";
+import { useRegistry } from "@/lib/use-registry";
 
 /** Editing roles: a task's role on the task page (a new version by the user), and a project's role templates. */
 
@@ -184,7 +184,11 @@ function DefinitionFields({
           )}
           {profiles?.map((p) => {
             const profile = registry?.profiles.find((profile) => profile.profile_id === p.profile_id);
-            return <option key={p.profile_id} value={p.profile_id}>{profile ? profileLabel(profile) : profileName(p)}</option>;
+            return (
+              <option key={p.profile_id} value={p.profile_id}>
+                {p.name}{profile?.provider.enabled === false ? " · provider disabled" : ""}
+              </option>
+            );
           })}
         </select>
         <p id={`${id}-profile-help`} className="text-xs text-muted-foreground">

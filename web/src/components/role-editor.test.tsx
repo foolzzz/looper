@@ -7,17 +7,17 @@ import type { AgentProfile, AllowedProfile, PlannerRole } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-it("marks disabled providers in both task-role and project-role template profile pickers", async () => {
+it.each([true, false])("preserves profile names in both role pickers when provider enabled is %s", async (enabled) => {
   const profile: AgentProfile = {
     profile_id: "disabled", name: "Saved profile", model_id: "model", effort: "high", agent_teams: false,
     model: { model_id: "model", name: "Exact model", protocol: "anthropic-messages", provider_id: "account" },
     custom_prompt: "", runtime_id: "runtime", runtime_type: "claude-code", runtime_name: "Claude Code", builtin: false,
-    provider: { provider_id: "account", name: "Saved account", vendor_type: "custom", auth: "api_key", enabled: false },
+    provider: { provider_id: "account", name: "Saved account", vendor_type: "custom", auth: "api_key", enabled },
     roles: ["worker", "reviewer"], used_by: { layers: [], task_count: 0, schedule_count: 0, allowed_in: [] }, warnings: [],
     cost: { source: "runtime", equivalent: false, unpriced: [] },
   };
   const allowed: AllowedProfile = {
-    profile_id: profile.profile_id, name: profile.name, runtime: profile.runtime_type, model: profile.model.name,
+    profile_id: profile.profile_id, name: "Allowed profile", runtime: profile.runtime_type, model: profile.model.name,
     effort: profile.effort, roles: profile.roles as AllowedProfile["roles"], usd_per_million_tokens: { input: null, output: null },
   };
   const role: PlannerRole = {
@@ -32,7 +32,7 @@ it("marks disabled providers in both task-role and project-role template profile
   };
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     if (input === "/api/v1/registry/view") {
-      return Response.json({ status: "ok", result: { profiles: [profile], providers: [] } });
+      return Response.json({ status: "ok", result: { profiles: [profile], providers: [profile.provider] } });
     }
     if (input === "/api/v1/allowed_profiles/get") {
       return Response.json({ status: "ok", result: { profiles: [allowed], choosable: [allowed], restricted: true } });
@@ -57,8 +57,8 @@ it("marks disabled providers in both task-role and project-role template profile
     const pickers = [...container.querySelectorAll<HTMLSelectElement>('select[id$="-profile"]')];
     expect(pickers).toHaveLength(2);
     expect(pickers.map((picker) => picker.querySelector('option[value="disabled"]')?.textContent)).toEqual([
-      "Saved profile · high — Claude Code · Saved account / Exact model / anthropic-messages · provider disabled",
-      "Saved profile · high — Claude Code · Saved account / Exact model / anthropic-messages · provider disabled",
+      enabled ? allowed.name : `${allowed.name} · provider disabled`,
+      enabled ? allowed.name : `${allowed.name} · provider disabled`,
     ]);
     expect(pickers[0].value).toBe("disabled");
   } finally {
