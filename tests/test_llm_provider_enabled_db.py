@@ -242,13 +242,11 @@ def test_config_transfer_preserves_omitted_enabled_and_imports_explicit_state(mo
         await registry.set_provider_enabled("prov-test", False)
         disabled = await exported()
         assert next(p for p in disabled["providers"] if p["name"] == "Test account")["enabled"] is False
-        older_file = {"format": transfer.FORMAT, "providers": [account], "profiles": [
-            *original["profiles"], {**original["profiles"][0], "name": "Imported profile"}]}
+        older_file = {"format": transfer.FORMAT, "providers": [account], "profiles": original["profiles"]}
         plan = await imported(older_file)
         assert not any(c.action == transfer.Action.SKIPPED for c in plan.changes)
         assert await pool.fetchval("SELECT enabled FROM llm_providers WHERE id='prov-test'") is False
         assert await pool.fetchval("SELECT id FROM agent_profiles WHERE id=$1", profile["profile_id"])
-        assert await pool.fetchval("SELECT count(*) FROM agent_profiles WHERE name='Imported profile'") == 1
         plan = await imported({"format": transfer.FORMAT, "providers": [{**account, "enabled": True}]})
         assert any(c.section == "providers" and c.action == transfer.Action.CHANGED for c in plan.changes)
         assert await pool.fetchval("SELECT enabled FROM llm_providers WHERE id='prov-test'") is True
@@ -260,3 +258,106 @@ def test_config_transfer_preserves_omitted_enabled_and_imports_explicit_state(mo
             assert await pool.fetchval("SELECT enabled FROM llm_providers WHERE id='prov-test'") is True
 
     run_with_models(test, monkeypatch)
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_config_import_refuses_disabled_model_bindings_but_allows_same_model_edits(
+    monkeypatch: pytest.MonkeyPatch, apply: bool,
+) -> None:
+    from looper.agents import config_transfer as transfer
+
+    async def test(pool: Any) -> None:
+        existing = await _profile()
+        other = await _profile(provider_id="prov-other", name="Other profile")
+        second = (await registry.create_model({"provider_id": "prov-test", "name": "claude-haiku-4-5",
+                                               "protocol": "anthropic-messages"}))["model"]
+        switching = (await registry.create_profile({"name": "Switching profile", "runtime_id": "rt-claude-code",
+                                                    "model_id": second["model_id"]}))["profile"]
+        await registry.set_provider_enabled("prov-test", False)
+        with pytest.raises(registry.RegistryError) as refused:
+            await registry.create_profile({"name": "API profile", "runtime_id": "rt-claude-code",
+                                           "model_id": existing["model_id"]})
+        entry = {"runtime": "claude-code", "model": {"provider": "Test account", "name": "claude-sonnet-4-5",
+                                                    "protocol": "anthropic-messages"}}
+        document = {"format": transfer.FORMAT, "profiles": [
+            {**entry, "name": name} for name in ("Imported profile", "Other profile", "Switching profile")
+        ] + [{**entry, "name": "Example profile", "effort": "high", "custom_prompt": "Check carefully."}]}
+        async with pool.acquire() as conn:
+            plan = await transfer.run_import(conn, document, apply=apply)
+        skipped = [change for change in plan.changes if change.action == transfer.Action.SKIPPED]
+        assert {change.key for change in skipped} == {"Imported profile", "Other profile", "Switching profile"}
+        assert all(change.section == "profiles" and change.reason == str(refused.value) for change in skipped)
+        assert await pool.fetchval("SELECT count(*) FROM agent_profiles WHERE name='Imported profile'") == 0
+        for profile in (other, switching):
+            assert await pool.fetchval("SELECT model_id FROM agent_profiles WHERE id=$1", profile["profile_id"]) == profile["model_id"]
+        stored = await pool.fetchrow("SELECT model_id, effort, custom_prompt FROM agent_profiles WHERE id=$1",
+                                     existing["profile_id"])
+        assert tuple(stored) == (existing["model_id"], "high" if apply else None, "Check carefully." if apply else "")
+        assert any(change.key == "Example profile" and change.action == transfer.Action.CHANGED
+                   for change in plan.changes)
+
+    run_with_models(test, monkeypatch)
+
+
+async def _select_everywhere(pool: Any, profile_id: str, key: str) -> dict[str, Any]:
+    from looper.db import agent_sessions, managers, projects, schedules, tasks
+
+    manager_id = f"manager-{key}"
+    manager = await managers.insert_manager({"id": manager_id, "name": key, "system_prompt": "Use tools.",
+        "tools": "all", "task_scope": "own", "profile_id": profile_id}, conn=pool)
+    await agent_sessions.select_profile(manager_id, profile_id, pool=pool)
+    await pool.execute("INSERT INTO manager_task_templates (manager_id, key, name, worker_profile_id) "
+                       "VALUES ($1, 'review', 'Review', $2)", manager_id, profile_id)
+    project = await projects.create_project(name=key, pool=pool)
+    await tasks.create_task(task_id=f"task-{key}", requirement="Review changes.", project_id=project["id"],
+                            manager_id=manager_id, pool=pool)
+    await pool.execute("INSERT INTO task_profile_overrides (task_id, role, profile_id) VALUES ($1, 'worker', $2)",
+                       f"task-{key}", profile_id)
+    await schedules.create_schedule(pool, project_id=project["id"], fields={"name": "Review", "cron": "0 0 * * *",
+        "timezone": "UTC", "requirement": "Review changes."}, profiles={"worker": profile_id}, manager_id=manager_id)
+    return manager
+
+
+@pytest.mark.parametrize("caller", ["own", "all", "operator"])
+def test_provider_disable_usage_warning_stays_in_callers_scope(monkeypatch: pytest.MonkeyPatch, caller: str) -> None:
+    from looper.agents.managers_api import ManagerDefinition
+    from looper.agents.ops import Call, Turn, check_arguments
+    from looper.agents.ops.config import TOOLS
+    from looper.agents.ops.service import scope_for
+
+    async def test(pool: Any) -> None:
+        own = await _profile(name="Own profile")
+        other = (await registry.create_profile({"name": "Other profile", "runtime_id": "rt-claude-code",
+                                                "model_id": own["model_id"]}))["profile"]
+        manager = await _select_everywhere(pool, own["profile_id"], "alpha")
+        await _select_everywhere(pool, other["profile_id"], "beta")
+        await pool.execute("INSERT INTO task_profile_overrides (task_id, role, profile_id) "
+                           "VALUES ('task-beta', 'reviewer', $1)", own["profile_id"])
+        tool = next(tool for tool in TOOLS if tool.name == "looper_providers")
+        arguments = check_arguments(tool.schema, {"action": "update", "provider": "prov-test", "enabled": False})
+        scope = None if caller == "operator" else scope_for(ManagerDefinition.from_row({**manager, "task_scope": caller}))
+        answer = await tool.run(Call(arguments, Turn(channel=None, chat=None), None, scope=scope))
+        warning = " ".join(answer["warnings"])
+        assert "Own profile" in warning and "Manager alpha" in warning and "manager-alpha" in warning
+        assert "template Review of Manager alpha" in warning and "1 task" in warning
+        if caller == "own":
+            assert "Other profile" not in warning and "beta" not in warning and "schedule" not in warning
+            assert "2 tasks" not in warning
+        else:
+            assert "Other profile" in warning and "Manager beta" in warning and "manager-beta" in warning
+            assert "template Review of Manager beta" in warning and "1 schedule" in warning
+            assert "2 tasks" in warning
+
+    run_with_models(test, monkeypatch)
+
+
+def test_builtin_provider_disable_lists_explicit_selections_as_well_as_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test(pool: Any) -> None:
+        await _select_everywhere(pool, "agent-claude-code-opus", "review")
+        answer = await registry.set_provider_enabled("prov-claude-subscription", False)
+        warning = " ".join(answer["warnings"])
+        for selection in ("1 task", "1 schedule", "Manager review", "manager-review", "template Review of Manager review"):
+            assert selection in warning
+        assert "when nothing selects another profile" in warning
+
+    run_db(test, monkeypatch, timeout=30)
