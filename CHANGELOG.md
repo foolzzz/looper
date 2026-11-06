@@ -18,6 +18,12 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.94] - 2026-11-05
+
+### Changed
+
+- **A Custom provider is described by API format and one base URL, and model prices default to 0.** Dashboard: adding a Custom provider asks for an API format (Anthropic or OpenAI, from the registry's `limits.api_formats`) and one base URL instead of three protocol checkboxes. Anthropic saves an `anthropic-messages` endpoint (a trailing `/v1` in the typed URL is dropped, and the form says so); OpenAI saves `openai-responses` and `openai-chat` at that URL, or only one when the operator says the gateway serves only that API. A link switches to the per-protocol editor; editing a provider is unchanged. Add model now goes through `models.add_many`: an empty price becomes Looper's built-in price when it knows the model, otherwise 0 (counted as free); a typed price, including 0, is kept, and editing a model keeps its override semantics. Model rows show a zero price as "0 (free)". Server side, provider model listing now marks a listing as truncated when the endpoint reports more pages, and a transport or URL error on one endpoint no longer fails the others. No schema or API change, nothing model-visible. ([#1115](https://github.com/foolzzz/looper/pull/1115))
+
 ## [2.14.93] - 2026-11-05
 
 ### Fixed
