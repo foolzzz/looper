@@ -1269,8 +1269,11 @@ if text == 'unfinished':
 if text == 'hang':
     import signal, subprocess, time
     child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
-    (home / 'child-pid').write_text(str(child.pid))
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    # Publish readiness only after the PID is complete and the signal handler is installed.
+    pending_pid = home / 'child-pid.tmp'
+    pending_pid.write_text(str(child.pid))
+    pending_pid.replace(home / 'child-pid')
     time.sleep(60)
 print(json.dumps({'type': 'status', 'phase': 'step_end', 'turn': len(sessions[sid]['turns']), 'step': 1,
                   'usage': {'inputTokens': 10, 'outputTokens': 4, 'cacheReadTokens': 7, 'cacheWriteTokens': 2}}))

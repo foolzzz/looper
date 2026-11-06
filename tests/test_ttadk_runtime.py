@@ -45,7 +45,7 @@ def test_native_codex_run_record_preserves_exact_serialized_snapshot(monkeypatch
         "settings_sources": {"harness": "builtin", "profile": "builtin", "effort": "builtin",
             "env": {}, "run_budget_usd": "builtin"},
         "llm_model": {"model_id": "model-login", "provider_id": "prov-codex-login",
-            "name": "gpt-6.1-sol", "protocol": "openai-responses"},
+            "name": "gpt-6.1-sol", "protocol": "openai-responses", "path": "direct"},
         "pricing": {"cost_source": "provider_price", "rule": "exact_normalized_builtin_v1",
             "builtin_prices_as_of": "2026-10-14", "exact": {"gpt-6.1-sol": price},
             "normalized": {"gpt-6.1-sol": price}, "builtin": {}, "aliases": {}},

@@ -88,17 +88,21 @@ def test_update_rejects_identity_changes_and_preserves_settings(tmp_path, monkey
 def test_exact_provider_name_protocol_references_select_only_the_matching_model(tmp_path, monkeypatch):
     async def run(pool):
         async with _api(tmp_path, pool) as call:
-            variants = [{}, {"protocol": "openai-chat"}, {"provider": "prov-other"}, {"name": "Example-model"}]
+            await pool.execute("INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url) "
+                               "VALUES ('prov-test', 'openai-responses', 'https://responses.example.invalid')")
+            variants = [{}, {"protocol": "openai-chat"}, {"protocol": "openai-responses"},
+                        {"provider": "prov-other"}, {"name": "Example-model"}]
             models = [await _create(call, **fields) for fields in variants]
             assert len({m["model_id"] for m in models}) == len(variants)
             for index, (model, fields) in enumerate(zip(models, variants)):
                 reference = {**CREATE, **fields}
                 status, answer = await call("models.update", {"model": reference, "context_window": 100 + index})
                 assert status == 200 and answer["result"]["model"]["model_id"] == model["model_id"], answer
-            assert [(await db.get_model(m["model_id"]))["context_window"] for m in models] == [100, 101, 102, 103]
+            assert [(await db.get_model(m["model_id"]))["context_window"] for m in models] == [100, 101, 102, 103, 104]
             status, answer = await call("models.list", {"provider": "Test account", "runtime": "claude-code"})
             assert status == 200
-            assert {m["model_id"] for m in answer["result"]["models"]} == {models[0]["model_id"], models[3]["model_id"]}
+            assert {m["model_id"] for m in answer["result"]["models"]} == {
+                models[0]["model_id"], models[1]["model_id"], models[4]["model_id"]}
     run_with_models(run, monkeypatch)
 
 

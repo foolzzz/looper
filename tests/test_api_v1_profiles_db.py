@@ -82,8 +82,10 @@ def test_profile_create_update_runtime_model_compatibility_is_atomic(tmp_path, m
     async def run(pool):
         async with _api(tmp_path, pool) as call:
             profile = await _create(call)
-            incompatible = (await profile_registry.create_model({"provider_id": "prov-test", "name": "chat-model",
-                                                                  "protocol": "openai-chat"}))["model"]
+            await pool.execute("INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url) "
+                               "VALUES ('prov-test', 'openai-responses', 'https://responses.example.invalid')")
+            incompatible = (await profile_registry.create_model({"provider_id": "prov-test", "name": "responses-model",
+                                                                  "protocol": "openai-responses"}))["model"]
             fields = {k: incompatible["model_id"] if v == "incompatible" else v for k, v in changes.items()}
             body = ({"name": "Another", "runtime_id": profile["runtime_id"], "model_id": profile["model_id"], **fields}
                     if action == "create" else {"profile_id": profile["profile_id"], "fields": fields})

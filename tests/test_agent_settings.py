@@ -295,7 +295,7 @@ class TestRecord:
             "profile": {**builtin_resolved_profile().record(), "source": "builtin"},
             "model_choice": {"model": "opus", "source": "builtin", "effort": None},
             "llm_model": {"model_id": "model-84f4b69e-12a7-5fd7-b665-a9b7d01568eb", "provider_id": BUILTIN_PROVIDER.id,
-                          "name": "opus", "protocol": "anthropic-messages"},
+                          "name": "opus", "protocol": "anthropic-messages", "path": "direct"},
             "pricing": {"builtin_prices_as_of": PRICES_AS_OF, "cost_source": "runtime", "rule": "runtime_reported"},
             "settings_sources": {"harness": "builtin", "profile": "builtin", "effort": "builtin", "env": {},
                                  "run_budget_usd": "builtin"},

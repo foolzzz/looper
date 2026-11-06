@@ -149,7 +149,7 @@ def test_invalid_binding_keeps_the_selected_profile_and_fails_before_secret_read
     from looper.db import agent_setting_layers, profile_registry as db
     row = _profile_row(bound_profile())
     if damage == 'runtime':
-        row['runtime_type'] = 'claude-code'
+        row['runtime_type'] = 'codex'  # Claude Code can now translate this Chat model; Codex still cannot.
     elif damage == 'endpoint':
         row['endpoint']['protocol'] = 'anthropic-messages'
     else:

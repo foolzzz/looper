@@ -1065,7 +1065,7 @@ def test_the_manager_moves_to_codex_after_a_handoff_and_resumes_it_turn_by_turn(
         {"id": "model-gpt-5.5", "provider_id": "prov-cpa", "name": "gpt-5.5", "protocol": "openai-responses",
          "context_window": None, "input_usd_per_mtok": None, "output_usd_per_mtok": None,
          "cache_read_usd_per_mtok": None, "cache_write_usd_per_mtok": None, "efforts": None,
-         "background_model": None, "catalog_order": 0, "builtin": False}]))
+         "background_model": None, "chat_dialect": None, "catalog_order": 0, "builtin": False}]))
     codex = fake_claude(tmp_path / "codex", _CODEX)
     on_codex = [_manager(profile=_codex_profile(codex))]
     chat = _converse(monkeypatch, _resident(), ["hello", "again", "third"], layers=[[], on_codex, on_codex])
