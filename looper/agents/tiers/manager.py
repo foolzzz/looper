@@ -363,7 +363,7 @@ STOP_DRAIN_SEC = 10.0
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
     "persist_user_message", "route_to_gate", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
-    "load_session_state", "agent_settings", "templates", "library", "library_server", "build_user_message",
+    "load_session_state", "agent_settings", "templates", "library", "library_server", "llmrec_attach", "build_user_message",
     "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
 )
@@ -1343,7 +1343,8 @@ class ManagerAgent:
             self._runtime_root, AgentType.MANAGER.value, manager_id=self.agent_id))
         library = await token.step("library_server", self._library_with_server(library))
         launch = Launch(agent_settings, library, role=AgentType.MANAGER)
-        launch = await llmrec.attach(launch, agent_id=self.agent_id, task_id=None, reuse=True)
+        launch = await token.step("llmrec_attach", llmrec.attach(
+            launch, agent_id=self.agent_id, task_id=None, reuse=True))
         if ask.turn is not None:
             ask.turn.runtime = launch.runtime.type  # named in what the turn binding logs
         try:
