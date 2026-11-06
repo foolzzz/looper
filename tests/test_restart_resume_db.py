@@ -211,8 +211,10 @@ def test_a_task_carries_on_after_the_server_restarts(tmp_path: Path) -> None:
     # The M2 baseline held: each finished Planner turn records its own 0.001, never the session's total.
     planner_costs = [r["cost_usd"] for r in records if r["agent_id"].startswith("planner-") and r["cost_usd"]]
     assert planner_costs and all(c == pytest.approx(PLANNER_TURN_COST) for c in planner_costs)
-    # The database holds the state: no plan or session file was written.
-    assert list(runtime.glob(".local/**/*.json")) == []
+    # The database holds task state; only the proxy's disabled gateway configuration is written locally.
+    gateway_config = runtime / ".local/llmrec/gateway.json"
+    assert list(runtime.glob(".local/**/*.json")) == [gateway_config]
+    assert json.loads(gateway_config.read_text()) == {"format": 1, "enabled": False, "record": False}
     assert not (runtime / ".local" / "planner").exists() and not (runtime / ".local" / "manager").exists()
 
 
@@ -244,7 +246,9 @@ def test_a_task_failed_at_its_cap_continues_from_the_database_after_a_restart(tm
     assert [t for t in turns if t.startswith("[PLAN]")] == [turns[0]]  # planned once
     argvs = _log(state, "planner_argv.jsonl")
     assert argvs[-1][argvs[-1].index("--resume") + 1] == "fake-planner-session"
-    assert list(runtime.glob(".local/**/*.json")) == []
+    gateway_config = runtime / ".local/llmrec/gateway.json"
+    assert list(runtime.glob(".local/**/*.json")) == [gateway_config]
+    assert json.loads(gateway_config.read_text()) == {"format": 1, "enabled": False, "record": False}
 
 
 def test_a_ready_task_stays_ready_through_a_restart_until_it_is_started(tmp_path: Path) -> None:
