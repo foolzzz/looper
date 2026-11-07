@@ -2844,6 +2844,49 @@ export interface LlmrecLimit {
   maximum: number;
 }
 
+export interface GatewayUsage {
+  requests?: number;
+  input_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  output_tokens?: number;
+  errors_by_type?: Record<string, number>;
+  usage_missing?: number;
+  cache_fields_missing?: number;
+  tool_args_invalid?: number;
+  stream_errors?: number;
+  pings?: number;
+  dropped?: Record<string, number>;
+  degraded?: Record<string, number>;
+  clamped?: Record<string, number>;
+}
+
+export interface GatewaySettings {
+  enabled: boolean;
+  port: number | null;
+  url: string | null;
+  key_exists: boolean;
+  aliases: { alias: string; model_id: string; model_name: string; provider_id: string; provider_name: string; enabled: boolean }[];
+  client_environment: Record<string, string>;
+  proxy: LlmrecSettings["proxy"];
+  translate: GatewayUsage;
+  auth_failures: number;
+  alias_usage: Record<string, GatewayUsage>;
+}
+
+async function gatewayOperation<T extends object>(operation: string, fields: object = {}): Promise<T> {
+  const result = await callV1<T>(`/api/v1/gateway/${operation}`, fields);
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export const fetchGatewaySettings = () => gatewayOperation<GatewaySettings>("get");
+export const updateGatewaySettings = (fields: { enabled: boolean; port?: number }) => gatewayOperation<GatewaySettings>("update", fields);
+export const setGatewayAlias = (alias: string, model_id: string) => gatewayOperation<GatewaySettings>("alias_set", { alias, model_id });
+export const deleteGatewayAlias = (alias: string) => gatewayOperation<GatewaySettings>("alias_delete", { alias });
+export const revealGatewayKey = () => gatewayOperation<{ key: string }>("key_reveal");
+export const rotateGatewayKey = () => gatewayOperation<{ key: string }>("key_rotate");
+
 export interface LlmrecSettingsUpdate {
   enabled?: boolean;
   include_oauth?: boolean;

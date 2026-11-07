@@ -17,11 +17,11 @@ import sys
 import time
 
 # Import the complete recorder before serving: an in-place upgrade must not mix versions.
-from . import capture as capture, control, dialects, gateway, proxy, translate, translate_stream, writer
+from . import capture as capture, control, dialects, gateway, proxy, translate, translate_stream, writer  # noqa: F401
 from . import LOCK_FILE, LOG_FILE, ROUTE_FORMAT, STATE_FILE, code_sha256
 from .. import proc_tree
 from ..keeper import read_json, write_json
-from ...db import llm_requests as llm_requests
+from ...db import llm_requests as llm_requests, gateway as gateway_db  # noqa: F401
 from ...db.connection import init_pool
 
 logger = logging.getLogger(__name__)

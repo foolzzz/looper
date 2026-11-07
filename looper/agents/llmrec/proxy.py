@@ -31,6 +31,7 @@ from looper import __version__
 from . import ROUTE_FORMAT, ROUTE_ID, ROUTES_DIR, TLS_ENV, RouteFile, code_sha256
 from .capture import MIB, build_capture, kind_of, redact_headers, redact_query
 from .dialects import DIALECTS, ChatDialect
+from .gateway import GatewayKey, GatewayConfig, AliasResolver, Unavailable, request_guard
 from .translate import Rejection, RejectionCode, to_chat, from_chat, local_response, error_response, anthropic_usage
 from .translate_stream import StreamTranslator, sse_events
 
@@ -243,6 +244,11 @@ class Proxy:
             pings=0, usage_missing=0, cache_fields_missing=0, tool_args_invalid=0,
             dropped=Counter(), degraded=Counter(), clamped=Counter(), input_tokens=0,
             cache_read_input_tokens=0, cache_creation_input_tokens=0, output_tokens=0)
+        self._gateway_key = GatewayKey(self.root)
+        self._gateway_config = GatewayConfig(self.root)
+        self._aliases = AliasResolver(lambda: getattr(self.sink, 'pool', None))
+        self._auth_failures = 0
+        self._alias_usage = {}
         self._routes = {}
         self._handlers = set()
         self._server = None
@@ -251,7 +257,8 @@ class Proxy:
 
     @property
     def stats(self):
-        return {**self._stats, 'translate': self._translate_stats, 'recorded': getattr(self.sink, 'recorded', self._stats['recorded']),
+        return {**self._stats, 'translate': self._translate_stats,
+                'auth_failures': self._auth_failures, 'alias_usage': self._alias_usage, 'recorded': getattr(self.sink, 'recorded', self._stats['recorded']),
                 'gaps': getattr(self.sink, 'gaps', self._stats['gaps']),
                 'gap_reasons': dict(getattr(self.sink, 'gap_reasons', self._gap_reasons)),
                 'write_errors': getattr(self.sink, 'write_errors', 0),
@@ -368,6 +375,8 @@ class Proxy:
                 dict(instance=self.instance, pid=os.getpid(), port=self.port, writer_healthy=healthy,
                 code_sha256=self._code_sha256, route_format=ROUTE_FORMAT, features={'translate': 1}, **self.stats))
             return b''
+        if path.path.startswith('/gw/'):
+            return await self._gateway_request(connection, reader, writer, request, body, path.path[3:])
         prefix = path.path.split('/', 3)
         route = stamped[0] if stamped else None
         if any(k.lower() == b'upgrade' for k, _ in request.headers):
@@ -512,7 +521,69 @@ class Proxy:
                      values['status'], values['duration_ms'], response_bytes)
         return bytes(buffered)
 
-    async def _translated(self, connection, reader, writer, request, body, stamped, path):
+    async def _gateway_request(self, connection, reader, writer, request, body, path):
+        config = self._gateway_config.read()
+        try:
+            if not config['enabled']:
+                raise Rejection(404, 'not_found_error', 'Gateway endpoint is disabled')
+            if rejection := request_guard(request.headers, self.port):
+                raise rejection
+            # Claude Code probes connectivity without credentials before its first request.
+            if request.method == b'HEAD' and path == '/api/hello':
+                writer.write(connection.send(h11.Response(status_code=200, headers=[(b'content-length', b'0')])))
+                writer.write(connection.send(h11.EndOfMessage()))
+                await writer.drain()
+                return b''
+            if not self._gateway_key.check(request.headers):
+                self._auth_failures += 1
+                raise Rejection(401, 'authentication_error', 'Invalid gateway API key')
+            if any(name.lower() == b'upgrade' for name, _ in request.headers):
+                raise Rejection(400, 'invalid_request_error', 'Gateway upgrades are unsupported')
+            if request.method == b'GET' and path == '/v1/models':
+                aliases = await self._aliases.list_aliases()
+                models = [row['alias'] for row in aliases if row['enabled']]
+                await self._json(connection, writer, 200, {'data': [
+                    {'type': 'model', 'id': alias, 'display_name': alias,
+                     'created_at': '1970-01-01T00:00:00+00:00'} for alias in models],
+                    'has_more': False, 'first_id': models[0] if models else None,
+                    'last_id': models[-1] if models else None})
+                return b''
+            if request.method == b'GET' and path == '/api/hello':
+                writer.write(connection.send(h11.Response(status_code=200, headers=[(b'content-length', b'0')])))
+                writer.write(connection.send(h11.EndOfMessage()))
+                await writer.drain()
+                return b''
+            if request.method != b'POST' or path != '/v1/messages':
+                raise Rejection(404, 'not_found_error', 'endpoint is not supported through the Looper gateway')
+            try:
+                parsed = json.loads(body)
+            except (ValueError, UnicodeError):
+                raise Rejection(400, 'invalid_request_error', 'Invalid JSON through the Looper gateway')
+            if not isinstance(parsed, dict) or not isinstance(parsed.get('model'), str):
+                raise Rejection(400, 'invalid_request_error', 'Expected a model alias through the Looper gateway')
+            alias = parsed['model']
+            target = await self._aliases.resolve(alias)
+            if target is None:
+                raise Rejection(404, 'not_found_error', 'Unknown model alias through the Looper gateway')
+            now = datetime.now(timezone.utc)
+            route = RouteFile(id='gw_' + hashlib.sha256(alias.encode()).hexdigest()[:16] + '_' + now.strftime('%Y%m%d'),
+                upstream=target.base_url, kind='translate', record=config['record'], api='openai-chat',
+                dialect=target.dialect, models={alias: target.upstream_model}, protocol='openai-chat',
+                provider_id=target.provider_id, model=alias, agent_id='gateway:' + alias,
+                runtime_type='external', created_at=now.isoformat())
+            self._stats['requests'] += 1
+            stamped = route, self._stats['requests'], now, time.monotonic()
+            return await self._translated(connection, reader, writer, request, body, stamped, path,
+                                          upstream_auth='Bearer ' + target.api_key)
+        except Unavailable:
+            rejection = Rejection(503, 'api_error', 'gateway configuration unavailable')
+        except Rejection as error:
+            rejection = error
+        await self._json(connection, writer, rejection.status, {'type': 'error', 'error': {
+            'type': rejection.error_type, 'message': rejection.message}})
+        return b''
+
+    async def _translated(self, connection, reader, writer, request, body, stamped, path, *, upstream_auth=None):
         route, seq, started_at, started = stamped
         stats = self._translate_stats
         stats['requests'] += 1
@@ -604,6 +675,7 @@ class Proxy:
                     raise Rejection(400, 'invalid_request_error', 'Expected an object through the Looper gateway')
                 request_headers = dict(request.headers)
                 session = request_headers.get(b'x-claude-code-session-id')
+                history_key = (route.id, session or b'') if route.runtime_type == 'external' else route.id
                 chat = to_chat(parsed, dialect, route.models,
                                session_id=session.decode('utf-8', errors='replace') if session else None)
                 common, reused, previous = self._prefix_history.remember((route.id, session), chat.body)
@@ -616,7 +688,9 @@ class Proxy:
                 headers = {'content-type': 'application/json',
                     'accept': 'text/event-stream' if chat.stream else 'application/json',
                     'accept-encoding': 'gzip, deflate', 'user-agent': 'looper-gateway/' + __version__}
-                if authorization := request_headers.get(b'authorization'):
+                if upstream_auth is not None:
+                    headers['authorization'] = upstream_auth
+                elif authorization := request_headers.get(b'authorization'):
                     headers['authorization'] = authorization.decode('latin-1')
                 upstream_request = self._client.build_request('POST', url, headers=headers, content=chat.body,
                     timeout=httpx.Timeout(self.read_idle_s if self.read_idle_s is not None else 600,
@@ -644,7 +718,7 @@ class Proxy:
                     count_error(json.loads(data)['error']['type'])
                     await send_response(status, fields, data)
                 elif chat.stream:
-                    start_input_tokens = self._prompt_history.estimate(route.id, chat.body)
+                    start_input_tokens = self._prompt_history.estimate(history_key, chat.body)
                     translation.update(start_usage_estimated=True, start_input_tokens=start_input_tokens)
                     translator = StreamTranslator(dialect, parsed['model'],
                         'msg_lgw_' + hashlib.sha256(f'{self.instance}:{seq}'.encode()).hexdigest()[:24],
@@ -734,7 +808,7 @@ class Proxy:
                         stats['cache_fields_missing'] += 1
                     prompt_tokens = raw_usage.get('prompt_tokens') if isinstance(raw_usage, dict) else None
                     if type(prompt_tokens) is int and prompt_tokens >= 0:
-                        self._prompt_history.remember(route.id, chat.body,
+                        self._prompt_history.remember(history_key, chat.body,
                             sum(usage.get(key, 0) for key in ('input_tokens', 'cache_read_input_tokens',
                                                        'cache_creation_input_tokens')))
                     for key, value in usage.items():
@@ -774,6 +848,12 @@ class Proxy:
                     self._stats['dropped'] += 1
                     log.error('Gateway capture failed route=%s', route.id)
             usage, _ = anthropic_usage(translation['upstream_usage'], dialect)
+            if route.runtime_type == 'external':
+                counters = self._alias_usage.setdefault(route.model, dict(requests=0,
+                    input_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=0, output_tokens=0))
+                counters['requests'] += 1
+                for key, value in usage.items():
+                    counters[key] += value
             previous_tokens = translation['previous_prompt_tokens']
             prefix = translation['common_prefix_tokens']
             log.info('route=%s kind=translate upstream_host=%s upstream_model=%s status=%s finish=%s '

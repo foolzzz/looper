@@ -3458,6 +3458,39 @@ upstream URL containing credentials, refuses the run with a specific reason.
 Startup checks report gateway availability and warn when upstream usage is
 missing, since spend would be understated.
 
+For hand-run clients, enable **Settings → Local gateway** and add a model
+alias pointing to an enabled API-key `openai-chat` model. This exposes the
+Anthropic-compatible `/gw` endpoint on loopback only, with a fixed local port.
+Clients authenticate with a separate local key stored at
+`<runtime-root>/.local/llmrec/gateway.key` with mode `0600`; the upstream
+provider key stays inside the proxy. Reveal or rotate the local key in the
+same Settings section. Rotation invalidates the old key, so existing clients
+must fetch the new one. Enablement, port and aliases are configured there or
+through `/api/v1/gateway/{update,alias_set,alias_delete}`; `loopercli` provides
+only `gateway-env` for this workflow, not gateway configuration commands.
+
+Run this before starting Claude Code (replace `NAME` with the configured alias):
+
+```sh
+eval "$(loopercli gateway-env --alias NAME)"
+claude
+```
+
+The command prints shell-quoted `export` lines, including an empty
+`ANTHROPIC_API_KEY`, and pins every model tier and subagent to the selected
+alias. The Settings client-environment example uses the same export function
+with a local-key placeholder. A project's `.claude/settings.json` `env` can
+override these variables for a hand-run client; check it if requests do not
+reach the local gateway. Claude Code estimates a 200k context window for
+unknown model names, including local aliases; this may differ from the
+upstream model's actual limit.
+
+The unauthenticated `HEAD /gw/api/hello` connectivity probe is answered
+locally without changing counters or calling upstream. Other requests require
+the local key. Settings' translation counters cover all translated requests
+through the proxy, including Looper's agents and local clients, since proxy
+startup; they are not limited to the external `/gw` endpoint.
+
 Context sizes during translated streams are estimates: `message_start` puts
 the estimate in `input_tokens`, with both cache counts zero. The gateway uses
 the previous request's exact total prompt tokens on the same route (input +

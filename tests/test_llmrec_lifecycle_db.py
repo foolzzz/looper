@@ -1,8 +1,11 @@
 """Exercise recorder ownership through its actual isolated subprocess boot."""
 
 import asyncio
+from dataclasses import asdict
+import json
 import os
 import signal
+import socket
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -44,6 +47,15 @@ async def started(control, kept=()):
     await wait_for(control._health)
 
 
+@pytest.fixture(autouse=True)
+def _gateway_settings(monkeypatch):
+    # These process-lifecycle cases supply a DSN without owning the application pool.
+    # Endpoint settings persistence is exercised with the shared schema fixture separately.
+    from looper.db import system_settings
+
+    monkeypatch.setattr(system_settings, "get_settings", AsyncMock(return_value={}))
+
+
 @pytest.fixture
 def short_checks(monkeypatch):
     boot = module.boot_argv
@@ -81,6 +93,116 @@ def test_boot_reuse_and_upgrade(tmp_path, short_checks, kept):
     asyncio.run(asyncio.wait_for(run(), 25))
 
 
+@pytest.mark.parametrize("replacement", ["tick", "start"])
+@pytest.mark.parametrize("route_format", [3, 4])
+def test_kept_outdated_proxy_replaced_with_gateway_disabled(tmp_path, monkeypatch, short_checks, replacement, route_format):
+    from looper.agents.agent_settings import AgentSettings, Launch
+    from looper.agents.llmrec import LlmrecRoute
+    from looper.agents.profile_registry import builtin_resolved_profile
+
+    async def run(pool):
+        schema = await pool.fetchval("SELECT current_schema()")
+        url = urlsplit(DSN)
+        scoped_dsn = urlunsplit(url._replace(query=urlencode([*parse_qsl(url.query), ("search_path", schema)])))
+        control = ProxyControl(tmp_path, scoped_dsn, enabled=True, include_oauth=True)
+        adopted = ProxyControl(tmp_path, scoped_dsn, enabled=True, include_oauth=True)
+        boot = module.boot_argv
+
+        def legacy_boot(*args):
+            argv = boot(*args)
+            argv[3] = argv[3].replace("from looper.agents.llmrec.__main__ import main;",
+                f"from looper.agents import llmrec; llmrec.ROUTE_FORMAT = {route_format}; "
+                "from looper.agents.llmrec import proxy; proxy.code_sha256 = lambda: 'old-code'; "
+                f"proxy.ROUTE_FORMAT = {route_format}; "
+                "from looper.agents.llmrec.__main__ import main;")
+            return argv
+
+        try:
+            with monkeypatch.context() as old:
+                old.setattr(module, "boot_argv", legacy_boot)
+                await started(control)
+            initial = control._state()
+            route = RouteFile(id="e" * 22, upstream="https://model.example.invalid", agent_id="kept-worker",
+                              created_at="2026-01-01T00:00:00+00:00", record_id=42)
+            path = tmp_path / ROUTES_DIR / f"{route.id}.json"
+            route.write(path)
+            payload = {**asdict(route), "format": route_format}
+            if route_format == 3:
+                # v2.14.99 rejects fields introduced with gateway routes.
+                for field in ("kind", "record", "api", "dialect", "models"):
+                    payload.pop(field)
+            write_json(path, payload)
+            orphan = {**payload, "id": "d" * 22, "record_id": 41}
+            orphan_path = path.with_name(f"{orphan['id']}.json")
+            write_json(orphan_path, orphan)
+            await adopted.at_start([42])
+            retired = json.loads(orphan_path.read_text())
+            assert retired["ended_at"]
+            assert retired == {**orphan, "record_id": None, "last_record_id": 41, "ended_at": retired["ended_at"]}
+            assert not adopted.gateway_enabled
+            assert (await adopted.status())["proxy"]["state"] == "outdated"
+            await adopted.tick()
+            assert not await adopted._start()
+            assert adopted._state()["pid"] == initial["pid"]
+            assert json.loads(path.read_text()) == payload
+            if route_format == 3:
+                assert RouteFile.read(path) is None
+            # The kept Worker's next model request still goes through the old route.
+            async with FakeModelAPI([ResponseScript(events=[{"type": "message_stop"}])]) as upstream:
+                payload["upstream"] = upstream.base_url
+                write_json(path, payload)
+                await pool.execute("INSERT INTO llm_records(id, agent_id, status) VALUES (42, 'kept-worker', 'running')")
+                async with httpx.AsyncClient(trust_env=False, timeout=3) as client:
+                    response = await client.post(f"http://127.0.0.1:{initial['port']}/r/{route.id}/messages",
+                        json={"model": "kept-worker", "messages": [], "stream": True},
+                        headers={"authorization": "Bearer test-key"})
+                    assert response.status_code == 200 and b"message_stop" in response.content
+                assert len(upstream.requests) == 1
+            # A resident route pins the proxy even between turns.
+            adopted.release(42, end_route=False)
+            idle = json.loads(path.read_text())
+            assert idle == {**payload, "record_id": None, "last_record_id": 42}
+            await adopted.tick()
+            assert adopted._state()["pid"] == initial["pid"]
+            adopted.bind(route.id, 43)
+            assert json.loads(path.read_text()) == {**idle, "record_id": 43}
+            adopted.release(43, end_route=True)
+            ended = json.loads(path.read_text())
+            assert ended["ended_at"]
+            assert ended == {**idle, "last_record_id": 43, "ended_at": ended["ended_at"]}
+            if replacement == "tick":
+                await adopted.tick()
+            else:
+                assert await adopted._start()
+            current = adopted._state()
+            assert current["pid"] != initial["pid"] and current["instance"] != initial["instance"]
+            assert current["port"] == initial["port"]
+            assert not await adopted._running(initial)
+            assert (await adopted.status())["proxy"]["state"] == "running"
+            script = ResponseScript(events=[{"type": "message_start", "message": {
+                "id": "msg_test", "type": "message", "role": "assistant", "content": [],
+                "usage": {"input_tokens": 1, "output_tokens": 0}}}, {"type": "message_stop"}])
+            async with FakeModelAPI([script]) as upstream:
+                launch = Launch(AgentSettings(profile=builtin_resolved_profile()))
+                monkeypatch.setattr(type(launch.runtime), "llmrec_upstream", lambda self, launch: upstream.base_url)
+                attached = await adopted.attach(launch, agent_id="new-worker", task_id=None)
+                assert isinstance(attached.llmrec, LlmrecRoute)
+                async with httpx.AsyncClient(trust_env=False, timeout=3) as client:
+                    response = await client.post(f"{attached.llmrec.url}/messages",
+                        json={"model": "after-upgrade", "messages": [], "stream": True},
+                        headers={"authorization": "Bearer test-key"})
+                    assert response.status_code == 200 and b"message_stop" in response.content
+                assert len(upstream.requests) == 1
+                async def written():
+                    return await pool.fetchval("SELECT count(*) FROM llm_requests WHERE model='after-upgrade'") == 1
+                await wait_for(written)
+        finally:
+            await cleanup(adopted)
+            await cleanup(control)
+
+    run_db(run, timeout=30)
+
+
 def test_crash_restarts_on_original_port(tmp_path, short_checks):
     async def run():
         control = ProxyControl(tmp_path, DSN, enabled=True)
@@ -100,6 +222,41 @@ def test_crash_restarts_on_original_port(tmp_path, short_checks):
         finally:
             await cleanup(control)
     asyncio.run(asyncio.wait_for(run(), 20))
+
+
+@pytest.mark.parametrize("restart", ["cold", "crash", "upgrade"])
+def test_disabled_gateway_port_does_not_pin_recorder(tmp_path, short_checks, monkeypatch, restart):
+    from looper.db import system_settings
+
+    async def run():
+        control = ProxyControl(tmp_path, DSN, enabled=True)
+        initial = None
+        try:
+            if restart != "cold":
+                await started(control)
+                initial = control._state()
+                if restart == "crash":
+                    os.kill(initial["pid"], signal.SIGKILL)
+                    await control._children[initial["pid"]].wait()
+                else:
+                    write_json(tmp_path / STATE_FILE, {**initial, "code_sha256": "old-code"})
+            with socket.socket() as occupied:
+                occupied.bind(("127.0.0.1", 0))
+                occupied.listen()
+                port = occupied.getsockname()[1]
+                monkeypatch.setattr(system_settings, "get_settings", AsyncMock(return_value={
+                    "gateway.enabled": "false", "gateway.port": str(port)}))
+                await started(control)
+                final = control._state()
+                assert control.gateway_port == port
+                assert final["port"] != port
+                if initial:
+                    assert final["port"] == initial["port"]
+                    assert final["pid"] != initial["pid"]
+        finally:
+            await cleanup(control)
+
+    asyncio.run(asyncio.wait_for(run(), 25))
 
 
 @pytest.mark.parametrize('replacement_fails', [False, True])

@@ -633,6 +633,36 @@ def _llm_requests_arguments(parser: Parser) -> Any:
     return commands
 
 
+def _gateway_env_arguments(parser: Parser) -> None:
+    parser.description = 'Run eval "$(loopercli gateway-env --alias NAME)" before starting claude.'
+    parser.add_argument("--alias", required=True, help="the configured local gateway model alias")
+    _operator_arguments(parser)
+
+
+def _gateway_env(args: argparse.Namespace, ctx: Context) -> int:
+    _use_operator(args, ctx)
+    status, answer = ctx.api().call("POST", f"{API_PREFIX}/gateway/get", {})
+    if status != 200 or answer.get("status") != "ok":
+        return finish(status, answer, ctx.as_json, ctx.session)
+    settings = answer.get("result")
+    if not isinstance(settings, dict):
+        raise Unreachable("Looper returned invalid local gateway settings")
+    if not settings.get("enabled") or not settings.get("url"):
+        raise UsageError("the local gateway is not enabled; enable it in Settings → Local gateway")
+    if not any(row.get("alias") == args.alias for row in _rows(settings.get("aliases"))):
+        raise UsageError("the alias is not configured; add it in Settings → Local gateway")
+    status, answer = ctx.api().call("POST", f"{API_PREFIX}/gateway/key_reveal", {})
+    if status != 200 or answer.get("status") != "ok":
+        return finish(status, answer, ctx.as_json, ctx.session)
+    result = answer.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("key"), str) or not result["key"]:
+        raise Unreachable("Looper returned an invalid local gateway key")
+    from looper.gateway_env import gateway_environment
+
+    print(gateway_environment(settings["url"], args.alias, result["key"]))
+    return EXIT_OK
+
+
 def _llm_requests(args: argparse.Namespace, ctx: Context) -> int:
     filters = {key: getattr(args, key) for key in ("task_id", "agent_id", "record_id", "since", "until")
                if getattr(args, key) is not None}
@@ -1106,6 +1136,8 @@ HAND_COMMANDS: dict[str, HandCommand] = {command.name: command for command in (
                 _config_arguments, _config),
     HandCommand("llm-requests", "Read and export recorded model requests using an operator token",
                 _llm_requests_arguments, _llm_requests),
+    HandCommand("gateway-env", "Print an external Anthropic client's local gateway environment",
+                _gateway_env_arguments, _gateway_env),
     HandCommand("login", "Save an API client's token (read from stdin or a prompt) after checking it with Looper",
                 _login_arguments, _login),
     HandCommand("confirm", "Run the call that answered needs_confirmation", _confirm_arguments, _confirm),

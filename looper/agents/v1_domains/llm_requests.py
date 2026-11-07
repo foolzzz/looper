@@ -29,7 +29,8 @@ def _setting(value):
 
 SETTINGS = _object({"enabled": _BOOL, "include_oauth": _BOOL, "proxy": PROXY,
     "retention_days": _setting(_INT), "max_total_mb": _setting({"type": "number"}),
-    "stored_bytes": _INT, "request_count": _INT, "translate": {"type": "object"}}, closed=True)
+    "stored_bytes": _INT, "request_count": _INT, "translate": {"type": "object"},
+    "auth_failures": _INT, "alias_usage": {"type": "object"}}, closed=True)
 _FIELDS = {
     "id": _INT, "route_id": _STR, "proxy_instance": _STR, "proxy_seq": _INT,
     "record_id": _NULL_INT, "after_record_id": _NULL_INT, "agent_id": _STR, "task_id": _NULL_STR,
@@ -96,6 +97,8 @@ async def settings():
         result = {"enabled": enabled, "include_oauth": values.get("llmrec.include_oauth") == "true",
             "proxy": {"state": "unavailable" if enabled else "stopped", "port": None, "pid": None,
                       "requests": 0, "recorded": 0, "gaps": 0, "gap_reasons": {}, "dropped": 0, "write_errors": 0}, "translate": {}}
+    result.setdefault("auth_failures", 0)
+    result.setdefault("alias_usage", {})
     async with get_pool().acquire() as conn, conn.transaction():
         result.update(await retention.settings_view(conn))
         result["stored_bytes"] = await llm_requests.logical_bytes(conn)
