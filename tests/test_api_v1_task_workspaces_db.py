@@ -143,9 +143,10 @@ def test_finish_failure_keeps_task_session_checkout_and_task_branch(tmp_path, mo
     run_db(run, monkeypatch, timeout=30)
 
 
-def test_operator_delete_removes_owned_state_in_original_order_and_retires_legacy(tmp_path, monkeypatch):
+@pytest.mark.parametrize("task_status", ["init", "stopped", "failed", "cancelled", "completed"])
+def test_operator_delete_removes_owned_state_in_original_order_and_retires_legacy(tmp_path, monkeypatch, task_status):
     async def run(pool):
-        repo, checkout, session = await _prepared(pool, tmp_path)
+        repo, checkout, session = await _prepared(pool, tmp_path, status=task_status)
         workspace = await _workspace(str(checkout), tmp_path, "task-a", "s1")
         _, other_checkout, other_session = await _prepared(pool, tmp_path, "task-b")
         other = await _workspace(str(other_checkout), tmp_path, "task-b", "s1")

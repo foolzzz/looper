@@ -18,8 +18,9 @@ STEP_WORKSPACE = _object({
 SCHEMAS = {"StepWorkspace": STEP_WORKSPACE}
 RESULTS = {}
 OPERATIONS = (
-    Operation("tasks.delete", "POST", "/api/v1/tasks/delete", "Delete a stopped task and its workspaces.",
-              "Delete a stopped task and its workspaces. The task's result branch stays.",
+    Operation("tasks.delete", "POST", "/api/v1/tasks/delete", "Delete a non-running task and its workspaces.",
+              "Refuse running tasks; delete ready, stopped, failed, cancelled or completed tasks and their "
+              "workspaces. The task's result branch stays.",
               _object({"task_id": _TASK_ID}, closed=True), _object({"deleted": _STR}), risk="high", confirms=True),
     Operation("workspaces.check", "POST", "/api/v1/workspaces/check", "Check a task workspace before creation.",
               "Check a task workspace before creation. Use the project's mode, base and warnings.",

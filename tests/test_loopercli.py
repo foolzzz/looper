@@ -1393,10 +1393,59 @@ def test_schedule_log_closed_pipe_exits_silently(client: Path, looper: FakeLoope
 
 
 def test_start_and_stop_post_the_task_id_to_task_control(cli: Run, looper: FakeLooper) -> None:
+    looper.answers.append((200, {"status": "ok", "result": {"status": "init", "group": "ready"}}))
     assert cli("start", "t1")[0] == 0
     assert cli("stop", "t1")[0] == 0
     assert [call[1:4:2] for call in looper.calls()] == [
+        ("/api/v1/ops/tasks/get", {"task_id": "t1"}),
         ("/api/v1/ops/task_control/start", {"task_id": "t1"}), ("/api/v1/ops/task_control/stop", {"task_id": "t1"})]
+
+
+@pytest.mark.parametrize(("status", "group", "action", "message", "code"), [
+    ("init", "ready", "start", "started", 0),
+    ("stopped", "attention", "restart", "saved plan", 0),
+    ("failed", "attention", "restart", "saved plan", 0),
+    ("cancelled", "cancelled", "restart", "saved plan", 0),
+    ("running", "in_progress", None, "already running", 0),
+    ("waiting_user", "needs_you", None, "already running", 0),
+    ("completed", "completed", None, "completed", 1),
+    ("unknown", "other", None, "cannot start", 1),
+])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_start_uses_task_state(cli: Run, looper: FakeLooper, status: str, group: str,
+                               action: str | None, message: str, code: int, as_json: bool) -> None:
+    looper.answers.append((200, {"status": "ok", "result": {"task_id": "t1", "status": status, "group": group}}))
+    if action:
+        looper.answers.append((200, {"status": "ok", "result": {"task_id": "t1", "action": action}}))
+    actual, out, err = cli("start", "t1", *(["--json"] if as_json else []))
+    assert actual == code
+    if as_json and code == 0:
+        assert json.loads(out)["status"] == "ok"
+    else:
+        assert message in out + err
+    assert [call[1:4:2] for call in looper.calls()] == [
+        ("/api/v1/ops/tasks/get", {"task_id": "t1"}),
+        *([(f"/api/v1/ops/task_control/{action}", {"task_id": "t1"})] if action else [])]
+
+
+def test_start_read_failure_does_not_change_task(cli: Run, looper: FakeLooper) -> None:
+    looper.answers.append((404, {"status": "error", "error": {"code": "not_found", "message": "no task"}}))
+    code, _, err = cli("start", "missing")
+    assert code == 1 and "no task" in err
+    assert len(looper.calls()) == 1
+
+
+@pytest.mark.parametrize("state", ["init", "stopped"])
+@pytest.mark.parametrize(("answer", "code"), [
+    ({"status": "error", "error": {"code": "conflict", "message": "state changed"}}, 1),
+    ({"status": "needs_confirmation", "confirmation_id": "confirm-start", "expires_in_seconds": 60}, 3),
+])
+def test_start_preserves_control_failure(cli: Run, looper: FakeLooper, state: str, answer: dict[str, Any], code: int) -> None:
+    looper.answers.extend([(200, {"status": "ok", "result": {"status": state}}), (200, answer)])
+    actual, out, err = cli("start", "t1")
+    assert actual == code
+    assert ("state changed" in err) if code == 1 else ("loopercli confirm confirm-start" in out)
+    assert "saved plan" not in out and "started" not in out
 
 
 @pytest.mark.parametrize("confirmation", [False, True])
@@ -1430,15 +1479,18 @@ def test_delete_accepts_transient_operator_token(cli: Run, looper: FakeLooper) -
 
 @pytest.mark.parametrize(("command", "description"), [
     ("create", "Create a task from a requirement; it stays ready until started (use --start)"),
-    ("start", "Start a ready task, or continue a stopped/failed one from its saved plan"),
+    ("start", "Start a ready task; continue stopped, failed or cancelled tasks from their saved plan; "
+              "running tasks succeed unchanged; completed tasks are refused"),
     ("stop", "Stop a running task"),
-    ("delete", "Delete a stopped task and its workspaces; its result branch stays"),
+    ("delete", "Delete a ready, stopped, failed, cancelled or completed task and its workspaces; "
+               "running tasks are refused; its result branch stays"),
 ])
 def test_task_lifecycle_help_is_for_the_single_command(cli: Run, command: str, description: str) -> None:
     code, out, err = cli(command, "--help")
     assert code == 0 and err == ""
     assert description in " ".join(out.split())
     assert "once the user confirmed" not in out and "start_over" not in out
+    assert all(text not in out for text in ("the user clarified", "in the user's language", "Only when the user"))
 
 
 def test_tasks_help_lists_operations_from_every_domain(cli: Run) -> None:
@@ -1453,15 +1505,40 @@ def test_tasks_help_lists_operations_from_every_domain(cli: Run) -> None:
 
 @pytest.mark.parametrize("start", [False, True])
 def test_create_prints_id_first_and_optionally_starts(cli: Run, looper: FakeLooper, start: bool) -> None:
-    looper.answers.append((200, {"status": "ok", "result": {"task_id": "t-new", "title": "Build"}}))
+    looper.answers.append((200, {"status": "ok", "result": {"task_id": "t-new", "title": "Build"},
+                                "notes": ["现在开始吗？回复「开始」就会启动"]}))
     if start:
         looper.answers.append((200, {"status": "ok", "result": {"task_id": "t-new", "started": True}}))
     code, out, err = cli("create", "--requirement", "Build it", "--project", "P", *(["--start"] if start else []))
     assert code == 0 and err == ""
-    assert out.splitlines()[0] == "t-new" and "title: Build" in out
+    from looper.agents.ops import check_arguments
+    operation = next(op for op in api_v1.operations() if op.operation_id == "task_create")
+    assert check_arguments(operation.request, looper.calls()[0][3]) == looper.calls()[0][3]
+    assert out.splitlines() == ["t-new", "t-new: started" if start else "ready; start it with: loopercli start t-new"]
     assert [call[1:4:2] for call in looper.calls()] == [
-        ("/api/v1/ops/task_create", {"requirement": "Build it", "project": "P"}),
+        ("/api/v1/ops/task_create", {"requirement": "Build it", "title": "Build it", "project": "P"}),
         *([("/api/v1/ops/task_control/start", {"task_id": "t-new"})] if start else [])]
+
+
+@pytest.mark.parametrize(("requirement", "title"), [
+    ("  First line  \nSecond line", "First line"),
+    ("a" * 60, "a" * 60),
+    ("a" * 61, "a" * 59 + "…"),
+    ("word " * 11 + "elephant", "word " * 10 + "word…"),
+    ("a" * 59 + " word", "a" * 59 + "…"),
+])
+def test_create_defaults_title_from_requirement(cli: Run, looper: FakeLooper, requirement: str, title: str) -> None:
+    looper.answers.append((200, {"status": "ok", "result": {"task_id": "t-new"}}))
+    assert cli("create", "--requirement-file", "-", "--project", "P", stdin=requirement)[0] == 0
+    assert looper.calls()[0][3]["title"] == title
+
+
+@pytest.mark.parametrize("project", [[], ["--project", "  "]])
+def test_create_requires_project_before_sending(cli: Run, looper: FakeLooper, project: list[str]) -> None:
+    code, out, err = cli("create", "--requirement", "Build it", *project)
+    assert code == 2 and not out and "usage:" in err
+    assert "--project NAME is required: an existing project or a new one to create" in err
+    assert looper.calls() == []
 
 
 def test_create_needing_confirmation_does_not_start(cli: Run, looper: FakeLooper) -> None:
@@ -1476,7 +1553,7 @@ def test_create_needing_confirmation_does_not_start(cli: Run, looper: FakeLooper
 
 def test_create_failure_does_not_start(cli: Run, looper: FakeLooper) -> None:
     looper.answers.append((400, {"status": "error", "error": {"code": "invalid", "message": "bad requirement"}}))
-    code, out, err = cli("create", "--requirement", "", "--start")
+    code, out, err = cli("create", "--requirement", "", "--project", "P", "--start")
     assert code == 1 and out == "" and "bad requirement" in err
     assert len(looper.calls()) == 1
 
@@ -1490,15 +1567,16 @@ def test_create_start_json_preserves_creation_and_start_outcome(
         cli: Run, looper: FakeLooper, started: dict[str, Any], exit_code: int) -> None:
     created = {"status": "ok", "result": {"task_id": "t-new"}}
     looper.answers.extend([(200, created), (200, started)])
-    code, out, err = cli("create", "--requirement", "Build it", "--start", "--json")
+    code, out, err = cli("create", "--requirement", "Build it", "--project", "P", "--start", "--json")
     assert code == exit_code and err == ""
     assert json.loads(out) == {**started, "create": created}
     assert looper.calls()[-1][1:4:2] == ("/api/v1/ops/task_control/start", {"task_id": "t-new"})
 
 
-def test_create_missing_returned_id_does_not_start(cli: Run, looper: FakeLooper) -> None:
+@pytest.mark.parametrize("start", [False, True])
+def test_create_missing_returned_id_does_not_start(cli: Run, looper: FakeLooper, start: bool) -> None:
     looper.answers.append((200, {"status": "ok", "result": {}}))
-    code, _, err = cli("create", "--requirement", "Build it", "--start")
+    code, _, err = cli("create", "--requirement", "Build it", "--project", "P", *(["--start"] if start else []))
     assert code == 1 and "no task id" in err
     assert len(looper.calls()) == 1
 
@@ -1512,10 +1590,11 @@ def test_status_is_one_task_or_the_overview(cli: Run, looper: FakeLooper) -> Non
 
 def test_create_and_list_take_the_options_of_the_operations_they_stand_for(
         cli: Run, looper: FakeLooper) -> None:
-    assert cli("create", "--title", "T", "--requirement", "R")[0] == 0
+    looper.answers.append((200, {"status": "ok", "result": {"task_id": "t-new"}}))
+    assert cli("create", "--title", "T", "--requirement", "R", "--project", "P")[0] == 0
     assert cli("list", "--limit", "5", "--group", "ready")[0] == 0
     assert [call[1:4:2] for call in looper.calls()] == [
-        ("/api/v1/ops/task_create", {"title": "T", "requirement": "R"}),
+        ("/api/v1/ops/task_create", {"title": "T", "requirement": "R", "project": "P"}),
         ("/api/v1/ops/tasks/list", {"limit": 5, "group": "ready"})]
     assert cli("list", "--group", "nowhere")[0] == 2
 

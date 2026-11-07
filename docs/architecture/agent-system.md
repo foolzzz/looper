@@ -5325,15 +5325,20 @@ the token only to that URL and never follows a redirect.
 
 ### Task lifecycle
 
-- `loopercli create --requirement "…" --project myproj` creates a ready task and prints its id first, then the summary.
-  The generated `task-create` command and existing creation options remain available.
-- `loopercli start TASK` starts a ready task; `loopercli task-control restart --task-id TASK` continues a
-  stopped or failed task from its saved plan.
+- `loopercli create --requirement "…" --project myproj` creates a ready task and prints its id first, then
+  `ready; start it with: loopercli start <id>`. `--project` is required and names an existing project or a new
+  one to create. `--title` is optional: it defaults to the requirement's first line, trimmed to 60 characters
+  at a word boundary with `…` when shortened. The generated `task-create` command and existing creation options
+  remain available.
+- `loopercli start TASK` starts a ready task, or continues a stopped, failed or cancelled task from its saved
+  plan, keeping accepted steps. An already running task succeeds unchanged; a completed task is refused.
 - `loopercli stop TASK` stops a running task.
-- `loopercli delete TASK` deletes only a stopped task and removes its workspaces; its result branch stays.
+- `loopercli delete TASK` refuses a running task. A ready, stopped, failed, cancelled or completed task is
+  deleted with its workspaces; its result branch stays.
   Client tokens receive the usual confirmation id and `loopercli confirm ID` hint; operator tokens execute directly.
 
 For example, `loopercli create --requirement "…" --project myproj --start` creates and then starts the new task.
+It prints the task id on the first line and the start result on the next, without the Manager's creation notes.
 If creation needs confirmation, it starts nothing: run `loopercli confirm ID`, then `loopercli start TASK` with
 the returned task id. With `--json --start`, the single answer includes the create response under `create` and
 reports the start outcome.
