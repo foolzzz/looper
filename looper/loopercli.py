@@ -1309,10 +1309,36 @@ def _run_generated(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def _run_task_alias(args: argparse.Namespace, ctx: Context) -> int:
-    """``start``, ``stop`` and ``status TASK``: the generated operation with the task's id."""
+    """``start``, ``stop``, ``delete`` and ``status TASK``: the generated operation with the task's id."""
     operation: Generated = args._generated
     status, answer = ctx.api().call(operation.method, operation.path, {"task_id": args.task})
     return finish(status, answer, ctx.as_json, ctx.session)
+
+
+def _run_create(args: argparse.Namespace, ctx: Context) -> int:
+    operation: Generated = args._generated
+    start: Generated | None = args._start_operation
+    if args.start and start is None:
+        raise UsageError("this Looper version has no task_control.start operation; upgrade the service")
+    status, answer = ctx.api().call(operation.method, operation.path, request_body(args, operation))
+    result = answer.get("result")
+    task_id = result.get("task_id") if isinstance(result, dict) else None
+    if answer.get("status") == "ok" and task_id and not ctx.as_json:
+        print(task_id, flush=True)
+    if not args.start or answer.get("status") != "ok":
+        code = finish(status, answer, ctx.as_json, ctx.session)
+        if args.start and answer.get("status") == "needs_confirmation":
+            print("--start applies after loopercli confirm; then run loopercli start TASK with the new task id.",
+                  file=sys.stderr if ctx.as_json else sys.stdout)
+        return code
+    if not ctx.as_json:
+        finish(status, answer, False, ctx.session)
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise CliError("the create response has no task id; cannot start the task")
+    assert start is not None
+    status, started = ctx.api().call(start.method, start.path, {"task_id": task_id})
+    # Keep --json a single answer, including the creation result if starting fails.
+    return finish(status, {**started, "create": answer} if ctx.as_json else started, ctx.as_json, ctx.session)
 
 
 def _run_status(args: argparse.Namespace, ctx: Context) -> int:
@@ -1358,27 +1384,34 @@ def _run_pipeline(args: argparse.Namespace, ctx: Context) -> int:
     return EXIT_OK
 
 
-def _add_aliases(commands: Any, found: Mapping[tuple[str, str], Generated], summaries: Mapping[tuple[str, str], str],
-                 taken: set[str]) -> None:
+def _add_aliases(commands: Any, found: Mapping[tuple[str, str], Generated], taken: set[str]) -> None:
     """The short names of the commands used most; each needs its operation in the document."""
 
     def alias(name: str, key: tuple[str, str], help_text: str) -> Parser | None:
         if name in taken or key not in found:
             return None
         taken.add(name)
-        return commands.add_parser(name, help=_escape(help_text), description=summaries.get(key) or help_text)
+        return commands.add_parser(name, help=_escape(help_text), description=help_text)
 
-    for name, key, help_text in (("create", ("task-create", ""), "Create a task (the options of task-create)"),
-                                 ("list", ("tasks", "list"), "List tasks (the options of tasks list)")):
-        if (sub := alias(name, key, help_text)) is not None:
-            _add_operation(sub, found[key])
-            sub.set_defaults(_run=_run_generated)
+    if (sub := alias("create", ("task-create", ""),
+                     "Create a task from a requirement; it stays ready until started (use --start)")) is not None:
+        _add_operation(sub, found[("task-create", "")])
+        sub.add_argument("--start", action="store_true", help="start the new task after successful creation")
+        sub.set_defaults(_run=_run_create, _start_operation=found.get(("task-control", "start")))
+    if (sub := alias("list", ("tasks", "list"), "List tasks (the options of tasks list)")) is not None:
+        _add_operation(sub, found[("tasks", "list")])
+        sub.set_defaults(_run=_run_generated)
     for name, key, help_text, run in (
-            ("start", ("task-control", "start"), "Start a ready task", _run_task_alias),
+            ("start", ("task-control", "start"),
+             "Start a ready task, or continue a stopped/failed one from its saved plan", _run_task_alias),
             ("stop", ("task-control", "stop"), "Stop a running task", _run_task_alias),
+            ("delete", ("tasks", "delete"),
+             "Delete a stopped task and its workspaces; its result branch stays", _run_task_alias),
             ("pipeline", ("task-pipeline", ""), "A task's steps, gates and waits", _run_pipeline)):
         if (sub := alias(name, key, help_text)) is not None:
             sub.add_argument("task", metavar="TASK", help="the task's id")
+            if name == "delete":
+                _operator_arguments(sub)
             sub.set_defaults(_run=run, _generated=found[key])
     if (sub := alias("status", ("tasks", "get"), "One task's state, or the overview without a TASK")) is not None:
         sub.add_argument("task", metavar="TASK", nargs="?", help="the task's id (without it: the overview)")
@@ -1402,7 +1435,6 @@ def build_parser(document: Mapping[str, Any] | None) -> Parser:
         sub.set_defaults(_run=hand.run)
     parents: dict[str, Any] = {}
     found: dict[tuple[str, str], Generated] = {}
-    summaries: dict[tuple[str, str], str] = {}
     for head, tail, summary, description, operation in generated_operations(document or {"paths": {}}):
         if head in HAND_COMMANDS:
             children = hand_groups.get(head)
@@ -1413,7 +1445,7 @@ def build_parser(document: Mapping[str, Any] | None) -> Parser:
                     _operator_arguments(sub)
                 sub.set_defaults(_run=_run_generated)
             continue
-        found[head, tail], summaries[head, tail] = operation, summary
+        found[head, tail] = operation
         if not tail:
             sub = commands.add_parser(head, help=_escape(summary), description=description)
             _add_operation(sub, operation)
@@ -1425,7 +1457,7 @@ def build_parser(document: Mapping[str, Any] | None) -> Parser:
         sub = parents[head].add_parser(tail, help=_escape(summary), description=description)
         _add_operation(sub, operation)
         sub.set_defaults(_run=_run_generated)
-    _add_aliases(commands, found, summaries, set(HAND_COMMANDS) | set(commands.choices))
+    _add_aliases(commands, found, set(HAND_COMMANDS) | set(commands.choices))
     return parser
 
 

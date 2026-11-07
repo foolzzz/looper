@@ -82,6 +82,7 @@ class FakeLooper(Server):
     """The ``/api/v1`` of a Looper: the document, ``whoami`` for ``lpc_good`` and the answers a test queues."""
 
     def __init__(self) -> None:
+        self.token = TOKEN
         self.answers: list[tuple[int, Any]] = []
         self.document_status = 200
         self.redirects: dict[str, tuple[int, str]] = {}  # path prefix -> (status, location)
@@ -97,7 +98,7 @@ class FakeLooper(Server):
         if path == "/api/v1/openapi.json":
             _send(handler, self.document_status,
                   api_v1.document() if self.document_status == 200 else {"status": "error"})
-        elif headers.get("authorization") != f"Bearer {TOKEN}":
+        elif headers.get("authorization") != f"Bearer {self.token}":
             _send(handler, 401, {"status": "error", "error": {"code": "unauthorized", "message": "no"}})
         elif path == "/api/v1/whoami":
             _send(handler, 200, api_v1.whoami(api_v1.Principal("client", "c-1", "ci")))
@@ -1396,6 +1397,110 @@ def test_start_and_stop_post_the_task_id_to_task_control(cli: Run, looper: FakeL
     assert cli("stop", "t1")[0] == 0
     assert [call[1:4:2] for call in looper.calls()] == [
         ("/api/v1/ops/task_control/start", {"task_id": "t1"}), ("/api/v1/ops/task_control/stop", {"task_id": "t1"})]
+
+
+@pytest.mark.parametrize("confirmation", [False, True])
+def test_delete_posts_task_id_and_preserves_confirmation(cli: Run, looper: FakeLooper, confirmation: bool) -> None:
+    answer = ({"status": "needs_confirmation", "confirmation_id": "confirm-delete", "impact": "Delete task",
+               "expires_in_seconds": 60} if confirmation else {"status": "ok", "result": {"deleted": "t1"}})
+    looper.answers.append((200, answer))
+    code, out, err = cli("delete", "t1", "--session", "task-session")
+    assert code == (3 if confirmation else 0) and err == ""
+    assert [call[1:4:2] for call in looper.calls()] == [("/api/v1/tasks/delete", {"task_id": "t1"})]
+    if confirmation:
+        assert "loopercli --session task-session confirm confirm-delete" in out
+    else:
+        assert "deleted: t1" in out
+
+
+def test_delete_requires_task(cli: Run, looper: FakeLooper) -> None:
+    code, _, err = cli("delete")
+    assert code == 2 and "TASK" in err and "usage:" in err
+    assert looper.calls() == []
+
+
+def test_delete_accepts_transient_operator_token(cli: Run, looper: FakeLooper) -> None:
+    looper.token = "operator-test"
+    cli.client.unlink()
+    looper.answers.append((200, {"status": "ok", "result": {"deleted": "t1"}}))
+    code, out, err = cli("delete", "t1", "--url", looper.url, "--operator-token-file", "-", stdin=looper.token)
+    assert code == 0 and "deleted: t1" in out and err == ""
+    assert [call[1:4:2] for call in looper.calls()] == [("/api/v1/tasks/delete", {"task_id": "t1"})]
+
+
+@pytest.mark.parametrize(("command", "description"), [
+    ("create", "Create a task from a requirement; it stays ready until started (use --start)"),
+    ("start", "Start a ready task, or continue a stopped/failed one from its saved plan"),
+    ("stop", "Stop a running task"),
+    ("delete", "Delete a stopped task and its workspaces; its result branch stays"),
+])
+def test_task_lifecycle_help_is_for_the_single_command(cli: Run, command: str, description: str) -> None:
+    code, out, err = cli(command, "--help")
+    assert code == 0 and err == ""
+    assert description in " ".join(out.split())
+    assert "once the user confirmed" not in out and "start_over" not in out
+
+
+def test_tasks_help_lists_operations_from_every_domain(cli: Run) -> None:
+    code, out, err = cli("tasks", "--help")
+    assert code == 0 and err == ""
+    expected = {op.operation_id.partition(".")[2].replace("_", "-")
+                for op in api_v1.operations() if op.operation_id.startswith("tasks.") and not op.hand}
+    assert "delete" in expected
+    listed = set(re.findall(r"^    ([a-z][a-z-]*)\s", out, re.MULTILINE))
+    assert expected <= listed
+
+
+@pytest.mark.parametrize("start", [False, True])
+def test_create_prints_id_first_and_optionally_starts(cli: Run, looper: FakeLooper, start: bool) -> None:
+    looper.answers.append((200, {"status": "ok", "result": {"task_id": "t-new", "title": "Build"}}))
+    if start:
+        looper.answers.append((200, {"status": "ok", "result": {"task_id": "t-new", "started": True}}))
+    code, out, err = cli("create", "--requirement", "Build it", "--project", "P", *(["--start"] if start else []))
+    assert code == 0 and err == ""
+    assert out.splitlines()[0] == "t-new" and "title: Build" in out
+    assert [call[1:4:2] for call in looper.calls()] == [
+        ("/api/v1/ops/task_create", {"requirement": "Build it", "project": "P"}),
+        *([("/api/v1/ops/task_control/start", {"task_id": "t-new"})] if start else [])]
+
+
+def test_create_needing_confirmation_does_not_start(cli: Run, looper: FakeLooper) -> None:
+    looper.answers.append((200, {"status": "needs_confirmation", "confirmation_id": "confirm-create",
+                                "impact": "Create project and task", "expires_in_seconds": 60}))
+    code, out, err = cli("create", "--requirement", "Build it", "--project", "P", "--start")
+    assert code == 3 and err == ""
+    assert "loopercli confirm confirm-create" in out
+    assert "--start applies after loopercli confirm" in out
+    assert len(looper.calls()) == 1
+
+
+def test_create_failure_does_not_start(cli: Run, looper: FakeLooper) -> None:
+    looper.answers.append((400, {"status": "error", "error": {"code": "invalid", "message": "bad requirement"}}))
+    code, out, err = cli("create", "--requirement", "", "--start")
+    assert code == 1 and out == "" and "bad requirement" in err
+    assert len(looper.calls()) == 1
+
+
+@pytest.mark.parametrize(("started", "exit_code"), [
+    ({"status": "ok", "result": {"task_id": "t-new", "started": True}}, 0),
+    ({"status": "error", "error": {"code": "conflict", "message": "cannot start"}}, 1),
+    ({"status": "needs_confirmation", "confirmation_id": "confirm-start", "expires_in_seconds": 60}, 3),
+])
+def test_create_start_json_preserves_creation_and_start_outcome(
+        cli: Run, looper: FakeLooper, started: dict[str, Any], exit_code: int) -> None:
+    created = {"status": "ok", "result": {"task_id": "t-new"}}
+    looper.answers.extend([(200, created), (200, started)])
+    code, out, err = cli("create", "--requirement", "Build it", "--start", "--json")
+    assert code == exit_code and err == ""
+    assert json.loads(out) == {**started, "create": created}
+    assert looper.calls()[-1][1:4:2] == ("/api/v1/ops/task_control/start", {"task_id": "t-new"})
+
+
+def test_create_missing_returned_id_does_not_start(cli: Run, looper: FakeLooper) -> None:
+    looper.answers.append((200, {"status": "ok", "result": {}}))
+    code, _, err = cli("create", "--requirement", "Build it", "--start")
+    assert code == 1 and "no task id" in err
+    assert len(looper.calls()) == 1
 
 
 def test_status_is_one_task_or_the_overview(cli: Run, looper: FakeLooper) -> None:

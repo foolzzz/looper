@@ -5295,7 +5295,7 @@ the token only to that URL and never follows a redirect.
 
 - **Commands.** Each operation of `/api/v1/openapi.json` becomes a command at run time, so a new operation needs no
   command-line code; `loopercli --help` lists them. Hand-written are `login`, `confirm`, `chat`, `wait` and `skill`, and
-  the aliases `list`, `status`, `pipeline`, `start` and `stop` for the common task operations; stage 2a adds
+  the aliases `create`, `list`, `status`, `pipeline`, `start`, `stop` and `delete` for the common task operations; stage 2a adds
   `auth set-password` / `clear-password`, `doctor` and `config export` / `import`. Generated client-management
   commands are `loopercli clients list`, `loopercli clients create --name NAME` and
   `loopercli clients revoke --client-id ID`. They require operator authentication via `--url URL` and
@@ -5322,6 +5322,21 @@ the token only to that URL and never follows a redirect.
 - **Skill.** `looper-skill` teaches a coding agent to use only these commands. `loopercli skill path` and `skill show`
   print the packaged copy; installing it into Claude Code, Codex or OMP is in
   [plugins/looper/README.md](../../plugins/looper/README.md). Looper never writes into those tools' directories.
+
+### Task lifecycle
+
+- `loopercli create --requirement "…" --project myproj` creates a ready task and prints its id first, then the summary.
+  The generated `task-create` command and existing creation options remain available.
+- `loopercli start TASK` starts a ready task; `loopercli task-control restart --task-id TASK` continues a
+  stopped or failed task from its saved plan.
+- `loopercli stop TASK` stops a running task.
+- `loopercli delete TASK` deletes only a stopped task and removes its workspaces; its result branch stays.
+  Client tokens receive the usual confirmation id and `loopercli confirm ID` hint; operator tokens execute directly.
+
+For example, `loopercli create --requirement "…" --project myproj --start` creates and then starts the new task.
+If creation needs confirmation, it starts nothing: run `loopercli confirm ID`, then `loopercli start TASK` with
+the returned task id. With `--json --start`, the single answer includes the create response under `create` and
+reports the start outcome.
 
 `looper` keeps `serve`, `service`, `version`, `mcp-server` and `config init-ops`, plus the offline rescue commands
 `doctor` and `auth set-password` / `clear-password`, which work when the server cannot start; everyday interaction
