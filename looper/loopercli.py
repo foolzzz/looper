@@ -634,6 +634,7 @@ def _llm_requests_arguments(parser: Parser) -> Any:
 
 
 def _gateway_env_arguments(parser: Parser) -> None:
+    parser.description = 'Run eval "$(loopercli gateway-env --alias NAME)" before starting claude.'
     parser.add_argument("--alias", required=True, help="the configured local gateway model alias")
     _operator_arguments(parser)
 
@@ -656,13 +657,9 @@ def _gateway_env(args: argparse.Namespace, ctx: Context) -> int:
     result = answer.get("result")
     if not isinstance(result, dict) or not isinstance(result.get("key"), str) or not result["key"]:
         raise Unreachable("Looper returned an invalid local gateway key")
-    env = {"ANTHROPIC_BASE_URL": settings["url"], "ANTHROPIC_AUTH_TOKEN": result["key"], "ANTHROPIC_API_KEY": "",
-           **dict.fromkeys(("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-                            "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
-                            "CLAUDE_CODE_SUBAGENT_MODEL"), args.alias),
-           "CLAUDE_CODE_ATTRIBUTION_HEADER": "0", "ENABLE_TOOL_SEARCH": "false",
-           "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1"}
-    print(" ".join(f"{name}={shlex.quote(value)}" for name, value in env.items()))
+    from looper.gateway_env import gateway_environment
+
+    print(gateway_environment(settings["url"], args.alias, result["key"]))
     return EXIT_OK
 
 

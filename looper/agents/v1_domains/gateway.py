@@ -1,6 +1,7 @@
 """Operator configuration of the loopback Anthropic gateway."""
 
 from looper.db import gateway as db, system_settings
+from looper.gateway_env import gateway_environment
 from ..api_v1 import Operation, _array, _object, _STR, _INT
 from ..llmrec.control import controller
 from ..llmrec.gateway import GatewayKey
@@ -18,6 +19,7 @@ SETTINGS = _object(
         "url": {"type": ["string", "null"]},
         "key_exists": _BOOL,
         "aliases": _array(_ALIAS),
+        "client_environment": {"type": "object", "additionalProperties": _STR},
         "proxy": {"type": "object"},
         "translate": {"type": "object"},
         "auth_failures": _INT,
@@ -75,12 +77,15 @@ async def settings(root):
     proxy = status.get("proxy", {"state": "stopped"})
     ready = (values.get("gateway.enabled") == "true" and proxy.get("state") == "running"
              and proxy.get("port") == port)
+    url = f"http://127.0.0.1:{port}/gw" if port and ready else None
+    aliases = await db.list_aliases()
     return {
         "enabled": values.get("gateway.enabled") == "true",
         "port": port,
-        "url": f"http://127.0.0.1:{port}/gw" if port and ready else None,
+        "url": url,
         "key_exists": GatewayKey(root).exists(),
-        "aliases": await db.list_aliases(),
+        "aliases": aliases,
+        "client_environment": {row["alias"]: gateway_environment(url, row["alias"]) for row in aliases} if url else {},
         "proxy": proxy,
         "translate": status.get("translate", {}),
         "auth_failures": status.get("auth_failures", 0),

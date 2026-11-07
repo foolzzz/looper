@@ -11,9 +11,6 @@ import {
   revealGatewayKey, rotateGatewayKey, type GatewaySettings, type GatewayUsage,
 } from "@/lib/api";
 
-const MODEL_VARIABLES = ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-  "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"];
-
 function hitRate(usage: GatewayUsage) {
   const total = (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
   return total ? `${Math.round((usage.cache_read_input_tokens ?? 0) / total * 100)}%` : "—";
@@ -59,12 +56,7 @@ export function GatewaySettingsSection() {
   const validPort = port === "" || (Number.isInteger(Number(port)) && Number(port) >= 1 && Number(port) <= 65535);
   const disabled = busy || confirming;
   const selectedAlias = settings?.aliases.some((entry) => entry.alias === exampleAlias) ? exampleAlias : settings?.aliases[0]?.alias;
-  const env = settings?.url && selectedAlias ? [
-    `export ANTHROPIC_BASE_URL='${settings.url}'`, "export ANTHROPIC_AUTH_TOKEN='<local-key>'", "export ANTHROPIC_API_KEY=''",
-    ...MODEL_VARIABLES.map((variable) => `export ${variable}='${selectedAlias}'`),
-    "export CLAUDE_CODE_ATTRIBUTION_HEADER=0", "export ENABLE_TOOL_SEARCH=false",
-    "export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1", "export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
-  ].join("\n") : "";
+  const env = settings?.url && selectedAlias ? settings.client_environment[selectedAlias] ?? "" : "";
   return <Card className="min-w-0">
     <CardHeader><CardTitle>Local gateway</CardTitle></CardHeader>
     <CardContent className="min-w-0 space-y-5">
@@ -77,7 +69,7 @@ export function GatewaySettingsSection() {
             <Badge variant={settings.enabled ? "success" : "outline"}>{settings.enabled ? "Enabled" : "Disabled"}</Badge>
           </div>
           <p className="text-xs text-muted-foreground">Accepts authenticated clients on this machine only. Requests follow the Request recording setting.</p>
-          <p className="break-all font-mono text-sm">{settings.url ?? "The URL is assigned when you first enable the gateway."}</p>
+          <p className="break-all font-mono text-sm">{settings.url ?? (settings.port ? `Port ${settings.port}` : "The URL is assigned when you first enable the gateway.")}</p>
           <form className="flex flex-wrap items-end gap-3" onSubmit={(event) => {
             event.preventDefault();
             if (validPort && port) void action(async () => apply(await updateGatewaySettings({ enabled: settings.enabled, port: Number(port) })));
@@ -163,6 +155,7 @@ export function GatewaySettingsSection() {
           <div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-medium">Since proxy startup</h3>
             <Badge variant={settings.proxy.state === "running" ? "success" : "destructive"}>Proxy {settings.proxy.state}</Badge>
             <Button className="ml-auto" variant="outline" disabled={disabled} onClick={() => void action(async () => apply(await fetchGatewaySettings()))}>Refresh</Button></div>
+          <p className="text-xs text-muted-foreground">All translated requests through this proxy, including Looper agents and local clients.</p>
           <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             {Object.entries({ Requests: settings.translate.requests ?? 0, "Authentication failures": settings.auth_failures,
               "Cache hit": hitRate(settings.translate), "Input tokens": settings.translate.input_tokens ?? 0,

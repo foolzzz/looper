@@ -84,6 +84,7 @@ def test_gateway_toggle_pins_port_and_tracks_recording(monkeypatch, tmp_path):
     from looper.agents.llmrec.control import ProxyControl, install
     from looper.agents.llmrec.gateway import GatewayConfig
     from looper.db import system_settings
+    from looper.gateway_env import gateway_environment
 
     async def check(pool):
         control = ProxyControl(tmp_path, "", enabled=False)
@@ -98,16 +99,22 @@ def test_gateway_toggle_pins_port_and_tracks_recording(monkeypatch, tmp_path):
                 assert answer["result"]["port"] == 32123
                 assert answer["result"]["proxy"]["state"] == "running"
                 assert answer["result"]["url"] == "http://127.0.0.1:32123/gw"
+                status, answer = await call("gateway.alias_set", {"alias": "chat", "model_id": "model-gw-chat"})
+                assert status == 200, answer
+                assert answer["result"]["client_environment"] == {
+                    "chat": gateway_environment("http://127.0.0.1:32123/gw", "chat")}
+                assert "<local-key>" in answer["result"]["client_environment"]["chat"]
                 assert GatewayConfig(tmp_path).read() == {"format": 1, "enabled": True, "record": False}
                 await control.set_enabled(True)
                 assert GatewayConfig(tmp_path).read()["record"] is True
                 assert (await system_settings.get_settings(["gateway.port"], pool=pool))["gateway.port"] == "32123"
-                await call("gateway.update", {"enabled": False})
+                _, answer = await call("gateway.update", {"enabled": False})
+                assert answer["result"]["client_environment"] == {}
                 assert GatewayConfig(tmp_path).read()["enabled"] is False
         finally:
             install(None)
 
-    run_db(check, monkeypatch, timeout=20)
+    run_db(check, monkeypatch, setup=seed, timeout=20)
 
 
 @pytest.mark.parametrize("enable_at_start", [False, True])

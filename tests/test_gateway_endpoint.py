@@ -112,6 +112,24 @@ def test_external_local_paths(tmp_path, method, path, status):
     run_db(check, timeout=15)
 
 
+def test_unauthenticated_hello_probe_preserves_counters(tmp_path):
+    from copy import deepcopy
+
+    async def check(pool):
+        async with endpoint(tmp_path, pool) as (client, base, proxy, received, key, sink):
+            before = deepcopy(proxy.stats)
+            response = await client.head(base + '/api/hello')
+            assert response.status_code == 200 and response.content == b''
+            assert proxy.stats == before
+            assert not received
+            # Ordinary requests still require a key and count real authentication failures.
+            response = await client.get(base + '/v1/models')
+            assert response.status_code == 401
+            assert proxy.stats['auth_failures'] == 1
+            assert not received
+    run_db(check, timeout=15)
+
+
 def test_rotated_key_invalidates_existing_proxy_authentication(tmp_path):
     async def check(pool):
         async with endpoint(tmp_path, pool) as (client, base, proxy, received, key, sink):

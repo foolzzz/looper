@@ -2867,6 +2867,7 @@ export interface GatewaySettings {
   url: string | null;
   key_exists: boolean;
   aliases: { alias: string; model_id: string; model_name: string; provider_id: string; provider_name: string; enabled: boolean }[];
+  client_environment: Record<string, string>;
   proxy: LlmrecSettings["proxy"];
   translate: GatewayUsage;
   auth_failures: number;

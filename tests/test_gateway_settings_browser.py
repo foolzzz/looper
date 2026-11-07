@@ -6,6 +6,8 @@ from threading import Thread
 
 import pytest
 
+from looper.gateway_env import gateway_environment
+
 pytestmark = pytest.mark.installed
 
 
@@ -45,6 +47,7 @@ def _settings():
             "aliases": [{"alias": "local-chat", "model_id": "chat", "model_name": "Chat model",
                          "provider_id": "example", "provider_name": "Example", "enabled": True}],
             "proxy": {"state": "running", "port": 32991}, "translate": usage,
+            "client_environment": {"local-chat": gateway_environment("http://127.0.0.1:32991/gw", "local-chat")},
             "auth_failures": 0, "alias_usage": {"local-chat": usage}}
 
 
@@ -59,7 +62,7 @@ def test_local_gateway_settings_layout(gateway_dashboard, gateway_browser, width
     page.on("pageerror", lambda error: errors.append(str(error)))
     settings = _settings()
     if state == "empty":
-        settings.update(enabled=False, aliases=[], alias_usage={})
+        settings.update(enabled=False, url=None, aliases=[], alias_usage={}, client_environment={})
     if state == "unavailable":
         settings["proxy"]["state"] = "unavailable"
     registry = {"providers": [{"provider_id": "example", "enabled": True, "api_key": "***", "auth": "api_key"}],
@@ -94,9 +97,12 @@ def test_local_gateway_settings_layout(gateway_dashboard, gateway_browser, width
                 "aria-checked", "false" if state == "empty" else "true")
             if state == "empty":
                 expect(page.get_by_text("No aliases yet.", exact=False)).to_be_visible()
+                expect(page.get_by_text("Port 32991", exact=True)).to_be_visible()
             else:
                 expect(page.get_by_label("Model for local-chat")).to_be_visible()
                 expect(page.get_by_text("12 requests · Cache hit 80%", exact=False)).to_be_visible()
+                expect(page.locator("pre code")).to_have_text(settings["client_environment"]["local-chat"])
+            expect(page.get_by_text("All translated requests through this proxy, including Looper agents and local clients.")).to_be_visible()
             if state == "unavailable":
                 expect(page.get_by_text("Proxy unavailable", exact=True)).to_be_visible()
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), "page overflows horizontally"

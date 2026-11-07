@@ -528,6 +528,12 @@ class Proxy:
                 raise Rejection(404, 'not_found_error', 'Gateway endpoint is disabled')
             if rejection := request_guard(request.headers, self.port):
                 raise rejection
+            # Claude Code probes connectivity without credentials before its first request.
+            if request.method == b'HEAD' and path == '/api/hello':
+                writer.write(connection.send(h11.Response(status_code=200, headers=[(b'content-length', b'0')])))
+                writer.write(connection.send(h11.EndOfMessage()))
+                await writer.drain()
+                return b''
             if not self._gateway_key.check(request.headers):
                 self._auth_failures += 1
                 raise Rejection(401, 'authentication_error', 'Invalid gateway API key')
@@ -542,7 +548,7 @@ class Proxy:
                     'has_more': False, 'first_id': models[0] if models else None,
                     'last_id': models[-1] if models else None})
                 return b''
-            if request.method in (b'GET', b'HEAD') and path == '/api/hello':
+            if request.method == b'GET' and path == '/api/hello':
                 writer.write(connection.send(h11.Response(status_code=200, headers=[(b'content-length', b'0')])))
                 writer.write(connection.send(h11.EndOfMessage()))
                 await writer.drain()

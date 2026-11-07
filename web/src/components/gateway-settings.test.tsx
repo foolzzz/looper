@@ -8,14 +8,16 @@ import type { GatewaySettings } from "@/lib/api";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 afterEach(() => vi.unstubAllGlobals());
 const alias = { alias: "local-chat", model_id: "chat", model_name: "Chat model", provider_id: "key", provider_name: "Example", enabled: true };
+const environment = "export ANTHROPIC_MODEL=local-chat\nexport ANTHROPIC_AUTH_TOKEN='<local-key>'\nexport ANTHROPIC_API_KEY=''";
 function settings(): GatewaySettings {
-  return { enabled: false, port: 32991, url: "http://127.0.0.1:32991/gw", key_exists: true, aliases: [alias],
+  return { enabled: true, port: 32991, url: "http://127.0.0.1:32991/gw", key_exists: true, aliases: [alias],
+    client_environment: { "local-chat": environment },
     proxy: { state: "running", port: 32991, pid: null, requests: 12, recorded: 12, gaps: 0, gap_reasons: {}, dropped: 0, write_errors: 0 },
     translate: { requests: 12, input_tokens: 20, cache_read_input_tokens: 80, output_tokens: 10, usage_missing: 1 },
     auth_failures: 2, alias_usage: { "local-chat": { requests: 12, input_tokens: 20, cache_read_input_tokens: 80, output_tokens: 10 } } };
 }
-function fixture() {
-  let saved = settings();
+function fixture(initial: Partial<GatewaySettings> = {}) {
+  let saved = { ...settings(), ...initial };
   let fail = false;
   const writes: [string, Record<string, unknown>][] = [];
   const providers = [
@@ -57,8 +59,10 @@ async function enter(input: HTMLInputElement, value: string) {
 }
 
 it("saves endpoint enablement and fixed port, preserving state after a failure", async () => {
-  const api = fixture(); const page = await mount();
+  const api = fixture({ enabled: false, url: null }); const page = await mount();
   try {
+    expect(page.container.textContent).toContain("Port 32991");
+    expect(page.container.textContent).not.toContain("The URL is assigned when you first enable the gateway.");
     const toggle = page.container.querySelector<HTMLButtonElement>('[role="switch"]')!;
     await act(async () => toggle.click());
     expect(api.writes).toEqual([["update", { enabled: true, port: 32991 }]]);
@@ -113,18 +117,15 @@ it("fetches keys only on demand, copies them, and confirms rotation with cancel 
   } finally { page.close(); }
 });
 
-it("shows all model tiers pinned to the alias, token totals, cache hit and authentication failures", async () => {
+it("shows the server's client environment, token totals, cache hit and authentication failures", async () => {
   fixture(); const page = await mount();
   try {
     const env = page.container.querySelector("pre")!.textContent!;
-    for (const variable of ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"]) {
-      expect(env).toContain(`export ${variable}='local-chat'`);
-    }
-    expect(env).toContain("ANTHROPIC_AUTH_TOKEN='<local-key>'");
-    expect(env).toContain("ANTHROPIC_API_KEY=''");
+    expect(env).toBe(environment);
     expect(page.container.textContent).not.toContain("example-test-key");
     expect(page.container.textContent).toContain("12 requests · Cache hit 80%");
     const facts = Object.fromEntries(Array.from(page.container.querySelectorAll("dl > div")).map((entry) => [entry.querySelector("dt")!.textContent, entry.querySelector("dd")!.textContent]));
     expect(facts).toMatchObject({ Requests: "12", "Authentication failures": "2", "Cache hit": "80%", "Missing usage": "1" });
+    expect(page.container.textContent).toContain("All translated requests through this proxy, including Looper agents and local clients.");
   } finally { page.close(); }
 });

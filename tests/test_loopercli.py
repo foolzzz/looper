@@ -1445,8 +1445,9 @@ def test_pipeline_json_and_errors_use_the_generic_answer(cli: Run, looper: FakeL
     assert code == 1 and "not_found" in err
 
 
-def test_gateway_env_prints_selected_alias_and_transient_operator_credentials(tmp_path, capsys):
-    import shlex
+@pytest.mark.parametrize('key', ['synthetic-gateway-key', "key' $(printf injected); $HOME"])
+def test_gateway_env_prints_selected_alias_and_transient_operator_credentials(tmp_path, capsys, key):
+    import subprocess
 
     token = tmp_path / 'operator-token'
     token.write_text('operator-test-secret\n')
@@ -1459,7 +1460,7 @@ def test_gateway_env_prints_selected_alias_and_transient_operator_credentials(tm
             result = {'enabled': True, 'url': 'http://127.0.0.1:19231/gw', 'aliases': [{'alias': 'local-chat'}]}
         else:
             assert request[1] == '/api/v1/gateway/key_reveal'
-            result = {'key': 'synthetic-gateway-key'}
+            result = {'key': key}
         _send(handler, 200, {'status': 'ok', 'result': result})
 
     server = Server(respond)
@@ -1469,19 +1470,31 @@ def test_gateway_env_prints_selected_alias_and_transient_operator_credentials(tm
                               '--url', server.url, '--operator-token-file', str(token)])
         captured = capsys.readouterr()
         assert code == 0 and captured.err == ''
-        assert dict(value.split('=', 1) for value in shlex.split(captured.out)) == {
-            'ANTHROPIC_BASE_URL': 'http://127.0.0.1:19231/gw', 'ANTHROPIC_AUTH_TOKEN': 'synthetic-gateway-key',
+        expected = {
+            'ANTHROPIC_BASE_URL': 'http://127.0.0.1:19231/gw', 'ANTHROPIC_AUTH_TOKEN': key,
             'ANTHROPIC_API_KEY': '', 'ANTHROPIC_MODEL': 'local-chat',
             'ANTHROPIC_DEFAULT_OPUS_MODEL': 'local-chat', 'ANTHROPIC_DEFAULT_SONNET_MODEL': 'local-chat',
             'ANTHROPIC_DEFAULT_HAIKU_MODEL': 'local-chat', 'ANTHROPIC_SMALL_FAST_MODEL': 'local-chat',
             'CLAUDE_CODE_SUBAGENT_MODEL': 'local-chat', 'CLAUDE_CODE_ATTRIBUTION_HEADER': '0',
             'ENABLE_TOOL_SEARCH': 'false', 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS': '1',
         }
+        assert all(line.startswith('export ') for line in captured.out.splitlines())
+        shell = subprocess.run(['bash', '-c', 'eval "$1"; env', 'bash', captured.out],
+                               env={'PATH': os.defpath, 'ANTHROPIC_API_KEY': 'operator-key'},
+                               capture_output=True, text=True, check=True, timeout=5)
+        exported = dict(line.split('=', 1) for line in shell.stdout.splitlines())
+        assert {name: exported.get(name) for name in expected} == expected
+        assert len(captured.out.splitlines()) == len(expected)
         assert not client_file.exists()
         assert [request[1] for request in server.requests] == ['/api/v1/gateway/get', '/api/v1/gateway/key_reveal']
         assert 'operator-test-secret' not in captured.out
     finally:
         server.close()
+
+
+def test_gateway_env_help_explains_eval_before_claude(capsys):
+    assert loopercli.main(['gateway-env', '--help']) == 0
+    assert 'eval "$(loopercli gateway-env --alias NAME)"' in capsys.readouterr().out
 
 
 @pytest.mark.parametrize('settings,message', [
