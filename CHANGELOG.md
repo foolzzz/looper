@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.109] - 2026-11-06
+
+### Added
+
+- **`loopercli` creates, starts, stops and deletes tasks with short commands.** ([#1165](https://github.com/foolzzz/looper/pull/1165))
+  - `loopercli create --requirement "…" --project NAME` creates a ready task and prints its id; `--start` starts it at once. `--title` defaults to the requirement's first line, shortened to 60 characters.
+  - `loopercli start TASK` starts a ready task or continues a stopped, failed or cancelled one from its saved plan; a running task succeeds unchanged and a completed task is refused.
+  - `loopercli delete TASK` deletes a ready, stopped, failed, cancelled or completed task and its workspaces (its result branch stays) and refuses a running task. It uses the usual confirmation flow: a client token gets a confirmation id for `loopercli confirm`.
+  - The `create` help is written for a CLI user. The `tasks.delete` description in the API document now names the states it accepts. No server behavior change.
+
 ## [2.14.108] - 2026-11-06
 
 ### Changed
