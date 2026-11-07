@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.107] - 2026-11-06
+
+### Added
+
+- **A local gateway endpoint lets other Anthropic clients on this machine use OpenAI Chat models.** ([#1160](https://github.com/foolzzz/looper/pull/1160))
+  - Off by default. When enabled in Settings → Local gateway (or `/api/v1/gateway/*`), the local proxy serves `/gw` on 127.0.0.1 only, behind a local key stored owner-only, for operator-defined model aliases of enabled API-key `openai-chat` models; browser (`Origin`) and foreign-`Host` requests are refused. Requests are recorded when recording is on.
+  - `loopercli gateway-env --alias NAME` prints the client environment for `eval`.
+  - `ensure_schema` adds a `gateway_aliases` table once. The `looper-config/v4` document gains an optional `gateway.aliases` section; importing aliases needs an operator token.
+  - For translated Claude Code runs the launch environment also sets `ANTHROPIC_MODEL`.
+
 ## [2.14.106] - 2026-11-06
 
 ### Added
