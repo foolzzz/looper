@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.108] - 2026-11-06
+
+### Changed
+
+- **Server log lines name the task, and Planner resumes and system suspends are logged.** ([#1166](https://github.com/foolzzz/looper/pull/1166))
+  - Observability only. The Worker and Reviewer "dispatching", "starting run", "run started" and "waits" lines say `worker` or `reviewer` and add `task=<parent task id> step=<step id>`; the "waits" wording changed, so filters on the old text need an update.
+  - A Planner resumed from a saved plan logs one INFO line with its task id and the steps re-dispatched, runs adopted and decisions resumed.
+  - The server logs one WARNING when the wall clock jumped ahead of the monotonic clock by more than 60 s (the system was suspended).
+
 ## [2.14.107] - 2026-11-06
 
 ### Added
