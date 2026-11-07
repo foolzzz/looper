@@ -99,6 +99,43 @@ def test_hosted_run_completes_without_a_process(tmp_path: Path, monkeypatch: pyt
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
+@pytest.mark.parametrize("review", [False, True])
+@pytest.mark.parametrize("task_id", ["t1", ""])
+def test_run_lifecycle_logs_name_the_task_and_step(tmp_path, monkeypatch, agent_db, caplog, review, task_id):
+    caplog.set_level("INFO", logger=worker.__name__)
+    events = _events()
+    if review:
+        events[-1]["result"] = json.dumps({"passed": True, "summary": "checked", "findings": []})
+    run = ScriptedRun(events)
+
+    async def scenario():
+        async with _pool(tmp_path, monkeypatch, run) as (pool, _, _):
+            limit = AsyncMock(return_value=0)
+            monkeypatch.setattr(worker, "load_task_limit", limit)
+            item = _item(tmp_path)
+            item.payload["parent_task_id"] = task_id
+            item.payload["step_key"] = "human-label"
+            if review:
+                item = replace(item, message_type=MessageType.VERIFY_REQUEST)
+            await pool._dispatch(item)
+            await asyncio.sleep(0)  # the run reaches its slot wait
+            assert not run.launch_calls
+            limit.return_value = 1
+            await pool.recheck()
+            await pool._tasks["w1"]
+        assert run.launch_calls == 1
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+    for fragment in ("dispatching", "waits:", "starting run:", "run started"):
+        lines = [record.message for record in caplog.records if fragment in record.message]
+        assert len(lines) == 1
+        assert f'{"reviewer" if review else "worker"} w1' in lines[0]
+        if task_id:
+            assert "task=t1 step=s1" in lines[0]
+        else:
+            assert "task=" not in lines[0] and "step=" not in lines[0]
+
+
 @pytest.mark.parametrize("reason", ["kill", "timeout", "cap"])
 def test_hosted_run_is_ended_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                 agent_db: Any, reason: str) -> None:
