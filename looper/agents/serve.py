@@ -65,6 +65,22 @@ from .tiers.worker import WorkerConfig, WorkerPool
 logger = logging.getLogger(__name__)
 
 
+class _SuspendDetector:
+    """Detect wall time that elapsed while the monotonic clock was paused."""
+
+    def __init__(self, *, wall_clock: Callable[[], float] = time.time,
+                 monotonic_clock: Callable[[], float] = time.monotonic) -> None:
+        self._wall_clock, self._monotonic_clock = wall_clock, monotonic_clock
+        self._wall, self._monotonic = wall_clock(), monotonic_clock()
+
+    def check(self) -> None:
+        wall, monotonic = self._wall_clock(), self._monotonic_clock()
+        suspended = (wall - self._wall) - (monotonic - self._monotonic)
+        self._wall, self._monotonic = wall, monotonic
+        if suspended > 60:
+            logger.warning("the system was suspended for about %.0f s (sleep); timers and runs paused", suspended)
+
+
 class _StartupSteps:
     """Elapsed seconds in execution order; only entered steps are recorded."""
 
@@ -927,8 +943,13 @@ async def _run_agent_system_owned(
                 stop_event, exit_now=fence.exit, prepare_stop=lambda sig=sig: prepare_stop(sig)))
 
         async def check_recording_proxy() -> None:
+            suspend_detector = _SuspendDetector()
+            next_suspend_check = time.monotonic() + 30
             while True:
                 await asyncio.sleep(5)
+                if time.monotonic() >= next_suspend_check:
+                    suspend_detector.check()
+                    next_suspend_check = time.monotonic() + 30
                 if control is not None:
                     try:
                         await control.tick()

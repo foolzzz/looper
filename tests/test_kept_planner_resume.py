@@ -1,6 +1,7 @@
 """A resumed Planner adopts held runs before considering a new dispatch."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,9 +13,45 @@ from looper.agents.message import MessageEnvelope, MessageType, planner_address,
 from looper.agents.tiers.planner import PlanStep, PlannerAgent, ReviewStage, StepReviewRole, TaskPlan
 
 
+def test_resume_logs_the_actions_taken_from_the_saved_plan(tmp_path, agent_db, caplog):
+    from looper.agents.tiers.planner_protocol import Decision, DecisionReply
+
+    caplog.set_level(logging.INFO, logger='looper.agents.tiers.planner')
+
+    async def run():
+        async def adopt(run_id, hold):
+            return AdoptResult(AdoptOutcome.ADOPTED if run_id.endswith('held') else AdoptOutcome.NOT_CANDIDATE)
+
+        planner = PlannerAgent(task_id='task-resume', runtime_root=tmp_path, adopter=adopt)
+        planner._bus = SimpleNamespace(publish=AsyncMock())
+        planner._ask = AsyncMock(return_value=DecisionReply(Decision.ACCEPT, '', '', (), 'accepted'))
+        steps = [PlanStep(step_id=f'step-{i}', index=i, instruction='finish the change', status=status,
+                          worker_id=f'worker-{suffix}', reviewer_id=f'reviewer-{suffix}',
+                          result={'status': 'completed'})
+                 for i, (status, suffix) in enumerate([
+                     ('dispatched', 'repeat'), ('completed', 'repeat'),
+                     ('dispatched', 'held'), ('completed', 'held'), ('deciding', 'decide')])]
+        planner._plan = TaskPlan('plan-resume', 'goal-resume', 'finish the change', str(tmp_path),
+                                 steps=steps, status='executing')
+        await planner._resume(MessageEnvelope.create(
+            source=planner_address('old'), target=planner.agent_address,
+            message_type=MessageType.TASK_RESUME, payload={}))
+        messages = [call.args[0] for call in planner._bus.publish.await_args_list]
+        assert sum(message.message_type is MessageType.WORK_ITEM for message in messages) == 1
+        assert sum(message.message_type is MessageType.VERIFY_REQUEST for message in messages) == 1
+        assert planner._adopted_runs == {'worker-held', 'reviewer-held'}
+        assert steps[-1].status == 'verified'
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+    summaries = [record.message for record in caplog.records if 'resumed from its saved plan:' in record.message]
+    assert summaries == ['planner task-resume resumed from its saved plan: 2 step(s) re-dispatched, '
+                         '2 run(s) adopted, 1 decision(s) resumed']
+
+
 @pytest.mark.parametrize('review', [False, True])
 @pytest.mark.parametrize('outcome', list(AdoptOutcome) + [None])
-def test_resume_adopts_or_repeats_the_same_attempt(tmp_path, review, outcome):
+def test_resume_adopts_or_repeats_the_same_attempt(tmp_path, caplog, review, outcome):
+    caplog.set_level(logging.INFO, logger='looper.agents.tiers.planner')
     async def run():
         failure = AdoptFailure.LOG_SHORT if outcome is AdoptOutcome.FAILED else None
         adopter = AsyncMock(return_value=AdoptResult(outcome, failure)) if outcome is not None else None
@@ -45,6 +82,10 @@ def test_resume_adopts_or_repeats_the_same_attempt(tmp_path, review, outcome):
             await planner._resume(envelope)
             adopter.assert_awaited_once()
             dispatch.assert_not_awaited()
+            summaries = [record.message for record in caplog.records if 'resumed from its saved plan:' in record.message]
+            assert summaries == [
+                'planner task-resume resumed from its saved plan: 0 step(s) re-dispatched, '
+                f'{adopted} run(s) adopted, 0 decision(s) resumed' for adopted in (1, 0)]
         elif outcome is AdoptOutcome.END_PENDING:
             dispatch.assert_not_awaited()
             assert run_id in planner._ending_runs
@@ -134,10 +175,12 @@ def test_parallel_adopted_results_enforce_the_task_cap_after_the_last_run(
 @pytest.mark.parametrize('enabled', [False, True])
 @pytest.mark.parametrize('status', ['deciding', 'dispatched'])
 def test_resume_checks_the_budget_before_any_new_decision_or_dispatch(
-    tmp_path, monkeypatch, agent_db, enabled, status,
+    tmp_path, monkeypatch, agent_db, caplog, enabled, status,
 ):
     from looper.agents.project_execution import ProjectExecution
     from looper.db import llm_records
+
+    caplog.set_level(logging.INFO, logger='looper.agents.tiers.planner')
 
     async def run():
         adopter = AsyncMock(return_value=AdoptResult(AdoptOutcome.NOT_CANDIDATE)) if enabled else None
@@ -165,6 +208,8 @@ def test_resume_checks_the_budget_before_any_new_decision_or_dispatch(
             assert adopter.await_count == (1 if status == 'dispatched' else 0)
 
     asyncio.run(run())
+    assert any(record.message == 'planner task-resume resumed from its saved plan: 0 step(s) re-dispatched, '
+               '0 run(s) adopted, 0 decision(s) resumed' for record in caplog.records)
 
 
 @pytest.mark.parametrize('review', [False, True])
