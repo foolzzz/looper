@@ -465,6 +465,10 @@ class RunReply:
     metadata: dict[str, Any]
 
 
+def _task_step_log(task_id: str, step_id: str | None) -> str:
+    return f" task={task_id} step={step_id}" if task_id else ""
+
+
 class WorkerPool:
     """Manages a pool of Worker runs.
 
@@ -1066,7 +1070,10 @@ class WorkerPool:
             logger.debug("worker %s already active, skipping", worker_id)
             return
 
-        logger.info("dispatching worker %s (active=%d)", worker_id, len(self._active))
+        role = "reviewer" if envelope.message_type is MessageType.VERIFY_REQUEST else "worker"
+        logger.info("dispatching %s %s%s (active=%d)", role, worker_id,
+                    _task_step_log(envelope.payload.get("parent_task_id", ""), envelope.payload.get("task_id")),
+                    len(self._active))
         self._input_ready[worker_id] = asyncio.Event()
         task = asyncio.create_task(self._run_worker(envelope))
         self._tasks[worker_id] = task
@@ -1118,8 +1125,8 @@ class WorkerPool:
             if not waiting:
                 waiting = True
                 label = "Reviewer" if agent is AgentType.REVIEWER else "Worker"
-                logger.info("worker %s waits: %d %ss run in task %s, its limit %d", worker_id, running, agent.value,
-                            task_id, limit)
+                logger.info("%s %s%s waits: %d %ss run, its limit %d", agent.value, worker_id,
+                            _task_step_log(task_id, wp.task_id), running, agent.value, limit)
                 if task_id:
                     await self._activity(task_id, worker_id, "phase",
                                          f"{label} waits for room in this task ({running} running, limit {limit})")
@@ -1515,6 +1522,8 @@ class WorkerPool:
             return ctx
         worker_id, parent_task_id, work_dir, prompt = ctx.worker_id, ctx.parent_task_id, ctx.work_dir, ctx.prompt
         command, launch, runtime, hosted, handle = ctx.command, ctx.launch, ctx.runtime, ctx.hosted, ctx.handle
+        role = "reviewer" if is_verify else "worker"
+        task_step = _task_step_log(parent_task_id, ctx.step_id)
         assert handle is not None
         recorder = ClaudeRunRecorder(
             agent_id=worker_id,
@@ -1528,12 +1537,12 @@ class WorkerPool:
             whole_process=True,
         )
         async with self._record_run(worker_id, recorder):
-            logger.info("worker %s starting run: %s (cwd=%s)", worker_id, command[0], work_dir)
+            logger.info("%s %s%s starting run: %s (cwd=%s)", role, worker_id, task_step, command[0], work_dir)
             try:
                 if isinstance(handle, KeptRun):
                     handle.set_record(recorder.record_id)
                 await handle.launch()
-                logger.info("worker %s run started (pid=%s)", worker_id, handle.pid)
+                logger.info("%s %s%s run started (pid=%s)", role, worker_id, task_step, handle.pid)
                 wp = self._active.get(worker_id)
                 if wp is not None:
                     wp.handle = handle

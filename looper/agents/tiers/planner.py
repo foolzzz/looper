@@ -2594,6 +2594,7 @@ class PlannerAgent:
                        if (step.worker_id if status == "dispatched" else
                            step.reviewer_id if status == "completed" else None) == ended_run_id]
         repeat = []
+        adopted = 0
         for step, status in cut_off:
             if step.status != status:
                 continue
@@ -2612,6 +2613,7 @@ class PlannerAgent:
                 self._ending_runs.discard(run_id)
                 if result.outcome is AdoptOutcome.ADOPTED:
                     self._adopted_runs.add(run_id)
+                    adopted += 1
                     await self._activity("phase", f"{role.value.title()} {run_id} carried on across the restart",
                                          worker=run_id)
                     continue
@@ -2619,27 +2621,37 @@ class PlannerAgent:
                     await self._activity("phase", f"{role.value.title()} {run_id} could not carry on across the "
                                          f"restart ({result.failure}); running the step again", worker=run_id)
             repeat.append((step, status))
-        # Identify all carried-on runs before checking the cap; only they may finish at the cap.
-        # Every new decision or dispatch below still needs the ordinary budget check.
-        if not await self._within_budget(plan):
-            return
-        for step, status in repeat:
-            if plan.status not in _LIVE:
+        redispatched = decisions = 0
+        try:
+            # Identify all carried-on runs before checking the cap; only they may finish at the cap.
+            # Every new decision or dispatch below still needs the ordinary budget check.
+            if not await self._within_budget(plan):
                 return
-            if step.status != status:
-                continue
-            if status == "dispatched":
-                await self._dispatch_step(plan, step, same_attempt=True)
-            elif status == "completed":
-                await self._spawn_reviewer(plan, step, same_attempt=True)
-        for step, status in cut_off:
-            if plan.status not in _LIVE:
-                return
-            if status == "deciding" and step.status == status:
-                if step.workspace is not None and step.workspace.state is StepWorkspaceState.MERGING:
-                    await self._finish_merge(plan, step)  # it was accepted: only its merge was cut off
-                else:
-                    await self._decide_again(plan, step)
+            for step, status in repeat:
+                if plan.status not in _LIVE:
+                    return
+                if step.status != status:
+                    continue
+                if status == "dispatched":
+                    run_id = step.worker_id
+                    await self._dispatch_step(plan, step, same_attempt=True)
+                    redispatched += int(step.status == "dispatched" and step.worker_id != run_id)
+                elif status == "completed":
+                    run_id = step.reviewer_id
+                    await self._spawn_reviewer(plan, step, same_attempt=True)
+                    redispatched += int(step.status == "completed" and step.reviewer_id != run_id)
+            for step, status in cut_off:
+                if plan.status not in _LIVE:
+                    return
+                if status == "deciding" and step.status == status:
+                    if step.workspace is not None and step.workspace.state is StepWorkspaceState.MERGING:
+                        await self._finish_merge(plan, step)  # it was accepted: only its merge was cut off
+                    else:
+                        decisions += 1
+                        await self._decide_again(plan, step)
+        finally:
+            logger.info("planner %s resumed from its saved plan: %d step(s) re-dispatched, %d run(s) adopted, "
+                        "%d decision(s) resumed", self._task_id, redispatched, adopted, decisions)
         if plan.status not in _LIVE:
             return
         await self._report_progress(plan)
