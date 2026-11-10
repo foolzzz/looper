@@ -193,3 +193,42 @@ def test_unavailable_runtime_records_are_explicit_without_losing_delivery(planne
     h = drive(planner_claude(plan(step("s1")), decide("accept")), always(WORK_OK))
     assert h.final().payload["status"] == "completed"
     assert "运行记录读取失败" in process_record_text(h.final().payload["process_record"])
+
+
+@pytest.mark.parametrize('blocking', [False, True])
+@pytest.mark.parametrize('reverse_passes', [False, True])
+def test_delivery_keeps_first_seats_late_result_before_earlier_quorum_passes(
+    planner_claude, agent_db, monkeypatch, blocking, reverse_passes,
+):
+    from looper.agents import step_workspaces
+    from tests.test_review_panel_planner import BLOCK, MEMBERS, held_reviews
+
+    monkeypatch.setattr(step_workspaces, 'inspect', AsyncMock(return_value=step_workspaces.Unusable(
+        'This delivery test uses a plain work directory', repository=False)))
+    configure(agent_db, monkeypatch, review_panel={'members': MEMBERS,
+              'accept_when': {'k_of': 2, 'of': MEMBERS}})
+    label = 'delivery-complete-verification'
+    replies = [plan(step(label, review=True)), decide('review'), decide('accept')]
+    if blocking:
+        replies.append(decide('fail', reason='Late blocker needs repair'))
+
+    async def scenario(h):
+        await h.start()
+        await h.until(lambda: len(h.held) == 3)
+        first = h.held.pop(0)
+        if reverse_passes:
+            h.held.reverse()
+        await h.release(REVIEW_PASS)
+        await h.release(REVIEW_PASS)
+        await h.until(lambda: h.planner._plan.steps[0].status == 'verified')
+        await h.answer(first, BLOCK if blocking else REVIEW_PASS)
+        final = await h.finished()
+        reviews = final.payload['delivery_summary'].splitlines()[2]
+        assert reviews.startswith(f'Reviews: {label} 第 1 轮 / {label}/review_a: ')
+        assert ('失败, 1 blocking' if blocking else '通过, 0 blocking') in reviews
+        latest, earlier = ('b', 'c') if reverse_passes else ('c', 'b')
+        assert f'{label}/review_{latest}: 通过' in reviews and f'{label}/review_{earlier}:' not in reviews
+        assert '另 1 条' in reviews
+        assert len(final.payload['delivery_summary']) <= 1200
+
+    drive(planner_claude(*replies), held_reviews, scenario)

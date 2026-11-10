@@ -28,7 +28,6 @@ from .message import builtin_channel_id, is_lark, parse_channel_id
 
 NAME_CHARS = 40
 LEAD_CHARS = 300
-DELIVERY_SUMMARY_CHARS = 600
 # The start of the second section of a Markdown summary: a heading line after the first line.
 _NEXT_SECTION = re.compile(r"\n(?=#{1,6} )")
 
@@ -167,8 +166,7 @@ def notice_text(task_id: str, name: str, status: str, summary: str | None, *, ch
     if text := lead(summary):
         lines.append(text)
     if delivery_summary:
-        lines.append(delivery_summary if len(delivery_summary) <= DELIVERY_SUMMARY_CHARS else
-                     delivery_summary[:DELIVERY_SUMMARY_CHARS - 1].rstrip() + '…')
+        lines.append(delivery_summary)
     if extra:
         lines.append(extra)
     lines.append(link_line(task_link(dashboard_url, task_id), channel))

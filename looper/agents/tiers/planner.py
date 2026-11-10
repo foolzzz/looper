@@ -2421,6 +2421,11 @@ class PlannerAgent:
                 # Quorum acceptance can leave referenced seats running too. Every member's late blocker
                 # reopens the decision so the Planner can retry the work, not merely acknowledge a chat.
                 target.status = "completed"
+        else:
+            # Preserve arrival order before quorum snapshots repeat seats in plan order.
+            entries.append(JournalEntry(target.step_id, target.label, json.dumps({
+                "round": target.retries, "reviews": {seat.label: {"status": seat.status, "result": result}},
+            }), kind=JournalKind.REVIEW_ROUND))
         # Persist the reopened target with the late verdict: a restart must take its decision too.
         await self._save(plan, seat, target, entries=entries)
         if target.status == "completed":

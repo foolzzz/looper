@@ -3945,14 +3945,18 @@ and outcomes (`Verification`), gate topics and conclusions (`Escalations`), and
 run evidence (`Runs`). Repeated ordinary runs with the same role, Profile,
 runtime and models share a counted entry (for example, `12 worker runs on
 <model>`); fallback runs remain separate. Requested and reported models follow
-the Runs API rules: explicit `model_reported` takes precedence (including null),
-Cursor otherwise uses `model_display`, and runtimes without report evidence do
-not substitute the requested model. Runtime/model read failures are explicit.
+the Runs API rules: Cursor prefers `routed_model` when present, then explicit
+`model_reported` (including null), then `model_display`. Other runtimes prefer
+explicit `model_reported`; runtimes without report evidence do not substitute
+the requested model. Runtime/model read failures are explicit.
 
 The result text ends with a code-generated `## Process record` delivery summary,
 at most 1200 characters: one line each for actual roles/runtime/models and
 fallbacks, latest review rounds and outcomes, latest verification outcomes, and
-escalations. It points to the task page or `looper_tasks` get for the full record.
+escalations. Failing reviews and verification results come first, then other
+outcomes, newest evidence first within each group. Each escalation keeps its
+gate state and clipped reason together. Channel notices append this summary
+whole, including its pointer to the task page or `looper_tasks` get for the full record.
 The bounded summary is also stored as `process_record.delivery_summary`; it is
 computed from evidence before detail truncation, so an oversized verification
 explanation cannot hide its final outcome.

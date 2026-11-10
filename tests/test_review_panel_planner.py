@@ -218,7 +218,8 @@ def test_late_blocker_retries_merged_work_in_a_fresh_workspace(
         await h.answer(parallel, WORK_OK)
         assert (await h.finished()).payload["status"] == "completed"
 
-    drive(claude, outcome, scenario)
+    # Two real git/review/merge rounds plus removal can exceed the ordinary scenario budget.
+    drive(claude, outcome, scenario, timeout=90)
 
 
 def test_suggestions_are_merged_shown_and_recorded_without_losing_delivery(planner_claude, agent_db, monkeypatch):

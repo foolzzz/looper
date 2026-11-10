@@ -241,23 +241,66 @@ def test_delivery_summary_orders_revisited_steps_by_latest_evidence():
 
 
 @pytest.mark.parametrize('gate', [False, True])
-def test_delivery_summary_shortens_escalation_reason_but_full_record_keeps_it(gate):
+@pytest.mark.parametrize('reason', [pytest.param('Needs approval ' * 33 + 'done!', id='words'),
+                                  pytest.param('需' * 500, id='cjk'),
+                                  pytest.param('https://example.org/' + 'a' * 480, id='url')])
+def test_delivery_summary_shortens_escalation_reason_but_full_record_keeps_it(gate, reason):
     from looper.agents.workflow_reporting import process_record_summary
 
-    reason = 'Needs approval ' * 33 + 'done!'
-    assert len(reason) == 500
     plan = task(PlanStep('g1', 0, 'Approval', key='g1', gate=Gate('Continue?', (),
         state=GateState.OPEN, resolution=reason))) if gate else task()
     journal = [] if gate else [entry(JournalKind.ESCALATION, reason=reason, gates=['g1'])]
     record = process_record(plan, journal, [])
     line = process_record_summary(record).splitlines()[4]
     assert ('g1 / Continue?: open' if gate else 's1 升级') in line
-    assert 'Needs approval' in line and '…' in line
+    assert reason[:15] in line and '…' in line
     assert 'done!' not in line
     clipped = line.rsplit('; ', 1)[-1] if gate else line.split('升级: ', 1)[1]
     assert len(clipped) <= 80
-    assert clipped.removesuffix('…').endswith(('Needs', 'approval'))
+    if ' ' in reason:
+        assert clipped.removesuffix('…').endswith(('Needs', 'approval'))
+    else:
+        assert clipped == reason[:79] + '…'
     assert reason in process_record_text(record)
+
+
+def test_delivery_summary_keeps_escalation_state_and_reason_together():
+    label, gate_label = 'w' * 60, 'g' * 60
+    reason = '需' * 500
+    plan = task(PlanStep('s1', 0, 'Build', key=label),
+                PlanStep('g1', 1, 'Approve', key=gate_label,
+                         gate=Gate('Approve', (), state=GateState.OPEN)))
+    journal = [JournalEntry('s1', label, json.dumps({'reason': reason, 'gates': [gate_label]}),
+                            kind=JournalKind.ESCALATION)]
+    summary = process_record(plan, journal, [])['delivery_summary']
+    escalation = summary.splitlines()[4]
+    assert all(piece in escalation for piece in (label, gate_label, 'open', reason[:79] + '…'))
+    assert escalation.count(gate_label) == 1
+    assert '另 ' not in escalation
+    assert len(summary) <= 1200
+
+
+@pytest.mark.parametrize('kind', [JournalKind.REVIEW_ROUND, JournalKind.VERIFICATION_ROUND])
+def test_delivery_summary_keeps_latest_failure_before_newer_passes(kind):
+    journal = []
+    for number, passed in enumerate((False, False, True)):
+        label = f'step-{number}-' + 'x' * 110
+        data = ({'round': 0, 'reviews': {'review': {'passed': passed}}} if kind is JournalKind.REVIEW_ROUND
+                else {'attempt': 1, 'status': 'completed' if passed else 'failed'})
+        journal.append(entry(kind, label, **data))
+    summary = process_record(task(), journal, [])['delivery_summary']
+    line = summary.splitlines()[2 if kind is JournalKind.REVIEW_ROUND else 3]
+    assert line.split(': ', 1)[1].startswith('step-1-')
+    assert 'step-0-' not in line and 'step-2-' not in line
+    assert '另 2 条' in line
+
+
+@pytest.mark.parametrize('text,expected', [('short', 'short'), ('a' * 12 + ' ' + 'b' * 10, 'a' * 12 + '…'),
+                                        ('a ' + 'b' * 30, 'a ' + 'b' * 17 + '…')])
+def test_notice_clipping_uses_only_nearby_word_boundaries(text, expected):
+    from looper.agents.workflow_reporting import _notice_piece
+
+    assert _notice_piece(text, 20) == expected
 
 
 def test_unique_run_history_cannot_starve_other_sections_or_hide_omissions():

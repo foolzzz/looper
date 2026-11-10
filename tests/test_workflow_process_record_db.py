@@ -87,7 +87,8 @@ def test_router_record_reaches_task_detail_and_manager_get(monkeypatch, tmp_path
         finally:
             await bus.shutdown()
 
-    run_db(run, monkeypatch, timeout=30)
+    # Budget for schema migration, HTTP startup, Manager readback and restart on a loaded host.
+    run_db(run, monkeypatch, timeout=90)
 
 
 def test_process_record_baseline_upgrade_is_additive_and_runs_once(monkeypatch):
