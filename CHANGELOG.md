@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.110] - 2026-11-09
+
+### Added
+
+- **Agent Profile fallback chains and the model actually used.** ([#1170](https://github.com/foolzzz/looper/pull/1170))
+  - An Agent Profile may name one fallback profile (acyclic, at most three hops, same roles). A Planner follows it on a profile configuration error; a Worker or Reviewer also on a launch failure, within the same step attempt and without consuming a retry. The no-model-event detection exists but is off for every shipped runtime. Each switch is journaled (`profile_fallback`) and recorded on the next run.
+  - `runs.get` and `runs.list` add `model_requested` and `model_reported`; an unreported model stays null.
+  - Profile API, config export/import and the Settings form carry the fallback. A profile that is a fallback target cannot be deleted.
+  - Additive schema change: nullable `agent_profiles.fallback_profile_id` and the `profile_fallback` journal kind, added by `ensure_schema`.
+
 ## [2.14.109] - 2026-11-06
 
 ### Added
