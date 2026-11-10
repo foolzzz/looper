@@ -83,6 +83,9 @@ TASK_DETAIL = _object({
     "attempt_ended_at": _NULL_STR,
     "config": _OBJ, "origin_channel_id": _STR,
     **dict.fromkeys(("result_summary", "error", "fail_kind"), _NULL_STR),
+    "process_record": _nullable(_object({
+        "sections": _object({name: _array(_STR) for name in ("Roles", "Reviews", "Verification", "Escalations")}, closed=True),
+        "remote_safety": _STR, "omitted": {"type": "integer", "minimum": 0}}, closed=True)),
     "task_budget_usd": _NULL_NUMBER, "own_budget_usd": _NULL_NUMBER,
     "client": _nullable(_object({"id": _STR, "name": _STR}, closed=True)),
     "profile_overrides": {"type": "object", "additionalProperties": _PROFILE},

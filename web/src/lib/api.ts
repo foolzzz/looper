@@ -1864,6 +1864,11 @@ export interface TaskDetail extends TaskInfo {
   config: Record<string, unknown>;
   origin_channel_id: string;
   result_summary: string | null;
+  process_record?: {
+    sections: Record<"Roles" | "Reviews" | "Verification" | "Escalations", string[]>;
+    remote_safety: string;
+    omitted: number;
+  } | null;
   error: string | null;
   /** "task_budget": the task failed at its project's task spend cap and can continue with a higher one. */
   fail_kind: "task_budget" | null;

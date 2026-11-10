@@ -512,6 +512,7 @@ class TaskRouter:
             await db_tasks.update_task_status(
                 task_id, status,
                 result_summary=summary if status == "completed" else None,
+                process_record=envelope.payload.get("process_record") if ends_task(status) else None,
                 error=summary if status == "failed" else None,
                 fail_kind=db_tasks.FailKind(fail_kind) if fail_kind else None,
             )

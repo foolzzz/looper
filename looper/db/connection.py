@@ -106,6 +106,7 @@ _WORKFLOW_RULES = "workflow_rules"
 _GATE_PURPOSE = "gate_purpose"
 _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
+_TASK_PROCESS_RECORD = "task_process_record"
 _CHAT_BINDING_SENDERS = "chat_binding_senders"
 _PROVIDER_ENABLED = "provider_enabled"
 _MANAGER_SCOPE_PROJECTS = "manager_scope_projects"
@@ -402,6 +403,16 @@ async def _task_reply_route_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _task_process_record_pending(conn: asyncpg.Connection) -> bool:
+    """An unmarked baseline lacks the task process record; recorded upgrades never repair DDL."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _TASK_PROCESS_RECORD):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('tasks') AND attname = 'process_record' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
 async def _chat_binding_senders_pending(conn: asyncpg.Connection) -> bool:
     """Unmarked bindings without extra senders need the additive upgrade."""
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _CHAT_BINDING_SENDERS):
@@ -620,6 +631,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             for ddl in _COMMAND_SCHEDULES_DDL:
                 await conn.execute(ddl)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _COMMAND_SCHEDULES)
+        if await _task_process_record_pending(conn):
+            await conn.execute("ALTER TABLE tasks ADD COLUMN process_record JSONB "
+                               "CHECK (jsonb_typeof(process_record) = 'object')")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _TASK_PROCESS_RECORD)
         if await _task_reply_route_pending(conn):
             await conn.execute("ALTER TABLE tasks ADD COLUMN origin_reply_route JSONB "
                                "CHECK (jsonb_typeof(origin_reply_route) = 'object')")
@@ -754,6 +769,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             await _schedule_user_gates_pending(conn) or await _cursor_login_pending(conn)
             or await _runtime_launcher_pending(conn) or await _profile_fallback_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
+            or await _task_process_record_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _llm_requests_pending(conn)
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)

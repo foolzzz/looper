@@ -268,6 +268,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     correlation_id    TEXT NOT NULL DEFAULT '',
     origin_channel_id TEXT NOT NULL DEFAULT '',
     result_summary    TEXT,
+    process_record    JSONB CHECK (jsonb_typeof(process_record) = 'object'),
     error             TEXT,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),

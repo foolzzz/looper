@@ -2446,7 +2446,7 @@ class PlannerAgent:
 
     async def _reset_reviews(self, plan: TaskPlan, target: PlanStep, *, drop: bool = False) -> None:
         seats = [s for s in plan.steps if s.reviews == target.step_id and s.status != "skipped"]
-        if any(s.status == "dispatched" for s in seats):
+        if any(s.status == "dispatched" for s in seats) and (target.result or {}).get("review_round") != target.retries:
             await self._save(plan, entries=[JournalEntry(target.step_id, target.label, json.dumps({
                 "round": target.retries, "stale": [s.label for s in seats if s.status == "dispatched"],
                 "reviews": {s.label: s.result for s in seats}}), kind=JournalKind.REVIEW_ROUND)])
@@ -2577,7 +2577,7 @@ class PlannerAgent:
             entries.append(JournalEntry(step.step_id, step.label, json.dumps({
                 "role": step.role, "attempt": step.retries + 1, "head": evidence.get("head"),
                 "git": evidence.get("git", False), "status": "completed" if context.succeeded else "failed",
-                "summary": summary.split(". ", 1)[0].splitlines()[0][:300] if summary else "",
+                "summary": journal.clip(summary.split(". ", 1)[0], 300) if summary else "",
                 **({"failure": "verification_changed_code", "repair_after_index": max(s.index for s in plan.steps)}
                    if result.get("failure") == "verification_changed_code" else {}),
             }), kind=JournalKind.VERIFICATION_ROUND))
@@ -4781,8 +4781,9 @@ class PlannerAgent:
         judgments = [e for e in plan.journal if e.kind is JournalKind.REVIEW_ADJUDICATED]
         if judgments:
             summary += "\n\n## Review adjudications\n" + "\n".join(f"- {e.step}: {e.summary}" for e in judgments)
-        if process := await self._process_record(plan):
-            summary += "\n\n" + process
+        process = await self._process_record(plan)
+        if process is not None:
+            summary += "\n\nProcess record: see the task page"
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
             target=TASK_ROUTER_ADDRESS,
@@ -4794,6 +4795,7 @@ class PlannerAgent:
                 "status": "completed",
                 "progress": plan.progress_summary(),
                 "summary": summary,
+                **({"process_record": process} if process is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
@@ -4939,9 +4941,10 @@ class PlannerAgent:
             await self._vault_closeout(
                 plan, f"failed: {_clip(plan.fail_reason or 'a step failed and the Planner could not go on', 300)}")
 
+        process = await self._process_record(plan)
         summary = closing_note(plan.fail_reason or "A step failed and the Planner could not go on.",
                                ((s.label, s.status, s.result) for s in plan.steps),
-                               process=await self._process_record(plan))
+                               process="Process record: see the task page" if process is not None else "")
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
@@ -4955,14 +4958,15 @@ class PlannerAgent:
                 "progress": plan.progress_summary(),
                 "summary": summary,
                 "fail_kind": fail_kind.value if fail_kind else None,
+                **({"process_record": process} if process is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
         ))
 
-    async def _process_record(self, plan: TaskPlan) -> str:
+    async def _process_record(self, plan: TaskPlan) -> dict[str, Any] | None:
         if not self._workflow:
-            return ""
+            return None
         try:
             runs = await db_llm_records.process_record_runs(self._task_id)
         except Exception:

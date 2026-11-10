@@ -13,6 +13,7 @@ from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 from looper.db import llm_records
 from tests.test_planner_agent import FINAL_RESULT, REVIEW_FAIL, REVIEW_PASS, WORK_FAILED, WORK_OK, always, chat, decide, drive, plan, step
 from tests.test_review_panel_planner import configure
+from looper.agents.workflow_reporting import process_record_text
 
 
 @pytest.mark.parametrize("notices", [True, False])
@@ -62,7 +63,7 @@ def test_plan_and_review_phase_reach_telegram_transport(planner_claude, agent_db
 
 
 @pytest.mark.parametrize("failed", [False, True])
-def test_workflow_delivery_appends_process_record(planner_claude, agent_db, monkeypatch, failed):
+def test_workflow_delivery_stores_separate_process_record(planner_claude, agent_db, monkeypatch, failed):
     configure(agent_db, monkeypatch)
     monkeypatch.setattr(llm_records, "process_record_runs", AsyncMock(return_value=[{
         "role": "worker", "model": "reported-model", "metadata": {
@@ -71,11 +72,13 @@ def test_workflow_delivery_appends_process_record(planner_claude, agent_db, monk
     replies = [plan(step("s1")), decide("fail", reason="Stop") if failed else decide("accept")]
     h = drive(planner_claude(*replies), always(WORK_FAILED if failed else WORK_OK))
     summary = h.final().payload["summary"]
-    assert "\n\n## Process record\n" in summary
-    assert all(text in summary for text in ("Roles", "Reviews", "Verification", "Escalations", "dev",
+    assert summary.endswith("Process record: see the task page")
+    assert "## Process record" not in summary
+    record = process_record_text(h.final().payload["process_record"])
+    assert all(text in record for text in ("Roles", "Reviews", "Verification", "Escalations", "dev",
                                             "reported-model", "requested-model", "first-profile"))
     if not failed:
-        assert summary.startswith(FINAL_RESULT + "\n\n## Process record\n")
+        assert summary == FINAL_RESULT + "\n\nProcess record: see the task page"
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -101,7 +104,7 @@ def test_verification_start_and_result_notices(planner_claude, agent_db, monkeyp
     texts = [e.payload["phase_text"] for e in h.statuses if "phase_text" in e.payload]
     assert sum("验证第 1 轮（v1）：开始" in text for text in texts) == int(notices)
     assert sum("验证第 1 轮（v1）：通过" in text for text in texts) == int(notices)
-    assert "HEAD abc123" in h.final().payload["summary"]
+    assert "HEAD abc123" in process_record_text(h.final().payload["process_record"])
 
 
 def test_exhaustion_emits_one_escalation_notice(planner_claude, agent_db, monkeypatch):
@@ -139,7 +142,7 @@ def test_workflow_without_panel_preserves_every_review_round(planner_claude, age
         decide("retry", feedback="Add the missing tests"), decide("review"), decide("accept"))
     verdicts = iter([REVIEW_FAIL, REVIEW_PASS])
     h = drive(claude, lambda e: next(verdicts) if e.message_type is MessageType.VERIFY_REQUEST else WORK_OK)
-    summary = h.final().payload["summary"]
+    summary = process_record_text(h.final().payload["process_record"])
     assert "s1 第 1 轮 / builtin: 失败, 1 blocking" in summary
     assert "s1 第 2 轮 / builtin: 通过, 0 blocking" in summary
 
@@ -149,4 +152,4 @@ def test_unavailable_runtime_records_are_explicit_without_losing_delivery(planne
     monkeypatch.setattr(llm_records, "process_record_runs", AsyncMock(side_effect=OSError("Unavailable")))
     h = drive(planner_claude(plan(step("s1")), decide("accept")), always(WORK_OK))
     assert h.final().payload["status"] == "completed"
-    assert "运行记录读取失败" in h.final().payload["summary"]
+    assert "运行记录读取失败" in process_record_text(h.final().payload["process_record"])

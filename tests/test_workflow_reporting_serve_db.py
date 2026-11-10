@@ -78,8 +78,12 @@ def test_workflow_record_is_persisted_by_serve(monkeypatch):
                     assert time.monotonic() < deadline, detail['status']
                     time.sleep(.2)
                 assert detail['status'] == 'completed', detail.get('error')
-                result = detail['result_summary']
-                assert '\n\n## Process record\n' in result
+                assert detail['result_summary'].endswith('Process record: see the task page')
+                assert '## Process record' not in detail['result_summary']
+                from looper.agents.workflow_reporting import process_record_text
+                result = process_record_text(detail['process_record'])
+                manager_view = api.post('/api/v1/ops/tasks/get', {'task_id': task['task_id']})['result']
+                assert manager_view['process_record'] == result
                 assert '报告模型 stand-in' in result
                 for text in ('dev', 'review_a', 'codex', '请求模型', '报告模型', '第 1 轮', '0 blocking',
                              'Remote-environment safety (read-only / dry run) is not enforced by Looper'):
