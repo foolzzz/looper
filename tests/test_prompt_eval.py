@@ -2419,7 +2419,7 @@ _MISBEHAVING = EvalTask(
 
 
 # What each fake-mode task is run through: (steps, retries, reviews, chat turns), and how its steps sit side by side.
-_FLOW = {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
+_FLOW = {"panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
          "wait_pr_rereview": (3, 0, 0, 0), "wait_not_needed": (2, 0, 0, 0),
          "any_of_ready": (3, 0, 0, 0), "conditions_not_needed": (2, 0, 0, 0),
          "parallel_parts": (3, 0, 0, 0),
@@ -2447,7 +2447,7 @@ _FLOW = {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_ste
          "reviewer_elsewhere_wrong": (1, 1, 2, 0)}
 # (independent pairs, bracketed pairs, parallel workers): only the parts that need nothing of each other run side by
 # side; interface_first's sit between its interface step and its integration step.
-_SHAPE = {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
+_SHAPE = {"panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
           "wait_pr_rereview": (0, 0, 1), "wait_not_needed": (0, 0, 1),
           "any_of_ready": (1, 0, 2), "conditions_not_needed": (0, 0, 1),
           "parallel_parts": (1, 0, 2),
@@ -2477,7 +2477,8 @@ _SHAPE = {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": 
 # accepted.
 _ROLE_KEYS = ("roles_defined", "role_runs", "role_profile_runs", "role_reviews", "role_prompt_mismatches",
               "role_boundary_misses", "gate_breaches", "advisory_role_fails")
-_ROLES = {"roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0, 0),
+_ROLES = {"panel_merge": (3, 6, 4, 4, 0, 0, 0, 0), "panel_adjudicate": (3, 3, 2, 2, 0, 0, 0, 0),
+          "roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0, 0),
           "roles_advisory_review": (1, 1, 0, 1, 0, 0, 0, 1),
           "roles_two_reviews": (2, 2, 0, 2, 0, 0, 0, 0),
           "roles_multi_platform": (4, 4, 0, 0, 0, 0, 0, 0),
@@ -2492,7 +2493,8 @@ _COUNTS = {
     # Only the multi-platform task's disciplines each get a role that names their conventions, and its four platform
     # steps are built on its interface step (the tester's and the doc writer's on the module).
     "discipline_roles": {"roles_multi_platform": 4},
-    "interface_dependents": {"roles_tester_docs": 2, "roles_multi_platform": 4},
+    "interface_dependents": {"roles_tester_docs": 2, "roles_multi_platform": 4,
+                             "panel_merge": 2, "panel_adjudicate": 2},
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     "planner_profile_runs": {"profile_choice": 1},
     # Only the two changes that make the second step wrong change the plan.

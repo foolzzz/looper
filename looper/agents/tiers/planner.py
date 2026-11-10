@@ -437,6 +437,8 @@ class PlanStep:
     acceptance_criteria: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)  # step_ids
     ready_when: dict | str | None = None  # persisted with step ids
+    accept_when: dict | str | None = None
+    reviews: str | None = None
     review: bool = False  # a Reviewer must pass the step before it is accepted
     # "pending" | "dispatched" | "deciding" | "completed" (in review) | "verified" | "failed" | "skipped"
     status: str = "pending"
@@ -463,6 +465,10 @@ class PlanStep:
     # When its run was first dispatched; kept through its retries and reviews, gone when it is sent back to not
     # started (task_steps.started_at).
     started_at: datetime | None = None
+
+    @property
+    def kind(self) -> str:
+        return "review" if self.reviews else "gate" if self.gate else "wait" if self.wait else "work"
 
     @property
     def label(self) -> str:
@@ -563,7 +569,7 @@ class TaskPlan:
         def deps(step: PlanStep) -> tuple[str, ...]:
             return tuple(labels.get(d, d) for d in step.depends_on)
 
-        live = [s for s in self.steps if s.status != "skipped"]
+        live = [s for s in self.steps if s.status != "skipped" and not s.reviews]
         dropped = [s for s in self.steps if s.status == "skipped"]
         return PlanView(
             started={s.label: deps(s) for s in live if s.started},
@@ -584,7 +590,7 @@ class TaskPlan:
         return [s for s in self.steps if s.wait is not None and s.wait.state.open]
 
     def progress_summary(self) -> str:
-        live = [s for s in self.steps if s.status != "skipped"]
+        live = [s for s in self.steps if s.status != "skipped" and not s.reviews]
         total = len(live)
         done = sum(1 for s in live if s.status == "verified")
         running = sum(1 for s in live if s.status in ("dispatched", "deciding", "completed"))
@@ -628,6 +634,8 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "acceptance_criteria": step.acceptance_criteria,
         "depends_on": step.depends_on,
         "ready_when": step.ready_when,
+        "accept_when": step.accept_when,
+        "reviews": step.reviews,
         "review": step.review,
         "status": step.status,
         "result": step.result,
@@ -641,7 +649,7 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "review_roles": [item.row() for item in step.review_roles],
         "review_stage": step.review_stage.value if step.review_stage else None,
         "review_position": step.review_position,
-        "kind": "gate" if step.gate is not None else "wait" if step.wait is not None else "work",
+        "kind": step.kind,
         "started_at": step.started_at,
     }
 
@@ -1154,7 +1162,7 @@ class PlannerAgent:
                                     lambda text: parse_plan(
                                         text, self._roles, gate_policy=self._gate_policy,
                                         wait_policy=self._wait_policy(), conditions=self._execution.conditions_on,
-                                        isolate_steps=self._execution.isolate_steps))
+                                        isolate_steps=self._execution.isolate_steps, review_panel=self._panel_on))
         except PlannerTurnError as exc:
             await self._fail_plan(plan, reason=f"Planning failed: {exc}")
             return
@@ -1223,7 +1231,41 @@ class PlannerAgent:
             step.depends_on = [by_label[label].step_id for label in spec.depends_on]
             step.ready_when = (to_json(spec.ready_when, lambda label: by_label[label].step_id)
                                if spec.ready_when is not None else None)
+        changed.extend(self._expand_reviews(plan, changed))
         return changed
+
+    def _expand_reviews(self, plan: TaskPlan, targets: list[PlanStep]) -> list[PlanStep]:
+        by_label = {s.label: s for s in plan.steps if s.status != "skipped"}
+        changed: list[PlanStep] = []
+        panel = (self._workflow or {}).get("review_panel")
+        for target in targets:
+            verification = (self._workflow or {}).get("verification") or {}
+            if target.role == verification.get("role", ""):
+                target.review = False
+            if not panel or not target.review:
+                target.accept_when = None
+                for seat in (s for s in plan.steps if s.reviews == target.step_id and s.status == "pending"):
+                    seat.status = "skipped"
+                    changed.append(seat)
+                continue
+            seats = {}
+            for member in panel["members"]:
+                key = f"{target.label}/{member}"
+                seat = by_label.get(key)
+                if seat is None:
+                    seat = PlanStep(f"step-{uuid.uuid4().hex[:8]}", len(plan.steps), target.instruction, key=key,
+                                    reviews=target.step_id, role=None if member == "builtin" else member,
+                                    depends_on=[target.step_id], ready_when={"step": target.step_id, "on": "completed"})
+                    plan.steps.append(seat)
+                seats[member] = seat.step_id
+                changed.append(seat)
+            from .review_panel import acceptance
+            target.accept_when = acceptance(parse_condition(panel["accept_when"], "accept_when"), seats)
+        return changed
+
+    @property
+    def _panel_on(self) -> bool:
+        return bool((self._workflow or {}).get("review_panel"))
 
     def _describe(self, plan: TaskPlan, steps: list[PlanStep]) -> str:
         labels = plan.labels()
@@ -1261,7 +1303,10 @@ class PlannerAgent:
             else:
                 await self._open_wait(plan, step)
             opened = True
-        work = [step for step in ready if step.gate is None and step.wait is None]
+        for step in [s for s in ready if s.reviews]:
+            if step.status == "pending" and plan.status in _LIVE:
+                await self._dispatch_review(plan, step)
+        work = [step for step in ready if step.gate is None and step.wait is None and not step.reviews]
         base: _RoundBase | None = None
         if work and self._execution.isolate_steps:
             work, base = await self._plan_round(plan, work)
@@ -1972,7 +2017,9 @@ class PlannerAgent:
         """Which of the ready steps start now (``workspaces.plan_round``), and where the new worktrees among them
         start (None: none of them needs one)."""
         repo = await self._task_repo(plan)
-        decided = workspaces.plan_round(in_flight=[s.isolated for s in plan.steps if s.status in _IN_FLIGHT],
+        decided = workspaces.plan_round(in_flight=[
+            (plan.step(s.reviews).workspace is not None if s.reviews else s.isolated)
+            for s in plan.steps if s.status in _IN_FLIGHT],
                                         ready=[s.isolated for s in ready], repo=repo)
         if decided.note and decided.note != self._round_note:
             await self._activity("phase", decided.note[:500])
@@ -2098,7 +2145,8 @@ class PlannerAgent:
         else:
             note = f"Step {step.label} changed nothing to merge into {merged.target}"
         await self._activity("phase", note)
-        step.workspace = await self._remove_workspace(merged)  # its commits are on the branch now
+        if not any(s.reviews == step.step_id and s.status not in ("verified", "skipped") for s in plan.steps):
+            step.workspace = await self._remove_workspace(merged)  # no reviewer still uses it
         return True
 
     async def _merge_failed(self, plan: TaskPlan, step: PlanStep, outcome: MergeResult, *, decide: bool = True) -> None:
@@ -2140,6 +2188,8 @@ class PlannerAgent:
 
     async def _drop_workspace(self, step: PlanStep) -> None:
         """A step dropped from the plan: its worktree and branch go with it."""
+        if self._plan is not None and step.accept_when is not None:
+            await self._reset_reviews(self._plan, step, drop=True)
         if step.isolated and step.workspace is not None:
             step.workspace = await self._discard(step.workspace)
 
@@ -2271,12 +2321,125 @@ class PlannerAgent:
             metadata={"origin_channel_id": plan.origin_channel_id},
         ))
 
+    @staticmethod
+    def _accept_state(plan: TaskPlan, step: PlanStep) -> State:
+        from .review_panel import state
+        return state(plan, step)
+
+    def _panel_decision(self, text: str, plan: TaskPlan, step: PlanStep, context: DecisionContext,
+                        view: PlanView) -> DecisionReply:
+        from .planner_protocol import extract_reply
+        from .review_adjudication import adjudicate
+        from .review_panel import state
+        data = extract_reply(text)
+        verification = (self._workflow or {}).get("verification") or {}
+        if self._panel_on and step.role == verification.get("role", "") and data.get("decision") == "review":
+            raise ProtocolError("verification steps are not reviewed")
+        enabled = bool((self._workflow or {}).get("adjudication")) and context.result is ResultKind.REVIEW
+        if "adjudications" in data and enabled and step.accept_when is not None:
+            results = adjudicate(plan, step, data["adjudications"])
+            context = replace(context, succeeded=state(plan, step, results) is State.SATISFIED)
+            return parse_decision(text, context, view, adjudications=True)
+        return parse_decision(text, context, view)
+
+    async def _dispatch_review(self, plan: TaskPlan, step: PlanStep, *, same_attempt: bool = False) -> None:
+        if not await self._within_budget(plan):
+            return
+        target = plan.step(step.reviews)
+        role = await self._role(step.role, step.role_version if same_attempt else None) if step.role else None
+        step.role_version = role.version if role else None
+        step.reviewer_id = f"reviewer-{uuid.uuid4().hex[:12]}"
+        step.worker_id = step.reviewer_id  # ordinary in-flight tracking and restart adoption
+        step.status = "dispatched"
+        step.started_at = step.started_at or datetime.now(timezone.utc)
+        await self._save(plan, step)
+        await self._activity("phase", f"Review {step.label} dispatched", worker=step.reviewer_id)
+        if step.role and role is None:
+            await self._review_done(plan, step, {"passed": False, "findings": [
+                {"severity": "blocking", "where": "", "text": f"Cannot read role {step.role}"}]})
+            return
+        context = {"work_dir": plan.work_dir}
+        if target.workspace is not None:
+            context = {"work_dir": target.workspace.work_dir, "workspace": target.workspace.context()}
+        await self._bus.publish(MessageEnvelope.create(
+            source=self.agent_address, target=worker_address(step.reviewer_id), message_type=MessageType.VERIFY_REQUEST,
+            payload={"task_id": step.step_id, "parent_task_id": self._task_id, "plan_id": plan.plan_id,
+                     "requirement": plan.requirement, "supplements": journal.supplement_texts(plan.journal),
+                     "step_key": target.label, "instruction": target.instruction,
+                     "work_result": target.result or {}, "acceptance_criteria": target.acceptance_criteria,
+                     **({"feedback": list(target.feedback)} if target.feedback else {}), "context": context,
+                     "severity": True, "head": (target.result or {}).get("head"),
+                     "worker_runtime_id": (target.result or {}).get("runtime_id"),
+                     **({"task_role": role.payload()} if role else {})},
+            correlation_id=plan.correlation_id, metadata={"origin_channel_id": plan.origin_channel_id}))
+
+    async def _review_done(self, plan: TaskPlan, seat: PlanStep, result: dict[str, Any]) -> None:
+        from .review_panel import blocking
+        self._adopted_runs.discard(seat.reviewer_id)
+        await self._record_profile_fallbacks(plan, seat.role or "reviewer", result.get("fallback") or [], seat)
+        seat.result, seat.status = result, "verified"
+        await self._save(plan, seat)
+        if blocked := result.get("prompt_blocked"):
+            raise TurnBlocked(**blocked)
+        target = plan.step(seat.reviews)
+        required = leaves(parse_condition(target.accept_when, "accept_when"))
+        if target.status == "verified" and not result.get("passed") and seat.step_id not in required:
+            await self._save(plan, entries=[JournalEntry(seat.step_id, seat.label, json.dumps(result),
+                                                       kind=JournalKind.LATE_REVIEW)])
+            if blocking(result):
+                view = self._checked(plan.view())
+                try:
+                    reply = await self._ask(TurnKind.CHAT, f"[CHAT] Late advisory review {seat.role or 'builtin'} "
+                        f"of accepted step {target.label}:\n" + "\n".join(self._review_report(target, result)),
+                        lambda text: parse_chat(text, view))
+                except PlannerTurnError as exc:
+                    await self._fail_plan(plan, reason=f"Cannot resolve late review: {exc}", model_closeout=False)
+                    return
+                await self._apply_chat(plan, reply, None, at=f"late review of {target.label}")
+        elif target.status == "completed":
+            await self._settle_reviews(plan, target)
+        if plan.status in _LIVE:
+            await self._settle_plan(plan)
+
+    async def _settle_reviews(self, plan: TaskPlan, target: PlanStep) -> None:
+        state = self._accept_state(plan, target)
+        required = leaves(parse_condition(target.accept_when, "accept_when"))
+        if state is State.PENDING or (state is State.UNSATISFIABLE and
+                                     any(plan.step(sid).status != "verified" for sid in required)):
+            return
+        target.result = {**(target.result or {}), "review_round": target.retries}
+        await self._save(plan, target, entries=[JournalEntry(target.step_id, target.label,
+            json.dumps({"round": target.retries, "reviews": {s.label: {"status": s.status, "result": s.result} for s in plan.steps
+                        if s.reviews == target.step_id}}), kind=JournalKind.REVIEW_ROUND)])
+        context = DecisionContext(target.label, ResultKind.REVIEW, state is State.SATISFIED, True,
+                                  target.retries, self._execution.step_retries)
+        await self._decide(plan, target, context, self._review_report(target, {}))
+
+    async def _reset_reviews(self, plan: TaskPlan, target: PlanStep, *, drop: bool = False) -> None:
+        seats = [s for s in plan.steps if s.reviews == target.step_id and s.status != "skipped"]
+        if any(s.status == "dispatched" for s in seats):
+            await self._save(plan, entries=[JournalEntry(target.step_id, target.label, json.dumps({
+                "round": target.retries, "stale": [s.label for s in seats if s.status == "dispatched"],
+                "reviews": {s.label: s.result for s in seats}}), kind=JournalKind.REVIEW_ROUND)])
+        for seat in seats:
+            if seat.status == "dispatched":
+                await self._kill_worker(seat, run_id=seat.reviewer_id)
+            seat.status = "skipped" if drop else "pending"
+            seat.result = None
+            seat.worker_id = seat.reviewer_id = None
+            seat.retries += int(not drop)
+        await self._save(plan, *seats)
+
     async def _handle_verify_result(self, envelope: MessageEnvelope) -> None:
         result = envelope.payload
         plan = self._plan
         if not plan or plan.status not in ("executing", "verifying"):
             return
         step = plan.step(result.get("task_id", ""))
+        if step is not None and step.reviews:
+            if step.status == "dispatched" and envelope.source.agent_id == step.reviewer_id:
+                await self._review_done(plan, step, result)
+            return
         if step is None or step.status != "completed" or envelope.source.agent_id != step.reviewer_id:
             logger.info("planner %s ignores a review that is not for a step in review", self.agent_id)
             return
@@ -2380,10 +2543,10 @@ class PlannerAgent:
         step.missed_messages.clear()
         try:
             reply = await self._ask(
-                TurnKind.DECISION, message, lambda text: parse_decision(text, context, self._checked(view)),
+                TurnKind.DECISION, message, lambda text: self._panel_decision(text, plan, step, context, self._checked(view)),
             )
         except PlannerTurnError as exc:
-            if self._execution.review_all and context.result is ResultKind.WORK and context.succeeded:
+            if ((self._execution.review_all and self._needs_review(step)) or step.accept_when is not None) and context.result is ResultKind.WORK and context.succeeded:
                 # The project reviews every step, so a Worker's own success never accepts one.
                 await self._activity(
                     "error",
@@ -2423,6 +2586,15 @@ class PlannerAgent:
     async def _decided(
         self, plan: TaskPlan, step: PlanStep, context: DecisionContext, reply: DecisionReply,
     ) -> None:
+        if reply.adjudications:
+            from .review_adjudication import adjudicate
+            changed = adjudicate(plan, step, reply.adjudications)
+            for seat_id, result in changed.items():
+                plan.step(seat_id).result = result
+            entries = [JournalEntry(step.step_id, step.label, json.dumps(item), kind=JournalKind.REVIEW_ADJUDICATED)
+                       for item in reply.adjudications]
+            await self._save(plan, *(plan.step(sid) for sid in changed), entries=entries)
+            context = replace(context, succeeded=self._accept_state(plan, step) is State.SATISFIED)
         decision = reply.decision
         note = f": {reply.reason}" if reply.reason else ""
         if decision is Decision.RETRY:
@@ -2448,6 +2620,8 @@ class PlannerAgent:
             retried = self._step_entry(
                 JournalKind.STEP_RETRY, step, f"attempt {step.retries + 1} {self._outcome(step)}. "
                                               f"Retry: {reply.feedback}")
+            if step.accept_when is not None:
+                await self._reset_reviews(plan, step)
             step.retries += 1
             step.feedback.append(reply.feedback)
             step.reviewer_id, step.review_stage, step.review_position = None, None, None
@@ -2470,6 +2644,24 @@ class PlannerAgent:
     async def _send_to_review(self, plan: TaskPlan, step: PlanStep) -> None:
         step.review = True
         step.status = "completed"
+        if self._panel_on and step.accept_when is None:
+            seats = self._expand_reviews(plan, [step])
+            await self._save(plan, step, *seats)
+        if step.accept_when is not None:
+            if step.isolated and step.workspace is not None:
+                try:
+                    step.workspace = await workspaces.freeze_review(step.workspace, step_key=step.label)
+                except workspaces.GitError as exc:
+                    await self._attempt_failed(plan, step, f"Cannot freeze review workspace: {exc}")
+                    return
+                await self._save_workspace(step.workspace)
+                step.result = {**(step.result or {}), "worker_head": (step.result or {}).get("head"),
+                               "head": step.workspace.result_commit}
+            await self._save(plan, step)
+            await update_task_phase(self._task_id, "verifying")
+            await self._settle_reviews(plan, step)
+            await self._dispatch_ready(plan)
+            return
         step.review_stage, step.review_position = ReviewStage.BUILTIN, None
         # A new review chain: the review roles' verdicts on this result from before (a restart) no longer stand.
         step.result = {k: v for k, v in (step.result or {}).items() if k != "role_reviews"} if step.result else None
@@ -2481,7 +2673,8 @@ class PlannerAgent:
     def _needs_review(self, step: PlanStep) -> bool:
         """Whether ``step`` needs a passing review before it is accepted: the Planner asked for one, or the
         project reviews every step."""
-        return step.review or self._execution.review_all
+        verification = (self._workflow or {}).get("verification") or {}
+        return (step.role != verification.get("role", "") and (step.review or self._execution.review_all))
 
     @staticmethod
     def _skip(step: PlanStep) -> None:
@@ -2496,7 +2689,7 @@ class PlannerAgent:
         """Replace every step that has not started with ``specs``; saved with the ``decided`` step and the
         decision's journal entry at once."""
         keep = {spec.id for spec in specs}
-        dropped = [s for s in plan.steps if s.status == "pending" and s.label not in keep]
+        dropped = [s for s in plan.steps if s.status == "pending" and not s.reviews and s.label not in keep]
         for step in dropped:
             self._skip(step)
             await self._drop_workspace(step)
@@ -2611,6 +2804,7 @@ class PlannerAgent:
                 continue
             if reply.action is ChatAction.NONE:
                 self._skip(blocked)
+                await self._drop_workspace(blocked)
             await self._save(plan, blocked, entries=[JournalEntry(
                 blocked.step_id, blocked.label, journal.clip(marker +
                     ("skipped. " if reply.action is ChatAction.NONE else "") + reply.reply, journal.SUMMARY_MAX_CHARS),
@@ -2732,7 +2926,7 @@ class PlannerAgent:
             if run_id in self._adopted_runs:
                 continue  # expiry of another run can resume this Planner again
             if self._adopter is not None and run_id:
-                role = AgentType.WORKER if status == "dispatched" else AgentType.REVIEWER
+                role = AgentType.WORKER if status == "dispatched" and not step.reviews else AgentType.REVIEWER
                 result = await self._adopter(run_id, RunHold(self._task_id, step.step_id, role))
                 if result.outcome is AdoptOutcome.END_PENDING:
                     self._ending_runs.add(run_id)
@@ -2762,11 +2956,17 @@ class PlannerAgent:
                     return
                 if step.status != status:
                     continue
+                if step.reviews:
+                    await self._dispatch_review(plan, step, same_attempt=True)
+                    continue
                 if status == "dispatched":
                     run_id = step.worker_id
                     await self._dispatch_step(plan, step, same_attempt=True)
                     redispatched += int(step.status == "dispatched" and step.worker_id != run_id)
                 elif status == "completed":
+                    if step.accept_when is not None:
+                        await self._settle_reviews(plan, step)
+                        continue
                     run_id = step.reviewer_id
                     await self._spawn_reviewer(plan, step, same_attempt=True)
                     redispatched += int(step.status == "completed" and step.reviewer_id != run_id)
@@ -2796,7 +2996,10 @@ class PlannerAgent:
     async def _decide_again(self, plan: TaskPlan, step: PlanStep) -> None:
         """Take the decision on ``step`` that a restart cut off, from the result saved with it."""
         result = step.result or {}
-        if role_reviews := _role_reviews(result):  # its review roles' verdicts, after the built-in Reviewer passed
+        if step.accept_when is not None and "review_round" in result:
+            passed, kind = self._accept_state(plan, step) is State.SATISFIED, ResultKind.REVIEW
+            report = self._review_report(step, {})
+        elif role_reviews := _role_reviews(result):  # its review roles' verdicts, after the built-in Reviewer passed
             passed = self._roles_acceptable(step)
             kind = ResultKind.REVIEW
             report = self._review_report(step, role_reviews[-1])
@@ -2855,6 +3058,8 @@ class PlannerAgent:
         again = [s for s in plan.steps
                  if s.gate is None and not (s.wait is not None and s.wait.state.open)
                  and s.status not in ("verified", "skipped") and (s.status != "pending" or s.started)]
+        for target in [s for s in again if s.accept_when is not None]:
+            await self._reset_reviews(plan, target)
         for step in again:
             step.status, step.worker_id, step.reviewer_id = "pending", None, None
             step.review_stage, step.review_position = None, None
@@ -3141,7 +3346,13 @@ class PlannerAgent:
 
     def _step_seats(self, step: PlanStep) -> list[str]:
         """The room seats of ``step``: its Worker's, its Reviewer's, its review roles'."""
+        if step.reviews and self._plan is not None:
+            target = self._plan.step(step.reviews)
+            return [seat_key(step.role or "reviewer", target.label)]
         seats = [seat_key(step.role or "worker", step.label)]
+        if step.accept_when is not None and self._plan is not None:
+            return seats + [seat_key(s.role or "reviewer", step.label) for s in self._plan.steps
+                            if s.reviews == step.step_id]
         if step.review or step.reviewer_id or step.review_roles:
             seats.append(seat_key("reviewer", step.label))
         seats += [seat_key(item.role, step.label) for item in step.review_roles]
@@ -3204,7 +3415,7 @@ class PlannerAgent:
             step.status = "skipped"
             await self._drop_workspace(step)
         keep = {spec.id for spec in reply.steps}
-        dropped = [s for s in plan.steps if s.status == "pending" and s.label not in keep]
+        dropped = [s for s in plan.steps if s.status == "pending" and not s.reviews and s.label not in keep]
         for step in dropped:
             self._skip(step)
             await self._drop_workspace(step)
@@ -3479,7 +3690,8 @@ class PlannerAgent:
     def _checked(self, view: PlanView) -> PlanView:
         """``view`` with the task's roles as last read and whether it may open gates, for checking a reply."""
         return replace(view, roles=self._roles, gate_policy=self._gate_policy, wait_policy=self._wait_policy(),
-                       conditions=self._execution.conditions_on, isolate_steps=self._execution.isolate_steps)
+                       conditions=self._execution.conditions_on, isolate_steps=self._execution.isolate_steps,
+                       review_panel=self._panel_on)
 
     def _wait_policy(self) -> WaitPolicy:
         """System limits, command permission, and this event's scheduled-run stop time."""
@@ -4072,7 +4284,8 @@ class PlannerAgent:
                                     gates=self._gate_policy is GatePolicy.ALLOWED
                                     or any(s.gate is not None and not s.gate.state.closed for s in plan.steps),
                                     room=self._room is not None, wait_commands=self._execution.wait_commands_on,
-                                    wait_limits=waits.limits(), conditions=self._execution.conditions_on)
+                                    wait_limits=waits.limits(), conditions=self._execution.conditions_on, review_panel=self._panel_on,
+                                    adjudication=self._panel_on and bool((self._workflow or {}).get("adjudication")))
             + ("\n" + self._ops.guide_for(roles=self._execution.roles_on, room=self._room is not None,
                                          vault=planner_guide(self._vault) if self._vault else "")
                if self._ops else ""),
@@ -4198,6 +4411,9 @@ class PlannerAgent:
     def _review_report(self, step: PlanStep, result: Mapping[str, Any]) -> list[str]:
         """The review the decision is about: the built-in Reviewer's ``result``, or, once it passed the step, each
         of its review roles' verdicts in the order they reviewed it (``result`` the last)."""
+        if step.accept_when is not None and self._plan is not None:
+            from .review_panel import report
+            return report(self._plan, step)
         role_reviews = _role_reviews(step.result or {}) if step.review_stage is ReviewStage.ROLE else []
         if not role_reviews:
             return self._verdict_lines(f"Review of step {step.label} by {step.reviewer_id}:", result)
@@ -4419,6 +4635,9 @@ class PlannerAgent:
                     parts.append(f"  - {step.instruction[:50]}: 完成")
             summary = "\n".join(parts)
 
+        judgments = [e for e in plan.journal if e.kind is JournalKind.REVIEW_ADJUDICATED]
+        if judgments:
+            summary += "\n\n## Review adjudications\n" + "\n".join(f"- {e.step}: {e.summary}" for e in judgments)
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
             target=TASK_ROUTER_ADDRESS,
@@ -4752,6 +4971,8 @@ class PlannerAgent:
                     step.workspace.state is StepWorkspaceState.MERGING:
                 merging.append(step)  # accepted: only its merge was cut off
             elif step.status in ("dispatched", "deciding"):
+                if step.accept_when is not None:
+                    await self._reset_reviews(plan, step)
                 step.status, step.started_at = "pending", None  # started again when dispatched again
                 again.append(step)
             elif step.status == "completed":
@@ -5071,6 +5292,7 @@ class PlannerAgent:
                 acceptance_criteria=list(sd.get("acceptance_criteria") or []),
                 depends_on=list(sd.get("depends_on") or []),
                 ready_when=sd.get("ready_when"),
+                accept_when=sd.get("accept_when"), reviews=sd.get("reviews"),
                 review=bool(sd.get("review")),
                 status=forced_status or sd.get("status") or "pending",
                 result=sd.get("result"),

@@ -98,6 +98,9 @@ class JournalKind(str, Enum):
     STEP_RETRY = "step_retry"
     DECISION = "decision"
     CONDITION_BLOCKED = "condition_blocked"
+    REVIEW_ROUND = "review_round"
+    LATE_REVIEW = "late_review"
+    REVIEW_ADJUDICATED = "review_adjudicated"
     SUPPLEMENT = "supplement"
     SESSION_SWITCH = "session_switch"
     HANDOFF = "handoff"
@@ -117,6 +120,9 @@ class JournalKind(str, Enum):
 
 # How a section heads each kind, in the order the Planner's section shows them: pitfalls first.
 _HEADINGS: dict[JournalKind, str] = {
+    JournalKind.REVIEW_ROUND: "Review rounds",
+    JournalKind.LATE_REVIEW: "Late reviews",
+    JournalKind.REVIEW_ADJUDICATED: "Review adjudications",
     JournalKind.STEP_FAILED: "Failed steps",
     JournalKind.STEP_RETRY: "Retried attempts",
     JournalKind.DECISION: "Planner decisions",
@@ -133,6 +139,7 @@ _DETAILED = frozenset({JournalKind.STEP_FAILED, JournalKind.STEP_RETRY, JournalK
 # in the resume brief.
 _PLANNER_KINDS = (JournalKind.STEP_FAILED, JournalKind.STEP_RETRY, JournalKind.DECISION, JournalKind.STEP_ACCEPTED,
                   JournalKind.SESSION_SWITCH)
+_REVIEW_KINDS = (JournalKind.REVIEW_ROUND, JournalKind.LATE_REVIEW, JournalKind.REVIEW_ADJUDICATED)
 _WORKER_KINDS = (JournalKind.STEP_ACCEPTED, JournalKind.STEP_FAILED, JournalKind.STEP_RETRY)
 _ENTRIES = ("entry", "entries")
 
@@ -334,9 +341,10 @@ def planner_section(entries: Sequence[JournalEntry]) -> list[str]:
     lines = supplements(
         entries, title="Supplements (what the user added to the task while it ran, oldest first; each stands "
                        "unless a later one changes it)")
+    kinds = _PLANNER_KINDS + tuple(kind for kind in _REVIEW_KINDS if any(e.kind is kind for e in entries))
     progress = _by_kind(
         "Progress and findings (the task journal, newest first under each heading)",
-        _newest_first_by_priority(entries, _PLANNER_KINDS), PLANNER_SECTION_MAX_CHARS, _PLANNER_KINDS,
+        _newest_first_by_priority(entries, kinds), PLANNER_SECTION_MAX_CHARS, kinds,
         _ENTRIES)
     if lines and progress:
         lines.append("")
@@ -373,7 +381,7 @@ def progress_notes(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 
 def lessons_journal(entries: Sequence[JournalEntry]) -> list[str]:
     """The journal a LESSONS turn distills: the supplements, then every other kind."""
-    kinds = tuple(_HEADINGS)
+    kinds = tuple(kind for kind in _HEADINGS if kind not in _REVIEW_KINDS or any(e.kind is kind for e in entries))
     lines = supplements(entries, title="Supplements (what the user added to the task while it ran, oldest first)")
     journal = _by_kind("Task journal (newest first under each heading)", _newest_first_by_priority(entries, kinds),
                        LESSONS_JOURNAL_MAX_CHARS, kinds, _ENTRIES)

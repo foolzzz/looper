@@ -38,6 +38,7 @@ import contextlib
 import json
 import logging
 import shutil
+import subprocess
 import time
 import uuid
 from collections import Counter
@@ -79,12 +80,12 @@ from ..message import (
 from . import journal
 from ..drain import DrainState
 from ..system_prompt import (
-    REVIEW_CONTRACT,
     WORK_CONTRACT,
     build_role_prompt,
     build_system_prompt,
     is_recommended,
     review_task_section,
+    review_contract,
     work_task_section,
 )
 
@@ -228,7 +229,7 @@ def run_outcome(result_event: dict[str, Any] | None, judged: dict[str, Any], *, 
         verdict = extract_report(text, "passed")
         if verdict is None or not isinstance(verdict.get("passed"), bool):
             return RunOutcome.CONTRACT
-        return RunOutcome.PASSED if verdict["passed"] else RunOutcome.NOT_PASSED
+        return RunOutcome.PASSED if judged.get("passed") else RunOutcome.NOT_PASSED
     report = extract_report(text, "status")
     if report is None or report.get("status") not in ("completed", "failed") \
             or not isinstance(report.get("changed_files", {}), dict) or not isinstance(report.get("deleted_files", []),
@@ -247,6 +248,32 @@ def _verify_failed(finding: str) -> dict[str, Any]:
     return {"passed": False, "findings": [finding], "summary": finding}
 
 
+def _severity_verdict(verdict: dict[str, Any]) -> dict[str, Any]:
+    if "passed" not in verdict:
+        verdict = {**verdict, **_verify_failed(str(verdict.get("error") or "Reviewer run failed"))}
+    findings = verdict.get("findings") or []
+    if not isinstance(findings, list):
+        findings = [findings]
+    verdict["findings"] = [
+        {"severity": item.get("severity") if item.get("severity") in ("blocking", "suggestion") else "blocking",
+         "where": str(item.get("where") or "unknown"), "text": str(item.get("text") or "")}
+        if isinstance(item, dict) else {"severity": "blocking", "where": "unknown", "text": str(item)}
+        for item in findings
+    ]
+    if verdict.get("passed") and any(item["severity"] == "blocking" for item in verdict["findings"]):
+        verdict["passed"], verdict["inconsistent"] = False, True
+    return verdict
+
+
+def _git_head(work_dir: str | Path) -> str | None:
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=work_dir,
+                                capture_output=True, text=True, timeout=10)
+        return result.stdout.strip() if result.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def judge_result(
     result_event: dict[str, Any] | None,
     *,
@@ -255,6 +282,7 @@ def judge_result(
     started_at: datetime | None = None,
     runtime_label: str = "Claude Code",
     failure_detail: str | None = None,
+    severity: bool = False,
 ) -> dict[str, Any]:
     """Decide a step's outcome from Claude's stream-json ``result`` event.
 
@@ -264,7 +292,8 @@ def judge_result(
     since ``started_at``, the run's start (``reported_files``). It may run git,
     so the pool calls it off the event loop.
     """
-    failed = _verify_failed if is_verify else _work_failed
+    failed = (lambda text: _severity_verdict(_verify_failed(text))) if is_verify and severity else (
+        _verify_failed if is_verify else _work_failed)
     if result_event is None:
         return failed(f"{runtime_label} run did not succeed: {failure_detail}"[:500] if failure_detail else
                       f"{runtime_label} ended without a result event")
@@ -276,14 +305,15 @@ def judge_result(
     if is_verify:
         verdict = extract_report(text, "passed")
         if verdict is None or not isinstance(verdict.get("passed"), bool):
-            return _verify_failed("Reviewer did not end with the JSON verdict")
+            return failed("Reviewer did not end with the JSON verdict")
         findings = verdict.get("findings", [])
-        return {
+        outcome = {
             "passed": verdict["passed"],
-            "findings": findings if isinstance(findings, list) else [str(findings)],
+            "findings": findings if isinstance(findings, list) or severity else [str(findings)],
             "summary": str(verdict.get("summary") or ""),
             "learnings": journal.reported_learnings(verdict.get("learnings")),
         }
+        return _severity_verdict(outcome) if severity else outcome
 
     report = extract_report(text, "status")
     if report is None:
@@ -458,6 +488,8 @@ class RunContext:
     system_prompt: SystemPrompt | None = None
     model_events: int = 0
     fallback_reason: str | None = None
+    severity: bool = False
+    head: str | None = None
 
 
 @dataclass(frozen=True)
@@ -776,7 +808,8 @@ class WorkerPool:
             if seat is None and self.room_ops is not None and manifest.get("room_seat"):
                 seat = run_seat(manifest, is_verify=is_verify, run=run_id)
             ctx = RunContext(run_id, task_id, step_id, work_dir, "", is_verify, launch, launch.runtime, seat,
-                             run_timeout, started_at, False, command)
+                             run_timeout, started_at, False, command,
+                             severity=manifest.get("severity") is True, head=manifest.get("head"))
             wp = WorkerProcess(worker_id=run_id, task_id=step_id, plan_id=manifest.get("plan_id") or "",
                                role=agent, parent_task_id=task_id, step=manifest.get("step_key") or "",
                                instruction=manifest.get("instruction") or "", task_role=run_role(manifest.get("task_role")),
@@ -867,7 +900,7 @@ class WorkerPool:
             async with self._record_run(wp.worker_id, recorder):
                 return await self._consume(ctx, handle, recorder, start=ConsumeStart.ADOPTED)
 
-        await self._finish_run(wp, ctx.seat, reply, run, fallbacks=fallbacks)
+        await self._finish_run(wp, ctx.seat, reply, run, fallbacks=fallbacks, severity=ctx.severity)
 
     async def _listen_loop(self) -> None:
         """Listen for work items addressed to any worker-* queue.
@@ -1205,7 +1238,8 @@ class WorkerPool:
 
         reply = RunReply(envelope.source, envelope.correlation_id, envelope.metadata)
         await self._finish_run(wp, seat, reply,
-                               lambda: self._execute(envelope, is_verify=is_verify, started_at=wp.since))
+                               lambda: self._execute(envelope, is_verify=is_verify, started_at=wp.since),
+                               severity=payload.get("severity") is True)
 
     async def _end_room_run(self, worker_id: str, task_id: str | None = None, seat: Seat | None = None) -> None:
         if self.room_ops is None:
@@ -1223,7 +1257,8 @@ class WorkerPool:
                 logger.exception("worker %s could not announce it left task %s's room", worker_id, task_id)
 
     async def _finish_run(self, wp: WorkerProcess, seat: Any, reply: RunReply,
-                          run: Callable[[], Awaitable[dict]], *, fallbacks: list[dict[str, str]] | None = None) -> None:
+                          run: Callable[[], Awaitable[dict]], *, fallbacks: list[dict[str, str]] | None = None,
+                          severity: bool = False) -> None:
         assert self._bus is not None
         worker_id, task_id, plan_id = wp.worker_id, wp.task_id, wp.plan_id
         parent_task_id, is_verify = wp.parent_task_id, wp.role is AgentType.REVIEWER
@@ -1260,6 +1295,8 @@ class WorkerPool:
             if fallbacks:
                 wp.result = {**(wp.result or {}), "fallback": fallbacks}
 
+            if is_verify and severity:
+                wp.result = _severity_verdict(wp.result or {})
             result_type = MessageType.VERIFY_RESULT if is_verify else MessageType.WORK_RESULT
             await self._bus.publish(MessageEnvelope.create(
                 source=worker_address(worker_id),
@@ -1364,6 +1401,8 @@ class WorkerPool:
                 return {"passed": False, "findings": [agent_settings.profile_error],
                         "summary": agent_settings.profile_error}
             return {"status": "failed", "error": agent_settings.profile_error}
+        if is_verify and payload.get("worker_runtime_id") == agent_settings.profile.runtime.id:
+            return {**_severity_verdict(_verify_failed("same_runtime_as_worker")), "refused": "same_runtime"}
         profile_runtime = ADAPTERS.get(agent_settings.profile.runtime.type)
         hosted = profile_runtime is not None and profile_runtime.hosts_runs
         launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
@@ -1415,7 +1454,7 @@ class WorkerPool:
                 step_id=payload.get("task_id") or None,
                 task=self._task_section(payload, work_dir, is_verify=is_verify),
                 contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
-                contract=REVIEW_CONTRACT if is_verify else WORK_CONTRACT,
+                contract=review_contract(payload.get("severity") is True) if is_verify else WORK_CONTRACT,
                 knowledge=knowledge,
                 room=room_text,
                 vault=vault_text,
@@ -1432,7 +1471,7 @@ class WorkerPool:
                 step_id=payload.get("task_id") or None,
                 task=self._task_section(payload, work_dir, is_verify=is_verify),
                 contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
-                contract=REVIEW_CONTRACT if is_verify else WORK_CONTRACT,
+                contract=review_contract(payload.get("severity") is True) if is_verify else WORK_CONTRACT,
                 knowledge=knowledge,
                 room=room_text,
                 vault=vault_text,
@@ -1496,6 +1535,7 @@ class WorkerPool:
                         "plan_id": payload.get("plan_id"), "step_key": payload.get("step_key"),
                         "instruction": payload.get("instruction"), "task_role": payload.get("task_role"),
                         "is_verify": is_verify, "started_at": started_at.isoformat(),
+                        "severity": payload.get("severity") is True, "head": payload.get("head"),
                         "timeout_s": run_timeout, "max_turns": max_turns, "room_seat": seat is not None,
                         "reply": {"target": {"agent_type": envelope.source.agent_type,
                                              "agent_id": envelope.source.agent_id},
@@ -1541,7 +1581,7 @@ class WorkerPool:
 
         return RunContext(worker_id, parent_task_id, payload.get("task_id") or None, work_dir, prompt,
                           is_verify, launch, runtime, seat, run_timeout, started_at, hosted, command,
-                          handle, system_prompt)
+                          handle, system_prompt, severity=payload.get("severity") is True, head=payload.get("head"))
 
     async def _execute(self, envelope: MessageEnvelope, *, is_verify: bool = False,
                        started_at: datetime | None = None) -> dict[str, Any]:
@@ -1584,6 +1624,10 @@ class WorkerPool:
                 missed_input.extend(ctx.handle.dropped_input())
             self._reminders.pop(ctx.worker_id, None)
             await self._end_room_run(ctx.worker_id)
+        if not is_verify and isinstance(ctx, RunContext) and "runtime_id" not in result:
+            result.update(head=await asyncio.to_thread(_git_head, ctx.work_dir), runtime_id=ctx.launch.profile.runtime.id)
+        elif is_verify and envelope.payload.get("severity") is True:
+            result = _severity_verdict(result)
         if missed_input:
             result = {**result, "missed_input": missed_input + result.get("missed_input", [])}
         return {**result, "fallback": fallbacks} if fallbacks else result
@@ -1963,7 +2007,14 @@ class WorkerPool:
             )
 
         outcome = await asyncio.to_thread(judge_result, result_event, work_dir=Path(work_dir), is_verify=is_verify,
-                                          started_at=started_at, runtime_label=runtime.label, failure_detail=detail)
+                                          started_at=started_at, runtime_label=runtime.label, failure_detail=detail,
+                                          severity=ctx.severity)
+        if not is_verify:
+            outcome.update(head=await asyncio.to_thread(_git_head, work_dir), runtime_id=launch.profile.runtime.id)
+        elif ctx.head is not None and await asyncio.to_thread(_git_head, work_dir) != ctx.head:
+            outcome = {**outcome, "passed": False, "failure": "head_moved",
+                       "findings": [*outcome.get("findings", []),
+                                    {"severity": "blocking", "where": "HEAD", "text": "head_moved"}]}
         if (elsewhere := reported_files.locations(outcome.get("found_elsewhere"))) and parent_task_id:
             places = []
             for item in elsewhere:

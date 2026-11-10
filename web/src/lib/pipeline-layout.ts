@@ -51,49 +51,66 @@ export interface ConditionNode extends LayoutItem {
   condition: Condition;
   label: string;
   inputs: Dependency[];
+  acceptance?: boolean;
 }
 
 /** Post-order junctions: path 0 is the root, 0.1 its second child group. */
 export function conditionNodes(steps: TaskStep[]): ConditionNode[] {
   const nodes: ConditionNode[] = [];
   for (const step of steps) {
-    if (step.ready_when == null || isPlainAllOf(step.ready_when)) continue;
-    const visit = (condition: Condition, path: string): string => {
-      const id = `${step.id}:c${path}`;
-      const children = typeof condition === "string" || "step" in condition ? [condition]
-        : "all_of" in condition ? condition.all_of : "any_of" in condition ? condition.any_of : condition.of;
-      const label = typeof condition === "string" || "step" in condition || "all_of" in condition ? "全部"
-        : "any_of" in condition ? "任一" : `${condition.k_of}/${children.length}`;
-      const inputs = children.map((child, index): Dependency => {
-        if (typeof child === "string") return { source: child, target: id };
-        if ("step" in child) return { source: child.step, target: id, on: child.on };
-        return { source: visit(child, `${path}.${index}`), target: id };
-      });
-      nodes.push({ id, stepId: step.id, condition, label, inputs,
-        depends_on: inputs.map((input) => input.source), step_index: step.step_index, status: step.status });
-      return id;
-    };
-    visit(step.ready_when, "0");
+    for (const [condition, prefix, acceptance] of [
+      [step.kind === "review" ? null : step.ready_when, "c", false], [step.accept_when, "a", true],
+    ] as const) {
+      if (condition == null || !acceptance && isPlainAllOf(condition)) continue;
+      const visit = (condition: Condition, path: string): string => {
+        const id = `${step.id}:${prefix}${path}`;
+        const children = typeof condition === "string" || "step" in condition ? [condition]
+          : "all_of" in condition ? condition.all_of : "any_of" in condition ? condition.any_of : condition.of;
+        const label = typeof condition === "string" || "step" in condition || "all_of" in condition ? "全部"
+          : "any_of" in condition ? "任一" : `${condition.k_of}/${children.length}`;
+        const inputs = children.map((child, index): Dependency => {
+          if (typeof child === "string") return { source: child, target: id };
+          if ("step" in child) return { source: child.step, target: id, on: child.on };
+          return { source: visit(child, `${path}.${index}`), target: id };
+        });
+        nodes.push({ id, stepId: step.id, condition, label: acceptance && path === "0"
+          ? label === "全部" ? "必选全部通过" : `${label} 通过` : label, inputs, acceptance,
+          depends_on: inputs.map((input) => input.source), step_index: step.step_index, status: step.status });
+        return id;
+      };
+      visit(condition, "0");
+    }
   }
   return nodes;
 }
 
 function layoutItems(steps: TaskStep[]): LayoutItem[] {
   const nodes = conditionNodes(steps);
-  const roots = new Map(nodes.map((node) => [node.stepId, node.id]));
-  return [...steps.map((step) => roots.has(step.id) ? { ...step, depends_on: [roots.get(step.id)!] } : step), ...nodes];
+  const roots = new Map(nodes.filter((node) => !node.acceptance).map((node) => [node.stepId, node.id]));
+  const acceptance = new Map(nodes.filter((node) => node.id.endsWith(":a0")).map((node) => [node.stepId, node.id]));
+  const source = (id: string) => acceptance.get(id) ?? id;
+  return [...steps.map((step) => ({ ...step, depends_on: roots.has(step.id) ? [roots.get(step.id)!]
+    : step.depends_on.map((id) => step.reviews === id ? id : source(id)) })),
+    ...nodes.map((node) => ({ ...node, depends_on: node.depends_on.map(source),
+      inputs: node.inputs.map((input) => ({ ...input, source: source(input.source) })) }))];
 }
 
 /** The same edges drive layering and drawing, omitting only dependencies hidden by the viewer. */
 export function dependencyEdges(steps: TaskStep[]): Dependency[] {
   const items = layoutItems(steps);
   const ids = new Set(items.map((item) => item.id));
-  return items.flatMap((item) => {
+  const edges: Dependency[] = items.flatMap((item) => {
     const inputs: Dependency[] = "inputs" in item ? (item as ConditionNode).inputs
-      : item.depends_on.map((source) => ({ source, target: item.id }));
+      : item.depends_on.map((source) => ({ source, target: item.id,
+        ...("kind" in item && item.kind === "review" ? { on: "completed" as const } : {}) }));
     const shown = inputs.filter((input) => ids.has(input.source));
     return shown.length ? shown : [{ source: "planner", target: item.id }];
   });
+  for (const step of steps.filter((step) => step.kind === "review" && step.reviews)) {
+    const target = `${step.reviews}:a0`;
+    if (ids.has(target) && !edges.some((edge) => edge.source === step.id)) edges.push({ source: step.id, target });
+  }
+  return edges;
 }
 
 /** Mirror the API's outcome rules for nested groups (the API reports only the root state). */
@@ -112,6 +129,8 @@ export function conditionState(condition: Condition, steps: TaskStep[], gates: U
       if (wait.state !== "done") return "pending";
       return on === "passed" && wait.outcome !== "ready" && wait.outcome !== "resumed" ? "unsatisfiable" : "satisfied";
     }
+    if (step.kind === "review" && step.status === "verified") return on === "passed"
+      && !step.result?.passed && step.result?.status !== "passed_by_adjudication" ? "unsatisfiable" : "satisfied";
     if (step.status === "verified") return "satisfied";
     return on === "completed" && (step.status === "completed" || step.status === "deciding" && step.result?.status === "completed")
       ? "satisfied" : "pending";

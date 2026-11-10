@@ -48,6 +48,7 @@ class EvalTask:
     # role templates (each its key and fields, as the dashboard writes one) for it to copy.
     roles_on: bool = False
     schedule_template: dict[str, Any] | None = None
+    workflow: dict[str, Any] | None = None
     role_templates: tuple[dict[str, Any], ...] = ()
     # The task's project lets its Planner open user gates (user_gates on); what the user answers in them, in turn
     # (END_DISCUSSION ends the discussion), and how long a gate waits before each answer.
@@ -1633,6 +1634,68 @@ TASKS += (
                              depends_on=["s1"])],
               "attempts": {"s1": [{"status": "completed", "files": {"numbers.txt": "1\n2\n3\n4\n5\n"}}],
                            "s2": [{"status": "completed", "files": {"sum.txt": "15\n"}}]}},
+    ),
+)
+
+
+def _panel_flow(detail, records, _events, *, adjudication=False):
+    work = [step for step in detail.get("steps", []) if step.get("kind", "work") == "work"]
+    if len(work) != 1 or not work[0].get("accept_when"):
+        return "expected one work step with the workflow's acceptance condition"
+    seats = [step for step in detail["steps"] if step.get("reviews") == work[0]["id"]]
+    if {step.get("role_key") for step in seats} != {"review_a", "review_b"}:
+        return "the workflow's two review steps did not run"
+    replies = [extract_report(str(record.get("output_text") or ""), "decision") for record in records
+               if role(record) == "planner"]
+    if adjudication:
+        for reply in filter(None, replies):
+            proposals = reply.get("adjudications") or []
+            if reply.get("decision") == "retry" and str(reply.get("feedback") or "").strip():
+                return None
+            if proposals and all(str(item.get("reason") or "").strip() for item in proposals):
+                return None
+        return "the false blocking was accepted without a reasoned adjudication or retry"
+    if not any(reply and reply.get("decision") == "retry" and
+               all(path in str(reply.get("feedback")) for path in ("left.txt", "right.txt")) for reply in replies):
+        return "retry feedback did not cover both blocking locations"
+    return None
+
+
+def _panel_workflow(adjudication=False):
+    return {"roles": [{"key": "dev", "kind": "work", "role_prompt": "Write the requested files."},
+                      *[{"key": member, "kind": "review", "role_prompt": f"Review panel member {member}."}
+                        for member in ("review_a", "review_b")]],
+            "work_role": "dev", "review_all": True, "adjudication": adjudication,
+            "review_panel": {"members": ["review_a", "review_b"],
+                             "accept_when": {"all_of": ["review_a", "review_b"]}},
+            "planner_instructions": "Use exactly one work step labelled s1. The workflow supplies its reviewers."}
+
+
+TASKS += (
+    EvalTask(
+        id="panel_merge", requirement="Write left.txt containing left and right.txt containing right, then deliver both.",
+        workflow=_panel_workflow(), check=_all(_equals("left.txt", "left"), _equals("right.txt", "right")),
+        flow_check=_panel_flow, expect={"min_retries": 1, "min_reviews": 4, "max_contract_violations": 0},
+        fake={"real_planner": True,
+              "plan": [_step("s1", "Write left.txt and right.txt.", ["Both files contain the requested words"], review=True)],
+              "attempts": {"s1": [{"files": {"left.txt": "wrong", "right.txt": "wrong"}},
+                                   {"files": {"left.txt": "left", "right.txt": "right"}}]},
+              "retry_feedback": {"s1": ["Fix left.txt and right.txt to contain left and right respectively."]},
+              "panel_findings": {"review_a": [[{"severity": "blocking", "where": "left.txt:1", "text": "Expected left."}], []],
+                                 "review_b": [[{"severity": "blocking", "where": "right.txt:1", "text": "Expected right."}], []]}},
+    ),
+    EvalTask(
+        id="panel_adjudicate", requirement="Write sum.txt containing 4, the sum of 2 and 2. Deliver the file.",
+        workflow=_panel_workflow(adjudication=True), check=_equals("sum.txt", "4"),
+        flow_check=lambda detail, records, events: _panel_flow(detail, records, events, adjudication=True),
+        expect={"min_reviews": 2, "max_contract_violations": 0},
+        fake={"real_planner": True,
+              "plan": [_step("s1", "Write sum.txt containing 4.", ["sum.txt contains 4"], review=True)],
+              "attempts": {"s1": [{"files": {"sum.txt": "4"}}]},
+              "panel_findings": {"review_a": [[{"severity": "blocking", "where": "sum.txt:1",
+                                                  "text": "2 + 2 equals 5, so replace 4 with 5."}], []], "review_b": [[]]},
+              "panel_adjudications": [{"member": "review_a", "finding": 0, "level": "suggestion",
+                                        "reason": "2 + 2 equals 4; the file already satisfies the requirement."}]},
     ),
 )
 

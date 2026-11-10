@@ -3914,8 +3914,34 @@ on current project execution settings; escalation enables user gates. A
 work step without a role uses `work_role` when set. Only the Planner receives
 the workflow instructions, in its Task section alongside the rules already
 enforced. Tasks without a workflow retain their prompt and execution paths.
-Review panels and verification rules are validated and stored here; their
-execution, workflow settings UI and configuration transfer are separate work.
+A review panel expands each reviewed work step into parallel `review` steps,
+excluding the workflow's verification role. Each seat's `reviews` points to the
+work step; its start condition waits for that work to complete. The work step's
+`accept_when` remaps the panel's member condition to review step ids testing
+`passed`, evaluated by the same dependency-condition evaluator. The Planner
+cannot supply review steps, `accept_when` or `review_roles` for such tasks.
+A satisfied condition triggers a review decision immediately; an impossible one
+waits until every referenced seat has returned. Other seats keep running and
+hold task completion. An advisory blocking finding arriving after acceptance
+is journaled and sent to the Planner in a chat-shaped turn.
+
+Panel findings carry `severity`, `where` and `text`; blocking findings override a
+reported pass. Reports group blocking findings by location and identify their
+source seat. When adjudication is enabled, a review decision may downgrade a
+current blocking finding with a nonempty reason (at most 500 characters); each
+change is journaled, and acceptance still requires a satisfied condition.
+Workers report their runtime id and Git HEAD; a panel reviewer refuses the same
+runtime id and fails if HEAD changes during its run. Review requests use the
+work step's isolated workspace when present. Before its panel starts, an isolated
+step snapshots uncommitted output so accepting it does not move a still-running
+reviewer's HEAD; its original reported commit remains as `worker_head`.
+Retries stop stale reviews and
+reset the same seats; dropping work cascades to its reviews. Unfinished reviews
+resume through normal dispatch after a restart. Review seats do not add to the
+work progress count, and their room seats use `<member>@<work-step-key>`.
+Tasks without a review panel keep the built-in Reviewer and sequential role
+review path. Verification execution, workflow settings UI and configuration
+transfer remain separate work.
 
 ### A task's Planner's tools
 

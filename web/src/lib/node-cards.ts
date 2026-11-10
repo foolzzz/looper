@@ -138,7 +138,7 @@ const str = (value: unknown) => (typeof value === "string" ? value : "");
 function stepRoleLines(step: TaskStep) {
   const version = (v: number | null) => (v != null ? ` v${v}` : "");
   return [
-    step.role_key && `${step.role_key} · work${version(step.role_version)}`,
+    step.role_key && `${step.role_key} · ${step.kind === "review" ? "review" : "work"}${version(step.role_version)}`,
     ...(step.review_roles ?? []).map(
       (item) => `${item.role} · review${version(item.version)}${item.required ? "" : " (advisory)"}`,
     ),

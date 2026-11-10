@@ -124,6 +124,21 @@ after it:
   later task of this project as {"text": "...", "scope": "project"}."""
 
 
+def review_contract(severity: bool = False) -> str:
+    """The panel's structured verdict; the original contract for ordinary reviews."""
+    if not severity:
+        return REVIEW_CONTRACT
+    return REVIEW_CONTRACT.replace(
+        '"findings": ["..."]',
+        '"findings": [{"severity": "blocking", "where": "path:line", "text": "..."}]',
+    ).replace(
+        '- findings: each problem you found, one per item; [] when there is none.',
+        '- findings: each problem as an object with severity (blocking or suggestion), where '
+        '(path:line), and text; [] when there is none.\n'
+        '- passed is true only when no finding is blocking.',
+    )
+
+
 # The longest task requirement. Where a requirement comes in (a task created or
 # edited, a schedule, the Manager's tools) a longer one is refused
 # (``projects.check_requirement``); clipping it in a task section is only a

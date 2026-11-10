@@ -574,6 +574,16 @@ def _files_detail(files: Sequence[str], limit: int = 20) -> str:
     return shown + (f" (+{len(files) - limit} more)" if len(files) > limit else "")
 
 
+async def freeze_review(workspace: StepWorkspace, *, step_key: str) -> StepWorkspace:
+    """Commit pending output before reviews start, retaining the active workspace and its reviewed HEAD."""
+    still = tuple(p for p in workspace.links if (Path(workspace.work_dir) / p).is_symlink())
+    try:
+        frozen, _ = await _close_step_branch(workspace, step_key, still)
+    except _Unmerged as exc:
+        raise GitError(str(exc)) from None
+    return frozen
+
+
 async def merge(workspace: StepWorkspace, *, step_key: str, title: str,
                 save: Callable[[StepWorkspace], Awaitable[None]]) -> MergeResult:
     """Merge an accepted step's branch into the task directory's branch, with a merge commit of its own.

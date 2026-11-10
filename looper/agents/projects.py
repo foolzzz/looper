@@ -793,7 +793,7 @@ async def task_readiness(task: dict[str, Any], *, compact: bool = False) -> list
     task_id = task["id"]
     waits = await waits_view(task_id, compact=compact)
     steps = task.get("steps", [])
-    if any(step.get("ready_when") is not None for step in steps):
+    if any(step.get("ready_when") is not None or step.get("accept_when") is not None for step in steps):
         from ..db import user_gates as db_user_gates
         from types import SimpleNamespace
         from .tiers.conditions import StepOutcome, evaluate, parse
@@ -803,11 +803,16 @@ async def task_readiness(task: dict[str, Any], *, compact: bool = False) -> list
         outcomes = {step["id"]: StepOutcome.from_step(SimpleNamespace(
             **step, gate=gates_by_id.get(step["id"]), wait=waits_by_id.get(step["id"]))) for step in steps}
         for step in steps:
+            step["accept_state"] = (evaluate(parse(step["accept_when"], "accept_when"), outcomes.__getitem__).value
+                                    if step.get("accept_when") is not None else None)
             step["ready_state"] = (evaluate(parse(step["ready_when"], "ready_when"), outcomes.__getitem__).value
                                    if step["status"] == "pending" and step.get("ready_when") is not None else None)
     done = {step.get("id") for step in steps if step.get("status") == "verified"}
     for step in steps:
         step.setdefault("ready_when", None)
+        step.setdefault("accept_when", None)
+        step.setdefault("accept_state", None)
+        step.setdefault("reviews", None)
         if step.get("ready_when") is None:
             step["ready_state"] = (("satisfied" if all(dep in done for dep in step.get("depends_on", [])) else "pending")
                                    if step.get("status") == "pending" else None)
@@ -952,10 +957,15 @@ def step_condition_view(step: Mapping[str, Any], labels: Mapping[str, str]) -> d
     """The Manager's condition fields, absent on steps without a condition."""
     from .tiers.conditions import parse, render, to_json
 
-    if step.get("ready_when") is None:
-        return {}
-    return {"ready_when_text": render(parse(to_json(parse(step["ready_when"], "ready_when"), labels), "ready_when")),
-            "ready_state": step.get("ready_state")}
+    fields = {}
+    for name in ("ready", "accept"):
+        if step.get(f"{name}_when") is not None:
+            fields[f"{name}_when_text"] = render(parse(to_json(
+                parse(step[f"{name}_when"], f"{name}_when"), labels), f"{name}_when"))
+            fields[f"{name}_state"] = step.get(f"{name}_state")
+    if step.get("reviews") is not None:
+        fields["reviews"] = labels.get(step["reviews"], step["reviews"])
+    return fields
 
 
 async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | None, agents: dict[str, Any],

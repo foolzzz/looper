@@ -218,8 +218,8 @@ def install_claude(bin_dir: Path, *, mode: str, scenarios: Path | None = None,
                    max_budget_usd: float | None = None, real_claude: str | None = None,
                    real_reviewer: bool = False) -> Path:
     """Put the ``claude`` the server runs in ``bin_dir``: the stand-in, or real Claude Code with a budget. With
-    ``real_reviewer`` (real mode, a task whose script plays its Planner and Workers), the stand-in hands every run
-    but those to real Claude Code (``fake_claude.REAL_CLAUDE_ENV``)."""
+    ``real_reviewer`` installs the role-selective stand-in in real mode. Each task script chooses
+    real Reviewers or a real Planner (``fake_claude.REAL_CLAUDE_ENV``); other tasks remain fully real."""
     bin_dir.mkdir(parents=True, exist_ok=True)
     prefix = ""
     if mode == "fake":
@@ -505,6 +505,7 @@ def run_task(
     notes_root: Path | None = None,
     vault_dir: Path | None = None,
     fake: bool = False,
+    review_profile_id: str | None = None,
 ) -> dict[str, Any]:
     """Create and start ``task`` in ``work_dir``, wait until it ends, and read back what it shows.
 
@@ -542,7 +543,14 @@ def run_task(
         project["vault"] = "on"
     before = snapshot(work_dir)
     started = time.monotonic()
-    created = api.post("/api/v1/tasks/create", {"requirement": task.requirement, "project": project})["result"]
+    selection = {}
+    if task.workflow:
+        definition = {**task.workflow, "key": "eval-" + task.id.replace("_", "-"), "name": task.id}
+        definition["roles"] = [{**item, **({"profile_id": review_profile_id} if item["kind"] == "review" else {})}
+                               for item in definition["roles"]]
+        api.post("/api/v1/workflows/put", definition)
+        selection["workflow"] = definition["key"]
+    created = api.post("/api/v1/tasks/create", {"requirement": task.requirement, "project": project, **selection})["result"]
     task_id = created["task_id"]
     try:
         if task.planner_may_choose:
@@ -773,7 +781,7 @@ TASK_SETS: dict[str, tuple[str, ...]] = {
                 "gate_not_needed", "gate_parallel_branch", "gate_discoverable", "room_interface", "room_consult",
                 "wait_pr_rereview", "wait_not_needed",
                 "planner_plan_file", "operator_notes", "operator_notes_stale",
-                "vault_closeout_keeps", "vault_closeout_nothing"),
+                "vault_closeout_keeps", "vault_closeout_nothing", "panel_merge", "panel_adjudicate"),
 }
 
 
@@ -1016,7 +1024,8 @@ def run(
                                          for (task_id, _), path in work_dirs.items()}), encoding="utf-8")
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
                        max_budget_usd=None if provider is not None or register is not None else max_budget_usd,
-                       real_claude=real_claude, real_reviewer=any(task.real_reviewer for task in tasks))
+                       real_claude=real_claude, real_reviewer=any(task.real_reviewer or task.fake.get("real_planner")
+                                                                 for task in tasks))
         (root / "runtime").mkdir(mode=0o700)
         home = root / "home" if mode == "fake" else None
         if home is not None:
@@ -1045,6 +1054,22 @@ def run(
             if register is not None:
                 api.post("/api/v1/agent_settings/update_system", {"values": {
                     "profile_id": chosen["profile_id"], "run_budget_usd": max_budget_usd}})["result"]
+            review_profile_id = None
+            if any(task.workflow for task in tasks):
+                # The scripted fixture needs a distinct identity; it does not test runtime independence.
+                async def panel_runtime():
+                    import asyncpg
+                    conn = await asyncpg.connect(database_url, timeout=10, command_timeout=30)
+                    try:
+                        await conn.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
+                            "SELECT 'rt-eval-review', 'Eval scripted review', type, executable, capabilities "
+                            "FROM agent_runtimes WHERE id = $1", chosen["runtime_id"])
+                    finally:
+                        await conn.close()
+                asyncio.run(panel_runtime())
+                review_profile_id = api.post("/api/v1/profiles/create", {
+                    "name": "eval/scripted-review", "runtime_id": "rt-eval-review",
+                    **{key: chosen[key] for key in ("model_id", "effort")}})["result"]["profile"]["profile_id"]
             chosen_profile_id = None
             if any(task.planner_may_choose for task in tasks):
                 chosen_profile_id = api.post("/api/v1/profiles/create", {
@@ -1056,6 +1081,7 @@ def run(
                                                      cap_left=cap_left, clock_offset=clock_offset,
                                                      step_workspaces=step_workspaces,
                                                      chosen_profile_id=chosen_profile_id, user_gates=user_gates,
+                                                     review_profile_id=review_profile_id,
                                                      notes_root=notes_root, vault_dir=vault_dir, fake=mode == "fake"),
                 total_cap_usd=total_cap_usd,
                 reps=reps,

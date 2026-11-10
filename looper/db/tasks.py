@@ -392,7 +392,7 @@ def step_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """A ``task_steps`` row as the plan and the task page read it: ``result`` and ``review_roles`` decoded, the array
     columns as lists."""
     step = dict(row)
-    for name in ("result", "review_roles", "ready_when"):
+    for name in ("result", "review_roles", "ready_when", "accept_when"):
         if isinstance(step.get(name), str):
             step[name] = json.loads(step[name])
     for name in ("target_files", "validation_commands", "acceptance_criteria", "depends_on", "feedback",
