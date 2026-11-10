@@ -111,6 +111,20 @@ describe("Agent Profiles", () => {
 
   const CODEX: AgentProfile = { ...PROFILE, model_id: "model-responses", model: { ...PROFILE.model, model_id: "model-responses", protocol: "openai-responses" }, runtime_id: "rt-codex", runtime_type: "codex", agent_teams: false };
 
+  it("saves and clears fallback profiles while excluding itself and incompatible roles", async () => {
+    registry.profiles.push({ ...PROFILE, profile_id: "target", name: "Target" },
+      { ...PROFILE, profile_id: "limited", name: "Limited", roles: [] });
+    await show({ ...PROFILE, fallback_profile_id: "target" });
+    expect(select("Fallback to").value).toBe("target");
+    expect(select("Fallback to").querySelector('option[value="p"]')).toBeNull();
+    expect(select("Fallback to").querySelector<HTMLOptionElement>('option[value="limited"]')!.disabled).toBe(true);
+    await submit();
+    expect(requests[0].body.fallback_profile_id).toBe("target");
+    await choose("Fallback to", "");
+    await submit();
+    expect(requests[1].body.fallback_profile_id).toBeNull();
+  });
+
   it("keeps Claude Code selectable for chat models and labels their gateway path", async () => {
     registry.runtime_types[0].translated_protocols = ["openai-chat"];
     await show();
@@ -545,7 +559,7 @@ describe("Agent Profiles", () => {
     await choose("Effort", "high");
     await submit();
     expect(requests[0].body).toEqual({ name: "New profile", runtime_id: "rt-claude-code", model_id: "model-messages",
-      effort: "high", agent_teams: true, custom_prompt: "" });
+      effort: "high", agent_teams: true, custom_prompt: "", fallback_profile_id: null });
   });
 
   it("switches an incompatible runtime with the reason and applies its effort and teams defaults", async () => {

@@ -97,6 +97,7 @@ _SCHEMA_LOCK = 0x6C6F6F70  # "loop"
 REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
 _RUNTIME_LAUNCHER = "runtime_launcher"
+_PROFILE_FALLBACK = "profile_fallback"
 _CURSOR_LOGIN = "cursor_login"
 _DEPENDENCY_CONDITIONS = "dependency_conditions"
 _COMMAND_SCHEDULES = "command_schedules"
@@ -297,6 +298,14 @@ async def _runtime_launcher_pending(conn: asyncpg.Connection) -> bool:
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('agent_runtimes') AND attname = 'launcher' "
         "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _profile_fallback_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROFILE_FALLBACK):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('agent_profiles') "
+        "AND attname = 'fallback_profile_id' AND attnum > 0 AND NOT attisdropped)")
 
 
 async def _schedule_user_gates_pending(conn: asyncpg.Connection) -> bool:
@@ -551,6 +560,17 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE schedules ADD COLUMN IF NOT EXISTS user_gates "
                                "TEXT NOT NULL DEFAULT 'off' CHECK (user_gates IN ('off', 'on'))")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_USER_GATES)
+        if await _profile_fallback_pending(conn):
+            await conn.execute("ALTER TABLE agent_profiles ADD COLUMN fallback_profile_id TEXT "
+                               "REFERENCES agent_profiles(id) ON DELETE RESTRICT")
+            # Use the fresh schema's canonical check so upgraded catalogs match it.
+            constraint = re.search(
+                r"CONSTRAINT task_journal_kind_check (CHECK \(kind IN \(.*?\)\))", sql, re.S,
+            ).group(1)
+            await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
+            await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check "
+                               + constraint)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROFILE_FALLBACK)
         if await _cursor_login_pending(conn):
             await conn.execute(_CURSOR_LOGIN_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CURSOR_LOGIN)
@@ -616,7 +636,7 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             # Freeze this upgrade's constraint in the same order as the fresh schema.
             await conn.execute("""ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
                 'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement',
-                'session_switch', 'handoff', 'progress', 'profile_choice', 'concurrency_change',
+                'session_switch', 'handoff', 'progress', 'profile_choice', 'profile_fallback', 'concurrency_change',
                 'role_defined', 'gate_opened', 'gate_updated', 'gate_cancelled', 'gate_closed',
                 'wait_opened', 'wait_extended', 'wait_closed', 'condition_blocked'))""")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _DEPENDENCY_CONDITIONS)
@@ -652,7 +672,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         state = await _classify_schema(conn, sql)
         return state == "bridge" or (state == "current" and (
             await _schedule_user_gates_pending(conn) or await _cursor_login_pending(conn)
-            or await _runtime_launcher_pending(conn)
+            or await _runtime_launcher_pending(conn) or await _profile_fallback_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _llm_requests_pending(conn)

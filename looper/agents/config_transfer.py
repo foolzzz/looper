@@ -255,7 +255,7 @@ def model_entry(row: Mapping[str, Any]) -> dict[str, Any]:
 def profile_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     return {**{name: row[name] for name in ("name", "runtime", "effort", "agent_teams")},
             "model": {"provider": row["provider"], "name": row["model"], "protocol": row["protocol"]},
-            "custom_prompt": row.get("custom_prompt", "")}
+            "custom_prompt": row.get("custom_prompt", ""), "fallback": row.get("fallback")}
 
 
 def _portable_layer_environment(raw: Any) -> Any:
@@ -1105,6 +1105,8 @@ class _Importer:
             key = (row["provider"], row["model"], row["protocol"])
             self.profiles[name] = (row["id"], self._profile_spec(
                 row["id"], name, row["runtime"], key, row["effort"], row["agent_teams"], row.get("custom_prompt", "")))
+        self.profile_fallbacks = {name: row.get("fallback") for name, row in target.profiles.items()}
+        self.imported_profiles: set[str] = set()
         self.blocked_runtimes: set[str] = set()
         self.blocked_providers: set[str] = set()
         self.blocked_models: set[tuple[str, str, str]] = set()
@@ -1370,11 +1372,12 @@ class _Importer:
         label = str(entry.get("name")) if isinstance(entry, Mapping) else "None"
         try:
             entry = _mapping(entry, "an Agent Profile")
-            unknown = set(entry) - {"name", "runtime", "model", "effort", "agent_teams", "custom_prompt"}
+            unknown = set(entry) - {"name", "runtime", "model", "effort", "agent_teams", "custom_prompt", "fallback"}
             if unknown:
                 raise _Skip(f"unknown field {sorted(unknown)[0]!r}")
             name = label = entry_name(entry.get("name"), "Agent Profile")
             self._unique("profiles", name)
+            fallback = entry_name(entry["fallback"], "fallback Agent Profile") if entry.get("fallback") is not None else None
             runtime = _string(entry.get("runtime"), "runtime", required=True)
             if runtime in self.blocked_runtimes or runtime not in self.runtimes:
                 raise _Skip(f"no runtime {runtime!r} here or in the file")
@@ -1393,16 +1396,54 @@ class _Importer:
             check_profile_model(spec.resolved_model, self.profiles[name][1].model_id if row else None)
             spec.resolved_model.check_runtime(spec.runtime, spec.effort)
             values = {"runtime": spec.runtime.name, "provider": key[0], "model": key[1], "protocol": key[2],
-                      "effort": spec.effort, "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt}
-            current = {k: row[k] for k in values} if row else None
+                      "effort": spec.effort, "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt,
+                      "fallback": fallback}
+            current = {k: row.get(k) for k in values} if row else None
             action = self.outcome("profiles", name, current, _differs(values, current, values))
             profile_id = spec.id
             if self.apply and action in (Action.ADDED, Action.CHANGED):
                 profile_id = await self._write_profile(row["id"] if row else None, name, spec)
             self.profiles[name] = (profile_id, spec)
+            self.profile_fallbacks[name] = fallback
+            self.imported_profiles.add(name)
         except (RegistryError, _Skip) as exc:
             self.blocked_profiles.add(label)
             self.record("profiles", label, Action.SKIPPED, reason=str(exc))
+
+    async def settle_profile_fallbacks(self) -> None:
+        """Resolve names only after all profiles exist, validating the complete resulting graph."""
+        from dataclasses import replace
+
+        from ..db import profile_registry as db
+        from .profile_registry import RegistryError, check_roles, servable_roles
+
+        for source in self.profiles:
+            seen = {source}
+            current = source
+            hops = 0
+            while target := self.profile_fallbacks.get(current):
+                if target not in self.profiles or target in self.blocked_profiles:
+                    raise ConfigFileError(f"{source}: no valid fallback Agent Profile {target!r} here or in the file")
+                if target in seen:
+                    raise ConfigFileError("Profile fallback chains cannot contain a cycle")
+                hops += 1
+                if hops > 3:
+                    raise ConfigFileError("Profile fallback chains allow at most 3 hops")
+                runtime = self.profiles[current][1].runtime
+                try:
+                    check_roles(self.profiles[target][1], servable_roles(runtime.capabilities, runtime.type))
+                except RegistryError as exc:
+                    raise ConfigFileError(f"{source}: {exc}") from None
+                seen.add(target)
+                current = target
+        for name in self.imported_profiles:
+            profile_id, spec = self.profiles[name]
+            target = self.profile_fallbacks.get(name)
+            target_id = self.profiles[target][0] if target is not None else None
+            self.profiles[name] = (profile_id, replace(spec, id=profile_id, fallback_profile_id=target_id))
+            row = self.target.profiles.get(name)
+            if self.apply and (row is None or row.get("fallback") != target):
+                await db.update_profile(profile_id, {"fallback_profile_id": target_id}, pool=self.conn)
 
     async def _write_profile(self, profile_id: str | None, name: str, spec: Any) -> str:
         from ..db import config_transfer as db
@@ -2435,6 +2476,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
                 "the database schema is older than this Looper; start `looper serve` once (it backs the database up "
                 "before changing the schema), then import again")
         await ensure_schema(conn)
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext('looper.profile_fallbacks'))")
         # Take the same locks as registry writes before reading target rows.
         # The outer apply transaction uses READ COMMITTED, so a lock wait
         # cannot leave the import on a snapshot from before another writer.
@@ -2498,6 +2540,7 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
         await importer.model(entry)
     for entry in data.get("profiles", []):
         await importer.profile(entry)
+    await importer.settle_profile_fallbacks()
     for entry in data.get("gateway", {}).get("aliases", []):
         await importer.gateway_alias(entry)
     settings = data.get("settings", {})

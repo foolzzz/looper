@@ -1406,6 +1406,7 @@ class ClaudeRunRecorder:
         self._thinking_seq: int | None = None
         self._model: str | None = None
         self._model_display: str | None = None
+        self._model_reported: str | None = None
         self._context_tokens: int | None = None  # the prompt of the run's latest main-loop request
         self._compactions: list[dict[str, Any]] = []
         self._streamed = Usage()  # the tokens of the run's model requests so far, from its usage events
@@ -1501,6 +1502,7 @@ class ClaudeRunRecorder:
     def account(self, event: dict[str, Any]) -> None:
         """What ``event`` tells the run (its usage, so its cap, its model and session), at once; ``persist`` writes
         it to the record, which may wait on the database."""
+        self._model_reported = self._runtime().reported_model(event) or self._model_reported
         if event.get("type") == "usage":  # internal: counted, not part of the transcript
             from .runtimes.pricing import event_usage
 
@@ -1711,6 +1713,8 @@ class ClaudeRunRecorder:
         try:
             cost = self._runtime().cost(usage, self._provider())
             usage = cost.usage
+            if self._model_reported:
+                metadata = {"model_reported": self._model_reported, **(metadata or {})}
             if self._model_display:
                 metadata = {"model_display": self._model_display, **(metadata or {})}
             fields = {

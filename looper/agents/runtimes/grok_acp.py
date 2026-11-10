@@ -303,7 +303,7 @@ class AcpTurn:
         if not calls:
             self.final_text = "".join(block["text"] for block in blocks if block["type"] == "text")
         message: dict[str, Any] = {
-            "id": f"msg_{self._messages}", "type": "message", "role": "assistant", "model": self.model or "grok",
+            "id": f"msg_{self._messages}", "type": "message", "role": "assistant", "model": None,
             "content": blocks, "stop_reason": "tool_use" if calls else "end_turn", "stop_sequence": None}
         if self._usage is not None:
             message["usage"], self._usage = self._usage, None

@@ -3240,6 +3240,7 @@ export interface VendorType {
 }
 
 export interface AgentProfile {
+  fallback_profile_id?: string | null;
   profile_id: string;
   name: string;
   model_id: string;
@@ -3283,6 +3284,7 @@ export interface ProviderFields {
 export type CreateProviderFields = ProviderFields & Pick<Provider, "name" | "vendor_type">;
 
 export interface ProfileFields {
+  fallback_profile_id?: string | null;
   name?: string;
   runtime_id?: string;
   model_id?: string;

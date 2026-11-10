@@ -64,6 +64,11 @@ def test_dependency_conditions_upgrade_is_named_and_idempotent(monkeypatch):
         assert await pool.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'dependency_conditions')")
         await connection.ensure_schema(pool)
         assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'dependency_conditions'") == 1
+        constraint = await pool.fetchval(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'task_journal_kind_check' AND conrelid = 'task_journal'::regclass")
+        assert "'profile_fallback'" in constraint
+        assert "'condition_blocked'" in constraint
         assert await pool.fetchval("SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema() "
                                    "AND column_name IN ('ready_when', 'dependency_conditions')") == 2
 

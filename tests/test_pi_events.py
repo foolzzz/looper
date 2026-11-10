@@ -247,9 +247,9 @@ def test_unknown_message_roles_are_kept_as_redacted_diagnostics() -> None:
     assert "opaque extension content" not in json.dumps(event)
 
 
-def test_message_model_falls_back_to_the_configured_model() -> None:
+def test_message_without_model_does_not_report_the_configured_model() -> None:
     events = _parse(_wire(_assistant(model=None), SETTLED))
-    assert events[0]["message"]["model"] == "configured-model"
+    assert events[0]["message"]["model"] is None
 
 
 def test_usage_counts_final_requests_nested_work_and_compaction_even_when_cancelled() -> None:

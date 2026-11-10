@@ -103,6 +103,7 @@ class JournalKind(str, Enum):
     HANDOFF = "handoff"
     PROGRESS = "progress"
     PROFILE_CHOICE = "profile_choice"
+    PROFILE_FALLBACK = "profile_fallback"
     CONCURRENCY_CHANGE = "concurrency_change"
     ROLE_DEFINED = "role_defined"
     GATE_OPENED = "gate_opened"

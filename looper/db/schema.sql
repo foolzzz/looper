@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     agent_teams BOOLEAN NOT NULL DEFAULT false,
     custom_prompt TEXT NOT NULL DEFAULT '',
+    fallback_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
     model_id TEXT NOT NULL REFERENCES llm_models(id) ON DELETE RESTRICT
 );
 
@@ -405,7 +406,7 @@ CREATE TABLE IF NOT EXISTS task_journal (
     step_id     TEXT NOT NULL,
     kind        TEXT NOT NULL CONSTRAINT task_journal_kind_check CHECK (kind IN (
                     'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement',
-                    'session_switch', 'handoff', 'progress', 'profile_choice', 'concurrency_change',
+                    'session_switch', 'handoff', 'progress', 'profile_choice', 'profile_fallback', 'concurrency_change',
                     'role_defined', 'gate_opened', 'gate_updated', 'gate_cancelled', 'gate_closed',
                     'wait_opened', 'wait_extended', 'wait_closed', 'condition_blocked')),
     summary     TEXT NOT NULL DEFAULT '',

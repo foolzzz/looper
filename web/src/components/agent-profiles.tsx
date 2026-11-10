@@ -161,6 +161,7 @@ export function AgentProfileForm({
       effort: profile?.effort ?? "",
       agent_teams: profile?.agent_teams ?? defaultTeams(registry, runtime),
       custom_prompt: profile?.custom_prompt ?? "",
+      fallback_profile_id: profile?.fallback_profile_id ?? "",
     };
   });
   const action = useAction();
@@ -239,6 +240,7 @@ export function AgentProfileForm({
     setModelError("");
     const body = { name: draft.name.trim(), runtime_id: draft.runtime_id, model_id: model.model_id,
                    custom_prompt: draft.custom_prompt, effort: draft.effort || null,
+                   fallback_profile_id: draft.fallback_profile_id || null,
                    agent_teams: teams && draft.agent_teams };
     let answer: { profile: AgentProfile; warnings: string[] } | null = null;
     const done = await action.run(async () => {
@@ -330,6 +332,18 @@ export function AgentProfileForm({
               <option key={level} value={level}>{level}</option>
             ))}
           </select>
+        </div>
+        <div className="space-y-1 sm:col-span-2">
+          <label htmlFor={`${id}-fallback`} className={LABEL}>Fallback to</label>
+          <select id={`${id}-fallback`} value={draft.fallback_profile_id}
+            onChange={(e) => set({ fallback_profile_id: e.target.value })} className={SELECT}>
+            <option value="">No fallback</option>
+            {registry.profiles.filter((p) => p.profile_id !== profile?.profile_id).map((p) => (
+              <option key={p.profile_id} value={p.profile_id}
+                disabled={(runtime?.roles ?? []).some((role) => !p.roles.includes(role))}>{profileLabel(p)}</option>
+            ))}
+          </select>
+          <p className="text-[11px] text-muted-foreground">Used when this profile cannot start. At most three fallback hops.</p>
         </div>
         <p className="text-[11px] text-muted-foreground sm:col-span-2" data-testid="prompt-mode-per-role">
           The system prompt mode (append to the runtime&apos;s default or replace it) is set per role in Settings → Roles.
@@ -533,7 +547,9 @@ function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registr
     if (confirm(`Delete ${AGENT_PROFILE.name} "${profile.name}"?`)) action.run(() => deleteAgentProfile(profile.profile_id));
   };
   const runtime = registry.runtimes.find((r) => r.runtime_id === profile.runtime_id);
-  const inUse = usedByText(profile.used_by);
+  const fallbackUsers = registry.profiles.filter((p) => p.fallback_profile_id === profile.profile_id);
+  const inUse = [usedByText(profile.used_by), fallbackUsers.length
+    ? `fallback of ${fallbackUsers.map((p) => p.name).join(", ")}` : ""].filter(Boolean).join(", ");
   return (
     <Row
       ref={ref}
@@ -575,6 +591,9 @@ function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registr
           {profile.roles.length ? profile.roles.map(roleLabel).join(", ") : "no role"}
         </span>
       </p>
+      {profile.fallback_profile_id && <p className="text-xs text-muted-foreground">
+        Fallback to {registry.profiles.find((p) => p.profile_id === profile.fallback_profile_id)?.name ?? profile.fallback_profile_id}
+      </p>}
       <UsedBy used={profile.used_by} />
       {profile.provider.enabled === false && (
         <p className="flex items-start gap-1 text-xs text-warning">

@@ -225,6 +225,7 @@ def test_adoption_reports_unreachable_keepers_and_preserves_newer_controllers(tm
         })
         monkeypatch.setattr(pool, '_task_project', AsyncMock(return_value=None))
         monkeypatch.setattr(worker, 'load_agent_settings', AsyncMock(return_value=launch.settings))
+        monkeypatch.setattr(llm_records, 'get_record', AsyncMock(return_value={'metadata': launch.record()}))
         monkeypatch.setattr(worker.ClaudeRunRecorder, 'resume', AsyncMock())
         error = (KeeperError(ErrorCode.STALE_CONTROLLER, 'a newer control plane holds this run')
                  if failure == 'newer_controller' else OSError('keeper is unreachable'))

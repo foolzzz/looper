@@ -106,6 +106,8 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                     assert after[table] == expected
                 elif table == "agent_runtimes":
                     assert after[table] == [{**r, "launcher": "native"} for r in before[table]]
+                elif table == "agent_profiles":
+                    assert after[table] == [{**r, "fallback_profile_id": None} for r in before[table]]
                 elif table == "sequence_state":
                     # New audit tables add unused sequences; historical values must survive.
                     assert after[table] == sorted(

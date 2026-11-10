@@ -176,6 +176,13 @@ class OmpRuntime(RuntimeAdapter):
     def read_only_for(self, capabilities: frozenset[Capability]) -> ReadOnly:
         return ReadOnly.TOOLS if Capability.READ_TOOLS in capabilities else ReadOnly.CHECK
 
+    def reported_model(self, event: Mapping[str, Any]) -> str | None:
+        if (event.get("type") != "assistant" or event.get("parent_tool_use_id")
+                or not isinstance(event.get("message"), Mapping)):
+            return None
+        model = event["message"].get("model")
+        return model if isinstance(model, str) and model.strip() and model not in ("unknown", "<synthetic>") else None
+
     def probe(self, executable: str) -> Probe:
         """The version and rpc flags, with an empty ``HOME`` so nothing of the operator's is read."""
         home = tempfile.mkdtemp(prefix="looper-omp-probe-")
@@ -861,7 +868,7 @@ class OmpStream:
         events: list[dict[str, Any]] = []
         if blocks:
             events.append({"type": "assistant", **self._base(), "parent_tool_use_id": None, "message": {
-                "role": "assistant", "model": message.get("model") or self.model, "content": blocks,
+                "role": "assistant", "model": message.get("model"), "content": blocks,
                 "usage": {"input_tokens": tokens.input_tokens, "output_tokens": tokens.output_tokens,
                           "cache_read_input_tokens": tokens.cache_read_tokens,
                           "cache_creation_input_tokens": tokens.cache_creation_tokens}}})
