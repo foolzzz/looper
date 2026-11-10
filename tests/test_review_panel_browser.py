@@ -6,12 +6,18 @@ import pytest
 
 pytestmark = pytest.mark.installed
 STAMP = "2026-01-01T00:00:00Z"
+FINDING = {"member": "review_a", "severity": "suggestion", "where": "src/cache.py:18", "text": "复用缓存 / Reuse the cache."}
 
 
 def _task():
     steps = []
     for index, key in enumerate(("dev", "review_a", "review_b", "review_c", "verify_staging")):
         review = key.startswith("review_")
+        result = None
+        if not index:
+            result = {"status": "completed", "summary": "Done.", "verify_passed": True, "verify_findings": [FINDING]}
+        elif review and key != "review_c":
+            result = {"status": "completed", "passed": True, "findings": [FINDING]}
         steps.append({
             "id": key, "step_key": key, "step_index": index, "task_id": "panel-example",
             "kind": "review" if review else "work", "reviews": "dev" if review else None,
@@ -22,7 +28,7 @@ def _task():
             "accept_state": "satisfied" if not index else None,
             "review": False, "review_roles": [], "role_key": key if review else None,
             "role_version": None, "review_stage": None, "review_position": None, "retries": 0,
-            "worker_id": None, "reviewer_id": None, "result": {"passed": True} if review and key != "review_c" else None,
+            "worker_id": None, "reviewer_id": None, "result": result,
             "created_at": STAMP, "updated_at": STAMP, "started_at": None, "completed_at": None,
         })
     return {
@@ -77,6 +83,12 @@ def test_review_panel_junction_advisory_and_downstream(staged_dashboard_dir, wid
             expect(page.locator('[data-id="dep:review_c->dev:a0"]')).to_have_count(1)
             junction.focus()
             expect(junction).to_be_focused()
+            for key in ("review_a", "dev"):
+                page.locator(f'.react-flow__node[data-id="{key}"]').hover()
+                card = page.get_by_role("dialog", name=f"{key}: details", exact=True)
+                expect(card).to_be_visible()
+                expect(card).to_contain_text("review_a · suggestion · src/cache.py:18: 复用缓存 / Reuse the cache.")
+                expect(card).not_to_contain_text("[object Object]")
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
             output = Path(__file__).resolve().parents[1] / "output/playwright" / f"pipeline-review-panel-{width}.png"
             output.parent.mkdir(parents=True, exist_ok=True)

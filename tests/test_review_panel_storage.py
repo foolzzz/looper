@@ -33,15 +33,25 @@ def test_review_panel_persists_acceptance_and_task_readback(monkeypatch):
         api_v1.validate_arguments(api_v1.find("POST", "/api/v1/tasks/detail").result, detail)
         assert detail["steps"][0]["accept_state"] == "pending"
         assert detail["steps"][1]["ready_state"] == "satisfied"
+        assert (await projects.task_detail("task-a", compact=True))["steps"][1]["verdict"] == "pending"
         await pool.execute("UPDATE task_steps SET status='verified', result=$1::jsonb WHERE id='step-r1'",
-                           '{"passed": false}')
+                           json.dumps({"passed": False, "findings": [
+                               {"severity": "blocking", "where": "calc.py:4", "text": "Handle empty input"}]}))
         detail = await projects.task_detail("task-a")
         assert detail["steps"][0]["accept_state"] == "unsatisfiable"
+        seat = (await projects.task_detail("task-a", compact=True))["steps"][1]
+        assert seat["verdict"] == "fail" and seat["blocking"] == 1
+        assert seat["findings"] == [{"level": "blocking", "where": "calc.py:4", "text": "Handle empty input"}]
         await pool.execute("UPDATE task_steps SET result=$1::jsonb WHERE id='step-r1'",
-                           '{"passed": true, "status": "passed_by_adjudication"}')
+                           json.dumps({"passed": False, "status": "passed_by_adjudication", "findings": [
+                               {"severity": "suggestion", "where": "calc.py:4", "text": "Handle empty input",
+                                "reason": "The caller already checks empty input"}]}))
         detail = await projects.task_detail("task-a", compact=True)
         assert detail["steps"][0]["accept_state"] == "satisfied"
         assert detail["steps"][0]["accept_when_text"] == "s1/review_a passed"
+        seat = detail["steps"][1]
+        assert seat["verdict"] == "pass" and seat["blocking"] == 0 and seat["suggestions"] == 1
+        assert seat["reasons"] == [{"where": "calc.py:4", "reason": "The caller already checks empty input"}]
         pipeline = await PIPELINE_TOOL.run(SimpleNamespace(arguments={"task_id": "task-a"}))
         assert pipeline["steps"][0]["accept_state"] == "satisfied"
         assert pipeline["steps"][1]["reviews"] == "s1"

@@ -91,8 +91,11 @@ function layoutItems(steps: TaskStep[]): LayoutItem[] {
   const source = (id: string) => acceptance.get(id) ?? id;
   return [...steps.map((step) => ({ ...step, depends_on: roots.has(step.id) ? [roots.get(step.id)!]
     : step.depends_on.map((id) => step.reviews === id ? id : source(id)) })),
-    ...nodes.map((node) => ({ ...node, depends_on: node.depends_on.map(source),
-      inputs: node.inputs.map((input) => ({ ...input, source: source(input.source) })) }))];
+    ...nodes.map((node) => {
+      const inputs = node.inputs.map((input) => ({ ...input,
+        source: input.on === "completed" ? input.source : source(input.source) }));
+      return { ...node, depends_on: inputs.map((input) => input.source), inputs };
+    })];
 }
 
 /** The same edges drive layering and drawing, omitting only dependencies hidden by the viewer. */

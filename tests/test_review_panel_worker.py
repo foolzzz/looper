@@ -79,6 +79,32 @@ def test_same_runtime_never_starts_reviewer(tmp_path, agent_db):
     assert "rt-claude-code" in result["findings"][0]["text"]
 
 
+@pytest.mark.parametrize("records,same_runtime", [
+    ([{"metadata": {"profile": {"runtime": {"id": "rt-claude-code"}}}}], True),
+    ([{"metadata": {"agent": {"runtime": {"id": "rt-claude-code"}}}}], True),
+    ([{"metadata": {"profile": {"runtime": {"id": "rt-other"}}}}], False),
+    ([{"metadata": {"profile": {}}}], False),
+    ([], False),
+])
+def test_panel_uses_saved_work_run_when_result_predates_runtime_ids(
+    tmp_path, agent_db, monkeypatch, records, same_runtime,
+):
+    from looper.agents.tiers import worker
+
+    async def saved_runs(*, agent_id, task_id, limit):
+        return records if agent_id == "developer-latest" and task_id == "task-1" else []
+
+    monkeypatch.setattr(worker.db_llm_records, "list_records", saved_runs)
+    result = run(tmp_path, "open('started', 'w').write('yes')\n" + REPORT.replace(
+        "REPORT", repr({"passed": True, "findings": []})),
+        verify=True, severity=True, worker_id="developer-latest", parent_task_id="task-1",
+        work_result={"status": "completed"})
+    assert (tmp_path / "started").exists() is not same_runtime
+    assert result["passed"] is not same_runtime
+    if same_runtime:
+        assert result["refused"] == "same_runtime"
+
+
 @pytest.mark.parametrize("member", ["builtin", "review_a"])
 @pytest.mark.parametrize("fallback", [False, True])
 @pytest.mark.parametrize("same_runtime", [False, True])

@@ -980,6 +980,29 @@ def step_condition_view(step: Mapping[str, Any], labels: Mapping[str, str]) -> d
     return fields
 
 
+def step_review_view(step: Mapping[str, Any]) -> dict[str, Any]:
+    """Bounded panel-seat evidence for the Manager; ordinary steps keep their existing shape."""
+    from types import SimpleNamespace
+
+    from .tiers.conditions import State, StepOutcome
+    from .tiers.journal import clip
+
+    if not step.get("reviews"):
+        return {}
+    result = step.get("result") or {}
+    findings = result.get("findings") or []
+    passed = StepOutcome.from_step(SimpleNamespace(kind="review", status=step.get("status"), result=result)).passed
+    # Reasons are separate so adjudications beyond the five findings shown remain visible.
+    reasons = [{"where": clip(f.get("where"), 120), "reason": clip(f["reason"], 300)}
+               for f in findings if f.get("reason")][:5]
+    return {"verdict": {State.SATISFIED: "pass", State.UNSATISFIABLE: "fail", State.PENDING: "pending"}[passed],
+            "blocking": sum(f.get("severity") == "blocking" for f in findings),
+            "suggestions": sum(f.get("severity") == "suggestion" for f in findings),
+            "findings": [{"level": f.get("severity"), "where": clip(f.get("where"), 120),
+                          "text": clip(f.get("text"), 200)} for f in findings[:5]],
+            **({"reasons": reasons} if reasons else {})}
+
+
 async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | None, agents: dict[str, Any],
                                waits: list[dict[str, Any]]) -> dict[str, Any]:
     from ..db import task_changes as db_changes, task_roles as db_roles, user_gates as db_user_gates
@@ -1000,6 +1023,7 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
         "steps": [{"step": s.get("step_key") or s.get("id"), "status": s.get("status"),
                    "kind": s.get("kind") or "work",
                    **step_condition_view(s, labels),
+                   **step_review_view(s),
                    "instruction": clip(s.get("instruction") or "", 200),
                    # The roles its Planner defined that the step runs as and is reviewed by, when it has them.
                    **({"role": s["role_key"]} if s.get("role_key") else {}),

@@ -52,6 +52,7 @@ def test_required_reviews_release_accept_before_advisory_but_delivery_waits(
         assert len(h.held) == 3
         assert all(e.payload["severity"] for e in h.reviews)
         assert all(e.payload["worker_runtime_id"] == "runtime-from-worker-run" for e in h.reviews)
+        assert all(e.payload["worker_id"] == h.planner._plan.steps[0].worker_id for e in h.reviews)
         await h.release(REVIEW_PASS)
         await h.release(REVIEW_PASS)
         await h.until(lambda: h.planner._plan.steps[0].status == "verified")
@@ -460,7 +461,7 @@ def test_panel_reviews_use_independent_commits_while_another_step_commits(
             if commit_output:
                 git(directory, "add", "result.txt")
                 git(directory, "commit", "-qm", "Deliver result")
-            return {**WORK_OK, "head": git(directory, "rev-parse", "HEAD")}
+            return {**WORK_OK, "head": git(directory, "rev-parse", "HEAD"), "runtime_id": "runtime-test-worker"}
         return None
 
     async def scenario(h):
@@ -573,19 +574,47 @@ def test_adjudication_must_address_current_blocking_with_a_bounded_reason(tmp_pa
     assert seat.result == BLOCK  # invalid proposals never partially change live verdicts
 
 
-def test_review_all_excludes_the_workflow_verification_role(planner_claude, agent_db, monkeypatch):
-    configure(agent_db, monkeypatch, review_all=True, verification={"role": "verify_staging", "max_rounds": 2},
+@pytest.mark.parametrize("panel", [False, True], ids=["without-panel", "with-panel"])
+@pytest.mark.parametrize("review_all", [False, True], ids=["explicit-review", "review-all"])
+def test_verification_review_policy_with_and_without_a_panel(planner_claude, agent_db, monkeypatch, panel, review_all):
+    from dataclasses import replace
+
+    configure(agent_db, monkeypatch, review_all=review_all,
+              review_panel=PANEL["review_panel"] if panel else None,
+              verification={"role": "verify_staging", "max_rounds": 2},
               roles=[*PANEL["roles"], {"key": "verify_staging", "kind": "work", "role_prompt": "Verify the change."}])
     rows = task_roles.current.return_value
     rows.append({**rows[0], "role_key": "verify_staging", "kind": "work", "role_prompt": "Verify the change."})
     monkeypatch.setattr(task_roles, "get", AsyncMock(side_effect=lambda _, key, *args: next(
         row for row in rows if row["role_key"] == key)))
-    claude = planner_claude(plan(step("work"), {**step("s1", "work", review=True), "role": "verify_staging"}),
-                            decide("review"), decide("accept"), decide("accept"))
-    h = drive(claude, lambda envelope: REVIEW_PASS if envelope.message_type == MessageType.VERIFY_REQUEST else WORK_OK)
+    needs_review = not panel and not review_all
+    decisions = [decide("review"), decide("accept")]
+    decisions.extend(([decide("review")] if needs_review else []) + [decide("accept")])
+    claude = planner_claude(plan(step("work", review=not review_all),
+                                {**step("s1", "work", review=not review_all), "role": "verify_staging"}),
+                            *decisions)
+    def outcome(envelope):
+        if envelope.message_type == MessageType.VERIFY_REQUEST:
+            return REVIEW_PASS
+        return None if envelope.payload["step_key"] == "work" else WORK_OK
+
+    async def scenario(h):
+        await h.start()
+        await h.until(lambda: len(h.held) == 1)
+        verification = h.planner._plan.steps[1]
+        assert verification.review is needs_review
+        # Restored steps may predate review_all and still have review=False.
+        assert h.planner._needs_review(replace(verification, review=False)) is False
+        assert h.planner._needs_review(replace(verification, review=True)) is (not panel)
+        await h.release(WORK_OK)
+        await h.finished()
+
+    h = drive(claude, outcome, scenario)
     assert h.final().payload["status"] == "completed"
     work, verification = h.planner._plan.steps[:2]
-    assert len(h.reviews) == len(MEMBERS)
-    assert all(envelope.payload["step_key"] == work.label for envelope in h.reviews)
+    assert len(h.reviews) == (len(MEMBERS) if panel else 1 + needs_review)
+    assert {envelope.payload["step_key"] for envelope in h.reviews} == (
+        {work.label, verification.label} if needs_review else {work.label})
+    assert verification.review is needs_review
     assert verification.accept_when is None
     assert h.work_items[-1].payload["verification"] is True

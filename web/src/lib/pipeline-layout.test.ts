@@ -248,6 +248,24 @@ describe("review panel acceptance", () => {
     expect(conditionState(condition, plan, [], [])).toBe("satisfied");
   });
 
+  it.each(["completed", "verified", "passed"] as const)("routes an explicit %s condition from the matching outcome", (on) => {
+    const plan = panel({ all_of: [{ step: "review_a", on: "passed" }] });
+    plan.push({ ...step("followup", 5, "pending", ["dev"]), ready_when: { step: "dev", on } });
+    const source = on === "completed" ? "dev" : "dev:a0";
+    expect(dependencyEdges(plan)).toContainEqual({ source, target: "followup:c0", on });
+    expect(stepLevels(plan).get("followup:c0")).toBe(on === "completed" ? 1 : 3);
+    expect(dependencyEdges(plan)).not.toContainEqual({ source: on === "completed" ? "dev:a0" : "dev", target: "followup:c0", on });
+  });
+
+  it("keeps completed leaves attached to work inside nested conditions", () => {
+    const plan = panel({ all_of: [{ step: "review_a", on: "passed" }] });
+    plan.push({ ...step("followup", 5, "pending", ["dev", "review_a"]), ready_when: {
+      any_of: [{ all_of: [{ step: "dev", on: "completed" }, { step: "review_a", on: "passed" }] }, "dev"],
+    } });
+    expect(dependencyEdges(plan)).toContainEqual({ source: "dev", target: "followup:c0.0", on: "completed" });
+    expect(dependencyEdges(plan)).toContainEqual({ source: "dev:a0", target: "followup:c0" });
+  });
+
   it.each([
     [{ passed: false }, "unsatisfiable"],
     [{ passed: false, status: "passed_by_adjudication" }, "satisfied"],
