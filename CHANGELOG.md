@@ -18,6 +18,13 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.114] - 2026-11-10
+
+### Fixed
+
+- **Drain serve test no longer times out on loaded CI runners.** ([#1184](https://github.com/foolzzz/looper/pull/1184))
+  - Test-only: `tests/test_drain_serve_db.py` waits up to 120 seconds for both steps to be dispatched, holds the restart Worker for 180 seconds, and reports the dispatched step ids and the serve log tail on timeout; `tests/test_kept_detach_serve_db.py` matches its fake CLI anchor independently of the hold duration. No production change.
+
 ## [2.14.113] - 2026-11-10
 
 ### Added

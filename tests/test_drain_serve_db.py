@@ -54,7 +54,8 @@ if step:
     label = step.group(1)
     log("worker", step=label)
     if variant in ("restart", "deadline") and label == "s1":
-        limit = time.monotonic() + 90
+        # Keep the restart Worker held through dispatch and the next task's planning turn.
+        limit = time.monotonic() + (180 if variant == "restart" else 90)
         while not (state / ("release-" + variant)).exists():
             if time.monotonic() >= limit:
                 raise RuntimeError("test did not release its Worker")
@@ -194,8 +195,18 @@ def test_drain_restart_replays_held_runs_and_manager_once_and_keeps_planners_mov
                    "the serving Manager's positive control reply")
             task = _task(api, project, "restart")
             _until(lambda: _events(state, "worker", "restart"), "the first Worker to start")
-            _until(lambda: len([s for s in _detail(api, task)["steps"] if s["status"] == "dispatched"]) == 2,
-                   "both steps to be dispatched")
+            dispatched = []
+
+            def both_dispatched():
+                dispatched[:] = [s["step_key"] for s in _detail(api, task)["steps"] if s["status"] == "dispatched"]
+                return len(dispatched) == 2
+
+            # running_server has already waited for /api/v1/system/status to answer.
+            try:
+                _until(both_dispatched, "both steps to be dispatched", seconds=120)
+            except AssertionError as exc:
+                tail = "\n".join((tmp_path / "before.log").read_text().splitlines()[-40:])
+                raise AssertionError(f"{exc}; dispatched step ids: {dispatched}\nserve log tail:\n{tail}") from exc
             status = _drain(api, "drain", {"scope": "runs", "timeout_seconds": 60})
             assert status["phase"] == "draining" and status["scope"] == "runs"
             (run,) = status["waiting"]["runs"]
