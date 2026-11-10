@@ -714,6 +714,9 @@ TOOLS: tuple[Tool, ...] = (
                                                           "commit a worktree task starts from (default: what the "
                                                           "directory has checked out)."},
                 "goal_id": {"type": "string", "description": "A short kebab-case id for the task's goal."},
+                "workflow": {"type": "string", "minLength": 1,
+                             "description": "An operator workflow key, or none to run without the project's "
+                                            "default; cannot be combined with a template."},
                 "profiles": {**_PROFILES_SCHEMA, "description": "An Agent Profile (id or name) the user chose for "
                                                                 "some of the task's roles."},
             },
@@ -812,9 +815,7 @@ def task_workflow_tool(tool: Tool, workflow_keys: Sequence[str]) -> Tool:
         return tool
     properties = dict(tool.schema["properties"])
     if workflow_keys:
-        properties["workflow"] = {"type": "string", "minLength": 1,
-                                  "description": "An operator workflow key, or none to run without the project's "
-                                                 "default; cannot be combined with a template.",
+        properties["workflow"] = {**_CREATE_TOOL.schema["properties"]["workflow"],
                                   "enum": [*workflow_keys, "none"]}
     else:
         properties.pop("workflow", None)
