@@ -110,7 +110,7 @@ async def list_layers(
                 f"tr.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = tr.profile_id) AS profile "
                 "FROM task_roles tr JOIN tasks k ON k.id = tr.task_id "
                 "WHERE tr.task_id = $1 AND tr.role_key = $2 AND tr.version = $3 "
-                f"AND {profile_allowed_sql('k.project_id', 'tr.profile_id')}",
+                f"AND (tr.via = 'workflow' OR {profile_allowed_sql('k.project_id', 'tr.profile_id')})",
                 task_id, task_role[0], task_role[1],
             )
             layers += [{"task_id": task_id, **_row(r)} for r in role]

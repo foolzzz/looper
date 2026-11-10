@@ -517,6 +517,7 @@ def _task_work_dir(raw: Any, project_default: str) -> str:
 async def create_task_core(
     data: dict[str, Any], *, task_fields: dict[str, Any] | None = None,
     profiles: dict[str, str | None] | None = None, roles: Sequence[dict[str, Any]] = (),
+    workflow: str | None = None,
     template_name: str | None = None, lock_manager: bool = False, named: bool | None = None,
     visible_to: str | None = None, task_filter: db_tasks.TaskFilter | None = None, show_configuration: bool = False,
     template_display: tuple[str, Sequence[tuple[str, str]]] | None = None,
@@ -544,6 +545,11 @@ async def create_task_core(
             raise RequestError(HTTP_400, "project must be an object with a name")
         new_fields = _project_fields(new_project, update=False)
 
+    workflow = data.get("workflow") if workflow is None else workflow
+    if workflow is not None and (not isinstance(workflow, str) or not workflow.strip()):
+        raise RequestError(HTTP_400, "workflow must be a key or none")
+    if workflow is not None and (template_name is not None or (task_fields or {}).get("template") is not None):
+        raise RequestError(HTTP_400, "workflow and template cannot be selected together")
     config = data.get("config")
     if config is not None and not isinstance(config, dict):
         raise RequestError(HTTP_400, "config must be a JSON object")
@@ -578,22 +584,47 @@ async def create_task_core(
             "title": db_tasks.task_title(data.get("title")),
             **(task_fields or {}),
         }
+        selected_profiles, selected_roles = dict(profiles or {}), list(roles)
+        selected_workflow = workflow
+        if selected_workflow is None and not template_name and not task.get("schedule_id") and not task.get("template"):
+            selected_workflow = project.get("default_workflow")
+        source, source_name = "template", template_name
+        if selected_workflow and selected_workflow != "none":
+            from ..db import workflows as db_workflows
+            from .workflows import Workflow, WorkflowError, check_profiles
+            row = await db_workflows.get(selected_workflow, pool=conn)
+            if row is None:
+                raise RequestError(HTTP_400, f"no workflow {selected_workflow!r}")
+            try:
+                definition = Workflow.from_row(row)
+                await check_profiles(definition, pool=conn)
+                for role, profile in definition.profiles.items():
+                    if selected_profiles.get(role) and selected_profiles[role] != profile:
+                        raise WorkflowError(f"the workflow {definition.name} sets the {role}'s Agent Profile to {profile}")
+                    selected_profiles[role] = profile
+            except WorkflowError as exc:
+                raise RequestError(HTTP_400, str(exc)) from None
+            task["workflow"] = definition.snapshot()
+            task["budget_usd"] = definition.budget_usd
+            selected_roles = [{**r, "role_key": r["key"]} for r in task["workflow"]["roles"]]
+            source, source_name = "workflow", definition.name
         created = await db_tasks.create_task(**task, project_id=project["id"], pool=conn)
-        if profiles:
-            await db_layers.set_profile_overrides(conn, task["task_id"], profiles)
-        if roles:
+        if selected_profiles:
+            await db_layers.set_profile_overrides(conn, task["task_id"], selected_profiles)
+        if selected_roles:
             from ..db import task_roles as db_roles
             from .tiers.journal import JournalKind, SUMMARY_MAX_CHARS, clip
-            for role in roles:
-                summary = f"Role {role['role_key']} v1 from the task template {template_name}"
+            for role in selected_roles:
+                summary = f"Role {role['role_key']} v1 from the task {source} {source_name}"
                 await db_roles.add_first_version(conn, task["task_id"], role["role_key"], {
-                    **role, "reason": f"from template {template_name}", "via": "template"},
+                    **role, "reason": f"from {source} {source_name}", "via": source},
                     {"step_id": "", "kind": JournalKind.ROLE_DEFINED.value,
                      "summary": clip(summary, SUMMARY_MAX_CHARS), "learnings": []})
         return created, task, workspace
 
     try:
-        if project is not None and not profiles and not lock_manager and not roles:
+        if (project is not None and not profiles and not lock_manager and not roles
+                and workflow is None and not project.get("default_workflow")):
             created, task, workspace = await persist()
         else:
             with project_directories() as created_directories:
@@ -736,6 +767,7 @@ async def list_tasks_page(
             "manager_name": manager_names.get(t.get("manager_id") or "manager"),
             # The task template it came from, as it said then (null for none).
             "template": t.get("template"),
+            "workflow": t.get("workflow"),
             "status": t.get("status", "pending"),
             "group": db_tasks.task_group(t.get("status")).value,
             "phase": t.get("phase", "pending"),
@@ -847,6 +879,7 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         "manager_id": raw.get("manager_id") or "manager",
         "manager_name": owner["name"] if owner else None,
         "template": raw.get("template"),
+        "workflow": raw.get("workflow"),
         # The API client the task was created through (also a revoked one), or null.
         "client": {"id": client_id, "name": client_name} if client_id and client_name else None,
         "goal_id": raw.get("goal_id", ""),

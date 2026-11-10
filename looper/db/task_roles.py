@@ -24,7 +24,7 @@ from .projects import profile_allowed_sql
 _VERSION = (
     "SELECT r.task_id, r.role_key, r.version, r.kind, r.profile_id, r.role_prompt, r.harness, r.reason, "
     "r.via, r.template_key, r.items, r.created_at, a.name AS profile_name, "
-    f"{profile_allowed_sql('k.project_id', 'r.profile_id')} AS profile_allowed "
+    f"(r.via = 'workflow' OR {profile_allowed_sql('k.project_id', 'r.profile_id')}) AS profile_allowed "
     "FROM task_roles r JOIN tasks k ON k.id = r.task_id LEFT JOIN agent_profiles a ON a.id = r.profile_id "
 )
 

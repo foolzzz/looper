@@ -142,11 +142,22 @@ CREATE TABLE IF NOT EXISTS llm_model_migration_map (
     PRIMARY KEY (legacy_provider_id, legacy_model, protocol)
 );
 
+-- Operator-owned presets; tasks hold independent definition snapshots.
+CREATE TABLE IF NOT EXISTS workflows (
+    key TEXT PRIMARY KEY CHECK (key ~ '^[a-z][a-z0-9_-]{0,31}$' AND key <> 'none'),
+    name TEXT NOT NULL CHECK (btrim(name) <> '' AND length(name) <= 60),
+    description TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 300),
+    definition JSONB NOT NULL CHECK (jsonb_typeof(definition) = 'object'),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS workflows_name_key ON workflows (lower(btrim(name)));
+
 -- Every task belongs to one project; a project may give its tasks a default
 -- directory (work_dir, '' = none).
 CREATE TABLE IF NOT EXISTS projects (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
+    default_workflow TEXT REFERENCES workflows(key) ON DELETE SET NULL,
     description TEXT NOT NULL DEFAULT '',
     work_dir    TEXT NOT NULL DEFAULT '',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -272,6 +283,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     manager_id TEXT NOT NULL DEFAULT 'manager'
     REFERENCES managers(id) ON DELETE RESTRICT,
     template JSONB,
+    workflow JSONB,
     origin_thread TEXT,
     origin_reply_route JSONB CHECK (jsonb_typeof(origin_reply_route) = 'object'),
     schedule_id TEXT,
@@ -740,7 +752,7 @@ CREATE TABLE IF NOT EXISTS task_roles (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (task_id, role_key, version),
     via TEXT NOT NULL DEFAULT 'planner'
-    CONSTRAINT task_roles_via_check CHECK (via IN ('planner', 'user', 'template')),
+    CONSTRAINT task_roles_via_check CHECK (via IN ('planner', 'user', 'template', 'workflow')),
     template_key TEXT,
     items TEXT[] NOT NULL DEFAULT '{}'
 );

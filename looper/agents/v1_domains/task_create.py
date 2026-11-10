@@ -52,7 +52,7 @@ NEW_PROJECT_FIELDS = _object({
 REQUEST = {**_object({
     "requirement": {"type": "string", "minLength": 1, "maxLength": 32_000, "pattern": r"\S"},
     "project_id": {"type": "string", "minLength": 1}, "project": NEW_PROJECT_FIELDS,
-    "work_dir": _STR, "config": {"type": "object"}, "goal_id": _STR,
+    "work_dir": _STR, "config": {"type": "object"}, "goal_id": _STR, "workflow": _STR,
     "profile_overrides": _object({role: _STR
                                   for role in projects.TASK_PROFILE_ROLES}, [], closed=True),
     "workspace_mode": WORKSPACE_MODE, "base": {"type": "string", "maxLength": projects.BASE_MAX_CHARS}},
@@ -150,7 +150,8 @@ async def run(server, operation, arguments, principal, headers):
                 "workspace_base": arguments.get("base", "").strip(), "manager_id": "manager",
                 "client_id": principal.client_id}
     if (stored is None or any(stored[key] != value for key, value in expected.items())
-            or {role: profile["id"] for role, profile in profiles.items()} != chosen):
+            or {role: profile["id"] for role, profile in profiles.items()} != {
+                **chosen, **(stored.get("workflow") or {}).get("profiles", {})}):
         raise OpError(ErrorCode.UNAVAILABLE, "the created task could not be verified; refresh tasks before retrying")
     return {"task_id": stored["id"], "status": stored["status"], "created_at": stored["created_at"],
             "project_id": stored["project_id"], "workspace": result["workspace"]}

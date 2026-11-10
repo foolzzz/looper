@@ -177,8 +177,9 @@ def _task(row: Mapping[str, Any]) -> dict[str, Any]:
     task = dict(row)
     if "config" in task:
         task["config"] = _read_config(task["config"])
-    if isinstance(task.get("template"), str):
-        task["template"] = json.loads(task["template"])
+    for field in ("template", "workflow"):
+        if isinstance(task.get(field), str):
+            task[field] = json.loads(task[field])
     if isinstance(task.get("origin_reply_route"), str):
         task["origin_reply_route"] = json.loads(task["origin_reply_route"])
     task["name"] = task_name(title=task.get("title"), goal_id=task.get("goal_id"),
@@ -209,6 +210,7 @@ async def create_task(
     workspace_base: str = "",
     manager_id: str = "manager",
     template: Mapping[str, Any] | None = None,
+    workflow: Mapping[str, Any] | None = None,
     origin_thread: str | None = None,
     origin_reply_route: Mapping[str, str] | None = None,
     client_id: str | None = None,
@@ -237,9 +239,9 @@ async def create_task(
                            config, status, correlation_id, origin_channel_id, chat_id, original_user_text, title,
                            created_at, updated_at, schedule_id, budget_usd, chat_kind, chat_mention,
                            workspace_dir, workspace_mode, workspace_base, manager_id, template, origin_thread,
-                           client_id, origin_reply_route)
+                           client_id, origin_reply_route, workflow)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13, $14, $15, $16, $17, $18, $19, $20,
-                $21, $22::jsonb, $23, $24, $25::jsonb)
+                $21, $22::jsonb, $23, $24, $25::jsonb, $26::jsonb)
         ON CONFLICT (id) DO NOTHING
         """,
         task_id, requirement, goal_id, work_dir, project_id,
@@ -248,6 +250,7 @@ async def create_task(
         manager_id, json.dumps(dict(template)) if template is not None else None,
         origin_thread or None, client_id,
         json.dumps(dict(origin_reply_route)) if origin_reply_route is not None else None,
+        json.dumps(dict(workflow)) if workflow is not None else None,
     )
     return {"task_id": task_id, "created_at": now.isoformat()}
 
@@ -429,24 +432,26 @@ async def delete_task(
 
 
 async def _restore_template_roles(conn: asyncpg.Connection, task_id: str) -> None:
-    """Give the task back, as version 1, the roles its template had when it was created (planned anew, the Planner
-    sees them again)."""
+    """Restore version 1 roles from the task's template or workflow snapshot when planning anew."""
     from . import task_roles as db_task_roles  # task_roles imports projects, which imports this module
 
-    template = await conn.fetchval("SELECT template FROM tasks WHERE id = $1", task_id)
-    if isinstance(template, str):
-        template = json.loads(template)
-    for item in (template or {}).get("roles") or ():
-        profile_id = item.get("profile_id")
-        if profile_id is not None and not await conn.fetchval(
-                "SELECT 1 FROM agent_profiles WHERE id = $1", profile_id):
-            profile_id = None
-        name = template.get("name") or ""
-        await db_task_roles.add_first_version(
-            conn, task_id, item["role_key"],
-            {**item, "via": "template", "reason": f"from template {name}", "profile_id": profile_id},
-            {"step_id": "", "kind": "role_defined", "learnings": [],
-             "summary": f"Role {item['role_key']} v1 restored from the task template {name}"})
+    row = await conn.fetchrow("SELECT template, workflow FROM tasks WHERE id = $1", task_id)
+    for source in ("template", "workflow"):
+        snapshot = row[source]
+        if isinstance(snapshot, str):
+            snapshot = json.loads(snapshot)
+        for item in (snapshot or {}).get("roles") or ():
+            key = item.get("role_key") or item["key"]
+            profile_id = item.get("profile_id")
+            if profile_id is not None and not await conn.fetchval(
+                    "SELECT 1 FROM agent_profiles WHERE id = $1", profile_id):
+                profile_id = None
+            name = snapshot.get("name") or ""
+            await db_task_roles.add_first_version(
+                conn, task_id, key,
+                {**item, "via": source, "reason": f"from {source} {name}", "profile_id": profile_id},
+                {"step_id": "", "kind": "role_defined", "learnings": [],
+                 "summary": f"Role {key} v1 restored from the task {source} {name}"})
 
 
 async def reset_task_for_restart(

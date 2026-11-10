@@ -411,7 +411,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   The system prompt is rebuilt for every turn from the harness (resolved for
   the Planner in the task's project), the `planner` role prompt,
   the task's project, the task section (task id, project name and
-  description, working directory and the requirement) and `REPLY_CONTRACT`,
+  description, working directory, workflow rules and instructions when selected, and the requirement) and `REPLY_CONTRACT`,
   followed under `looper serve` by how to use its own tools
   (`ops.planner.TOOLS_GUIDE`, [A task's Planner's tools](#a-tasks-planners-tools));
   the project is read before each event's turns. The turns themselves carry
@@ -3806,7 +3806,7 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
 |---|---|---|
 | `looper_overview` | Task counts by group, the running tasks (with their own Worker and Reviewer limits, when set) and step runs, each active project's load against its limits, today's spend, unhealthy components | read |
 | `looper_tasks` | `list` (newest first; by `query` words in the id, name, requirement or project, by `group`, by `project`; at most `limit`) or `get` one task: status, phase, directory, requirement, steps, supplements (delivered or not), latest progress note, result, cost, and its Worker and Reviewer concurrency limits with their source (as `GET /api/tasks/:id` gives them) | read |
-| `looper_task_create` | Create a ready task: `requirement`, `title`, `project` (matched by name ignoring case), `work_dir` (its workspace; else the project's default; a new project, or one without a default, needs one), `workspace_mode` and `base` (only when the user asks: [Task workspaces](#task-workspaces)), `goal_id`, `profiles` (an Agent Profile by id or name for some roles). The task records the chat it came from (its progress, and in Telegram or Lark its end notice). Looper adds the configuration block (how the task runs in its directory and each warning, the settings in effect for the task, with the layer each came from, the project's review policy, spend cap, lessons setting and the task's Worker and Reviewer limits) and the start question | write; a new project is high |
+| `looper_task_create` | Create a ready task: `requirement`, `title`, `project` (matched by name ignoring case), `work_dir` (its workspace; else the project's default; a new project, or one without a default, needs one), `workspace_mode` and `base` (only when the user asks: [Task workspaces](#task-workspaces)), `goal_id`, `profiles` (an Agent Profile by id or name for some roles), and `workflow` (a preset key, or `none` to disable the project default). The task records the chat it came from (its progress, and in Telegram or Lark its end notice). Looper adds the configuration block (how the task runs in its directory and each warning, the settings in effect for the task, with the layer each came from, the project's review policy, spend cap, lessons setting and the task's Worker and Reviewer limits) and the start question | write; a new project is high |
 | `looper_task_control` | `start` a ready task (`TASK_START`); `stop` a running one; `restart` a stopped, failed or cancelled one, going on from its saved plan (`TASK_RESTART` `continue`); `start_over` one, planned anew with its steps, plan and Planner session deleted (`start_over`; the confirmation says how many accepted steps it deletes); `cancel` a running one | write; start_over and cancel are high |
 | `looper_task_instruct` | Add the user's words to a running task as a supplement (`via` `manager:<channel>`), delivered to its Planner like any ([Changes to a task](#changes-to-a-task)) | write |
 | `looper_task_gate_reply` | Add the user's message this turn answers to a user gate waiting for them (`task_id`, `gate`, `end` to end the discussion), as the task page does: Looper sends the message itself, or the `excerpt` of it the model names, which must be in it word for word; a turn that answers no message is refused. The channel message it is is kept, so the Planner's reply goes under it when it came from the gate's chat ([User gates](#user-gates)) | write |
@@ -3890,6 +3890,32 @@ section gains, before `Requirement:`, the lines `Template: <name>`,
 `Template inputs:` and `Template instructions:`; a task without a snapshot
 gets none of them. The instructions go to the Planner only. The repository
 ships an example, `docs/examples/manager-github-pr-review.json`.
+
+### Workflow presets
+
+Operators define reusable presets through `workflows.list/get/put/delete` in
+v1 or `loopercli workflows`. A put replaces the complete definition. A task
+selects a preset with `tasks.create.workflow` or `loopercli create --workflow`:
+an explicit key (or `none`) wins over `projects.default_workflow`. Templates
+and scheduled tasks ignore that default; an explicit workflow together with a
+template is invalid.
+
+Creation atomically stores `tasks.workflow`, copies its roles as version 1
+with `via=workflow`, merges fixed Profile choices into task overrides (a
+conflicting explicit choice is invalid), and writes its task budget. Later
+replacement or deletion affects future tasks only; deletion clears project
+defaults. `start_over` restores roles from the snapshot. Workflow roles may
+run even with `planner_roles` off; the Planner cannot change them. Their fixed
+Profiles are operator choices, independent of the project's list of Profiles
+the Planner may choose.
+
+The snapshot overlays retry limits, review policy and dependency conditions
+on current project execution settings; escalation enables user gates. A
+work step without a role uses `work_role` when set. Only the Planner receives
+the workflow instructions, in its Task section alongside the rules already
+enforced. Tasks without a workflow retain their prompt and execution paths.
+Review panels and verification rules are validated and stored here; their
+execution, workflow settings UI and configuration transfer are separate work.
 
 ### A task's Planner's tools
 
@@ -4666,8 +4692,9 @@ PostgreSQL is a hard startup dependency. All data paths:
 
 | Table | Purpose |
 |---|---|
-| `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), and the execution settings (`project_execution`) |
-| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history), `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement), and `workspace_dir`, `workspace_mode` and `workspace_base` ([Task workspaces](#task-workspaces)); `manager_id` (the Manager that created it, which hears of its progress and end), `template` (JSON snapshot of the task template it came from, NULL without one) and `origin_thread` (the web chat thread it was asked for in) |
+| `workflows` | Operator presets: key, unique name, description, typed JSON definition and update time; deletion clears only project defaults |
+| `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), the execution settings (`project_execution`), and nullable `default_workflow` |
+| `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history), `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement), and `workspace_dir`, `workspace_mode` and `workspace_base` ([Task workspaces](#task-workspaces)); `manager_id` (the Manager that created it, which hears of its progress and end), `template` (JSON snapshot of the task template it came from, NULL without one), `workflow` (immutable workflow snapshot, NULL without one) and `origin_thread` (the web chat thread it was asked for in) |
 | `task_worktrees` | A worktree task's git worktree ([Task workspaces](#task-workspaces)), one per task (going with it): `repo_dir` and `subdir` (the workspace in its repository), `path`, `branch`, `base_commit`, `links`, `state` (`active`, `removed`), `result_commit` (the branch's tip when it was removed), `created_at`, `removed_at` |
 | `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column) |
 | `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |

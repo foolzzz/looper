@@ -75,7 +75,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import PurePosixPath
 from typing import Any
@@ -217,6 +217,21 @@ class ProjectExecution:
     room_consult_budget_usd: float | None = None
     room_consult_timeout_seconds: int | None = None
     room_consults_per_task: int | None = None
+
+    def overlaid(self, workflow: Mapping[str, Any] | None) -> ProjectExecution:
+        """Apply the immutable task workflow over the project's current settings."""
+        if not workflow:
+            return self
+        fields: dict[str, Any] = {
+            "review_policy": ReviewPolicy.ALL if workflow.get("review_all") else ReviewPolicy.PLANNER,
+            "dependency_conditions": (DependencyConditions.ON if workflow.get("dependency_conditions")
+                                      else DependencyConditions.OFF),
+        }
+        if workflow.get("max_step_retries") is not None:
+            fields["max_step_retries"] = workflow["max_step_retries"]
+        if workflow.get("escalate_on_exhaustion"):
+            fields["user_gates"] = UserGates.ON
+        return replace(self, **fields)
 
     @property
     def review_all(self) -> bool:
