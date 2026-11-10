@@ -66,7 +66,6 @@ def test_an_unresolved_condition_reply_retries_without_another_event(
             {"id": "g1", "action": "cancel", "resolution": "Source unavailable"}]),
         chat("Keep the blocked branch.", action, steps=[blocked] if action == "replan" else [step("s3", "s2")]),
         chat("Skip s2 because the gate cannot pass."),
-        *([chat("Skip s3 because s2 was skipped.")] if action == "add_steps" else []),
     )
 
     async def scenario(h: Any) -> None:
@@ -78,13 +77,90 @@ def test_an_unresolved_condition_reply_retries_without_another_event(
     h = drive(claude, always(WORK_OK), scenario)
     assert h.final().payload["status"] == "completed"
     assert h.work_items == []
-    assert all("[CHAT] Step s2 can no longer start" in claude.turns()[i]["text"] for i in (2, 3))
+    assert "[CHAT] Step s2 can no longer start" in claude.turns()[2]["text"]
+    assert "broke the reply contract" in claude.turns()[3]["text"]
+    assert "s2" in claude.turns()[3]["text"] and "unsatisfiable" in claude.turns()[3]["text"]
     rows = {row["key"]: row for row in agent_db.store.steps["t1"].values()}
     assert rows["s2"]["status"] == "skipped"
     if action == "add_steps":
-        assert rows["s3"]["status"] == "skipped"
+        assert "s3" not in rows  # The rejected reply must not change the plan.
     assert sum(entry["kind"] == "condition_blocked" and entry["step_id"] == rows["s2"]["id"]
                for entry in agent_db.store.journal["t1"]) == 1
+
+
+@pytest.mark.parametrize("failure", ["replan", "add_steps", "runtime_error"])
+def test_a_condition_without_inflight_work_fails_after_an_unresolved_turn(
+    planner_claude: Any, agent_db: Any, failure: str,
+) -> None:
+    agent_db.get_task_project.return_value = {**_project(), "dependency_conditions": "on", "user_gates": "on"}
+    gate = {"id": "g1", "kind": "gate", "topic": "Choose source", "depends_on": [],
+            "agenda": [{"question": "Which source?"}]}
+    blocked = {**step("s2", "g1"), "ready_when": {"step": "g1", "on": "passed"}}
+    unresolved = (chat("Keep the blocked branch.", failure,
+                       steps=[blocked] if failure == "replan" else [step("s3", "s2")])
+                  if failure != "runtime_error" else "<error>")
+    claude = planner_claude(
+        plan(gate, blocked),
+        chat("Cancel the source gate.", gates=[
+            {"id": "g1", "action": "cancel", "resolution": "Source unavailable"}]),
+        unresolved, unresolved, "<error>",
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.planner._plan is not None and h.planner._plan.waiting_gates())
+        await h.say("Cancel g1.")
+        await h.finished()
+
+    h = drive(claude, always(WORK_OK), scenario)
+    assert h.final().payload["status"] == "failed"
+    assert "condition" in h.final().payload["summary"]
+    assert len(claude.turns()) == (3 if failure == "runtime_error" else 4)
+    assert h.work_items == []
+    rows = {row["key"]: row for row in agent_db.store.steps["t1"].values()}
+    assert rows["s2"]["status"] == "pending" and "s3" not in rows
+    assert not any(entry["kind"] == "decision" and entry["step_id"] == rows["s2"]["id"]
+                   for entry in agent_db.store.journal["t1"])
+
+
+def test_condition_replans_cannot_keep_replacing_the_blocked_step_forever(
+    planner_claude: Any, agent_db: Any, monkeypatch: Any,
+) -> None:
+    agent_db.get_task_project.return_value = {**_project(), "dependency_conditions": "on", "user_gates": "on"}
+    gate = {"id": "g1", "kind": "gate", "topic": "Choose source", "depends_on": [],
+            "agenda": [{"question": "Which source?"}]}
+    claude = planner_claude(
+        plan(gate, {**step("s2", "g1"), "ready_when": {"step": "g1", "on": "passed"}}),
+        chat("Cancel the source gate.", gates=[
+            {"id": "g1", "action": "cancel", "resolution": "Source unavailable"}]),
+    )
+    attempts = 0
+
+    async def scenario(h: Any) -> None:
+        nonlocal attempts
+        await h.start()
+        await h.until(lambda: h.planner._plan is not None and h.planner._plan.waiting_gates())
+        turn = h.planner._turn
+
+        async def replace_blocked(message: str) -> str:
+            nonlocal attempts
+            if "can no longer start" not in message:
+                return await turn(message)
+            attempts += 1
+            assert attempts <= 8, "condition recovery kept creating blocked steps without yielding"
+            return chat("Replace the blocked branch.", "replan", steps=[{
+                **step(f"replacement{attempts}", "g1"), "ready_when": {"step": "g1", "on": "passed"},
+            }])
+
+        monkeypatch.setattr(h.planner, "_turn", replace_blocked)
+        await h.say("Cancel g1.")
+        await h.finished()
+
+    h = drive(claude, always(WORK_OK), scenario)
+    assert h.final().payload["status"] == "failed"
+    assert "condition" in h.final().payload["summary"]
+    assert 1 < attempts <= 8
+    assert h.work_items == []
 
 
 def test_unconditional_ready_steps_keep_all_verified_semantics() -> None:

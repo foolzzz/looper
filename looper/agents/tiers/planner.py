@@ -2525,16 +2525,23 @@ class PlannerAgent:
             await self._dispatch_ready(plan)
 
     async def _blocked_conditions(self, plan: TaskPlan) -> bool:
-        """Offer impossible starts to the Planner; failed turns retry on the next event."""
+        """Resolve impossible starts; only in-flight work can defer a failed turn to another event."""
         changed = False
+        # Allow a cascade through the current pending steps, but bound replans that keep inventing blocked ones.
+        turns_left = max(2, 2 * sum(s.status == "pending" for s in plan.steps))
         while plan.status in _LIVE and not plan.has_failed:
             blocked = next((s for s in plan.steps if s.status == "pending"
                             and s.step_id not in self._condition_attempts
-                            and (plan.ready_state(s) is State.UNSATISFIABLE if s.ready_when is not None else
-                                 any(source is None or source.status == "skipped"
-                                     for source in (plan.step(sid) for sid in s.depends_on)))), None)
+                            and self._cannot_start(plan, s)), None)
             if blocked is None:
                 break
+            if turns_left == 0:
+                await self._fail_plan(plan, reason="Planner exceeded the blocked condition recovery limit",
+                                      model_closeout=False)
+                break
+            if not await self._within_budget(plan):
+                break
+            turns_left -= 1
             self._condition_attempts.add(blocked.step_id)
             labels = plan.labels()
             condition = (plan.condition_text(blocked) if blocked.ready_when is not None else
@@ -2560,6 +2567,21 @@ class PlannerAgent:
                 reply = parse_chat(text, view)
                 if reply.action not in (ChatAction.NONE, ChatAction.ADD_STEPS, ChatAction.REPLAN) or reply.gates or reply.waits:
                     raise ProtocolError("Use none, add_steps or replan to resolve the blocked condition")
+                if reply.action is not ChatAction.NONE:
+                    # Preview the same replacement and additions without mutating or saving the live plan.
+                    after = replace(plan, steps=[replace(s) for s in plan.steps])
+                    keep = {spec.id for spec in reply.steps}
+                    for s in after.steps:
+                        if reply.action is ChatAction.REPLAN and (s.label in reply.stop or
+                                                                 s.status == "pending" and s.label not in keep):
+                            s.status = "skipped"
+                    self._add_steps(after, reply.steps)
+                    pending = after.step(blocked.step_id)
+                    if (pending is not None and pending.status == "pending" and self._cannot_start(after, pending)
+                            and not any(s.status == "dispatched" for s in after.steps)):
+                        raise ProtocolError(f"Step {blocked.label} remains pending with an unsatisfiable condition "
+                                            "and no Worker in flight; use none to skip it or replan to remove it "
+                                            "or make its condition satisfiable")
                 return reply
 
             try:
@@ -2567,6 +2589,10 @@ class PlannerAgent:
                                         + "\nAllowed actions: none (skip this step), add_steps, replan.", check)
             except PlannerTurnError as exc:
                 await self._activity("error", f"Planner could not resolve condition for {blocked.label}: {exc}"[:500])
+                if not any(s.status in _IN_FLIGHT for s in plan.steps):
+                    await self._fail_plan(plan, reason=f"Planner could not resolve condition for {blocked.label}: {exc}",
+                                          model_closeout=False)
+                    break
                 continue
             if reply.action is ChatAction.NONE:
                 self._skip(blocked)
@@ -2581,6 +2607,12 @@ class PlannerAgent:
                 self._condition_attempts.discard(blocked.step_id)
             changed = True
         return changed
+
+    @staticmethod
+    def _cannot_start(plan: TaskPlan, step: PlanStep) -> bool:
+        return (plan.ready_state(step) is State.UNSATISFIABLE if step.ready_when is not None else
+                any(source is None or source.status == "skipped"
+                    for source in (plan.step(sid) for sid in step.depends_on)))
 
     @classmethod
     def _accepted_entry(cls, plan: TaskPlan, step: PlanStep) -> JournalEntry | None:
