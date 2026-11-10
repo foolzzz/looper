@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.119] - 2026-11-10
+
+### Fixed
+
+- **Review panel follow-ups.** ([#1192](https://github.com/foolzzz/looper/pull/1192))
+  - A workflow with a review panel no longer reviews its verification step through `review_all` or an explicit review; a workflow without a panel keeps the ordinary review rules.
+  - The `looper_tasks` compact task view shows each panel seat's verdict (pass, fail or pending), blocking and suggestion counts, up to five bounded findings and adjudication reasons.
+  - The Pipeline card shows panel findings (member, level, location, text) instead of `[object Object]`, and `on: completed` edges stay on the work node in the Pipeline layout.
+  - A work result saved before review panels still gets the developer runtime check, using the developer's last run record.
+  - Tasks without a workflow are unchanged.
+
 ## [2.14.118] - 2026-11-10
 
 ### Added
