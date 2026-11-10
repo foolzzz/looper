@@ -3633,7 +3633,8 @@ class PlannerAgent:
                     self._claude.set_turn_tools(PlannerTurnTools(self._ops, self._token))
                 if isinstance(self._claude, RunnerSession):
                     async def limits() -> TurnLimits:
-                        settings = await load_agent_settings(AgentType.PLANNER, plan.project_id or None, self._task_id)
+                        settings = await load_agent_settings(AgentType.PLANNER, plan.project_id or None, self._task_id,
+                                                             profile_id=process.launch.profile.id)
                         if settings.error or settings.profile_error:
                             raise RuntimeError(settings.error or settings.profile_error)
                         execution = await self._read_execution()
