@@ -17,6 +17,7 @@ export const SETTINGS_PAGES = [
   { id: "runtimes", label: "Agent Runtimes", icon: Cpu },
   { id: AGENT_PROFILE.slug, label: AGENT_PROFILE.plural, icon: Bot },
   { id: "roles", label: "Roles", icon: Users },
+  { id: "workflows", label: "Workflows", icon: Users },
   { id: "managers", label: "Managers", icon: UserCog },
   { id: "clients", label: "API clients", icon: KeyRound },
   { id: "catalog", label: "Skills & MCP", icon: Puzzle },

@@ -3,13 +3,13 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TasksPage } from "@/pages/tasks";
-import { fetchTasks, fetchProjectsList, type TaskInfo, type TasksPage as TaskPage } from "@/lib/api";
+import { fetchTasks, fetchWorkflows, fetchProjectsList, type Workflow, type Project, type TaskInfo, type TasksPage as TaskPage } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
-  fetchTasks: vi.fn(), fetchProjectsList: vi.fn(), fetchManagers: vi.fn(async () => []),
+  fetchWorkflows: vi.fn(async () => []), fetchTasks: vi.fn(), fetchProjectsList: vi.fn(), fetchManagers: vi.fn(async () => []),
 }));
-vi.mock("@/components/agent-profiles", () => ({ AgentProfileSelect: () => null }));
+vi.mock("@/components/agent-profiles", () => ({ AgentProfileSelect: ({ id, value, disabled }: { id: string; value: string; disabled?: boolean }) => <select id={id} value={value} disabled={disabled} onChange={() => {}}><option value={value}>{value}</option></select> }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const task = (id: string, day: number): TaskInfo => ({
@@ -36,6 +36,7 @@ describe("task list polling and pagination", () => {
   }[];
 
   beforeEach(() => {
+    vi.mocked(fetchWorkflows).mockResolvedValue([]);
     vi.useFakeTimers();
     requests = [];
     vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
@@ -68,6 +69,39 @@ describe("task list polling and pagination", () => {
     await act(async () => el!.click());
   };
   const rows = () => [...container.querySelectorAll(".divide-y p.truncate")].map((el) => el.textContent);
+
+  it.each([
+    { rows: [], defaultKey: null, expected: null },
+    { rows: [{ key: "dev", name: "Development", profiles: {}, roles: [], review_panel: null, verification: null }], defaultKey: null, expected: "none" },
+    { rows: [{ key: "dev", name: "Development", profiles: { worker: "fixed" }, roles: [], review_panel: { members: ["review_a", "review_b"], accept_when: { all_of: ["review_a", "review_b"] } }, verification: { role: "verify_staging", max_rounds: 2 } }], defaultKey: "dev", expected: "dev" },
+  ])("selects a workflow in the create form ($expected)", async ({ rows, defaultKey, expected }) => {
+    vi.mocked(fetchWorkflows).mockResolvedValue(rows as Workflow[]);
+    vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [{ project_id: "demo", name: "Demo", work_dir: "", default_workflow: defaultKey } as Project], projects_root: "" });
+    await show("project=demo");
+    await finish(0, page([]));
+    await click("New Task");
+    const select = container.querySelector<HTMLSelectElement>("#workflow-choice");
+    expect(select?.value ?? null).toBe(expected);
+    if (expected === "dev") {
+      expect(container.textContent).toContain("all (review_a passes, review_b passes)");
+      expect(container.textContent).toContain("verify_staging (2 rounds)");
+      const fixed = container.querySelector<HTMLSelectElement>("#new-task-profile-worker")!;
+      expect(fixed.disabled).toBe(true);
+      expect(fixed.value).toBe("fixed");
+    }
+    if (expected === "none") {
+      await act(async () => { select!.value = "dev"; select!.dispatchEvent(new Event("change", { bubbles: true })); });
+      expect(select!.value).toBe("dev");
+    }
+    const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => Response.json({ status: "ok", result: { task_id: "created", project_id: "demo" } }));
+    vi.stubGlobal("fetch", fetcher);
+    await fill('textarea[placeholder="Describe what this task should accomplish..."]', "Implement a small change");
+    await fill('input[placeholder="~/projects/my-app"]', "/workspace");
+    await click("Create");
+    const body = JSON.parse(fetcher.mock.calls[0][1]!.body as string);
+    expect(body.workflow).toBe(expected === null ? undefined : "dev");
+    expect(body.profile_overrides).toBeUndefined();
+  });
 
   it("shows the Running filter count and requests it without changing an executing badge", async () => {
     const executing: TaskInfo = { ...first, status: "executing", group: "in_progress" };

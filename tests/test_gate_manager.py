@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -59,7 +60,7 @@ def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route, text: str = "Postgre
             manager.ops = SimpleNamespace(platform=SimpleNamespace(task_router=SimpleNamespace(
                 has_planner=lambda task_id: True)), tools_problem=tools_problem,
                 asks_in=lambda message_id: False, begin_turn=lambda turn, binding=None: "", publish_binding=lambda binding: None, end_turn=lambda turn: None,
-                library_with_server=library_with_server)
+                library_with_server=library_with_server, current_listing=AsyncMock(return_value=[]))
             await manager._handle(MessageEnvelope.create(
                 source=LARK, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
                 payload={"text": text, "channel_context": {"chat_id": "oc_dm", "chat_type": "p2p",

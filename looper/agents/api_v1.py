@@ -205,6 +205,7 @@ _CONFIG_PROPERTIES = {
     "format": _STR, "looper_version": _STR, "exported_at": _STR, "secrets": _STR,
     "runtimes": _array(), "providers": _array(), "models": _array(), "profiles": _array(),
     "settings": _OBJ, "channels": _array(), "catalog": _array(), "installs": _array(), "projects": _array(),
+    "workflows": _array(),
     "gateway": _object({"aliases": _array(_object({"alias": _STR,
         "model": _object({"provider": _STR, "name": _STR, "protocol": {"const": "openai-chat", "type": "string"}}, closed=True)},
         closed=True))}, [], closed=True),
@@ -234,6 +235,7 @@ RESULTS: dict[str, dict[str, Any]] = {
     "tasks.list": _object({"tasks": _array(_object(_LISTED)), "more": _BOOL}),
     "tasks.get": _object({
         **_LISTED, "phase": _NULL_STR, "work_dir": _NULL_STR, "requirement": _NULL_STR, "steps": _array(),
+        "workflow": {"type": ["object", "null"]},
         "waits": _array(), "roles": _array(), "supplements": _array(), "latest_progress": _NULL_STR,
         "result": _NULL_STR, "cost_usd": {"type": ["number", "null"]}, "concurrency": _OBJ, "gates": _array(),
     }, [*_LISTED, "phase", "work_dir", "requirement", "steps", "waits", "supplements", "latest_progress", "result",

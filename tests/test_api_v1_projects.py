@@ -30,7 +30,7 @@ def test_project_schemas_cover_canonical_execution_columns_and_ordinary_operatio
     assert set(schemas["ProjectExecution"]["properties"]) == set(EXECUTION_COLUMNS)
     assert set(schemas["Project"]["properties"]) == set(EXECUTION_COLUMNS) | {
         "project_id", "name", "description", "work_dir", "background", "created_at", "updated_at",
-        "task_count", "active_count", "schedule_count"}
+        "task_count", "active_count", "schedule_count", "default_workflow"}
     for action in ("list", "create", "update", "delete"):
         operation = api_v1.find("POST", f"/api/v1/project_admin/{action}")
         assert operation is not None and operation.tool is None and not operation.hand

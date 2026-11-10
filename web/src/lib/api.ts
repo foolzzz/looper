@@ -157,6 +157,7 @@ export interface ProjectExecution {
   planner_roles: "off" | "on" | null;
   /** Whether Planners may compose dependency conditions; null = "off". */
   dependency_conditions: "off" | "on" | null;
+  default_workflow?: string | null;
   /** Whether a wait may run a shell command as the server's user; null = "off". */
   wait_commands: "off" | "on" | null;
   /** How long such a role's prompt and its harness may each be, 500 to 20,000 characters; null = 8,000. */
@@ -765,6 +766,7 @@ type TaskProjectChoice =
 export async function createTask(
   params: {
     requirement: string;
+    workflow?: string;
     /** The directory the task runs in (absolute or ~/...); omit to use the project's default. */
     work_dir?: string;
     config?: Record<string, unknown>;
@@ -1845,6 +1847,7 @@ export async function setTaskAgents(
 }
 
 export interface TaskDetail extends TaskInfo {
+  workflow?: Workflow | null;
   /** The task template the task was created from, as it said then; null for none. */
   template?: {
     key: string;
@@ -4546,4 +4549,29 @@ export async function deleteManagerTemplate(id: string, key: string): Promise<Ma
   const result = await callV1<ManagersSnapshot>("/api/v1/manager_templates/delete", { manager_id: id, key });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;
+}
+
+/** A reusable workflow; task detail holds the immutable creation snapshot. */
+export interface Workflow {
+  key: string; name: string; description: string;
+  profiles: Partial<Record<TaskRole, string>>;
+  roles: { key: string; kind: "work" | "review"; role_prompt: string; profile_id?: string | null }[];
+  work_role: string | null;
+  review_panel: { members: string[]; accept_when: Condition } | null;
+  max_step_retries: number | null;
+  verification: { role: string; max_rounds: number } | null;
+}
+export async function fetchWorkflows(): Promise<Workflow[]> {
+  const result = await callV1<{ workflows: Workflow[] }>("/api/v1/workflows/list", {});
+  if ("status" in result) throw new Error(result.impact);
+  return result.workflows;
+}
+export async function putWorkflow(definition: unknown): Promise<void> {
+  const result = await callV1("/api/v1/workflows/put", definition);
+  if (result && typeof result === "object" && "impact" in result) throw new Error(String(result.impact));
+}
+export async function deleteWorkflow(key: string, confirmation?: V1PendingConfirmation): Promise<void | V1PendingConfirmation> {
+  const result = confirmation ? await confirmV1<{ deleted: string }>(confirmation.confirmation_id, confirmation.session)
+    : await callV1<{ deleted: string }>("/api/v1/workflows/delete", { key });
+  if ("status" in result) return result;
 }

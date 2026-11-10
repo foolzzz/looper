@@ -272,7 +272,7 @@ def test_existing_tool_operations_keep_compact_list_full_project_and_name_deleti
                 api_v1.validate_arguments(api_v1.find("POST", path).result, result)
                 if action == "list":
                     assert result == {"projects": [{"project": "Example", "work_dir": None, "tasks": 0,
-                        "active_tasks": 0, "schedules": 0, "background": "Background"}]}
+                        "active_tasks": 0, "schedules": 0, "background": "Background", "dependency_conditions": None}]}
                 elif action == "delete":
                     assert result == {"deleted": "Example"}
                 else:

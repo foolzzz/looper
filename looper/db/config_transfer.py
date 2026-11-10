@@ -154,7 +154,7 @@ async def read_projects(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     from .projects import EXECUTION_COLUMNS
 
     rows = await conn.fetch(
-        f"SELECT id, name, description, background, {', '.join(EXECUTION_COLUMNS)} FROM projects "
+        f"SELECT id, name, description, background, default_workflow, {', '.join(EXECUTION_COLUMNS)} FROM projects "
         "ORDER BY lower(name)"
     )
     return [dict(row) for row in rows]

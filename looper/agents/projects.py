@@ -143,6 +143,7 @@ def project_view(row: dict[str, Any]) -> dict[str, Any]:
         "description": row["description"],
         "work_dir": row["work_dir"],
         "background": row["background"],
+        "default_workflow": row.get("default_workflow"),
         **ProjectExecution.from_row(row).view(),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -170,6 +171,12 @@ def _project_fields(data: dict[str, Any], *, update: bool) -> dict[str, Any]:
             fields["work_dir"] = project_work_dir(data["work_dir"])
         if "background" in data:
             fields["background"] = project_background(data["background"])
+        if "default_workflow" in data:
+            from .task_templates import KEY_PATTERN
+            key = data["default_workflow"]
+            if key is not None and (not isinstance(key, str) or not re.fullmatch(KEY_PATTERN, key) or key == "none"):
+                raise ValueError("default_workflow must be a workflow key or null")
+            fields["default_workflow"] = key
         if execution := execution_fields(data):
             fields["execution"] = execution
     except ValueError as exc:
@@ -280,6 +287,8 @@ async def create_project(data: dict[str, Any]) -> dict[str, Any]:
             row = await db_projects.create_project(**fields)
     except asyncpg.UniqueViolationError:
         raise _name_taken(fields["name"]) from None
+    except asyncpg.ForeignKeyViolationError:
+        raise RequestError(HTTP_400, "default_workflow must name an existing workflow") from None
     return project_view(row)
 
 
@@ -331,6 +340,8 @@ async def update_project(project_id: str, data: dict[str, Any], *, manager_id: s
                 updated = await db_projects.update_project(project_id, **fields, pool=conn)
     except asyncpg.UniqueViolationError:
         raise _name_taken(fields["name"]) from None
+    except asyncpg.ForeignKeyViolationError:
+        raise RequestError(HTTP_400, "default_workflow must name an existing workflow") from None
     if not updated:
         raise RequestError(HTTP_404, f"project {project_id!r} not found")
     return project_view(await _existing_project(project_id, manager_id=manager_id))
@@ -970,6 +981,7 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
     progress = [entry for entry in journal if entry.get("kind") == "progress"]
     return {
         **task_listed(task),
+        "workflow": task.get("workflow"),
         "phase": task.get("phase"),
         "work_dir": task.get("work_dir"),
         "requirement": task.get("requirement"),
