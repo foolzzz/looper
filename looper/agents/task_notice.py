@@ -28,6 +28,7 @@ from .message import builtin_channel_id, is_lark, parse_channel_id
 
 NAME_CHARS = 40
 LEAD_CHARS = 300
+DELIVERY_SUMMARY_CHARS = 600
 # The start of the second section of a Markdown summary: a heading line after the first line.
 _NEXT_SECTION = re.compile(r"\n(?=#{1,6} )")
 
@@ -155,7 +156,7 @@ def lead(summary: str | None) -> str:
 
 
 def notice_text(task_id: str, name: str, status: str, summary: str | None, *, channel: NotifyChannel,
-                dashboard_url: str = "", extra: str | None = None) -> str:
+                dashboard_url: str = "", extra: str | None = None, delivery_summary: str | None = None) -> str:
     """What ended and how, the start of its summary (or closing note), ``extra`` (where a worktree task's work is),
     and the link to the task, as Markdown for ``channel``. ``name`` is what the user asked for, else the
     requirement; the task id when both are empty."""
@@ -165,6 +166,9 @@ def notice_text(task_id: str, name: str, status: str, summary: str | None, *, ch
     lines = [f"{head} · {shown}"]
     if text := lead(summary):
         lines.append(text)
+    if delivery_summary:
+        lines.append(delivery_summary if len(delivery_summary) <= DELIVERY_SUMMARY_CHARS else
+                     delivery_summary[:DELIVERY_SUMMARY_CHARS - 1].rstrip() + '…')
     if extra:
         lines.append(extra)
     lines.append(link_line(task_link(dashboard_url, task_id), channel))

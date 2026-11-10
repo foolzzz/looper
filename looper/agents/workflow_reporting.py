@@ -66,6 +66,7 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
     summary_roles: dict[str, None] = {}
     summary_reviews: dict[str, str] = {}
     summary_verification: dict[str, str] = {}
+    summary_escalations: list[str] = []
     ordinary_runs: dict[tuple[str, str, str], int] = {}
     for run in runs or []:
         metadata = run.get('metadata') or {}
@@ -74,8 +75,10 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
         role = _line(task_role.get('key') or task_role.get('id') or run.get('role'))
         runtime = profile.get('runtime') or {}
         runtime_type = runtime.get('type')
-        # Match runs API evidence rules: an explicit null is not a missing key.
-        reported = (metadata['model_reported'] if 'model_reported' in metadata else
+        # Older Cursor runs kept the routed model separately from their Auto display label.
+        # Otherwise an explicit null is not a missing key.
+        reported = (metadata['routed_model'] if runtime_type == 'cursor-agent' and metadata.get('routed_model') else
+                    metadata['model_reported'] if 'model_reported' in metadata else
                     metadata.get('model_display') if runtime_type == 'cursor-agent' else
                     None if runtime_type in ('codex', 'grok', 'pi', 'omp', 'dsh') else run.get('model'))
         details = (f'{role}: Profile {_line(profile.get("name") or profile.get("id"))}; 运行时 '
@@ -114,7 +117,9 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
                                    seat.get('status', '') if wrapped else '')
                 reviews.append(f'- {label} 第 {round_no} 轮 / {verdict}')
                 result = seat.get('result') if wrapped else seat
-                summary_reviews[f'{entry.step_id}/{member}'] = (
+                key = f'{entry.step_id}/{member}'
+                summary_reviews.pop(key, None)  # Keep the latest evidence order when a step is revisited.
+                summary_reviews[key] = (
                     f'{label} 第 {round_no} 轮 / '
                     + _verdict(member, result, seat.get('status', '') if wrapped else '', details=False))
             if data.get('stale'):
@@ -125,6 +130,7 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
         elif entry.kind is JournalKind.LATE_REVIEW:
             reviews.append(f'- 晚到 / 第 {rounds.get(entry.step.rsplit("/", 1)[0], 1)} 轮 / {_verdict(label, data)}')
         elif entry.kind is JournalKind.VERIFICATION_ROUND:
+            summary_verification.pop(entry.step_id, None)
             summary_verification[entry.step_id] = f'{label} 第 {data.get("attempt", "?")} 轮: {_line(data.get("status"))}'
             verification.append(f'- {label} 第 {data.get("attempt", "?")} 轮: HEAD {_line(data.get("head"))}; '
                                 f'结果 {_line(data.get("status"))}; git {_line(data.get("git"))}'
@@ -133,6 +139,7 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
         elif entry.kind is JournalKind.ESCALATION:
             escalations.append(f'- {label} 升级: {_line(data.get("reason"))}; '
                                f'关卡 {_line(", ".join(data.get("gates") or []))}')
+            summary_escalations.append(f'{_notice_piece(label, 60)} 升级: {_notice_piece(data.get("reason"), 80)}')
     for step in plan.steps:
         # Seats hold the final verdict after adjudication or a late response.
         if step.reviews and step.result is not None:
@@ -162,10 +169,12 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
                 conclusion.append(_line(gate.resolution))
             escalations.append(f'- {step.label} / {_line(gate.topic)}: {gate.state.value}; '
                                + ('; '.join(conclusion) or '尚无结论'))
+            summary_escalations.append(f'{_notice_piece(step.label, 60)} / {_notice_piece(gate.topic, 60)}: '
+                                       f'{gate.state.value}; {_notice_piece("; ".join(conclusion) or "尚无结论", 80)}')
     summary = _summary_text({
         "Roles": list(summary_roles) if runs is not None else ['运行记录读取失败；运行时和模型信息不可用'],
         "Reviews": list(summary_reviews.values()), "Verification": list(summary_verification.values()),
-        "Escalations": escalations,
+        "Escalations": summary_escalations,
     })
     record = {"sections": {name: [] for name in sections}, "remote_safety": REMOTE_SAFETY, "omitted": 0,
               "delivery_summary": summary}
@@ -226,7 +235,10 @@ def _summary_text(sections: Mapping[str, list[str]]) -> str:
     budget = (PROCESS_RECORD_SUMMARY_MAX_CHARS - reserved) // len(names)
     lines = ["## Process record"]
     for name in names:
-        kept, omitted = _fit_entries(sections.get(name, []), budget, "; ")
+        items = sections.get(name, [])
+        if name in ('Reviews', 'Verification'):
+            items = reversed(items)
+        kept, omitted = _fit_entries(items, budget, "; ")
         value = "; ".join(kept) or ("未记录" if not omitted else "详见完整记录")
         lines.append(f'{name}: {value}' + (f'（另 {omitted} 条，完整记录见下）' if omitted else ''))
     return "\n".join([*lines, pointer])

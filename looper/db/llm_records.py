@@ -438,7 +438,9 @@ async def process_record_runs(task_id: str, *, pool: asyncpg.Pool | None = None)
             || CASE WHEN metadata ? 'model_reported' THEN
                 jsonb_build_object('model_reported', metadata->'model_reported') ELSE '{{}}'::jsonb END
             || CASE WHEN metadata ? 'model_display' THEN
-                jsonb_build_object('model_display', metadata->'model_display') ELSE '{{}}'::jsonb END AS metadata
+                jsonb_build_object('model_display', metadata->'model_display') ELSE '{{}}'::jsonb END
+            || CASE WHEN metadata ? 'routed_model' THEN
+                jsonb_build_object('routed_model', metadata->'routed_model') ELSE '{{}}'::jsonb END AS metadata
             FROM llm_records WHERE task_id = $1 AND {TASK_RUN} ORDER BY created_at, id""", task_id)
     return [{**dict(row), "metadata": json.loads(row["metadata"])} for row in rows]
 

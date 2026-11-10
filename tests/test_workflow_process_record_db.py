@@ -121,6 +121,8 @@ def test_process_record_runs_preserve_reported_model_metadata(monkeypatch):
         cases = [({}, None), ({"model_display": "cursor-actual"}, "cursor-actual"),
                  ({"model_display": "cursor-display", "model_reported": "cursor-reported"}, "cursor-reported"),
                  ({"model_display": "cursor-display", "model_reported": None}, None),
+                 ({"model_display": "Auto Balance", "routed_model": "Grok 4.7"}, "Grok 4.7"),
+                 ({"model_reported": "Auto Balance", "routed_model": "Grok 4.7"}, "Grok 4.7"),
                  ({"model_display": None}, None),
                  *[({"model_display": "cursor-legacy", "profile": empty,
                      "agent": {"runtime": {"type": "cursor-agent"}}}, "cursor-legacy")
@@ -138,8 +140,8 @@ def test_process_record_runs_preserve_reported_model_metadata(monkeypatch):
         assert len(rows) == len(expected)
         for row, (rid, fields, reported) in zip(rows, expected):
             assert row["id"] == rid and row["model"] == "auto"
-            assert {key: row["metadata"][key] for key in ("model_display", "model_reported")
-                    if key in row["metadata"]} == {key: fields[key] for key in ("model_display", "model_reported")
+            assert {key: row["metadata"][key] for key in ("model_display", "model_reported", "routed_model")
+                    if key in row["metadata"]} == {key: fields[key] for key in ("model_display", "model_reported", "routed_model")
                                                  if key in fields}
             assert row["metadata"]["model_choice"] == {"model": "auto"}
             assert "system_prompt" not in row["metadata"]

@@ -533,7 +533,8 @@ class TaskRouter:
             })
 
         payload = envelope.payload
-        if ends_task(status) and (notice := self._notice(task, status, summary, branch_line)) is not None:
+        if ends_task(status) and (notice := self._notice(
+                task, status, summary, branch_line, delivery_summary=payload.get("delivery_summary"))) is not None:
             payload = {**payload, "notice": notice.payload()}
         await self._bus.publish(MessageEnvelope.create(
             source=TASK_ROUTER_ADDRESS,
@@ -548,7 +549,8 @@ class TaskRouter:
             task.status = status  # teardown persists this; it would default to "completed"
             await self._teardown_task(task_id)
 
-    def _notice(self, task: Task, status: str, summary: str | None, branch_line: str | None = None) -> Notice | None:
+    def _notice(self, task: Task, status: str, summary: str | None, branch_line: str | None = None, *,
+                delivery_summary: str | None = None) -> Notice | None:
         """The end notice of a Telegram or Lark task that recorded who to tell (``task_notice``); None for any
         other. The Manager sends it behind the task's progress. ``branch_line``: where a worktree task's work is."""
         channel = notify_channel(task.origin_channel_id)
@@ -557,7 +559,7 @@ class TaskRouter:
         name = db_tasks.task_name(title=task.title, goal_id=task.goal_id, requirement=task.requirement,
                                   task_id=task.task_id)
         text = notice_text(task.task_id, name, status, summary, channel=channel, dashboard_url=self._dashboard_url,
-                           extra=branch_line)
+                           extra=branch_line, delivery_summary=delivery_summary)
         return Notice(channel, task.notify, text, channel_id=task.origin_channel_id)
 
     async def _finish_workspace(self, task: Task) -> str | None:

@@ -4796,7 +4796,8 @@ class PlannerAgent:
                 "status": "completed",
                 "progress": plan.progress_summary(),
                 "summary": summary,
-                **({"process_record": process} if process is not None else {}),
+                **({"process_record": process, "delivery_summary": workflows.process_record_summary(process)}
+                   if process is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
@@ -4959,7 +4960,8 @@ class PlannerAgent:
                 "progress": plan.progress_summary(),
                 "summary": summary,
                 "fail_kind": fail_kind.value if fail_kind else None,
-                **({"process_record": process} if process is not None else {}),
+                **({"process_record": process, "delivery_summary": workflows.process_record_summary(process)}
+                   if process is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},

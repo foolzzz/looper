@@ -76,6 +76,31 @@ def _passed_on(router: TaskRouter, envelope: MessageEnvelope) -> list[dict[str, 
 
 @pytest.mark.usefixtures("agent_db")
 class TestTheNotice:
+    @pytest.mark.parametrize('channel,target', [('telegram', TELEGRAM_CHAT), ('lark', LARK_USER)])
+    @pytest.mark.parametrize('status', ['completed', 'failed'])
+    @pytest.mark.parametrize('long', [False, True])
+    def test_workflow_summary_follows_clipped_lead(self, tmp_path, channel, target, status, long):
+        router = _router(tmp_path)
+        _task(router, channel=f'channel-{channel}', notify=target)
+        delivery = ('## Process record\nRoles: '
+                    + '; '.join(f'role-{i} → cursor-agent/model-{i}' for i in range(20 if long else 1))
+                    + '\nReviews: passed\nVerification: completed\nEscalations: none')
+        assert (len(delivery) > 600) is long
+        summary = '## Delivered\n' + 'Result ' * 100 + '\n\n## Details\nDetails\n\n' + delivery
+        envelope = _status('task-n1', status, summary)
+        envelope.payload['delivery_summary'] = delivery
+        (passed,) = _passed_on(router, envelope)
+        text = passed['notice']['text']
+        assert '\n' + lead(summary) + '\n## Process record\n' in text
+        assert text.count('## Process record') == 1
+        appendix = text.split('\n## Process record\n', 1)[1].rsplit('\n', 1)[0]
+        assert len('## Process record\n' + appendix) <= 600
+        if long:
+            assert appendix.endswith('…')
+        else:
+            assert '## Process record\n' + appendix == delivery
+        assert 'Details' not in text
+
     def test_a_completed_telegram_task(self, tmp_path: Path) -> None:
         router = _router(tmp_path)
         _task(router, channel="channel-telegram", notify=TELEGRAM_CHAT)

@@ -75,6 +75,7 @@ def test_workflow_delivery_stores_separate_process_record(planner_claude, agent_
     summary = h.final().payload["summary"]
     assert summary.endswith("Full record: task page / looper_tasks get")
     appendix = summary.split("## Process record", 1)[1]
+    assert h.final().payload['delivery_summary'] == '## Process record' + appendix
     assert len("## Process record" + appendix) <= 1200
     assert all(text in appendix for text in ("Roles:", "codex", "reported-model", "first-profile",
                                            "Reviews:", "Verification:", "Escalations:"))
@@ -94,7 +95,42 @@ def test_task_without_workflow_keeps_delivery_bytes(planner_claude, agent_db, mo
     expected = ("## Why it ended\nStop\n\n## Done\n- nothing\n\n## Not done\n"
                 "- s1 (failed): failed: tests fail") if failed else FINAL_RESULT
     assert h.final().payload["summary"] == expected
+    assert 'delivery_summary' not in h.final().payload
     assert not records.called
+
+
+@pytest.mark.parametrize('status', ['completed', 'failed'])
+@pytest.mark.parametrize('long', [False, True])
+@pytest.mark.parametrize('workflow', [False, True])
+def test_web_completion_keeps_result_clip_and_separate_workflow_summary(tmp_path, agent_db, status, long, workflow):
+    import asyncio
+    from looper.agents.bus import MessageBus
+    from looper.agents.tiers.planner import TaskPlan
+    from looper.agents.workflow_reporting import process_record_summary, process_record
+
+    delivery = process_record_summary(process_record(TaskPlan('plan', 'goal', 'Deliver', ''), [], [])) if workflow else ''
+    body = 'Result ' * (400 if long else 1)
+    appendix = '\n\n' + delivery if workflow else ''
+
+    async def scenario():
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        try:
+            await manager._handle_goal_status(MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS, target=manager.agent_address,
+                message_type=MessageType.GOAL_STATUS,
+                payload={'status': status, 'summary': body + appendix,
+                         **({'delivery_summary': delivery} if workflow else {})},
+                metadata={'origin_channel_id': 'channel-web', 'origin_thread': 'web-thread'}))
+            return bus.get_queue('channel-web').get_nowait().payload['text']
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    text = asyncio.run(scenario())
+    assert text.endswith(body[:2000] + appendix)
+    assert text.count('## Process record') == int(workflow)
 
 
 @pytest.mark.parametrize("notices", [True, False])

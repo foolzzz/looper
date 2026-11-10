@@ -118,15 +118,19 @@ def test_text_section_order_survives_jsonb_key_reordering():
     ("cursor-agent", {"model_display": "actual-cursor"}, "actual-cursor"),
     ("cursor-agent", {"model_display": "display", "model_reported": "actual"}, "actual"),
     ("cursor-agent", {"model_display": "display", "model_reported": None}, "未记录"),
+    ("cursor-agent", {"model_display": "Auto Balance", "routed_model": "Grok 4.7"}, "Grok 4.7"),
+    ("cursor-agent", {"model_reported": "Auto Balance", "routed_model": "Grok 4.7"}, "Grok 4.7"),
     ("cursor-agent", {}, "未记录"),
     *[(runtime, {}, "未记录") for runtime in ("codex", "grok", "pi", "omp", "dsh")],
     ("claude-code", {}, "legacy-model"),
     ("codex", {"model_reported": "actual"}, "actual"),
 ])
 def test_reported_models_follow_runs_api_rules(runtime, metadata, expected):
-    record = process_record_text(process_record(task(), [], [{"id": 1, "role": "worker", "model": "legacy-model",
-        "metadata": {"profile": {"runtime": {"type": runtime}}, "model_choice": {"model": "auto"}, **metadata}}]))
+    data = process_record(task(), [], [{"id": 1, "role": "worker", "model": "legacy-model",
+        "metadata": {"profile": {"runtime": {"type": runtime}}, "model_choice": {"model": "auto"}, **metadata}}])
+    record = process_record_text(data)
     assert f"请求模型 auto; 报告模型 {expected}" in record
+    assert f'/{expected}' in data['delivery_summary']
 
 
 def test_many_runs_keep_all_sections_whole_entries_safety_and_omissions():
@@ -197,6 +201,63 @@ def test_delivery_summary_keeps_final_adjudicated_seat_verdict():
                      reviews={'s1/review_a': {'passed': False, 'findings': ['Blocking']}})]
     text = process_record_summary(process_record(plan, journal, []))
     assert '裁决后通过' in text and '失败' not in text
+
+
+def test_delivery_summary_fits_latest_steps_and_seats_before_older_verdicts():
+    from looper.agents.workflow_reporting import process_record_summary
+
+    journal = []
+    for number in range(1, 5):
+        label = f'step-{number}-check-the-delivery-with-complete-verification'
+        journal.extend((entry(JournalKind.REVIEW_ROUND, label, round=0,
+            reviews={seat: {'passed': number != 4, 'findings': []} for seat in ('review_a', 'review_b')}),
+            entry(JournalKind.VERIFICATION_ROUND, label, attempt=1,
+                  status='failed' if number == 4 else 'completed')))
+    summary = process_record_summary(process_record(task(), journal, []))
+    reviews, verification = summary.splitlines()[2:4]
+    assert reviews.startswith('Reviews: step-4-check-the-delivery-with-complete-verification 第 1 轮 / review_b: 失败')
+    assert 'review_a: 失败' in reviews
+    assert verification.startswith('Verification: step-4-check-the-delivery-with-complete-verification 第 1 轮: failed')
+    for line, total in ((reviews, 8), (verification, 4)):
+        kept = line.count('第 1 轮')
+        assert 0 < kept < total
+        assert f'另 {total - kept} 条' in line
+        assert 'step-1-' not in line
+    assert len(summary) <= 1200
+
+
+def test_delivery_summary_orders_revisited_steps_by_latest_evidence():
+    from looper.agents.workflow_reporting import process_record_summary
+
+    journal = []
+    for label, passed in [('s1', True), ('s2', True), ('s1', False)]:
+        journal.extend((entry(JournalKind.REVIEW_ROUND, label, round=0,
+                              reviews={'review_a': {'passed': passed}}),
+                        entry(JournalKind.VERIFICATION_ROUND, label, attempt=1,
+                              status='completed' if passed else 'failed')))
+    lines = process_record_summary(process_record(task(), journal, [])).splitlines()
+    assert lines[2].startswith('Reviews: s1 第 1 轮 / review_a: 失败')
+    assert lines[3].startswith('Verification: s1 第 1 轮: failed')
+
+
+@pytest.mark.parametrize('gate', [False, True])
+def test_delivery_summary_shortens_escalation_reason_but_full_record_keeps_it(gate):
+    from looper.agents.workflow_reporting import process_record_summary
+
+    reason = 'Needs approval ' * 33 + 'done!'
+    assert len(reason) == 500
+    plan = task(PlanStep('g1', 0, 'Approval', key='g1', gate=Gate('Continue?', (),
+        state=GateState.OPEN, resolution=reason))) if gate else task()
+    journal = [] if gate else [entry(JournalKind.ESCALATION, reason=reason, gates=['g1'])]
+    record = process_record(plan, journal, [])
+    line = process_record_summary(record).splitlines()[4]
+    assert ('g1 / Continue?: open' if gate else 's1 升级') in line
+    assert 'Needs approval' in line and '…' in line
+    assert 'done!' not in line
+    clipped = line.rsplit('; ', 1)[-1] if gate else line.split('升级: ', 1)[1]
+    assert len(clipped) <= 80
+    assert clipped.removesuffix('…').endswith(('Needs', 'approval'))
+    assert reason in process_record_text(record)
 
 
 def test_unique_run_history_cannot_starve_other_sections_or_hide_omissions():
