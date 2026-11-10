@@ -104,6 +104,7 @@ _WORKFLOWS = "workflows"
 _REVIEW_PANEL = "review_panel"
 _WORKFLOW_RULES = "workflow_rules"
 _GATE_PURPOSE = "gate_purpose"
+_VERIFICATION_PATHS = "verification_paths"
 _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
 _TASK_PROCESS_RECORD = "task_process_record"
@@ -507,6 +508,15 @@ async def _gate_purpose_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _verification_paths_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _VERIFICATION_PATHS):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('projects') AND attname = 'verification_paths' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
 class RegistrySchemaVersionError(RuntimeError):
     """The registry cannot be opened safely by this binary."""
 
@@ -735,6 +745,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE task_user_gates ADD COLUMN purpose TEXT NOT NULL DEFAULT 'discussion' "
                                "CHECK (purpose IN ('discussion', 'exhaustion', 'verification_exhaustion'))")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _GATE_PURPOSE)
+        if await _verification_paths_pending(conn):
+            await conn.execute("ALTER TABLE projects ADD COLUMN verification_paths TEXT[] "
+                               "CHECK (cardinality(verification_paths) <= 20)")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _VERIFICATION_PATHS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -778,4 +792,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)
             or await _dependency_conditions_pending(conn) or await _workflows_pending(conn)
             or await _review_panel_pending(conn)
-            or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)))
+            or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
+            or await _verification_paths_pending(conn)))

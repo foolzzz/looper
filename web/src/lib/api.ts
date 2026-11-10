@@ -147,6 +147,8 @@ export interface ProjectExecution {
   /** The paths Looper's worktrees link back to the directory they come from (its ignored local state, such as
    * .venv or .env): a task's worktree to its workspace, a step's to its task directory; null = none. */
   workspace_links: string[] | null;
+  /** Extra ignored paths copied read-only into workflow verification checkouts; null = none. */
+  verification_paths: string[] | null;
   /** Where a task that names no directory of its own runs; null = in place. A new project gets "worktree". */
   task_workspaces: WorkspaceMode | null;
   /** Whether the project's agents get the operator's Claude Code notes for their directory; null = "off". */

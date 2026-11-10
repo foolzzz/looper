@@ -39,6 +39,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -65,6 +67,7 @@ from ..run_usage import run_usage
 from ..knowledge import documents_label, load_knowledge
 from ..operator_notes import notes_note
 from ..project_execution import ProjectExecution
+from ..verification_writes import VerificationWrites
 from ..library import items_label, load_installed
 from ..runtimes import ADAPTERS, RunChannel, RuntimeAdapter, RuntimeUnsupported
 from ..runtimes.channel import DeliveryResult, RunHandle, RunStartError
@@ -494,6 +497,7 @@ class RunContext:
     head: str | None = None
     verification: dict[str, Any] | None = None
     verification_source: str | None = None
+    verification_writes: VerificationWrites | None = None
 
 
 def _verification_paths(work_dir: str) -> tuple[Path, list[str]]:
@@ -509,6 +513,21 @@ def _verification_gitlinks(root: Path) -> dict[str, bytes]:
                              capture_output=True, check=True, timeout=5).stdout
     return {os.fsdecode(name): metadata.split()[1] for entry in entries.split(b"\0") if entry
             for metadata, name in [entry.split(b"\t", 1)] if metadata.startswith(b"160000 ")}
+
+
+def _verification_write_paths(work_dir: str) -> tuple[Path, list[str]]:
+    root, paths = _verification_paths(work_dir)
+    gitlinks = _verification_gitlinks(root)
+    watched = []
+    for name in paths:
+        path = root / name
+        if name in gitlinks and not path.is_symlink():
+            if (path / ".git").exists():
+                _, nested = _verification_write_paths(str(path))
+                watched.extend(str(Path(name) / child) for child in nested)
+        else:
+            watched.append(name)
+    return root, watched
 
 
 def _verification_snapshot(work_dir: str) -> dict[str, Any]:
@@ -591,7 +610,8 @@ def _verification_baseline(work_dir: str, backup: Path) -> dict[str, Any]:
     if _verification_snapshot(work_dir) != current:
         return {**current, "error": "verification_baseline_changed"}
     manifest.write_text(json.dumps({"snapshot": current, "paths": saved, "ref": ref,
-                                    "submodules": submodules, "root": str(root.resolve())}))
+                                    "submodules": submodules,
+                                    "subdir": str(Path(work_dir).resolve().relative_to(root.resolve()))}))
     return current
 
 
@@ -600,7 +620,10 @@ def _restore_verification(work_dir: str, backup: Path, *, detached: bool = False
     try:
         before = json.loads((backup / "baseline.json").read_text())
         root, paths = _verification_paths(work_dir)
-        expected = Path(work_dir).resolve() if detached else Path(before["root"])
+        expected = Path(work_dir).resolve()
+        if not detached:
+            for _ in Path(before.get("subdir", ".")).parts:
+                expected = expected.parent
         if root.resolve() != expected:
             return False  # A deleted .git must not redirect rollback into an enclosing repository.
         saved = set(before["paths"])
@@ -642,7 +665,7 @@ def _restore_verification(work_dir: str, backup: Path, *, detached: bool = False
         return False
 
 
-def _verification_checkout(work_dir: str, backup: Path) -> str:
+def _verification_checkout(work_dir: str, backup: Path, runtime_paths: Collection[str] = ()) -> str:
     """Seed a private Git checkout with the source's staged, unstaged and untracked files.
 
     Objects and refs are private, with no remote pointing back to the developer's repository.
@@ -684,12 +707,129 @@ def _verification_checkout(work_dir: str, backup: Path) -> str:
                     # Resolve chains in the source, then point only into the private tree.
                     path.unlink()
                     path.symlink_to(os.path.relpath(tree / destination, path.parent))
+                    # The seed is readable too: its backup links must not point at the developer tree.
+                    seed_link = saved / "files" / name
+                    seed_link.unlink()
+                    seed_link.symlink_to(os.path.relpath(tree / destination, seed_link.parent))
             for name in manifest.get("submodules", []):
                 relocate_links(source / name, target / name, saved / "submodules" / name)
 
         relocate_links(root, tree, seed)
+        copied = _copy_verification_runtime(Path(work_dir), tree / Path(work_dir).resolve().relative_to(root.resolve()),
+                                            runtime_paths, repository_roots=(root, tree))
+        (backup / "runtime-paths.json").write_text(json.dumps(copied))
         ready.touch()
     return str(tree / Path(work_dir).resolve().relative_to(root.resolve()))
+
+
+def _verification_repository_relocations(repository_roots: tuple[Path, Path]) -> dict[str, str]:
+    """Map the developer's worktrees to the private checkout."""
+    root, checkout = (path.resolve() for path in repository_roots)
+    replacements = {str(root): str(checkout)}
+    # A task worktree often links the main worktree's environment. Its editable
+    # install names that main worktree, rather than the task directory.
+    worktrees = subprocess.run(["git", "-C", str(root), "worktree", "list", "--porcelain", "-z"],
+                              check=True, capture_output=True, text=True, timeout=5)
+    for field in worktrees.stdout.split("\0"):
+        if field.startswith("worktree "):
+            path = field.removeprefix("worktree ")
+            replacements[path] = replacements[str(Path(path).resolve())] = str(checkout)
+    return replacements
+
+
+def _relocate_verification_venv(source: Path, target: Path, repository_roots: tuple[Path, Path]) -> None:
+    """Relocate entry points and editable imports before executing a copied environment."""
+    replacements = _verification_repository_relocations(repository_roots)
+    replacements.update({str(source.absolute()): str(target.absolute()), str(source.resolve()): str(target.absolute())})
+    pattern = re.compile("(?:" + "|".join(re.escape(path) for path in sorted(replacements, key=len, reverse=True))
+                         + r""")(?=/|[\s'"\\]|$)""")
+    for path in target.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if path.suffix == ".pyc":
+            path.unlink()  # Cached editable finders may still contain the developer's paths.
+            continue
+        raw = path.read_bytes()
+        if b"\0" in raw:
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        relocated = pattern.sub(lambda match: replacements[match.group()], text)
+        if relocated.startswith("#!" + str(target / "bin" / "python")):
+            # The private path can exceed the kernel's shebang limit. Use the
+            # same shell/Python wrapper as installers do for long entry points.
+            shebang, _, body = relocated.partition("\n")
+            relocated = ("#!/bin/sh\n'''exec' " + shlex.join(shlex.split(shebang[2:]))
+                         + " \"$0\" \"$@\"\n' '''\n" + body)
+        if relocated != text:
+            mode = path.stat().st_mode
+            path.chmod(mode | 0o200)
+            try:
+                path.write_bytes(relocated.encode("utf-8"))
+            finally:
+                path.chmod(mode)
+
+
+def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str], *,
+                               repository_roots: tuple[Path, Path] | None = None) -> list[str]:
+    """Copy declared local state, never exposing a writable link to the source.
+
+    An explicitly declared workspace link may point outside the repository. Links
+    to regular files are dereferenced (for example a virtualenv's interpreter).
+    Links back into a repository worktree are relocated to the private checkout.
+    Other directory links must remain inside the declared tree; repository metadata
+    and special files are never runtime inputs.
+    """
+    copied = []
+    relocations = _verification_repository_relocations(repository_roots) if repository_roots and paths else {}
+
+    def copy(path: Path, destination: Path, boundary: Path, ancestors: frozenset[Path]) -> None:
+        resolved = path.resolve(strict=True)
+        if resolved in ancestors or ".git" in resolved.parts:
+            raise OSError("verification runtime path crosses its declared tree")
+        if (path.is_symlink() and not resolved.is_relative_to(boundary)
+                and (resolved.is_file() or resolved.is_dir())):
+            for origin in sorted(relocations, key=len, reverse=True):
+                if resolved.is_relative_to(origin):
+                    relocated = Path(relocations[origin]) / resolved.relative_to(origin)
+                    destination.symlink_to(os.path.relpath(relocated, destination.parent))
+                    return
+        if resolved.is_dir() and not resolved.is_relative_to(boundary):
+            raise OSError("verification runtime path crosses its declared tree")
+        if resolved.is_dir():
+            destination.mkdir()
+            for child in sorted(resolved.iterdir()):
+                if child.name == ".git":
+                    raise OSError("verification runtime paths must not contain repository metadata")
+                copy(child, destination / child.name, boundary, ancestors | {resolved})
+            if (resolved / "pyvenv.cfg").is_file():
+                _relocate_verification_venv(path, destination, repository_roots or (source, target))
+        elif resolved.is_file():
+            shutil.copy2(resolved, destination)
+            destination.chmod(destination.stat().st_mode & ~0o222)
+        else:
+            raise OSError("verification runtime path is not a regular file or directory")
+
+    for name in sorted(set(paths), key=lambda value: (len(Path(value).parts), value)):
+        relative = Path(name)
+        if relative.is_absolute() or not relative.parts or any(p in ("..", ".git") for p in relative.parts):
+            raise OSError("invalid verification runtime path")
+        if any(relative.is_relative_to(previous) for previous in copied):
+            continue
+        origin, destination = source / relative, target / relative
+        if not origin.exists():
+            raise OSError("declared verification runtime path is missing")
+        if not destination.parent.resolve().is_relative_to(target.resolve()):
+            raise OSError("verification runtime destination leaves the checkout")
+        if os.path.lexists(destination):
+            raise OSError("verification runtime path would replace repository files")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        resolved = origin.resolve(strict=True)
+        copy(origin, destination, resolved if resolved.is_dir() else resolved.parent, frozenset())
+        copied.append(name)
+    return copied
 
 
 @dataclass(frozen=True)
@@ -959,6 +1099,9 @@ class WorkerPool:
             if (manifest.get("task_id"), manifest.get("step_id"), manifest.get("role")) != (
                     expect.task_id, expect.step_id, expect.role.value):
                 raise AttachError(AdoptFailure.HOLD_MISMATCH, "the run does not match the held step")
+            if manifest.get("verification") is not None:
+                raise AttachError(AdoptFailure.PROTOCOL,
+                                  "verification write monitoring cannot resume across a control-plane restart")
             if run_id in self._tasks or run_id in self._active:
                 return AdoptResult(AdoptOutcome.FAILED, AdoptFailure.HOLD_MISMATCH, "the run is already attached")
             task_id, step_id, agent = expect.task_id, expect.step_id, expect.role
@@ -1559,6 +1702,8 @@ class WorkerPool:
                 return {"passed": False, "findings": [problem], "summary": problem}
             return {"status": "failed", "error": problem}
 
+        # Runtime inputs are project-owned configuration, never a model-supplied copy list.
+        project = await self._task_project(parent_task_id, worker_id)
         verification = None
         verification_source = None
         if payload.get("verification") is True and not is_verify:
@@ -1584,8 +1729,13 @@ class WorkerPool:
                     raise OSError(source["error"])
                 if source["git"]:
                     # New attempts get current source; only this run's profile fallback reuses its checkout.
+                    execution = ProjectExecution.from_row(project)
+                    backup = self._verification_backup(parent_task_id, worker_id, work_dir)
                     work_dir = await asyncio.to_thread(_verification_checkout, work_dir,
-                        self._verification_backup(parent_task_id, worker_id, work_dir))
+                        backup, (*execution.link_paths, *(execution.verification_paths or ())))
+                    copied = json.loads((backup / "runtime-paths.json").read_text())
+                    await self._activity(parent_task_id, worker_id, "phase",
+                        "Verification runtime inputs copied read-only: " + (", ".join(copied) or "none"))
                 verification = await asyncio.to_thread(_verification_baseline, work_dir,
                     self._verification_backup(parent_task_id, payload.get("task_id"), work_dir))
             except (OSError, ValueError, subprocess.SubprocessError):
@@ -1617,7 +1767,6 @@ class WorkerPool:
         settings = await _load_settings(agent)
         run_timeout, max_turns = settings.timeout_seconds, settings.max_turns
         # Read as the run starts: a later change reaches the next run, not this one.
-        project = await self._task_project(parent_task_id, worker_id)
         knowledge = await load_knowledge(self._runtime_root, project, work_dir,
                                          notes=ProjectExecution.from_row(project).notes_on)
         project_id = str((project or {}).get("id") or "") or None
@@ -1662,7 +1811,7 @@ class WorkerPool:
         launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
         runtime = launch.runtime
         kept = (self._keeper is not None and runtime.keepable and not hosted and not launch.steers
-                and launch.exit_code_reliable and bool(parent_task_id))
+                and launch.exit_code_reliable and bool(parent_task_id) and verification is None)
         token: str | None = None
         # The task's room and knowledge vault share the run's token and MCP entry.
         execution = ProjectExecution.from_row(project)
@@ -1870,7 +2019,10 @@ class WorkerPool:
                     raise
                 result = _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
                 break
-            if timeout is None and result.get("failure") == "verification_changed_code":
+            finally:
+                if ctx.verification_writes is not None:
+                    ctx.verification_writes.close()
+            if timeout is None and result.get("failure") in ("verification_changed_code", "verification_unavailable"):
                 break
             if ctx.fallback_reason is None:
                 if timeout is not None:
@@ -1942,6 +2094,21 @@ class WorkerPool:
                     await self.room_ops.room.presence_changed(parent_task_id, ctx.seat, online=True)
             logger.info("%s %s%s starting run: %s (cwd=%s)", role, worker_id, task_step, command[0], work_dir)
             try:
+                if ctx.verification is not None and ctx.verification["git"]:
+                    try:
+                        root, paths = await asyncio.to_thread(_verification_write_paths, work_dir)
+                        ctx.verification_writes = VerificationWrites(root, paths)
+                        ctx.verification_writes.start()
+                    except (OSError, subprocess.SubprocessError):
+                        logger.warning("worker %s cannot start verification write monitoring", worker_id, exc_info=True)
+                        if ctx.verification_writes is not None:
+                            ctx.verification_writes.close()
+                        error = "Verification write monitoring unavailable; the agent was not started."
+                        await handle.end()
+                        await recorder.finish(output_text=None, result_event=None, error=error,
+                                              outcome=RunOutcome.RUN_FAILED.value)
+                        return {"status": "failed", "failure": "verification_unavailable", "error": error,
+                                "summary": error, "verification": ctx.verification}
                 if isinstance(handle, KeptRun):
                     handle.set_record(recorder.record_id)
                 await handle.launch()
@@ -1957,7 +2124,8 @@ class WorkerPool:
                 error = f"Cannot prepare {runtime.label}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value)
-                return _verify_failed(error) if is_verify else _work_failed(error)
+                result = _verify_failed(error) if is_verify else _work_failed(error)
+                return await self._verification_result(ctx, result) if ctx.verification is not None else result
             except RunStartError as exc:
                 ctx.fallback_reason = "start_error"
                 if hosted:
@@ -1966,7 +2134,17 @@ class WorkerPool:
                 error = f"Cannot start {runtime.label}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value)
-                return {"status": "failed", "error": error}
+                result = {"status": "failed", "error": error}
+                return await self._verification_result(ctx, result) if ctx.verification is not None else result
+            except BaseException as exc:
+                # Launch can fail after it has started a process. Stop it before
+                # draining writes, just as the consuming path does on interruption.
+                await handle.end()
+                if ctx.verification is not None:
+                    result = await self._verification_result(ctx, {"status": "failed", "error": str(exc)})
+                    if not isinstance(exc, asyncio.CancelledError) and result.get("failure") == "verification_changed_code":
+                        return result
+                raise
 
             return await self._consume(ctx, handle, recorder, start=ConsumeStart.NEW)
 
@@ -1980,7 +2158,8 @@ class WorkerPool:
             if ctx.verification is None:
                 raise
             result = await self._verification_result(ctx, {"status": "failed", "error": str(exc)})
-            if isinstance(exc, asyncio.CancelledError) or result.get("failure") != "verification_changed_code":
+            if isinstance(exc, asyncio.CancelledError) or result.get("failure") not in (
+                    "verification_changed_code", "verification_unavailable"):
                 raise
             return result
         if ctx.verification is not None and "verification" not in result:
@@ -2246,7 +2425,9 @@ class WorkerPool:
             raise
         finally:
             self._inputs.pop(worker_id, None)
-            if not waited:
+            if not waited or ctx.verification is not None:
+                # Successful CLIs can leave children behind. End the whole run
+                # before the write monitor drains, including their final writes.
                 await _end_run()
         if finished is not None and finished in (result_event, last_result):
             await _report_finished(finished)
@@ -2325,11 +2506,21 @@ class WorkerPool:
                                    report: dict[str, Any] | None = None) -> dict[str, Any]:
         before = ctx.verification
         assert before is not None
+        writes = getattr(ctx, "verification_writes", None)
+        written_paths = []
+        monitoring_error = False
+        if writes is not None:
+            try:
+                written_paths = writes.finish()
+            except OSError:
+                monitoring_error = True
         after = await asyncio.to_thread(_verification_snapshot, ctx.work_dir)
         details = {**before, "head_after": after["head"], "status_sha256_after": after["status_sha256"],
-                   "content_sha256_after": after.get("content_sha256")}
+                   "content_sha256_after": after.get("content_sha256"), "written_paths": written_paths}
         reported = report if report is not None else result
         reasons = []
+        if written_paths:
+            reasons.append("file writes recorded during verification")
         if any(source.get("changed_files") or source.get("deleted_files") for source in (reported, result)):
             reasons.append("reported file changes")
         if before.get("error") or (before["git"] and (not after["git"] or after.get("error"))):
@@ -2355,6 +2546,15 @@ class WorkerPool:
         if before.get("limitation") == "report_only":
             note = "Verification guard: report only (working directory is not a Git repository)."
             result = {**result, "summary": f"{result.get('summary') or ''}\n{note}".strip()}
+        if monitoring_error:
+            details["monitoring_error"] = True
+            error = "Verification write monitoring failed; the result cannot be accepted."
+            failure = ("verification_changed_code" if result.get("failure") == "verification_changed_code"
+                       else "verification_unavailable")
+            result = {**result, "status": "failed", "failure": failure,
+                      "error": error, "summary": error}
+            if ctx.parent_task_id:
+                await self._activity(ctx.parent_task_id, ctx.worker_id, "error", error)
         return {**result, "verification": details}
 
     def _verification_backup(self, task_id: str, step_id: str | None, work_dir: str) -> Path:

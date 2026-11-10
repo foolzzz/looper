@@ -67,11 +67,14 @@ describe("TaskWorkspaces", () => {
 });
 
 describe("the project's links in its editor", () => {
-  const project = { workspace_links: [".venv", ".env"] } as Project;
+  const project = { workspace_links: [".venv", ".env"], verification_paths: ["staging/config"] } as Project;
 
   it("are one path per line, and blank lines are dropped", () => {
     const draft = executionDraft(project);
     expect(draft.workspace_links).toBe(".venv\n.env");
+    expect(draft.verification_paths).toBe("staging/config");
+    expect(executionChanges({ ...draft, verification_paths: " .env\n\nstaging/config " }, project))
+      .toEqual({ verification_paths: [".env", "staging/config"] });
     expect(executionChanges(draft, project)).toEqual({});
     expect(executionChanges({ ...draft, workspace_links: ".venv\n\n  node_modules \n" }, project))
       .toEqual({ workspace_links: [".venv", "node_modules"] });

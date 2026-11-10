@@ -15,6 +15,7 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "distill_lessons",
   "step_workspaces",
   "workspace_links",
+  "verification_paths",
   "max_step_retries",
   "planner_roles",
   "wait_commands",
@@ -38,7 +39,7 @@ const NUMBERS = new Set<keyof ProjectExecution>([
   ...ROOM_LIMITS.map((limit) => limit.field),
 ]);
 
-const LISTS = new Set<keyof ProjectExecution>(["workspace_links"]);
+const LISTS = new Set<keyof ProjectExecution>(["workspace_links", "verification_paths"]);
 
 export function executionDraft(project: Project): ExecutionDraft {
   const text = (value: unknown) => (value == null ? "" : Array.isArray(value) ? value.join("\n") : String(value));
@@ -200,6 +201,23 @@ export function ProjectExecutionFields({
             One path per line, relative to the directory: ignored local state a worktree would lack. In a task&apos;s
             worktree each is a link to the workspace&apos;s own, in a step&apos;s to the task directory&apos;s; shared,
             and never committed.
+          </p>
+        </div>
+        <div className="space-y-1">
+          {label("verification_paths", "Extra files for verification")}
+          <textarea
+            id={`${idPrefix}-verification_paths`}
+            value={draft.verification_paths}
+            onChange={set("verification_paths")}
+            aria-describedby={`${idPrefix}-verification_paths-help`}
+            placeholder={".env\nstaging/config"}
+            rows={3}
+            spellCheck={false}
+            className="flex w-full rounded-md border border-input bg-transparent px-3 py-1.5 font-mono text-sm text-foreground"
+          />
+          <p id={`${idPrefix}-verification_paths-help`} className="text-xs text-muted-foreground">
+            One ignored path per line, relative to the source directory. Workflow verification gets read-only copies
+            of these paths and the linked paths above in its private checkout.
           </p>
         </div>
         <div className="space-y-1">
