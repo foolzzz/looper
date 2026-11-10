@@ -1902,7 +1902,9 @@ async def delete_profile(profile_id: str) -> dict[str, Any]:
                                    f"task(s) that have not ended: {named}; clear the choice (looper_task_profile_set "
                                    "with a null profile_id, or define the role again without it) or wait for the "
                                    "task to end")
-    except asyncpg.ForeignKeyViolationError:  # selected since it was checked
+    except asyncpg.ForeignKeyViolationError as exc:  # referenced since it was checked
+        if exc.constraint_name == "agent_profiles_fallback_profile_id_fkey":
+            raise RegistryConflict("this Agent Profile is a fallback target: remove those references first") from None
         raise RegistryConflict(f"Agent Profile {row['name']!r} is still selected: select another profile there "
                                "first") from None
     return {"deleted": profile_id}

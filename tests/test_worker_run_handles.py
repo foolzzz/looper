@@ -488,6 +488,27 @@ def test_runs_outside_the_fallback_boundary_are_not_repeated(tmp_path, monkeypat
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
+def test_two_fallback_switches_are_recorded_in_order(tmp_path, monkeypatch, agent_db):
+    async def scenario():
+        first = ScriptedRun([], launch_error=RunStartError("first unavailable"))
+        second = ScriptedRun([], launch_error=RunStartError("second unavailable"))
+        third = ScriptedRun(_events())
+        async with _pool(tmp_path, monkeypatch, first, second, third) as (pool, _, results):
+            final = builtin_launch().settings
+            middle = replace(final, profile=replace(final.profile, id="middle", fallback_profile_id=final.profile.id))
+            initial = replace(final, profile=replace(final.profile, id="initial", fallback_profile_id="middle"))
+            monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=initial))
+            monkeypatch.setattr(worker, "fallback_settings", AsyncMock(side_effect=[middle, final]))
+            await _finish(pool, tmp_path)
+            history = [{"from": "initial", "to": "middle", "reason": "start_error"},
+                       {"from": "middle", "to": final.profile.id, "reason": "start_error"}]
+            assert results[0].payload["fallback"] == history
+            notes = [call.args[1] for call in agent_db.add_metadata.await_args_list if "fallback" in call.args[1]]
+            assert [note["fallback"] for note in notes] == [history[:1], history]
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
 @pytest.mark.parametrize("last_failure", ["timeout", "after_model_event"])
 def test_fallback_history_survives_final_timeout(tmp_path, monkeypatch, agent_db, last_failure):
     async def scenario():

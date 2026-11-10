@@ -141,12 +141,15 @@ async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None, rooms=False,
     load = AsyncMock(side_effect=lambda *args, **kwargs: settings)
     if fallback:
         await db.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id, fallback_profile_id) "
-                         "SELECT 'profile-primary', 'Primary', 'rt-claude-code', id, 'agent-claude-code-opus' "
+                         "SELECT 'profile-middle', 'Middle', 'rt-claude-code', id, 'agent-claude-code-opus' "
+                         "FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'sonnet'")
+        await db.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id, fallback_profile_id) "
+                         "SELECT 'profile-primary', 'Primary', 'rt-claude-code', id, 'profile-middle' "
                          "FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'sonnet'")
         await db.execute("INSERT INTO agent_setting_layers (scope, role, profile_id) VALUES "
                          "('role', $1, 'profile-primary')", 'reviewer' if review else 'worker')
         monkeypatch.setattr(agent_settings, '_login_problem', AsyncMock(side_effect=lambda profile:
-                            'primary cannot start' if profile.id == 'profile-primary' else None))
+                            'profile cannot start' if profile.id in ('profile-primary', 'profile-middle') else None))
         load = agent_settings.load_agent_settings
     monkeypatch.setattr(worker, 'KeptRun', ShortKeptRun)
     monkeypatch.setattr(worker, 'load_agent_settings', load)
@@ -249,7 +252,10 @@ def test_a_fallback_run_survives_control_plane_restart(tmp_path, monkeypatch, re
         async with _pools(db, tmp_path, monkeypatch, fallback=True, review=review) as case:
             record = (await llm_records.list_records())[0]
             assert record['metadata']['profile']['id'] == 'agent-claude-code-opus'
-            assert record['metadata']['fallback_from'] == 'profile-primary'
+            history = [{'from': 'profile-primary', 'to': 'profile-middle', 'reason': 'profile_error'},
+                       {'from': 'profile-middle', 'to': 'agent-claude-code-opus', 'reason': 'profile_error'}]
+            assert record['metadata']['fallback_from'] == 'profile-middle'
+            assert record['metadata']['fallback'] == history
             await _detach(case)
             # Adoption follows the run's profile even if the configured chain was edited.
             await db.execute("UPDATE agent_profiles SET fallback_profile_id = NULL WHERE id = 'profile-primary'")
@@ -261,11 +267,17 @@ def test_a_fallback_run_survives_control_plane_restart(tmp_path, monkeypatch, re
             (tmp_path / 'release').touch()
             result = await _finished(case)
             assert result.payload['passed'] if review else result.payload['status'] == 'completed'
+            assert result.payload['fallback'] == history
             records = await llm_records.list_records()
             assert len(records) == 1
             assert records[0]['id'] == record['id']
             assert records[0]['status'] == 'completed'
             assert records[0]['metadata']['profile'] == record['metadata']['profile']
+            assert records[0]['metadata']['fallback'] == history
+            from tests.test_api_v1_run_records_db import _api
+            async with _api(tmp_path, db, client=False) as call:
+                loaded = (await call('get', {'record_id': record['id']}))['record']
+                assert loaded['metadata']['fallback'] == history
     run_db(run, monkeypatch, timeout=35)
 
 

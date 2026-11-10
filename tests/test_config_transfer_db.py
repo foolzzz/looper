@@ -1057,3 +1057,90 @@ def test_a_schedules_chat_this_machine_does_not_allow_is_dropped_with_a_note(
                        for note in _plan(out)["notes"])
 
     asyncio.run(_test())
+
+
+def test_profile_fallback_chain_roundtrip_and_clear(tmp_path):
+    async def run():
+        async with _installation() as (source, source_url), _installation() as (target, target_url):
+            # Export order is source before its targets, whose ids differ on the destination.
+            for name in ("A primary", "B secondary", "C last"):
+                await source.execute(
+                    "INSERT INTO agent_profiles (id, name, runtime_id, model_id) "
+                    "SELECT $1, $2, runtime_id, model_id FROM agent_profiles WHERE id = 'agent-claude-code-opus'",
+                    f"source-{name[0]}", name)
+            await source.execute("UPDATE agent_profiles SET fallback_profile_id = 'source-B' WHERE id = 'source-A'")
+            await source.execute("UPDATE agent_profiles SET fallback_profile_id = 'source-C' WHERE id = 'source-B'")
+            exported = tmp_path / "fallbacks.json"
+            code, _, err = await _transfer_file(source_url, "export", str(exported))
+            assert code == 0, err
+            data = json.loads(exported.read_text())
+            assert {entry["name"]: entry["fallback"] for entry in data["profiles"]} == {
+                "A primary": "B secondary", "B secondary": "C last", "C last": None}
+            before = await _rows(target)
+            code, out, err = await _transfer_file(target_url, "import", str(exported), json_output=True)
+            assert code == 0, err
+            assert _plan(out)["counts"]["profiles"]["added"] == 3
+            assert await _rows(target) == before
+            for attempt in range(2):
+                code, out, err = await _transfer_file(target_url, "import", str(exported), apply=True, json_output=True)
+                assert code == 0, err
+                assert _plan(out)["counts"]["profiles"]["added" if attempt == 0 else "unchanged"] == 3
+            rows = await target.fetch(
+                "SELECT a.id, a.name, b.name AS fallback FROM agent_profiles a "
+                "LEFT JOIN agent_profiles b ON b.id = a.fallback_profile_id WHERE NOT a.builtin ORDER BY a.name")
+            assert {row["name"]: row["fallback"] for row in rows} == {
+                "A primary": "B secondary", "B secondary": "C last", "C last": None}
+            assert all(not row["id"].startswith("source-") for row in rows)
+            readback = tmp_path / "readback.json"
+            code, _, err = await _transfer_file(target_url, "export", str(readback))
+            assert code == 0, err
+            assert json.loads(readback.read_text())["profiles"] == data["profiles"]
+            data["profiles"][0]["fallback"] = None
+            exported.write_text(json.dumps(data))
+            code, out, err = await _transfer_file(target_url, "import", str(exported), apply=True, json_output=True)
+            assert code == 0, err
+            assert _plan(out)["changes"] == [{"section": "profiles", "key": "A primary", "action": "changed",
+                                               "fields": ["fallback"]}]
+            assert await target.fetchval("SELECT fallback_profile_id FROM agent_profiles WHERE name = 'A primary'") is None
+
+    asyncio.run(asyncio.wait_for(run(), timeout=30))
+
+
+@pytest.mark.parametrize("failure", ["missing", "cycle", "too_long", "roles"])
+def test_import_rejects_invalid_profile_fallback_graph_without_writes(tmp_path, failure):
+    async def run():
+        async with _installation() as (pool, url):
+            exported = tmp_path / "fallbacks.json"
+            code, _, err = await _transfer_file(url, "export", str(exported))
+            assert code == 0, err
+            data = json.loads(exported.read_text())
+            data["profiles"] = [{"name": f"Profile {index}", "runtime": "Claude Code", "model": {
+                "provider": "Claude subscription", "name": "opus", "protocol": "anthropic-messages"},
+                "fallback": f"Profile {index + 1}" if index < 4 else None} for index in range(5)]
+            # Use the destination's seeded natural references rather than ids.
+            from looper.db.config_transfer import read_profiles
+
+            async with pool.acquire() as conn:
+                builtin = next(row for row in await read_profiles(conn) if row["id"] == "agent-claude-code-opus")
+            for profile in data["profiles"]:
+                profile["runtime"] = builtin["runtime"]
+                profile["model"]["provider"] = builtin["provider"]
+                profile["model"]["name"] = builtin["model"]
+            if failure != "too_long":
+                data["profiles"] = data["profiles"][:2]
+                data["profiles"][1]["fallback"] = "absent" if failure == "missing" else "Profile 0"
+            if failure == "roles":
+                await pool.execute("INSERT INTO agent_runtimes (id, name, type, capabilities, builtin) "
+                                   "VALUES ('rt-limited', 'Limited', 'claude-code', ARRAY['run'], false)")
+                data["runtimes"].append({"name": "Limited", "type": "claude-code", "executable": ""})
+                data["profiles"][1].update(runtime="Limited", fallback=None)
+            exported.write_text(json.dumps(data))
+            before = await _rows(pool)
+            for apply in (False, True):
+                code, _, err = await _transfer_file(url, "import", str(exported), apply=apply, json_output=True)
+                assert code == 1
+                assert {"missing": "no valid fallback", "cycle": "cycle", "too_long": "at most 3 hops",
+                        "roles": "cannot run the manager"}[failure] in err
+                assert await _rows(pool) == before
+
+    asyncio.run(asyncio.wait_for(run(), timeout=30))

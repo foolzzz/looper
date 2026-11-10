@@ -45,9 +45,44 @@ def test_unverified_runtime_first_event_detection_stays_disabled() -> None:
     ("cursor-agent", {"type": "system", "subtype": "init", "model": "requested-model"}, None),
     ("codex", {"type": "assistant", "message": {"model": "requested-model"}}, None),
     ("grok", {"type": "system", "subtype": "init", "model": "requested-model"}, None),
+    *[(runtime, {"type": "system", "subtype": "init", "model": "requested-model"}, None)
+      for runtime in ("pi", "omp", "dsh")],
+    *[(runtime, {"type": "assistant", "message": {"model": "reported-model"}}, "reported-model")
+      for runtime in ("pi", "omp", "grok")],
+    ("grok", {"type": "assistant", "message": {"model": "unknown"}}, None),
+    ("grok", {"type": "assistant", "parent_tool_use_id": "child", "message": {"model": "child-model"}}, None),
 ])
 def test_reported_model_never_uses_normalized_requested_model(runtime: str, event: dict, expected: str | None) -> None:
     assert ADAPTERS[runtime].reported_model(event) == expected
+
+
+@pytest.mark.parametrize("runtime", ["pi", "omp", "dsh", "grok"])
+@pytest.mark.parametrize("reported", [None, "reported-model"])
+def test_normalized_events_preserve_only_native_model_reports(runtime, reported):
+    from looper.agents.runtimes.pi import PiStream
+    from looper.agents.runtimes.omp import OmpStream
+    from looper.agents.runtimes.dsh import DshStream
+    from looper.agents.runtimes.grok import GrokStream
+
+    stream = {"pi": PiStream, "omp": OmpStream, "dsh": DshStream, "grok": GrokStream}[runtime](model="configured")
+    message = {"role": "assistant", "content": [{"type": "text", "text": "Ready"}],
+               **({"model": reported} if reported else {})}
+    raw = ({"type": "text", "text": "Ready"} if runtime == "dsh" else
+           {"type": "assistant" if runtime == "grok" else "message_end", "message": message})
+    events = stream.translate(raw)
+    assistant = next(event for event in events if event["type"] == "assistant")
+    assert ADAPTERS[runtime].reported_model(assistant) == (None if runtime == "dsh" else reported)
+
+
+def test_grok_acp_assistant_does_not_report_the_configured_model():
+    from looper.agents.runtimes.grok_acp import AcpTurn
+
+    turn = AcpTurn(model="configured", session_id="test-session")
+    turn.feed({"method": "session/update", "params": {"update": {
+        "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Ready"}}}})
+    events = turn.finish({"result": {"stopReason": "end_turn"}}, duration_ms=1)
+    assistant = next(event for event in events if event["type"] == "assistant")
+    assert ADAPTERS["grok"].reported_model(assistant) is None
 
 
 @pytest.mark.parametrize(("role", "text", "contract", "prompt_hash", "contract_hash"), [

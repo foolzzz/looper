@@ -109,7 +109,8 @@ def test_full_and_compact_profiles_preserve_usage_shapes_and_warning_results(tmp
             compact = compact["result"]["profile"]
             assert isinstance(compact["used_by"], str) and "session" in compact["used_by"]
             assert set(compact) == {"profile_id", "name", "runtime", "provider", "model_id", "model", "effort",
-                                    "agent_teams", "custom_prompt", "roles", "builtin", "used_by", "model_path"}
+                                    "agent_teams", "custom_prompt", "roles", "builtin", "used_by", "model_path",
+                                    "fallback_profile_id", "fallback_profile_name"}
             listing = (await call("agent_profiles.list"))[1]["result"]["profiles"]
             assert next(p for p in listing if p["profile_id"] == pid) == compact
             assert (await db.get_profile(pid))["name"] == "Renamed" and full["effort"] is None

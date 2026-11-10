@@ -792,7 +792,8 @@ class WorkerPool:
             self._active[run_id] = wp
             self._slots[run_id] = (agent, task_id)
             self._input_ready[run_id] = asyncio.Event()
-            task = asyncio.create_task(self._run_adopted(wp, ctx, handle, recorder, reply))
+            task = asyncio.create_task(self._run_adopted(wp, ctx, handle, recorder, reply,
+                                                        (record.get("metadata") or {}).get("fallback", [])))
             self._tasks[run_id] = task
             task.add_done_callback(lambda t: self._cleanup_worker(run_id))
             logger.info("adopt run=%s offset=%d", run_id, handle.replay_until)
@@ -860,12 +861,13 @@ class WorkerPool:
             self._cleanup_worker(run_dir.name)
 
     async def _run_adopted(self, wp: WorkerProcess, ctx: RunContext, handle: KeptRun,
-                           recorder: ClaudeRunRecorder, reply: RunReply) -> None:
+                           recorder: ClaudeRunRecorder, reply: RunReply,
+                           fallbacks: list[dict[str, str]]) -> None:
         async def run() -> dict:
             async with self._record_run(wp.worker_id, recorder):
                 return await self._consume(ctx, handle, recorder, start=ConsumeStart.ADOPTED)
 
-        await self._finish_run(wp, ctx.seat, reply, run)
+        await self._finish_run(wp, ctx.seat, reply, run, fallbacks=fallbacks)
 
     async def _listen_loop(self) -> None:
         """Listen for work items addressed to any worker-* queue.
@@ -1221,7 +1223,7 @@ class WorkerPool:
                 logger.exception("worker %s could not announce it left task %s's room", worker_id, task_id)
 
     async def _finish_run(self, wp: WorkerProcess, seat: Any, reply: RunReply,
-                          run: Callable[[], Awaitable[dict]]) -> None:
+                          run: Callable[[], Awaitable[dict]], *, fallbacks: list[dict[str, str]] | None = None) -> None:
         assert self._bus is not None
         worker_id, task_id, plan_id = wp.worker_id, wp.task_id, wp.plan_id
         parent_task_id, is_verify = wp.parent_task_id, wp.role is AgentType.REVIEWER
@@ -1255,6 +1257,8 @@ class WorkerPool:
 
             if wp.handle is not None and (missed := wp.handle.dropped_input()):
                 wp.result = {**(wp.result or {}), "missed_input": (wp.result or {}).get("missed_input", []) + missed}
+            if fallbacks:
+                wp.result = {**(wp.result or {}), "fallback": fallbacks}
 
             result_type = MessageType.VERIFY_RESULT if is_verify else MessageType.WORK_RESULT
             await self._bus.publish(MessageEnvelope.create(
@@ -1619,7 +1623,7 @@ class WorkerPool:
         )
         async with self._record_run(worker_id, recorder):
             if fallbacks:
-                await recorder.annotate({"fallback_from": fallbacks[-1]["from"]})
+                await recorder.annotate({"fallback_from": fallbacks[-1]["from"], "fallback": list(fallbacks)})
                 if ctx.seat is not None and self.room_ops is not None:
                     await self.room_ops.room.presence_changed(parent_task_id, ctx.seat, online=True)
             logger.info("%s %s%s starting run: %s (cwd=%s)", role, worker_id, task_step, command[0], work_dir)

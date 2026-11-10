@@ -16,6 +16,7 @@ COMPACT_PROFILE = _object({
     "model_id": _STR, "model": PROFILE_MODEL, "effort": _NULL_STR, "agent_teams": _BOOL,
     "model_path": AGENT_PROFILE["properties"]["model_path"],
     "custom_prompt": _STR, "roles": _array(ROLE), "builtin": _BOOL, "used_by": _NULL_STR,
+    "fallback_profile_id": _NULL_STR, "fallback_profile_name": _NULL_STR,
 }, closed=True)
 PROMPT_BLOCK = _object({"name": _STR, "owner": {"type": "string", "enum": ["looper", "runtime"]},
                         "text": _NULL_STR, "note": _STR}, closed=True)

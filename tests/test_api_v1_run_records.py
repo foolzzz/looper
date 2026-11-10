@@ -152,6 +152,7 @@ def test_run_reads_distinguish_requested_and_reported_models(tmp_path, monkeypat
     ({"model_reported": None}, None),
     ({"model_reported": "reported-model"}, "reported-model"),
     ({"profile": {"runtime": {"type": "codex"}}}, None),
+    *[({"profile": {"runtime": {"type": runtime}}}, None) for runtime in ("pi", "omp", "dsh", "grok")],
     ({"profile": {"runtime": {"type": "cursor-agent"}}, "model_display": "reported-model"}, "reported-model"),
 ])
 def test_run_get_preserves_model_report_evidence(tmp_path, monkeypatch, metadata, reported):

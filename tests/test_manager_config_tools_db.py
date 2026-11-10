@@ -203,6 +203,47 @@ def test_project_delete_names_affected_managers_without_their_tasks(monkeypatch,
 # --- looper_agent_profiles and looper_providers ---
 
 
+def test_agent_profile_fallbacks_are_listed_validated_and_cleared(monkeypatch, tmp_path):
+    async def test(pool):
+        chat = _Chat(tmp_path)
+        model = next(m for m in (await _ok("POST", "/api/v1/ops/models/list", {}))["models"]
+                     if m["provider_id"] == "prov-claude-subscription" and m["name"] == "sonnet")
+        target = (await _tool(chat, "looper_agent_profiles", action="create", name="Target",
+                              runtime="claude-code", model=model["model_id"]))["profile"]
+        source = (await _tool(chat, "looper_agent_profiles", action="create", name="Source",
+                              runtime="claude-code", model=model["model_id"],
+                              fallback_profile_id=target["profile_id"]))["profile"]
+        assert source["fallback_profile_id"] == target["profile_id"]
+        assert source["fallback_profile_name"] == "Target"
+        (invalid,) = await chat.say("创建后备配置", ("looper_agent_profiles", {
+            "action": "create", "name": "Invalid", "runtime": "claude-code", "model": model["model_id"],
+            "fallback_profile_id": "missing-profile"}))
+        assert _error(invalid) == "invalid" and "no fallback Agent Profile" in invalid["error"]["message"]
+        assert not await pool.fetchval("SELECT EXISTS (SELECT 1 FROM agent_profiles WHERE name = 'Invalid')")
+        listed = await _tool(chat, "looper_agent_profiles", action="list")
+        assert next(p for p in listed["profiles"] if p["profile_id"] == source["profile_id"]) == source
+        for profile_id, fallback_id, message in (
+            (target["profile_id"], source["profile_id"], "cycle"),
+            (source["profile_id"], "missing-profile", "no fallback Agent Profile"),
+        ):
+            (refused,) = await chat.say("修改后备配置", ("looper_agent_profiles", {
+                "action": "update", "profile": profile_id, "fallback_profile_id": fallback_id}))
+            assert _error(refused) == "invalid" and message in refused["error"]["message"]
+        cleared = (await _tool(chat, "looper_agent_profiles", action="update", profile=source["profile_id"],
+                               fallback_profile_id=None))["profile"]
+        assert cleared["fallback_profile_id"] is None and cleared["fallback_profile_name"] is None
+        assert await pool.fetchval("SELECT fallback_profile_id FROM agent_profiles WHERE id = $1",
+                                   source["profile_id"]) is None
+        changed = (await _tool(chat, "looper_agent_profiles", action="update", profile=source["profile_id"],
+                               fallback_profile_id=target["profile_id"]))["profile"]
+        assert changed["fallback_profile_name"] == "Target"
+        registered = next(p for p in (await _ok("POST", "/api/v1/registry/view", {}))["profiles"]
+                          if p["profile_id"] == source["profile_id"])
+        assert registered["fallback_profile_id"] == target["profile_id"]
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_agent_profiles_are_created_changed_and_read_back(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     async def test(pool: Any) -> None:
         model = next(m for m in (await _ok("POST", "/api/v1/ops/models/list", {}))["models"]

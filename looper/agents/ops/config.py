@@ -250,13 +250,16 @@ async def _confirming_project(call: Call) -> str | None:
 # --- looper_agent_profiles and looper_providers ---
 
 
-def _profile_listed(view: Mapping[str, Any]) -> dict[str, Any]:
+def _profile_listed(view: Mapping[str, Any], profiles: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     used = profile_registry.usage_text(view["used_by"])
+    fallback_id = view.get("fallback_profile_id")
     return {"profile_id": view["profile_id"], "name": view["name"], "runtime": view["runtime_name"],
             "provider": view["provider"], "model_id": view["model_id"], "model": view["model"],
             "effort": view["effort"], "model_path": view["model_path"],
             "agent_teams": view["agent_teams"],
             "custom_prompt": view.get("custom_prompt", ""),
+            "fallback_profile_id": fallback_id,
+            "fallback_profile_name": next((p["name"] for p in profiles if p["profile_id"] == fallback_id), None),
             "roles": view["roles"], "builtin": view["builtin"],
             "used_by": used or None}
 
@@ -303,15 +306,15 @@ async def _profile_parts(registry: Mapping[str, Any], arguments: Mapping[str, An
     return parts
 
 
-def _profile_answer(answer: Mapping[str, Any]) -> dict[str, Any]:
-    return {"profile": _profile_listed(answer["profile"]), "warnings": answer["warnings"]}
+def _profile_answer(answer: Mapping[str, Any], registry: Mapping[str, Any]) -> dict[str, Any]:
+    return {"profile": _profile_listed(answer["profile"], registry["profiles"]), "warnings": answer["warnings"]}
 
 
 async def _profiles(call: Call) -> dict[str, Any]:
     arguments, action = call.arguments, call.arguments["action"]
     registry = await _registry(call)
     if action == "list":
-        return {"profiles": [_profile_listed(p) for p in registry["profiles"]],
+        return {"profiles": [_profile_listed(p, registry["profiles"]) for p in registry["profiles"]],
                 "runtimes": [{"runtime_id": r["runtime_id"], "name": r["name"], "type": r["type"], "roles": r["roles"]}
                              for r in registry["runtimes"]],
                 "runtime_types": registry["runtime_types"],
@@ -323,13 +326,14 @@ async def _profiles(call: Call) -> dict[str, Any]:
         _required(arguments, action, "profile")
         profile = _profile(registry, arguments["profile"])
     if action in ("create", "update"):
-        fields = {**_given(arguments, ("name", "effort", "agent_teams", "custom_prompt"), clears=("effort",)),
+        fields = {**_given(arguments, ("name", "effort", "agent_teams", "custom_prompt", "fallback_profile_id"),
+                          clears=("effort", "fallback_profile_id")),
                   **await _profile_parts(registry, arguments)}
         manager_id = call.manager_id if call.scoped else None
         if action == "create":
-            return _profile_answer(await answered(profile_registry.create_profile(fields, manager_id=manager_id)))
+            return _profile_answer(await answered(profile_registry.create_profile(fields, manager_id=manager_id)), registry)
         return _profile_answer(await answered(profile_registry.update_profile(profile["profile_id"], fields,
-                                                                              manager_id=manager_id)))
+                                                                              manager_id=manager_id)), registry)
     await _unshared(call, profile_registry.delete_profile(profile["profile_id"]), profile)
     return {"deleted": profile["name"]}
 
@@ -687,6 +691,8 @@ TOOLS: tuple[Tool, ...] = (
                 "agent_teams": {"type": "boolean", "description": "Claude Code only."},
                 "custom_prompt": {"type": "string", "description": "Text placed first in this profile's system "
                                   "prompt, before the harness; empty adds nothing."},
+                "fallback_profile_id": {"type": ["string", "null"],
+                                        "description": "Fallback Agent Profile id; null clears it."},
             },
         },
         risk=Risk.WRITE, run=_profiles, escalate=_deleting_profile, read_actions=frozenset({"list"}),

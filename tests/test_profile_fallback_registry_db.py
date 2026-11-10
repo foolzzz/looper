@@ -77,6 +77,26 @@ def test_profile_fallback_target_cannot_be_deleted(tmp_path, monkeypatch):
     run_with_models(run, monkeypatch)
 
 
+def test_profile_delete_racing_with_fallback_reference_explains_conflict(tmp_path, monkeypatch):
+    async def run(pool):
+        async with _api(tmp_path, pool) as call:
+            target = await _create(call, name="Target")
+            source = await _create(call, name="Source")
+            preflight = profile_registry.deletable_profile
+
+            async def checked(profile_id):
+                row = await preflight(profile_id)
+                await pool.execute("UPDATE agent_profiles SET fallback_profile_id = $1 WHERE id = $2",
+                                   target["profile_id"], source["profile_id"])
+                return row
+
+            monkeypatch.setattr(profile_registry, "deletable_profile", checked)
+            with pytest.raises(profile_registry.RegistryConflict, match="fallback target"):
+                await profile_registry.delete_profile(target["profile_id"])
+            assert await db.get_profile(target["profile_id"])
+    run_with_models(run, monkeypatch)
+
+
 def test_existing_database_adds_profile_fallback_and_journal_kind(monkeypatch):
     from looper.db import connection
     from tests.db_support import run_db

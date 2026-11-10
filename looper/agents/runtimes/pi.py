@@ -146,6 +146,13 @@ class PiRuntime(RuntimeAdapter):
         return (self.capabilities if found and tuple(int(part) for part in found.groups()) >= MIN_VERSION
                 else frozenset())
 
+    def reported_model(self, event: Mapping[str, Any]) -> str | None:
+        if (event.get("type") != "assistant" or event.get("parent_tool_use_id")
+                or not isinstance(event.get("message"), Mapping)):
+            return None
+        model = event["message"].get("model")
+        return model if isinstance(model, str) and model.strip() and model not in ("unknown", "<synthetic>") else None
+
     def probe(self, executable: str) -> Probe:
         """``executable --version`` and, when that is new enough, ``--help``.
 
@@ -572,7 +579,7 @@ class PiStream:
         self._last_stop = str(message.get("stopReason") or "") or None
         self._last_error = str(message.get("errorMessage") or "") or None
         return {"type": "assistant", **self._base(), "parent_tool_use_id": None, "message": {
-            "role": "assistant", "model": message.get("model") or self.model, "content": blocks}}
+            "role": "assistant", "model": message.get("model"), "content": blocks}}
 
     def failure(self, message: str) -> dict[str, Any]:
         """Keep all observed usage when the transport fails outside the Pi event stream."""
