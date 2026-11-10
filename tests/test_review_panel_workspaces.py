@@ -43,7 +43,8 @@ def workspace(tmp_path, monkeypatch):
     git(task, "worktree", "remove", "--force", workspace.path)
 
 
-def test_freeze_commits_pending_output_without_moving_an_advisory_review_head(workspace):
+@pytest.mark.parametrize("review_output", [None, "coverage/report.txt", "output.txt"])
+def test_freeze_commits_pending_output_without_moving_an_advisory_review_head(workspace, review_output):
     directory = Path(workspace.work_dir)
     worker_head = git(directory, "rev-parse", "HEAD")
     (directory / "output.txt").write_text("delivered\n")
@@ -56,15 +57,22 @@ def test_freeze_commits_pending_output_without_moving_an_advisory_review_head(wo
     # A slow advisory reviewer starts on the frozen HEAD before required seats allow acceptance.
     reviewer = subprocess.Popen([sys.executable, "-c", (
         "import json, subprocess, sys\n"
+        "from pathlib import Path\n"
         "head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()\n"
+        "if len(sys.argv) > 1:\n"
+        "    output = Path(sys.argv[1])\n"
+        "    output.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    output.write_text('review output\\n')\n"
         "print(head, flush=True)\n"
         "sys.stdin.readline()\n"
         "after = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()\n"
         "print(json.dumps({'passed': head == after}), flush=True)\n"
-    )], cwd=directory, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    ), *([review_output] if review_output else [])], cwd=directory,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         assert select.select([reviewer.stdout], [], [], 10)[0], "review did not start"
         assert reviewer.stdout.readline().strip() == reviewed_head
+        pending = git(directory, "status", "--porcelain")
         async def save(_workspace):
             pass
         outcome = asyncio.run(ws.merge(frozen, step_key="s1", title="Deliver output", save=save))
@@ -72,14 +80,55 @@ def test_freeze_commits_pending_output_without_moving_an_advisory_review_head(wo
         assert reviewer.returncode == 0, stderr
         assert json.loads(stdout)["passed"] is True
         assert outcome.workspace.state is ws.StepWorkspaceState.MERGED
+        assert outcome.workspace.result_commit == frozen.result_commit
         assert outcome.leftovers is None
         assert git(directory, "rev-parse", "HEAD") == reviewed_head
+        assert git(directory, "status", "--porcelain") == pending
+        assert git(workspace.task_dir, "rev-parse", "HEAD^2") == reviewed_head
+        if review_output:
+            assert (directory / review_output).read_text() == "review output\n"
         assert (Path(workspace.task_dir) / "output.txt").read_text() == "delivered\n"
         assert git(workspace.task_dir, "ls-tree", "-r", "--name-only", "HEAD").splitlines() == [".gitignore", "output.txt"]
     finally:
         if reviewer.poll() is None:
             reviewer.kill()
             reviewer.communicate(timeout=10)
+
+
+@pytest.mark.parametrize("change", ["commit", "index", "branch", "detached"])
+def test_merge_refuses_changes_to_a_frozen_review_head_or_index(workspace, change):
+    directory = Path(workspace.work_dir)
+    (directory / "output.txt").write_text("delivered\n")
+    frozen = asyncio.run(ws.freeze_review(workspace, step_key="s1"))
+    if change in ("commit", "index"):
+        (directory / "output.txt").write_text("unreviewed\n")
+        git(directory, "add", "output.txt")
+        if change == "commit":
+            git(directory, "commit", "-qm", "Unreviewed change")
+    elif change == "branch":
+        git(directory, "switch", "-qc", "changed")
+    else:
+        git(directory, "checkout", "-q", "--detach")
+    target_head = git(workspace.task_dir, "rev-parse", "HEAD")
+    review_head = git(directory, "rev-parse", "HEAD")
+    index = git(directory, "ls-files", "--stage")
+    pending = git(directory, "status", "--porcelain")
+    saved = []
+
+    async def save(current):
+        saved.append(current)
+
+    outcome = asyncio.run(ws.merge(frozen, step_key="s1", title="Deliver output", save=save))
+    assert outcome.workspace.state is ws.StepWorkspaceState.UNMERGED
+    assert outcome.workspace.merge_error is ws.MergeError.STEP_BRANCH_CHANGED
+    assert outcome.workspace.result_commit == frozen.result_commit
+    assert saved[-1] == outcome.workspace
+    assert outcome.leftovers is None
+    assert git(workspace.task_dir, "rev-parse", "HEAD") == target_head
+    assert not (Path(workspace.task_dir) / "output.txt").exists()
+    assert git(directory, "rev-parse", "HEAD") == review_head
+    assert git(directory, "ls-files", "--stage") == index
+    assert git(directory, "status", "--porcelain") == pending
 
 
 def test_freeze_keeps_a_link_replaced_with_worker_output(workspace):

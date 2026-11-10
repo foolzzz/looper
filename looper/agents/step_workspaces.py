@@ -12,9 +12,10 @@ the step workspaces RFC (``docs/architecture/rfcs/step-workdir-isolation-v0``):
 - a step's worktree is on a branch of its own, ``looper/<task>/<key>-<id>``,
   under ``<runtime_root>/worktrees`` (``ensure_worktree``), with the project's
   links back to the task directory's ignored local state (``link``);
-- when the step is accepted, ``merge`` commits what its Worker left
-  uncommitted, computes the merge with the branch in memory, writes a merge
-  commit and fast-forwards the branch, its index and working tree to it. A
+- when the step is accepted, ``merge`` uses its frozen review result, or commits
+  what its Worker left uncommitted if no result was frozen. It computes the
+  merge with the branch in memory, writes a merge commit and fast-forwards
+  the branch, its index and working tree to it. A
   merge that cannot be made leaves the task directory as it was and says why
   (``MergeError``). A link is never part of a step's result;
 - Looper's own commits have the ``Looper`` identity and ``Looper-Task`` and
@@ -118,7 +119,7 @@ class StepWorkspace:
     branch: str  # the step's branch, looper/<task_id>/<key>-<id>
     base_commit: str  # where the step's branch starts
     checkpoint: bool = False  # base_commit is the checkpoint of the round the step started in
-    result_commit: str | None = None  # the step's branch when it was merged
+    result_commit: str | None = None  # the frozen review result, or the step's branch when it was merged
     merge_commit: str | None = None  # written before the branch moves to it
     state: StepWorkspaceState = StepWorkspaceState.ACTIVE
     merge_error: MergeError | None = None  # set when state is unmerged
@@ -602,7 +603,10 @@ async def merge(workspace: StepWorkspace, *, step_key: str, title: str,
     still = tuple(p for p in workspace.links if (Path(workspace.work_dir) / p).is_symlink())
     replaced = tuple(p for p in workspace.links if p not in still and os.path.lexists(Path(workspace.work_dir) / p))
     try:
-        workspace, leftovers = await _close_step_branch(workspace, step_key, still)
+        if workspace.result_commit is not None:
+            await _check_frozen_result(workspace)
+        else:
+            workspace, leftovers = await _close_step_branch(workspace, step_key, still)
         await save(workspace)
         workspace, files = await _merge_into_target(workspace, step_key, title, save)
     except _Unmerged as failure:
@@ -618,6 +622,27 @@ async def merge(workspace: StepWorkspace, *, step_key: str, title: str,
     workspace = workspace.moved(StepWorkspaceState.MERGED)
     await save(workspace)
     return MergeResult(workspace, files, leftovers, replaced)
+
+
+async def _check_frozen_result(workspace: StepWorkspace) -> None:
+    """Keep review checkouts untouched, and reject a HEAD or index that no longer matches the reviewed result."""
+    assert workspace.result_commit is not None
+    tip = await _git(workspace.repo_dir, "rev-parse", "--verify", "-q", f"refs/heads/{workspace.branch}^{{commit}}",
+                     check=False)
+    if tip.returncode != 0 or tip.text != workspace.result_commit:
+        raise _Unmerged(MergeError.STEP_BRANCH_CHANGED, "the step's branch no longer matches its frozen review result")
+    path = Path(workspace.path)
+    if (path / ".git").exists():
+        head = await _git(path, "symbolic-ref", "-q", "HEAD", check=False)
+        if head.text != f"refs/heads/{workspace.branch}":
+            raise _Unmerged(MergeError.STEP_BRANCH_CHANGED,
+                            f"the step's checkout is no longer on its branch {prompt_name(workspace.branch)}")
+        staged = await _git(path, "diff", "--cached", "--quiet", workspace.result_commit, "--", check=False)
+        if staged.returncode not in (0, 1):
+            raise GitError(f"git diff --cached failed: {staged.stderr.decode('utf-8', 'replace').strip()[:500]}")
+        if staged.returncode == 1:
+            raise _Unmerged(MergeError.STEP_BRANCH_CHANGED,
+                            "the step's index no longer matches its frozen review result")
 
 
 async def commit_pending(path: Path, links: Sequence[str], message: str) -> str | None:
