@@ -554,6 +554,184 @@ def test_panel_retry_discards_old_snapshots_and_reviews_the_new_output(planner_c
     drive(claude, outcome, scenario)
 
 
+@pytest.mark.parametrize("passed_seats", [0, 1])
+def test_continue_at_cap_keeps_the_original_panel_snapshot(
+    planner_claude, agent_db, monkeypatch, passed_seats,
+):
+    from looper.agents.message import MessageEnvelope, TASK_ROUTER_ADDRESS
+    from looper.agents.tiers.planner import PlannerAgent
+    from looper.db import llm_records
+    from tests.test_planner_workspaces import init_repo
+    from tests.test_review_panel_workspaces import git
+
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    configure(agent_db, monkeypatch)
+    project = agent_db.get_task_project.return_value
+    project["task_budget_usd"] = 1
+    spent = {"cost_usd": 0}
+    monkeypatch.setattr(llm_records, "task_costs", AsyncMock(side_effect=lambda *a: {"t1": spent}))
+    claude = planner_claude(plan(step("s1", review=True)), decide("review"), decide("accept"))
+
+    def outcome(envelope):
+        if envelope.message_type == MessageType.VERIFY_REQUEST:
+            return None
+        directory = Path(envelope.payload["context"]["work_dir"])
+        (directory / "output.txt").write_text("reviewed output\n")
+        return {**WORK_OK, "head": git(directory, "rev-parse", "HEAD")}
+
+    async def scenario(h):
+        init_repo(h.work_dir)
+        await h.start()
+        await h.until(lambda: len(h.reviews) == 3)
+        original = h.reviews[0].payload["head"]
+        worker_head = h.planner._plan.steps[0].result["worker_head"]
+        for _ in range(passed_seats):
+            await h.release(REVIEW_PASS)
+        await h.until(lambda: sum(s.status == "verified" for s in h.planner._plan.steps) == passed_seats)
+        # An independent step commits before the cap interrupts the remaining reviewers.
+        (h.work_dir / "other.txt").write_text("independent output\n")
+        git(h.work_dir, "add", "other.txt")
+        git(h.work_dir, "commit", "-qm", "Independent work")
+        spent["cost_usd"] = 1
+        await h.bus.publish(MessageEnvelope.create(source=TASK_ROUTER_ADDRESS,
+            target=h.planner.agent_address, message_type=MessageType.SYSTEM_EVENT, payload={"type": "supervise"}))
+        assert (await h.finished()).payload["fail_kind"] == "task_budget"
+        await h.planner.stop()
+        project["task_budget_usd"] = 2
+        agent_db.store.tasks["t1"] = {"requirement": "build", "work_dir": str(h.work_dir)}
+        h.statuses.clear()
+        h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+        await h.planner.start(h.bus)
+        await h.bus.publish(MessageEnvelope.create(source=TASK_ROUTER_ADDRESS,
+            target=h.planner.agent_address, message_type=MessageType.TASK_REQUEST,
+            payload={"restart": "at_cap", "project_id": "proj-1"}))
+        await h.until(lambda: len(h.reviews) == 6 - passed_seats)
+        assert h.planner._plan.steps[0].result["worker_head"] == worker_head
+        for envelope in h.reviews[3:]:
+            directory = Path(envelope.payload["context"]["work_dir"])
+            assert envelope.payload["head"] == git(directory, "rev-parse", "HEAD") == original
+            assert (directory / "output.txt").read_text() == "reviewed output\n"
+            assert not (directory / "other.txt").exists()
+        for _ in range(3 - passed_seats):
+            await h.release(REVIEW_PASS)
+        assert (await h.finished()).payload["status"] == "completed"
+        assert len(h.work_items) == 1
+
+    drive(claude, outcome, scenario)
+
+
+@pytest.mark.parametrize("problem,stage", [
+    ("detached", "freeze"), ("merge", "freeze"), ("size", "freeze"), ("git-error", "freeze"),
+    ("detached", "dispatch"), ("git-error", "dispatch"),
+    ("detached", "resume"),
+])
+def test_shared_panel_git_problems_wait_for_the_operator_then_review_saved_work(
+    planner_claude, agent_db, monkeypatch, problem, stage,
+):
+    from looper.agents import step_workspaces as ws
+    from looper.agents.message import MessageEnvelope, TASK_ROUTER_ADDRESS
+    from tests.test_planner_agent import reply
+    from tests.test_planner_workspaces import init_repo
+    from tests.test_review_panel_workspaces import git
+
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    configure(agent_db, monkeypatch)
+    close_gate = reply({"reply": "The checkout is ready; continue review.", "gate": "close", "agenda": [
+            {"id": "q1", "question": "Restore the checkout for review?", "status": "resolved", "answer": "Ready"}],
+            "summary": {"decisions": ["Resume review"], "assumptions": [], "open": []}, "action": "none"})
+    claude = planner_claude(plan(step("s1", review=True)), decide("review"), close_gate, close_gate, decide("accept"))
+    snapshot, inspect = ws.snapshot_review, ws.inspect
+
+    def break_checkout(directory):
+        if problem == "detached":
+            git(directory, "checkout", "-q", "--detach")
+        elif problem == "merge":
+            (directory / ".git" / "MERGE_HEAD").write_text(git(directory, "rev-parse", "HEAD") + "\n")
+        elif problem == "size":
+            monkeypatch.setattr(ws, "CHECKOUT_LIMIT_BYTES", 1)
+        elif stage == "dispatch":
+            monkeypatch.setattr(ws, "inspect", AsyncMock(side_effect=ws.GitError("snapshot unavailable")))
+        else:
+            monkeypatch.setattr(ws, "snapshot_review", AsyncMock(side_effect=ws.GitError("snapshot unavailable")))
+
+    def outcome(envelope):
+        if envelope.message_type == MessageType.VERIFY_REQUEST:
+            return None
+        directory = Path(envelope.payload["context"]["work_dir"])
+        (directory / "output.txt").write_text("saved worker output\n")
+        if stage == "freeze":
+            break_checkout(directory)
+        elif stage == "dispatch":
+            async def freeze_then_break(*args, **kwargs):
+                head = await snapshot(*args, **kwargs)
+                break_checkout(directory)
+                return head
+            monkeypatch.setattr(ws, "snapshot_review", freeze_then_break)
+        return {**WORK_OK, "head": git(directory, "rev-parse", "HEAD")}
+
+    async def resume(h, gate):
+        _, added = await agent_db.store.add_gate_message("t1", gate.label,
+            {"kind": "message", "text": "Checkout restored; resume review", "via": "dashboard"})
+        assert added is not None
+        await h.bus.publish(MessageEnvelope.create(source=TASK_ROUTER_ADDRESS,
+            target=h.planner.agent_address, message_type=MessageType.GATE_MESSAGE, payload={"gate": gate.label}))
+
+    async def scenario(h):
+        init_repo(h.work_dir)
+        await h.start()
+        old_reviews = []
+        if stage == "resume":
+            await h.until(lambda: len(h.reviews) == 3)
+            old_reviews = list(h.reviews)
+            break_checkout(h.work_dir)
+            await h.bus.publish(MessageEnvelope.create(source=TASK_ROUTER_ADDRESS,
+                target=h.planner.agent_address, message_type=MessageType.TASK_RESUME, payload={}))
+        await h.until(lambda: h.planner._plan is not None and h.planner._plan.steps and (h.planner._plan.waiting_gates()
+            or (h.planner._plan.steps[0].result or {}).get("status") == "failed" or h.final()))
+        assert h.final() is None
+        target = h.planner._plan.steps[0]
+        assert target.status == "completed" and target.result["status"] == "completed"
+        assert target.retries == 0 and len(h.work_items) == 1 and h.reviews == old_reviews
+        for envelope in old_reviews:
+            h.held.remove(envelope)
+            await h.answer(envelope, BLOCK)  # interrupted reviewers cannot settle the restored round
+        gate, = h.planner._plan.waiting_gates()
+        expected = {"detached": "detached", "merge": "merge", "size": "limit", "git-error": "snapshot unavailable"}
+        assert expected[problem] in gate.gate.findings
+        # Unrelated events cannot bypass the gate and dispatch unfrozen reviews.
+        await h.bus.publish(MessageEnvelope.create(source=TASK_ROUTER_ADDRESS,
+            target=h.planner.agent_address, message_type=MessageType.SYSTEM_EVENT, payload={"type": "supervise"}))
+        await h.until(lambda: h.bus.pending_count(h.planner.agent_id) == 0 and not h.planner._handling_message)
+        assert h.reviews == old_reviews
+        # Closing the gate without repairing Git must open another gate, never bypass the check.
+        await resume(h, gate)
+        await h.until(lambda: any(s is not gate for s in h.planner._plan.waiting_gates()))
+        gate, = h.planner._plan.waiting_gates()
+        assert h.reviews == old_reviews and len(h.work_items) == 1
+        if problem == "detached":
+            git(h.work_dir, "switch", "-q", "main")
+        elif problem == "merge":
+            (h.work_dir / ".git" / "MERGE_HEAD").unlink()
+        elif problem == "size":
+            monkeypatch.setattr(ws, "CHECKOUT_LIMIT_BYTES", 1 << 30)
+        else:
+            monkeypatch.setattr(ws, "inspect", inspect)
+        monkeypatch.setattr(ws, "snapshot_review", snapshot)
+        await resume(h, gate)
+        await h.until(lambda: len(h.reviews) == len(old_reviews) + 3)
+        for envelope in h.reviews[len(old_reviews):]:
+            directory = Path(envelope.payload["context"]["work_dir"])
+            assert (directory / "output.txt").read_text() == "saved worker output\n"
+            assert git(directory, "rev-parse", "HEAD") == envelope.payload["head"]
+            await h.release(REVIEW_PASS)
+        assert (await h.finished()).payload["status"] == "completed"
+        assert len(h.work_items) == 1 and target.retries == 0
+
+    drive(claude, outcome, scenario)
+
+
 def test_review_chosen_after_work_still_uses_the_fixed_panel(planner_claude, agent_db, monkeypatch):
     configure(agent_db, monkeypatch)
     claude = planner_claude(plan(step("s1")), decide("review"), decide("accept"))

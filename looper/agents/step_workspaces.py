@@ -595,9 +595,11 @@ async def snapshot_review(repo: Repo, *, task_id: str, step_key: str) -> str:
         # contains tracked files. Select tracked and non-ignored files first.
         paths = await _git(repo.toplevel, "ls-files", "-z", "--cached", "--others", "--exclude-standard",
                            "--", repo.subdir or ".", env=env)
-        if paths.stdout:
+        # The real index also tracks new files explicitly added under ignored paths.
+        staged = await _git(repo.toplevel, "ls-files", "-z", "--cached", "--", repo.subdir or ".")
+        if paths.stdout or staged.stdout:
             pathspec = Path(directory) / "paths"
-            pathspec.write_bytes(paths.stdout)
+            pathspec.write_bytes(paths.stdout + staged.stdout)
             # Force only this selected set so tracked files under ignored parents update too.
             await _git(repo.toplevel, "--literal-pathspecs", "add", "-A", "-f", "--pathspec-file-nul",
                        f"--pathspec-from-file={pathspec}", env=env)

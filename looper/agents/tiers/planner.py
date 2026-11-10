@@ -171,6 +171,7 @@ from ..user_gates import (
     RETRY_WAIT_SEC,
     THREAD_MAX_CHARS,
     WAITING_USER,
+    AgendaItem,
     Gate,
     GateAction,
     GatePolicy,
@@ -2363,6 +2364,28 @@ class PlannerAgent:
         if not await self._within_budget(plan):
             return
         target = plan.step(step.reviews)
+        # A run that could not be adopted is no longer dispatched. A checkout gate may
+        # defer its replacement; leave it pending so closing that gate can dispatch it.
+        step.status, step.worker_id, step.reviewer_id = "pending", None, None
+        await self._save(plan, step)
+        if not await self._prepare_panel_review(plan, target):
+            return
+        context = {"work_dir": plan.work_dir}
+        head = target.workspace.result_commit if target.workspace is not None else (target.result or {}).get("head")
+        if head:
+            # Each seat keeps its own checkout of the round's immutable snapshot.
+            try:
+                repo = await workspaces.inspect(plan.work_dir)
+                base = _RoundBase(repo=repo, commit=head) if isinstance(repo, Repo) else _RoundBase(error=repo.reason)
+                if not isinstance(repo, Repo):
+                    raise _NoWorkspace(repo.reason)
+                await self._open_workspace(plan, step, base)
+            except (workspaces.GitError, _NoWorkspace) as exc:
+                await self._review_workspace_gate(plan, target, str(exc))
+                return
+            context = {"work_dir": step.workspace.work_dir}
+            if target.workspace is not None:
+                context["workspace"] = {**step.workspace.context(), "base_commit": target.workspace.base_commit}
         role = await self._role(step.role, step.role_version if same_attempt else None) if step.role else None
         step.role_version = role.version if role else None
         step.reviewer_id = f"reviewer-{uuid.uuid4().hex[:12]}"
@@ -2375,22 +2398,6 @@ class PlannerAgent:
             await self._review_done(plan, step, {"passed": False, "findings": [
                 {"severity": "blocking", "where": "", "text": f"Cannot read role {step.role}"}]})
             return
-        context = {"work_dir": plan.work_dir}
-        head = target.workspace.result_commit if target.workspace is not None else (target.result or {}).get("head")
-        if head:
-            # Each seat checks the same commit in its own checkout. Tests may write files, and other
-            # steps may commit in the task directory while a required or advisory review is running.
-            repo = await workspaces.inspect(plan.work_dir)
-            base = _RoundBase(repo=repo, commit=head) if isinstance(repo, Repo) else _RoundBase(error=repo.reason)
-            try:
-                await self._open_workspace(plan, step, base)
-            except _NoWorkspace as exc:
-                await self._review_done(plan, step, {"passed": False, "failure": "snapshot_unavailable",
-                    "findings": [{"severity": "blocking", "where": "HEAD", "text": str(exc)}]})
-                return
-            context = {"work_dir": step.workspace.work_dir}
-            if target.workspace is not None:
-                context["workspace"] = {**step.workspace.context(), "base_commit": target.workspace.base_commit}
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address, target=worker_address(step.reviewer_id), message_type=MessageType.VERIFY_REQUEST,
             payload={"task_id": step.step_id, "parent_task_id": self._task_id, "plan_id": plan.plan_id,
@@ -2429,6 +2436,8 @@ class PlannerAgent:
             await self._settle_plan(plan)
 
     async def _settle_reviews(self, plan: TaskPlan, target: PlanStep) -> None:
+        if (target.result or {}).get("review_workspace_gate"):
+            return  # a verdict cannot bypass a checkout problem still waiting for the operator
         state = self._accept_state(plan, target)
         required = leaves(parse_condition(target.accept_when, "accept_when"))
         if state is State.PENDING or (state is State.UNSATISFIABLE and
@@ -2725,7 +2734,31 @@ class PlannerAgent:
             seats = self._expand_reviews(plan, [step])
             await self._save(plan, step, *seats)
         if step.accept_when is not None:
-            try:
+            if not await self._prepare_panel_review(plan, step):
+                return
+            await update_task_phase(self._task_id, "verifying")
+            await self._settle_reviews(plan, step)
+            await self._dispatch_ready(plan)
+            return
+        step.review_stage, step.review_position = ReviewStage.BUILTIN, None
+        # A new review chain: the review roles' verdicts on this result from before (a restart) no longer stand.
+        step.result = {k: v for k, v in (step.result or {}).items() if k != "role_reviews"} if step.result else None
+        await self._save(plan, step)
+        await update_task_phase(self._task_id, "verifying")
+        await self._spawn_reviewer(plan, step)
+        await self._report_progress(plan)
+
+    async def _prepare_panel_review(self, plan: TaskPlan, step: PlanStep) -> bool:
+        result = step.result or {}
+        gate = plan.step(result.get("review_workspace_gate", ""))
+        if gate is not None and not gate.gate.state.closed:
+            return False
+        if gate is None and "worker_head" in result:
+            return True
+        try:
+            # A cap continuation keeps both finished seats and their checkouts, so it must keep
+            # the same snapshot too. A new Worker result starts a new round without this marker.
+            if "worker_head" not in result:
                 if step.isolated and step.workspace is not None:
                     step.workspace = await workspaces.freeze_review(step.workspace, step_key=step.label)
                     await self._save_workspace(step.workspace)
@@ -2738,21 +2771,27 @@ class PlannerAgent:
                         raise workspaces.GitError(repo.reason)
                     else:
                         head = None
-            except workspaces.GitError as exc:
-                await self._attempt_failed(plan, step, f"Cannot freeze review workspace: {exc}")
-                return
-            step.result = {**(step.result or {}), "worker_head": (step.result or {}).get("head"), "head": head}
-            await self._save(plan, step)
-            await update_task_phase(self._task_id, "verifying")
-            await self._settle_reviews(plan, step)
-            await self._dispatch_ready(plan)
-            return
-        step.review_stage, step.review_position = ReviewStage.BUILTIN, None
-        # A new review chain: the review roles' verdicts on this result from before (a restart) no longer stand.
-        step.result = {k: v for k, v in (step.result or {}).items() if k != "role_reviews"} if step.result else None
+                result = {**result, "worker_head": result.get("head"), "head": head}
+        except workspaces.GitError as exc:
+            await self._review_workspace_gate(plan, step, str(exc))
+            return False
+        step.result = {k: v for k, v in result.items() if k != "review_workspace_gate"}
         await self._save(plan, step)
-        await update_task_phase(self._task_id, "verifying")
-        await self._spawn_reviewer(plan, step)
+        return True
+
+    async def _review_workspace_gate(self, plan: TaskPlan, step: PlanStep, problem: str) -> None:
+        """Keep successful work and wait for the operator to restore a reviewable checkout."""
+        gate = PlanStep(step_id=f"step-{uuid.uuid4().hex[:8]}", index=len(plan.steps),
+            instruction=f"Restore the checkout for review of {step.label}",
+            key=f"review-checkout-{uuid.uuid4().hex[:8]}",
+            gate=Gate(f"Restore the checkout for review of {step.label}"[:200],
+                (AgendaItem("q1", "Restore the checkout for review?"),),
+                findings=f"Review is waiting: {problem}. Restore the checkout, then reply to resume review."[:2000]))
+        plan.steps.append(gate)
+        step.result = {**(step.result or {}), "review_workspace_gate": gate.step_id}
+        await self._save(plan, step, gate)
+        await self._activity("error", f"Review of {step.label} waits for the operator: {problem}"[:500])
+        await self._open_gate(plan, gate)
         await self._report_progress(plan)
 
     def _needs_review(self, step: PlanStep) -> bool:
