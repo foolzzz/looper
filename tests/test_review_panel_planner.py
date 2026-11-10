@@ -19,6 +19,16 @@ PANEL = {"key": "panel", "name": "Review panel", "review_panel": {
     "roles": [{"key": member, "kind": "review", "role_prompt": "Review the work."} for member in MEMBERS]}
 BLOCK = {"passed": False, "summary": "Needs a fix", "findings": [
     {"severity": "blocking", "where": "calc.py:4", "text": "Handle empty input"}]}
+PASSED_PANEL_SUMMARY = (
+    "## Process record\n"
+    "Roles: 未记录\n"
+    "Reviews: s1 第 1 轮 / s1/review_a: 通过, 0 blocking; "
+    "s1 第 1 轮 / s1/review_b: 通过, 0 blocking; "
+    "s1 第 1 轮 / s1/review_c: 通过, 0 blocking\n"
+    "Verification: 未记录\n"
+    "Escalations: 未记录\n"
+    "Full record: task page / looper_tasks get"
+)
 
 
 def configure(agent_db: Any, monkeypatch: pytest.MonkeyPatch, **changes: Any) -> None:
@@ -60,7 +70,8 @@ def test_required_reviews_release_accept_before_advisory_but_delivery_waits(
         await h.release(REVIEW_PASS)
         final = await h.finished()
         assert final.payload["status"] == "completed"
-        assert final.payload["summary"] == FINAL_RESULT + "\n\nProcess record: see the task page"
+        assert final.payload["summary"] == FINAL_RESULT + "\n\n" + PASSED_PANEL_SUMMARY
+        assert final.payload["process_record"]["delivery_summary"] == PASSED_PANEL_SUMMARY
         assert final.payload["process_record"]["sections"]["Reviews"]
     drive(claude, outcome, scenario)
 
@@ -228,7 +239,8 @@ def test_suggestions_are_merged_shown_and_recorded_without_losing_delivery(plann
         await h.release({**REVIEW_PASS, "findings": [late]})
         final = await h.finished()
         assert final.payload["status"] == "completed"
-        assert final.payload["summary"] == FINAL_RESULT + "\n\nProcess record: see the task page"
+        assert final.payload["summary"] == FINAL_RESULT + "\n\n" + PASSED_PANEL_SUMMARY
+        assert final.payload["process_record"]["delivery_summary"] == PASSED_PANEL_SUMMARY
         assert final.payload["process_record"]["sections"]["Reviews"]
         assert len(claude.turns()) == 3  # a late suggestion records advice without another decision
         stored = await agent_db.load_plan("t1")
