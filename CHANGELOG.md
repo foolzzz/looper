@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.116] - 2026-11-10
+
+### Added
+
+- **Workflow rules: verification guard, verification round cap and escalation when exhausted.** ([#1182](https://github.com/foolzzz/looper/pull/1182))
+  - A verification step must not change code: reported changes, a moved HEAD or changed status, contents or index fail it with `verification_changed_code`, the baseline is restored, and in git the check runs in a private checkout. Only a reviewed repair, with new verification depending on it, may follow.
+  - Verification steps must depend on a work step and need no review unless requested. After the workflow's `max_rounds` failed verifications, retry is off and new verification needs a new gate.
+  - With `escalate_on_exhaustion`, exhausted attempts allow only replan or fail, and a replan must add a new user gate that the Planner cannot cancel. Gates carry a `purpose`.
+  - Database: `task_user_gates.purpose` and the journal kinds `verification_round` and `escalation`, migrated on start. Tasks without a workflow are unchanged.
+
 ## [2.14.115] - 2026-11-10
 
 ### Added
