@@ -813,10 +813,13 @@ async def task_readiness(task: dict[str, Any], *, compact: bool = False) -> list
         waits_by_id = {w["step_id"]: SimpleNamespace(**w) for w in waits}
         outcomes = {step["id"]: StepOutcome.from_step(SimpleNamespace(
             **step, gate=gates_by_id.get(step["id"]), wait=waits_by_id.get(step["id"]))) for step in steps}
+        project = await db_projects.get_task_project(task_id)
+        isolate_steps = ProjectExecution.from_row(project).isolate_steps
         for step in steps:
             step["accept_state"] = (evaluate(parse(step["accept_when"], "accept_when"), outcomes.__getitem__).value
                                     if step.get("accept_when") is not None else None)
-            step["ready_state"] = (evaluate(parse(step["ready_when"], "ready_when"), outcomes.__getitem__).value
+            step["ready_state"] = (evaluate(parse(step["ready_when"], "ready_when"), outcomes.__getitem__,
+                                           isolate_steps=isolate_steps and not step.get("reviews")).value
                                    if step["status"] == "pending" and step.get("ready_when") is not None else None)
     done = {step.get("id") for step in steps if step.get("status") == "verified"}
     for step in steps:
