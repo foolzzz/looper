@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.111] - 2026-11-09
+
+### Added
+
+- **Pipeline step dependencies: composable AND/OR conditions.** ([#1171](https://github.com/foolzzz/looper/pull/1171))
+  - With the per-project `dependency_conditions` switch on (off by default), a Planner may give work, gate and wait steps a `ready_when` condition: nested `all_of`, `any_of` and `k_of` over steps that are completed, verified or passed. Readiness is decided in code (satisfied, pending, unsatisfiable); replans keep started steps' conditions.
+  - A step that can no longer start gets a Planner chat turn (`none`, `add_steps` or `replan`) and a `condition_blocked` journal entry. This also covers plain `depends_on` on a skipped or missing step, in every project.
+  - Task detail and the Manager's views carry `ready_when` and `ready_state`; the Settings form gains the switch.
+  - Additive schema change: nullable `task_steps.ready_when` and `projects.dependency_conditions`, and the `condition_blocked` journal kind, added by `ensure_schema`.
+
 ## [2.14.110] - 2026-11-09
 
 ### Added
