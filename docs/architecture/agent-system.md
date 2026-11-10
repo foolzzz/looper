@@ -1283,7 +1283,8 @@ Manager tools.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
   providers that serve `openai-responses`, or with Codex's own ChatGPT
-  login (below). Each process gets a `CODEX_HOME`
+  login (below). Its home layout is defined by the frozen `CodexHome` value.
+  Each process gets a `CODEX_HOME`
   of Looper's own under `<runtime_root>/.local/codex`, named on its command
   line (`env CODEX_HOME=... codex exec ...`) and holding only the generated
   `config.toml` (the provider as `[model_providers.looper]`, its key only in
