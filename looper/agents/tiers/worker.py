@@ -39,6 +39,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -683,13 +685,59 @@ def _verification_checkout(work_dir: str, backup: Path, runtime_paths: Collectio
 
         relocate_links(root, tree, seed)
         copied = _copy_verification_runtime(Path(work_dir), tree / Path(work_dir).resolve().relative_to(root.resolve()),
-                                            runtime_paths)
+                                            runtime_paths, repository_roots=(root, tree))
         (backup / "runtime-paths.json").write_text(json.dumps(copied))
         ready.touch()
     return str(tree / Path(work_dir).resolve().relative_to(root.resolve()))
 
 
-def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str]) -> list[str]:
+def _relocate_verification_venv(source: Path, target: Path, repository_roots: tuple[Path, Path]) -> None:
+    """Relocate entry points and editable imports before executing a copied environment."""
+    root, checkout = (path.resolve() for path in repository_roots)
+    replacements = {str(root): str(checkout), str(source.absolute()): str(target.absolute()),
+                    str(source.resolve()): str(target.absolute())}
+
+    # A task worktree often links the main worktree's environment. Its editable
+    # install names that main worktree, rather than the task directory.
+    worktrees = subprocess.run(["git", "-C", str(root), "worktree", "list", "--porcelain", "-z"],
+                              check=True, capture_output=True, text=True, timeout=5)
+    for field in worktrees.stdout.split("\0"):
+        if field.startswith("worktree "):
+            path = field.removeprefix("worktree ")
+            replacements[path] = replacements[str(Path(path).resolve())] = str(checkout)
+    pattern = re.compile("(?:" + "|".join(re.escape(path) for path in sorted(replacements, key=len, reverse=True))
+                         + r""")(?=/|[\s'"\\]|$)""")
+    for path in target.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix == ".pyc":
+            path.unlink()  # Cached editable finders may still contain the developer's paths.
+            continue
+        raw = path.read_bytes()
+        if b"\0" in raw:
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        relocated = pattern.sub(lambda match: replacements[match.group()], text)
+        if relocated.startswith("#!" + str(target / "bin" / "python")):
+            # The private path can exceed the kernel's shebang limit. Use the
+            # same shell/Python wrapper as installers do for long entry points.
+            shebang, _, body = relocated.partition("\n")
+            relocated = ("#!/bin/sh\n'''exec' " + shlex.join(shlex.split(shebang[2:]))
+                         + " \"$0\" \"$@\"\n' '''\n" + body)
+        if relocated != text:
+            mode = path.stat().st_mode
+            path.chmod(mode | 0o200)
+            try:
+                path.write_bytes(relocated.encode("utf-8"))
+            finally:
+                path.chmod(mode)
+
+
+def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str], *,
+                               repository_roots: tuple[Path, Path] | None = None) -> list[str]:
     """Copy declared local state, never exposing a writable link to the source.
 
     An explicitly declared workspace link may point outside the repository. Links
@@ -709,6 +757,8 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
                 if child.name == ".git":
                     raise OSError("verification runtime paths must not contain repository metadata")
                 copy(child, destination / child.name, boundary, ancestors | {resolved})
+            if (resolved / "pyvenv.cfg").is_file():
+                _relocate_verification_venv(path, destination, repository_roots or (source, target))
         elif resolved.is_file():
             shutil.copy2(resolved, destination)
             destination.chmod(destination.stat().st_mode & ~0o222)

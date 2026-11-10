@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import shutil
 import subprocess
+import sys
+import venv
 from types import SimpleNamespace
 from dataclasses import replace
 from pathlib import Path
@@ -348,6 +351,79 @@ def test_runtime_file_links_are_copied_without_exposing_their_source(tmp_path):
     assert copied.stat().st_mode & 0o111
     assert not copied.stat().st_mode & 0o222
     assert interpreter.stat().st_mode & 0o200
+
+
+@pytest.mark.parametrize("editable", ["pth", "finder"])
+def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatch, editable):
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    developer = _repo(tmp_path / "developer")
+    (developer / ".gitignore").write_text(".venv\n__pycache__/\n")
+    package = developer / "src" / "checkout_probe"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("VALUE = 1\n")
+    (developer / "test_probe.py").write_text(
+        "import checkout_probe\n"
+        "def test_value():\n"
+        "    print(checkout_probe.__file__)\n"
+        "    assert checkout_probe.VALUE == 1\n"
+    )
+    _git(developer, "add", ".gitignore", "src", "test_probe.py")
+    _git(developer, "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-m", "package")
+    environment = developer / ".venv" if editable == "pth" else tmp_path / "environment"
+    venv.EnvBuilder(with_pip=False).create(environment)
+    if editable == "finder":
+        (developer / ".venv").symlink_to(environment, target_is_directory=True)
+    site = environment / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    # Copy the installed test runner only: the fixture needs neither pip nor network access.
+    for name in ("pytest", "_pytest", "pluggy", "packaging", "iniconfig", "pygments", "py"):
+        spec = importlib.util.find_spec(name)
+        if spec.submodule_search_locations is None:
+            shutil.copy2(spec.origin, site / Path(spec.origin).name)
+        else:
+            shutil.copytree(Path(spec.origin).parent, site / name, ignore=shutil.ignore_patterns("__pycache__"))
+    if editable == "pth":
+        (site / "checkout_probe.pth").write_text(str(developer / "src") + "\n")
+    else:
+        (site / "__editable___checkout_probe_finder.py").write_text(
+            "import sys\nfrom importlib.machinery import PathFinder\n"
+            f"MAPPING = {{'checkout_probe': {str(developer / 'src')!r}}}\n"
+            "class Finder:\n"
+            "    @classmethod\n"
+            "    def find_spec(cls, fullname, path=None, target=None):\n"
+            "        if fullname in MAPPING:\n"
+            "            return PathFinder.find_spec(fullname, [MAPPING[fullname]])\n"
+            "def install():\n    sys.meta_path.append(Finder)\n"
+        )
+        (site / "checkout_probe.pth").write_text("import __editable___checkout_probe_finder; __editable___checkout_probe_finder.install()\n")
+    executable = environment / "bin" / "pytest"
+    shebang = (f"#!{environment / 'bin' / 'python'}\n" if editable == "pth" else
+               f"#!/bin/sh\n'''exec' '{environment / 'bin' / 'python'}' \"$0\" \"$@\"\n' '''\n")
+    executable.write_text(shebang + "import pytest\nraise SystemExit(pytest.main())\n")
+    executable.chmod(0o755)
+
+    def run(root, command):
+        return subprocess.run([str(root / ".venv" / "bin" / command[0]), *command[1:]],
+                              cwd=root, capture_output=True, text=True, timeout=20)
+
+    assert run(developer, ["pytest", "-q", "-s", "-p", "no:cacheprovider", "test_probe.py"]).returncode == 0
+    source = tmp_path / "task"
+    _git(developer, "worktree", "add", "--detach", str(source))
+    (source / ".venv").symlink_to(environment, target_is_directory=True)
+    (source / "src" / "checkout_probe" / "__init__.py").write_text("VALUE = 0\n")
+    checkout = Path(worker._verification_checkout(str(source), tmp_path / "backup", [".venv"]))
+    assert not list((checkout / ".venv").rglob("*.pyc"))
+    assert all(not path.stat().st_mode & 0o222 for path in (checkout / ".venv").rglob("*") if path.is_file())
+    prefix = run(checkout, ["python", "-c", "import sys; print(sys.prefix)"])
+    assert prefix.returncode == 0, prefix.stderr
+    assert Path(prefix.stdout.strip()) == checkout / ".venv"
+    for command in (["pytest"], ["python", "-m", "pytest"]):
+        result = run(checkout, [*command, "-q", "-s", "-p", "no:cacheprovider", "test_probe.py"])
+        assert str(checkout / "src" / "checkout_probe" / "__init__.py") in result.stdout, result.stdout + result.stderr
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "1 failed" in result.stdout
+    assert (package / "__init__.py").read_text() == "VALUE = 1\n"
+    assert executable.read_text().startswith(shebang)
 
 
 @pytest.mark.parametrize("change", ["rewrite", "replace", "submodule"])
