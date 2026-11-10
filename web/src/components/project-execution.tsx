@@ -1,3 +1,4 @@
+import { WorkflowField, useWorkflows } from "@/components/workflows";
 import type { Project, ProjectExecution, ProjectUpdate } from "@/lib/api";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
@@ -18,6 +19,7 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "planner_roles",
   "wait_commands",
   "dependency_conditions",
+  "default_workflow",
   "role_text_max_chars",
   "user_gates",
   "gate_reminder_hours",
@@ -78,6 +80,7 @@ export function ProjectExecutionFields({
   draft: ExecutionDraft;
   onChange: (draft: ExecutionDraft) => void;
 }) {
+  const workflows = useWorkflows();
   const set = (field: keyof ProjectExecution) => (e: { target: { value: string } }) =>
     onChange({ ...draft, [field]: e.target.value });
   const label = (field: keyof ProjectExecution, text: string) => (
@@ -91,6 +94,8 @@ export function ProjectExecutionFields({
       <p className="text-xs text-muted-foreground">
         How this project&apos;s Planner, Workers and Reviewers run. Empty fields inherit; changes apply to the next run.
       </p>
+      <WorkflowField rows={workflows.rows} label="Default workflow" value={draft.default_workflow || "none"} onChange={(key) => onChange({ ...draft, default_workflow: key === "none" ? "" : key })} />
+      {workflows.error && <p role="alert" className="text-xs text-destructive">{workflows.error}</p>}
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
           {label("review_policy", "Review")}

@@ -3,9 +3,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectSettingsForm } from "@/components/project-settings";
-import { PROJECTS_CHANGED_EVENT, type Project } from "@/lib/api";
+import { PROJECTS_CHANGED_EVENT, fetchWorkflows, type Workflow, type Project } from "@/lib/api";
 import { resetSessionGuard } from "@/lib/session";
 
+vi.mock("@/lib/api", async (original) => ({
+  ...await original<typeof import("@/lib/api")>(), fetchWorkflows: vi.fn(async () => []),
+}));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const project = (counts: Partial<Project> = {}): Project => ({
@@ -32,6 +35,23 @@ describe("project deletion", () => {
   });
   const button = (text: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === text)!;
   const section = () => container.querySelector('section[aria-labelledby$="-delete"]')!;
+
+  it.each([
+    { before: null, choice: "dev", saved: "dev" },
+    { before: "dev", choice: "none", saved: null },
+  ])("saves the project default workflow ($before → $saved)", async ({ before, choice, saved }) => {
+    vi.mocked(fetchWorkflows).mockResolvedValueOnce([{ key: "dev", name: "Development", description: "", profiles: {}, roles: [], work_role: null, review_panel: null, max_step_retries: null, verification: null } as Workflow]);
+    const fetcher = vi.fn(async () => Response.json({ status: "ok", result: { project: project({ default_workflow: saved }) } }));
+    vi.stubGlobal("fetch", fetcher);
+    await act(async () => root.render(<ProjectSettingsForm project={project({ default_workflow: before })} onDeleted={() => {}} />));
+    const select = container.querySelector<HTMLSelectElement>("#workflow-choice")!;
+    expect(select.value).toBe(before ?? "none");
+    await act(async () => { select.value = choice; select.dispatchEvent(new Event("change", { bubbles: true })); });
+    await act(async () => container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith("/api/v1/project_admin/update", expect.objectContaining({
+      body: JSON.stringify({ project_id: "project-example", fields: { default_workflow: saved } }),
+    }));
+  });
 
   it("requires local confirmation before an authenticated operator can delete, and cancels without a request", async () => {
     const fetcher = vi.fn().mockResolvedValue(Response.json({ status: "ok", result: { deleted: "project-example" } }));

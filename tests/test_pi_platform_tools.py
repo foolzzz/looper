@@ -171,7 +171,7 @@ class _Server(AgentHTTPServer):
 
 
 @pytest.fixture
-def platform(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+def platform(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_workflows: None) -> SimpleNamespace:
     """Storage boundaries only; production catalogs, permission checks and reads."""
     from looper.db import agent_setting_layers, manager_actions, managers, projects, schedules, system_settings, tasks
     from looper.agents import ops

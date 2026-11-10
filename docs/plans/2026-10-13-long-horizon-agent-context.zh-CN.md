@@ -866,6 +866,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 ### 5.2 工程待办
 
+- **流程预设的后续入口**：任务模板引用流程、定时任务选择流程；当前模板和定时任务仍不采用项目默认流程。
+
 - **DSH SDK runner 的后续**（[RFC §10.6、§16](../architecture/rfcs/agent-sdk-runner-v0.zh-CN.md#106-实现进展与验证缺口)）：全角色与咨询的单 runner opt-in 已实现，installed 隔离 serve 验证及真实 DeepSeek smoke、CLI/runner 对照已准备，真实结果待 lead。尚余按 provider binding 分运行器、容量数字及完整 composition 长期内存/exit hook 验证、运行时卡；完成门禁后切换默认值并删除 DSH CLI 路径；补齐 state root 中保留的 run sessions 的保留期限与回收，以及 runner 的 web fetch 和 skills。
 
 - **Pi SDK runner 的后续**（[RFC §16](../architecture/rfcs/agent-sdk-runner-v0.zh-CN.md#16-阶段)）：S1 的 Worker/Reviewer RunnerChannel、咨询分叉与取消、`WorkerPool` 运行句柄已实现；隔离 serve 验证与 CLI/runner 真实任务对照已准备，待 lead 实跑，不能计通过。尚余容量测量及数字、运行时卡、完成门禁后切换默认值和删除 Pi CLI 路径；runner 重启退避期间的 fail-fast 重试、服务崩溃后遗留 `runners/pi-N/` generation 目录清扫、`runners/state/pi/<owner>` 的 owner 状态删除与过期清理需分别补齐。S0 的周期健康检查、runner pool 和 compaction 的独立更新事件仍待实现。

@@ -8,6 +8,9 @@ import { SettingsPage } from "@/pages/settings";
 import { SETTINGS_PAGES, settingsHref } from "@/lib/settings-pages";
 import type { Project, VaultSettings } from "@/lib/api";
 
+vi.mock("@/lib/api", async (original) => ({
+  ...await original<typeof import("@/lib/api")>(), fetchWorkflows: vi.fn(async () => []),
+}));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const EMPTY: VaultSettings = {

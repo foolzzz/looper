@@ -34,7 +34,7 @@ from tests.db_support import until
 from tests.stop_faults import hold_at
 from tests.stop_matrix_support import _alive
 from tests.test_manager_new_session import _web
-from tests.test_manager_stop import _manager, _replies, _Session, _stop_on  # noqa: F401
+from tests.test_manager_stop import _manager, _replies, _Session, _stop_on, _with_ops  # noqa: F401
 
 
 def _functions() -> list[ast.AsyncFunctionDef]:
@@ -70,6 +70,8 @@ class _Stale(_Session):
 def _setup(name: str, manager: ManagerAgent, session: _Session, agent_db: Any) -> _Session:
     """The state in which a turn reaches the step ``name``."""
     match name:
+        case "tool_listing":
+            _with_ops(manager)
         case "switch_session":
             manager._session_loaded = True
             manager._session_id, manager._session_runtime = "old-session", "omp"

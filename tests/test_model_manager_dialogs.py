@@ -793,20 +793,27 @@ def test_fake_dialog_outcome_uses_observations_instead_of_success_words(monkeypa
 
 
 @pytest.mark.parametrize("case_id", ["model_login_runtime", "model_missing_endpoint"])
-@pytest.mark.parametrize("mutation", [None, "write", "state_changed", "no_successful_read"])
+@pytest.mark.parametrize("mutation", [None, "login_changed", "write", "state_changed", "endpoint_changed",
+                                      "no_successful_read"])
 def test_refused_pairings_require_readback_without_registry_changes(monkeypatch, case_id, mutation):
     registry = provider_state()
+    registry["providers"][0]["login"] = {"state": "checking", "detail": "checking the login"}
     actions = [action("looper_providers", "list")]
     look = observed(monkeypatch, registry, actions)
     look.registry_before = deepcopy(registry)
-    if mutation == "write":
+    if mutation == "login_changed":
+        registry["providers"][0]["login"] = {"state": "unknown", "detail": "CLI unavailable"}
+    elif mutation == "write":
         actions.append(action("looper_agent_profiles", "create"))
     elif mutation == "state_changed":
         registry["profiles"].append({"profile_id": "agent-wrong"})
+    elif mutation == "endpoint_changed":
+        registry["providers"][0]["endpoints"][0]["base_url"] = "https://changed.example.invalid"
     elif mutation == "no_successful_read":
         actions[0]["status"] = "error"
     check = dialogs.select([case_id])[0].says[0].check
-    assert (check(look) is None) is (mutation is None)
+    assert (check(look) is None) is (mutation in (None, "login_changed"))
+    assert look.registry_before["providers"][0]["login"]["state"] == "checking"
 
 
 def dual_state(input_price=1):
@@ -861,7 +868,7 @@ def test_repricing_keeps_historical_spend_and_other_protocol_price(monkeypatch, 
                                        "project_dir_command_schedule", "project_dir_plain", "project_move_dir",
                                        "model_custom", "model_dual_protocol", "model_login_runtime",
                                        "model_missing_endpoint", "model_price_history", "template_review_task",
-                                       "template_missing_input"])
+                                       "template_missing_input", "workflow_named", "workflow_unspecified"])
 def test_targeted_model_dialogs_run_through_fake_manager_and_database(tmp_path, dialog_id):
     cases = dialogs.select([dialog_id])
     result, path = dialogs.run(mode="fake", dialogs=cases, admin_url=os.environ["LOOPER_TEST_DATABASE_URL"],

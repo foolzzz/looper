@@ -657,6 +657,7 @@ def test_pending_gate_and_wait_cannot_swap_kinds(original: str) -> None:
         parse_chat(reply({"reply": "ok", "action": "replan", "steps": [step() if original == "gate" else gate]}), view)
 
 
+@pytest.mark.usefixtures("no_workflows")
 def test_manager_wait_settings_read_confirmation_update_and_reset(
     settings: dict[str, str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -707,6 +708,7 @@ def test_manager_wait_settings_read_confirmation_update_and_reset(
 
 @pytest.mark.parametrize("values", [{}, {"unknown": 1}, {"max_wait_seconds": 59},
                                   {"max_wait_seconds": 60, "min_check_seconds": 61}])
+@pytest.mark.usefixtures("no_workflows")
 def test_manager_wait_settings_validate_before_confirmation(
     settings: dict[str, str], monkeypatch: pytest.MonkeyPatch, values: dict[str, Any],
 ) -> None:
@@ -726,6 +728,7 @@ def test_manager_wait_settings_validate_before_confirmation(
     asyncio.run(run())
 
 
+@pytest.mark.usefixtures("no_workflows")
 def test_manager_task_returns_wait_conditions_and_each_step_kind(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents import projects
     from looper.agents.ops.service import ManagerOps, Platform

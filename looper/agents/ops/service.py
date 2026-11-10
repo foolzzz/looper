@@ -55,14 +55,14 @@ from typing import Any
 
 from ... import child_env
 from .. import chat_settings
-from ...db import manager_actions as db_actions, managers as db_managers, tasks as db_tasks
+from ...db import manager_actions as db_actions, managers as db_managers, tasks as db_tasks, workflows as db_workflows
 from ..managers_api import DEFAULT_MANAGER_ID, ManagerDefinition, ManagerTools, TaskPolicy, TaskScope
 from . import Call, ErrorCode, OpError, Risk, Tool, Turn, TurnState, check_arguments
 from .concurrency import TOOLS as CONCURRENCY_TOOLS
 from .config import TOOLS as CONFIG_TOOLS, project_tool
 from .schedules import TOOLS as SCHEDULE_TOOLS
 from .settings import TOOLS as SETTINGS_TOOLS
-from .tasks import TOOLS as TASK_TOOLS, task_create_tool, task_directory_tool
+from .tasks import TOOLS as TASK_TOOLS, task_create_tool, task_directory_tool, task_workflow_tool
 
 logger = logging.getLogger(__name__)
 
@@ -163,11 +163,12 @@ def _tool_map(tools: Sequence[Tool]) -> Mapping[str, Tool]:
     return MappingProxyType({tool.name: tool for tool in tools})
 
 
-def scope_for(definition: ManagerDefinition, template_keys: Sequence[str] = ()) -> OpsScope:
+def scope_for(definition: ManagerDefinition, template_keys: Sequence[str] = (),
+              workflow_keys: Sequence[str] = ()) -> OpsScope:
     """The scope a Manager definition gives; with templates, ``looper_task_create`` takes ``template`` and
     ``inputs``."""
     all_tools = definition.tools is ManagerTools.ALL
-    tools = tuple(task_create_tool(template_keys) if tool.name == "looper_task_create" else tool
+    tools = tuple(task_create_tool(template_keys, workflow_keys) if tool.name == "looper_task_create" else tool
                   for tool in (MANAGER_TOOLS if all_tools else TASKS_SCOPE_TOOLS))
     return OpsScope(
         manager_id=definition.id, revision=definition.revision,
@@ -268,6 +269,14 @@ class ManagerOps:
         rebuilt when the definition changed since. Never falls back to a scope that may be older than what was
         committed."""
         scope = self._scope
+        if "looper_task_create" in scope.tools:
+            keys = [row["key"] for row in await db_workflows.list_workflows()]
+            if self._scope is not scope:
+                return await self.current_scope()
+            scope = replace(scope, tools=_tool_map([
+                task_workflow_tool(tool, keys) if tool.name == "looper_task_create" else tool
+                for tool in scope.tools.values()]))
+            self._scope = scope
         if scope.revision < 0 or scope.manager_id == DEFAULT_MANAGER_ID:
             return scope
         try:
@@ -285,7 +294,7 @@ class ManagerOps:
                                                  "was done; try again in a moment") from None
         if definition is None or not definition.enabled:
             raise OpError(ErrorCode.FORBIDDEN, "this Manager was turned off")
-        current = scope_for(definition, keys or ())
+        current = scope_for(definition, keys or (), [row["key"] for row in await db_workflows.list_workflows()])
         if self._scope is scope:  # not replaced meanwhile by the fleet
             self.set_scope(current)
         return current

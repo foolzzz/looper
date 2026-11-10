@@ -1,3 +1,4 @@
+import { WorkflowsSection } from "@/components/workflows";
 import { LlmrecSettingsSection } from "@/components/llmrec-settings";
 import { GatewaySettingsSection } from "@/components/gateway-settings";
 import { AgentProfilesSection } from "@/components/agent-profiles";
@@ -29,6 +30,7 @@ const DESCRIPTIONS: Record<Exclude<SettingsPageId, "roles">, React.ReactNode> = 
     "The agent runtimes this version can run, as found on the server's PATH. A runtime's capabilities decide the " +
     "roles it can run. Runtimes are built in; a different binary comes from the server's PATH.",
   [AGENT_PROFILE.slug]: AGENT_PROFILE.help,
+  workflows: "Reusable task roles, review conditions and execution settings, snapshotted when a task is created.",
   managers:
     "Managers you talk to, each with its own duty, session and spend. Task templates set what a Manager's tasks run with.",
   clients:
@@ -69,6 +71,7 @@ export function SettingsPage({ sub }: { sub: string }) {
       {page === "runtimes" && <RuntimesSection />}
       {page === AGENT_PROFILE.slug && <AgentProfilesSection />}
       {page === "roles" && <RolesSection sub={inner} />}
+      {page === "workflows" && <WorkflowsSection />}
       {page === "managers" && <ManagersSection />}
       {page === "clients" && <ApiClientsSection />}
       {page === "catalog" && <CatalogCard />}

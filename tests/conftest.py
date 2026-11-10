@@ -138,6 +138,7 @@ _AGENT_DB_READS = (
     ("managers", "list_managers", [_DEFAULT_MANAGER]),
     ("managers", "revision_of", (0, True)),
     ("managers", "list_templates", []),
+    ("workflows", "list_workflows", []),
     # A task is created only while its Manager is enabled; the default one always is.
     ("managers", "lock_for_task", True),
     ("projects", "list_projects", []),
@@ -166,6 +167,16 @@ _AGENT_DB_READS = (
 
 # Columns the wait loop writes. A Planner save leaves them as they are.
 _WAIT_LOOP_COLUMNS = ("baseline", "checks", "last_checked_at", "last_result", "last_output", "last_error", "notice")
+
+
+@pytest.fixture
+def no_workflows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty workflow store for isolated Manager tools; database tests keep the real store."""
+    from unittest.mock import AsyncMock
+
+    from looper.db import workflows
+
+    monkeypatch.setattr(workflows, "list_workflows", AsyncMock(return_value=[]))
 
 
 class _PlanStore:

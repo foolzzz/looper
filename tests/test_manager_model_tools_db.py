@@ -89,6 +89,7 @@ def test_model_reference_schema_and_fixed_descriptions():
     ("looper_models", {"action": "list", "env": {"API_KEY": SECRET}}),
     ("looper_models", {"action": "list", "base_url": "https://example.invalid"}),
 ])
+@pytest.mark.usefixtures("no_workflows")
 def test_real_handlers_refuse_invalid_or_secret_arguments_without_database(monkeypatch, name, arguments):
     monkeypatch.setattr(manager_actions, "record", AsyncMock())
     ops = ManagerOps(Platform(bus=None, task_router=None), url="http://127.0.0.1:9")

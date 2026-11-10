@@ -3893,12 +3893,27 @@ ships an example, `docs/examples/manager-github-pr-review.json`.
 
 ### Workflow presets
 
-Operators define reusable presets through `workflows.list/get/put/delete` in
-v1 or `loopercli workflows`. A put replaces the complete definition. A task
-selects a preset with `tasks.create.workflow` or `loopercli create --workflow`:
+Operators define reusable presets in Settings → Workflows through a JSON
+editor, or through `workflows.list/get/put/delete` in v1 and `loopercli workflows`.
+Validation errors are shown unchanged; deletion asks for confirmation. A put
+replaces the complete definition. The dashboard's task form, the Manager
+(including Telegram and Lark), `tasks.create.workflow` and `loopercli create --workflow` select a preset:
 an explicit key (or `none`) wins over `projects.default_workflow`. Templates
 and scheduled tasks ignore that default; an explicit workflow together with a
 template is invalid.
+
+Project Execution settings select `default_workflow`. The task form preselects
+it, summarizes the preset and displays its fixed Profiles read-only; task
+details show the immutable workflow. The Manager lists workflow keys and names
+only when presets exist, offers those keys and `none` in its creation tool,
+and names the selected workflow in the creation confirmation. It uses a preset
+only when requested or supplied by the project default. `looper_projects`
+can update `dependency_conditions`; get and list return its stored value.
+
+Configuration transfer carries workflows, project defaults and dependency
+conditions. Workflow Profile references use names in the file and resolve to
+local IDs on import. The same workflow key is replaced, invalid definitions
+are skipped with a reason, and missing Profile bindings are cleared with notes.
 
 Creation atomically stores `tasks.workflow`, copies its roles as version 1
 with `via=workflow`, merges fixed Profile choices into task overrides (a
@@ -3914,27 +3929,8 @@ on current project execution settings; escalation enables user gates. A
 work step without a role uses `work_role` when set. Only the Planner receives
 the workflow instructions, in its Task section alongside the rules already
 enforced. Tasks without a workflow retain their prompt and execution paths.
-Review panel execution, workflow settings UI and configuration transfer are
-separate work.
-
-When the snapshot selects a verification role, its work steps must depend on
-at least one work step. They skip automatic review unless `review: true` is
-explicit. Their dispatch payload sets `verification: true`: the Worker records
-HEAD and a SHA-256 of `git status --porcelain` before and after the run. Reported
-changed or deleted files, a moved HEAD or a changed workspace status fail the
-step with `failure: verification_changed_code`, which cannot be accepted.
-Outside Git only the report is checked, and the result states that limitation.
-Each attempt records its HEAD, result and first summary sentence in a
-`verification_round` journal entry. Verification failures count across steps
-and restarts; at `max_rounds`, a failed verification cannot retry. Adding a new
-verification step then requires a new user gate in the same reply and a
-dependency on it.
-
-With `escalate_on_exhaustion`, an unacceptable result with no retries left
-allows only `replan` or `fail`. The replan must add a user gate and every other
-new step must depend on it. An accepted escalation is recorded as an
-`escalation` journal entry. These rules and their Planner instructions apply
-only when the corresponding snapshot fields are enabled.
+Review panels and verification rules are validated and stored here; their
+execution is separate work.
 
 ### A task's Planner's tools
 
