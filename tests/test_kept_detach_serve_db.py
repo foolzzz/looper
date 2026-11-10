@@ -21,12 +21,13 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 # Produce complete observable events throughout the held run, including while
 # there is no control plane, so the detach cursor has a meaningful readback.
+# Match the deadline assignment independently of the shared CLI's hold duration.
 STREAMING_CLI = CLI.replace(
-    '        limit = time.monotonic() + 90',
+    '        limit = time.monotonic()',
     '        print(json.dumps({"type": "system", "subtype": "init", '
     '"session_id": "detach-worker", "model": "fake"}), flush=True)\n'
     '        sequence = 0\n'
-    '        limit = time.monotonic() + 90',
+    '        limit = time.monotonic()',
 ).replace(
     '            time.sleep(0.05)',
     '            print(json.dumps({"type": "assistant", "message": {"role": "assistant", '
