@@ -2421,6 +2421,11 @@ class PlannerAgent:
                 # Quorum acceptance can leave referenced seats running too. Every member's late blocker
                 # reopens the decision so the Planner can retry the work, not merely acknowledge a chat.
                 target.status = "completed"
+        else:
+            # Preserve arrival order before quorum snapshots repeat seats in plan order.
+            entries.append(JournalEntry(target.step_id, target.label, json.dumps({
+                "round": target.retries, "reviews": {seat.label: {"status": seat.status, "result": result}},
+            }), kind=JournalKind.REVIEW_ROUND))
         # Persist the reopened target with the late verdict: a restart must take its decision too.
         await self._save(plan, seat, target, entries=entries)
         if target.status == "completed":
@@ -4800,7 +4805,8 @@ class PlannerAgent:
                 "status": "completed",
                 "progress": plan.progress_summary(),
                 "summary": summary,
-                **({"process_record": process} if process is not None else {}),
+                **({"process_record": process, "delivery_summary": workflows.process_record_summary(process)}
+                   if process is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
@@ -4963,7 +4969,8 @@ class PlannerAgent:
                 "progress": plan.progress_summary(),
                 "summary": summary,
                 "fail_kind": fail_kind.value if fail_kind else None,
-                **({"process_record": process} if process is not None else {}),
+                **({"process_record": process, "delivery_summary": workflows.process_record_summary(process)}
+                   if process is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},

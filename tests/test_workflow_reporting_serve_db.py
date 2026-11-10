@@ -43,7 +43,7 @@ def test_workflow_record_is_persisted_by_serve(monkeypatch):
         with fresh_database_without_recording(str(DSN)) as (url, _):
             with running_server(database_url=url, runtime_root=root / 'runtime', bin_dir=bin_dir,
                                 home=home, notes_root=home / 'notes', env=env,
-                                startup_timeout=30, log_path=root / 'serve.log') as api:
+                                log_path=root / 'serve.log') as api:
                 assert not api.base_url.endswith(':8767')
                 models = api.post('/api/v1/ops/models/list', {})['result']['models']
                 profiles = {}

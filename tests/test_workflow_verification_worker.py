@@ -5,6 +5,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import py_compile
 import shutil
 import subprocess
 import sys
@@ -393,6 +394,7 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
         (linked_package / "__init__.py").symlink_to(
             package / "__init__.py" if editable == "strict-absolute" else
             "../../../src/checkout_probe/__init__.py")
+        py_compile.compile(str(linked_package / "__init__.py"), doraise=True)
         (site / "checkout_probe.pth").write_text(str(linked_package.parent) + "\n")
     else:
         (site / "__editable___checkout_probe_finder.py").write_text(
@@ -430,6 +432,8 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
     package_stat = (package / "__init__.py").stat()
     os.utime(source_package, ns=(package_stat.st_atime_ns, package_stat.st_mtime_ns))
     checkout = Path(worker._verification_checkout(str(source), tmp_path / "backup", runtime_paths))
+    if editable.startswith("strict-"):
+        assert list((developer / "build").rglob("*.pyc"))
     for runtime_path in runtime_paths:
         assert not list((checkout / runtime_path).rglob("*.pyc"))
     assert all(not path.stat().st_mode & 0o222 for path in (checkout / ".venv").rglob("*") if path.is_file())
