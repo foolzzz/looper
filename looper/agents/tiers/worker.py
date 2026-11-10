@@ -1644,7 +1644,15 @@ class WorkerPool:
                 return {"passed": False, "findings": [agent_settings.profile_error],
                         "summary": agent_settings.profile_error}
             return {"status": "failed", "error": agent_settings.profile_error}
-        if is_verify and payload.get("worker_runtime_id") == agent_settings.profile.runtime.id:
+        worker_runtime_id = payload.get("worker_runtime_id")
+        if is_verify and not worker_runtime_id and payload.get("worker_id") and parent_task_id:
+            # Results saved before review panels did not include their developer's runtime.
+            records = await db_llm_records.list_records(
+                agent_id=payload["worker_id"], task_id=parent_task_id, limit=1)
+            metadata = (records[0].get("metadata") or {}) if records else {}
+            profile = metadata.get("profile") or metadata.get("agent") or {}
+            worker_runtime_id = (profile.get("runtime") or {}).get("id")
+        if is_verify and worker_runtime_id == agent_settings.profile.runtime.id:
             member = task_role.key if task_role else "builtin"
             problem = (f"Review member {member!r} resolved runtime {agent_settings.profile.runtime.id!r}, "
                        "the same runtime as the developer; choose a different reviewer runtime")

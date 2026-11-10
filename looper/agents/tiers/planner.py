@@ -1219,7 +1219,8 @@ class PlannerAgent:
             step.role = (spec.role or (self._workflow or {}).get("work_role")
                          if spec.gate is None and spec.wait is None else None)
             step.review = (spec.gate is None and spec.wait is None
-                           and (spec.review or (self._execution.review_all and not self._is_verification(step))))
+                           and (spec.review or self._execution.review_all)
+                           and not (self._panel_on and self._is_verification(step)))
             step.review_roles = [StepReviewRole(item.role, item.required) for item in spec.review_roles]
             if spec.gate is not None:
                 step.gate = Gate(spec.gate.topic, spec.gate.agenda, spec.gate.findings, purpose=spec.gate.purpose)
@@ -1242,8 +1243,7 @@ class PlannerAgent:
         changed: list[PlanStep] = []
         panel = (self._workflow or {}).get("review_panel")
         for target in targets:
-            verification = (self._workflow or {}).get("verification") or {}
-            if target.role == verification.get("role", ""):
+            if panel and self._is_verification(target):
                 target.review = False
             if not panel or not target.review:
                 target.accept_when = None
@@ -2392,6 +2392,7 @@ class PlannerAgent:
                      "work_result": target.result or {}, "acceptance_criteria": target.acceptance_criteria,
                      **({"feedback": list(target.feedback)} if target.feedback else {}), "context": context,
                      "severity": True, "head": head,
+                     "worker_id": target.worker_id,
                      "worker_runtime_id": (target.result or {}).get("runtime_id"),
                      **({"task_role": role.payload()} if role else {})},
             correlation_id=plan.correlation_id, metadata={"origin_channel_id": plan.origin_channel_id}))
@@ -2733,7 +2734,7 @@ class PlannerAgent:
         project reviews every step."""
         if self._panel_on and self._is_verification(step):
             return False
-        return step.review or (self._execution.review_all and not self._is_verification(step))
+        return step.review or self._execution.review_all
 
     def _is_verification(self, step: PlanStep) -> bool:
         rule = (self._workflow or {}).get("verification")
