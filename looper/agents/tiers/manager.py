@@ -1669,7 +1669,7 @@ class ManagerAgent:
                 metadata={"origin_channel_id": origin},
             ))
         elif origin:
-            progress_text = envelope.payload.get("summary", "")
+            progress_text = envelope.payload.get("phase_text") or envelope.payload.get("summary", "")
             if progress_text:
                 await self._task_progress(envelope, progress_text)
 
@@ -1706,6 +1706,8 @@ class ManagerAgent:
             step_count = envelope.payload.get("step_count", 0)
             await self._web_thread_reply(envelope, thread, f"任务「{title}」已分解为 {step_count} 个步骤，开始执行。")
         elif origin:
+            if envelope.payload.get("phase_notices"):
+                return  # The plan-created phase report supplies the role table and breakdown.
             step_count = envelope.payload.get("step_count", 0)
             await self._task_progress(envelope, f"任务已分解为 {step_count} 个步骤，开始执行...")
 

@@ -60,7 +60,7 @@ def test_required_reviews_release_accept_before_advisory_but_delivery_waits(
         await h.release(REVIEW_PASS)
         final = await h.finished()
         assert final.payload["status"] == "completed"
-        assert final.payload["summary"] == FINAL_RESULT
+        assert final.payload["summary"].startswith(FINAL_RESULT + "\n\n## Process record\n")
     drive(claude, outcome, scenario)
 
 
@@ -226,7 +226,8 @@ def test_suggestions_are_merged_shown_and_recorded_without_losing_delivery(plann
         late = {**suggestion, "where": "calc.py:9", "text": "Add a usage example"}
         await h.release({**REVIEW_PASS, "findings": [late]})
         final = await h.finished()
-        assert final.payload["status"] == "completed" and final.payload["summary"] == FINAL_RESULT
+        assert final.payload["status"] == "completed"
+        assert final.payload["summary"].startswith(FINAL_RESULT + "\n\n## Process record\n")
         assert len(claude.turns()) == 3  # a late suggestion records advice without another decision
         stored = await agent_db.load_plan("t1")
         result = stored["steps"][0]["result"]

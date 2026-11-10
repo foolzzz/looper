@@ -134,6 +134,7 @@ _DEFAULT_MANAGER = {
 
 # Reads the agents make, answered as a database that holds no projects and no settings yet.
 _AGENT_DB_READS = (
+    ("llm_records", "process_record_runs", []),
     ("managers", "get_manager", _DEFAULT_MANAGER),
     ("managers", "list_managers", [_DEFAULT_MANAGER]),
     ("managers", "revision_of", (0, True)),

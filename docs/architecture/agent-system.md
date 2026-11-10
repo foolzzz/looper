@@ -3929,8 +3929,23 @@ on current project execution settings; escalation enables user gates. A
 work step without a role uses `work_role` when set. Only the Planner receives
 the workflow instructions, in its Task section alongside the rules already
 enforced. Tasks without a workflow retain their prompt and execution paths.
-Review panels and verification rules are validated and stored here; their
-execution is separate work.
+Review panels and verification guards run from this immutable snapshot. With
+`phase_notices` enabled, typed plan-created, review-round, verification-start
+and result, escalation and blocked-condition events send deterministic Chinese
+notices through the Manager to Telegram and Lark. The plan-created notice lists
+roles and the step breakdown, then work starts without an additional gate.
+Disabling notices retains the existing count-based progress messages.
+
+Completed and failed workflow tasks append `## Process record` to their result.
+It records configured Profiles and each run's runtime, requested and reported
+model, fallbacks, review rounds and seats, adjudications, late reviews,
+verification HEADs and outcomes, and gate topics and conclusions. The section
+is capped at 6000 characters by omitting whole entries and reporting the count;
+the remote-environment safety disclaimer is always retained. Runtime/model
+read failures are marked explicitly. Tasks without a workflow keep their result
+bytes and do not query these additional run records. Dashboard and CLI task
+reads expose the stored result through their existing fields; no new channel
+command or dashboard aggregation is added.
 
 ### A task's Planner's tools
 

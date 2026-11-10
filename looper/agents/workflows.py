@@ -10,6 +10,7 @@ from .agent_settings import SettingsError, budget_usd
 from .task_roles import RoleError, RoleKind, check_definition, role_key
 from .task_templates import KEY_PATTERN
 from .tiers import conditions
+from .workflow_reporting import Phase as Phase, phase_text as phase_text, process_record as process_record
 
 
 class WorkflowError(ValueError):
