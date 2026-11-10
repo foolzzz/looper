@@ -714,9 +714,6 @@ TOOLS: tuple[Tool, ...] = (
                                                           "commit a worktree task starts from (default: what the "
                                                           "directory has checked out)."},
                 "goal_id": {"type": "string", "description": "A short kebab-case id for the task's goal."},
-                "workflow": {"type": "string", "minLength": 1,
-                             "description": "An operator workflow key, or none to run without the project's "
-                                            "default; cannot be combined with a template."},
                 "profiles": {**_PROFILES_SCHEMA, "description": "An Agent Profile (id or name) the user chose for "
                                                                 "some of the task's roles."},
             },
@@ -809,14 +806,17 @@ def task_directory_tool(tool: Tool) -> Tool:
             "do not ask the user for a directory."}}})
 
 
-def task_workflow_tool(tool: Tool, workflow_keys: Sequence[str]) -> Tool:
-    """Offer current workflow keys without changing the Manager's other tool choices."""
-    if not workflow_keys and "workflow" not in tool.schema["properties"]:
+def task_workflow_tool(tool: Tool, workflow_keys: Sequence[str] | None) -> Tool:
+    """Offer the Manager's current keys; ``None`` accepts any key for API clients."""
+    if workflow_keys is not None and not workflow_keys and "workflow" not in tool.schema["properties"]:
         return tool
     properties = dict(tool.schema["properties"])
-    if workflow_keys:
-        properties["workflow"] = {**_CREATE_TOOL.schema["properties"]["workflow"],
-                                  "enum": [*workflow_keys, "none"]}
+    if workflow_keys is None or workflow_keys:
+        properties["workflow"] = {"type": "string", "minLength": 1,
+                                  "description": "An operator workflow key, or none to run without the project's "
+                                                 "default; cannot be combined with a template."}
+        if workflow_keys is not None:
+            properties["workflow"]["enum"] = [*workflow_keys, "none"]
     else:
         properties.pop("workflow", None)
     return dataclasses.replace(tool, schema={**tool.schema, "properties": properties})
