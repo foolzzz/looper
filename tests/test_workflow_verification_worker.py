@@ -428,14 +428,14 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
         runtime_paths.append("build")
     source_package = source / "src" / "checkout_probe" / "__init__.py"
     source_package.write_text("VALUE = 0\n")
-    # A same-size edit within a timestamp tick must not reuse the developer's bytecode.
-    original_stat = (package / "__init__.py").stat()
-    os.utime(source_package, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    # Same-size edits within one timestamp tick must not reuse the developer's bytecode.
+    package_stat = (package / "__init__.py").stat()
+    os.utime(source_package, ns=(package_stat.st_atime_ns, package_stat.st_mtime_ns))
     checkout = Path(worker._verification_checkout(str(source), tmp_path / "backup", runtime_paths))
     if editable.startswith("strict-"):
         assert list((developer / "build").rglob("*.pyc"))
-        assert not list((checkout / "build").rglob("*.pyc"))
-    assert not list((checkout / ".venv").rglob("*.pyc"))
+    for runtime_path in runtime_paths:
+        assert not list((checkout / runtime_path).rglob("*.pyc"))
     assert all(not path.stat().st_mode & 0o222 for path in (checkout / ".venv").rglob("*") if path.is_file())
     prefix = run(checkout, ["python", "-c", "import sys; print(sys.prefix)"])
     assert prefix.returncode == 0, prefix.stderr
