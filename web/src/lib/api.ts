@@ -1866,6 +1866,11 @@ export interface TaskDetail extends TaskInfo {
   config: Record<string, unknown>;
   origin_channel_id: string;
   result_summary: string | null;
+  process_record?: {
+    sections: Record<"Roles" | "Reviews" | "Verification" | "Escalations", string[]> & { Runs?: string[] };
+    remote_safety: string;
+    omitted: number;
+  } | null;
   error: string | null;
   /** "task_budget": the task failed at its project's task spend cap and can continue with a higher one. */
   fail_kind: "task_budget" | null;
@@ -2436,8 +2441,8 @@ export interface TaskStep {
   step_index: number;
   /** The Planner's label for the step, unique within the task. */
   step_key: string;
-  /** "gate": a user gate (`TaskDetail.gates`); "wait": time or a check (`TaskDetail.waits`). Instruction is the topic. */
-  kind: "work" | "gate" | "wait";
+  /** "gate": a user gate; "wait": time or a check; "review": a workflow panel member reviewing `reviews`. */
+  kind: "work" | "gate" | "wait" | "review";
   instruction: string;
   /** How to tell the step is done, as the Planner wrote it; checked by its Worker and its Reviewer. */
   acceptance_criteria: string[];
@@ -2446,6 +2451,9 @@ export interface TaskStep {
   depends_on: string[];
   ready_when?: Condition | null;
   ready_state?: ConditionState | null;
+  accept_when?: Condition | null;
+  accept_state?: ConditionState | null;
+  reviews?: string | null;
   /** pending, dispatched, deciding, completed (in review), verified, failed or skipped (dropped by a replan); a gate
    * is waiting_user while it waits, verified once it passed or was cancelled. A wait is waiting until the Planner
    * settles it, then verified, failed or skipped. */

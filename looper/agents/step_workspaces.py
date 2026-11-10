@@ -12,9 +12,10 @@ the step workspaces RFC (``docs/architecture/rfcs/step-workdir-isolation-v0``):
 - a step's worktree is on a branch of its own, ``looper/<task>/<key>-<id>``,
   under ``<runtime_root>/worktrees`` (``ensure_worktree``), with the project's
   links back to the task directory's ignored local state (``link``);
-- when the step is accepted, ``merge`` commits what its Worker left
-  uncommitted, computes the merge with the branch in memory, writes a merge
-  commit and fast-forwards the branch, its index and working tree to it. A
+- when the step is accepted, ``merge`` uses its frozen review result, or commits
+  what its Worker left uncommitted if no result was frozen. It computes the
+  merge with the branch in memory, writes a merge commit and fast-forwards
+  the branch, its index and working tree to it. A
   merge that cannot be made leaves the task directory as it was and says why
   (``MergeError``). A link is never part of a step's result;
 - Looper's own commits have the ``Looper`` identity and ``Looper-Task`` and
@@ -36,6 +37,7 @@ import os
 import re
 import shlex
 import shutil
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -118,7 +120,7 @@ class StepWorkspace:
     branch: str  # the step's branch, looper/<task_id>/<key>-<id>
     base_commit: str  # where the step's branch starts
     checkpoint: bool = False  # base_commit is the checkpoint of the round the step started in
-    result_commit: str | None = None  # the step's branch when it was merged
+    result_commit: str | None = None  # the frozen review result, or the step's branch when it was merged
     merge_commit: str | None = None  # written before the branch moves to it
     state: StepWorkspaceState = StepWorkspaceState.ACTIVE
     merge_error: MergeError | None = None  # set when state is unmerged
@@ -574,6 +576,39 @@ def _files_detail(files: Sequence[str], limit: int = 20) -> str:
     return shown + (f" (+{len(files) - limit} more)" if len(files) > limit else "")
 
 
+async def freeze_review(workspace: StepWorkspace, *, step_key: str) -> StepWorkspace:
+    """Commit pending output before reviews start, retaining the active workspace and its reviewed HEAD."""
+    still = tuple(p for p in workspace.links if (Path(workspace.work_dir) / p).is_symlink())
+    try:
+        frozen, _ = await _close_step_branch(workspace, step_key, still)
+    except _Unmerged as exc:
+        raise GitError(str(exc)) from None
+    return frozen
+
+
+async def snapshot_review(repo: Repo, *, task_id: str, step_key: str) -> str:
+    """Freeze shared output without changing the workers' HEAD, index or working tree."""
+    with tempfile.TemporaryDirectory(prefix="looper-review-index-") as directory:
+        env = {"GIT_INDEX_FILE": str(Path(directory) / "index")}
+        await _git(repo.toplevel, "read-tree", repo.head, env=env)
+        # An explicitly named ignored directory makes `git add` fail, even when it
+        # contains tracked files. Select tracked and non-ignored files first.
+        paths = await _git(repo.toplevel, "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+                           "--", repo.subdir or ".", env=env)
+        if paths.stdout:
+            pathspec = Path(directory) / "paths"
+            pathspec.write_bytes(paths.stdout)
+            # Force only this selected set so tracked files under ignored parents update too.
+            await _git(repo.toplevel, "--literal-pathspecs", "add", "-A", "-f", "--pathspec-file-nul",
+                       f"--pathspec-from-file={pathspec}", env=env)
+        tree = (await _git(repo.toplevel, "write-tree", env=env)).text
+    if tree == (await _git(repo.toplevel, "rev-parse", f"{repo.head}^{{tree}}")).text:
+        return repo.head
+    return (await _git(repo.toplevel, "commit-tree", "--no-gpg-sign", tree, "-p", repo.head,
+                       "-m", f"looper: review snapshot for step {step_key}" + _trailers(task_id, step_key),
+                       identity=True)).text
+
+
 async def merge(workspace: StepWorkspace, *, step_key: str, title: str,
                 save: Callable[[StepWorkspace], Awaitable[None]]) -> MergeResult:
     """Merge an accepted step's branch into the task directory's branch, with a merge commit of its own.
@@ -592,7 +627,10 @@ async def merge(workspace: StepWorkspace, *, step_key: str, title: str,
     still = tuple(p for p in workspace.links if (Path(workspace.work_dir) / p).is_symlink())
     replaced = tuple(p for p in workspace.links if p not in still and os.path.lexists(Path(workspace.work_dir) / p))
     try:
-        workspace, leftovers = await _close_step_branch(workspace, step_key, still)
+        if workspace.result_commit is not None:
+            await _check_frozen_result(workspace)
+        else:
+            workspace, leftovers = await _close_step_branch(workspace, step_key, still)
         await save(workspace)
         workspace, files = await _merge_into_target(workspace, step_key, title, save)
     except _Unmerged as failure:
@@ -608,6 +646,27 @@ async def merge(workspace: StepWorkspace, *, step_key: str, title: str,
     workspace = workspace.moved(StepWorkspaceState.MERGED)
     await save(workspace)
     return MergeResult(workspace, files, leftovers, replaced)
+
+
+async def _check_frozen_result(workspace: StepWorkspace) -> None:
+    """Keep review checkouts untouched, and reject a HEAD or index that no longer matches the reviewed result."""
+    assert workspace.result_commit is not None
+    tip = await _git(workspace.repo_dir, "rev-parse", "--verify", "-q", f"refs/heads/{workspace.branch}^{{commit}}",
+                     check=False)
+    if tip.returncode != 0 or tip.text != workspace.result_commit:
+        raise _Unmerged(MergeError.STEP_BRANCH_CHANGED, "the step's branch no longer matches its frozen review result")
+    path = Path(workspace.path)
+    if (path / ".git").exists():
+        head = await _git(path, "symbolic-ref", "-q", "HEAD", check=False)
+        if head.text != f"refs/heads/{workspace.branch}":
+            raise _Unmerged(MergeError.STEP_BRANCH_CHANGED,
+                            f"the step's checkout is no longer on its branch {prompt_name(workspace.branch)}")
+        staged = await _git(path, "diff", "--cached", "--quiet", workspace.result_commit, "--", check=False)
+        if staged.returncode not in (0, 1):
+            raise GitError(f"git diff --cached failed: {staged.stderr.decode('utf-8', 'replace').strip()[:500]}")
+        if staged.returncode == 1:
+            raise _Unmerged(MergeError.STEP_BRANCH_CHANGED,
+                            "the step's index no longer matches its frozen review result")
 
 
 async def commit_pending(path: Path, links: Sequence[str], message: str) -> str | None:

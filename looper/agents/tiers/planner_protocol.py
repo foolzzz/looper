@@ -279,6 +279,7 @@ class DecisionReply:
     final: FinalSummary | None = None  # only on the decision that completes the task
     gates: tuple[GateChange, ...] = ()  # applied before the decision
     waits: tuple[WaitChange, ...] = ()
+    adjudications: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -376,6 +377,7 @@ class PlanView:
     wait_policy: WaitPolicy = WaitPolicy()
     conditions: bool = False
     isolate_steps: bool = False
+    review_panel: bool = False
     verification_role: str | None = None
     work_role: str | None = None
     verification_exhausted: bool = False
@@ -455,22 +457,24 @@ def extract_reply(text: str) -> dict[str, Any]:
 
 def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
                gate_policy: GatePolicy = GatePolicy.OFF, wait_policy: WaitPolicy = WaitPolicy(),
-               conditions: bool = False, isolate_steps: bool = False,
+               conditions: bool = False, isolate_steps: bool = False, review_panel: bool = False,
                verification_role: str | None = None, work_role: str | None = None) -> PlanReply:
     data = extract_reply(text)
     _only_keys(data, {"steps"}, "the PLAN reply")
-    steps = _step_list(data.get("steps"), "steps", conditions=conditions)
+    steps = _step_list(data.get("steps"), "steps", conditions=conditions, review_panel=review_panel)
     if not steps:
         raise ProtocolError("steps must list at least one step")
     steps = _check_new_steps(steps, PlanView(started={}, pending={}, roles=roles, gate_policy=gate_policy,
                                                wait_policy=wait_policy, conditions=conditions,
-                                               isolate_steps=isolate_steps, verification_role=verification_role,
+                                               isolate_steps=isolate_steps, review_panel=review_panel,
+                                               verification_role=verification_role,
                                                work_role=work_role), replace_pending=True)
     return PlanReply(steps)
 
 
-def parse_decision(text: str, context: DecisionContext, plan: PlanView) -> DecisionReply:
+def parse_decision(text: str, context: DecisionContext, plan: PlanView, *, adjudications: bool = False) -> DecisionReply:
     data = extract_reply(text)
+    judgments = data.pop("adjudications", ()) if adjudications else ()
     _only_keys(data, {"decision", "reason", "feedback", "steps", "summary", "progress", "final", "gates", "waits"},
                "the DECISION reply")
     raw = data.get("decision")
@@ -498,7 +502,7 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView) -> Decis
     elif decision is Decision.FAIL:
         reason = _required_text(data, "reason")
     elif decision is Decision.REPLAN:
-        steps = _step_list(data.get("steps"), "steps", conditions=plan.conditions)
+        steps = _step_list(data.get("steps"), "steps", conditions=plan.conditions, review_panel=plan.review_panel)
         if not steps and not context.acceptable:
             raise ProtocolError(
                 f"step {context.step} cannot be accepted, so a replan must list the steps that replace it"
@@ -519,7 +523,7 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView) -> Decis
         raise ProtocolError('this decision completes the task, so it must carry "final": '
                             + ", ".join(FINAL_FIELDS))
     # Only the decision that completes the task keeps a final summary.
-    return DecisionReply(decision, reason, feedback, steps, summary, progress, final if completes else None, gates, waits)
+    return DecisionReply(decision, reason, feedback, steps, summary, progress, final if completes else None, gates, waits, tuple(judgments))
 
 
 def parse_wrap_up(text: str) -> str:
@@ -710,12 +714,12 @@ def _chat_action(data: Mapping[str, Any], plan: PlanView) -> ChatReply:
             raise ProtocolError(f"step {step!r} has no running Worker (running: {running})")
         text_out = _required_text(data, "text")
     elif action is ChatAction.ADD_STEPS:
-        steps = _step_list(data.get("steps"), "steps", conditions=plan.conditions)
+        steps = _step_list(data.get("steps"), "steps", conditions=plan.conditions, review_panel=plan.review_panel)
         if not steps:
             raise ProtocolError("add_steps must list at least one step")
         steps = _check_new_steps(steps, plan, replace_pending=False)
     elif action is ChatAction.REPLAN:
-        steps = _step_list(data.get("steps", []), "steps", conditions=plan.conditions)
+        steps = _step_list(data.get("steps", []), "steps", conditions=plan.conditions, review_panel=plan.review_panel)
         stop = _stop_list(data.get("stop", []), plan)
         after = plan
         for label in stop:
@@ -828,6 +832,8 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
     kept = dict(plan.started) if replace_pending else {**plan.started, **plan.pending}
     seen: set[str] = set()
     for step in steps:
+        if plan.review_panel and step.review_roles:
+            raise ProtocolError("the workflow fixes the review panel")
         if step.id in seen:
             raise ProtocolError(f"step id {step.id!r} is used twice")
         if step.id in plan.started and step.id in plan.gates and plan.gates[step.id].state.waiting:
@@ -990,9 +996,11 @@ def _find_cycle(graph: Mapping[str, Iterable[str]]) -> list[str] | None:
     return None
 
 
-def _step_list(value: Any, field: str, *, conditions: bool = False) -> tuple[StepSpec, ...]:
+def _step_list(value: Any, field: str, *, conditions: bool = False, review_panel: bool = False) -> tuple[StepSpec, ...]:
     if not isinstance(value, list):
         raise ProtocolError(f"{field} must be a list of steps")
+    if review_panel and any(isinstance(item, dict) and "review_roles" in item for item in value):
+        raise ProtocolError("the workflow fixes the review panel")
     return tuple(_step(item, i, conditions=conditions) for i, item in enumerate(value))
 
 
@@ -1657,7 +1665,7 @@ _CONDITION_RULES = """- ready_when (optional on work, gate and wait steps): a de
 
 def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = False, gates: bool = False,
                    room: bool = False, wait_commands: bool = False, wait_limits: WaitLimits = WaitLimits(),
-                   conditions: bool = False, workflow_roles: bool = False) -> str:
+                   conditions: bool = False, workflow_roles: bool = False, review_panel: bool = False, adjudication: bool = False) -> str:
     """The reply contract for a project whose steps may be retried ``max_retries`` times; with ``roles``, whose
     Planners may define the roles their steps run as; with ``gates``, for a task that may open user gates or has
     one that is not closed; with ``room``, whose agents share a room. Waits use ``wait_limits``;
@@ -1670,12 +1678,20 @@ def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = Fal
     wait_rules = wait_rules.replace('"new_comments").', '"new_comments")' + command + '.')
     contract = _REPLY_CONTRACT.format(
         wait_rules=wait_rules, max_retries=max_retries,
-        roles=_ROLE_RULES if roles else _WORKFLOW_ROLE_RULES if workflow_roles else "", kinds=_KINDS[(gates, room)],
+        roles=('- Roles: "role" names a fixed workflow work role. Leave it out to use the workflow default.\n'
+               if review_panel else _ROLE_RULES if roles else _WORKFLOW_ROLE_RULES if workflow_roles else ""), kinds=_KINDS[(gates, room)],
         gate_rules=_GATE_RULES if gates else "", gate_changes=_GATE_CHANGES if gates else "",
         chat_gates=_CHAT_GATES if gates else "", gate_section=_GATE_SECTION if gates else "",
         room_section=_ROOM_SECTION if room else "")
     if conditions:
         contract = contract.replace("- review: true when", _CONDITION_RULES + "- review: true when", 1)
+    if review_panel:
+        contract += "\nThe workflow fixes the review panel. Do not write review_roles, review steps or accept_when."
+    if adjudication:
+        contract += ('\nOn a REVIEW decision only, you may give adjudications: '
+                     '[{"member": "review_a", "finding": 0, "level": "suggestion", "reason": "..."}]. '
+                     'finding is a zero-based index of an existing blocking finding in this round; reason must be '
+                     'nonempty and at most 500 characters. Accept only if the resulting acceptance condition passes.')
     return contract
 
 

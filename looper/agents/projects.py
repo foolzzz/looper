@@ -804,7 +804,7 @@ async def task_readiness(task: dict[str, Any], *, compact: bool = False) -> list
     task_id = task["id"]
     waits = await waits_view(task_id, compact=compact)
     steps = task.get("steps", [])
-    if any(step.get("ready_when") is not None for step in steps):
+    if any(step.get("ready_when") is not None or step.get("accept_when") is not None for step in steps):
         from ..db import user_gates as db_user_gates
         from types import SimpleNamespace
         from .tiers.conditions import StepOutcome, evaluate, parse
@@ -814,11 +814,16 @@ async def task_readiness(task: dict[str, Any], *, compact: bool = False) -> list
         outcomes = {step["id"]: StepOutcome.from_step(SimpleNamespace(
             **step, gate=gates_by_id.get(step["id"]), wait=waits_by_id.get(step["id"]))) for step in steps}
         for step in steps:
+            step["accept_state"] = (evaluate(parse(step["accept_when"], "accept_when"), outcomes.__getitem__).value
+                                    if step.get("accept_when") is not None else None)
             step["ready_state"] = (evaluate(parse(step["ready_when"], "ready_when"), outcomes.__getitem__).value
                                    if step["status"] == "pending" and step.get("ready_when") is not None else None)
     done = {step.get("id") for step in steps if step.get("status") == "verified"}
     for step in steps:
         step.setdefault("ready_when", None)
+        step.setdefault("accept_when", None)
+        step.setdefault("accept_state", None)
+        step.setdefault("reviews", None)
         if step.get("ready_when") is None:
             step["ready_state"] = (("satisfied" if all(dep in done for dep in step.get("depends_on", [])) else "pending")
                                    if step.get("status") == "pending" else None)
@@ -935,6 +940,7 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         **({"run_roles": ran_as} if ran_as else {}),
         "origin_channel_id": raw.get("origin_channel_id", ""),
         "result_summary": raw.get("result_summary"),
+        "process_record": raw.get("process_record"),
         "error": raw.get("error"),
         "fail_kind": raw.get("fail_kind"),  # "task_budget": it failed at its project's task spend cap
         # The task's spend cap as the Planner enforces it (its own, else its project's); null for none.
@@ -963,16 +969,45 @@ def step_condition_view(step: Mapping[str, Any], labels: Mapping[str, str]) -> d
     """The Manager's condition fields, absent on steps without a condition."""
     from .tiers.conditions import parse, render, to_json
 
-    if step.get("ready_when") is None:
+    fields = {}
+    for name in ("ready", "accept"):
+        if step.get(f"{name}_when") is not None:
+            fields[f"{name}_when_text"] = render(parse(to_json(
+                parse(step[f"{name}_when"], f"{name}_when"), labels), f"{name}_when"))
+            fields[f"{name}_state"] = step.get(f"{name}_state")
+    if step.get("reviews") is not None:
+        fields["reviews"] = labels.get(step["reviews"], step["reviews"])
+    return fields
+
+
+def step_review_view(step: Mapping[str, Any]) -> dict[str, Any]:
+    """Bounded panel-seat evidence for the Manager; ordinary steps keep their existing shape."""
+    from types import SimpleNamespace
+
+    from .tiers.conditions import State, StepOutcome
+    from .tiers.journal import clip
+
+    if not step.get("reviews"):
         return {}
-    return {"ready_when_text": render(parse(to_json(parse(step["ready_when"], "ready_when"), labels), "ready_when")),
-            "ready_state": step.get("ready_state")}
+    result = step.get("result") or {}
+    findings = result.get("findings") or []
+    passed = StepOutcome.from_step(SimpleNamespace(kind="review", status=step.get("status"), result=result)).passed
+    # Reasons are separate so adjudications beyond the five findings shown remain visible.
+    reasons = [{"where": clip(f.get("where"), 120), "reason": clip(f["reason"], 300)}
+               for f in findings if f.get("reason")][:5]
+    return {"verdict": {State.SATISFIED: "pass", State.UNSATISFIABLE: "fail", State.PENDING: "pending"}[passed],
+            "blocking": sum(f.get("severity") == "blocking" for f in findings),
+            "suggestions": sum(f.get("severity") == "suggestion" for f in findings),
+            "findings": [{"level": f.get("severity"), "where": clip(f.get("where"), 120),
+                          "text": clip(f.get("text"), 200)} for f in findings[:5]],
+            **({"reasons": reasons} if reasons else {})}
 
 
 async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | None, agents: dict[str, Any],
                                waits: list[dict[str, Any]]) -> dict[str, Any]:
     from ..db import task_changes as db_changes, task_roles as db_roles, user_gates as db_user_gates
     from .tiers.journal import clip
+    from .workflow_reporting import process_record_text
 
     labels = {s["id"]: s.get("step_key") or s["id"] for s in task.get("steps") or [] if "id" in s}
     task_id = task["id"]
@@ -988,6 +1023,7 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
         "steps": [{"step": s.get("step_key") or s.get("id"), "status": s.get("status"),
                    "kind": s.get("kind") or "work",
                    **step_condition_view(s, labels),
+                   **step_review_view(s),
                    "instruction": clip(s.get("instruction") or "", 200),
                    # The roles its Planner defined that the step runs as and is reviewed by, when it has them.
                    **({"role": s["role_key"]} if s.get("role_key") else {}),
@@ -1003,6 +1039,7 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
                         for entry in supplements],
         "latest_progress": progress[-1]["summary"] if progress else None,
         "result": clip(task.get("result_summary") or task.get("error") or "", 1_000) or None,
+        **({"process_record": process_record_text(task["process_record"])} if task.get("process_record") else {}),
         "cost_usd": (cost or {}).get("cost_usd"),
         # How many of its Workers and Reviewers run at once, with the source; its own limits (task).
         "concurrency": {role: view["concurrency"] for role, view in agents["roles"].items()

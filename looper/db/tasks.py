@@ -177,7 +177,7 @@ def _task(row: Mapping[str, Any]) -> dict[str, Any]:
     task = dict(row)
     if "config" in task:
         task["config"] = _read_config(task["config"])
-    for field in ("template", "workflow"):
+    for field in ("template", "workflow", "process_record"):
         if isinstance(task.get(field), str):
             task[field] = json.loads(task[field])
     if isinstance(task.get("origin_reply_route"), str):
@@ -299,6 +299,7 @@ async def update_task_status(
     *,
     planner_id: str | None = None,
     result_summary: str | None = None,
+    process_record: Mapping[str, Any] | None = None,
     error: str | None = None,
     fail_kind: FailKind | None = None,
     pool: asyncpg.Pool | None = None,
@@ -319,12 +320,14 @@ async def update_task_status(
             updated_at = $6,
             completed_at = COALESCE($7, completed_at),
             fail_kind = COALESCE($8, fail_kind),
-            attempt_ended_at = COALESCE($9, attempt_ended_at)
+            attempt_ended_at = COALESCE($9, attempt_ended_at),
+            process_record = COALESCE($10::jsonb, process_record)
         WHERE id = $1
         """,
         task_id, status, planner_id, result_summary, error, now, completed_at,
         FailKind(fail_kind).value if fail_kind else None,
         attempt_ended_at,
+        json.dumps(process_record, ensure_ascii=False) if process_record is not None else None,
     )
 
 
@@ -392,7 +395,7 @@ def step_row(row: Mapping[str, Any]) -> dict[str, Any]:
     """A ``task_steps`` row as the plan and the task page read it: ``result`` and ``review_roles`` decoded, the array
     columns as lists."""
     step = dict(row)
-    for name in ("result", "review_roles", "ready_when"):
+    for name in ("result", "review_roles", "ready_when", "accept_when"):
         if isinstance(step.get(name), str):
             step[name] = json.loads(step[name])
     for name in ("target_files", "validation_commands", "acceptance_criteria", "depends_on", "feedback",
@@ -483,7 +486,7 @@ async def reset_task_for_restart(
         UPDATE tasks
         SET status = 'pending', phase = 'pending',
             error = NULL, completed_at = NULL, attempt_ended_at = NULL, fail_kind = NULL,
-            result_summary = NULL, updated_at = now()
+            result_summary = NULL, process_record = NULL, updated_at = now()
         WHERE id = $1
         """,
         task_id,

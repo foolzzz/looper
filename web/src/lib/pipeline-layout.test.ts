@@ -220,3 +220,59 @@ describe("dependency conditions", () => {
     expect(conditionState(condition, steps, [], [])).toBe(state);
   });
 });
+
+describe("review panel acceptance", () => {
+  const panel = (condition: Condition): TaskStep[] => [
+    { ...step("dev", 0, "verified"), accept_when: condition },
+    ...["review_a", "review_b", "review_c"].map((id, index): TaskStep => ({
+      ...step(id, index + 1, "verified", ["dev"]), kind: "review", reviews: "dev",
+      ready_when: { step: "dev", on: "completed" }, result: { passed: index < 2 },
+    })),
+    step("verify_staging", 4, "pending", ["dev"]),
+  ];
+
+  it("routes reviews and subsequent work through the acceptance junction", () => {
+    const plan = panel({ all_of: [{ step: "review_a", on: "passed" }, { step: "review_b", on: "passed" }] });
+    expect(conditionNodes(plan).map((node) => [node.id, node.label])).toEqual([["dev:a0", "必选全部通过"]]);
+    expect(Object.fromEntries(stepLevels(plan))).toEqual({ dev: 0, review_a: 1, review_b: 1, review_c: 1,
+      "dev:a0": 2, verify_staging: 3 });
+    expect(dependencyEdges(plan)).toContainEqual({ source: "dev:a0", target: "verify_staging" });
+    expect(dependencyEdges(plan)).toContainEqual({ source: "review_c", target: "dev:a0" });
+  });
+
+  it("renders threshold acceptance without waiting for the third conclusion", () => {
+    const condition: Condition = { k_of: 2, of: ["review_a", "review_b", "review_c"].map((step) => ({ step, on: "passed" })) };
+    const plan = panel(condition);
+    plan[3].status = "dispatched";
+    expect(conditionNodes(plan)[0].label).toBe("2/3 通过");
+    expect(conditionState(condition, plan, [], [])).toBe("satisfied");
+  });
+
+  it.each(["completed", "verified", "passed"] as const)("routes an explicit %s condition from the matching outcome", (on) => {
+    const plan = panel({ all_of: [{ step: "review_a", on: "passed" }] });
+    plan.push({ ...step("followup", 5, "pending", ["dev"]), ready_when: { step: "dev", on } });
+    const source = on === "completed" ? "dev" : "dev:a0";
+    expect(dependencyEdges(plan)).toContainEqual({ source, target: "followup:c0", on });
+    expect(stepLevels(plan).get("followup:c0")).toBe(on === "completed" ? 1 : 3);
+    expect(dependencyEdges(plan)).not.toContainEqual({ source: on === "completed" ? "dev:a0" : "dev", target: "followup:c0", on });
+  });
+
+  it("keeps completed leaves attached to work inside nested conditions", () => {
+    const plan = panel({ all_of: [{ step: "review_a", on: "passed" }] });
+    plan.push({ ...step("followup", 5, "pending", ["dev", "review_a"]), ready_when: {
+      any_of: [{ all_of: [{ step: "dev", on: "completed" }, { step: "review_a", on: "passed" }] }, "dev"],
+    } });
+    expect(dependencyEdges(plan)).toContainEqual({ source: "dev", target: "followup:c0.0", on: "completed" });
+    expect(dependencyEdges(plan)).toContainEqual({ source: "dev:a0", target: "followup:c0" });
+  });
+
+  it.each([
+    [{ passed: false }, "unsatisfiable"],
+    [{ passed: false, status: "passed_by_adjudication" }, "satisfied"],
+  ])("uses review conclusions rather than the terminal step state", (result, expected) => {
+    const plan = panel("review_c");
+    plan[3].result = result;
+    expect(conditionState({ step: "review_c", on: "passed" }, plan, [], [])).toBe(expected);
+    expect(conditionState({ step: "review_c", on: "completed" }, plan, [], [])).toBe("satisfied");
+  });
+});

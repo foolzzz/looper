@@ -20,6 +20,7 @@ def definition(**extra):
 def test_snapshot_round_trip_preserves_the_definition_and_passed_panel_semantics():
     workflow = Workflow.from_dict(definition(
         review_panel={"members": ["review_a", "builtin"], "accept_when": {"all_of": ["review_a"]}},
+        distinct_reviewer_runtime=True,
         verification={"role": "verify_staging", "max_rounds": 2}, max_step_retries=0, budget_usd=2.5))
     snapshot = json.loads(json.dumps(workflow.snapshot()))
     assert Workflow.from_dict(snapshot) == workflow
@@ -70,6 +71,15 @@ def test_panel_requires_review_members_and_nonempty_acceptance(panel, match):
         Workflow.from_dict(definition(review_panel=panel))
 
 
+@pytest.mark.parametrize("distinct", [False, None])
+def test_panel_requires_distinct_reviewer_runtime(distinct):
+    raw = definition(review_panel={"members": ["review_a"], "accept_when": "review_a"})
+    if distinct is not None:
+        raw["distinct_reviewer_runtime"] = distinct
+    with pytest.raises(WorkflowError, match="review_panel requires distinct_reviewer_runtime to be true"):
+        Workflow.from_dict(raw)
+
+
 def test_profiles_are_checked_for_the_agent_that_runs_them(monkeypatch):
     async def selection(profile_id, roles, **kwargs):
         expected = {"p": "planner", "w": "worker", "r": "reviewer"}
@@ -104,7 +114,7 @@ def test_distinct_runtime_checks_only_both_fixed_profiles(monkeypatch, worker, r
     monkeypatch.setattr(profile_registry, "check_selection", selection)
     profiles = {key: value for key, value in (("worker", worker), ("reviewer", reviewer)) if value}
     workflow = Workflow.from_dict(definition(profiles=profiles, distinct_reviewer_runtime=distinct,
-        review_panel={"members": ["review_a"], "accept_when": "review_a"}))
+        **({"review_panel": {"members": ["review_a"], "accept_when": "review_a"}} if distinct else {})))
     if rejected:
         with pytest.raises(WorkflowError, match="different runtime"):
             asyncio.run(check_profiles(workflow))

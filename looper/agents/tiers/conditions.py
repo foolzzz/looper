@@ -121,13 +121,19 @@ class StepOutcome:
     @classmethod
     def from_step(cls, step: Any) -> StepOutcome:
         """Read a PlanStep (or equivalent projection) without importing the Planner."""
-        if getattr(step, 'kind', None) == 'review':
-            return cls()  # Review outcomes are introduced with review steps.
         if step is None:
             return cls(*(State.UNSATISFIABLE,) * 3, reason='step no longer exists')
         status = step.status
         if status in ('failed', 'skipped'):
             return cls(*(State.UNSATISFIABLE,) * 3, reason=f'step is {status}')
+        if getattr(step, 'kind', None) == 'review':
+            if status != 'verified':
+                return cls()
+            result = getattr(step, 'result', None) or {}
+            passed = result.get('passed') is True or result.get('status') == 'passed_by_adjudication'
+            return cls(State.SATISFIED, State.SATISFIED,
+                       State.SATISFIED if passed else State.UNSATISFIABLE,
+                       'review passed' if passed else 'review did not pass')
         gate, wait = getattr(step, 'gate', None), getattr(step, 'wait', None)
         if gate is not None:
             if gate.state in ('passed', 'cancelled'):

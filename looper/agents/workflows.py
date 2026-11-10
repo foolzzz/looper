@@ -10,6 +10,7 @@ from .agent_settings import SettingsError, budget_usd
 from .task_roles import RoleError, RoleKind, check_definition, role_key
 from .task_templates import KEY_PATTERN
 from .tiers import conditions
+from .workflow_reporting import Phase as Phase, phase_text as phase_text, process_record as process_record
 
 
 class WorkflowError(ValueError):
@@ -161,6 +162,8 @@ class Workflow:
                 return conditions.KOf(cond.k, tuple(passed(child) for child in cond.of), cond.form)
 
             data["review_panel"] = ReviewPanel(tuple(members), passed(accept))
+            if not data.get("distinct_reviewer_runtime"):
+                raise WorkflowError("review_panel requires distinct_reviewer_runtime to be true")
         verification = data.get("verification")
         if verification is not None:
             if not isinstance(verification, dict) or set(verification) != {"role", "max_rounds"}:

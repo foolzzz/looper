@@ -898,6 +898,8 @@ function OverviewTab({
 
       <TaskProgress task={task} />
 
+      <TaskProcessRecord task={task} />
+
       {task.cost && task.cost.runs > 0 && <TaskCostBreakdown cost={task.cost} />}
 
       <TaskWorkspaceCard task={task} />
@@ -1058,6 +1060,31 @@ function TaskProgress({ task }: { task: TaskDetail }) {
             </ol>
           </details>
         )}
+      </div>
+    </section>
+  );
+}
+
+function TaskProcessRecord({ task }: { task: TaskDetail }) {
+  const record = task.process_record;
+  if (!record) return null;
+  return (
+    <section aria-labelledby="task-process-record-title">
+      <h3 id="task-process-record-title" className="mb-2 text-sm font-semibold">Process record</h3>
+      <div className="space-y-4 rounded-lg border border-border bg-card px-4 py-3 text-sm">
+        {(["Roles", "Reviews", "Verification", "Escalations", "Runs"] as const)
+          .filter((name) => name !== "Runs" || (record.sections.Runs?.length ?? 0) > 0).map((name) => (
+          <div key={name}>
+            <h4 className="mb-1 text-xs font-medium text-muted-foreground">{name}</h4>
+            <ul className="space-y-1">
+              {(record.sections[name] ?? []).map((entry, index) => (
+                <li key={index} className="whitespace-pre-wrap break-words">{entry}</li>
+              ))}
+            </ul>
+          </div>
+        ))}
+        <p className="break-words text-xs text-muted-foreground">{record.remote_safety}</p>
+        {record.omitted > 0 && <p className="text-xs text-muted-foreground">{record.omitted} records omitted.</p>}
       </div>
     </section>
   );
@@ -1890,7 +1917,8 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
 
     for (const node of junctions) {
       const step = byId.get(node.stepId)!;
-      const state = node.id === `${step.id}:c0` && step.ready_state != null ? step.ready_state
+      const state = node.id === `${step.id}:a0` && step.accept_state != null ? step.accept_state
+        : node.id === `${step.id}:c0` && step.ready_state != null ? step.ready_state
         : conditionState(node.condition, all, task.gates ?? [], task.waits ?? []);
       ns.push({
         id: node.id, type: "condition", focusable: true,
@@ -1898,6 +1926,7 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
         ariaLabel: `${step.step_key || step.id}：${node.label}，${CONDITION_STATES[state].label}`,
         position: { x: (x.get(node.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(node.id) ?? 0)) },
         data: { label: node.label, state },
+        ...(node.acceptance && { domAttributes: { title: `${step.step_key || step.id} 已接受：${step.status === "verified" ? "是" : "否"}` } }),
         style: { width: NODE_W, height: NODE_H, padding: 0, background: "transparent", border: "none" },
       });
     }
@@ -1907,7 +1936,9 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
       const fromLive = source === "planner" || (byId.get(source) ?? junctionById.get(source))?.status !== "skipped";
       const running = step.status === "dispatched";
       es.push({ id: `dep:${source}->${target}`, source, target, animated: running,
-        style: edgeStyle(step.status !== "skipped" && fromLive, running),
+        style: { ...edgeStyle(step.status !== "skipped" && fromLive, running),
+          ...(byId.get(source)?.kind === "review" && !junctions.some((node) => node.depends_on.includes(source))
+            ? { strokeDasharray: "6 4" } : {}) },
         ...(on === "completed" || on === "passed" ? {
           label: on === "completed" ? "完成" : "通过",
           labelStyle: { fill: "var(--color-foreground)" }, labelBgStyle: { fill: "var(--color-card)" },
@@ -1915,8 +1946,8 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
       });
     }
 
-    const dependedOn = new Set(steps.filter((s) => s.status !== "skipped").flatMap((s) => s.depends_on ?? []));
-    const ends = steps.filter((s) => s.status !== "skipped" && !dependedOn.has(s.id));
+    const dependedOn = new Set(steps.filter((s) => s.status !== "skipped" && s.kind !== "review").flatMap((s) => s.depends_on ?? []));
+    const ends = steps.filter((s) => s.status !== "skipped" && s.kind !== "review" && !dependedOn.has(s.id));
     for (const step of steps) {
       const name = step.step_key || `step ${step.step_index + 1}`;
       const position = { x: (x.get(step.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(step.id) ?? 0)) };
@@ -1932,10 +1963,15 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
           : gateCard(step, gates.get(step.id), { look, lookOf, stepsById: allById, active });
       }
       if (step.kind === "gate" || step.kind === "wait") continue;
-      const look = stepLook(step.status);
+      const required = junctions.some((node) => node.acceptance && node.depends_on.includes(step.id));
+      const advisory = step.kind === "review" && !required;
+      const reviewLook = step.kind === "review" && step.status === "verified"
+        ? { ...stepLook(step.result?.passed || step.result?.status === "passed_by_adjudication" ? "verified" : "failed"),
+            label: step.result?.passed || step.result?.status === "passed_by_adjudication" ? "通过" : "未通过" } : stepLook(step.status);
+      const look = advisory ? { ...reviewLook, borderStyle: "dashed" as const } : reviewLook;
       // Its seats' messages in the task's room (keyed as the room keys its seats).
       const room = task.room?.by_step[step.step_key || step.id];
-      const note = [step.retries ? `retry ${step.retries}` : "", roomNote(room)].filter(Boolean).join(" · ");
+      const note = [advisory ? "建议" : "", step.retries ? `retry ${step.retries}` : "", roomNote(room)].filter(Boolean).join(" · ");
       ns.push({
         id: step.id,
         position,
@@ -1958,7 +1994,7 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
     });
     cards.result = resultCard(task, resultLook);
     for (const step of ends) {
-      es.push({ id: `end:${step.id}`, source: step.id, target: "result", style: edgeStyle(true) });
+      es.push({ id: `end:${step.id}`, source: step.accept_when ? `${step.id}:a0` : step.id, target: "result", style: edgeStyle(true) });
     }
     return { nodes: described(ns), edges: es, rows: depth + 3, cards, skipped };
   }, [task, runs, hideSkipped, onOpenGate]);

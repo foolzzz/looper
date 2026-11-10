@@ -44,14 +44,14 @@ _SAVE_STEP = f"""
 INSERT INTO task_steps (id, task_id, step_index, step_key, instruction, target_files, validation_commands,
                         acceptance_criteria, depends_on, review, status, result, worker_id, reviewer_id,
                         retries, feedback, missed_messages, role_key, role_version, review_stage, review_roles,
-                        review_position, kind, created_at, updated_at, completed_at, started_at, ready_when)
+                        review_position, kind, created_at, updated_at, completed_at, started_at, ready_when, accept_when, reviews)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20, $21::jsonb,
-        $22, $23, now(), now(), CASE WHEN $11::text IN {_DONE_STEP_STATUSES!r} THEN now() END, $24, $25::jsonb)
+        $22, $23, now(), now(), CASE WHEN $11::text IN {_DONE_STEP_STATUSES!r} THEN now() END, $24, $25::jsonb, $26::jsonb, $27)
 ON CONFLICT (id) DO UPDATE
 SET step_index = EXCLUDED.step_index, step_key = EXCLUDED.step_key, instruction = EXCLUDED.instruction,
     target_files = EXCLUDED.target_files, validation_commands = EXCLUDED.validation_commands,
     acceptance_criteria = EXCLUDED.acceptance_criteria, depends_on = EXCLUDED.depends_on,
-    ready_when = EXCLUDED.ready_when,
+    ready_when = EXCLUDED.ready_when, accept_when = EXCLUDED.accept_when, reviews = EXCLUDED.reviews,
     review = EXCLUDED.review, status = EXCLUDED.status, result = EXCLUDED.result,
     worker_id = EXCLUDED.worker_id, reviewer_id = EXCLUDED.reviewer_id, retries = EXCLUDED.retries,
     feedback = EXCLUDED.feedback, missed_messages = EXCLUDED.missed_messages, role_key = EXCLUDED.role_key,
@@ -90,6 +90,8 @@ def _step_args(task_id: str, step: Mapping[str, Any]) -> tuple[Any, ...]:
         json.dumps(list(step.get("review_roles") or [])), step.get("review_position"), step.get("kind") or "work",
         step.get("started_at"),
         None if step.get("ready_when") is None else json.dumps(step["ready_when"], ensure_ascii=False),
+        None if step.get("accept_when") is None else json.dumps(step["accept_when"], ensure_ascii=False),
+        step.get("reviews"),
     )
 
 

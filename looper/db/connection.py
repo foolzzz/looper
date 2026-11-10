@@ -101,11 +101,13 @@ _PROFILE_FALLBACK = "profile_fallback"
 _CURSOR_LOGIN = "cursor_login"
 _DEPENDENCY_CONDITIONS = "dependency_conditions"
 _WORKFLOWS = "workflows"
+_REVIEW_PANEL = "review_panel"
 _WORKFLOW_RULES = "workflow_rules"
 _GATE_PURPOSE = "gate_purpose"
 _VERIFICATION_PATHS = "verification_paths"
 _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
+_TASK_PROCESS_RECORD = "task_process_record"
 _CHAT_BINDING_SENDERS = "chat_binding_senders"
 _PROVIDER_ENABLED = "provider_enabled"
 _MANAGER_SCOPE_PROJECTS = "manager_scope_projects"
@@ -402,6 +404,16 @@ async def _task_reply_route_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _task_process_record_pending(conn: asyncpg.Connection) -> bool:
+    """An unmarked baseline lacks the task process record; recorded upgrades never repair DDL."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _TASK_PROCESS_RECORD):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('tasks') AND attname = 'process_record' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
 async def _chat_binding_senders_pending(conn: asyncpg.Connection) -> bool:
     """Unmarked bindings without extra senders need the additive upgrade."""
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _CHAT_BINDING_SENDERS):
@@ -466,6 +478,15 @@ async def _workflows_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _WORKFLOWS):
         return False
     return not await conn.fetchval("SELECT to_regclass('workflows') IS NOT NULL")
+
+
+async def _review_panel_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _REVIEW_PANEL):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('task_steps') AND attname = 'accept_when' "
+        "AND attnum > 0 AND NOT attisdropped)")
 
 
 async def _workflow_rules_pending(conn: asyncpg.Connection) -> bool:
@@ -620,6 +641,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             for ddl in _COMMAND_SCHEDULES_DDL:
                 await conn.execute(ddl)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _COMMAND_SCHEDULES)
+        if await _task_process_record_pending(conn):
+            await conn.execute("ALTER TABLE tasks ADD COLUMN process_record JSONB "
+                               "CHECK (jsonb_typeof(process_record) = 'object')")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _TASK_PROCESS_RECORD)
         if await _task_reply_route_pending(conn):
             await conn.execute("ALTER TABLE tasks ADD COLUMN origin_reply_route JSONB "
                                "CHECK (jsonb_typeof(origin_reply_route) = 'object')")
@@ -692,6 +717,23 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                 ALTER TABLE task_roles ADD CONSTRAINT task_roles_via_check
                     CHECK (via IN ('planner', 'user', 'template', 'workflow'));""")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _WORKFLOWS)
+        if await _review_panel_pending(conn):
+            await conn.execute("ALTER TABLE task_steps ADD COLUMN accept_when JSONB, ADD COLUMN reviews TEXT")
+            await conn.execute("ALTER TABLE task_steps DROP CONSTRAINT task_steps_kind_check")
+            await conn.execute("ALTER TABLE task_steps ADD CONSTRAINT task_steps_kind_check "
+                               "CHECK (kind IN ('work', 'gate', 'wait', 'review'))")
+            constraint = re.search(
+                r"CONSTRAINT task_journal_kind_check (CHECK \(kind IN \(.*?\)\))", sql, re.S,
+            ).group(1)
+            await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
+            await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check " + constraint)
+            # Released workflow presets allowed panels without distinct runtimes. Bring those presets
+            # under the panel invariant before readers validate them; existing task snapshots stay fixed.
+            await conn.execute("UPDATE workflows SET definition = jsonb_set(definition, "
+                               "'{distinct_reviewer_runtime}', 'true'::jsonb) "
+                               "WHERE jsonb_typeof(definition->'review_panel') = 'object' "
+                               "AND definition->'distinct_reviewer_runtime' IS DISTINCT FROM 'true'::jsonb")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _REVIEW_PANEL)
         if await _workflow_rules_pending(conn):
             constraint = re.search(
                 r"CONSTRAINT task_journal_kind_check (CHECK \(kind IN \(.*?\)\))", sql, re.S,
@@ -741,6 +783,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             await _schedule_user_gates_pending(conn) or await _cursor_login_pending(conn)
             or await _runtime_launcher_pending(conn) or await _profile_fallback_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
+            or await _task_process_record_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)
             or await _project_activity_pending(conn) or await _llm_requests_pending(conn)
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
@@ -748,5 +791,6 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _chat_binding_senders_pending(conn)
             or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)
             or await _dependency_conditions_pending(conn) or await _workflows_pending(conn)
+            or await _review_panel_pending(conn)
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
             or await _verification_paths_pending(conn)))

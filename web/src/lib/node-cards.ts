@@ -134,11 +134,21 @@ const facts = (title: string, items: (CardFact | false | "" | null | undefined)[
 };
 const str = (value: unknown) => (typeof value === "string" ? value : "");
 
+function findingText(findings: unknown, member = ""): string {
+  return (Array.isArray(findings) ? findings : []).map((value: unknown) => {
+    if (typeof value === "string") return value;
+    if (!value || typeof value !== "object") return "";
+    const finding = value as Record<string, unknown>;
+    const label = [str(finding.member) || member, str(finding.severity), str(finding.where)].filter(Boolean).join(" · ");
+    return [label, str(finding.text)].filter(Boolean).join(": ");
+  }).filter(Boolean).join("\n");
+}
+
 /** The roles a step runs and is reviewed as, as runs name them: "fe_rd · work v2", "security · review (advisory)". */
 function stepRoleLines(step: TaskStep) {
   const version = (v: number | null) => (v != null ? ` v${v}` : "");
   return [
-    step.role_key && `${step.role_key} · work${version(step.role_version)}`,
+    step.role_key && `${step.role_key} · ${step.kind === "review" ? "review" : "work"}${version(step.role_version)}`,
     ...(step.review_roles ?? []).map(
       (item) => `${item.role} · review${version(item.version)}${item.required ? "" : " (advisory)"}`,
     ),
@@ -154,7 +164,7 @@ function stepResult(step: TaskStep): CardSection[] {
   const report = worked ? str(result.summary) : str(result.error) || str(result.summary);
   const roleReviews = (Array.isArray(result.role_reviews) ? result.role_reviews : []) as Record<string, unknown>[];
   const reasons = (findings: unknown, summary: unknown) =>
-    (Array.isArray(findings) ? findings.map(String).join("\n") : "") || str(summary) || "no reason given";
+    findingText(findings) || str(summary) || "no reason given";
   const failed = roleReviews
     .filter((r) => r.passed !== true)
     .map((r) => `Review by role ${str(r.role)}${r.required === false ? " (advisory)" : ""} did not pass it:\n${reasons(r.findings, r.summary)}`);
@@ -167,6 +177,8 @@ function stepResult(step: TaskStep): CardSection[] {
     ...text(worked ? "Result" : `Result: ${str(result.status) || "unknown"}`, report,
             { clip: true, tone: worked ? undefined : "destructive" }),
     ...text("Review", review, { clip: true, tone: "destructive" }),
+    ...text("Findings", step.kind === "review" ? findingText(result.findings, step.role_key || "builtin")
+      : review ? "" : findingText(result.verify_findings), { clip: true }),
   ];
 }
 

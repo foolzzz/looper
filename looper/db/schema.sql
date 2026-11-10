@@ -269,6 +269,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     correlation_id    TEXT NOT NULL DEFAULT '',
     origin_channel_id TEXT NOT NULL DEFAULT '',
     result_summary    TEXT,
+    process_record    JSONB CHECK (jsonb_typeof(process_record) = 'object'),
     error             TEXT,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -330,6 +331,8 @@ CREATE TABLE IF NOT EXISTS task_steps (
     step_key TEXT NOT NULL DEFAULT '',
     depends_on TEXT[] NOT NULL DEFAULT '{}',
     ready_when JSONB,
+    accept_when JSONB,
+    reviews TEXT,
     review BOOLEAN NOT NULL DEFAULT false,
     validation_commands TEXT[] NOT NULL DEFAULT '{}',
     acceptance_criteria TEXT[] NOT NULL DEFAULT '{}',
@@ -343,7 +346,7 @@ CREATE TABLE IF NOT EXISTS task_steps (
     review_stage TEXT CHECK (review_stage IN ('builtin', 'role')),
     review_roles JSONB NOT NULL DEFAULT '[]'::jsonb,
     review_position INTEGER,
-    kind TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'gate', 'wait')),
+    kind TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'gate', 'wait', 'review')),
     CONSTRAINT task_steps_review_roles_reviewed
         CHECK (jsonb_typeof(review_roles) = 'array' AND (jsonb_array_length(review_roles) = 0 OR review))
 );
@@ -422,6 +425,7 @@ CREATE TABLE IF NOT EXISTS task_journal (
                     'session_switch', 'handoff', 'progress', 'profile_choice', 'profile_fallback', 'concurrency_change',
                     'role_defined', 'gate_opened', 'gate_updated', 'gate_cancelled', 'gate_closed',
                     'wait_opened', 'wait_extended', 'wait_closed', 'condition_blocked',
+                    'review_round', 'late_review', 'review_adjudicated',
                     'verification_round', 'escalation')),
     summary     TEXT NOT NULL DEFAULT '',
     learnings   TEXT[] NOT NULL DEFAULT '{}',

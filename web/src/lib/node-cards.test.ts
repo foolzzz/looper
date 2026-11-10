@@ -267,6 +267,33 @@ describe("stepCard", () => {
     expect(titles(card.sections)).not.toContain("Result: failed");
   });
 
+  it("shows panel findings with their member, severity, location and text", () => {
+    const card = cardOf(step("dev", { status: "completed", result: {
+      status: "completed", summary: "Done.", verify_passed: false, verify_findings: [
+        { member: "security", severity: "blocking", where: "src/server.py:24", text: "Validate the request." },
+        { member: "performance", severity: "suggestion", where: "src/cache.py:18", text: "Reuse the cache." },
+        "Keep legacy findings readable.",
+      ],
+    } }));
+    expect(section(card.sections, "Review")).toMatchObject({ text:
+      "The review did not pass it:\nsecurity · blocking · src/server.py:24: Validate the request.\n"
+      + "performance · suggestion · src/cache.py:18: Reuse the cache.\nKeep legacy findings readable.",
+    });
+    expect(JSON.stringify(card)).not.toContain("[object Object]");
+  });
+
+  it("shows a review seat's findings and passing panel suggestions", () => {
+    const finding = { severity: "suggestion", where: "src/cache.py:18", text: "Reuse the cache." };
+    const seat = cardOf(step("review_a", { kind: "review", role_key: "performance", status: "verified", result: {
+      status: "completed", passed: true, summary: "Looks good.", findings: [finding],
+    } }));
+    expect(section(seat.sections, "Findings")).toMatchObject({ text: "performance · suggestion · src/cache.py:18: Reuse the cache." });
+    const work = cardOf(step("dev", { status: "verified", result: {
+      status: "completed", verify_passed: true, verify_findings: [{ ...finding, member: "performance" }],
+    } }));
+    expect(section(work.sections, "Findings")).toMatchObject({ text: "performance · suggestion · src/cache.py:18: Reuse the cache." });
+  });
+
   it("says what a step in review waits for", () => {
     const roles = [{ role: "security", required: true, version: 1 }, { role: "perf", required: true, version: 1 }];
     const card = cardOf(step("s1", { status: "completed", review_stage: "role", review_roles: roles, review_position: 1 }));

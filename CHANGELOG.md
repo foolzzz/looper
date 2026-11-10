@@ -18,6 +18,46 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.120] - 2026-11-10
+
+### Fixed
+
+- **Process record follow-ups.** ([#1195](https://github.com/foolzzz/looper/pull/1195))
+  - The result of a completed or failed workflow task ends with a code-generated summary (at most 1200 characters) of actual roles, runtimes and models with fallbacks, review rounds, verification outcomes and escalations, plus a pointer to the full record; it is also stored as `process_record.delivery_summary`.
+  - The reported model follows the Runs API rules (Cursor shows its display model; runtimes without report evidence no longer show the requested model).
+  - The stored record and the `looper_tasks` text view reserve a budget per section, repeated ordinary runs share a counted `Runs` entry, and the safety line and omitted count always survive truncation.
+  - A dashboard chat task with phase notices skips the generic plan line.
+  - Tasks without a workflow are unchanged.
+
+## [2.14.119] - 2026-11-10
+
+### Fixed
+
+- **Review panel follow-ups.** ([#1192](https://github.com/foolzzz/looper/pull/1192))
+  - A workflow with a review panel no longer reviews its verification step through `review_all` or an explicit review; a workflow without a panel keeps the ordinary review rules.
+  - The `looper_tasks` compact task view shows each panel seat's verdict (pass, fail or pending), blocking and suggestion counts, up to five bounded findings and adjudication reasons.
+  - The Pipeline card shows panel findings (member, level, location, text) instead of `[object Object]`, and `on: completed` edges stay on the work node in the Pipeline layout.
+  - A work result saved before review panels still gets the developer runtime check, using the developer's last run record.
+  - Tasks without a workflow are unchanged.
+
+## [2.14.118] - 2026-11-10
+
+### Added
+
+- **Workflow phase broadcasts and the delivery process record.** ([#1193](https://github.com/foolzzz/looper/pull/1193))
+  - With `phase_notices`, a workflow task sends one code-generated line per phase to its channels: plan created, review round, verification start and result, escalation and blocked condition. The plan-created line replaces the count-based decomposition message.
+  - A completed or failed workflow task stores a process record (roles, requested and reported models, fallbacks, review rounds, verification, escalations) in `tasks.process_record`, shown on the task page and in the task tools; its result text points to the task page.
+  - Database: `tasks.process_record`, migrated on start. Tasks without a workflow are unchanged.
+
+## [2.14.117] - 2026-11-10
+
+### Added
+
+- **Review panel built on dependency conditions.** ([#1183](https://github.com/foolzzz/looper/pull/1183))
+  - A workflow `review_panel` gives each step needing review one parallel review step per member and an `accept_when` condition over them, evaluated by the dependency-condition evaluator. Suggestion findings do not block, late verdicts are journaled and a late blocker reopens the step.
+  - Findings carry `blocking` or `suggestion` severity and are merged per issue. With `adjudication`, the Planner may downgrade a blocking finding with a reason. Developer and reviewers must use different runtimes, and every seat reviews the same frozen commit.
+  - Database: `task_steps.accept_when` and `reviews`, step kind `review`, journal kinds `review_round`, `late_review` and `review_adjudicated`, and stored presets with a panel get `distinct_reviewer_runtime` true; migrated on start. Tasks without a workflow panel are unchanged.
+
 ## [2.14.116] - 2026-11-10
 
 ### Added
