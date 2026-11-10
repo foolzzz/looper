@@ -1657,6 +1657,8 @@ class ManagerAgent:
             else:
                 text = f"任务「{title}」已取消。"
             await self._web_thread_reply(envelope, thread, text)
+        elif thread and envelope.payload.get("phase_text"):
+            await self._web_thread_reply(envelope, thread, envelope.payload["phase_text"])
         elif notice is not None:
             # A Telegram or Lark task's end goes to who it recorded, instead of its final summary, behind the
             # progress sent before it (``task_notice``).
@@ -1669,7 +1671,7 @@ class ManagerAgent:
                 metadata={"origin_channel_id": origin},
             ))
         elif origin:
-            progress_text = envelope.payload.get("summary", "")
+            progress_text = envelope.payload.get("phase_text") or envelope.payload.get("summary", "")
             if progress_text:
                 await self._task_progress(envelope, progress_text)
 
@@ -1706,6 +1708,8 @@ class ManagerAgent:
             step_count = envelope.payload.get("step_count", 0)
             await self._web_thread_reply(envelope, thread, f"任务「{title}」已分解为 {step_count} 个步骤，开始执行。")
         elif origin:
+            if envelope.payload.get("phase_notices"):
+                return  # The plan-created phase report supplies the role table and breakdown.
             step_count = envelope.payload.get("step_count", 0)
             await self._task_progress(envelope, f"任务已分解为 {step_count} 个步骤，开始执行...")
 

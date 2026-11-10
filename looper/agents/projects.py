@@ -940,6 +940,7 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
         **({"run_roles": ran_as} if ran_as else {}),
         "origin_channel_id": raw.get("origin_channel_id", ""),
         "result_summary": raw.get("result_summary"),
+        "process_record": raw.get("process_record"),
         "error": raw.get("error"),
         "fail_kind": raw.get("fail_kind"),  # "task_budget": it failed at its project's task spend cap
         # The task's spend cap as the Planner enforces it (its own, else its project's); null for none.
@@ -983,6 +984,7 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
                                waits: list[dict[str, Any]]) -> dict[str, Any]:
     from ..db import task_changes as db_changes, task_roles as db_roles, user_gates as db_user_gates
     from .tiers.journal import clip
+    from .workflow_reporting import process_record_text
 
     labels = {s["id"]: s.get("step_key") or s["id"] for s in task.get("steps") or [] if "id" in s}
     task_id = task["id"]
@@ -1013,6 +1015,7 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
                         for entry in supplements],
         "latest_progress": progress[-1]["summary"] if progress else None,
         "result": clip(task.get("result_summary") or task.get("error") or "", 1_000) or None,
+        **({"process_record": process_record_text(task["process_record"])} if task.get("process_record") else {}),
         "cost_usd": (cost or {}).get("cost_usd"),
         # How many of its Workers and Reviewers run at once, with the source; its own limits (task).
         "concurrency": {role: view["concurrency"] for role, view in agents["roles"].items()

@@ -898,6 +898,8 @@ function OverviewTab({
 
       <TaskProgress task={task} />
 
+      <TaskProcessRecord task={task} />
+
       {task.cost && task.cost.runs > 0 && <TaskCostBreakdown cost={task.cost} />}
 
       <TaskWorkspaceCard task={task} />
@@ -1058,6 +1060,30 @@ function TaskProgress({ task }: { task: TaskDetail }) {
             </ol>
           </details>
         )}
+      </div>
+    </section>
+  );
+}
+
+function TaskProcessRecord({ task }: { task: TaskDetail }) {
+  const record = task.process_record;
+  if (!record) return null;
+  return (
+    <section aria-labelledby="task-process-record-title">
+      <h3 id="task-process-record-title" className="mb-2 text-sm font-semibold">Process record</h3>
+      <div className="space-y-4 rounded-lg border border-border bg-card px-4 py-3 text-sm">
+        {(["Roles", "Reviews", "Verification", "Escalations"] as const).map((name) => (
+          <div key={name}>
+            <h4 className="mb-1 text-xs font-medium text-muted-foreground">{name}</h4>
+            <ul className="space-y-1">
+              {record.sections[name].map((entry, index) => (
+                <li key={index} className="whitespace-pre-wrap break-words">{entry}</li>
+              ))}
+            </ul>
+          </div>
+        ))}
+        <p className="break-words text-xs text-muted-foreground">{record.remote_safety}</p>
+        {record.omitted > 0 && <p className="text-xs text-muted-foreground">{record.omitted} records omitted.</p>}
       </div>
     </section>
   );

@@ -151,6 +151,8 @@ from ..session_switch import SessionSwitch, SwitchReason
 from ..step_workspaces import MergeError, MergeResult, Repo, StepWorkspace, StepWorkspaceState, Unusable
 from ..task_roles import RoleKind, TaskRole
 from .. import waits
+from .. import workflow_reporting as workflows
+from ..workflow_reporting import Phase
 from ..waits import (
     Wait,
     WaitAction,
@@ -816,7 +818,7 @@ def _reported_status(plan: TaskPlan) -> str:
     return plan.status
 
 
-def closing_note(why: str, steps: Iterable[tuple[str, str, Mapping[str, Any] | None]]) -> str:
+def closing_note(why: str, steps: Iterable[tuple[str, str, Mapping[str, Any] | None]], *, process: str = "") -> str:
     """What a task that ended without completing leaves as its result: why it ended, what its steps delivered, and
     what is not done. ``steps`` are (label, status, last result); a dropped step is neither."""
     done: list[str] = []
@@ -828,7 +830,7 @@ def closing_note(why: str, steps: Iterable[tuple[str, str, Mapping[str, Any] | N
             outcome = f": {result_outcome(result)}" if result else ""
             not_done.append(f"- {label} ({_NOT_DONE.get(status, status)}){outcome}")
     return "\n\n".join([f"## Why it ended\n{why}", "## Done\n" + ("\n".join(done) or "- nothing"),
-                        "## Not done\n" + ("\n".join(not_done) or "- nothing")])
+                        "## Not done\n" + ("\n".join(not_done) or "- nothing"), *([process] if process else [])])
 
 
 def _requirement_diff(edit: Any) -> str:
@@ -1187,12 +1189,14 @@ class PlannerAgent:
                 "plan_id": plan.plan_id,
                 "step_count": len(steps),
                 "steps": [{"step_id": s.step_id, "instruction": s.instruction} for s in steps],
+                **({"phase_notices": True} if (self._workflow or {}).get("phase_notices") else {}),
             },
             correlation_id=envelope.correlation_id,
             metadata=envelope.metadata,
         ))
 
-        await self._report_progress(plan)
+        await self._report_progress(plan, phase=Phase.PLAN_CREATED if (self._workflow or {}).get("phase_notices") else None,
+                                    data={"workflow": self._workflow, "steps": [s for s in steps if not s.reviews]})
         await self._dispatch_ready(plan)
 
     def _add_steps(self, plan: TaskPlan, specs: tuple[StepSpec, ...]) -> list[PlanStep]:
@@ -1961,6 +1965,9 @@ class PlannerAgent:
         await self._save(plan, step)
         await self._activity("phase", f"Worker dispatched{f' as {task_role.label}' if task_role else ''}: "
                                       f"{step.instruction[:80]}", worker=worker_id)
+        if self._is_verification(step):
+            await self._report_progress(plan, phase=Phase.VERIFICATION_STARTED,
+                                        data={"step": step.label, "attempt": step.retries + 1})
         context: dict[str, Any] = {"work_dir": plan.work_dir}
         if step.isolated and step.workspace is not None:
             context = {"work_dir": step.workspace.work_dir, "workspace": step.workspace.context()}
@@ -2430,16 +2437,21 @@ class PlannerAgent:
         await self._save(plan, target, entries=[JournalEntry(target.step_id, target.label,
             json.dumps({"round": target.retries, "reviews": {s.label: {"status": s.status, "result": s.result} for s in plan.steps
                         if s.reviews == target.step_id}}), kind=JournalKind.REVIEW_ROUND)])
+        await self._report_progress(plan, phase=Phase.REVIEW_ROUND, data={"step": target.label,
+            "attempt": target.retries + 1, "reviews": {s.label: {"result": s.result} for s in plan.steps
+                                                       if s.reviews == target.step_id}})
         context = DecisionContext(target.label, ResultKind.REVIEW, state is State.SATISFIED, True,
                                   target.retries, self._execution.step_retries)
         await self._decide(plan, target, context, self._review_report(target, {}))
 
     async def _reset_reviews(self, plan: TaskPlan, target: PlanStep, *, drop: bool = False) -> None:
         seats = [s for s in plan.steps if s.reviews == target.step_id and s.status != "skipped"]
-        if any(s.status == "dispatched" for s in seats):
+        if any(s.status == "dispatched" for s in seats) and (target.result or {}).get("review_round") != target.retries:
             await self._save(plan, entries=[JournalEntry(target.step_id, target.label, json.dumps({
                 "round": target.retries, "stale": [s.label for s in seats if s.status == "dispatched"],
                 "reviews": {s.label: s.result for s in seats}}), kind=JournalKind.REVIEW_ROUND)])
+            await self._report_progress(plan, phase=Phase.REVIEW_ROUND, data={"step": target.label,
+                "attempt": target.retries + 1, "reviews": {s.label: {"result": s.result} for s in seats}})
         for seat in seats:
             if seat.status == "dispatched":
                 await self._kill_worker(seat, run_id=seat.reviewer_id)
@@ -2565,10 +2577,17 @@ class PlannerAgent:
             entries.append(JournalEntry(step.step_id, step.label, json.dumps({
                 "role": step.role, "attempt": step.retries + 1, "head": evidence.get("head"),
                 "git": evidence.get("git", False), "status": "completed" if context.succeeded else "failed",
-                "summary": summary.split(". ", 1)[0].splitlines()[0][:300] if summary else "",
+                "summary": journal.clip(summary.split(". ", 1)[0], 300) if summary else "",
                 **({"failure": "verification_changed_code", "repair_after_index": max(s.index for s in plan.steps)}
                    if result.get("failure") == "verification_changed_code" else {}),
             }), kind=JournalKind.VERIFICATION_ROUND))
+        if self._workflow and record_verification and context.result is ResultKind.REVIEW and step.accept_when is None:
+            result = step.result or {}
+            reviews = {"builtin": {"passed": result.get("verify_passed"),
+                                    "findings": result.get("verify_findings", [])}}
+            reviews.update({r["role"]: r for r in _role_reviews(result)})
+            entries.append(JournalEntry(step.step_id, step.label,
+                json.dumps({"round": step.retries, "reviews": reviews}), kind=JournalKind.REVIEW_ROUND))
         if self._is_verification(step) and self._verification_repair_required(plan, entries):
             context = replace(context, succeeded=False, verification_repair_required=True)
         if self._is_verification(step) and not context.succeeded and self._verification_exhausted(plan, entries):
@@ -2580,6 +2599,13 @@ class PlannerAgent:
         report = [*report, *await self._room_lines(step)]
         # Saved with its result and the late messages, so a restart can take the decision again.
         await self._save(plan, step, entries=entries)
+        for entry in entries:
+            if entry.kind is JournalKind.VERIFICATION_ROUND:
+                await self._report_progress(plan, phase=Phase.VERIFICATION_ROUND,
+                                            data={"step": step.label, **json.loads(entry.summary)})
+            elif entry.kind is JournalKind.REVIEW_ROUND:
+                await self._report_progress(plan, phase=Phase.REVIEW_ROUND,
+                    data={"step": step.label, "attempt": step.retries + 1, **json.loads(entry.summary)})
         message = self._decision_message(plan, step, context, report)
         step.missed_messages.clear()
         try:
@@ -2797,6 +2823,9 @@ class PlannerAgent:
                 "reason": reason, "gates": [s.id for s in specs if s.gate is not None],
             }), kind=JournalKind.ESCALATION))
         await self._save(plan, decided, *dropped, *steps, entries=entries)
+        if escalate:
+            await self._report_progress(plan, phase=Phase.ESCALATION,
+                                        data={"step": decided.label, "reason": reason})
         await self._activity("phase", summary)
 
     async def _step_settled(self, plan: TaskPlan, step: PlanStep, *, note: str = "") -> None:
@@ -2860,6 +2889,8 @@ class PlannerAgent:
                        for e in plan.journal):
                 await self._save(plan, entries=[JournalEntry(blocked.step_id, blocked.label, message,
                                                            kind=JournalKind.CONDITION_BLOCKED)])
+                await self._report_progress(plan, phase=Phase.CONDITION_BLOCKED,
+                                            data={"step": blocked.label, "condition": condition})
             view = self._checked(plan.view())
 
             def check(text: str) -> ChatReply:
@@ -4750,6 +4781,9 @@ class PlannerAgent:
         judgments = [e for e in plan.journal if e.kind is JournalKind.REVIEW_ADJUDICATED]
         if judgments:
             summary += "\n\n## Review adjudications\n" + "\n".join(f"- {e.step}: {e.summary}" for e in judgments)
+        process = await self._process_record(plan)
+        if process is not None:
+            summary += "\n\nProcess record: see the task page"
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
             target=TASK_ROUTER_ADDRESS,
@@ -4761,6 +4795,7 @@ class PlannerAgent:
                 "status": "completed",
                 "progress": plan.progress_summary(),
                 "summary": summary,
+                **({"process_record": process} if process is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
@@ -4897,9 +4932,6 @@ class PlannerAgent:
         await self._save(plan, plan_row=True)
         await update_task_phase(self._task_id, "failed")
 
-        # The closing note: why the task failed, what its steps delivered and what is not done.
-        summary = closing_note(plan.fail_reason or "A step failed and the Planner could not go on.",
-                               ((s.label, s.status, s.result) for s in plan.steps))
         await self._activity("error", f"Task failed: {plan.fail_reason or 'see step details'}"[:500])
         kept = [s.workspace.branch for s in plan.steps if s.isolated and s.workspace is not None]
         if kept:
@@ -4908,6 +4940,11 @@ class PlannerAgent:
         if model_closeout:
             await self._vault_closeout(
                 plan, f"failed: {_clip(plan.fail_reason or 'a step failed and the Planner could not go on', 300)}")
+
+        process = await self._process_record(plan)
+        summary = closing_note(plan.fail_reason or "A step failed and the Planner could not go on.",
+                               ((s.label, s.status, s.result) for s in plan.steps),
+                               process="Process record: see the task page" if process is not None else "")
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
@@ -4921,12 +4958,27 @@ class PlannerAgent:
                 "progress": plan.progress_summary(),
                 "summary": summary,
                 "fail_kind": fail_kind.value if fail_kind else None,
+                **({"process_record": process} if process is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
         ))
 
-    async def _report_progress(self, plan: TaskPlan) -> None:
+    async def _process_record(self, plan: TaskPlan) -> dict[str, Any] | None:
+        if not self._workflow:
+            return None
+        try:
+            runs = await db_llm_records.process_record_runs(self._task_id)
+        except Exception:
+            logger.exception("failed to read workflow runs for task %s", self._task_id)
+            await self._activity("error", "Process record: runtime/model records could not be read")
+            runs = None
+        return workflows.process_record(plan, plan.journal, runs, workflow=self._workflow)
+
+    async def _report_progress(self, plan: TaskPlan, *, phase: Phase | None = None,
+                               data: Mapping[str, Any] | None = None) -> None:
+        if phase is not None and not (self._workflow or {}).get("phase_notices"):
+            return
         assert self._bus is not None
         if plan.status in ("completed", "failed"):
             return  # its final status is out (a task stopped at its spend cap mid-decision)
@@ -4942,6 +4994,7 @@ class PlannerAgent:
                 "status": _reported_status(plan),
                 "progress": plan.progress_summary(),
                 "summary": f"进度更新: {plan.progress_summary()}",
+                **({"phase_text": workflows.phase_text(phase, data or {})} if phase is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},

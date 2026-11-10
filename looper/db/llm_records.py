@@ -426,6 +426,18 @@ async def task_run_rows(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
     ]
 
 
+async def process_record_runs(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
+    """All task runs, with model requests separate from reports and no prompt/event bodies."""
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        f"""SELECT id, {_TASK_ROLE} AS role, model,
+            jsonb_build_object('profile', COALESCE(metadata->'profile', metadata->'agent'),
+                'model_choice', metadata->'model_choice', 'fallback_from', metadata->'fallback_from',
+                'prompt_layers', jsonb_build_object('task_role', metadata->'prompt_layers'->'task_role')) AS metadata
+            FROM llm_records WHERE task_id = $1 AND {TASK_RUN} ORDER BY created_at, id""", task_id)
+    return [{**dict(row), "metadata": json.loads(row["metadata"])} for row in rows]
+
+
 async def list_records(
     *,
     agent_id: str | None = None,
