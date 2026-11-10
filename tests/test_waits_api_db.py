@@ -93,7 +93,8 @@ def test_detail_waits_are_in_plan_order_with_all_fields(monkeypatch: pytest.Monk
                           "topic": "CI finishes", "check": None, "every_seconds": None, "opened_at": None,
                           "due_at": None, "deadline_at": None, "next_check_at": None, "last_checked_at": None,
                           "checks": 0, "last_result": None, "last_output": "", "last_error": "",
-                          "resolution": "", "notice": None, "closed_at": None, "depends_on": []}
+                          "resolution": "", "notice": None, "closed_at": None, "depends_on": [],
+                          "ready_when": None, "ready_state": "satisfied"}
         assert row == {"step": "w1", "step_id": "step-w1", "state": "waiting", "outcome": None,
                        "topic": "CI finishes", "check": check, "every_seconds": 600, "opened_at": NOW.isoformat(),
                        "due_at": (NOW + timedelta(seconds=60)).isoformat(),
@@ -101,7 +102,7 @@ def test_detail_waits_are_in_plan_order_with_all_fields(monkeypatch: pytest.Monk
                        "next_check_at": (NOW + timedelta(seconds=600)).isoformat(), "last_checked_at": NOW.isoformat(),
                        "checks": 1, "last_result": "error", "last_output": "pending", "last_error": "exit 1",
                        "resolution": "Keep waiting", "notice": "dashboard", "closed_at": None,
-                       "depends_on": ["s1"]}
+                       "depends_on": ["s1"], "ready_when": None, "ready_state": None}
 
     run_db(test, monkeypatch)
 
@@ -308,7 +309,8 @@ def test_manager_task_detail_includes_wait_conditions_states_and_step_kinds(
         detail = answer["result"]
         assert [(step["step"], step["kind"]) for step in detail["steps"]] == [("s1", "work"), ("w1", "wait")]
         expected = (await _api("POST", "/api/v1/tasks/detail", json.dumps({"task_id": "task-a"}).encode()))[1]["waits"]
-        assert detail["waits"] == expected
+        assert detail["waits"] == [{key: value for key, value in wait.items()
+                                     if key not in ("ready_when", "ready_state")} for wait in expected]
         assert detail["waits"][0]["check"] == check
         assert detail["waits"][0]["state"] == "waiting"
 

@@ -416,3 +416,26 @@ def test_vault_section_follows_task_and_room_and_has_its_own_hash(defined_role: 
         assert prompt.text.index(section) < prompt.text.index("## Boundaries")
     assert prompt.layers["vault"] == {"sha256": _sha(section)}
     assert prompt.layers["task"] == original.layers["task"]
+
+
+@pytest.mark.parametrize(("role", "expected_sha"), [
+    ("worker", "ca974aa80d6e37125fb94e529f7d3f3184ae582adf16fbc79515ffcbf5c31632"),
+    ("reviewer", "532864961524034dd9469dcbf02a0963aad88cd146454160b11258347eb12a66"),
+])
+def test_default_step_system_prompts_keep_their_bytes_without_conditions(role: str, expected_sha: str) -> None:
+    from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
+    from looper.agents.system_prompt import build_system_prompt
+    from looper.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT, REVIEWER_SYSTEM_PROMPT, WorkerPool
+
+    verify = role == "reviewer"
+    payload = {"requirement": "Build the project", "step_key": "dev",
+               "instruction": "Implement the requested change", "acceptance_criteria": ["The targeted checks pass"]}
+    prompt = build_system_prompt(
+        harness=Harness(DEFAULT_HARNESS_PROMPT, Layer.BUILTIN), role_id=role,
+        role=REVIEWER_SYSTEM_PROMPT if verify else DEFAULT_SYSTEM_PROMPT, recommended=True,
+        task_kind="review" if verify else "work", task_id="task-baseline", step_id="step-baseline",
+        task=WorkerPool._task_section(payload, "", is_verify=verify),
+        contract_name="REVIEW_CONTRACT" if verify else "WORK_CONTRACT",
+        contract=REVIEW_CONTRACT if verify else WORK_CONTRACT,
+    )
+    assert prompt.sha256 == expected_sha

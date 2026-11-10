@@ -39,7 +39,7 @@ RETURNING step_id
 """
 
 _WAITS = """
-SELECT w.*, s.step_key, s.step_index,
+SELECT w.*, s.step_key, s.step_index, s.ready_when,
        ARRAY(SELECT d.step_key FROM unnest(s.depends_on) WITH ORDINALITY AS dep(id, place)
              JOIN task_steps d ON d.id = dep.id ORDER BY dep.place) AS depends_on
 FROM task_waits w JOIN task_steps s ON s.id = w.step_id
@@ -52,7 +52,7 @@ def _json(value: Any) -> str | None:
 
 def _wait(row: Mapping[str, Any]) -> dict[str, Any]:
     wait = dict(row)
-    for name in ("spec", "baseline"):
+    for name in ("spec", "baseline", "ready_when"):
         if isinstance(wait.get(name), str):
             wait[name] = json.loads(wait[name])
     if "depends_on" in wait:

@@ -753,16 +753,47 @@ async def list_tasks_page(
     return {"tasks": result, "next_before": tasks[-1]["id"] if len(page) > limit else None, "counts": counts}
 
 
-async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
-    """A task's detail for the console, or its compact Manager view with the same tool contract."""
+async def task_readiness(task: dict[str, Any], *, compact: bool = False) -> list[dict[str, Any]]:
+    """Project step readiness and waits identically for task detail and the pipeline tool."""
     from .wait_service import waits_view
 
+    task_id = task["id"]
+    waits = await waits_view(task_id, compact=compact)
+    steps = task.get("steps", [])
+    if any(step.get("ready_when") is not None for step in steps):
+        from ..db import user_gates as db_user_gates
+        from types import SimpleNamespace
+        from .tiers.conditions import StepOutcome, evaluate, parse
+
+        gates_by_id = {g["step_id"]: SimpleNamespace(**g) for g in await db_user_gates.list_for_task(task_id)}
+        waits_by_id = {w["step_id"]: SimpleNamespace(**w) for w in waits}
+        outcomes = {step["id"]: StepOutcome.from_step(SimpleNamespace(
+            **step, gate=gates_by_id.get(step["id"]), wait=waits_by_id.get(step["id"]))) for step in steps}
+        for step in steps:
+            step["ready_state"] = (evaluate(parse(step["ready_when"], "ready_when"), outcomes.__getitem__).value
+                                   if step["status"] == "pending" and step.get("ready_when") is not None else None)
+    done = {step.get("id") for step in steps if step.get("status") == "verified"}
+    for step in steps:
+        step.setdefault("ready_when", None)
+        if step.get("ready_when") is None:
+            step["ready_state"] = (("satisfied" if all(dep in done for dep in step.get("depends_on", [])) else "pending")
+                                   if step.get("status") == "pending" else None)
+    by_id = {step["id"]: step for step in steps if "id" in step}
+    for wait in waits:
+        step = by_id.get(wait["step_id"], {})
+        if not compact or step.get("ready_when") is not None:
+            wait.update({key: step.get(key) for key in ("ready_when", "ready_state")})
+    return waits
+
+
+async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
+    """A task's detail for the console, or its compact Manager view with the same tool contract."""
     raw = await db_tasks.get_task_with_steps(task_id)
     if raw is None:
         raise RequestError(HTTP_404, "task not found")
     cost = (await db_llm_records.task_costs([task_id])).get(task_id)
     agents = await agents_view(raw)
-    waits = await waits_view(task_id)
+    waits = await task_readiness(raw, compact=compact)
     if compact:
         return await _compact_task_detail(raw, cost=cost, agents=agents, waits=waits)
 
@@ -784,6 +815,10 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
     client_name = (await db_api_clients.names([client_id])).get(client_id) if client_id else None
     roles = await roles_view(task_id, raw.get("steps", []))
     gates = await gate_service.gates_view(task_id)
+    by_id = {step["id"]: step for step in raw.get("steps", []) if "id" in step}
+    for gate in gates:
+        step = by_id.get(gate["step_id"], {})
+        gate.update({key: step.get(key) for key in ("ready_when", "ready_state")})
     task_workspace = await task_workspace_view(raw)
     workspaces = await step_workspaces_view(task_id, raw.get("steps", []),
                                             in_worktree=bool(task_workspace["worktree"]))
@@ -879,11 +914,22 @@ async def task_detail(task_id: str, *, compact: bool = False) -> dict[str, Any]:
     }
 
 
+def step_condition_view(step: Mapping[str, Any], labels: Mapping[str, str]) -> dict[str, Any]:
+    """The Manager's condition fields, absent on steps without a condition."""
+    from .tiers.conditions import parse, render, to_json
+
+    if step.get("ready_when") is None:
+        return {}
+    return {"ready_when_text": render(parse(to_json(parse(step["ready_when"], "ready_when"), labels), "ready_when")),
+            "ready_state": step.get("ready_state")}
+
+
 async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | None, agents: dict[str, Any],
                                waits: list[dict[str, Any]]) -> dict[str, Any]:
     from ..db import task_changes as db_changes, task_roles as db_roles, user_gates as db_user_gates
     from .tiers.journal import clip
 
+    labels = {s["id"]: s.get("step_key") or s["id"] for s in task.get("steps") or [] if "id" in s}
     task_id = task["id"]
     journal = task.get("journal") or []
     supplements = [entry for entry in journal if entry.get("kind") == db_changes.SUPPLEMENT]
@@ -895,6 +941,7 @@ async def _compact_task_detail(task: dict[str, Any], *, cost: dict[str, Any] | N
         "requirement": task.get("requirement"),
         "steps": [{"step": s.get("step_key") or s.get("id"), "status": s.get("status"),
                    "kind": s.get("kind") or "work",
+                   **step_condition_view(s, labels),
                    "instruction": clip(s.get("instruction") or "", 200),
                    # The roles its Planner defined that the step runs as and is reviewed by, when it has them.
                    **({"role": s["role_key"]} if s.get("role_key") else {}),

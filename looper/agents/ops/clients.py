@@ -45,22 +45,25 @@ DEFAULT_SESSION = "default"
 
 
 async def _pipeline(call: Call) -> dict[str, Any]:
-    from ..wait_service import waits_view
+    from ..projects import step_condition_view, task_readiness
 
     task_id = call.arguments["task_id"]
     task = await db_tasks.get_task_with_steps(task_id)
     if task is None:
         raise OpError(ErrorCode.NOT_FOUND, f"no task {task_id}: find its id with looper_tasks")
+    waits = await task_readiness(task, compact=True)
+    labels = {s["id"]: s.get("step_key") or s["id"] for s in task.get("steps") or [] if "id" in s}
     return {
         "task_id": task_id, "name": task["name"], "status": task["status"], "group": _group(task).value,
         "phase": task.get("phase"),
         "steps": [{"step": s.get("step_key") or s.get("id"), "kind": s.get("kind") or "work",
                    "status": s.get("status"), "depends_on": list(s.get("depends_on") or []),
+                   **step_condition_view(s, labels),
                    **({"role": s["role_key"]} if s.get("role_key") else {}),
                    "instruction": clip(s.get("instruction") or "", 200)}
                   for s in task.get("steps") or []],
         "gates": [_gate_listed(g) for g in await db_user_gates.list_for_task(task_id) if g.get("state") != "pending"],
-        "waits": await waits_view(task_id),
+        "waits": waits,
     }
 
 

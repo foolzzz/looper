@@ -756,6 +756,7 @@ def test_manager_task_returns_wait_conditions_and_each_step_kind(monkeypatch: py
         assert (wait["step"], wait["state"], wait["check"], wait["every_seconds"], wait["last_result"],
                 wait["depends_on"]) == ("w1", "waiting", check, 600, "not_ready", ["s1"])
         assert wait["opened_at"] == "2026-10-20T12:00:00+00:00"
+        assert "ready_when" not in wait and "ready_state" not in wait
 
     asyncio.run(run())
 

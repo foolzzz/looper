@@ -155,6 +155,8 @@ export interface ProjectExecution {
   max_step_retries: number | null;
   /** Whether the project's Planners may define the roles their steps run as; null = "off". */
   planner_roles: "off" | "on" | null;
+  /** Whether Planners may compose dependency conditions; null = "off". */
+  dependency_conditions: "off" | "on" | null;
   /** Whether a wait may run a shell command as the server's user; null = "off". */
   wait_commands: "off" | "on" | null;
   /** How long such a role's prompt and its harness may each be, 500 to 20,000 characters; null = 8,000. */

@@ -99,6 +99,7 @@ _SCHEDULE_USER_GATES = "schedule_user_gates"
 _RUNTIME_LAUNCHER = "runtime_launcher"
 _PROFILE_FALLBACK = "profile_fallback"
 _CURSOR_LOGIN = "cursor_login"
+_DEPENDENCY_CONDITIONS = "dependency_conditions"
 _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
 _CHAT_BINDING_SENDERS = "chat_binding_senders"
@@ -447,6 +448,16 @@ async def _schedule_deferred_by_drain_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _dependency_conditions_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _DEPENDENCY_CONDITIONS):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('task_steps') AND attname = 'ready_when' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
 class RegistrySchemaVersionError(RuntimeError):
     """The registry cannot be opened safely by this binary."""
 
@@ -617,6 +628,18 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _provider_enabled_pending(conn):
             await conn.execute("ALTER TABLE llm_providers ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT true")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROVIDER_ENABLED)
+        if await _dependency_conditions_pending(conn):
+            await conn.execute("ALTER TABLE task_steps ADD COLUMN ready_when JSONB")
+            await conn.execute("ALTER TABLE projects ADD COLUMN dependency_conditions TEXT "
+                               "CHECK (dependency_conditions IN ('off', 'on'))")
+            await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
+            # Freeze this upgrade's constraint in the same order as the fresh schema.
+            await conn.execute("""ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
+                'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement',
+                'session_switch', 'handoff', 'progress', 'profile_choice', 'profile_fallback', 'concurrency_change',
+                'role_defined', 'gate_opened', 'gate_updated', 'gate_cancelled', 'gate_closed',
+                'wait_opened', 'wait_extended', 'wait_closed', 'condition_blocked'))""")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _DEPENDENCY_CONDITIONS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -656,4 +679,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
             or await _llm_requests_stored_bytes_pending(conn)
             or await _chat_binding_senders_pending(conn)
-            or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)))
+            or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)
+            or await _dependency_conditions_pending(conn)))

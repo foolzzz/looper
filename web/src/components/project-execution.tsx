@@ -1,4 +1,5 @@
 import type { Project, ProjectExecution, ProjectUpdate } from "@/lib/api";
+import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { ROOM_LIMITS } from "@/lib/room";
 
@@ -16,6 +17,7 @@ const FIELDS: (keyof ProjectExecution)[] = [
   "max_step_retries",
   "planner_roles",
   "wait_commands",
+  "dependency_conditions",
   "role_text_max_chars",
   "user_gates",
   "gate_reminder_hours",
@@ -248,6 +250,16 @@ export function ProjectExecutionFields({
             When on, the project&apos;s Planners may define roles for their steps: an Agent Profile from the
             project&apos;s allowed list, a role prompt and a harness. A review role adds a review after the built-in
             Reviewer and never replaces it.
+          </p>
+        </div>
+        <div className="space-y-1">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-medium text-muted-foreground">Dependency conditions</span>
+            <Switch label="Dependency conditions" checked={draft.dependency_conditions === "on"}
+              onChange={(checked) => onChange({ ...draft, dependency_conditions: checked ? "on" : "off" })} />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            Off by default. Lets Planners start steps when all, any, or a chosen number of dependencies are ready.
           </p>
         </div>
         <div className="space-y-1">

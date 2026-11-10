@@ -97,6 +97,7 @@ class JournalKind(str, Enum):
     STEP_FAILED = "step_failed"
     STEP_RETRY = "step_retry"
     DECISION = "decision"
+    CONDITION_BLOCKED = "condition_blocked"
     SUPPLEMENT = "supplement"
     SESSION_SWITCH = "session_switch"
     HANDOFF = "handoff"

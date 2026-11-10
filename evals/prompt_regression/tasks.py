@@ -52,6 +52,7 @@ class EvalTask:
     # The task's project lets its Planner open user gates (user_gates on); what the user answers in them, in turn
     # (END_DISCUSSION ends the discussion), and how long a gate waits before each answer.
     user_gates: bool = False
+    dependency_conditions: bool = False
     gate_script: tuple[str, ...] = ()
     gate_reply_after_s: float = 0.0
     # Before its first scripted answer, wait for a recorded Worker run overlapping the open gate.
@@ -1570,6 +1571,70 @@ TASKS = TASKS + (EvalTask(
           "attempts": {"s1": [{"status": "completed", "files": {
               "report.txt": "source=https://example.org/report; checked\n"}}]}},
 ),)
+
+
+
+def _condition_flow(detail: Mapping[str, Any], *, any_required: bool) -> str | None:
+    from looper.agents.tiers.conditions import KOf, leaves, parse
+    from looper.agents.tiers.planner_protocol import ProtocolError
+
+    found_any = False
+    for step in detail.get("steps") or []:
+        raw = step.get("ready_when")
+        if raw is None:
+            continue
+        try:
+            condition = parse(raw, "ready_when")
+        except ProtocolError:
+            return "persisted dependency condition is invalid"
+        if leaves(condition) != frozenset(step.get("depends_on") or []):
+            return "condition leaves do not match the dependency edges"
+        todo = [condition]
+        while todo:
+            node = todo.pop()
+            if isinstance(node, KOf):
+                found_any |= node.form == "any_of" and len(node.of) >= 2
+                if not any_required and node.k != len(node.of):
+                    return "a serial task introduced a nontrivial alternative condition"
+                todo.extend(node.of)
+    return "alternative sources did not produce an any_of condition" if any_required and not found_any else None
+
+
+TASKS += (
+    EvalTask(
+        id="any_of_ready",
+        requirement=("Use three work steps. Two independent sources are alternatives: source A writes source_a.txt "
+                     "containing alpha; source B writes source_b.txt containing beta. The third step writes "
+                     "ready.txt containing ready as soon as either source is accepted, without waiting for both. "
+                     "Both source steps must still finish; do not cancel the other source."),
+        dependency_conditions=True,
+        check=_all(_equals("source_a.txt", "alpha"), _equals("source_b.txt", "beta"), _equals("ready.txt", "ready")),
+        flow_check=lambda detail, _records, _events: _condition_flow(detail, any_required=True),
+        expect={"min_steps": 3, "max_contract_violations": 0},
+        fake={"plan": [
+            _step("s1", "Write source_a.txt containing alpha.", ["source_a.txt holds alpha"]),
+            _step("s2", "Write source_b.txt containing beta.", ["source_b.txt holds beta"]),
+            {**_step("s3", "Write ready.txt containing ready.", ["ready.txt holds ready"], depends_on=["s1", "s2"]),
+             "ready_when": {"any_of": ["s1", "s2"]}}],
+            "attempts": {"s1": [{"status": "completed", "files": {"source_a.txt": "alpha\n"}}],
+                         "s2": [{"status": "completed", "seconds": 3, "files": {"source_b.txt": "beta\n"}}],
+                         "s3": [{"status": "completed", "files": {"ready.txt": "ready\n"}}]}},
+    ),
+    EvalTask(
+        id="conditions_not_needed",
+        requirement=("Use two serial work steps: first write numbers.txt containing 1 to 5, one per line. "
+                     "After that step is accepted, read numbers.txt and write their sum, 15, to sum.txt."),
+        dependency_conditions=True,
+        check=_numbers_and_sum,
+        flow_check=lambda detail, _records, _events: _condition_flow(detail, any_required=False),
+        expect={"min_steps": 2, "max_contract_violations": 0},
+        fake={"plan": [_step("s1", "Write numbers.txt containing 1 to 5.", ["numbers.txt holds 1 to 5"]),
+                       _step("s2", "Read numbers.txt and write sum.txt containing 15.", ["sum.txt holds 15"],
+                             depends_on=["s1"])],
+              "attempts": {"s1": [{"status": "completed", "files": {"numbers.txt": "1\n2\n3\n4\n5\n"}}],
+                           "s2": [{"status": "completed", "files": {"sum.txt": "15\n"}}]}},
+    ),
+)
 
 
 def select(ids: list[str] | None) -> tuple[EvalTask, ...]:

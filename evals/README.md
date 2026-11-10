@@ -193,6 +193,20 @@ mode too, and only its Reviewers are Claude Code: the stand-in hands Claude
 Code every other run of
 every task, with its arguments, so the other tasks run as before.
 
+### Dependency conditions
+
+`any_of_ready` enables dependency conditions for its project and asks for two independent, alternative
+sources. The persisted plan must contain an `any_of` group, its leaves must match `depends_on`, and both
+source artifacts and the downstream artifact must be delivered. `conditions_not_needed` enables the same
+setting for a serial task; it accepts omitted conditions or conjunctions, and rejects nontrivial OR or
+k-of-n conditions. Both cases have scripted fake-mode plans and Workers. Other cases keep their existing
+project settings.
+
+Run these two cases with `--tasks any_of_ready,conditions_not_needed`: use real mode with
+`--model sonnet --reps 2`, then `--model opus --reps 1`, and compare the result with its baseline using the
+comparison commands below. A fake-mode pass verifies the harness and runtime path; it does not establish
+real-model planning quality.
+
 ### Real mode: the effect, on demand
 
 Runs real Claude Code (`haiku` by default) and costs money. Every Claude Code

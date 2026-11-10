@@ -550,6 +550,9 @@ def run_task(
                 raise EvalError(f"{task.id} needs the profile its Planner may choose")
             api.post("/api/v1/allowed_profiles/replace",
                      {"project_id": created["project_id"], "profile_ids": [chosen_profile_id]})
+        if task.dependency_conditions:
+            api.post("/api/v1/project_admin/update", {
+                "project_id": created["project_id"], "fields": {"dependency_conditions": "on"}})["result"]["project"]
         if task.roles_on:
             api.post("/api/v1/project_admin/update", {"project_id": created['project_id'], "fields": {"planner_roles": "on"}})["result"]["project"]
         for template in task.role_templates:

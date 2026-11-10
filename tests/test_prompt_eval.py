@@ -2421,6 +2421,7 @@ _MISBEHAVING = EvalTask(
 # What each fake-mode task is run through: (steps, retries, reviews, chat turns), and how its steps sit side by side.
 _FLOW = {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
          "wait_pr_rereview": (3, 0, 0, 0), "wait_not_needed": (2, 0, 0, 0),
+         "any_of_ready": (3, 0, 0, 0), "conditions_not_needed": (2, 0, 0, 0),
          "parallel_parts": (3, 0, 0, 0),
          "interface_first": (4, 0, 0, 0), "reviewed_step": (1, 0, 1, 0),
          "retry_after_failure": (1, 1, 0, 0), "chat_correction": (1, 0, 0, 1), "misbehaving": (1, 1, 0, 0),
@@ -2448,6 +2449,7 @@ _FLOW = {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_ste
 # side; interface_first's sit between its interface step and its integration step.
 _SHAPE = {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
           "wait_pr_rereview": (0, 0, 1), "wait_not_needed": (0, 0, 1),
+          "any_of_ready": (1, 0, 2), "conditions_not_needed": (0, 0, 1),
           "parallel_parts": (1, 0, 2),
           "interface_first": (1, 1, 2), "reviewed_step": (0, 0, 1), "retry_after_failure": (0, 0, 1),
           "chat_correction": (0, 0, 1), "misbehaving": (0, 0, 1),

@@ -92,6 +92,18 @@ def _spend_from_records(monkeypatch: pytest.MonkeyPatch, agent_db: Any) -> None:
 
 
 class TestProjectApi:
+    def test_dependency_conditions_can_be_enabled_and_cleared(self, store: _Store) -> None:
+        store.add_project("proj-a", "calc")
+        assert not ProjectExecution.from_row(store.projects["proj-a"]).conditions_on
+        status, body = _call("POST", "/api/v1/project_admin/update", {
+            "project_id": "proj-a", "fields": {"dependency_conditions": "on"}})
+        assert status == 200 and body["dependency_conditions"] == "on"
+        assert ProjectExecution.from_row(store.projects["proj-a"]).conditions_on
+        status, body = _call("POST", "/api/v1/project_admin/update", {
+            "project_id": "proj-a", "fields": {"dependency_conditions": None}})
+        assert status == 200 and body["dependency_conditions"] is None
+        assert not ProjectExecution.from_row(store.projects["proj-a"]).conditions_on
+
     @pytest.mark.parametrize(("value", "enabled"), [("off", False), ("on", True), (None, False)])
     def test_wait_commands_are_off_unless_the_project_turns_them_on(
         self, store: _Store, value: str | None, enabled: bool,
