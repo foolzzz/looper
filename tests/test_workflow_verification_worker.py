@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -417,6 +418,7 @@ def test_verification_runtime_preserves_package_bin_links(tmp_path, absolute):
 def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatch, editable, symlinks):
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
     developer = _repo(tmp_path / "developer")
     (developer / ".gitignore").write_text(".venv\nbuild\n__pycache__/\n")
     package = developer / "src" / "checkout_probe"
@@ -478,6 +480,8 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
                               cwd=root, capture_output=True, text=True, timeout=20)
 
     assert run(developer, ["pytest", "-q", "-s", "-p", "no:cacheprovider", "test_probe.py"]).returncode == 0
+    if editable.startswith("strict-"):
+        assert list((linked_package / "__pycache__").glob("*.pyc"))
     source = tmp_path / "task"
     _git(developer, "worktree", "add", "--detach", str(source))
     (source / ".venv").symlink_to(environment, target_is_directory=True)
@@ -485,7 +489,11 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
     if editable.startswith("strict-"):
         (source / "build").symlink_to(developer / "build", target_is_directory=True)
         runtime_paths.append("build")
-    (source / "src" / "checkout_probe" / "__init__.py").write_text("VALUE = 0\n")
+    changed = source / "src" / "checkout_probe" / "__init__.py"
+    changed.write_text("VALUE = 0\n")
+    # Same-size edits in one timestamp tick must not reuse the developer's bytecode.
+    original = (package / "__init__.py").stat()
+    os.utime(changed, ns=(original.st_atime_ns, original.st_mtime_ns))
     runtime = tmp_path
     if editable == "strict-aliased":
         runtime = tmp_path / "runtime-alias"
@@ -500,6 +508,8 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
         assert copied.read_bytes() == interpreter.read_bytes()
         assert copied.stat().st_mode & 0o111 == interpreter.stat().st_mode & 0o111
     assert not list((checkout / ".venv").rglob("*.pyc"))
+    if editable.startswith("strict-"):
+        assert not list((checkout / "build").rglob("*.pyc"))
     assert all(not path.stat().st_mode & 0o222 for path in (checkout / ".venv").rglob("*") if path.is_file())
     prefix = run(checkout, ["python", "-c", "import sys; print(sys.prefix)"])
     assert prefix.returncode == 0, prefix.stderr

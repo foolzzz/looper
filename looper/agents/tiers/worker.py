@@ -821,6 +821,10 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
             for child in sorted(resolved.iterdir()):
                 if child.name == ".git":
                     raise OSError("verification runtime paths must not contain repository metadata")
+                if child.name == "__pycache__" and child.is_dir():
+                    # Relocated source links can match the old target's mtime and size.
+                    # Recompile from private sources instead of accepting stale bytecode.
+                    continue
                 copy(child, destination / child.name, boundary, private, ancestors | {resolved})
             if (resolved / "pyvenv.cfg").is_file():
                 _relocate_verification_venv(path, destination, repository_roots or (source, target))
