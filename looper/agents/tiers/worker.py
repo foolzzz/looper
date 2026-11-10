@@ -691,12 +691,10 @@ def _verification_checkout(work_dir: str, backup: Path, runtime_paths: Collectio
     return str(tree / Path(work_dir).resolve().relative_to(root.resolve()))
 
 
-def _relocate_verification_venv(source: Path, target: Path, repository_roots: tuple[Path, Path]) -> None:
-    """Relocate entry points and editable imports before executing a copied environment."""
+def _verification_repository_relocations(repository_roots: tuple[Path, Path]) -> dict[str, str]:
+    """Map the developer's worktrees to the private checkout."""
     root, checkout = (path.resolve() for path in repository_roots)
-    replacements = {str(root): str(checkout), str(source.absolute()): str(target.absolute()),
-                    str(source.resolve()): str(target.absolute())}
-
+    replacements = {str(root): str(checkout)}
     # A task worktree often links the main worktree's environment. Its editable
     # install names that main worktree, rather than the task directory.
     worktrees = subprocess.run(["git", "-C", str(root), "worktree", "list", "--porcelain", "-z"],
@@ -705,10 +703,17 @@ def _relocate_verification_venv(source: Path, target: Path, repository_roots: tu
         if field.startswith("worktree "):
             path = field.removeprefix("worktree ")
             replacements[path] = replacements[str(Path(path).resolve())] = str(checkout)
+    return replacements
+
+
+def _relocate_verification_venv(source: Path, target: Path, repository_roots: tuple[Path, Path]) -> None:
+    """Relocate entry points and editable imports before executing a copied environment."""
+    replacements = _verification_repository_relocations(repository_roots)
+    replacements.update({str(source.absolute()): str(target.absolute()), str(source.resolve()): str(target.absolute())})
     pattern = re.compile("(?:" + "|".join(re.escape(path) for path in sorted(replacements, key=len, reverse=True))
                          + r""")(?=/|[\s'"\\]|$)""")
     for path in target.rglob("*"):
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():
             continue
         if path.suffix == ".pyc":
             path.unlink()  # Cached editable finders may still contain the developer's paths.
@@ -742,14 +747,25 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
 
     An explicitly declared workspace link may point outside the repository. Links
     to regular files are dereferenced (for example a virtualenv's interpreter).
-    Directory links inside it must remain inside the declared tree; repository
-    metadata and special files are never runtime inputs.
+    Links back into a repository worktree are relocated to the private checkout.
+    Other directory links must remain inside the declared tree; repository metadata
+    and special files are never runtime inputs.
     """
     copied = []
+    relocations = _verification_repository_relocations(repository_roots) if repository_roots and paths else {}
 
     def copy(path: Path, destination: Path, boundary: Path, ancestors: frozenset[Path]) -> None:
         resolved = path.resolve(strict=True)
-        if (resolved.is_dir() and not resolved.is_relative_to(boundary)) or resolved in ancestors or ".git" in resolved.parts:
+        if resolved in ancestors or ".git" in resolved.parts:
+            raise OSError("verification runtime path crosses its declared tree")
+        if (path.is_symlink() and not resolved.is_relative_to(boundary)
+                and (resolved.is_file() or resolved.is_dir())):
+            for origin in sorted(relocations, key=len, reverse=True):
+                if resolved.is_relative_to(origin):
+                    relocated = Path(relocations[origin]) / resolved.relative_to(origin)
+                    destination.symlink_to(os.path.relpath(relocated, destination.parent))
+                    return
+        if resolved.is_dir() and not resolved.is_relative_to(boundary):
             raise OSError("verification runtime path crosses its declared tree")
         if resolved.is_dir():
             destination.mkdir()

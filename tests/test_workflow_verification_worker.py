@@ -353,26 +353,27 @@ def test_runtime_file_links_are_copied_without_exposing_their_source(tmp_path):
     assert interpreter.stat().st_mode & 0o200
 
 
-@pytest.mark.parametrize("editable", ["pth", "finder"])
+@pytest.mark.parametrize("editable", ["pth", "finder", "strict-relative", "strict-absolute"])
 def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatch, editable):
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.delenv("PYTHONPATH", raising=False)
     developer = _repo(tmp_path / "developer")
-    (developer / ".gitignore").write_text(".venv\n__pycache__/\n")
+    (developer / ".gitignore").write_text(".venv\nbuild\n__pycache__/\n")
     package = developer / "src" / "checkout_probe"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("VALUE = 1\n")
     (developer / "test_probe.py").write_text(
         "import checkout_probe\n"
+        "from pathlib import Path\n"
         "def test_value():\n"
-        "    print(checkout_probe.__file__)\n"
+        "    print(Path(checkout_probe.__file__).resolve())\n"
         "    assert checkout_probe.VALUE == 1\n"
     )
     _git(developer, "add", ".gitignore", "src", "test_probe.py")
     _git(developer, "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-m", "package")
     environment = developer / ".venv" if editable == "pth" else tmp_path / "environment"
     venv.EnvBuilder(with_pip=False).create(environment)
-    if editable == "finder":
+    if editable != "pth":
         (developer / ".venv").symlink_to(environment, target_is_directory=True)
     site = environment / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
     # Copy the installed test runner only: the fixture needs neither pip nor network access.
@@ -384,6 +385,14 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
             shutil.copytree(Path(spec.origin).parent, site / name, ignore=shutil.ignore_patterns("__pycache__"))
     if editable == "pth":
         (site / "checkout_probe.pth").write_text(str(developer / "src") + "\n")
+    elif editable.startswith("strict-"):
+        # setuptools strict editable installs use a .pth and an auxiliary link tree.
+        linked_package = developer / "build" / "__editable__.checkout_probe" / "checkout_probe"
+        linked_package.mkdir(parents=True)
+        (linked_package / "__init__.py").symlink_to(
+            package / "__init__.py" if editable == "strict-absolute" else
+            "../../../src/checkout_probe/__init__.py")
+        (site / "checkout_probe.pth").write_text(str(linked_package.parent) + "\n")
     else:
         (site / "__editable___checkout_probe_finder.py").write_text(
             "import sys\nfrom importlib.machinery import PathFinder\n"
@@ -410,8 +419,12 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
     source = tmp_path / "task"
     _git(developer, "worktree", "add", "--detach", str(source))
     (source / ".venv").symlink_to(environment, target_is_directory=True)
+    runtime_paths = [".venv"]
+    if editable.startswith("strict-"):
+        (source / "build").symlink_to(developer / "build", target_is_directory=True)
+        runtime_paths.append("build")
     (source / "src" / "checkout_probe" / "__init__.py").write_text("VALUE = 0\n")
-    checkout = Path(worker._verification_checkout(str(source), tmp_path / "backup", [".venv"]))
+    checkout = Path(worker._verification_checkout(str(source), tmp_path / "backup", runtime_paths))
     assert not list((checkout / ".venv").rglob("*.pyc"))
     assert all(not path.stat().st_mode & 0o222 for path in (checkout / ".venv").rglob("*") if path.is_file())
     prefix = run(checkout, ["python", "-c", "import sys; print(sys.prefix)"])
@@ -422,7 +435,20 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
         assert str(checkout / "src" / "checkout_probe" / "__init__.py") in result.stdout, result.stdout + result.stderr
         assert result.returncode == 1, result.stdout + result.stderr
         assert "1 failed" in result.stdout
+    if editable.startswith("strict-"):
+        monitor = worker.VerificationWrites(checkout, ["src/checkout_probe/__init__.py"])
+        monitor.start()
+        try:
+            result = run(checkout, ["python", "-c",
+                "import checkout_probe; from pathlib import Path; "
+                "p = Path(checkout_probe.__file__); original = p.read_bytes(); "
+                "p.write_text('VALUE = 2\\n'); p.write_bytes(original)"])
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert monitor.finish() == ["src/checkout_probe/__init__.py"]
+        finally:
+            monitor.close()
     assert (package / "__init__.py").read_text() == "VALUE = 1\n"
+    assert (source / "src" / "checkout_probe" / "__init__.py").read_text() == "VALUE = 0\n"
     assert executable.read_text().startswith(shebang)
 
 
