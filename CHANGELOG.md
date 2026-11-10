@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.120] - 2026-11-10
+
+### Fixed
+
+- **Process record follow-ups.** ([#1195](https://github.com/foolzzz/looper/pull/1195))
+  - The result of a completed or failed workflow task ends with a code-generated summary (at most 1200 characters) of actual roles, runtimes and models with fallbacks, review rounds, verification outcomes and escalations, plus a pointer to the full record; it is also stored as `process_record.delivery_summary`.
+  - The reported model follows the Runs API rules (Cursor shows its display model; runtimes without report evidence no longer show the requested model).
+  - The stored record and the `looper_tasks` text view reserve a budget per section, repeated ordinary runs share a counted `Runs` entry, and the safety line and omitted count always survive truncation.
+  - A dashboard chat task with phase notices skips the generic plan line.
+  - Tasks without a workflow are unchanged.
+
 ## [2.14.119] - 2026-11-10
 
 ### Fixed
