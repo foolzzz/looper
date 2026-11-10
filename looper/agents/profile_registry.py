@@ -1073,7 +1073,7 @@ def profile_warnings(profile: LegacyAgentProfile) -> list[str]:
 # Where nothing selects a profile.
 NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": [],
                                 "manager_session": False, "manager_sessions": [], "managers": [],
-                                "manager_templates": []}
+                                "manager_templates": [], "workflows": []}
 
 
 def _cost_profile(row: Mapping[str, Any], models: Iterable[Mapping[str, Any]] = ()) -> LegacyAgentProfile:
@@ -1137,6 +1137,7 @@ def usage_text(used_by: Mapping[str, Any]) -> str:
                      else f"the current session of Manager(s) {', '.join(ids)}")
     parts += [f"Manager {name}" for name in used_by.get("managers") or ()]
     parts += [f"template {label.replace(' of ', ' of Manager ', 1)}" for label in used_by.get("manager_templates") or ()]
+    parts += [f"workflow {name!r}" for name in used_by.get("workflows") or ()]
     return ", ".join(parts)
 
 

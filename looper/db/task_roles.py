@@ -3,7 +3,7 @@
 A role's current version is its newest; a new one is added with its
 ``role_defined`` journal entry (and, for one the user wrote, the supplement
 that tells the Planner), in one transaction. A version records who wrote it
-(``via``: ``planner`` or ``user``) and the project role template it was
+(``via``: ``planner``, ``user``, ``template`` or ``workflow``) and the project role template it was
 copied from (``template_key``). Planning the task anew deletes them
 (``tasks.reset_task_for_restart``).
 """
@@ -19,12 +19,13 @@ import asyncpg
 from . import journal as db_journal
 from .connection import get_pool
 from .projects import profile_allowed_sql
+from .workflows import role_profile_allowed_sql
 
 # A role's version with its profile's name, and whether its task's project allows that profile now.
 _VERSION = (
     "SELECT r.task_id, r.role_key, r.version, r.kind, r.profile_id, r.role_prompt, r.harness, r.reason, "
     "r.via, r.template_key, r.items, r.created_at, a.name AS profile_name, "
-    f"(r.via = 'workflow' OR {profile_allowed_sql('k.project_id', 'r.profile_id')}) AS profile_allowed "
+    f"({role_profile_allowed_sql('k', 'r')} OR {profile_allowed_sql('k.project_id', 'r.profile_id')}) AS profile_allowed "
     "FROM task_roles r JOIN tasks k ON k.id = r.task_id LEFT JOIN agent_profiles a ON a.id = r.profile_id "
 )
 
