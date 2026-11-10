@@ -2890,6 +2890,35 @@ def _the_calls_of(dialog_id: str, row: dict[str, Any]) -> None:
         assert row["turns"][index]["calls"] == calls
 
 
+@pytest.mark.parametrize("changed", [None, "providers", "runtimes", "models", "profiles"])
+def test_refused_model_configuration_allows_login_probe_progress_only(monkeypatch, changed):
+    from evals.prompt_regression import dialogs
+
+    before = {"providers": [{"name": "cursor-login", "env": [],
+                             "login": {"state": "checking", "detail": "checking the Cursor login"}}],
+              "runtimes": [{"capabilities": ["run"]}],
+              "models": [{"input_usd_per_mtok": 1}], "profiles": [{"model_id": "model-a"}]}
+    after = json.loads(json.dumps(before))
+    after["providers"][0]["login"] = {"state": "unknown", "detail": "cursor-agent is not available in tests"}
+    if changed:
+        # Even a change absent from the action trail must fail the snapshot check.
+        field, value = {"providers": ("env", [{"key": "MODE", "value": "changed"}]),
+                        "runtimes": ("capabilities", []), "models": ("input_usd_per_mtok", 2),
+                        "profiles": ("model_id", "model-b")}[changed]
+        after[changed][0][field] = value
+
+    class Api:
+        def post(self, path, body):
+            assert path == "/api/v1/registry/view"
+            return {"result": after}
+
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [
+        {"risk": "read", "status": "ok", "tool": "looper_agent_profiles", "arguments": {"action": "list"}}])
+    look = dialogs.Look(Api(), None, "Not compatible", "disposable", 0, frozenset(), True,
+                        registry_before=before)
+    assert dialogs._model_refused(look) == ("a refused configuration changed the registry" if changed else None)
+
+
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 @pytest.mark.parametrize("dialog", MANAGER_DIALOGS, ids=lambda dialog: dialog.id)
 def test_the_managers_dialog_passes_in_fake_mode(tmp_path: Path, dialog: Any) -> None:

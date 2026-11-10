@@ -934,7 +934,14 @@ def _model_refused(look: Look) -> str | None:
     problem = _model_writes(look, ())
     if problem:
         return problem
-    if look.registry_before is None or look.api.post("/api/v1/registry/view", {})["result"] != look.registry_before:
+
+    def configuration(registry: dict[str, Any]) -> dict[str, Any]:
+        # Login probes can finish between reads without changing any configuration.
+        return {**registry, "providers": [{key: value for key, value in provider.items() if key != "login"}
+                                         for provider in registry["providers"]]}
+
+    current = look.api.post("/api/v1/registry/view", {})["result"]
+    if look.registry_before is None or configuration(current) != configuration(look.registry_before):
         return "a refused configuration changed the registry"
     return _answered_by_reading(look)
 

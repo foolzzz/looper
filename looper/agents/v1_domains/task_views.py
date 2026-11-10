@@ -61,7 +61,6 @@ _GATE = _object({
                               "options": _array(_STR)},
                              ["id", "question", "status"])),
     "ready_when": _CONDITION, "ready_state": _READY,
-    "accept_when": _CONDITION, "accept_state": _READY, "reviews": _NULL_STR,
     "ended_by_user": _BOOL, "depends_on": _array(_STR),
     **dict.fromkeys(("turns", "not_delivered", "reminders"), _INT),
     "channel_posts": _nullable(_object({"channel": _STR, "target": _STR, "sent": _INT,
