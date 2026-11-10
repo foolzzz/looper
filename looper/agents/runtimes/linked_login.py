@@ -128,6 +128,8 @@ def inspect_homes(parents: Iterable[Path], links: Mapping[str, Path], *, is_logi
                         continue
                     if state is not LinkState.MISSING:
                         remove_entry(home / name)
+                    if (home / name).parent != home:
+                        (home / name).parent.mkdir(mode=0o700, exist_ok=True)
                     link(home, name, target, login=f"the {login}")
                 except FileNotFoundError:
                     continue  # an idle home removed meanwhile

@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     CHECK (jsonb_typeof(env) = 'array'),
     vendor_type TEXT NOT NULL
     CONSTRAINT llm_providers_vendor_type_check CHECK (vendor_type IN ('glm-bigmodel', 'glm-zai', 'deepseek', 'kimi-moonshot-cn', 'kimi-moonshot',
-                          'cpa', 'opencode', 'sub2api', 'claude-subscription', 'codex-login', 'grok-login', 'cursor-login', 'custom'))
+                          'cpa', 'opencode', 'sub2api', 'claude-subscription', 'codex-login', 'grok-login', 'cursor-login', 'coco-login', 'custom'))
     CONSTRAINT llm_providers_check1 CHECK (
         (vendor_type = 'claude-subscription' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
             AND oauth_runtime_type = 'claude-code')
@@ -56,7 +56,9 @@ CREATE TABLE IF NOT EXISTS llm_providers (
             AND oauth_runtime_type = 'grok')
         OR (vendor_type = 'cursor-login' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
             AND oauth_runtime_type = 'cursor-agent')
-        OR (vendor_type NOT IN ('claude-subscription', 'codex-login', 'grok-login', 'cursor-login')
+        OR (vendor_type = 'coco-login' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
+            AND oauth_runtime_type = 'coco')
+        OR (vendor_type NOT IN ('claude-subscription', 'codex-login', 'grok-login', 'cursor-login', 'coco-login')
             AND auth = 'api_key' AND oauth_runtime_type IS NULL)
     ),
     -- false: its Agent Profiles do not run (refused at launch); nothing else changes.

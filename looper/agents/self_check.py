@@ -45,7 +45,7 @@ from ..ops_config import OpsConfig
 from . import db_backup
 
 if TYPE_CHECKING:
-    from .runtimes import cursor_login, grok_login
+    from .runtimes import coco_login, cursor_login, grok_login
     from .runtimes.codex_login import LoginStatus
 
 logger = logging.getLogger(__name__)
@@ -216,6 +216,41 @@ async def codex_login_check() -> Check:
         logger.warning("cannot read whether an Agent Profile uses the Codex login", exc_info=True)
         profiles, problem = None, None
     return await asyncio.to_thread(check_codex_login, profiles, problem, codex_login.cached_probe)
+
+
+def check_coco_login(profiles: int | None, problem: dict[str, str] | None,
+                     probe: Callable[[], coco_login.LoginStatus]) -> Check:
+    """Check coco's machine login only when an Agent Profile uses it."""
+    from .runtimes.coco_login import PROBLEM_FIX, LoginState
+
+    if profiles is None:
+        return Check("coco_login", "coco login", SKIP,
+                     "not checked: the Agent Profiles are stored in PostgreSQL, which is unreachable")
+    if not profiles:
+        return Check("coco_login", "coco login", OK, "not used")
+    if problem is not None:
+        return Check("coco_login", "coco login", FAIL,
+                     f"unavailable since {problem.get('at') or '?'}: {problem.get('detail')}", PROBLEM_FIX)
+    status = probe()
+    if status.state is LoginState.LOGGED_IN:
+        return Check("coco_login", "coco login", OK, status.detail)
+    if status.state is LoginState.UNKNOWN:
+        return Check("coco_login", "coco login", WARN, status.detail, PROBLEM_FIX)
+    return Check("coco_login", "coco login", FAIL,
+                 "coco is not logged in on this machine: run `coco login`", PROBLEM_FIX)
+
+
+async def coco_login_check() -> Check:
+    from ..db import profile_registry
+    from .runtimes import coco_login
+
+    try:
+        profiles = await profile_registry.login_profile_count("coco")
+        problem = await coco_login.recorded_problem()
+    except Exception:
+        logger.warning("cannot read whether an Agent Profile uses the coco login", exc_info=True)
+        profiles, problem = None, None
+    return await asyncio.to_thread(check_coco_login, profiles, problem, coco_login.cached_probe)
 
 
 def check_grok_login(profiles: int | None, problem: dict[str, str] | None,
@@ -448,7 +483,8 @@ async def gateway_check(*, runtime_root: Path | None = None, database_url: str =
 
 # The checks of the runtimes' own logins, by id: what reads each now (``/api/v1/system/status`` reads them on every poll).
 LOGIN_CHECKS = {"codex_login": codex_login_check, "grok_login": grok_login_check,
-                "cursor_login": cursor_login_check, "ttadk": ttadk_check, "llmrec": llmrec_check, "gateway": gateway_check}
+                "cursor_login": cursor_login_check, "coco_login": coco_login_check, "ttadk": ttadk_check,
+                "llmrec": llmrec_check, "gateway": gateway_check}
 
 
 def check_lark_cli(lark_enabled: bool | None) -> Check:
@@ -595,6 +631,8 @@ class _DatabaseFacts:
     grok_login_profiles: int | None = None
     grok_login_problem: dict[str, str] | None = None
     cursor_login_profiles: int | None = None
+    coco_login_profiles: int | None = None
+    coco_login_problem: dict[str, str] | None = None
     ttadk_runtimes: list[dict[str, Any]] | None = None
     worktree_projects: list[dict[str, Any]] | None = None
 
@@ -604,7 +642,7 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
 
     from ..db.connection import RegistrySchemaVersionError, schema_change_pending
     from ..db.profile_registry import login_profile_count
-    from .runtimes import grok_login
+    from .runtimes import coco_login, grok_login
     from ..db.projects import worktree_projects
     from .runtimes.codex_login import recorded_problem
 
@@ -628,9 +666,12 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
             grok_profiles: int | None = await login_profile_count("grok", pool=conn)
             grok_problem = await grok_login.recorded_problem(pool=conn)
             cursor_profiles: int | None = await login_profile_count("cursor-agent", pool=conn)
+            coco_profiles: int | None = await login_profile_count("coco", pool=conn)
+            coco_problem = await coco_login.recorded_problem(pool=conn)
         except asyncpg.UndefinedTableError:  # a genuinely empty database
             profiles, problem, grok_profiles, grok_problem = 0, None, 0, None
             cursor_profiles = 0
+            coco_profiles, coco_problem = 0, None
         try:
             ttadk_runtimes = await _ttadk_runtime_rows(pool=conn)
         except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):
@@ -649,6 +690,8 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
             grok_login_profiles=grok_profiles,
             grok_login_problem=grok_problem,
             cursor_login_profiles=cursor_profiles,
+            coco_login_profiles=coco_profiles,
+            coco_login_problem=coco_problem,
             ttadk_runtimes=ttadk_runtimes,
             worktree_projects=worktrees,
         )
@@ -663,7 +706,7 @@ async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Chec
     facts = await _database_facts(ops.database_url) if database.status == OK else _DatabaseFacts()
     if facts.schema_error:
         database = Check("database", "PostgreSQL", FAIL, facts.schema_error)
-    from .runtimes import cursor_login, grok_login
+    from .runtimes import coco_login, cursor_login, grok_login
     from .runtimes.codex_login import probe_login
 
     claude = await asyncio.to_thread(check_claude, claude_bin)
@@ -671,9 +714,11 @@ async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Chec
                                     probe_login)
     grok = check_grok_login(facts.grok_login_profiles, facts.grok_login_problem, grok_login.probe_login)
     cursor = await asyncio.to_thread(check_cursor_login, facts.cursor_login_profiles, cursor_login.probe_login)
+    coco = await asyncio.to_thread(check_coco_login, facts.coco_login_profiles, facts.coco_login_problem,
+                                   coco_login.probe_login)
     pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending, ops)
     git = await asyncio.to_thread(check_git)
-    return [database, *claude, codex, grok, cursor, await check_ttadk(facts.ttadk_runtimes),
+    return [database, *claude, codex, grok, cursor, coco, await check_ttadk(facts.ttadk_runtimes),
             await llmrec_check(runtime_root=ops.runtime_root, database_url=ops.database_url),
             await gateway_check(runtime_root=ops.runtime_root, database_url=ops.database_url),
             check_lark_cli(facts.lark_enabled),

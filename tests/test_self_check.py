@@ -238,3 +238,23 @@ def test_database_facts_classify_before_reading_required_columns(monkeypatch, pa
             assert await pool.fetch("SELECT tablename FROM pg_tables WHERE schemaname = $1", schema) == before
 
     asyncio.run(test())
+
+
+@pytest.mark.parametrize(('profiles', 'problem', 'state', 'expected', 'detail'), [
+    (0, None, None, self_check.OK, 'not used'),
+    (1, {'at': 'now', 'detail': 'replaced link'}, None, self_check.FAIL, 'replaced link'),
+    (1, None, 'not_logged_in', self_check.FAIL, 'coco is not logged in'),
+    (1, None, 'unknown', self_check.WARN, 'probe failed'),
+    (1, None, 'logged_in', self_check.OK, 'logged in'),
+])
+def test_coco_login_check_outcomes(profiles, problem, state, expected, detail):
+    from looper.agents.runtimes.coco_login import PROBLEM_FIX, LoginState, LoginStatus
+
+    def probe():
+        assert state is not None, 'unused or forked logins must not invoke the CLI'
+        return LoginStatus(LoginState(state), 'probe failed' if state == 'unknown' else 'logged in')
+
+    result = self_check.check_coco_login(profiles, problem, probe)
+    assert result.id == 'coco_login' and result.status == expected and detail in result.detail
+    if expected in (self_check.FAIL, self_check.WARN):
+        assert result.fix == PROBLEM_FIX

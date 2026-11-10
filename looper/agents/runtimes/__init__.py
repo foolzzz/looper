@@ -154,6 +154,7 @@ class VendorType(str, Enum):
     CODEX_LOGIN = "codex-login"
     GROK_LOGIN = "grok-login"
     CURSOR_LOGIN = "cursor-login"
+    COCO_LOGIN = "coco-login"
     CUSTOM = "custom"
 
     @property
@@ -175,6 +176,8 @@ _LOGIN_VENDORS = {
     VendorType.GROK_LOGIN: ("grok", ApiProtocol.OPENAI_RESPONSES),
     # As for Grok login, this protocol is used only for pairing, not for requests.
     VendorType.CURSOR_LOGIN: ("cursor-agent", ApiProtocol.OPENAI_RESPONSES),
+    # This protocol is used only for pairing, not for requests.
+    VendorType.COCO_LOGIN: ("coco", ApiProtocol.OPENAI_RESPONSES),
 }
 
 
