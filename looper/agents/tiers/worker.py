@@ -636,6 +636,23 @@ def _verification_checkout(work_dir: str, backup: Path) -> str:
         clone(root, tree, seed)
         if not _restore_verification(str(tree), seed, detached=True):
             raise OSError("cannot seed verification checkout")
+
+        def relocate_links(source: Path, target: Path, saved: Path) -> None:
+            manifest = json.loads((saved / "baseline.json").read_text())
+            for name in manifest["paths"]:
+                path = target / name
+                if path.is_symlink():
+                    try:
+                        destination = (source / name).resolve().relative_to(root.resolve())
+                    except (ValueError, RuntimeError) as exc:
+                        raise OSError("verification symlink leaves the source repository") from exc
+                    # Resolve chains in the source, then point only into the private tree.
+                    path.unlink()
+                    path.symlink_to(os.path.relpath(tree / destination, path.parent))
+            for name in manifest.get("submodules", []):
+                relocate_links(source / name, target / name, saved / "submodules" / name)
+
+        relocate_links(root, tree, seed)
         ready.touch()
     return str(tree / Path(work_dir).resolve().relative_to(root.resolve()))
 
@@ -1510,6 +1527,10 @@ class WorkerPool:
                 original = json.loads(marker.read_text())
                 restored = await asyncio.to_thread(_restore_verification, original["work_dir"],
                                                    Path(original["backup"]))
+                if not restored and await asyncio.to_thread(self._discard_verification_checkout,
+                        original["work_dir"], Path(original["backup"])):
+                    marker.unlink(missing_ok=True)
+                    continue  # Seed a fresh private checkout below, including after a restart.
                 if restored:
                     marker.unlink()
                 error = "Verification changed the code: previous baseline restoration " + (
@@ -2275,6 +2296,22 @@ class WorkerPool:
     def _verification_pending(self, task_id: str, source: str) -> Path:
         return self._verification_backup(task_id, None, source) / "unrestored"
 
+    def _discard_verification_checkout(self, work_dir: str, backup: Path) -> bool:
+        directory = (self._runtime_root / ".local" / "verification").absolute()
+        path = Path(work_dir).absolute()
+        checkout = next((parent for parent in (path, *path.parents)
+                         if parent.name == "checkout" and parent.parent.parent == directory), None)
+        if checkout is None or backup.absolute().parent != directory:
+            return False  # Never discard a source repository or an unrelated backup.
+        try:
+            for stale in (checkout.parent, backup):
+                if stale.exists():
+                    shutil.rmtree(stale)
+            return True
+        except OSError:
+            logger.exception("cannot discard verification checkout")
+            return False
+
     async def _restore_verification_baseline(self, task_id: str, step_id: str | None,
                                            work_dir: str, source: str) -> bool:
         backup = self._verification_backup(task_id, step_id, work_dir)
@@ -2283,7 +2320,8 @@ class WorkerPool:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(json.dumps({"work_dir": work_dir, "backup": str(backup)}))
         restored = await asyncio.to_thread(_restore_verification, work_dir, backup)
-        if restored:
+        if restored or await asyncio.to_thread(self._discard_verification_checkout, work_dir, backup):
+            # A failed private rollback still fails this run; the next verification reseeds from the source.
             marker.unlink(missing_ok=True)
         return restored
 

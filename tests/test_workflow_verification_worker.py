@@ -253,6 +253,142 @@ def _item(root, run="v1", *, verification=True):
             "verification": verification, "context": {"work_dir": str(root)}})
 
 
+@pytest.mark.parametrize("link", ["absolute", "relative", "chain", "directory", "submodule"])
+def test_verification_symlink_writes_stay_in_checkout(tmp_path, verification_runtime, link):
+    runs, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+    if link == "submodule":
+        upstream = _repo(tmp_path / "upstream")
+        _git(root, "-c", "protocol.file.allow=always", "submodule", "add", str(upstream), "module")
+        _git(root, "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-am", "module")
+        source = root / "module"
+    else:
+        source = root
+    if link == "directory":
+        (source / "folder").mkdir()
+        (source / "folder" / "file").write_text("committed")
+        (source / "alias").symlink_to(source / "folder", target_is_directory=True)
+        write_path = "alias/file"
+    else:
+        (source / "alias").symlink_to("tracked" if link == "relative" else source / "tracked")
+        if link == "chain":
+            (source / "indirect").symlink_to("alias")
+        write_path = "indirect" if link == "chain" else "alias"
+    before = worker._verification_snapshot(str(root))
+    runs.extend([_completed_run(), _completed_run(hold=False)])
+
+    async def scenario():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+        task = asyncio.create_task(pool._execute(_item(root)))
+        await runs[0].started.wait()
+        checkout = Path(launches[0]["cwd"])
+        execution = checkout / "module" if link == "submodule" else checkout
+        (execution / write_path).write_text("silently rewritten by verifier")
+        runs[0].release.set()
+        result = await task
+        assert result["status"] == "failed"
+        assert result["failure"] == "verification_changed_code"
+        assert result["verification"]["restored"] is True
+        assert worker._verification_snapshot(str(root)) == before
+        assert (execution / write_path).read_text() == "committed"
+        assert (execution / write_path).resolve().is_relative_to(checkout)
+        retry = await pool._execute(_item(root))
+        assert retry["status"] == "completed"
+        assert len(launches) == 2
+        assert worker._verification_snapshot(str(root)) == before
+
+    asyncio.run(asyncio.wait_for(scenario(), 15))
+
+
+@pytest.mark.parametrize("link", ["absolute", "relative", "chain", "dangling"])
+def test_verification_rejects_external_symlinks(tmp_path, verification_runtime, link):
+    _, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+    outside = tmp_path / "outside"
+    if link != "dangling":
+        outside.write_text("must not change")
+    (root / "alias").symlink_to("../outside" if link == "relative" else outside)
+    if link == "chain":
+        (root / "indirect").symlink_to("alias")
+    before = worker._verification_snapshot(str(root))
+    pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+    result = asyncio.run(asyncio.wait_for(pool._execute(_item(root)), 10))
+    assert result["status"] == "failed"
+    assert result["failure"] == "verification_unavailable"
+    assert not launches
+    assert worker._verification_snapshot(str(root)) == before
+    assert outside.exists() == (link != "dangling")
+    if outside.exists():
+        assert outside.read_text() == "must not change"
+
+
+@pytest.mark.parametrize("replacement", ["file", "directory", "git_deleted"])
+@pytest.mark.parametrize("retry_step", ["v1", "v2"])
+@pytest.mark.parametrize("legacy_marker", [False, True])
+def test_unrestorable_private_checkout_is_reseeded(tmp_path, monkeypatch, verification_runtime,
+                                                  replacement, retry_step, legacy_marker):
+    runs, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+    (root / "folder").mkdir()
+    (root / "folder" / "nested").write_text("original")
+    _git(root, "add", "folder")
+    _git(root, "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-m", "folder")
+    (root / ".gitignore").write_text("/folder\ntracked/ignored/\n")
+    (root / "tracked").write_text("staged work")
+    _git(root, "add", "tracked")
+    (root / "tracked").write_text("unstaged work")
+    (root / "untracked").write_text("developer work")
+    before = worker._verification_snapshot(str(root))
+    runs.extend([_completed_run(), _completed_run(hold=False)])
+    runtime = tmp_path / "runtime"
+
+    async def scenario():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=runtime)
+        if legacy_marker:
+            # Simulate an older pool that leaves the damaged checkout and marker on disk.
+            monkeypatch.setattr(pool, "_discard_verification_checkout", lambda *_: False)
+        task = asyncio.create_task(pool._execute(_item(root)))
+        await runs[0].started.wait()
+        checkout = Path(launches[0]["cwd"])
+        baseline = pool._verification_backup("t1", "v1", str(checkout))
+        if replacement == "file":
+            shutil.rmtree(checkout / "folder")
+            (checkout / "folder").write_text("replaced directory")
+        elif replacement == "directory":
+            (checkout / "tracked").unlink()
+            (checkout / "tracked" / "ignored").mkdir(parents=True)
+            # git ls-files does not enumerate ignored files; rmdir cannot remove this tree.
+            (checkout / "tracked" / "ignored" / "file").write_text("verifier output")
+        else:
+            shutil.rmtree(checkout / ".git")
+        runs[0].release.set()
+        result = await task
+        assert result["failure"] == "verification_changed_code"
+        assert result["verification"]["restored"] is False
+        marker = pool._verification_pending("t1", str(root)) / f"{baseline.name}.json"
+        assert marker.exists() is legacy_marker
+        assert checkout.exists() is legacy_marker
+        assert baseline.exists() is legacy_marker
+        assert worker._verification_snapshot(str(root)) == before
+        (root / "tracked").write_text("reviewed repair")
+        before_retry = worker._verification_snapshot(str(root))
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=runtime)
+        retry = await pool._execute(_item(root, retry_step))
+        assert retry["status"] == "completed", retry
+        assert len(launches) == 2
+        assert not marker.exists()
+        if retry_step != "v1":
+            assert not baseline.exists()
+        fresh = Path(launches[-1]["cwd"])
+        assert worker._verification_snapshot(str(fresh)) == before_retry
+        assert worker._verification_snapshot(str(root)) == before_retry
+        assert (fresh / "tracked").read_text() == "reviewed repair"
+        assert (fresh / "folder" / "nested").read_text() == "original"
+        assert (fresh / "untracked").read_text() == "developer work"
+
+    asyncio.run(asyncio.wait_for(scenario(), 20))
+
+
 def test_verification_restore_never_falls_back_to_enclosing_repository(tmp_path):
     root = _repo(tmp_path / "repo")
     (root / ".gitignore").write_text("private/\n")
@@ -392,7 +528,7 @@ def test_interrupted_verifier_restores_before_next_step(tmp_path, monkeypatch, v
             (checkout / "new").write_text("verifier new file")
             real_restore = worker._restore_verification
             if not restore:
-                monkeypatch.setattr(worker, "_restore_verification", lambda *args: False)
+                monkeypatch.setattr(worker, "_restore_verification", lambda *args, **kwargs: False)
             if stop == "kill":
                 assert await pool.kill("v1")
             elif stop == "cancel":
@@ -405,9 +541,13 @@ def test_interrupted_verifier_restores_before_next_step(tmp_path, monkeypatch, v
                 await task
             assert runs[0].end_calls >= 1
             fallback.assert_not_awaited()  # A profile fallback must not hide a verifier's edits.
-            assert (checkout / "tracked").read_text() == (
-                "committed" if restore else "verifier edit before interruption")
-            assert (checkout / "new").exists() == (not restore)
+            if restore:
+                assert (checkout / "tracked").read_text() == "committed"
+                assert not (checkout / "new").exists()
+            else:
+                assert not checkout.exists()
+                assert not list(pool._verification_pending("t1", str(root)).glob("*.json"))
+            assert (root / "tracked").read_text() == "committed"
             if stop in {"timeout", "exception"}:
                 assert results[0].payload["failure"] == "verification_changed_code"
                 assert results[0].payload["verification"]["restored"] is restore
@@ -419,16 +559,10 @@ def test_interrupted_verifier_restores_before_next_step(tmp_path, monkeypatch, v
                 await pool.start(bus)
                 await pool._dispatch(_item(root, "new-verification-step"))
                 await pool._tasks["new-verification-step"]
-                assert results[-1].payload["failure"] == "verification_changed_code"
-                assert results[-1].payload["verification"]["restored"] is False
+                assert results[-1].payload["failure"] == "verification_unavailable"
                 assert len(launches) == 1
+                assert not list(pool._verification_pending("t1", str(root)).glob("*.json"))
                 monkeypatch.setattr(worker, "_restore_verification", real_restore)
-                await pool._dispatch(_item(root, "new-verification-step"))
-                await pool._tasks["new-verification-step"]
-                assert results[-1].payload["verification"]["restored"] is True
-                assert (checkout / "tracked").read_text() == "committed"
-                assert not (checkout / "new").exists()
-                assert len(launches) == 1
             await pool._dispatch(_item(root, "new-verification-step"))
             await pool._tasks["new-verification-step"]
             assert results[-1].payload["status"] == "completed"
