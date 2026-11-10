@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.112] - 2026-11-10
+
+### Changed
+
+- **Pipeline view draws AND/OR dependency conditions.** ([#1177](https://github.com/foolzzz/looper/pull/1177))
+  - A plain AND stays a straight edge. Any other `ready_when` gets a join node labelled all, any or k of n, edges labelled completed or passed, and a state shown as text and icon. Plans without conditions render as before.
+  - Step, gate and wait cards show the condition as text. Dashboard only: no API, schema or server change.
+
 ## [2.14.111] - 2026-11-09
 
 ### Added
