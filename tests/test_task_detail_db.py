@@ -100,8 +100,9 @@ def test_console_and_manager_share_task_detail_without_changing_the_compact_view
         assert compact == await _task_view("task-a")
         assert set(compact) == {
             "task_id", "name", "status", "group", "project", "created_at", "phase", "work_dir", "requirement",
-            "steps", "waits", "supplements", "latest_progress", "result", "cost_usd", "concurrency",
+            "steps", "waits", "supplements", "latest_progress", "result", "cost_usd", "concurrency", "workflow",
         }
+        assert compact["workflow"] is None
         assert compact["steps"][0] == {
             "step": "s1", "status": "verified", "kind": "work", "instruction": clip("i" * 220, 200),
         }

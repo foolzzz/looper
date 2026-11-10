@@ -931,10 +931,16 @@ def _dual_protocol_selected(look: Look) -> str | None:
 
 
 def _model_refused(look: Look) -> str | None:
+    def configuration(view: dict[str, Any]) -> dict[str, Any]:
+        # Login probes finish asynchronously; their live status is not saved configuration.
+        return {**view, "providers": [{key: value for key, value in provider.items() if key != "login"}
+                                      for provider in view["providers"]]}
+
     problem = _model_writes(look, ())
     if problem:
         return problem
-    if look.registry_before is None or look.api.post("/api/v1/registry/view", {})["result"] != look.registry_before:
+    if look.registry_before is None or (
+            configuration(look.api.post("/api/v1/registry/view", {})["result"]) != configuration(look.registry_before)):
         return "a refused configuration changed the registry"
     return _answered_by_reading(look)
 

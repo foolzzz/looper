@@ -364,7 +364,7 @@ NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
     "persist_user_message", "route_to_gate", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "llmrec_attach", "build_user_message",
-    "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
+    "tool_listing", "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
 )
 

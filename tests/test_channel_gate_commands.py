@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -114,7 +115,8 @@ class _World:
                 manager.ops = SimpleNamespace(platform=SimpleNamespace(task_router=SimpleNamespace(
                     has_planner=lambda task_id: True)), tools_problem=tools_problem,
                     asks_in=lambda message_id: False, begin_turn=lambda turn, binding=None: "", publish_binding=lambda binding: None, end_turn=lambda turn: None,
-                    library_with_server=library_with_server, current_scope=current_scope)
+                    library_with_server=library_with_server, current_scope=current_scope,
+                    current_listing=AsyncMock(return_value=[]))
                 base = {"chat_id": "42" if source == TELEGRAM else "ou_me", "chat_type": "p2p",
                         "sender_id": "ou_me", "message_id": "om_9"}
                 await manager._handle(MessageEnvelope.create(

@@ -169,6 +169,16 @@ _AGENT_DB_READS = (
 _WAIT_LOOP_COLUMNS = ("baseline", "checks", "last_checked_at", "last_result", "last_output", "last_error", "notice")
 
 
+@pytest.fixture
+def no_workflows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty workflow store for isolated Manager tools; database tests keep the real store."""
+    from unittest.mock import AsyncMock
+
+    from looper.db import workflows
+
+    monkeypatch.setattr(workflows, "list_workflows", AsyncMock(return_value=[]))
+
+
 class _PlanStore:
     """The Planner's and Manager's saved state, kept in memory the way ``plans`` and ``agent_sessions`` keep it.
 
