@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs thirty-nine small tasks through a disposable `looper serve` (a new
+It runs a fixed set of small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -19,6 +19,7 @@ directories), one at a time over the HTTP API:
 | `interface_first` | a service and its client that must agree on a request format the requirement leaves open: the plan must have a step both parts depend on (the interface), the two parts independent and running at the same time, and a step that depends on both (the integration); the client must work |
 | `reviewed_step` | a step an independent Reviewer must pass |
 | `retry_after_failure` | a step that fails once (a flaky `build.sh`) and is retried |
+| `workflow_verify_loop` | a failed read-only verification is replaced with a reviewed development repair and a separate dependent verification, without retrying the verification to edit files |
 | `chat_correction` | a correction sent to the task's Planner mid-task |
 | `supplement_replan` | a message to the task's Planner, while its first step runs, that changes what the second step writes: the Planner must change the plan (`add_steps` or `replan`), not leave it to the Worker |
 | `requirement_edit` | the same change as an edit of the requirement |

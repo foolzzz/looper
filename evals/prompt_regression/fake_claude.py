@@ -162,6 +162,9 @@ def _decide(script: dict[str, Any], message: str, retried: dict[str, int]) -> di
                 "final": FINAL, **({"gates": gates} if gates else {})}
     if "review" in allowed and "needs a passing review" in message:
         return {"decision": "review", "reason": "the step asks for an independent review"}
+    replacement = (script.get("decision_replans") or {}).get(step.group(1) if step else "")
+    if replacement and "replan" in allowed:
+        return {"decision": "replan", "reason": "verification needs a reviewed repair", "steps": replacement}
     if "retry" in allowed:
         label = step.group(1) if step else ""
         notes = (script.get("retry_feedback") or {}).get(label) or []
@@ -469,6 +472,14 @@ def main(argv: list[str]) -> int:
     if flag:
         with open(args[args.index(flag) + 1], encoding="utf-8") as handle:
             system_prompt = handle.read()
+    if not script:
+        # Private verification clones have no source remote. Bind the scripted run to its task context instead.
+        for candidate in scenarios.values():
+            requirement = candidate.get("_eval_requirement")
+            if requirement and ("The whole task, for context (your step is only part of it):\n"
+                                + requirement + "\n") in system_prompt:
+                script = candidate
+                break
     review = re.search(r"^The step under review:", system_prompt, re.MULTILINE)
     real = os.environ.get(REAL_CLAUDE_ENV)
     if real and (review or not script.get("real_reviewer")):

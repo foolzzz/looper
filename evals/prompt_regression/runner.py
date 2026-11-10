@@ -542,7 +542,14 @@ def run_task(
         project["vault"] = "on"
     before = snapshot(work_dir)
     started = time.monotonic()
-    created = api.post("/api/v1/tasks/create", {"requirement": task.requirement, "project": project})["result"]
+    workflow = {}
+    if task.workflow is not None:
+        suffix = uuid.uuid4().hex[:12]
+        definition = {**task.workflow, "key": "eval-" + suffix,
+                      "name": str(task.workflow["name"])[:47] + " " + suffix}
+        api.post("/api/v1/workflows/put", definition)
+        workflow = {"workflow": definition["key"]}
+    created = api.post("/api/v1/tasks/create", {"requirement": task.requirement, "project": project, **workflow})["result"]
     task_id = created["task_id"]
     try:
         if task.planner_may_choose:
@@ -1011,7 +1018,7 @@ def run(
     try:
         scenarios = root / "scenarios.json"
         work_dirs = {(task.id, rep): root / "work" / task.id / str(rep) for rep in range(1, reps + 1) for task in tasks}
-        fake = {task.id: task.fake for task in tasks}
+        fake = {task.id: {**task.fake, "_eval_requirement": task.requirement} for task in tasks}
         scenarios.write_text(json.dumps({os.path.realpath(path): fake[task_id]
                                          for (task_id, _), path in work_dirs.items()}), encoding="utf-8")
         install_claude(root / "bin", mode=mode, scenarios=scenarios,

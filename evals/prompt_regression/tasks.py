@@ -48,6 +48,7 @@ class EvalTask:
     # role templates (each its key and fields, as the dashboard writes one) for it to copy.
     roles_on: bool = False
     schedule_template: dict[str, Any] | None = None
+    workflow: dict[str, Any] | None = None
     role_templates: tuple[dict[str, Any], ...] = ()
     # The task's project lets its Planner open user gates (user_gates on); what the user answers in them, in turn
     # (END_DISCUSSION ends the discussion), and how long a gate waits before each answer.
@@ -132,6 +133,35 @@ def _review_files(work_dir: Path) -> str | None:
     for name in ("findings.md", "rereview.md"):
         if not _read(work_dir, name):
             return f"{name} is missing or empty"
+    return None
+
+
+def _verification_loop_flow(detail: Mapping[str, Any], records: list[Mapping[str, Any]],
+                            events: Mapping[int, list[Mapping[str, Any]]]) -> str | None:
+    steps = detail.get("steps") or []
+    verification = [step for step in steps if step.get("role_key") == "verify_staging"]
+    if any(step.get("retries", 0) for step in verification):
+        return "a verification step was retried instead of adding a repair"
+    failed = [step for step in verification if (step.get("result") or {}).get("status") == "failed"]
+    passed = [step for step in verification if (step.get("result") or {}).get("status") == "completed"]
+    if not failed or not passed:
+        return "requires a failed verification and a separate successful verification"
+    reviewed = {record["metadata"]["step_id"] for record in records
+                if role(record) == "reviewer" and (record.get("metadata") or {}).get("outcome") == "passed"}
+    failed_ids = {step["id"] for step in failed}
+    failed_ends = [timestamp(record.get("finished_at")) for record in records if role(record) == "worker"
+                   and (record.get("metadata") or {}).get("step_id") in failed_ids]
+    if not failed_ends or any(end is None for end in failed_ends):
+        return "missing failed verification run evidence"
+    repair_runs = {record["metadata"]["step_id"] for record in records if role(record) == "worker"
+                   and timestamp(record.get("created_at")) is not None
+                   and timestamp(record.get("created_at")) >= min(failed_ends)}
+    repairs = {step["id"] for step in steps if step.get("kind", "work") == "work"
+               and step.get("role_key") != "verify_staging" and step.get("status") == "verified"
+               and step["id"] in reviewed & repair_runs}
+    initial = {dependency for step in failed for dependency in step.get("depends_on") or []}
+    if not any((set(step.get("depends_on") or []) & (repairs - initial)) for step in passed):
+        return "the successful verification does not depend on a new reviewed repair"
     return None
 
 
@@ -526,6 +556,42 @@ TASKS: tuple[EvalTask, ...] = (
                  "summary": "sh build.sh exited 1: BUILD FAILED: transient error"},
                 {"status": "completed", "files": {"build.log": "BUILD OK\n"}},
             ]},
+        },
+    ),
+    EvalTask(
+        id="workflow_verify_loop",
+        requirement="First create prepared.txt containing ready, without changing answer.txt. Then have "
+                    "verify_staging check whether answer.txt contains exactly correct, without modifying any file. "
+                    "The seeded answer is deliberately wrong: report that first verification as failed. Only "
+                    "after that failure, add a dev repair step to correct answer.txt, have it independently "
+                    "reviewed, and add a separate verify_staging step depending on that repair. Do not retry "
+                    "a verification step to change code. Complete after the new verification passes.",
+        files={"answer.txt": "wrong\n"},
+        init_git=True,
+        workflow={"key": "verification-loop", "name": "Verification loop", "work_role": "dev",
+                  "review_all": True, "verification": {"role": "verify_staging", "max_rounds": 2},
+                  "roles": [
+                      {"key": "dev", "kind": "work", "role_prompt": "Implement the assigned file changes."},
+                      {"key": "verify_staging", "kind": "work",
+                       "role_prompt": "Inspect answer.txt read-only. Report completed only if it contains exactly "
+                                      "correct; otherwise report failed. Never create, edit, delete or commit files."}]},
+        check=_all(_equals("prepared.txt", "ready"), _equals("answer.txt", "correct")),
+        flow_check=_verification_loop_flow,
+        expect={"min_steps": 4, "min_reviews": 2, "max_retries": 0},
+        fake={
+            "plan": [
+                _step("s1", "Create prepared.txt containing ready; do not change answer.txt.", ["prepared.txt holds ready"]),
+                {**_step("s2", "Check answer.txt read-only.", ["answer.txt holds correct"], depends_on=["s1"]),
+                 "role": "verify_staging"}],
+            "decision_replans": {"s2": [
+                _step("s3", "Correct answer.txt.", ["answer.txt holds correct"], depends_on=["s1"], review=True),
+                {**_step("s4", "Check answer.txt read-only.", ["answer.txt holds correct"], depends_on=["s3"]),
+                 "role": "verify_staging"}]},
+            "attempts": {
+                "s1": [{"status": "completed", "files": {"prepared.txt": "ready\n"}}],
+                "s2": [{"status": "failed", "files": {}, "summary": "answer.txt is wrong; dev must repair it."}],
+                "s3": [{"status": "completed", "files": {"answer.txt": "correct\n"}}],
+                "s4": [{"status": "completed", "files": {}, "summary": "answer.txt is correct."}]},
         },
     ),
     EvalTask(
