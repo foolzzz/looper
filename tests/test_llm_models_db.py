@@ -6,6 +6,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -571,7 +572,7 @@ def test_http_profile_rejects_incompatible_model_before_inserting(
 
     @asynccontextmanager
     async def transaction():
-        yield object()
+        yield SimpleNamespace(execute=AsyncMock())
 
     monkeypatch.setattr(connection, "transaction", transaction)
     async def test(client, pool):
