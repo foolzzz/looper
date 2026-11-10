@@ -429,8 +429,8 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
     source_package = source / "src" / "checkout_probe" / "__init__.py"
     source_package.write_text("VALUE = 0\n")
     # Same-size edits within one timestamp tick must not reuse the developer's bytecode.
-    original_stat = (package / "__init__.py").stat()
-    os.utime(source_package, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    package_stat = (package / "__init__.py").stat()
+    os.utime(source_package, ns=(package_stat.st_atime_ns, package_stat.st_mtime_ns))
     checkout = Path(worker._verification_checkout(str(source), tmp_path / "backup", runtime_paths))
     for runtime_path in runtime_paths:
         assert not list((checkout / runtime_path).rglob("*.pyc"))
