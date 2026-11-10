@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.118] - 2026-11-10
+
+### Added
+
+- **Workflow phase broadcasts and the delivery process record.** ([#1193](https://github.com/foolzzz/looper/pull/1193))
+  - With `phase_notices`, a workflow task sends one code-generated line per phase to its channels: plan created, review round, verification start and result, escalation and blocked condition. The plan-created line replaces the count-based decomposition message.
+  - A completed or failed workflow task stores a process record (roles, requested and reported models, fallbacks, review rounds, verification, escalations) in `tasks.process_record`, shown on the task page and in the task tools; its result text points to the task page.
+  - Database: `tasks.process_record`, migrated on start. Tasks without a workflow are unchanged.
+
 ## [2.14.117] - 2026-11-10
 
 ### Added
