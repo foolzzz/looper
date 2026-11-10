@@ -809,16 +809,28 @@ def task_directory_tool(tool: Tool) -> Tool:
             "do not ask the user for a directory."}}})
 
 
-def task_create_tool(template_keys: Sequence[str]) -> Tool:
+def task_workflow_tool(tool: Tool, workflow_keys: Sequence[str]) -> Tool:
+    """Offer current workflow keys without changing the Manager's other tool choices."""
+    properties = dict(tool.schema["properties"])
+    if workflow_keys:
+        properties["workflow"] = {**_CREATE_TOOL.schema["properties"]["workflow"],
+                                  "enum": [*workflow_keys, "none"]}
+    else:
+        properties.pop("workflow", None)
+    return dataclasses.replace(tool, schema={**tool.schema, "properties": properties})
+
+
+def task_create_tool(template_keys: Sequence[str], workflow_keys: Sequence[str] = ()) -> Tool:
     """``looper_task_create`` as a Manager sees it: with templates it also takes ``template`` and ``inputs``, and
     ``project`` is judged by code; without, the tool itself."""
+    tool = task_workflow_tool(_CREATE_TOOL, workflow_keys)
     if not template_keys:
-        return _CREATE_TOOL
+        return tool
     schema = {
-        **_CREATE_TOOL.schema,
+        **tool.schema,
         "required": ["requirement", "title"],
         "properties": {
-            **_CREATE_TOOL.schema["properties"],
+            **tool.schema["properties"],
             "template": {"type": "string", "enum": list(template_keys),
                          "description": "The key of the task template that fits (see Task templates in the "
                                         "message); its project, roles and Planner instructions apply."},

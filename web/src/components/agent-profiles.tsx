@@ -652,6 +652,7 @@ const NEW_PROFILE = "__new_profile__";
  */
 export function AgentProfileSelect({
   id,
+  disabled = false,
   value,
   onChange,
   emptyLabel,
@@ -661,6 +662,7 @@ export function AgentProfileSelect({
   className = SELECT,
 }: {
   id: string;
+  disabled?: boolean;
   value: string;
   onChange: (profileId: string) => void;
   emptyLabel: string;
@@ -679,6 +681,7 @@ export function AgentProfileSelect({
     <div className="space-y-2">
       <select
         id={id}
+        disabled={disabled}
         value={value}
         onChange={(e) => (e.target.value === NEW_PROFILE ? setCreating(true) : onChange(e.target.value))}
         aria-describedby={describedBy}

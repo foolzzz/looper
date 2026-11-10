@@ -121,7 +121,8 @@ def project_tool(tool: Tool) -> Tool:
 def _project_listed(view: Mapping[str, Any]) -> dict[str, Any]:
     return {"project": view["name"], "work_dir": view["work_dir"] or None, "tasks": view["task_count"],
             "active_tasks": view["active_count"], "schedules": view["schedule_count"],
-            "background": clip(view["background"], 200) or None}
+            "background": clip(view["background"], 200) or None,
+            "dependency_conditions": view["dependency_conditions"]}
 
 
 async def _projects(call: Call) -> dict[str, Any]:
@@ -146,7 +147,8 @@ async def _projects(call: Call) -> dict[str, Any]:
     if action == "get":
         return {"project": projects.project_view(project)}
     if action == "update":
-        fields = _given(arguments, ("name", "work_dir", "background"))
+        fields = _given(arguments, ("name", "work_dir", "background", "dependency_conditions"),
+                        clears=("dependency_conditions",))
         return {"project": await answered(projects.update_project(
             project["id"], fields, manager_id=call.manager_id if call.scoped else None,
             expected_directory_version=call.confirmation.get("directory_version")))}
@@ -652,12 +654,13 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_projects",
         description="Projects: list; get one; create (name, and the work_dir and background the user gave; never "
-                    "pick a directory); update its name, work_dir or background (a work_dir change asks the user first "
+                    "pick a directory); update its name, work_dir, background or dependency_conditions (a work_dir change asks the user first "
                     "when enabled or queued command schedules run in its directory); delete one with its tasks and schedules, "
                     "stopping its running tasks first (the user confirms first); move its directory and files to an "
                     "absolute to path (omit to to use the configured projects root). Move asks the user first, "
                     "rewrites command and agent schedule directories, preserves the old path with a symbolic link "
-                    "unless link_old is false, and refuses running tasks, commands or gates without interrupting them.",
+                    "unless link_old is false, and refuses running tasks, commands or gates without interrupting them. "
+                    "dependency_conditions enables composed step readiness conditions (AND, OR and k-of).",
         schema={
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
@@ -666,6 +669,8 @@ TOOLS: tuple[Tool, ...] = (
                 "name": {"type": "string", "minLength": 1, "description": "create: its name; update: its new name."},
                 "work_dir": {"type": "string", "description": "Its default absolute directory; '' for none."},
                 "background": {"type": "string", "description": "What its agents should know."},
+                "dependency_conditions": {"type": ["string", "null"], "enum": ["on", "off", None],
+                                          "description": "update: enable, disable or inherit step readiness conditions."},
                 "to": {"type": "string", "description": "move: absolute destination; omit for projects root / safe project name."},
                 "link_old": {"type": "boolean", "description": "move: retain the old path as a symbolic link (default true)."},
             },

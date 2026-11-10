@@ -32,6 +32,13 @@ class _Clock:
         return self.now
 
 
+@pytest.fixture(autouse=True)
+def no_workflows(monkeypatch):
+    from looper.db import workflows
+
+    monkeypatch.setattr(workflows, "list_workflows", AsyncMock(return_value=[]))
+
+
 @pytest.fixture
 def recorded(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
@@ -154,12 +161,13 @@ def test_project_directory_default_is_described_only_when_configured(monkeypatch
                 "Its default absolute directory; '' for none.")
             assert project["description"] == (
                 "Projects: list; get one; create (name, and the work_dir and background the user gave; never "
-                "pick a directory); update its name, work_dir or background (a work_dir change asks the user first "
+                "pick a directory); update its name, work_dir, background or dependency_conditions (a work_dir change asks the user first "
                 "when enabled or queued command schedules run in its directory); delete one with its tasks and schedules, "
                 "stopping its running tasks first (the user confirms first); move its directory and files to an "
                 "absolute to path (omit to to use the configured projects root). Move asks the user first, "
                 "rewrites command and agent schedule directories, preserves the old path with a symbolic link "
-                "unless link_old is false, and refuses running tasks, commands or gates without interrupting them.")
+                "unless link_old is false, and refuses running tasks, commands or gates without interrupting them. "
+                "dependency_conditions enables composed step readiness conditions (AND, OR and k-of).")
 
 
 @pytest.mark.parametrize("root", ["", "/srv/projects"])

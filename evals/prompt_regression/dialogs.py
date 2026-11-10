@@ -1838,7 +1838,39 @@ _DEEPSEEK_MODEL = {"action": "create", "provider": "eval-deepseek", "name": "dee
                    "protocol": "anthropic-messages"}
 _DUAL_REFERENCE = {"provider": DUAL_ACCOUNT, "name": DUAL_MODEL, "protocol": "anthropic-messages"}
 
+
+def _seed_workflow(api: Api, project_id: str) -> None:
+    api.post("/api/v1/workflows/put", {"key": "reviewed", "name": "Reviewed",
+                                      "description": "Independent review."})
+
+
+def _created_with_workflow(look: Look, *, expected: str | None) -> str | None:
+    problem = _created_ready(look)
+    if problem:
+        return problem
+    calls = _writes(look, status="ok", tool="looper_task_create")
+    if len(calls) != 1 or calls[0]["arguments"].get("workflow") != expected:
+        return f"task creation did not select workflow {expected!r}"
+    task = look.detail(look.new_tasks()[0]["task_id"])
+    if (task.get("workflow") or {}).get("key") != expected:
+        return "the task's workflow snapshot differs from the selection"
+    if expected and "Reviewed" not in look.reply:
+        return "the reply does not tell the user which workflow was used"
+    return None
+
+
 DIALOGS: tuple[Dialog, ...] = (
+    Dialog("workflow_named", (
+        Say("在 eval-calc 项目里用 Reviewed 做一个计算器，先建任务不要启动。", _restated_and_asked),
+        Say("确认", lambda look: _created_with_workflow(look, expected="reviewed"),
+            (("looper_task_create", {"project": PROJECT, "title": "计算器", "requirement": "Build a calculator.",
+                                      "workflow": "reviewed"}),)),
+    ), seed=_seed_workflow, tags=("manager", "workflows")),
+    Dialog("workflow_unspecified", (
+        Say("在 eval-calc 项目里做一个计算器，先建任务不要启动。", _restated_and_asked),
+        Say("确认", lambda look: _created_with_workflow(look, expected=None),
+            (("looper_task_create", {"project": PROJECT, "title": "计算器", "requirement": "Build a calculator."}),)),
+    ), seed=_seed_workflow, tags=("manager", "workflows")),
     Dialog("project_scope_manager", (
         Say("现在有哪些任务？简单列一下。", _project_scope_listed, (("looper_tasks", {"action": "list"}),)),
         Say("给任务 <task> 补充一句：done.txt 的内容改成大写的 DONE。", _supplement_delivered,

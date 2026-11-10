@@ -138,6 +138,7 @@ _AGENT_DB_READS = (
     ("managers", "list_managers", [_DEFAULT_MANAGER]),
     ("managers", "revision_of", (0, True)),
     ("managers", "list_templates", []),
+    ("workflows", "list_workflows", []),
     # A task is created only while its Manager is enabled; the default one always is.
     ("managers", "lock_for_task", True),
     ("projects", "list_projects", []),

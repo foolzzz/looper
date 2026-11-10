@@ -3893,12 +3893,27 @@ ships an example, `docs/examples/manager-github-pr-review.json`.
 
 ### Workflow presets
 
-Operators define reusable presets through `workflows.list/get/put/delete` in
-v1 or `loopercli workflows`. A put replaces the complete definition. A task
-selects a preset with `tasks.create.workflow` or `loopercli create --workflow`:
+Operators define reusable presets in Settings → Workflows through a JSON
+editor, or through `workflows.list/get/put/delete` in v1 and `loopercli workflows`.
+Validation errors are shown unchanged; deletion asks for confirmation. A put
+replaces the complete definition. The dashboard's task form, the Manager
+(including Telegram and Lark), `tasks.create.workflow` and `loopercli create --workflow` select a preset:
 an explicit key (or `none`) wins over `projects.default_workflow`. Templates
 and scheduled tasks ignore that default; an explicit workflow together with a
 template is invalid.
+
+Project Execution settings select `default_workflow`. The task form preselects
+it, summarizes the preset and displays its fixed Profiles read-only; task
+details show the immutable workflow. The Manager lists workflow keys and names
+only when presets exist, offers those keys and `none` in its creation tool,
+and names the selected workflow in the creation confirmation. It uses a preset
+only when requested or supplied by the project default. `looper_projects`
+can update `dependency_conditions`; get and list return its stored value.
+
+Configuration transfer carries workflows, project defaults and dependency
+conditions. Workflow Profile references use names in the file and resolve to
+local IDs on import. The same workflow key is replaced, invalid definitions
+are skipped with a reason, and missing Profile bindings are cleared with notes.
 
 Creation atomically stores `tasks.workflow`, copies its roles as version 1
 with `via=workflow`, merges fixed Profile choices into task overrides (a
@@ -3915,7 +3930,7 @@ work step without a role uses `work_role` when set. Only the Planner receives
 the workflow instructions, in its Task section alongside the rules already
 enforced. Tasks without a workflow retain their prompt and execution paths.
 Review panels and verification rules are validated and stored here; their
-execution, workflow settings UI and configuration transfer are separate work.
+execution is separate work.
 
 ### A task's Planner's tools
 

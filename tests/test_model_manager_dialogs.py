@@ -861,7 +861,7 @@ def test_repricing_keeps_historical_spend_and_other_protocol_price(monkeypatch, 
                                        "project_dir_command_schedule", "project_dir_plain", "project_move_dir",
                                        "model_custom", "model_dual_protocol", "model_login_runtime",
                                        "model_missing_endpoint", "model_price_history", "template_review_task",
-                                       "template_missing_input"])
+                                       "template_missing_input", "workflow_named", "workflow_unspecified"])
 def test_targeted_model_dialogs_run_through_fake_manager_and_database(tmp_path, dialog_id):
     cases = dialogs.select([dialog_id])
     result, path = dialogs.run(mode="fake", dialogs=cases, admin_url=os.environ["LOOPER_TEST_DATABASE_URL"],

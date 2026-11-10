@@ -1360,9 +1360,11 @@ class ManagerAgent:
             launch.library.sha256, launch.binding_sha256,
             launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None,
         )
-        if self._has_templates or self.agent_id != DEFAULT_MANAGER_ID:
+        tools = await token.step("tool_listing", self.ops.current_listing()) if self.ops is not None else []
+        has_workflows = any("workflow" in t["inputSchema"].get("properties", {}) for t in tools)
+        if self._has_templates or has_workflows or self.agent_id != DEFAULT_MANAGER_ID:
             # The MCP tool list is read when the process starts: a changed one restarts it.
-            listing = json.dumps(self.ops.listing(), sort_keys=True) if self.ops is not None else ""
+            listing = json.dumps(tools, sort_keys=True) if self.ops is not None else ""
             signature += (hashlib.sha256(listing.encode("utf-8")).hexdigest(),)
         switch = session_switch.profile_switch(self._session_id, self._session_runtime, self._session_profile,
                                                launch, session_provider=self._session_provider,
@@ -2564,6 +2566,7 @@ class ManagerAgent:
                                   envelope: MessageEnvelope | None = None) -> str:
         parts = await self._projects_section()
         parts += await self._templates_section()
+        parts += await self._workflows_section()
         parts += await self._ready_tasks_section()
         parts += await self._open_gates_section(envelope)
 
@@ -2592,6 +2595,8 @@ class ManagerAgent:
         for project in projects:
             directory = f"default directory {prompt_name(project['work_dir'])}" if project["work_dir"] else "no default directory"
             line = f"  - {project['name']} ({directory})"
+            if project.get("default_workflow"):
+                line += f"; default workflow {project['default_workflow']}"
             description = " ".join(project["description"].split())
             if description:
                 line += f": {description if len(description) <= 80 else description[:79] + '…'}"
@@ -2601,6 +2606,16 @@ class ManagerAgent:
                          "Settings → Managers)" if listed.project_ids is not None else "  (none yet)")
         lines.append("")
         return lines
+
+    async def _workflows_section(self) -> list[str]:
+        from ...db import workflows
+
+        rows = await workflows.list_workflows()
+        if not rows:
+            return []
+        return ["Workflows (workflow is its key; use only when the user names one or the project has a default; "
+                "tell the user which workflow is used):",
+                *(f"  - {row['key']}: {row['name']} — {clip(row['description'], 120)}" for row in rows), ""]
 
     async def _read_templates(self) -> list[dict[str, Any]]:
         """The Manager's task templates; ``_has_templates`` follows the last read that worked."""

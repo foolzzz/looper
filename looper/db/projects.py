@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Mapping, Sequence
+from types import EllipsisType
 from typing import Any
 
 import asyncpg
@@ -118,14 +119,16 @@ async def create_project(
     description: str = "",
     work_dir: str = "",
     background: str = "",
+    default_workflow: str | None = None,
     execution: Mapping[str, Any] | None = None,
     project_id: str | None = None,
     pool: asyncpg.Pool | asyncpg.Connection | None = None,
 ) -> dict[str, Any]:
     pool = pool or get_pool()
     settings = _execution(execution)
-    columns = ["id", "name", "description", "work_dir", "background", *settings]
-    values = [project_id or f"proj-{uuid.uuid4().hex[:12]}", name, description, work_dir, background, *settings.values()]
+    columns = ["id", "name", "description", "work_dir", "background", "default_workflow", *settings]
+    values = [project_id or f"proj-{uuid.uuid4().hex[:12]}", name, description, work_dir, background,
+              default_workflow, *settings.values()]
     row = await pool.fetchrow(
         f"INSERT INTO projects ({', '.join(columns)}) "
         f"VALUES ({', '.join(f'${i}' for i in range(1, len(values) + 1))}) RETURNING *",
@@ -141,13 +144,17 @@ async def update_project(
     description: str | None = None,
     work_dir: str | None = None,
     background: str | None = None,
+    default_workflow: str | None | EllipsisType = ...,
     execution: Mapping[str, Any] | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> bool:
     """Set the fields given (not ``None``) and every execution column in ``execution`` (``None`` there
-    goes back to inheriting); False when there is no such project."""
+    goes back to inheriting); False when there is no such project. An omitted default_workflow keeps
+    its value; None clears it."""
     pool = pool or get_pool()
     settings = _execution(execution)
+    if default_workflow is not ...:
+        settings["default_workflow"] = default_workflow
     assignments = "".join(f"{column} = ${i}, " for i, column in enumerate(settings, start=6))
     result = await pool.execute(
         f"""

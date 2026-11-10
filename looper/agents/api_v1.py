@@ -234,6 +234,7 @@ RESULTS: dict[str, dict[str, Any]] = {
     "tasks.list": _object({"tasks": _array(_object(_LISTED)), "more": _BOOL}),
     "tasks.get": _object({
         **_LISTED, "phase": _NULL_STR, "work_dir": _NULL_STR, "requirement": _NULL_STR, "steps": _array(),
+        "workflow": {"type": ["object", "null"]},
         "waits": _array(), "roles": _array(), "supplements": _array(), "latest_progress": _NULL_STR,
         "result": _NULL_STR, "cost_usd": {"type": ["number", "null"]}, "concurrency": _OBJ, "gates": _array(),
     }, [*_LISTED, "phase", "work_dir", "requirement", "steps", "waits", "supplements", "latest_progress", "result",
