@@ -125,7 +125,7 @@ class Action(str, Enum):
 
 
 SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "settings.layers", "settings.roles", "settings.scheduler", "channels",
-            "catalog", "installs",
+            "catalog", "installs", "workflows",
             "projects", "project.layers", "project.items", "project.knowledge", "project.role_templates",
             "project.schedules", "project.installs", "managers", "manager.templates", "manager.installs")
 # A schedule's settings the file carries as they are; its notify target, Agent Profiles and task limits are
@@ -350,6 +350,17 @@ def role_template_entry(row: Mapping[str, Any], items: Mapping[str, Mapping[str,
     return entry
 
 
+def workflow_entry(row: Mapping[str, Any], profiles: Mapping[str, str]) -> dict[str, Any]:
+    from .workflows import Workflow
+
+    entry = Workflow.from_row(row).snapshot()
+    entry["profiles"] = {role: profiles[identity] for role, identity in entry["profiles"].items() if identity in profiles}
+    for role in entry["roles"]:
+        if role["profile_id"]:
+            role["profile_id"] = profiles.get(role["profile_id"])
+    return entry
+
+
 def manager_template_entry(row: Mapping[str, Any], profiles: Mapping[str, str],
                            projects: Mapping[str, str]) -> dict[str, Any]:
     """A portable task template, with natural references and an explicit local-directory reminder."""
@@ -475,6 +486,7 @@ async def export_chunks(
     from .. import __version__
     from ..db import config_transfer as db
     from ..db.projects import EXECUTION_COLUMNS
+    from ..db import workflows as db_workflows
 
     summary = summary if summary is not None else ExportSummary()
     layers = await db.read_layers(conn)
@@ -500,6 +512,11 @@ async def export_chunks(
         "channels": channels,
         "installs": [install_entry(r) for r in installs if r["scope"] == "global"],
     }
+    workflows = await db_workflows.list_workflows(pool=conn)
+    if workflows:
+        profile_names = {row["id"]: row["name"] for row in await db.read_profiles(conn)}
+        head["workflows"] = [workflow_entry(row, profile_names) for row in workflows]
+        summary.counts["workflows"] = len(workflows)
     from ..db import gateway as db_gateway
 
     aliases = await db_gateway.list_aliases(pool=conn)
@@ -556,6 +573,7 @@ async def export_chunks(
                     owned.append(item_entry(row, await db.read_item_files(conn, row["id"]), include_secrets))
             entry = {
                 "name": project["name"], "description": project["description"], "background": project["background"],
+                "default_workflow": project["default_workflow"],
                 "execution": {column: project[column] for column in EXECUTION_COLUMNS},
                 "layers": [layer_entry(r) for r in layers if r["project_id"] == project["id"]],
                 "knowledge": [document_entry(r) for r in documents[project["id"]]],
@@ -657,12 +675,12 @@ def validate_format(data: Any, *, label: str = "configuration") -> None:
 def validate_document(data: Any, *, label: str = "configuration") -> None:
     validate_format(data, label=label)
     unknown = set(data) - {"format", "looper_version", "exported_at", "secrets", "runtimes", "providers",
-                           "models", "profiles", "gateway", "settings", "channels", "catalog", "installs", "projects", "managers"}
+                           "models", "profiles", "gateway", "settings", "channels", "catalog", "installs", "projects", "managers", "workflows"}
     if unknown:
         raise ConfigFileError(f"unknown configuration field {sorted(unknown)[0]!r}")
     for section, kind in (("settings", dict), ("channels", list), ("installs", list), ("catalog", list),
                           ("projects", list), ("runtimes", list), ("providers", list), ("profiles", list),
-                          ("models", list), ("managers", list)):
+                          ("models", list), ("managers", list), ("workflows", list)):
         if section in data and not isinstance(data[section], kind):
             raise ConfigFileError(f"{section} must be a JSON {'object' if kind is dict else 'list'}")
     for section in ("layers", "roles"):
@@ -988,6 +1006,7 @@ class _Target:
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     models: dict[tuple[str, str, str], dict[str, Any]] = field(default_factory=dict)
+    workflows: dict[str, dict[str, Any]] = field(default_factory=dict)
     gateway_aliases: dict[str, dict[str, Any]] = field(default_factory=dict)
     schedules: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: defaultdict(list))  # by project id
     managers: dict[str, dict[str, Any]] = field(default_factory=dict)  # immutable full id, including tombstones
@@ -1021,6 +1040,9 @@ class _Target:
 
         target.gateway_aliases = {row["alias"]: row for row in await db_gateway.list_aliases(pool=conn)}
         target.profiles = {row["name"]: row for row in await db.read_profiles(conn)}
+        from ..db import workflows as db_workflows
+
+        target.workflows = {row["key"]: row for row in await db_workflows.list_workflows(pool=conn)}
         target.managers = {row["id"]: row for row in await db.read_managers(conn, include_deleted=True)}
         target.manager_templates = {(row["manager_id"], row["key"]): row for row in
                                     await db.read_manager_templates(conn)}
@@ -1057,6 +1079,7 @@ class _Importer:
         self.item_ids = {key: row["id"] for key, row in target.items.items()}
         self.item_origins = {key: row["origin"] for key, row in target.items.items()}
         self.item_sizes = {key: int(row["size_bytes"]) for key, row in target.items.items()}
+        self.workflow_values = dict(target.workflows)
         self.project_ids = {name: row["id"] for name, row in target.projects.items()}
         self.project_values = {row["id"]: dict(row) for row in target.projects.values()}
         self.install_values = dict(target.installs)
@@ -1808,6 +1831,53 @@ class _Importer:
             await db.write_install(self.conn, row["id"] if row else None, item_id=item_id, project_id=project_id,
                                    roles=values["roles"], enabled=values["enabled"])
 
+    async def workflow(self, entry: Any) -> None:
+        from ..db import workflows as db_workflows
+        from .profile_registry import RegistryError, check_roles
+        from .workflows import Workflow, WorkflowError
+
+        key = entry.get("key") if isinstance(entry, Mapping) else None
+        try:
+            raw = Workflow.from_dict(entry).snapshot()
+            self._unique("workflows", key)
+            selected = {}
+
+            def profile(name: str | None, role: str) -> str | None:
+                if name is None:
+                    return None
+                if name in self.blocked_profiles or name not in self.profiles:
+                    self.plan.notes.append(f"workflow {key}: no valid Agent Profile {name!r}; imported without it")
+                    return None
+                identity, spec = self.profiles[name]
+                check_roles(spec, (role,))
+                selected[identity] = spec
+                return identity
+
+            raw["profiles"] = {role: identity for role, name in raw["profiles"].items()
+                               if (identity := profile(name, role)) is not None}
+            for role in raw["roles"]:
+                role["profile_id"] = profile(role["profile_id"], "worker" if role["kind"] == "work" else "reviewer")
+            workflow = Workflow.from_dict(raw)
+            if workflow.distinct_reviewer_runtime:
+                fixed = {**{role.key: role.profile_id for role in workflow.roles}, **workflow.profiles}
+                work = selected.get(fixed.get("worker") or fixed.get(workflow.work_role))
+                for member in workflow.review_panel.members if workflow.review_panel else ("builtin",):
+                    review = selected.get(fixed.get("reviewer") or fixed.get(member))
+                    if work and review and work.runtime.id == review.runtime.id:
+                        raise WorkflowError(f"review member {member!r} must use a different runtime from the work role")
+            if any(row["name"].lower() == workflow.name.lower() and other != key
+                   for other, row in self.workflow_values.items()):
+                raise WorkflowError("workflow name is already in use")
+        except (_Skip, WorkflowError, RegistryError) as exc:
+            self.record("workflows", str(key), Action.SKIPPED, reason=str(exc))
+            return
+        row = self.target.workflows.get(key)
+        current = Workflow.from_row(row).snapshot() if row else None
+        action = self.outcome("workflows", key, current, _differs(raw, current, raw))
+        self.workflow_values[key] = {"name": workflow.name}
+        if self.apply and action in (Action.ADDED, Action.CHANGED):
+            await db_workflows.put(workflow, pool=self.conn)
+
     # --- projects ---
 
     async def project(self, entry: Mapping[str, Any]) -> str | None:
@@ -1829,7 +1899,12 @@ class _Importer:
             if name.lower() in self.seen_projects:
                 raise _Skip("the file gives this project twice")
             self.seen_projects.add(name.lower())
-            values = {"description": _string(entry.get("description", ""), "description", max_chars=10_000),
+            default = entry.get("default_workflow")
+            if default is not None and (not isinstance(default, str) or default not in self.workflow_values):
+                self.plan.notes.append(f"project {name}: no valid workflow {default!r}; imported without a default")
+                default = None
+            values = {"default_workflow": default,
+                      "description": _string(entry.get("description", ""), "description", max_chars=10_000),
                       "background": background, **execution}
         except _Skip as exc:
             self.record("projects", str(raw_name), Action.SKIPPED, reason=str(exc))
@@ -1847,7 +1922,8 @@ class _Importer:
         if self.apply and action is Action.ADDED:
             try:
                 created = await _create_project_row({"name": name, "description": values["description"],
-                    "background": background, "execution": execution, "work_dir": values["work_dir"]}, pool=self.conn,
+                    "background": background, "execution": execution, "work_dir": values["work_dir"],
+                    "default_workflow": default}, pool=self.conn,
                     created_directories=self.created_directories)
             except RequestError as exc:
                 raise ConfigFileError(str(exc)) from None
@@ -1857,7 +1933,7 @@ class _Importer:
             from ..db.projects import update_project
 
             await update_project(row["id"], description=values["description"], background=background,
-                                 execution=execution, pool=self.conn)
+                                 execution=execution, default_workflow=default, pool=self.conn)
         self.project_ids[name.lower()] = project_id
         self.project_values[project_id] = {**(row or {}), "id": project_id, "name": name, **values}
         from .project_execution import ProjectExecution
@@ -2482,6 +2558,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
         # cannot leave the import on a snapshot from before another writer.
         await conn.execute("LOCK TABLE llm_providers, llm_provider_endpoints, llm_models, agent_profiles "
                            "IN SHARE ROW EXCLUSIVE MODE")
+        if data.get("workflows"):
+            await conn.execute("LOCK TABLE workflows IN SHARE ROW EXCLUSIVE MODE")
         # Firing locks a schedule before its owner. Import takes those locks before locking Managers, too.
         schedule_projects, schedule_names = [], []
         for project in data.get("projects", []):
@@ -2541,6 +2619,8 @@ async def import_config(conn: Any, data: Mapping[str, Any], *, apply: bool,
     for entry in data.get("profiles", []):
         await importer.profile(entry)
     await importer.settle_profile_fallbacks()
+    for entry in data.get("workflows", []):
+        await importer.workflow(entry)
     for entry in data.get("gateway", {}).get("aliases", []):
         await importer.gateway_alias(entry)
     settings = data.get("settings", {})

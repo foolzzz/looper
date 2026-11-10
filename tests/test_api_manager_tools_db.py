@@ -67,6 +67,7 @@ def test_answers_match_the_mcp_tool_text(answer: dict[str, Any], turn_tools: Any
     assert outcome.ran
 
 
+@pytest.mark.usefixtures("no_workflows")
 def test_specs_preserve_the_current_platform_listing() -> None:
     ops = _ops()
 

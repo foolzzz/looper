@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -127,6 +128,13 @@ def test_panel_task_completes_on_serve_with_distinct_runtime_profiles(monkeypatc
         (home / '.codex').mkdir()
         (home / '.codex' / 'auth.json').write_text('{}')
         work.mkdir()
+        # Keep review snapshots independent of the enclosing checkout's Git state.
+        subprocess.run(['git', 'init', '-q', '-b', 'main'], cwd=work,
+                       check=True, capture_output=True, timeout=10)
+        subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false',
+                        '-c', 'user.name=Example', '-c', 'user.email=dev@example.org',
+                        'commit', '--allow-empty', '-qm', 'Initial'], cwd=work,
+                       check=True, capture_output=True, timeout=10)
         _install(bin_dir)
         env = {'CLAUDE_CONFIG_DIR': str(home / '.claude'), 'CODEX_HOME': str(home / '.codex'),
                'GROK_HOME': str(home / '.grok'), 'CURSOR_CONFIG_DIR': str(home / '.cursor-config'),

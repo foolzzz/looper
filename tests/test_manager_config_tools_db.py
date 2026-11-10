@@ -104,7 +104,8 @@ def test_projects_are_created_changed_and_read_back_as_the_dashboard_reads_them(
         assert (project["work_dir"], project["background"]) == ("/srv/tetris", "Blocks.")
         (listed,) = await chat.say("有哪些项目", ("looper_projects", {"action": "list"}))
         assert listed["result"]["projects"] == [{"project": "Tetris2", "work_dir": "/srv/tetris", "tasks": 0,
-                                                 "active_tasks": 0, "schedules": 0, "background": "Blocks."}]
+                                                 "active_tasks": 0, "schedules": 0, "background": "Blocks.",
+                                                 "dependency_conditions": None}]
         (got,) = await chat.say("看看 Tetris2", ("looper_projects", {"action": "get", "project": "tetris2"}))
         assert got["result"]["project"]["project_id"] == project["project_id"]
         # Writes keep their result in the trail; reads do not.

@@ -28,6 +28,7 @@ EXECUTION = {
 }
 assert set(EXECUTION) == set(FIELDS)
 PROJECT = _object({"project_id": _STR, "name": _STR, "description": _STR, "work_dir": _STR,
+    "default_workflow": _NULL_STR,
     "background": _STR, "created_at": _STR, "updated_at": _STR,
     "task_count": _INT, "active_count": _INT, "schedule_count": _INT, **EXECUTION})
 INPUT_EXECUTION = {}
@@ -41,7 +42,8 @@ for field, schema in EXECUTION.items():
     elif "enum" in schema or field == "workspace_links":
         schema = {"anyOf": [schema, {"const": ""}]}
     INPUT_EXECUTION[field] = schema
-PATCH_FIELDS = {"name": _STR, "description": _STR, "work_dir": _STR, "background": _STR, **INPUT_EXECUTION}
+PATCH_FIELDS = {"name": _STR, "description": _STR, "work_dir": _STR, "background": _STR,
+                "default_workflow": _NULL_STR, **INPUT_EXECUTION}
 PATCH = {**_object(PATCH_FIELDS, [], closed=True), "minProperties": 1}
 PROJECT_RESULT = _object({"project": PROJECT})
 DELETED = _object({"deleted": _STR})
@@ -54,7 +56,8 @@ SCHEMAS = {"Project": PROJECT, "ProjectExecution": _object(EXECUTION), "ProjectP
 RESULTS = {
     # The compact Manager list omits the root when unset to preserve its model-visible result.
     "projects.list": _object({"projects": _array(_object({"project": _STR, "work_dir": _NULL_STR,
-        "tasks": _INT, "active_tasks": _INT, "schedules": _INT, "background": _NULL_STR})),
+        "tasks": _INT, "active_tasks": _INT, "schedules": _INT, "background": _NULL_STR,
+        "dependency_conditions": _choice("off", "on")})),
         "projects_root": _STR}, ["projects"]),
     **dict.fromkeys(("projects.get", "projects.create", "projects.update"), PROJECT_RESULT),
     "projects.delete": DELETED,

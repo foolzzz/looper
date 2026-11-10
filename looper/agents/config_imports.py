@@ -78,6 +78,9 @@ async def authorize(data: dict[str, Any], policy: Literal["client", "operator"] 
     """Check the staging policy, including at confirmation; exclude a client's unchanged default from execution."""
     if policy != "client":
         return data
+    if data.get("workflows"):
+        raise OpError(ErrorCode.FORBIDDEN, "Workflow definitions require operator identity; "
+                      "upload this configuration with an operator token")
     if data.get("gateway", {}).get("aliases"):
         raise OpError(ErrorCode.FORBIDDEN, "Gateway aliases require operator identity; "
                       "upload this configuration with an operator token")

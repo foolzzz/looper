@@ -423,7 +423,8 @@ CREATE TABLE IF NOT EXISTS task_journal (
                     'session_switch', 'handoff', 'progress', 'profile_choice', 'profile_fallback', 'concurrency_change',
                     'role_defined', 'gate_opened', 'gate_updated', 'gate_cancelled', 'gate_closed',
                     'wait_opened', 'wait_extended', 'wait_closed', 'condition_blocked',
-                    'review_round', 'late_review', 'review_adjudicated')),
+                    'review_round', 'late_review', 'review_adjudicated',
+                    'verification_round', 'escalation')),
     summary     TEXT NOT NULL DEFAULT '',
     learnings   TEXT[] NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -865,6 +866,8 @@ CREATE TABLE IF NOT EXISTS task_user_gates (
     topic              TEXT NOT NULL CHECK (topic <> ''),
     agenda             JSONB NOT NULL DEFAULT '[]',
     findings           TEXT NOT NULL DEFAULT '',
+    purpose            TEXT NOT NULL DEFAULT 'discussion'
+                       CHECK (purpose IN ('discussion', 'exhaustion', 'verification_exhaustion')),
     state              TEXT NOT NULL DEFAULT 'pending'
                        CHECK (state IN ('pending', 'open', 'discussing', 'passed', 'cancelled', 'skipped')),
     summary            JSONB,

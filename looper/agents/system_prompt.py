@@ -208,7 +208,18 @@ def _workflow_lines(workflow: Mapping[str, Any] | None) -> list[str]:
     if workflow.get("budget_usd") is not None:
         lines.append(f"- Task spending cap: USD {workflow['budget_usd']}.")
     if workflow.get("escalate_on_exhaustion"):
-        lines.append("- User gates are enabled.")
+        lines.append("- User gates are enabled. When retries are exhausted and a result cannot be accepted, "
+                     "only fail or replan is allowed; a replan must add a new user gate and every other new "
+                     "step must depend on it.")
+    if verification := workflow.get("verification"):
+        lines += [f"- Verification role: {verification['role']}. Its steps must depend on at least one work step; "
+                  "they need no review unless explicitly requested with review: true.",
+                  "- Verification must not change code: reported file changes, a moved HEAD or a changed git "
+                  "status fail the step. The tested HEAD is recorded; outside git only the report is checked.",
+                  f"- After {verification['max_rounds']} failed verification attempts across the task, retry is "
+                  "disabled for failed verification; any new verification step must depend on a new user gate "
+                  "added in the same reply. To fix a failed verification, add a work step for the repair (with "
+                  "review) and a verification step depending on it."]
     if roles := workflow.get("roles"):
         lines.append("- Workflow roles are fixed: " + ", ".join(f"{r['key']} ({r['kind']})" for r in roles) + ".")
     if workflow.get("work_role"):

@@ -34,14 +34,16 @@ LATE_VIA = "gate_late"
 _WRITE = f"""
 INSERT INTO task_user_gates (step_id, task_id, topic, agenda, findings, state, summary, resolution, ended_by_user,
                              plan_change, delivered_through, turns, opened_at, closed_at, failures, failed_through,
-                             failed_at)
-VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17)
+                             failed_at, purpose)
+VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18)
 ON CONFLICT (step_id) DO UPDATE
 SET topic = EXCLUDED.topic, agenda = EXCLUDED.agenda, findings = EXCLUDED.findings,
     state = CASE WHEN EXCLUDED.state = 'open' AND task_user_gates.state = 'discussing' THEN 'discussing'
                  ELSE EXCLUDED.state END,
     summary = EXCLUDED.summary, resolution = EXCLUDED.resolution, ended_by_user = EXCLUDED.ended_by_user,
     plan_change = EXCLUDED.plan_change,
+    purpose = CASE WHEN task_user_gates.purpose <> 'discussion' THEN task_user_gates.purpose
+                   ELSE EXCLUDED.purpose END,
     delivered_through = GREATEST(task_user_gates.delivered_through, EXCLUDED.delivered_through),
     turns = GREATEST(task_user_gates.turns, EXCLUDED.turns), failures = EXCLUDED.failures,
     failed_through = EXCLUDED.failed_through, failed_at = EXCLUDED.failed_at,
@@ -138,7 +140,7 @@ async def write(conn: asyncpg.Connection, task_id: str, gates: Sequence[Mapping[
              gate["state"], _json(gate.get("summary")), gate.get("resolution") or "",
              bool(gate.get("ended_by_user")), _json(gate.get("plan_change")), int(gate.get("delivered_through") or 0),
              int(gate.get("turns") or 0), gate.get("opened_at"), gate.get("closed_at"), int(gate.get("failures") or 0),
-             int(gate.get("failed_through") or 0), gate.get("failed_at"))
+             int(gate.get("failed_through") or 0), gate.get("failed_at"), gate.get("purpose") or "discussion")
             for gate in gates
         ])
     if messages:

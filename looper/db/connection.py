@@ -102,6 +102,8 @@ _CURSOR_LOGIN = "cursor_login"
 _DEPENDENCY_CONDITIONS = "dependency_conditions"
 _WORKFLOWS = "workflows"
 _REVIEW_PANEL = "review_panel"
+_WORKFLOW_RULES = "workflow_rules"
+_GATE_PURPOSE = "gate_purpose"
 _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
 _CHAT_BINDING_SENDERS = "chat_binding_senders"
@@ -475,6 +477,25 @@ async def _review_panel_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _workflow_rules_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _WORKFLOW_RULES):
+        return False
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('task_journal') "
+        "AND conname = 'task_journal_kind_check' "
+        "AND (strpos(pg_get_constraintdef(oid), $1) = 0 OR strpos(pg_get_constraintdef(oid), $2) = 0))",
+        "'verification_round'", "'escalation'")
+
+
+async def _gate_purpose_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _GATE_PURPOSE):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('task_user_gates') AND attname = 'purpose' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
 class RegistrySchemaVersionError(RuntimeError):
     """The registry cannot be opened safely by this binary."""
 
@@ -688,6 +709,17 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                                "WHERE jsonb_typeof(definition->'review_panel') = 'object' "
                                "AND definition->'distinct_reviewer_runtime' IS DISTINCT FROM 'true'::jsonb")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _REVIEW_PANEL)
+        if await _workflow_rules_pending(conn):
+            constraint = re.search(
+                r"CONSTRAINT task_journal_kind_check (CHECK \(kind IN \(.*?\)\))", sql, re.S,
+            ).group(1)
+            await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
+            await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check " + constraint)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _WORKFLOW_RULES)
+        if await _gate_purpose_pending(conn):
+            await conn.execute("ALTER TABLE task_user_gates ADD COLUMN purpose TEXT NOT NULL DEFAULT 'discussion' "
+                               "CHECK (purpose IN ('discussion', 'exhaustion', 'verification_exhaustion'))")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _GATE_PURPOSE)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))
@@ -729,4 +761,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _chat_binding_senders_pending(conn)
             or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)
             or await _dependency_conditions_pending(conn) or await _workflows_pending(conn)
-            or await _review_panel_pending(conn)))
+            or await _review_panel_pending(conn)
+            or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)))

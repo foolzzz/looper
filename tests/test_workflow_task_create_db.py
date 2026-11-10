@@ -77,6 +77,28 @@ def test_project_default_is_used_unless_explicitly_disabled(tmp_path, monkeypatc
     run_db(test, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("selection,expected", [
+    ("alternate", "alternate"), (None, "reviewed"), ("none", None), ("missing", None),
+])
+def test_client_task_tool_applies_workflow_selection(tmp_path, monkeypatch, selection, expected):
+    async def test(pool):
+        async with v1_api(tmp_path, pool) as call:
+            project = await setup(pool, call, tmp_path)
+            assert (await call("workflows.put", {**PRESET, "key": "alternate", "name": "Alternate"}))[0] == 200
+            body = {"project": project["name"], "title": "Build", "requirement": "Build"}
+            if selection is not None:
+                body["workflow"] = selection
+            status, answer = await call("/api/v1/ops/task_create", body, client=True)
+            if selection == "missing":
+                assert status == 400 and answer["error"]["code"] == "invalid", answer
+                assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+                return
+            assert status == 200, answer
+            snapshot = (await tasks.get_task(answer["result"]["task_id"]))["workflow"]
+            assert (snapshot or {}).get("key") == expected
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_conflicting_profile_is_invalid_and_creates_nothing(tmp_path, monkeypatch):
     async def test(pool):
         async with v1_api(tmp_path, pool) as call:

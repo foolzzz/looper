@@ -577,7 +577,12 @@ def test_review_all_excludes_the_workflow_verification_role(planner_claude, agen
     rows.append({**rows[0], "role_key": "verify_staging", "kind": "work", "role_prompt": "Verify the change."})
     monkeypatch.setattr(task_roles, "get", AsyncMock(side_effect=lambda _, key, *args: next(
         row for row in rows if row["role_key"] == key)))
-    claude = planner_claude(plan({**step("s1", review=True), "role": "verify_staging"}), decide("accept"))
-    h = drive(claude, held_reviews)
+    claude = planner_claude(plan(step("work"), {**step("s1", "work", review=True), "role": "verify_staging"}),
+                            decide("review"), decide("accept"), decide("accept"))
+    h = drive(claude, lambda envelope: REVIEW_PASS if envelope.message_type == MessageType.VERIFY_REQUEST else WORK_OK)
     assert h.final().payload["status"] == "completed"
-    assert h.reviews == [] and h.planner._plan.steps[0].accept_when is None
+    work, verification = h.planner._plan.steps[:2]
+    assert len(h.reviews) == len(MEMBERS)
+    assert all(envelope.payload["step_key"] == work.label for envelope in h.reviews)
+    assert verification.accept_when is None
+    assert h.work_items[-1].payload["verification"] is True

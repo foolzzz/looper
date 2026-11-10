@@ -44,6 +44,7 @@ import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { formatUsd } from "@/lib/usage";
 import { ProjectBackgroundField, backgroundTooLong } from "@/components/project-background-field";
 import { TaskWorkspaceField, type WorkspaceChoice } from "@/components/task-workspace-field";
+import { WorkflowField, useWorkflows } from "@/components/workflows";
 import { TaskDetailRoute } from "./task-detail";
 
 // Chip order only; the backend defines the statuses each filter covers and counts them.
@@ -148,7 +149,7 @@ const TASK_ROLES: { id: TaskRole; label: string }[] = [
 type ProfileChoice = Partial<Record<TaskRole, string>>;
 
 /** The Agent Profile of each of the task's roles: from the settings (nothing chosen), or one for this task. */
-function TaskProfilesField({ value, onChange }: { value: ProfileChoice; onChange: (value: ProfileChoice) => void }) {
+function TaskProfilesField({ value, onChange, fixed = {} }: { value: ProfileChoice; fixed?: ProfileChoice; onChange: (value: ProfileChoice) => void }) {
   return (
     <fieldset className="space-y-2">
       <legend className="text-sm font-medium text-muted-foreground">{AGENT_PROFILE.plural}</legend>
@@ -158,7 +159,8 @@ function TaskProfilesField({ value, onChange }: { value: ProfileChoice; onChange
             <label htmlFor={`new-task-profile-${role.id}`} className="pt-2 text-xs text-muted-foreground">{role.label}</label>
             <AgentProfileSelect
               id={`new-task-profile-${role.id}`}
-              value={value[role.id] ?? ""}
+              value={fixed[role.id] ?? value[role.id] ?? ""}
+              disabled={!!fixed[role.id]}
               onChange={(profile) => onChange({ ...value, [role.id]: profile })}
               emptyLabel="From settings"
               roles={[role.id]}
@@ -275,6 +277,10 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const [newProjectDir, setNewProjectDir] = useState("");
   const [newProjectDesc, setNewProjectDesc] = useState("");
   const [newProjectBackground, setNewProjectBackground] = useState("");
+  const workflows = useWorkflows();
+  const [newWorkflow, setNewWorkflow] = useState<string | null>(null);
+  const workflowKey = newWorkflow ?? projects?.find((p) => p.project_id === newProject)?.default_workflow ?? "none";
+  const fixedProfiles = workflows.rows.find((w) => w.key === workflowKey)?.profiles ?? {};
   const [newProfiles, setNewProfiles] = useState<ProfileChoice>({});
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
@@ -456,6 +462,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     setNewProjectDesc("");
     setNewProjectBackground("");
     setNewProfiles({});
+    setNewWorkflow(null);
   };
 
   const openCreate = () => {
@@ -468,9 +475,10 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     setCreating(true);
     setCreateError("");
     // An empty directory is left out so the project's default applies; so is a role without a chosen Agent Profile.
-    const overrides = Object.fromEntries(Object.entries(newProfiles).filter(([, profileId]) => profileId));
+    const overrides = Object.fromEntries(Object.entries(newProfiles).filter(([role, profileId]) => profileId && !fixedProfiles[role as TaskRole]));
     const base = {
       requirement: newReq.trim(),
+      workflow: workflows.rows.length ? workflowKey : undefined,
       work_dir: newWorkDir.trim() || undefined,
       profile_overrides: Object.keys(overrides).length ? overrides : undefined,
       workspace_mode: newWorkspace.mode || undefined,
@@ -907,7 +915,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                 <select
                   id="new-task-project"
                   value={newProject}
-                  onChange={(e) => setNewProject(e.target.value)}
+                  onChange={(e) => { setNewProject(e.target.value); setNewWorkflow(null); }}
                   className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
                 >
                   <option value="" disabled>Choose a project…</option>
@@ -1005,7 +1013,9 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                 value={newWorkspace}
                 onChange={setNewWorkspace}
               />
-              <TaskProfilesField value={newProfiles} onChange={setNewProfiles} />
+              <WorkflowField rows={workflows.rows} value={workflowKey} onChange={setNewWorkflow} />
+              {workflows.error && <p role="alert" className="text-xs text-destructive">{workflows.error}</p>}
+              <TaskProfilesField value={newProfiles} onChange={setNewProfiles} fixed={fixedProfiles} />
               <p className="text-xs text-muted-foreground">
                 The task is created <strong>ready, not started</strong>: review and edit its configuration, then press Start.
               </p>

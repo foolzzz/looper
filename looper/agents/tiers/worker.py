@@ -35,8 +35,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -490,6 +492,204 @@ class RunContext:
     fallback_reason: str | None = None
     severity: bool = False
     head: str | None = None
+    verification: dict[str, Any] | None = None
+    verification_source: str | None = None
+
+
+def _verification_paths(work_dir: str) -> tuple[Path, list[str]]:
+    root = subprocess.run(["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
+                          capture_output=True, check=True, timeout=5).stdout.decode().strip()
+    paths = subprocess.run(["git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                           capture_output=True, check=True, timeout=5).stdout
+    return Path(root), sorted(set(os.fsdecode(p) for p in paths.split(b"\0") if p))
+
+
+def _verification_gitlinks(root: Path) -> dict[str, bytes]:
+    entries = subprocess.run(["git", "-C", str(root), "ls-files", "--stage", "-z"],
+                             capture_output=True, check=True, timeout=5).stdout
+    return {os.fsdecode(name): metadata.split()[1] for entry in entries.split(b"\0") if entry
+            for metadata, name in [entry.split(b"\t", 1)] if metadata.startswith(b"160000 ")}
+
+
+def _verification_snapshot(work_dir: str) -> dict[str, Any]:
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", work_dir, *args], capture_output=True, timeout=5)
+
+    try:
+        if git("rev-parse", "--is-inside-work-tree").stdout.strip() != b"true":
+            return {"git": False, "head": None, "status_sha256": None, "limitation": "report_only"}
+        head, status = git("rev-parse", "--verify", "HEAD"), git("status", "--porcelain")
+        if status.returncode:
+            return {"git": True, "head": None, "status_sha256": None, "error": "git_status_unavailable"}
+        root, paths = _verification_paths(work_dir)
+        gitlinks = _verification_gitlinks(root)
+        content = hashlib.sha256()
+        for name in paths:
+            path = root / name
+            if any((root / parent).is_symlink() for parent in Path(name).parents):
+                raise OSError("verification path crosses a symlink")
+            content.update(os.fsencode(name) + b"\0")
+            if name in gitlinks and not path.is_symlink():
+                content.update(b"gitlink\0" + gitlinks[name])
+                if (path / ".git").exists():
+                    submodule = _verification_snapshot(str(path))
+                    if submodule.get("error"):
+                        raise OSError("cannot snapshot verification submodule")
+                    content.update(json.dumps(submodule, sort_keys=True).encode())
+            elif path.is_symlink():
+                content.update(b"link\0" + hashlib.sha256(os.fsencode(os.readlink(path))).digest())
+            elif path.is_file():
+                content.update(str(path.stat().st_mode).encode() + b"\0")
+                with path.open("rb") as source:
+                    content.update(hashlib.file_digest(source, "sha256").digest())
+            elif path.exists():
+                raise OSError("unsupported verification path")
+            else:
+                content.update(b"missing")
+        index = git("diff", "--cached", "--binary", "--no-ext-diff")
+        if index.returncode:
+            raise OSError("cannot read verification index")
+        return {"git": True, "head": head.stdout.decode().strip() if head.returncode == 0 else None,
+                "status_sha256": hashlib.sha256(status.stdout).hexdigest(),
+                "content_sha256": content.hexdigest(), "index_sha256": hashlib.sha256(index.stdout).hexdigest()}
+    except (OSError, subprocess.SubprocessError):
+        return {"git": False, "head": None, "status_sha256": None, "error": "git_snapshot_unavailable"}
+
+
+def _verification_baseline(work_dir: str, backup: Path) -> dict[str, Any]:
+    """Keep the run's baseline on disk, including uncommitted work and the index."""
+    manifest = backup / "baseline.json"
+    current = _verification_snapshot(work_dir)
+    if manifest.exists():
+        before = json.loads(manifest.read_text())["snapshot"]
+        return before if current == before else {**before, "error": "verification_baseline_changed"}
+    if not current["git"] or current.get("error"):
+        return current
+    root, paths = _verification_paths(work_dir)
+    backup.mkdir(parents=True, exist_ok=True)
+    saved = []
+    submodules = []
+    gitlinks = _verification_gitlinks(root)
+    for name in paths:
+        source = root / name
+        if name in gitlinks and not source.is_symlink() and (source / ".git").exists():
+            nested = _verification_baseline(str(source), backup / "submodules" / name)
+            if nested.get("error"):
+                return {**current, "error": "git_snapshot_unavailable"}
+            submodules.append(name)
+        elif source.is_symlink() or source.is_file():
+            target = backup / "files" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target, follow_symlinks=False)
+            saved.append(name)
+    index = Path(subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-path", "index"],
+                               check=True, capture_output=True, timeout=5).stdout.decode().strip())
+    if index.exists():
+        shutil.copy2(index, backup / "index")
+    ref = subprocess.run(["git", "-C", str(root), "symbolic-ref", "-q", "HEAD"],
+                         capture_output=True, timeout=5).stdout.decode().strip()
+    if _verification_snapshot(work_dir) != current:
+        return {**current, "error": "verification_baseline_changed"}
+    manifest.write_text(json.dumps({"snapshot": current, "paths": saved, "ref": ref,
+                                    "submodules": submodules, "root": str(root.resolve())}))
+    return current
+
+
+def _restore_verification(work_dir: str, backup: Path, *, detached: bool = False) -> bool:
+    """Undo only the verifier's changes; preserve the developer's dirty files and staging."""
+    try:
+        before = json.loads((backup / "baseline.json").read_text())
+        root, paths = _verification_paths(work_dir)
+        expected = Path(work_dir).resolve() if detached else Path(before["root"])
+        if root.resolve() != expected:
+            return False  # A deleted .git must not redirect rollback into an enclosing repository.
+        saved = set(before["paths"])
+        for name in sorted(set(paths) | saved, reverse=True):
+            path = root / name
+            for parent in reversed(Path(name).parents):
+                ancestor = root / parent
+                if ancestor.is_symlink():
+                    ancestor.unlink()
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+        for name in before["paths"]:
+            target = root / name
+            if target.is_dir():
+                target.rmdir()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup / "files" / name, target, follow_symlinks=False)
+        def git(*args: str) -> bytes:
+            return subprocess.run(["git", "-C", str(root), *args], check=True,
+                                  capture_output=True, timeout=5).stdout
+        ref, head = "" if detached else before["ref"], before["snapshot"]["head"]
+        if ref:
+            git("symbolic-ref", "HEAD", ref)
+        if head is not None:
+            git("update-ref", *([ref, head] if ref else ["--no-deref", "HEAD", head]))
+        elif ref:
+            git("update-ref", "-d", ref)
+        index = Path(git("rev-parse", "--path-format=absolute", "--git-path", "index").decode().strip())
+        if (backup / "index").exists():
+            shutil.copy2(backup / "index", index)
+        else:
+            index.unlink(missing_ok=True)
+        for name in before.get("submodules", []):
+            if not _restore_verification(str(root / name), backup / "submodules" / name, detached=detached):
+                return False
+        return _verification_snapshot(work_dir) == before["snapshot"]
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        logger.exception("cannot restore verification baseline")
+        return False
+
+
+def _verification_checkout(work_dir: str, backup: Path) -> str:
+    """Seed a private Git checkout with the source's staged, unstaged and untracked files.
+
+    Objects and refs are private, with no remote pointing back to the developer's repository.
+    """
+    root, _ = _verification_paths(work_dir)
+    tree = backup / "checkout"
+    ready = backup / "checkout-ready"
+    if not ready.exists():
+        shutil.rmtree(backup, ignore_errors=True)
+        seed = backup / "seed"
+        snapshot = _verification_baseline(work_dir, seed)
+        if snapshot.get("error") or not snapshot["git"]:
+            raise OSError(snapshot.get("error") or "git_snapshot_unavailable")
+
+        def clone(source: Path, target: Path, saved: Path) -> None:
+            # Copy even uncommitted index objects, without hardlinks or inherited alternates.
+            subprocess.run(["git", "clone", "--no-hardlinks", "--dissociate", "--no-checkout", "--",
+                            str(source), str(target)],
+                           check=True, capture_output=True, timeout=30)
+            subprocess.run(["git", "-C", str(target), "remote", "remove", "origin"],
+                           check=True, capture_output=True, timeout=5)
+            manifest = json.loads((saved / "baseline.json").read_text())
+            for name in manifest.get("submodules", []):
+                clone(source / name, target / name, saved / "submodules" / name)
+
+        clone(root, tree, seed)
+        if not _restore_verification(str(tree), seed, detached=True):
+            raise OSError("cannot seed verification checkout")
+
+        def relocate_links(source: Path, target: Path, saved: Path) -> None:
+            manifest = json.loads((saved / "baseline.json").read_text())
+            for name in manifest["paths"]:
+                path = target / name
+                if path.is_symlink():
+                    try:
+                        destination = (source / name).resolve().relative_to(root.resolve())
+                    except (ValueError, RuntimeError) as exc:
+                        raise OSError("verification symlink leaves the source repository") from exc
+                    # Resolve chains in the source, then point only into the private tree.
+                    path.unlink()
+                    path.symlink_to(os.path.relpath(tree / destination, path.parent))
+            for name in manifest.get("submodules", []):
+                relocate_links(source / name, target / name, saved / "submodules" / name)
+
+        relocate_links(root, tree, seed)
+        ready.touch()
+    return str(tree / Path(work_dir).resolve().relative_to(root.resolve()))
 
 
 @dataclass(frozen=True)
@@ -809,7 +1009,9 @@ class WorkerPool:
                 seat = run_seat(manifest, is_verify=is_verify, run=run_id)
             ctx = RunContext(run_id, task_id, step_id, work_dir, "", is_verify, launch, launch.runtime, seat,
                              run_timeout, started_at, False, command,
-                             severity=manifest.get("severity") is True, head=manifest.get("head"))
+                             severity=manifest.get("severity") is True, head=manifest.get("head"),
+                             verification=manifest.get("verification"),
+                             verification_source=manifest.get("verification_source"))
             wp = WorkerProcess(worker_id=run_id, task_id=step_id, plan_id=manifest.get("plan_id") or "",
                                role=agent, parent_task_id=task_id, step=manifest.get("step_key") or "",
                                instruction=manifest.get("instruction") or "", task_role=run_role(manifest.get("task_role")),
@@ -1357,6 +1559,47 @@ class WorkerPool:
                 return {"passed": False, "findings": [problem], "summary": problem}
             return {"status": "failed", "error": problem}
 
+        verification = None
+        verification_source = None
+        if payload.get("verification") is True and not is_verify:
+            verification_source = work_dir
+            pending = self._verification_pending(parent_task_id, work_dir)
+            for marker in sorted(pending.glob("*.json")):
+                original = json.loads(marker.read_text())
+                restored = await asyncio.to_thread(_restore_verification, original["work_dir"],
+                                                   Path(original["backup"]))
+                if not restored and await asyncio.to_thread(self._discard_verification_checkout,
+                        original["work_dir"], Path(original["backup"])):
+                    marker.unlink(missing_ok=True)
+                    continue  # Seed a fresh private checkout below, including after a restart.
+                if restored:
+                    marker.unlink()
+                error = "Verification changed the code: previous baseline restoration " + (
+                    "completed; retry verification" if restored else "failed; repair required")
+                return {"status": "failed", "failure": "verification_changed_code", "error": error,
+                        "summary": error, "verification": {"restored": restored}}
+            try:
+                source = await asyncio.to_thread(_verification_snapshot, work_dir)
+                if source.get("error"):
+                    raise OSError(source["error"])
+                if source["git"]:
+                    # New attempts get current source; only this run's profile fallback reuses its checkout.
+                    work_dir = await asyncio.to_thread(_verification_checkout, work_dir,
+                        self._verification_backup(parent_task_id, worker_id, work_dir))
+                verification = await asyncio.to_thread(_verification_baseline, work_dir,
+                    self._verification_backup(parent_task_id, payload.get("task_id"), work_dir))
+            except (OSError, ValueError, subprocess.SubprocessError):
+                verification = {"git": True, "error": "git_snapshot_unavailable"}
+            if verification.get("error"):
+                backup = self._verification_backup(parent_task_id, payload.get("task_id"), work_dir)
+                changed = verification["error"] == "verification_baseline_changed" and (backup / "baseline.json").exists()
+                if changed:
+                    verification["restored"] = await self._restore_verification_baseline(
+                        parent_task_id, payload.get("task_id"), work_dir, verification_source)
+                error = ("Verification changed the code: repository baseline changed" if changed
+                         else "Verification snapshot unavailable; the agent was not started.")
+                return {"status": "failed", "failure": "verification_changed_code" if changed else "verification_unavailable",
+                        "error": error, "summary": error, "verification": verification}
         if is_verify:
             prompt = self._build_verify_prompt(payload)
         else:
@@ -1547,6 +1790,9 @@ class WorkerPool:
                                     "launcher": launch.profile.runtime.launcher.value,
                                     "max_budget_usd": launch.max_budget_usd},
                     })
+                    if verification is not None:
+                        handle.manifest["verification"] = verification
+                        handle.manifest["verification_source"] = verification_source
                     if (wp := self._active.get(worker_id)) is not None:
                         wp.keepable = True
                         wp.handle = handle  # register before activity and record writes can lose the lock
@@ -1584,19 +1830,28 @@ class WorkerPool:
 
         return RunContext(worker_id, parent_task_id, payload.get("task_id") or None, work_dir, prompt,
                           is_verify, launch, runtime, seat, run_timeout, started_at, hosted, command,
-                          handle, system_prompt, severity=payload.get("severity") is True, head=payload.get("head"))
+                          handle, system_prompt, severity=payload.get("severity") is True, head=payload.get("head"),
+                          verification=verification, verification_source=verification_source)
 
     async def _execute(self, envelope: MessageEnvelope, *, is_verify: bool = False,
                        started_at: datetime | None = None) -> dict[str, Any]:
         fallbacks: list[dict[str, str]] = []
         missed_input: list[str] = []
         settings = None
+        verification = None
+        verification_ctx = None
         while True:
             ctx = await self._prepare(envelope, is_verify=is_verify, started_at=started_at,
                                       agent_settings=settings, fallbacks=fallbacks)
             if isinstance(ctx, dict):
                 result = ctx
                 break
+            if ctx.verification is not None:
+                verification = verification if verification is not None else ctx.verification
+                ctx.verification = verification
+                verification_ctx = ctx
+                if isinstance(ctx.handle, KeptRun):
+                    ctx.handle.manifest["verification"] = verification
             timeout = None
             try:
                 result = await self._execute_once(ctx, fallbacks)
@@ -1606,6 +1861,8 @@ class WorkerPool:
                 if not fallbacks:
                     raise
                 result = _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
+                break
+            if timeout is None and result.get("failure") == "verification_changed_code":
                 break
             if ctx.fallback_reason is None:
                 if timeout is not None:
@@ -1631,6 +1888,8 @@ class WorkerPool:
             result.update(head=await asyncio.to_thread(_git_head, ctx.work_dir), runtime_id=ctx.launch.profile.runtime.id)
         elif is_verify and envelope.payload.get("severity") is True:
             result = _severity_verdict(result)
+        if verification_ctx is not None and "verification" not in result:
+            result = await self._verification_result(verification_ctx, result)
         if missed_input:
             result = {**result, "missed_input": missed_input + result.get("missed_input", [])}
         return {**result, "fallback": fallbacks} if fallbacks else result
@@ -1705,6 +1964,23 @@ class WorkerPool:
 
     async def _consume(self, ctx: RunContext, handle: RunHandle, recorder: ClaudeRunRecorder, *,
                        start: ConsumeStart) -> dict[str, Any]:
+        try:
+            result = await self._consume_once(ctx, handle, recorder, start=start)
+        except (asyncio.CancelledError, Exception) as exc:
+            if isinstance(handle, KeptRun) and handle.state is KeptRunState.DETACHED:
+                raise
+            if ctx.verification is None:
+                raise
+            result = await self._verification_result(ctx, {"status": "failed", "error": str(exc)})
+            if isinstance(exc, asyncio.CancelledError) or result.get("failure") != "verification_changed_code":
+                raise
+            return result
+        if ctx.verification is not None and "verification" not in result:
+            result = await self._verification_result(ctx, result)
+        return result
+
+    async def _consume_once(self, ctx: RunContext, handle: RunHandle, recorder: ClaudeRunRecorder, *,
+                            start: ConsumeStart) -> dict[str, Any]:
         worker_id, parent_task_id, work_dir, prompt = ctx.worker_id, ctx.parent_task_id, ctx.work_dir, ctx.prompt
         is_verify, launch, runtime, seat = ctx.is_verify, ctx.launch, ctx.runtime, ctx.seat
         run_timeout, started_at, command = ctx.run_timeout, ctx.started_at, ctx.command
@@ -2018,6 +2294,9 @@ class WorkerPool:
             outcome = {**outcome, "passed": False, "failure": "head_moved",
                        "findings": [*outcome.get("findings", []),
                                     {"severity": "blocking", "where": "HEAD", "text": "head_moved"}]}
+        if ctx.verification is not None:
+            report = extract_report(str((result_event or {}).get("result") or ""), "status")
+            outcome = await self._verification_result(ctx, outcome, report=report)
         if (elsewhere := reported_files.locations(outcome.get("found_elsewhere"))) and parent_task_id:
             places = []
             for item in elsewhere:
@@ -2033,6 +2312,78 @@ class WorkerPool:
         await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                               outcome=run_outcome(result_event, outcome, is_verify=is_verify).value)
         return outcome
+
+    async def _verification_result(self, ctx: RunContext, result: dict[str, Any], *,
+                                   report: dict[str, Any] | None = None) -> dict[str, Any]:
+        before = ctx.verification
+        assert before is not None
+        after = await asyncio.to_thread(_verification_snapshot, ctx.work_dir)
+        details = {**before, "head_after": after["head"], "status_sha256_after": after["status_sha256"],
+                   "content_sha256_after": after.get("content_sha256")}
+        reported = report if report is not None else result
+        reasons = []
+        if any(source.get("changed_files") or source.get("deleted_files") for source in (reported, result)):
+            reasons.append("reported file changes")
+        if before.get("error") or (before["git"] and (not after["git"] or after.get("error"))):
+            reasons.append("repository state unavailable")
+        if before["git"] and before["head"] != after["head"]:
+            reasons.append("HEAD changed")
+        if before["git"] and before["status_sha256"] != after["status_sha256"]:
+            reasons.append("working tree changed")
+        if before["git"] and any(before.get(key) != after.get(key) for key in ("content_sha256", "index_sha256")):
+            reasons.append("file contents or index changed")
+        if reasons:
+            if before["git"]:
+                details["restored"] = await self._restore_verification_baseline(
+                    ctx.parent_task_id, ctx.step_id, ctx.work_dir,
+                    getattr(ctx, "verification_source", None) or ctx.work_dir)
+                if not details["restored"]:
+                    reasons.append("baseline restoration failed; repair required")
+            error = "Verification changed the code: " + "; ".join(reasons)
+            result = {**result, "status": "failed", "failure": "verification_changed_code",
+                      "error": error, "summary": error}
+            if ctx.parent_task_id:
+                await self._activity(ctx.parent_task_id, ctx.worker_id, "error", error)
+        if before.get("limitation") == "report_only":
+            note = "Verification guard: report only (working directory is not a Git repository)."
+            result = {**result, "summary": f"{result.get('summary') or ''}\n{note}".strip()}
+        return {**result, "verification": details}
+
+    def _verification_backup(self, task_id: str, step_id: str | None, work_dir: str) -> Path:
+        key = hashlib.sha256(json.dumps([task_id, step_id, str(Path(work_dir).resolve())]).encode()).hexdigest()
+        return self._runtime_root / ".local" / "verification" / key
+
+    def _verification_pending(self, task_id: str, source: str) -> Path:
+        return self._verification_backup(task_id, None, source) / "unrestored"
+
+    def _discard_verification_checkout(self, work_dir: str, backup: Path) -> bool:
+        directory = (self._runtime_root / ".local" / "verification").absolute()
+        path = Path(work_dir).absolute()
+        checkout = next((parent for parent in (path, *path.parents)
+                         if parent.name == "checkout" and parent.parent.parent == directory), None)
+        if checkout is None or backup.absolute().parent != directory:
+            return False  # Never discard a source repository or an unrelated backup.
+        try:
+            for stale in (checkout.parent, backup):
+                if stale.exists():
+                    shutil.rmtree(stale)
+            return True
+        except OSError:
+            logger.exception("cannot discard verification checkout")
+            return False
+
+    async def _restore_verification_baseline(self, task_id: str, step_id: str | None,
+                                           work_dir: str, source: str) -> bool:
+        backup = self._verification_backup(task_id, step_id, work_dir)
+        marker = self._verification_pending(task_id, source) / f"{backup.name}.json"
+        # Persist before attempting restoration, so a crash cannot make a new step trust this dirty tree.
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({"work_dir": work_dir, "backup": str(backup)}))
+        restored = await asyncio.to_thread(_restore_verification, work_dir, backup)
+        if restored or await asyncio.to_thread(self._discard_verification_checkout, work_dir, backup):
+            # A failed private rollback still fails this run; the next verification reseeds from the source.
+            marker.unlink(missing_ok=True)
+        return restored
 
     @staticmethod
     def _run_limits(launch: Launch, project: dict[str, Any] | None,

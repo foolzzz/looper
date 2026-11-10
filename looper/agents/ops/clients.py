@@ -30,7 +30,7 @@ from . import API_CHANNEL, Call, ErrorCode, OpError, Risk, Tool, Turn, check_arg
 from .config import answered
 from .service import (CONFIRM_TOOL, CONFIRMATION_CHATS, CONFIRMATION_SECONDS, MANAGER_TOOLS, Platform, _created_task,
                       _error, _plain)
-from .tasks import TASKS_LISTED, TASKS_SEARCHED, _TASK_ID, _gate_listed, _group, _task_argument, _via
+from .tasks import TASKS_LISTED, TASKS_SEARCHED, _TASK_ID, _gate_listed, _group, _task_argument, _via, task_workflow_tool
 
 if TYPE_CHECKING:
     from ..api_v1 import Principal
@@ -164,7 +164,8 @@ def _client_tasks(original: Tool) -> Tool:
     return replace(original, schema=schema, run=run)
 
 
-CLIENT_TOOLS: tuple[Tool, ...] = (*(_client_tasks(t) if t.name == "looper_tasks" else t
+CLIENT_TOOLS: tuple[Tool, ...] = (*(_client_tasks(t) if t.name == "looper_tasks" else
+                                  task_workflow_tool(t, None) if t.name == "looper_task_create" else t
                                   for t in MANAGER_TOOLS if t.name not in MANAGER_ONLY), PIPELINE_TOOL,
                                   GATES_TOOL)
 

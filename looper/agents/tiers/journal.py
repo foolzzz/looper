@@ -101,6 +101,8 @@ class JournalKind(str, Enum):
     REVIEW_ROUND = "review_round"
     LATE_REVIEW = "late_review"
     REVIEW_ADJUDICATED = "review_adjudicated"
+    VERIFICATION_ROUND = "verification_round"
+    ESCALATION = "escalation"
     SUPPLEMENT = "supplement"
     SESSION_SWITCH = "session_switch"
     HANDOFF = "handoff"

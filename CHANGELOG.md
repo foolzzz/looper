@@ -18,6 +18,26 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.116] - 2026-11-10
+
+### Added
+
+- **Workflow rules: verification guard, verification round cap and escalation when exhausted.** ([#1182](https://github.com/foolzzz/looper/pull/1182))
+  - A verification step must not change code: reported changes, a moved HEAD or changed status, contents or index fail it with `verification_changed_code`, the baseline is restored, and in git the check runs in a private checkout. Only a reviewed repair, with new verification depending on it, may follow.
+  - Verification steps must depend on a work step and need no review unless requested. After the workflow's `max_rounds` failed verifications, retry is off and new verification needs a new gate.
+  - With `escalate_on_exhaustion`, exhausted attempts allow only replan or fail, and a replan must add a new user gate that the Planner cannot cancel. Gates carry a `purpose`.
+  - Database: `task_user_gates.purpose` and the journal kinds `verification_round` and `escalation`, migrated on start. Tasks without a workflow are unchanged.
+
+## [2.14.115] - 2026-11-10
+
+### Added
+
+- **Workflow presets in the dashboard, the Manager, project defaults and config transfer.** ([#1181](https://github.com/foolzzz/looper/pull/1181))
+  - Settings → Workflows lists, edits (JSON) and deletes presets, with a confirmation on delete. The task form chooses a workflow, preselects the project's default, summarizes the preset and shows its fixed Profiles read-only; task details show the workflow. Project Execution settings choose `default_workflow`, which the v1 projects API also accepts (`null` clears it; an unknown key is a 400 error).
+  - The Manager lists workflow keys and names when presets exist, offers those keys and `none` in `looper_task_create`, and names the workflow in its confirmation. `looper_projects` can update `dependency_conditions` (`on`, `off`, or null to inherit), and project get and list return it.
+  - Configuration export and import carry `workflows`, each project's `default_workflow` and dependency conditions. Profile references are names in the file; the same key is replaced, invalid definitions are skipped with a reason, and missing Profile bindings are cleared with notes. Importing workflows needs operator identity.
+  - Tasks and projects without a workflow are unchanged.
+
 ## [2.14.114] - 2026-11-10
 
 ### Fixed

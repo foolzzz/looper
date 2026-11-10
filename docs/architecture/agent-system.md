@@ -3893,12 +3893,27 @@ ships an example, `docs/examples/manager-github-pr-review.json`.
 
 ### Workflow presets
 
-Operators define reusable presets through `workflows.list/get/put/delete` in
-v1 or `loopercli workflows`. A put replaces the complete definition. A task
-selects a preset with `tasks.create.workflow` or `loopercli create --workflow`:
+Operators define reusable presets in Settings → Workflows through a JSON
+editor, or through `workflows.list/get/put/delete` in v1 and `loopercli workflows`.
+Validation errors are shown unchanged; deletion asks for confirmation. A put
+replaces the complete definition. The dashboard's task form, the Manager
+(including Telegram and Lark), `tasks.create.workflow` and `loopercli create --workflow` select a preset:
 an explicit key (or `none`) wins over `projects.default_workflow`. Templates
 and scheduled tasks ignore that default; an explicit workflow together with a
 template is invalid.
+
+Project Execution settings select `default_workflow`. The task form preselects
+it, summarizes the preset and displays its fixed Profiles read-only; task
+details show the immutable workflow. The Manager lists workflow keys and names
+only when presets exist, offers those keys and `none` in its creation tool,
+and names the selected workflow in the creation confirmation. It uses a preset
+only when requested or supplied by the project default. `looper_projects`
+can update `dependency_conditions`; get and list return its stored value.
+
+Configuration transfer carries workflows, project defaults and dependency
+conditions. Workflow Profile references use names in the file and resolve to
+local IDs on import. The same workflow key is replaced, invalid definitions
+are skipped with a reason, and missing Profile bindings are cleared with notes.
 
 Creation atomically stores `tasks.workflow`, copies its roles as version 1
 with `via=workflow`, merges fixed Profile choices into task overrides (a
@@ -3914,41 +3929,8 @@ on current project execution settings; escalation enables user gates. A
 work step without a role uses `work_role` when set. Only the Planner receives
 the workflow instructions, in its Task section alongside the rules already
 enforced. Tasks without a workflow retain their prompt and execution paths.
-A review panel expands each reviewed work step into parallel `review` steps,
-excluding the workflow's verification role. Each seat's `reviews` points to the
-work step; its start condition waits for that work to complete. The work step's
-`accept_when` remaps the panel's member condition to review step ids testing
-`passed`, evaluated by the same dependency-condition evaluator. The Planner
-cannot supply review steps, `accept_when` or `review_roles` for such tasks.
-A satisfied condition triggers a review decision immediately; an impossible one
-waits until every referenced seat has returned. Other seats keep running and
-hold task completion. A blocking finding from any member arriving after acceptance
-is merged, journaled and sent to the Planner in a follow-up review decision,
-which can retry the work. The last work decision keeps its final delivery summary
-while the remaining seats finish; late suggestions are merged and journaled too.
-
-Panel findings carry `severity`, `where` and `text`; blocking findings override a
-reported pass. The merged result keeps every finding with its severity, source
-member, location and text. Reports group all findings by location and identify
-their source seat; suggestions do not block acceptance. The Planner records
-whether it takes or declines suggestions in its decision summary, retry feedback
-or replan reason. When adjudication is enabled, a review decision may downgrade a
-current blocking finding with a nonempty reason (at most 500 characters); each
-change is journaled, and acceptance still requires a satisfied condition.
-Panels require `distinct_reviewer_runtime: true` when saved. Workers report their
-resolved runtime id and Git HEAD; each panel reviewer compares its resolved
-runtime with that worker run's runtime, refuses a match and fails if HEAD changes
-during its run. Each panel reviewer gets its own worktree of the frozen commit,
-including in shared mode. Before its panel starts, the work step snapshots
-uncommitted output so accepting it does not move a still-running reviewer's HEAD;
-its original reported commit remains as `worker_head`.
-Retries stop stale reviews and
-reset the same seats; dropping work cascades to its reviews. Unfinished reviews
-resume through normal dispatch after a restart. Review seats do not add to the
-work progress count, and their room seats use `<member>@<work-step-key>`.
-Tasks without a review panel keep the built-in Reviewer and sequential role
-review path. Verification execution, workflow settings UI and configuration
-transfer remain separate work.
+Review panels and verification rules are validated and stored here; their
+execution is separate work.
 
 ### A task's Planner's tools
 

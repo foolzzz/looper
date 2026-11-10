@@ -441,6 +441,7 @@ function TaskHeading({ task, taskId, onRenamed }: { task: TaskDetail | null; tas
   return (
     <div className="flex items-center gap-1.5">
       <h1 className="text-lg font-semibold leading-tight truncate">{name}</h1>
+      {task?.workflow && <Badge variant="outline">{task.workflow.name}</Badge>}
       {task && (
         <button
           type="button"
