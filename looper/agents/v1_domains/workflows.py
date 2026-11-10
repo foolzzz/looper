@@ -27,7 +27,8 @@ _FIELDS = {
     **dict.fromkeys(("review_all", "dependency_conditions", "distinct_reviewer_runtime", "adjudication",
                      "escalate_on_exhaustion", "phase_notices"), _BOOL),
 }
-WORKFLOW = _object({**_FIELDS, "updated_at": _STR})
+_READ_ONLY = {"updated_at": _STR}
+WORKFLOW = _object({**_FIELDS, **_READ_ONLY})
 SCHEMAS = {"Workflow": WORKFLOW}
 RESULTS = {}
 
@@ -43,7 +44,8 @@ OPERATIONS = (
     _op("get", "Read a workflow preset.", _object({"key": _KEY}, closed=True),
         _object({"workflow": WORKFLOW}, closed=True)),
     _op("put", "Create or replace a workflow preset; existing task snapshots stay unchanged.",
-        _object(_FIELDS, ["key", "name"], closed=True), _object({"workflow": WORKFLOW}, closed=True), "write"),
+        _object({**_FIELDS, **_READ_ONLY}, ["key", "name"], closed=True),
+        _object({"workflow": WORKFLOW}, closed=True), "write"),
     _op("delete", "Delete a workflow preset and clear project defaults; task snapshots stay unchanged.",
         _object({"key": _KEY}, closed=True), _object({"deleted": _STR}, closed=True), "high"),
 )
@@ -74,7 +76,7 @@ async def run(server, operation, arguments, principal, headers):
         return {"workflow": _view(await _get(arguments["key"]))}
     if action == "put":
         try:
-            workflow = workflows.Workflow.from_dict(arguments)
+            workflow = workflows.Workflow.from_dict({k: v for k, v in arguments.items() if k not in _READ_ONLY})
             await workflows.check_profiles(workflow)
             row = await db_workflows.put(workflow)
         except workflows.WorkflowError as exc:

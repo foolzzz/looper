@@ -3472,8 +3472,9 @@ class PlannerAgent:
                            exc_info=True)
             self._roles = self._roles or {}
             return
+        workflow_keys = {role["key"] for role in (self._workflow or {}).get("roles", [])}
         self._roles = {row["role_key"]: RoleKind(row["kind"]) for row in rows
-                       if self._execution.roles_on or row.get("via") == "workflow"}
+                       if self._execution.roles_on or row["role_key"] in workflow_keys}
 
     def _checked(self, view: PlanView) -> PlanView:
         """``view`` with the task's roles as last read and whether it may open gates, for checking a reply."""

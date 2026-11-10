@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
+from .agent_settings import SettingsError, budget_usd
 from .task_roles import RoleError, RoleKind, check_definition, role_key
 from .task_templates import KEY_PATTERN
 from .tiers import conditions
@@ -98,8 +98,11 @@ class Workflow:
         if retries is not None and (type(retries) is not int or not 0 <= retries <= 20):
             raise WorkflowError("max_step_retries must be a whole number from 0 to 20 or null")
         budget = data.get("budget_usd")
-        if budget is not None and (type(budget) not in (int, float) or not math.isfinite(budget) or budget <= 0):
-            raise WorkflowError("budget_usd must be a finite positive number or null")
+        if budget is not None:
+            try:
+                data["budget_usd"] = budget_usd(budget, field="budget_usd")
+            except SettingsError as exc:
+                raise WorkflowError(str(exc)) from None
         profiles = data.get("profiles", {})
         if (not isinstance(profiles, dict) or set(profiles) - {"planner", "worker", "reviewer"}
                 or any(not isinstance(value, str) or not value for value in profiles.values())):

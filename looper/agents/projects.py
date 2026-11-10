@@ -638,7 +638,8 @@ async def create_task_core(
     work_dir = task["work_dir"]
     shown = task["title"] or task["goal_id"] or task["task_id"]
     block = (await configuration_block(task["task_id"], shown, project, work_dir, new_project is not None,
-                                       workspace=workspace["check"], template=template_display)
+                                       workspace=workspace["check"], template=template_display,
+                                       workflow=task.get("workflow"))
              if show_configuration else None)
     return {
         "task_id": task["task_id"],
@@ -1515,6 +1516,7 @@ def _role_line(role: AgentType, settings: AgentSettings) -> str:
 async def configuration_block(
     task_id: str, name: str | None, project: Mapping[str, Any], work_dir: str, created: bool, *,
     workspace: Mapping[str, Any] | None = None, template: tuple[str, Sequence[tuple[str, str]]] | None = None,
+    workflow: Mapping[str, Any] | None = None,
 ) -> str:
     """The new ready task's configuration, from the settings in effect for it (resolved as the project's agent
     settings view resolves them, with the task's own choices), with how it runs in its directory and what to know
@@ -1529,6 +1531,8 @@ async def configuration_block(
         template_name, template_inputs = template
         inputs = "；".join(f"{label}：{value}" for label, value in template_inputs)
         lines.append(f"- 模板：{template_name}（{inputs}）" if inputs else f"- 模板：{template_name}")
+    if workflow:
+        lines.append(f"- 工作流：{workflow['name']}（{workflow['key']}）")
     lines.append(f"- 目录：{work_dir}")
     if workspace is not None:
         lines += _workspace_lines(task_id, workspace)
@@ -1541,7 +1545,11 @@ async def configuration_block(
     else:
         lines += [_role_line(role, resolve(role, layers, project_id)) for role in TASK_ROLES]
         limits = [resolve_task_concurrency(role, layers).value for role in TASK_LIMIT_ROLES]
-    execution = ProjectExecution.from_row(project)
+    # Runtime reads the task's own cap ahead of the project's cap, then overlays its workflow.
+    execution_row = dict(project)
+    if workflow and workflow.get("budget_usd") is not None:
+        execution_row["task_budget_usd"] = workflow["budget_usd"]
+    execution = ProjectExecution.from_row(execution_row).overlaid(workflow)
     lines.append("- 评审：每一步都要 Reviewer 评审通过" if execution.review_policy is ReviewPolicy.ALL
                  else "- 评审：由 Planner 决定哪些步骤要 Reviewer 评审")
     if execution.task_budget_usd is None:
@@ -1550,6 +1558,9 @@ async def configuration_block(
         at_cap = ("再让 Planner 总结一轮后结束" if execution.on_task_budget is TaskBudgetAction.WRAP_UP
                   else "立即失败")
         lines.append(f"- 每个任务的花费上限：${format_usd(execution.task_budget_usd)}，达到时{at_cap}")
+    if workflow:
+        lines.append(f"- 每步重试次数：{execution.step_retries}")
+        lines.append(f"- 依赖条件：{'开' if execution.conditions_on else '关'}")
     lines.append({
         LessonsMode.OFF: "- 经验沉淀：关",
         LessonsMode.DRAFT: "- 经验沉淀：任务完成后生成草稿，由你确认后写入项目知识",

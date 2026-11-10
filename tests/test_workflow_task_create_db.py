@@ -138,3 +138,78 @@ def test_fixed_workflow_role_profile_runs_when_project_restricts_planner_choices
             assert settings.profile.id == "workflow-profile"
             assert (await task_roles.current(task_id))[0]["profile_allowed"]
     run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("selection", [None, "reviewed", "none"], ids=["default", "explicit", "disabled"])
+@pytest.mark.parametrize("overrides", [True, False], ids=["workflow-caps", "project-caps"])
+def test_manager_start_confirmation_shows_effective_workflow_controls(tmp_path, monkeypatch, selection, overrides):
+    from tests.test_ops_tasks_db import _Chat
+
+    async def test(pool):
+        async with v1_api(tmp_path, pool) as call:
+            project = await setup(pool, call, tmp_path)
+            preset = {**PRESET, "review_all": overrides, "dependency_conditions": overrides,
+                      "budget_usd": 0.0001 if overrides else None,
+                      "max_step_retries": 0 if overrides else None}
+            assert (await call("workflows.put", preset))[0] == 200
+            await projects.update_project(project["id"], execution={
+                "review_policy": "planner" if overrides else "all", "task_budget_usd": 12,
+                "max_step_retries": 4, "dependency_conditions": "off" if overrides else "on",
+                "task_budget_action": "wrap_up"})
+            body = {"requirement": "Build", "title": "Build", "project": "Example"}
+            if selection is not None:
+                body["workflow"] = selection
+            chat = _Chat(tmp_path)
+            (answer,) = await chat.say("Create it", ("looper_task_create", body))
+            assert answer["status"] == "ok", answer
+            (block,) = chat.turns[0].blocks
+            row = await tasks.get_task(answer["result"]["task_id"])
+            effective = ProjectExecution.from_row(await projects.get_task_project(row["id"])).overlaid(row["workflow"])
+            assert ("- 评审：每一步都要 Reviewer 评审通过" if effective.review_all else
+                    "- 评审：由 Planner 决定哪些步骤要 Reviewer 评审") in block
+            from looper.agents.project_execution import format_usd
+            assert f"- 每个任务的花费上限：${format_usd(effective.task_budget_usd)}，达到时再让 Planner 总结一轮后结束" in block
+            if selection != "none":
+                assert "- 工作流：Reviewed（reviewed）" in block
+                assert f"- 每步重试次数：{effective.step_retries}" in block
+                assert f"- 依赖条件：{'开' if effective.conditions_on else '关'}" in block
+            else:
+                assert "工作流" not in block and "每步重试次数" not in block and "依赖条件" not in block
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("new_project", [False, True], ids=["project-default", "new-project"])
+@pytest.mark.parametrize("overrides", [True, False], ids=["workflow-caps", "project-caps"])
+def test_client_confirmation_shows_effective_workflow_controls(tmp_path, monkeypatch, new_project, overrides):
+    async def test(pool):
+        async with v1_api(tmp_path, pool) as call:
+            project = await setup(pool, call, tmp_path)
+            preset = {**PRESET, "review_all": overrides, "dependency_conditions": overrides,
+                      "budget_usd": 0.0001 if overrides else None,
+                      "max_step_retries": 0 if overrides else None}
+            assert (await call("workflows.put", preset))[0] == 200
+            settings = {"review_policy": "planner" if overrides else "all", "task_budget_usd": 12,
+                        "max_step_retries": 4, "dependency_conditions": "off" if overrides else "on"}
+            await projects.update_project(project["id"], execution=settings)
+            choice = ({"project": {"name": "New", "work_dir": str(tmp_path), **settings}, "workflow": "reviewed"}
+                      if new_project else {"project_id": project["id"]})
+            status, answer = await call("tasks.create", {"requirement": "Build", **choice}, client=True)
+            assert status == 202, answer
+            impact = answer["impact"]
+            assert "- 工作流：Reviewed（reviewed）" in impact
+            assert f"- task_budget_usd（每任务花费上限，USD）：{'0.0001' if overrides else '12'}" in impact
+            assert f"- max_step_retries（每步重试次数）：{0 if overrides else 4}" in impact
+            assert ("- review_policy（步骤评审）：all（每步须通过评审）" if overrides else
+                    "- review_policy（步骤评审）：planner（由 Planner 决定）") in impact
+            assert f"- dependency_conditions（Planner 组合步骤就绪条件）：{'on' if overrides else 'off'}" in impact
+            assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+            status, answer = await call("confirm", {"confirmation_id": answer["confirmation_id"]}, client=True)
+            assert status == 200, answer
+            row = await tasks.get_task(answer["result"]["task_id"])
+            effective = ProjectExecution.from_row(await projects.get_task_project(row["id"])).overlaid(row["workflow"])
+            assert effective.review_all is overrides and effective.conditions_on is overrides
+            assert effective.task_budget_usd == (0.0001 if overrides else 12)
+            assert effective.step_retries == (0 if overrides else 4)
+            saved = await projects.get_project(row["project_id"])
+            assert all(saved[k] == v for k, v in settings.items())
+    run_db(test, monkeypatch, timeout=30)

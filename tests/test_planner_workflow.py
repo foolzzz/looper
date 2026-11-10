@@ -43,20 +43,27 @@ def test_task_section_only_claims_the_workflow_rules_that_are_enforced() -> None
 
 
 @pytest.mark.parametrize("explicit_role", [False, True])
+@pytest.mark.parametrize("via,version", [("workflow", 1), ("user", 2)])
 def test_workflow_roles_run_even_with_project_roles_off(
     planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch, explicit_role: bool,
+    via: str, version: int,
 ) -> None:
     agent_db.get_task_project.return_value = {**_project(), "planner_roles": "off", "task_workflow": WORKFLOW}
-    role = {"task_id": "t1", "role_key": "dev", "version": 1, "kind": "work", "via": "workflow",
-            "role_prompt": "Implement the change.", "harness": None, "profile_id": None,
+    role = {"task_id": "t1", "role_key": "dev", "version": version, "kind": "work", "via": via,
+            "role_prompt": "Use the user's edited instructions." if via == "user" else "Implement the change.",
+            "harness": None, "profile_id": None,
             "reason": "from workflow", "profile_name": None, "profile_allowed": False}
-    monkeypatch.setattr(task_roles, "current", AsyncMock(return_value=[role]))
+    monkeypatch.setattr(task_roles, "current", AsyncMock(return_value=[
+        role, {**role, "role_key": "ad_hoc"}, {**role, "role_key": "old_workflow_role", "via": "workflow"}]))
     monkeypatch.setattr(task_roles, "get", AsyncMock(return_value=role))
     spec = {**step("s1"), **({"role": "dev"} if explicit_role else {})}
     claude = planner_claude(plan(spec), decide("accept"))
     h = drive(claude, always(WORK_OK))
     assert h.final().payload["status"] == "completed"
     assert h.work_items[0].payload["task_role"]["id"] == "dev"
+    assert h.work_items[0].payload["task_role"]["version"] == version
+    assert h.work_items[0].payload["task_role"]["role_prompt"] == role["role_prompt"]
+    assert set(h.planner._roles) == {"dev"}
     assert "Workflow: Reviewed work" in claude.prompts()[0]
     assert '"role", a fixed workflow work role' in claude.prompts()[0]
     assert '"review_roles", fixed workflow' in claude.prompts()[0]

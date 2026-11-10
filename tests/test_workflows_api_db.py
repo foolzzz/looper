@@ -81,3 +81,35 @@ def test_workflow_names_are_unique_ignoring_case(tmp_path, monkeypatch):
             assert await pool.fetchval("SELECT count(*) FROM workflows") == 1
 
     run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("budget", [0.00001, 100_000.0001, 0, -1])
+def test_invalid_budget_is_rejected_before_storage(tmp_path, monkeypatch, budget):
+    async def test(pool):
+        async with v1_api(tmp_path, pool) as call:
+            # A valid write proves this request path can store a preset.
+            assert (await call("workflows.put", {**PRESET, "budget_usd": 0.0001}))[0] == 200
+            status, answer = await call("workflows.put", {**PRESET, "budget_usd": budget})
+            assert status == 400 and answer["error"]["code"] == "invalid", answer
+            assert "budget_usd" in answer["error"]["message"]
+            saved = (await call("workflows.get", {"key": PRESET["key"]}))[1]["result"]["workflow"]
+            assert saved["budget_usd"] == 0.0001
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("source", ["get", "list"])
+def test_put_accepts_readback_body_and_ignores_server_timestamp(tmp_path, monkeypatch, source):
+    async def test(pool):
+        async with v1_api(tmp_path, pool) as call:
+            assert (await call("workflows.put", PRESET))[0] == 200
+            status, answer = await call("workflows." + source, {"key": PRESET["key"]} if source == "get" else {})
+            assert status == 200, answer
+            body = answer["result"]["workflow"] if source == "get" else answer["result"]["workflows"][0]
+            body.update(name="Edited", updated_at="2000-01-01T00:00:00Z")
+            status, answer = await call("workflows.put", body)
+            assert status == 200, answer
+            saved = answer["result"]["workflow"]
+            assert {k: v for k, v in saved.items() if k != "updated_at"} == {
+                k: v for k, v in body.items() if k != "updated_at"}
+            assert saved["updated_at"] != body["updated_at"]
+    run_db(test, monkeypatch, timeout=30)

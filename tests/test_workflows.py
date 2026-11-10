@@ -37,6 +37,10 @@ def test_snapshot_round_trip_preserves_the_definition_and_passed_panel_semantics
     ({"max_step_retries": True}, "max_step_retries"),
     ({"max_step_retries": 21}, "max_step_retries"),
     ({"budget_usd": float("nan")}, "budget_usd"),
+    ({"budget_usd": 0.00001}, "4 decimals"),
+    ({"budget_usd": 100_000.0001}, "100000"),
+    ({"budget_usd": 0}, "more than 0"),
+    ({"budget_usd": True}, "budget_usd"),
     ({"profiles": {"manager": "p"}}, "profiles"),
     ({"roles": [{}] * 9}, "roles"),
     ({"roles": [{"key": "dev", "kind": "work", "role_prompt": ""}]}, "role_prompt"),
@@ -47,6 +51,11 @@ def test_snapshot_round_trip_preserves_the_definition_and_passed_panel_semantics
 def test_definition_refuses_invalid_fields(extra, match):
     with pytest.raises(WorkflowError, match=match):
         Workflow.from_dict(definition(**extra))
+
+
+@pytest.mark.parametrize("budget", [None, 0.0001, 1.2345, 100_000])
+def test_budget_accepts_runtime_precision_and_range(budget):
+    assert Workflow.from_dict(definition(budget_usd=budget)).budget_usd == budget
 
 
 @pytest.mark.parametrize("panel,match", [
