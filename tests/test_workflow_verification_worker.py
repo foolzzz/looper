@@ -253,6 +253,79 @@ def _item(root, run="v1", *, verification=True):
             "verification": verification, "context": {"work_dir": str(root)}})
 
 
+@pytest.mark.parametrize("restart", [False, True])
+def test_verification_new_attempt_sees_current_head_and_fallback_reuses_checkout(
+        tmp_path, monkeypatch, verification_runtime, restart):
+    runs, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+    first_head = _git(root, "rev-parse", "HEAD")
+
+    class FailedRun(ScriptedRun):
+        async def wait(self):
+            return 2
+
+    runs.extend([
+        ScriptedRun([{"type": "result", "subtype": "success", "is_error": False,
+                      "result": json.dumps({"status": "failed", "summary": "Source needs a fix."})}]),
+        FailedRun([], hold=True),
+        _completed_run(hold=False),
+    ])
+    good = builtin_launch().settings
+    bad = replace(good, profile=replace(good.profile, id="unavailable", fallback_profile_id=good.profile.id))
+    monkeypatch.setattr(worker, "fallback_settings", AsyncMock(return_value=good))
+    monkeypatch.setattr(ADAPTERS["claude-code"], "first_event_known", True, raising=False)
+
+    async def scenario():
+        runtime = tmp_path / "runtime"
+        bus = MessageBus(runtime_root=runtime)
+        results = []
+        bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=runtime)
+        await pool.start(bus)
+        try:
+            item = _item(root, "attempt-1")
+            item = replace(item, payload={**item.payload, "task_id": "s1"})
+            await pool._dispatch(item)
+            await pool._tasks["attempt-1"]
+            assert results[-1].payload["status"] == "failed"
+            assert results[-1].payload["verification"]["head"] == first_head
+            assert "failure" not in results[-1].payload
+            (root / "tracked").write_text("fixed")
+            _git(root, "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-am", "fix")
+            fixed = worker._verification_snapshot(str(root))
+            assert fixed["head"] != first_head
+            if restart:
+                await pool.stop()
+                pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=runtime)
+                await pool.start(bus)
+            monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=bad))
+            retry = replace(item, target=worker_address("attempt-2"))
+            await pool._dispatch(retry)
+            await runs[1].started.wait()
+            checkout = Path(launches[1]["cwd"])
+            assert worker._verification_snapshot(str(checkout)) == fixed
+            assert (checkout / "tracked").read_text() == "fixed"
+            backup = pool._verification_backup("t1", "s1", str(checkout))
+            assert json.loads((backup / "baseline.json").read_text())["snapshot"] == fixed
+            # A later source commit must not change the checkout within this attempt.
+            (root / "tracked").write_text("next change")
+            _git(root, "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-am", "next")
+            runs[1].release.set()
+            await pool._tasks["attempt-2"]
+            assert len(results) == 2 and len(launches) == 3
+            assert launches[2]["cwd"] == str(checkout)
+            assert worker._verification_snapshot(str(checkout)) == fixed
+            assert results[-1].payload["status"] == "completed"
+            assert results[-1].payload["verification"]["head"] == fixed["head"]
+            assert results[-1].payload["verification"]["head_after"] == fixed["head"]
+            assert len(results[-1].payload["fallback"]) == 1
+        finally:
+            await pool.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(scenario(), 15))
+
+
 @pytest.mark.parametrize("link", ["absolute", "relative", "chain", "directory", "submodule"])
 def test_verification_symlink_writes_stay_in_checkout(tmp_path, verification_runtime, link):
     runs, launches = verification_runtime

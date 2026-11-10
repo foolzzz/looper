@@ -526,7 +526,7 @@ def _verification_snapshot(work_dir: str) -> dict[str, Any]:
 
 
 def _verification_baseline(work_dir: str, backup: Path) -> dict[str, Any]:
-    """Keep the first attempt's baseline on disk, including uncommitted work and the index."""
+    """Keep the run's baseline on disk, including uncommitted work and the index."""
     manifest = backup / "baseline.json"
     current = _verification_snapshot(work_dir)
     if manifest.exists():
@@ -1542,8 +1542,9 @@ class WorkerPool:
                 if source.get("error"):
                     raise OSError(source["error"])
                 if source["git"]:
+                    # New attempts get current source; only this run's profile fallback reuses its checkout.
                     work_dir = await asyncio.to_thread(_verification_checkout, work_dir,
-                        self._verification_backup(parent_task_id, payload.get("task_id"), work_dir))
+                        self._verification_backup(parent_task_id, worker_id, work_dir))
                 verification = await asyncio.to_thread(_verification_baseline, work_dir,
                     self._verification_backup(parent_task_id, payload.get("task_id"), work_dir))
             except (OSError, ValueError, subprocess.SubprocessError):
