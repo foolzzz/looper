@@ -1402,7 +1402,10 @@ class WorkerPool:
                         "summary": agent_settings.profile_error}
             return {"status": "failed", "error": agent_settings.profile_error}
         if is_verify and payload.get("worker_runtime_id") == agent_settings.profile.runtime.id:
-            return {**_severity_verdict(_verify_failed("same_runtime_as_worker")), "refused": "same_runtime"}
+            member = task_role.key if task_role else "builtin"
+            problem = (f"Review member {member!r} resolved runtime {agent_settings.profile.runtime.id!r}, "
+                       "the same runtime as the developer; choose a different reviewer runtime")
+            return {**_severity_verdict(_verify_failed(problem)), "refused": "same_runtime"}
         profile_runtime = ADAPTERS.get(agent_settings.profile.runtime.type)
         hosted = profile_runtime is not None and profile_runtime.hosts_runs
         launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)

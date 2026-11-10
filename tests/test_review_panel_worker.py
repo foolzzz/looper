@@ -5,12 +5,17 @@ import asyncio
 import hashlib
 import json
 import subprocess
+from dataclasses import replace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from fake_claude import fake_claude
+from looper.agents.agent_settings import AgentSettings, AgentType
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
 from looper.agents.system_prompt import REVIEW_CONTRACT, review_contract
+from looper.agents.profile_registry import builtin_resolved_profile
+from looper.agents.task_roles import RoleKind, TaskRole
 from looper.agents.tiers.worker import WorkerConfig, WorkerPool, judge_result
 
 
@@ -70,7 +75,47 @@ def test_same_runtime_never_starts_reviewer(tmp_path, agent_db):
                  worker_runtime_id="rt-claude-code")
     assert not (tmp_path / "started").exists()
     assert result["passed"] is False and result["refused"] == "same_runtime"
-    assert result["findings"][0]["text"] == "same_runtime_as_worker"
+    assert "same runtime as the developer" in result["findings"][0]["text"]
+    assert "rt-claude-code" in result["findings"][0]["text"]
+
+
+@pytest.mark.parametrize("member", ["builtin", "review_a"])
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("same_runtime", [False, True])
+def test_panel_compares_resolved_runtimes_including_inherited_profiles_and_fallbacks(
+    tmp_path, agent_db, monkeypatch, member, fallback, same_runtime,
+):
+    from looper.agents.tiers import worker
+
+    profile = builtin_resolved_profile()
+    developer = AgentSettings(profile=replace(profile, id="inherited-work",
+        runtime=replace(profile.runtime, id="runtime-inherited-work")))
+    reviewer = AgentSettings(profile=replace(profile, id="inherited-review",
+        runtime=replace(profile.runtime, id=developer.profile.runtime.id if same_runtime else "runtime-review")))
+    initial = replace(reviewer, profile=replace(profile, id="unavailable-review",
+        fallback_profile_id=reviewer.profile.id), profile_error="profile unavailable") if fallback else reviewer
+
+    async def load(agent, *args, **kwargs):
+        return developer if agent is AgentType.WORKER else initial
+
+    monkeypatch.setattr(worker, "load_agent_settings", load)
+    select_fallback = AsyncMock(return_value=reviewer)
+    monkeypatch.setattr(worker, "fallback_settings", select_fallback)
+    work = run(tmp_path, REPORT.replace("REPORT", repr({"status": "completed", "changed_files": {}})))
+    assert work["runtime_id"] == developer.profile.runtime.id
+    role = {} if member == "builtin" else {
+        "task_role": TaskRole(member, RoleKind.REVIEW, 1, "Review correctness.").payload()}
+    result = run(tmp_path, "open('started', 'w').write('yes')\n" + REPORT.replace(
+        "REPORT", repr({"passed": True, "findings": []})),
+        verify=True, severity=True, worker_runtime_id=work["runtime_id"], **role)
+    assert (tmp_path / "started").exists() is not same_runtime
+    assert result["passed"] is not same_runtime
+    if same_runtime:
+        assert result["refused"] == "same_runtime"
+        assert member in result["findings"][0]["text"]
+        assert work["runtime_id"] in result["findings"][0]["text"]
+        assert "choose a different reviewer runtime" in result["findings"][0]["text"]
+    assert select_fallback.await_count == int(fallback)
 
 
 def git(tmp_path, *args):

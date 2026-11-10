@@ -535,8 +535,8 @@ class TaskPlan:
         return any(s.status == "failed" for s in self.steps)
 
     def last_open(self, step: PlanStep) -> bool:
-        """Whether ``step`` is the only step not done: settling it settles the task."""
-        return all(s.status in ("verified", "skipped") for s in self.steps if s is not step)
+        """Whether settling ``step`` leaves only panel reviews, which need no delivery summary of their own."""
+        return all(s.status in ("verified", "skipped") for s in self.steps if s is not step and not s.reviews)
 
     def ready_steps(self) -> list[PlanStep]:
         """Steps whose dependencies are all verified."""
@@ -2387,29 +2387,25 @@ class PlannerAgent:
             correlation_id=plan.correlation_id, metadata={"origin_channel_id": plan.origin_channel_id}))
 
     async def _review_done(self, plan: TaskPlan, seat: PlanStep, result: dict[str, Any]) -> None:
-        from .review_panel import blocking
+        from .review_panel import blocking, merged
         self._adopted_runs.discard(seat.reviewer_id)
         await self._record_profile_fallbacks(plan, seat.role or "reviewer", result.get("fallback") or [], seat)
         seat.result, seat.status = result, "verified"
-        await self._save(plan, seat)
         if blocked := result.get("prompt_blocked"):
+            await self._save(plan, seat)
             raise TurnBlocked(**blocked)
         target = plan.step(seat.reviews)
-        required = leaves(parse_condition(target.accept_when, "accept_when"))
-        if target.status == "verified" and not result.get("passed") and seat.step_id not in required:
-            await self._save(plan, entries=[JournalEntry(seat.step_id, seat.label, json.dumps(result),
-                                                       kind=JournalKind.LATE_REVIEW)])
+        target.result = {**(target.result or {}), **merged(plan, target)}
+        entries = []
+        if target.status == "verified":
+            entries.append(JournalEntry(seat.step_id, seat.label, json.dumps(result), kind=JournalKind.LATE_REVIEW))
             if blocking(result):
-                view = self._checked(plan.view())
-                try:
-                    reply = await self._ask(TurnKind.CHAT, f"[CHAT] Late advisory review {seat.role or 'builtin'} "
-                        f"of accepted step {target.label}:\n" + "\n".join(self._review_report(target, result)),
-                        lambda text: parse_chat(text, view))
-                except PlannerTurnError as exc:
-                    await self._fail_plan(plan, reason=f"Cannot resolve late review: {exc}", model_closeout=False)
-                    return
-                await self._apply_chat(plan, reply, None, at=f"late review of {target.label}")
-        elif target.status == "completed":
+                # Quorum acceptance can leave referenced seats running too. Every member's late blocker
+                # reopens the decision so the Planner can retry the work, not merely acknowledge a chat.
+                target.status = "completed"
+        # Persist the reopened target with the late verdict: a restart must take its decision too.
+        await self._save(plan, seat, target, entries=entries)
+        if target.status == "completed":
             await self._settle_reviews(plan, target)
         if plan.status in _LIVE:
             await self._settle_plan(plan)
@@ -2603,12 +2599,14 @@ class PlannerAgent:
     ) -> None:
         if reply.adjudications:
             from .review_adjudication import adjudicate
+            from .review_panel import merged
             changed = adjudicate(plan, step, reply.adjudications)
             for seat_id, result in changed.items():
                 plan.step(seat_id).result = result
+            step.result = {**(step.result or {}), **merged(plan, step)}
             entries = [JournalEntry(step.step_id, step.label, json.dumps(item), kind=JournalKind.REVIEW_ADJUDICATED)
                        for item in reply.adjudications]
-            await self._save(plan, *(plan.step(sid) for sid in changed), entries=entries)
+            await self._save(plan, step, *(plan.step(sid) for sid in changed), entries=entries)
             context = replace(context, succeeded=self._accept_state(plan, step) is State.SATISFIED)
         decision = reply.decision
         note = f": {reply.reason}" if reply.reason else ""
@@ -2617,6 +2615,9 @@ class PlannerAgent:
         await self._activity("phase", f"Planner decision on step {step.index + 1} ({step.label}): {decision.value}{note}"[:500])
         if reply.progress is not None:
             await self._record_progress(plan, reply.progress)
+        if step.accept_when is not None and context.result is ResultKind.REVIEW and reply.summary:
+            await self._save(plan, entries=[JournalEntry(step.step_id, step.label,
+                journal.clip(reply.summary, journal.SUMMARY_MAX_CHARS), kind=JournalKind.DECISION)])
         keeps_work = decision is Decision.ACCEPT or (decision is Decision.REPLAN and context.acceptable)
         if keeps_work and not await self._merged(plan, step):
             return  # the decision turn on the failed merge took over
@@ -4525,7 +4526,14 @@ class PlannerAgent:
             lines += [f"- {_clip(m, 500)}" for m in step.missed_messages]
         if context.result is ResultKind.WORK and context.succeeded and context.review_required:
             lines += ["", "This step needs a passing review before it can be accepted."]
-        if context.last_open:
+        if step.accept_when is not None and context.result is ResultKind.REVIEW:
+            lines += ["", "Suggestions do not block acceptance. For each suggestion, take or decline it and record "
+                      "the choice and reason in summary (or retry feedback / replan reason)."]
+        if context.last_open and step.accept_when is not None:
+            lines += ["", "This is the task's last work step; remaining panel seats still hold completion. "
+                      'An accept (or replan with no new steps) must carry "final", the delivery summary '
+                      "to keep while those seats finish."]
+        elif context.last_open:
             lines += ["", "This is the task's last open step: a decision that completes the task (accept, or replan "
                           'with no new steps) must carry "final", the task\'s final summary.']
         elif context.open_gates:

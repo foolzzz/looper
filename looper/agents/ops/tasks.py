@@ -670,7 +670,7 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_tasks",
         description="List or search tasks (newest first), or get one task with its steps (including each kind), "
-                    "wait conditions and states, supplements, latest "
+                    "wait conditions and states, acceptance (accept_when, accept_state, accept_when_text), supplements, latest "
                     "progress note, result, cost and concurrency limits; room: what the task's agents said to each "
                     "other in its room (read only).",
         schema={

@@ -8,11 +8,12 @@ import pytest
 
 from looper.agents.message import MessageType
 from looper.db import task_roles
-from tests.test_planner_agent import (REVIEW_PASS, WORK_OK, _project, chat, decide, drive, plan, step)
+from tests.test_planner_agent import (FINAL_RESULT, REVIEW_PASS, WORK_OK, _project, chat, decide, drive, plan, step)
 
 MEMBERS = ["review_a", "review_b", "review_c"]
 PANEL = {"key": "panel", "name": "Review panel", "review_panel": {
     "members": MEMBERS, "accept_when": {"all_of": ["review_a", "review_b"]}},
+    "distinct_reviewer_runtime": True,
     "roles": [{"key": member, "kind": "review", "role_prompt": "Review the work."} for member in MEMBERS]}
 BLOCK = {"passed": False, "summary": "Needs a fix", "findings": [
     {"severity": "blocking", "where": "calc.py:4", "text": "Handle empty input"}]}
@@ -39,19 +40,26 @@ def test_required_reviews_release_accept_before_advisory_but_delivery_waits(
     configure(agent_db, monkeypatch)
     claude = planner_claude(plan(step("s1", review=True)), decide("review"), decide("accept"))
 
+    def outcome(envelope):
+        return None if envelope.message_type == MessageType.VERIFY_REQUEST else {
+            **WORK_OK, "runtime_id": "runtime-from-worker-run"}
+
     async def scenario(h):
         await h.start()
         await h.until(lambda: len(h.reviews) == 3)
         assert len(h.held) == 3
         assert all(e.payload["severity"] for e in h.reviews)
+        assert all(e.payload["worker_runtime_id"] == "runtime-from-worker-run" for e in h.reviews)
         await h.release(REVIEW_PASS)
         await h.release(REVIEW_PASS)
         await h.until(lambda: h.planner._plan.steps[0].status == "verified")
         assert h.final() is None
         assert h.planner._plan.progress_summary() == "1/1 完成"
         await h.release(REVIEW_PASS)
-        assert (await h.finished()).payload["status"] == "completed"
-    drive(claude, held_reviews, scenario)
+        final = await h.finished()
+        assert final.payload["status"] == "completed"
+        assert final.payload["summary"] == FINAL_RESULT
+    drive(claude, outcome, scenario)
 
 
 def test_failed_required_seat_waits_for_all_required_and_merges_locations(planner_claude, agent_db, monkeypatch):
@@ -68,6 +76,10 @@ def test_failed_required_seat_waits_for_all_required_and_merges_locations(planne
         await h.finished()
         report = claude.turns()[-1]["text"]
         assert all(text in report for text in ("calc.py:4", "calc.py:9", "review_a", "review_b"))
+        findings = h.planner._plan.steps[0].result["verify_findings"]
+        assert [(f["member"], f["severity"], f["where"], f["text"]) for f in findings] == [
+            ("review_a", "blocking", "calc.py:4", "Handle empty input"),
+            ("review_b", "blocking", "calc.py:9", "Handle empty input")]
     drive(claude, held_reviews, scenario)
 
 
@@ -87,9 +99,16 @@ def test_k_of_releases_after_two_passes_and_keeps_last_review_running(planner_cl
     drive(claude, held_reviews, scenario)
 
 
-def test_late_advisory_blocking_gets_chat_turn(planner_claude, agent_db, monkeypatch):
-    configure(agent_db, monkeypatch)
-    claude = planner_claude(plan(step("s1", review=True)), decide("review"), decide("accept"), chat("Recorded"))
+@pytest.mark.parametrize("condition", [
+    {"all_of": MEMBERS[:2]},
+    {"k_of": 2, "of": MEMBERS},
+    {"any_of": [{"all_of": MEMBERS[:2]}, MEMBERS[2]]},
+])
+def test_late_blocking_gets_a_decision_that_can_retry(condition, planner_claude, agent_db, monkeypatch):
+    configure(agent_db, monkeypatch, review_panel={"members": MEMBERS, "accept_when": condition})
+    claude = planner_claude(plan(step("s1", review=True)), decide("review"), decide("accept"),
+                            decide("retry", feedback="Handle the late empty-input finding"),
+                            decide("review"), decide("accept"))
 
     async def scenario(h):
         await h.start()
@@ -98,9 +117,46 @@ def test_late_advisory_blocking_gets_chat_turn(planner_claude, agent_db, monkeyp
         await h.release(REVIEW_PASS)
         await h.until(lambda: h.planner._plan.steps[0].status == "verified")
         await h.release(BLOCK)
-        await h.finished()
-        assert "[CHAT]" in claude.turns()[-1]["text"] and "review_c" in claude.turns()[-1]["text"]
+        await h.until(lambda: len(h.reviews) == 6)
+        message = claude.turns()[3]["text"]
+        assert "[DECISION]" in message
+        assert all(text in message for text in ("review_c", "calc.py:4", "Handle empty input", "blocking"))
         assert any(entry.kind.value == "late_review" for entry in h.planner._plan.journal)
+        assert len(h.work_items) == 2
+        assert h.work_items[-1].payload["feedback"] == ["Handle the late empty-input finding"]
+        for _ in MEMBERS:
+            await h.release(REVIEW_PASS)
+        assert (await h.finished()).payload["status"] == "completed"
+    drive(claude, held_reviews, scenario)
+
+
+def test_suggestions_are_merged_shown_and_recorded_without_losing_delivery(planner_claude, agent_db, monkeypatch):
+    configure(agent_db, monkeypatch)
+    suggestion = {"severity": "suggestion", "where": "calc.py:7", "text": "Clarify the parameter name"}
+    choice = "Decline review_a finding 0: the public API keeps its existing parameter name"
+    claude = planner_claude(plan(step("s1", review=True)), decide("review"), decide("accept", summary=choice))
+
+    async def scenario(h):
+        await h.start()
+        await h.until(lambda: len(h.reviews) == 3)
+        await h.release({**REVIEW_PASS, "findings": [suggestion]})
+        await h.release(REVIEW_PASS)
+        await h.until(lambda: h.planner._plan.steps[0].status == "verified")
+        message = claude.turns()[-1]["text"]
+        assert all(text in message for text in ("suggestion", "review_a", suggestion["where"], suggestion["text"]))
+        assert "take or decline" in message
+        late = {**suggestion, "where": "calc.py:9", "text": "Add a usage example"}
+        await h.release({**REVIEW_PASS, "findings": [late]})
+        final = await h.finished()
+        assert final.payload["status"] == "completed" and final.payload["summary"] == FINAL_RESULT
+        assert len(claude.turns()) == 3  # a late suggestion records advice without another decision
+        stored = await agent_db.load_plan("t1")
+        result = stored["steps"][0]["result"]
+        assert result["verify_passed"] is True
+        assert result["verify_findings"] == [{"member": "review_a", **suggestion}, {"member": "review_c", **late}]
+        assert any(choice in entry.summary for entry in h.planner._plan.journal)
+        assert any(entry.kind.value == "late_review" and late["text"] in entry.summary
+                   for entry in h.planner._plan.journal)
     drive(claude, held_reviews, scenario)
 
 
@@ -137,6 +193,8 @@ def test_adjudication_requires_reason_then_rechecks_acceptance(planner_claude, a
         await h.release(REVIEW_PASS)
         await h.until(lambda: h.planner._plan.steps[0].status == "verified")
         assert h.planner._plan.steps[1].result["status"] == "passed_by_adjudication"
+        assert h.planner._plan.steps[0].result["verify_findings"][0]["severity"] == "suggestion"
+        assert h.planner._plan.steps[0].result["verify_passed"] is True
         assert any(e.kind.value == "review_adjudicated" for e in h.planner._plan.journal)
         assert "reason" in claude.turns()[-1]["text"]
         await h.release(REVIEW_PASS)

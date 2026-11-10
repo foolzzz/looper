@@ -1666,6 +1666,7 @@ def _panel_workflow(adjudication=False):
                       *[{"key": member, "kind": "review", "role_prompt": f"Review panel member {member}."}
                         for member in ("review_a", "review_b")]],
             "work_role": "dev", "review_all": True, "adjudication": adjudication,
+            "distinct_reviewer_runtime": True,
             "review_panel": {"members": ["review_a", "review_b"],
                              "accept_when": {"all_of": ["review_a", "review_b"]}},
             "planner_instructions": "Use exactly one work step labelled s1. The workflow supplies its reviewers."}

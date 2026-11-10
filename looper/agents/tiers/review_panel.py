@@ -28,6 +28,13 @@ def blocking(result: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     return [f for f in (result or {}).get("findings", []) if f.get("severity") == "blocking"]
 
 
+def merged(plan: TaskPlan, target: PlanStep) -> dict[str, Any]:
+    return {"verify_passed": state(plan, target) is State.SATISFIED,
+            "verify_findings": [{**finding, "member": seat.role or "builtin"}
+                                for seat in plan.steps if seat.reviews == target.step_id
+                                for finding in (seat.result or {}).get("findings", [])]}
+
+
 def report(plan: TaskPlan, target: PlanStep) -> list[str]:
     required = leaves(parse(target.accept_when, "accept_when"))
     lines, locations = [], {}
@@ -37,10 +44,9 @@ def report(plan: TaskPlan, target: PlanStep) -> list[str]:
         lines.append(f"{seat.role or 'builtin'} ({'required' if seat.step_id in required else 'advisory'}): "
                      f"{verdict} — {len(blocking(result))} blocking")
         for index, finding in enumerate(result.get("findings", [])):
-            if finding["severity"] == "blocking":
-                locations.setdefault(finding["where"], []).append(
-                    f"- {seat.role or 'builtin'} finding {index}: {finding['text']}")
-    lines.append("Blocking findings by location")
+            locations.setdefault(finding["where"], []).append(
+                f"- {seat.role or 'builtin'} finding {index} ({finding['severity']}): {finding['text']}")
+    lines.append("Panel findings by location")
     for where, findings in locations.items():
         lines.extend([where, *findings])
     return lines

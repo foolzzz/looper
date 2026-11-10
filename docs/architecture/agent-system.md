@@ -3922,19 +3922,26 @@ work step; its start condition waits for that work to complete. The work step's
 cannot supply review steps, `accept_when` or `review_roles` for such tasks.
 A satisfied condition triggers a review decision immediately; an impossible one
 waits until every referenced seat has returned. Other seats keep running and
-hold task completion. An advisory blocking finding arriving after acceptance
-is journaled and sent to the Planner in a chat-shaped turn.
+hold task completion. A blocking finding from any member arriving after acceptance
+is merged, journaled and sent to the Planner in a follow-up review decision,
+which can retry the work. The last work decision keeps its final delivery summary
+while the remaining seats finish; late suggestions are merged and journaled too.
 
 Panel findings carry `severity`, `where` and `text`; blocking findings override a
-reported pass. Reports group blocking findings by location and identify their
-source seat. When adjudication is enabled, a review decision may downgrade a
+reported pass. The merged result keeps every finding with its severity, source
+member, location and text. Reports group all findings by location and identify
+their source seat; suggestions do not block acceptance. The Planner records
+whether it takes or declines suggestions in its decision summary, retry feedback
+or replan reason. When adjudication is enabled, a review decision may downgrade a
 current blocking finding with a nonempty reason (at most 500 characters); each
 change is journaled, and acceptance still requires a satisfied condition.
-Workers report their runtime id and Git HEAD; a panel reviewer refuses the same
-runtime id and fails if HEAD changes during its run. Review requests use the
-work step's isolated workspace when present. Before its panel starts, an isolated
-step snapshots uncommitted output so accepting it does not move a still-running
-reviewer's HEAD; its original reported commit remains as `worker_head`.
+Panels require `distinct_reviewer_runtime: true` when saved. Workers report their
+resolved runtime id and Git HEAD; each panel reviewer compares its resolved
+runtime with that worker run's runtime, refuses a match and fails if HEAD changes
+during its run. Each panel reviewer gets its own worktree of the frozen commit,
+including in shared mode. Before its panel starts, the work step snapshots
+uncommitted output so accepting it does not move a still-running reviewer's HEAD;
+its original reported commit remains as `worker_head`.
 Retries stop stale reviews and
 reset the same seats; dropping work cascades to its reviews. Unfinished reviews
 resume through normal dispatch after a restart. Review seats do not add to the
