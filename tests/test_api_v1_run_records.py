@@ -152,14 +152,19 @@ def test_run_reads_distinguish_requested_and_reported_models(tmp_path, monkeypat
     ({"model_reported": None}, None),
     ({"model_reported": "reported-model"}, "reported-model"),
     ({"profile": {"runtime": {"type": "codex"}}}, None),
-    *[({"profile": {"runtime": {"type": runtime}}}, None) for runtime in ("pi", "omp", "dsh", "grok")],
+    *[({"profile": {"runtime": {"type": runtime}}}, None) for runtime in ("pi", "omp", "dsh", "grok", "api")],
+    ({"profile": {"runtime": {"type": "api"}}, "model_reported": "native-model"}, "native-model"),
+    ({"agent": {"runtime": {"type": "api"}}}, None),
     ({"profile": {"runtime": {"type": "cursor-agent"}}, "model_display": "reported-model"}, "reported-model"),
 ])
-def test_run_get_preserves_model_report_evidence(tmp_path, monkeypatch, metadata, reported):
-    monkeypatch.setattr(llm_records, "get_record", AsyncMock(return_value={
-        "id": 1, "metadata": metadata, "model": "requested-model", "status": "completed"}))
+@pytest.mark.parametrize("action", ["get", "list"])
+def test_run_reads_preserve_model_report_evidence(tmp_path, monkeypatch, metadata, reported, action):
+    record = {"id": 1, "metadata": metadata, "model": "requested-model", "status": "completed"}
+    monkeypatch.setattr(llm_records, "get_record" if action == "get" else "list_records",
+                        AsyncMock(return_value=record if action == "get" else [record]))
     async def run():
         async with _serving(tmp_path) as server:
-            status, _, answer = await post(server, "get", {"record_id": 1})
-            assert status == 200 and answer["result"]["record"]["model_reported"] == reported
+            status, _, answer = await post(server, action, {"record_id": 1} if action == "get" else {})
+            row = answer["result"]["record"] if action == "get" else answer["result"]["records"][0]
+            assert status == 200 and row["model_reported"] == reported
     asyncio.run(run())
