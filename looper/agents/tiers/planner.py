@@ -1152,7 +1152,8 @@ class PlannerAgent:
             reply = await self._ask(TurnKind.PLAN, self._plan_message(plan, await self._template_lines(plan)),
                                     lambda text: parse_plan(
                                         text, self._roles, gate_policy=self._gate_policy,
-                                        wait_policy=self._wait_policy(), conditions=self._execution.conditions_on))
+                                        wait_policy=self._wait_policy(), conditions=self._execution.conditions_on,
+                                        isolate_steps=self._execution.isolate_steps))
         except PlannerTurnError as exc:
             await self._fail_plan(plan, reason=f"Planning failed: {exc}")
             return
@@ -3474,7 +3475,7 @@ class PlannerAgent:
     def _checked(self, view: PlanView) -> PlanView:
         """``view`` with the task's roles as last read and whether it may open gates, for checking a reply."""
         return replace(view, roles=self._roles, gate_policy=self._gate_policy, wait_policy=self._wait_policy(),
-                       conditions=self._execution.conditions_on)
+                       conditions=self._execution.conditions_on, isolate_steps=self._execution.isolate_steps)
 
     def _wait_policy(self) -> WaitPolicy:
         """System limits, command permission, and this event's scheduled-run stop time."""

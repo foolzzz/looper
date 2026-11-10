@@ -44,7 +44,7 @@ any_of 放行后，其他分支继续运行，任务完成仍要求每一步 ver
 
 ### 无法满足时的处理
 
-条件变成 unsatisfiable 不会静默丢弃步骤。代码记录 `condition_blocked`，通过任务变化的唤醒路径给 Planner 一个 `[CHAT]` 回合，说明哪个步骤无法开始、条件和失败原因。允许 `none`、`add_steps`、`replan`。`none` 将该步骤标为 skipped，记录 decision，然后级联判定。回合失败时仍保留 pending，后续事件重试投递。
+条件变成 unsatisfiable 不会静默丢弃步骤。代码记录 `condition_blocked`，通过任务变化的唤醒路径给 Planner 一个 `[CHAT]` 回合，说明哪个步骤无法开始、条件和失败原因。允许 `none`、`add_steps`、`replan`。`none` 将该步骤标为 skipped，记录 decision，然后级联判定。回合失败时，若仍有执行中的工作则保留 pending，后续事件重试投递；若没有执行中的工作，任务失败。
 
 ### 开关和读取
 

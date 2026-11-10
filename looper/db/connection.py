@@ -679,4 +679,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
             or await _llm_requests_stored_bytes_pending(conn)
             or await _chat_binding_senders_pending(conn)
-            or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)))
+            or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)
+            or await _dependency_conditions_pending(conn)))

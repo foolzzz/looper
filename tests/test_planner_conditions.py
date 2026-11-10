@@ -193,6 +193,35 @@ def test_completed_condition_starts_while_the_source_is_being_reviewed(planner_c
     assert h.final().payload["status"] == "completed"
 
 
+@pytest.mark.parametrize("on", ["completed", "verified", "passed"])
+def test_worktree_plan_checks_nested_condition_leaves_before_dispatch(
+    planner_claude: Any, agent_db: Any, monkeypatch: Any, on: str,
+) -> None:
+    from looper.agents.tiers.planner import PlannerAgent
+
+    agent_db.get_task_project.return_value = {
+        **_project(), "dependency_conditions": "on", "step_workspaces": "worktree",
+    }
+    # Workspace mechanics are covered separately; this exercises admission before dispatch.
+    async def in_task_directory(self: Any, plan_: Any, ready: Any) -> Any:
+        return ready, None
+
+    monkeypatch.setattr(PlannerAgent, "_plan_round", in_task_directory)
+    candidate = plan(step("s1"), {**step("s2", "s1"), "ready_when": {
+        "all_of": [{"any_of": [{"step": "s1", "on": on}]}],
+    }})
+    claude = planner_claude(candidate, candidate) if on == "completed" else planner_claude(
+        candidate, decide("accept"), decide("accept"))
+    h = drive(claude, always(WORK_OK))
+    if on == "completed":
+        assert h.final().payload["status"] == "failed"
+        assert h.work_items == []
+        assert "in worktree isolation, wait for verified so the upstream work is merged first" in claude.turns()[1]["text"]
+    else:
+        assert h.final().payload["status"] == "completed"
+        assert [item.payload["step_key"] for item in h.work_items] == ["s1", "s2"]
+
+
 @pytest.mark.parametrize("explicit_condition", [True, False])
 def test_skipping_an_impossible_condition_cascades_to_its_dependents(
     planner_claude: Any, agent_db: Any, explicit_condition: bool,

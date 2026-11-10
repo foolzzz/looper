@@ -1,5 +1,7 @@
 """Condition persistence and task readbacks on disposable PostgreSQL."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from tests.db_support import DSN, run_db
@@ -9,6 +11,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 def test_conditions_survive_plan_writes_and_api_readback(monkeypatch, tmp_path):
     from looper.agents import api_v1, projects
+    from looper.agents.ops.clients import PIPELINE_TOOL
     from looper.agents.ops.service import _plain
     from looper.db import journal, plans, projects as db_projects, tasks
 
@@ -43,12 +46,25 @@ def test_conditions_survive_plan_writes_and_api_readback(monkeypatch, tmp_path):
         assert detail["steps"][3]["ready_state"] == "satisfied"
         compact = await projects.task_detail("task-a", compact=True)
         assert compact["steps"][2]["ready_when_text"] == "any of (s1, s2 passed)"
+        assert compact["steps"][2]["ready_state"] == "satisfied"
         assert "ready_when_text" not in compact["steps"][0]
+        pipeline = await PIPELINE_TOOL.run(SimpleNamespace(arguments={"task_id": "task-a"}))
+        assert pipeline["steps"][2]["ready_when_text"] == compact["steps"][2]["ready_when_text"]
+        assert pipeline["steps"][2]["ready_state"] == "satisfied"
+        assert "ready_state" not in pipeline["steps"][0]
         await pool.execute("UPDATE task_steps SET status = 'skipped' WHERE id = 'step-s1'")
         await pool.execute("UPDATE task_steps SET status = 'failed' WHERE id = 'step-s2'")
         after = await projects.task_detail("task-a")
         assert after["steps"][2]["ready_state"] == "unsatisfiable"
         assert after["steps"][3]["ready_state"] == "pending"
+        pipeline = await PIPELINE_TOOL.run(SimpleNamespace(arguments={"task_id": "task-a"}))
+        assert pipeline["steps"][2]["ready_state"] == "unsatisfiable"
+        await pool.execute("UPDATE task_steps SET status = 'pending' WHERE id = 'step-s2'")
+        pipeline = await PIPELINE_TOOL.run(SimpleNamespace(arguments={"task_id": "task-a"}))
+        assert pipeline["steps"][2]["ready_state"] == "pending"
+        await pool.execute("UPDATE task_steps SET status = 'verified' WHERE id = 'step-s3'")
+        pipeline = await PIPELINE_TOOL.run(SimpleNamespace(arguments={"task_id": "task-a"}))
+        assert pipeline["steps"][2]["ready_state"] is None
 
     run_db(test, monkeypatch, timeout=30)
 
@@ -57,10 +73,23 @@ def test_dependency_conditions_upgrade_is_named_and_idempotent(monkeypatch):
     from looper.db import connection
 
     async def test(pool):
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
         await pool.execute("ALTER TABLE task_steps DROP COLUMN ready_when")
         await pool.execute("ALTER TABLE projects DROP COLUMN dependency_conditions")
         await pool.execute("DELETE FROM schema_migrations WHERE name = 'dependency_conditions'")
+        constraint = await pool.fetchval(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'task_journal_kind_check' AND conrelid = 'task_journal'::regclass")
+        assert ", 'condition_blocked'::text" in constraint
+        await pool.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
+        await pool.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check "
+                           + constraint.replace(", 'condition_blocked'::text", ""))
+        async with pool.acquire() as conn:
+            assert await connection.schema_change_pending(conn)
         await connection.ensure_schema(pool)
+        async with pool.acquire() as conn:
+            assert not await connection.schema_change_pending(conn)
         assert await pool.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = 'dependency_conditions')")
         await connection.ensure_schema(pool)
         assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'dependency_conditions'") == 1
@@ -95,5 +124,16 @@ def test_wait_view_evaluates_a_cancelled_gates_passed_condition(monkeypatch):
         assert detail["waits"][0]["ready_when"] == condition
         assert detail["waits"][0]["ready_state"] == "unsatisfiable"
         assert detail["gates"][0]["ready_state"] is None
+
+        from looper.agents.ops.clients import PIPELINE_TOOL
+
+        compact = await projects.task_detail("task-a", compact=True)
+        pipeline = await PIPELINE_TOOL.run(SimpleNamespace(arguments={"task_id": "task-a"}))
+        assert pipeline["waits"] == compact["waits"]
+        assert pipeline["waits"][0]["ready_state"] == "unsatisfiable"
+        assert pipeline["steps"][1]["ready_when_text"] == compact["steps"][1]["ready_when_text"]
+        assert pipeline["steps"][1]["ready_state"] == "unsatisfiable"
+        assert "ready_state" not in pipeline["steps"][0]
+        assert "ready_when_text" not in pipeline["steps"][0]
 
     run_db(test, monkeypatch, timeout=30)

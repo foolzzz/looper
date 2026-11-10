@@ -90,6 +90,29 @@ def test_replan_cannot_reference_a_dropped_condition_leaf():
         parse_chat(data, view)
 
 
+@pytest.mark.parametrize("entry", ["plan", "add_steps", "replan", "decision"])
+def test_worktree_condition_policy_applies_to_every_new_steps_entry(entry):
+    from looper.agents.tiers.planner_protocol import DecisionContext, ResultKind, parse_decision
+
+    steps = [work("s2", ["s1"], ready_when={"step": "s1", "on": "completed"})]
+    view = PlanView(started={"s1": ()}, pending={}, conditions=True, isolate_steps=True)
+    with pytest.raises(ProtocolError, match="in worktree isolation, wait for verified"):
+        if entry == "plan":
+            parse_plan(reply({"steps": [work("s1"), *steps]}), conditions=True, isolate_steps=True)
+        elif entry == "decision":
+            context = DecisionContext("s1", ResultKind.WORK, True, False, 0)
+            parse_decision(reply({"decision": "replan", "reason": "Continue", "steps": steps}), context, view)
+        else:
+            parse_chat(reply({"reply": "Continue", "action": entry, "steps": steps}), view)
+
+
+def test_database_journal_kinds_cover_the_typed_lifecycle():
+    from looper.agents.tiers.journal import JournalKind
+    from looper.db.journal import KINDS
+
+    assert set(KINDS) == {kind.value for kind in JournalKind}
+
+
 def test_unconditional_pipeline_tool_output_keeps_the_released_bytes(monkeypatch):
     import asyncio
     from datetime import datetime, timezone

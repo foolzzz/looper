@@ -74,7 +74,7 @@ from ..waits import (
     CommandCheck, GithubPrCheck, ReadyWhen, WaitAction, WaitChangeAction,
     WaitLimits, WaitPolicy, WaitSpec, WaitState, WaitView,
 )
-from .conditions import Condition, leaves, parse as parse_condition
+from .conditions import Condition, Leaf, On, leaves, parse as parse_condition
 from .journal import HANDOFF_MAX_CHARS, LESSONS_MAX_CHARS, kept_text
 
 # A progress note's fields and a final summary's, in the order they are shown, and what each keeps of a field.
@@ -373,6 +373,7 @@ class PlanView:
     waits: Mapping[str, WaitView] = field(default_factory=dict)
     wait_policy: WaitPolicy = WaitPolicy()
     conditions: bool = False
+    isolate_steps: bool = False
 
     def dropping(self, step: str) -> PlanView:
         """This plan once ``step``, a started step, is dropped."""
@@ -444,14 +445,15 @@ def extract_reply(text: str) -> dict[str, Any]:
 
 def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
                gate_policy: GatePolicy = GatePolicy.OFF, wait_policy: WaitPolicy = WaitPolicy(),
-               conditions: bool = False) -> PlanReply:
+               conditions: bool = False, isolate_steps: bool = False) -> PlanReply:
     data = extract_reply(text)
     _only_keys(data, {"steps"}, "the PLAN reply")
     steps = _step_list(data.get("steps"), "steps", conditions=conditions)
     if not steps:
         raise ProtocolError("steps must list at least one step")
     _check_new_steps(steps, PlanView(started={}, pending={}, roles=roles, gate_policy=gate_policy,
-                                               wait_policy=wait_policy, conditions=conditions), replace_pending=True)
+                                               wait_policy=wait_policy, conditions=conditions,
+                                               isolate_steps=isolate_steps), replace_pending=True)
     return PlanReply(steps)
 
 
@@ -822,6 +824,8 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
             raise ProtocolError(f"step {step.id}: {plan.gate_policy.refusal}")
         if step.wait is not None:
             _check_wait_policy(step.id, step.wait, plan.wait_policy)
+        if plan.isolate_steps and step.ready_when is not None:
+            _check_isolated_condition(step.ready_when, step.id)
         if step.id in plan.pending:
             kind = GATE_KIND if step.id in plan.gates else WAIT_KIND if step.id in plan.waits else WORK_KIND
             new_kind = GATE_KIND if step.gate is not None else WAIT_KIND if step.wait is not None else WORK_KIND
@@ -846,6 +850,16 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
     cycle = _find_cycle(graph)
     if cycle:
         raise ProtocolError("depends_on has a cycle: " + " -> ".join(cycle))
+
+
+def _check_isolated_condition(condition: Condition, step: str) -> None:
+    if isinstance(condition, Leaf):
+        if condition.on is On.COMPLETED:
+            raise ProtocolError(f"step {step}: in worktree isolation, wait for verified so the upstream work "
+                                "is merged first (ready_when cannot use on: completed)")
+    else:
+        for child in condition.of:
+            _check_isolated_condition(child, step)
 
 
 def _check_roles(step: StepSpec, roles: Mapping[str, RoleKind] | None) -> None:
