@@ -98,6 +98,7 @@ REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
 _RUNTIME_LAUNCHER = "runtime_launcher"
 _CURSOR_LOGIN = "cursor_login"
+_DEPENDENCY_CONDITIONS = "dependency_conditions"
 _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
 _CHAT_BINDING_SENDERS = "chat_binding_senders"
@@ -438,6 +439,16 @@ async def _schedule_deferred_by_drain_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _dependency_conditions_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _DEPENDENCY_CONDITIONS):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('task_steps') AND attname = 'ready_when' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
 class RegistrySchemaVersionError(RuntimeError):
     """The registry cannot be opened safely by this binary."""
 
@@ -597,6 +608,16 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _provider_enabled_pending(conn):
             await conn.execute("ALTER TABLE llm_providers ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT true")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROVIDER_ENABLED)
+        if await _dependency_conditions_pending(conn):
+            from .journal import KINDS
+            await conn.execute("ALTER TABLE task_steps ADD COLUMN ready_when JSONB")
+            await conn.execute("ALTER TABLE projects ADD COLUMN dependency_conditions TEXT "
+                               "CHECK (dependency_conditions IN ('off', 'on'))")
+            await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
+            kinds = (*KINDS, "wait_opened", "wait_extended", "wait_closed")
+            await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check "
+                               f"CHECK (kind IN {kinds!r})")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _DEPENDENCY_CONDITIONS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.
         await conn.execute(SEEDS_PATH.read_text(encoding="utf-8"))

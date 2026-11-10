@@ -403,16 +403,50 @@ def most_at_once(spans: Iterable[tuple[float, float]]) -> int:
 
 
 def dependency_order(steps: Iterable[Mapping[str, Any]], records: Iterable[Mapping[str, Any]]) -> dict[str, int]:
-    """Check API dependency edges against run times; missing evidence stays unknown."""
+    """Check readiness against run times; optional branches and missing evidence stay unknown."""
+    from looper.agents.tiers.conditions import Leaf, State, StepOutcome, evaluate, parse
+
     workers: dict[str, list[Mapping[str, Any]]] = {}
+    reviews: dict[str, list[Mapping[str, Any]]] = {}
     for record in records:
-        if role(record) == "worker":
-            workers.setdefault(str((record.get("metadata") or {}).get("step_id")), []).append(record)
+        kind = role(record)
+        if kind in ("worker", "reviewer"):
+            (workers if kind == "worker" else reviews).setdefault(
+                str((record.get("metadata") or {}).get("step_id")), []).append(record)
     result = {"edges": 0, "verified": 0, "violations": 0, "unknown": 0}
     for step in steps:
+        starts = [timestamp(r.get("created_at")) for r in workers.get(str(step.get("id")), [])]
+        condition = parse(step["ready_when"], "ready_when") if step.get("ready_when") is not None else None
+
+        def state_at_start(dependency: str, *, completed: bool) -> State:
+            runs = workers.get(dependency, []) + ([] if completed else reviews.get(dependency, []))
+            ends = [timestamp(r.get("finished_at")) for r in runs]
+            if not starts or not ends or None in starts or None in ends:
+                return State.PENDING
+            # At this fixed historical instant a later finish cannot satisfy a leaf.
+            return State.SATISFIED if max(ends) <= min(starts) else State.UNSATISFIABLE
+
+        def outcome(dependency: str) -> StepOutcome:
+            verified = state_at_start(dependency, completed=False)
+            return StepOutcome(state_at_start(dependency, completed=True), verified, verified)
+
+        ready = evaluate(condition, outcome) if condition is not None else None
+        required, todo = {}, [condition] if condition is not None else []
+        while todo:
+            node = todo.pop()
+            if isinstance(node, Leaf):
+                required[node.step] = node.on
+            else:
+                todo.extend(node.of)
         for dependency in step.get("depends_on") or []:
             result["edges"] += 1
-            starts = [timestamp(r.get("created_at")) for r in workers.get(str(step.get("id")), [])]
+            if condition is not None:
+                # A finished alternative is evidence; an unfinished optional branch is not an order violation.
+                state = outcome(dependency).for_on(required[dependency])
+                verdict = ("verified" if state is State.SATISFIED else
+                           "violations" if ready is State.UNSATISFIABLE and state is State.UNSATISFIABLE else "unknown")
+                result[verdict] += 1
+                continue
             ends = [timestamp(r.get("finished_at")) for r in workers.get(str(dependency), [])]
             if not starts or not ends or None in starts or None in ends:
                 result["unknown"] += 1

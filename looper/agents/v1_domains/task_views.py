@@ -18,6 +18,8 @@ def _nullable(schema):
 _NUMBER = {"type": "number"}
 _NULL_NUMBER = _nullable(_NUMBER)
 _NULL_INT = _nullable(_INT)
+_CONDITION = {"oneOf": [{"type": "null"}, _STR, _OBJ]}
+_READY = {"type": ["string", "null"], "enum": ["satisfied", "pending", "unsatisfiable", None]}
 _GROUP = {"type": "string", "enum": [group.value for group in tasks.TaskGroup]}
 _TEMPLATE = _object({"key": _STR, "name": _STR, "updated_at": _STR,
     "inputs": _array(_object({"key": _STR, "label": _STR, "value": _STR})), "planner_instructions": _STR})
@@ -31,6 +33,7 @@ _STEP = _object({
     **dict.fromkeys(("id", "task_id", "step_key", "kind", "instruction", "status", "created_at", "updated_at"), _STR),
     **dict.fromkeys(("step_index", "retries"), _INT), "review": _BOOL,
     **dict.fromkeys(("worker_id", "reviewer_id", "role_key", "review_stage", "started_at", "completed_at"), _NULL_STR),
+    "ready_when": _CONDITION, "ready_state": _READY,
     "role_version": _NULL_INT, "review_position": _NULL_INT, "result": _nullable(_OBJ),
     **{key: _array(_STR) for key in ("acceptance_criteria", "target_files", "depends_on")},
     "review_roles": _array(_object({"role": _STR, "required": _BOOL, "version": _NULL_INT}))})
@@ -56,6 +59,7 @@ _GATE = _object({
     "agenda": _array(_object({"id": _STR, "question": _STR, "status": _STR, "answer": _NULL_STR,
                               "options": _array(_STR)},
                              ["id", "question", "status"])),
+    "ready_when": _CONDITION, "ready_state": _READY,
     "ended_by_user": _BOOL, "depends_on": _array(_STR),
     **dict.fromkeys(("turns", "not_delivered", "reminders"), _INT),
     "channel_posts": _nullable(_object({"channel": _STR, "target": _STR, "sent": _INT,

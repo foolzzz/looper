@@ -1,0 +1,190 @@
+"""Conditions on the real Planner event path with scripted agents."""
+from __future__ import annotations
+
+from typing import Any
+
+from looper.agents.tiers.planner import PlanStep, TaskPlan
+from tests.test_planner_agent import REVIEW_PASS, WORK_OK, _project, always, chat, decide, drive, plan, step
+
+
+def test_any_of_dispatches_without_cancelling_the_other_source(planner_claude: Any, agent_db: Any) -> None:
+    agent_db.get_task_project.return_value = {**_project(), "dependency_conditions": "on"}
+    claude = planner_claude(
+        plan(step("s1"), step("s2"), {**step("s3", "s1", "s2"), "ready_when": {"any_of": ["s1", "s2"]}}),
+        decide("accept"), decide("accept"), decide("accept"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: len(h.work_items) == 3)
+        assert [item.payload["step_key"] for item in h.held] == ["s2"]
+        assert h.final() is None and not h.killed
+        await h.release(WORK_OK)
+        await h.finished()
+
+    h = drive(claude, lambda item: None if item.payload["step_key"] == "s2" else WORK_OK, scenario)
+    assert h.final().payload["status"] == "completed"
+    rows = {row["key"]: row for row in agent_db.store.steps["t1"].values()}
+    assert rows["s3"]["ready_when"] == {"any_of": [rows["s1"]["id"], rows["s2"]["id"]]}
+
+
+def test_cancelled_gate_asks_before_skipping_a_passed_dependent(planner_claude: Any, agent_db: Any) -> None:
+    agent_db.get_task_project.return_value = {**_project(), "dependency_conditions": "on", "user_gates": "on"}
+    gate = {"id": "g1", "kind": "gate", "topic": "Choose source", "depends_on": [],
+            "agenda": [{"question": "Which source?"}]}
+    claude = planner_claude(
+        plan(step("s1"), gate, {**step("s4", "g1"), "ready_when": {"step": "g1", "on": "passed"}}),
+        decide("accept", gates=[{"id": "g1", "action": "cancel", "resolution": "Source unavailable"}]),
+        chat("Discard the blocked step."),
+    )
+    h = drive(claude, always(WORK_OK))
+    assert h.final().payload["status"] == "completed"
+    assert [item.payload["step_key"] for item in h.work_items] == ["s1"]
+    assert "[CHAT]" in claude.turns()[2]["text"]
+    assert "Step s4 can no longer start" in claude.turns()[2]["text"]
+    assert "g1" in claude.turns()[2]["text"] and "cancelled" in claude.turns()[2]["text"]
+    rows = {row["key"]: row for row in agent_db.store.steps["t1"].values()}
+    assert rows["s4"]["status"] == "skipped"
+    journal = agent_db.store.journal["t1"]
+    assert sum(entry["kind"] == "condition_blocked" for entry in journal) == 1
+    assert any(entry["kind"] == "decision" and entry["step_id"] == rows["s4"]["id"] for entry in journal)
+
+
+def test_unconditional_ready_steps_keep_all_verified_semantics() -> None:
+    source = PlanStep("a", 0, "source", status="completed")
+    dependent = PlanStep("b", 1, "dependent", depends_on=["a"])
+    plan_ = TaskPlan("p", "g", "build", "", steps=[source, dependent])
+    assert plan_.ready_steps() == []
+    source.status = "verified"
+    assert plan_.ready_steps() == [dependent]
+
+
+def test_completed_condition_starts_while_the_source_is_being_reviewed(planner_claude: Any, agent_db: Any) -> None:
+    from looper.agents.message import MessageType
+
+    agent_db.get_task_project.return_value = {**_project(), "dependency_conditions": "on"}
+    claude = planner_claude(
+        plan(step("s1", review=True), {**step("s2", "s1"), "ready_when": {"step": "s1", "on": "completed"}}),
+        decide("review"), decide("accept"), decide("accept"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: len(h.work_items) == 2 and len(claude.turns()) >= 3)
+        assert h.final() is None
+        assert len(h.held) == 1 and h.held[0].message_type is MessageType.VERIFY_REQUEST
+        await h.release(REVIEW_PASS)
+        await h.finished()
+
+    h = drive(claude, lambda item: None if item.message_type is MessageType.VERIFY_REQUEST else WORK_OK, scenario)
+    assert h.final().payload["status"] == "completed"
+
+
+def test_skipping_an_impossible_condition_cascades_to_its_dependents(planner_claude: Any, agent_db: Any) -> None:
+    agent_db.get_task_project.return_value = {**_project(), "dependency_conditions": "on", "user_gates": "on"}
+    gate = {"id": "g1", "kind": "gate", "topic": "Choose source", "depends_on": [],
+            "agenda": [{"question": "Which source?"}]}
+    claude = planner_claude(
+        plan(step("s1"), gate, {**step("s4", "g1"), "ready_when": {"step": "g1", "on": "passed"}},
+             {**step("s5", "s4"), "ready_when": "s4"}),
+        decide("accept", gates=[{"id": "g1", "action": "cancel", "resolution": "Source unavailable"}]),
+        chat("Skip s4."), chat("Skip s5 too."),
+    )
+    h = drive(claude, always(WORK_OK))
+    assert h.final().payload["status"] == "completed"
+    assert [item.payload["step_key"] for item in h.work_items] == ["s1"]
+    assert "Step s4 can no longer start" in claude.turns()[2]["text"]
+    assert "Step s5 can no longer start" in claude.turns()[3]["text"]
+    rows = {row["key"]: row for row in agent_db.store.steps["t1"].values()}
+    assert rows["s4"]["status"] == rows["s5"]["status"] == "skipped"
+    assert sum(entry["kind"] == "condition_blocked" for entry in agent_db.store.journal["t1"]) == 2
+
+
+def test_a_failed_condition_turn_remains_pending_and_retries_on_the_next_event(planner_claude: Any, agent_db: Any) -> None:
+    agent_db.get_task_project.return_value = {**_project(), "dependency_conditions": "on", "user_gates": "on"}
+    gate = {"id": "g1", "kind": "gate", "topic": "Choose source", "depends_on": [],
+            "agenda": [{"question": "Which source?"}]}
+    claude = planner_claude(
+        plan(step("s1"), step("s2"), gate,
+             {**step("s4", "g1"), "ready_when": {"step": "g1", "on": "passed"}}),
+        decide("accept", gates=[{"id": "g1", "action": "cancel", "resolution": "Source unavailable"}]),
+        "<error>", decide("accept"), chat("Skip the blocked step."),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: len(claude.turns()) >= 3)
+        assert h.final() is None
+        rows = {row["key"]: row for row in agent_db.store.steps["t1"].values()}
+        assert rows["s4"]["status"] == "pending"
+        await h.release(WORK_OK)
+        await h.finished()
+
+    h = drive(claude, lambda item: None if item.payload["step_key"] == "s2" else WORK_OK, scenario)
+    assert h.final().payload["status"] == "completed"
+    assert "Step s4 can no longer start" in claude.turns()[4]["text"]
+    assert sum(entry["kind"] == "condition_blocked" for entry in agent_db.store.journal["t1"]) == 1
+
+
+def test_a_blocked_condition_replan_can_stop_an_unneeded_running_branch(planner_claude: Any, agent_db: Any) -> None:
+    agent_db.get_task_project.return_value = {**_project(), "dependency_conditions": "on", "user_gates": "on"}
+    gate = {"id": "g1", "kind": "gate", "topic": "Choose source", "depends_on": [],
+            "agenda": [{"question": "Which source?"}]}
+    claude = planner_claude(
+        plan(step("s1"), step("s2"), gate,
+             {**step("s4", "g1"), "ready_when": {"step": "g1", "on": "passed"}}),
+        decide("accept", gates=[{"id": "g1", "action": "cancel", "resolution": "Source unavailable"}]),
+        chat("Use another source.", "replan", stop=["s2"], steps=[
+            {**step("s5", "g1"), "ready_when": {"step": "g1", "on": "completed"}}]),
+        decide("accept"),
+    )
+    h = drive(claude, lambda item: None if item.payload["step_key"] == "s2" else WORK_OK)
+    assert h.final().payload["status"] == "completed"
+    assert len(h.killed) == 1
+    rows = {row["key"]: row for row in agent_db.store.steps["t1"].values()}
+    assert rows["s2"]["status"] == rows["s4"]["status"] == "skipped"
+    assert rows["s5"]["status"] == "verified"
+
+
+def test_default_planner_system_prompt_matches_the_released_bytes() -> None:
+    from pathlib import Path
+
+    from looper.agents.agent_settings import Harness, Layer
+    from looper.agents.knowledge import EMPTY_KNOWLEDGE
+    from looper.agents.tiers.planner import PlannerAgent, PlannerSettings
+
+    agent = PlannerAgent(task_id="task-baseline", runtime_root=Path("."))
+    prompt = agent._system_prompt(
+        TaskPlan("p", "g", "Build the project", ""), PlannerSettings("Plan carefully.", 60, 0, 0),
+        EMPTY_KNOWLEDGE, Harness("Work carefully.", Layer.BUILTIN),
+    )
+    assert prompt.sha256 == "9bc15086404f4efa8254e7b02da2bca0f7a334c9ebd2e83c17b1cfa3a0f90693"
+
+
+def test_replan_preserves_a_started_condition_and_replaces_a_pending_condition(planner_claude: Any, agent_db: Any) -> None:
+    agent_db.get_task_project.return_value = {**_project(), "dependency_conditions": "on"}
+    claude = planner_claude(
+        plan(step("s1"), step("s2"), {**step("s3", "s1", "s2"), "ready_when": {"any_of": ["s1", "s2"]}},
+             {**step("s4", "s3"), "ready_when": "s3"}),
+        decide("accept"),
+        chat("Wait for both source results.", "replan", steps=[
+            {**step("s4", "s2", "s3"), "ready_when": {"all_of": ["s2", "s3"]}}]),
+        decide("accept"), decide("accept"), decide("accept"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: len(h.held) == 2)
+        original = next(s for s in h.planner._plan.steps if s.label == "s3").ready_when
+        await h.say("Require both results for the final step.")
+        assert next(s for s in h.planner._plan.steps if s.label == "s3").ready_when == original
+        assert len(h.work_items) == 3
+        await h.release(WORK_OK)
+        await h.release(WORK_OK)
+        await h.finished()
+
+    h = drive(claude, lambda item: None if item.payload["step_key"] in ("s2", "s3") else WORK_OK, scenario)
+    assert h.final().payload["status"] == "completed"
+    rows = {row["key"]: row for row in agent_db.store.steps["t1"].values()}
+    assert rows["s3"]["ready_when"] == {"any_of": [rows["s1"]["id"], rows["s2"]["id"]]}
+    assert rows["s4"]["ready_when"] == {"all_of": [rows["s2"]["id"], rows["s3"]["id"]]}

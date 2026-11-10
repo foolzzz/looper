@@ -4566,7 +4566,7 @@ Key message types:
    Claude and asks `[PLAN]`. The steps go to `task_steps`, the activity gets
    `Plan created: ...`, and `TASK_ACCEPTED` reports the step count to the
    Manager.
-3. Dispatch: every step whose `depends_on` steps are all verified goes as
+3. Dispatch: without `ready_when`, every step whose `depends_on` steps are all verified goes as
    `WORK_ITEM` to a new Worker, up to 4 running at once per task. Steps
    without a dependency between them run at the same time in the same
    directory, so they must change different files, unless the project has
@@ -4575,6 +4575,16 @@ Key message types:
    `parallel_parts` and `interface_first` tasks check that the Planner plans
    independent and coordinated parts that way; with haiku the second still
    fails (the Planner chains the service, the client and the check).
+   Projects can enable `dependency_conditions` (off by default). Work, gate and wait steps may then specify
+   `ready_when`: nested all_of, any_of or k_of conditions over completed, verified or passed outcomes. Their
+   leaf set must equal `depends_on`. A satisfied condition releases a step without cancelling alternative
+   branches; completion still waits for every step. An unsatisfiable pending condition records
+   `condition_blocked` and gives the Planner a `[CHAT]` turn through the task-change wakeup path. The Planner
+   may add steps, replan or reply none; none skips the blocked step with a decision entry. Failed turns leave
+   it pending for a later event. APIs expose `ready_when` and pending steps' `ready_state`; the Manager's
+   compact task view adds `ready_when_text` only where a condition exists. See the
+   [workflow conditions RFC](rfcs/workflow-presets-v0.zh-CN.md).
+
 4. Decision turn: every `WORK_RESULT` and `VERIFY_RESULT` gets a `[DECISION]`
    turn whose message lists the decisions allowed now:
    - `accept` only when the result can be accepted: the Worker completed and
@@ -4656,7 +4666,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `projects` | Projects: name (unique ignoring case), description, default `work_dir` (`''` = none), `background` for the task agents' system prompt (`''` = none), and the execution settings (`project_execution`) |
 | `tasks` | Task metadata, status, phase, timestamps, `work_dir`, `project_id` (required), `schedule_id` (the schedule that fired it), `budget_usd` (its own spend cap, over its project's), `chat_id`, `chat_kind` and `chat_mention` (who is told when it ends: a Telegram chat id, a Lark sender's open_id, or a Lark group's id and the requester it @-mentions; `chat_kind` is `user` or `chat`; NULL for a task asked for elsewhere), `original_user_text` (the user's message the Manager's task JSON answered, often 「确认」; kept as history), `title` (a few words naming it, from the task JSON; `task_name` falls back to the goal id, then the requirement), and `workspace_dir`, `workspace_mode` and `workspace_base` ([Task workspaces](#task-workspaces)); `manager_id` (the Manager that created it, which hears of its progress and end), `template` (JSON snapshot of the task template it came from, NULL without one) and `origin_thread` (the web chat thread it was asked for in) |
 | `task_worktrees` | A worktree task's git worktree ([Task workspaces](#task-workspaces)), one per task (going with it): `repo_dir` and `subdir` (the workspace in its repository), `path`, `branch`, `base_commit`, `links`, `state` (`active`, `removed`), `result_commit` (the branch's tip when it was removed), `created_at`, `removed_at` |
-| `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work` or `gate`), `depends_on` (step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column) |
+| `task_steps` | A task's steps, each with everything its Planner decides with: `step_key` (label), `kind` (`work`, `gate` or `wait`), `depends_on` (step ids), optional `ready_when` (a composable condition stored with step ids), `review`, `acceptance_criteria`, `validation_commands`, `status`, `result`, `worker_id`, `reviewer_id`, `retries`, `feedback`, `missed_messages`, `started_at` (when its run was first dispatched, kept through retries, reviews and server restarts; cleared when a restart of the task sends it back to not started; null for steps from before the column) |
 | `task_user_gates` | A gate step's gate ([User gates](#user-gates)): `topic`, `agenda`, `findings`, `state`, `summary` (only once passed), `resolution`, `ended_by_user`, `plan_change`, `delivered_through`, `turns`, `reminders` and its times; the Planner writes all but `first_reply_at` and the reminders' columns, and a closed gate stays as it closed |
 | `task_user_gate_messages` | A gate's discussion, oldest first: the user's messages (`message`, `end`), the Planner's replies and code's notes (`opened`, `updated`, `reminder`, `cancelled`, `closed`, `resumed`, `error`), with `via`, the option a button chose, and in a group chat the author |
 | `task_plans` | A task's plan, one row per task: `plan_id`, `status` (`planning`, `executing`, `verifying`, `stopping`, `completed`, `failed`), `correlation_id`, `origin_channel_id`, `final_summary`, `fail_reason`, and with step workspaces `start_branch` and `start_commit` (where the branch was when the task dispatched its first step; `''` otherwise); replaced when the task is planned again |

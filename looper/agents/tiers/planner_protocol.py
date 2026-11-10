@@ -74,6 +74,7 @@ from ..waits import (
     CommandCheck, GithubPrCheck, ReadyWhen, WaitAction, WaitChangeAction,
     WaitLimits, WaitPolicy, WaitSpec, WaitState, WaitView,
 )
+from .conditions import Condition, leaves, parse as parse_condition
 from .journal import HANDOFF_MAX_CHARS, LESSONS_MAX_CHARS, kept_text
 
 # A progress note's fields and a final summary's, in the order they are shown, and what each keeps of a field.
@@ -186,6 +187,7 @@ class StepSpec:
     gate: GateSpec | None = None
     # A wait step: its instruction is its topic, and it has no criteria or review.
     wait: WaitSpec | None = None
+    ready_when: Condition | None = None
 
 
 @dataclass(frozen=True)
@@ -370,6 +372,7 @@ class PlanView:
     gate_policy: GatePolicy = GatePolicy.OFF
     waits: Mapping[str, WaitView] = field(default_factory=dict)
     wait_policy: WaitPolicy = WaitPolicy()
+    conditions: bool = False
 
     def dropping(self, step: str) -> PlanView:
         """This plan once ``step``, a started step, is dropped."""
@@ -440,14 +443,15 @@ def extract_reply(text: str) -> dict[str, Any]:
 
 
 def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
-               gate_policy: GatePolicy = GatePolicy.OFF, wait_policy: WaitPolicy = WaitPolicy()) -> PlanReply:
+               gate_policy: GatePolicy = GatePolicy.OFF, wait_policy: WaitPolicy = WaitPolicy(),
+               conditions: bool = False) -> PlanReply:
     data = extract_reply(text)
     _only_keys(data, {"steps"}, "the PLAN reply")
-    steps = _step_list(data.get("steps"), "steps")
+    steps = _step_list(data.get("steps"), "steps", conditions=conditions)
     if not steps:
         raise ProtocolError("steps must list at least one step")
     _check_new_steps(steps, PlanView(started={}, pending={}, roles=roles, gate_policy=gate_policy,
-                                               wait_policy=wait_policy), replace_pending=True)
+                                               wait_policy=wait_policy, conditions=conditions), replace_pending=True)
     return PlanReply(steps)
 
 
@@ -480,7 +484,7 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView) -> Decis
     elif decision is Decision.FAIL:
         reason = _required_text(data, "reason")
     elif decision is Decision.REPLAN:
-        steps = _step_list(data.get("steps"), "steps")
+        steps = _step_list(data.get("steps"), "steps", conditions=plan.conditions)
         if not steps and not context.acceptable:
             raise ProtocolError(
                 f"step {context.step} cannot be accepted, so a replan must list the steps that replace it"
@@ -691,12 +695,12 @@ def _chat_action(data: Mapping[str, Any], plan: PlanView) -> ChatReply:
             raise ProtocolError(f"step {step!r} has no running Worker (running: {running})")
         text_out = _required_text(data, "text")
     elif action is ChatAction.ADD_STEPS:
-        steps = _step_list(data.get("steps"), "steps")
+        steps = _step_list(data.get("steps"), "steps", conditions=plan.conditions)
         if not steps:
             raise ProtocolError("add_steps must list at least one step")
         _check_new_steps(steps, plan, replace_pending=False)
     elif action is ChatAction.REPLAN:
-        steps = _step_list(data.get("steps", []), "steps")
+        steps = _step_list(data.get("steps", []), "steps", conditions=plan.conditions)
         stop = _stop_list(data.get("stop", []), plan)
         after = plan
         for label in stop:
@@ -888,21 +892,25 @@ def _find_cycle(graph: Mapping[str, Iterable[str]]) -> list[str] | None:
     return None
 
 
-def _step_list(value: Any, field: str) -> tuple[StepSpec, ...]:
+def _step_list(value: Any, field: str, *, conditions: bool = False) -> tuple[StepSpec, ...]:
     if not isinstance(value, list):
         raise ProtocolError(f"{field} must be a list of steps")
-    return tuple(_step(item, i) for i, item in enumerate(value))
+    return tuple(_step(item, i, conditions=conditions) for i, item in enumerate(value))
 
 
-def _step(value: Any, index: int) -> StepSpec:
+def _step(value: Any, index: int, *, conditions: bool = False) -> StepSpec:
     where = f"steps[{index}]"
     if not isinstance(value, dict):
         raise ProtocolError(f"{where} must be an object")
+    if "ready_when" in value and not conditions:
+        raise ProtocolError(f"{where}.ready_when: dependency_conditions is off for this project; "
+                            "omit ready_when or enable dependency conditions")
+    optional = {"ready_when"} if conditions else set()
     kind = value.get("kind", WORK_KIND)
     if kind == GATE_KIND:
-        return _gate_step(value, where)
+        return _gate_step(value, where, optional)
     if kind == WAIT_KIND:
-        return _wait_step(value, where)
+        return _wait_step(value, where, optional)
     if kind != WORK_KIND:
         raise ProtocolError(f'{where}.kind must be "gate", "wait" or "work" (or left out for a work step); got {kind!r}')
     missing = sorted(_STEP_KEYS - value.keys())
@@ -911,7 +919,7 @@ def _step(value: Any, index: int) -> StepSpec:
     if old := [key for key in _SINGLE_REVIEW_ROLE_KEYS if key in value]:
         raise ProtocolError(f'{where} gives {" and ".join(old)}: a step lists its review roles in "review_roles" now, '
                             'each a role\'s id or {"role": "<id>", "required": false}')
-    _only_keys(value, _STEP_KEYS | _ROLE_KEYS | {"kind"}, where)
+    _only_keys(value, _STEP_KEYS | _ROLE_KEYS | {"kind"} | optional, where)
     step_id = value["id"]
     if not isinstance(step_id, str) or not _STEP_ID.fullmatch(step_id):
         raise ProtocolError(f"{where}.id must be a short label of letters, digits, '-', '_' or '.'; got {step_id!r}")
@@ -926,6 +934,7 @@ def _step(value: Any, index: int) -> StepSpec:
         raise ProtocolError(f"{where}.depends_on must be a list of step ids")
     if len(set(depends_on)) != len(depends_on):
         raise ProtocolError(f"{where}.depends_on lists a step twice")
+    ready_when = _ready_when(value, depends_on, where)
     review = value["review"]
     if not isinstance(review, bool):
         raise ProtocolError(f"{where}.review must be true or false")
@@ -933,7 +942,17 @@ def _step(value: Any, index: int) -> StepSpec:
     if role is not None and (not isinstance(role, str) or not role):
         raise ProtocolError(f"{where}.role must be a role's id")
     return StepSpec(step_id, instruction.strip(), tuple(c.strip() for c in criteria), tuple(depends_on), review,
-                    role=role, review_roles=_review_roles(value.get("review_roles"), f"{where}.review_roles"))
+                    role=role, ready_when=ready_when,
+                    review_roles=_review_roles(value.get("review_roles"), f"{where}.review_roles"))
+
+
+def _ready_when(value: Mapping[str, Any], depends_on: list[str], where: str) -> Condition | None:
+    if "ready_when" not in value:
+        return None
+    condition = parse_condition(value["ready_when"], f"{where}.ready_when")
+    if leaves(condition) != frozenset(depends_on):
+        raise ProtocolError(f"{where}.depends_on must list exactly the steps in ready_when")
+    return condition
 
 
 def _review_roles(value: Any, where: str) -> tuple[ReviewRoleSpec, ...]:
@@ -969,13 +988,13 @@ def _step_id(value: Any, where: str) -> str:
     return value
 
 
-def _gate_step(value: Mapping[str, Any], where: str) -> StepSpec:
+def _gate_step(value: Mapping[str, Any], where: str, optional: set[str]) -> StepSpec:
     """A gate step: ``id``, ``kind``, ``topic``, ``agenda`` (each item a question and its options) and
     ``depends_on``, and optionally ``findings``."""
     missing = sorted(_GATE_STEP_KEYS - {"findings"} - value.keys())
     if missing:
         raise ProtocolError(f"{where} is a gate and is missing {', '.join(missing)}")
-    unknown = sorted(set(value) - _GATE_STEP_KEYS)
+    unknown = sorted(set(value) - _GATE_STEP_KEYS - optional)
     if unknown:
         raise ProtocolError(f"{where} is a gate, which has only id, kind, topic, agenda, depends_on and findings; "
                             f"not {', '.join(unknown)}")
@@ -1001,8 +1020,10 @@ def _gate_step(value: Mapping[str, Any], where: str) -> StepSpec:
         raise ProtocolError(f"{where}.depends_on must be a list of step ids")
     if len(set(depends_on)) != len(depends_on):
         raise ProtocolError(f"{where}.depends_on lists a step twice")
+    ready_when = _ready_when(value, depends_on, where)
     findings = _limited_text(value, "findings", FINDINGS_MAX_CHARS, where)
-    return StepSpec(step_id, topic, (), tuple(depends_on), False, gate=GateSpec(topic, numbered(items), findings))
+    return StepSpec(step_id, topic, (), tuple(depends_on), False, gate=GateSpec(topic, numbered(items), findings),
+                    ready_when=ready_when)
 
 
 def _whole_seconds(raw: Any, where: str, low: int, high: int | None = None) -> int:
@@ -1012,9 +1033,9 @@ def _whole_seconds(raw: Any, where: str, low: int, high: int | None = None) -> i
     return raw
 
 
-def _wait_step(value: Mapping[str, Any], where: str) -> StepSpec:
+def _wait_step(value: Mapping[str, Any], where: str, optional: set[str]) -> StepSpec:
     """A wait step: a topic, a maximum duration, and a time or typed check to wait for."""
-    if unknown := sorted(set(value) - _WAIT_STEP_KEYS):
+    if unknown := sorted(set(value) - _WAIT_STEP_KEYS - optional):
         raise ProtocolError(f"{where} is a wait, which has only id, kind, topic, depends_on, max_wait_seconds, "
                             "not_before_seconds, not_before, check and every_seconds; not " + ", ".join(unknown))
     missing = sorted({"id", "kind", "topic", "depends_on", "max_wait_seconds"} - value.keys())
@@ -1027,6 +1048,7 @@ def _wait_step(value: Mapping[str, Any], where: str) -> StepSpec:
         raise ProtocolError(f"{where}.depends_on must be a list of step ids")
     if len(set(depends_on)) != len(depends_on):
         raise ProtocolError(f"{where}.depends_on lists a step twice")
+    condition = _ready_when(value, depends_on, where)
     maximum = _whole_seconds(value["max_wait_seconds"], f"{where}.max_wait_seconds", 1)
     if "not_before_seconds" in value and "not_before" in value:
         raise ProtocolError(f"{where}: give only one of not_before_seconds and not_before")
@@ -1075,7 +1097,7 @@ def _wait_step(value: Mapping[str, Any], where: str) -> StepSpec:
         raise ProtocolError(f"{where}: a wait without a check needs not_before_seconds (more than 0) or "
                             "not_before: it would end as soon as it opens")
     spec = WaitSpec(topic, maximum, seconds, absolute, check, every)
-    return StepSpec(step_id, topic, (), tuple(depends_on), False, wait=spec)
+    return StepSpec(step_id, topic, (), tuple(depends_on), False, wait=spec, ready_when=condition)
 
 
 def _check_wait_policy(label: str, spec: WaitSpec, policy: WaitPolicy) -> None:
@@ -1496,8 +1518,33 @@ _KINDS = {
 }
 
 
+_CONDITION_RULES = """- ready_when (optional on work, gate and wait steps): a dependency condition.
+  Omit it for the usual rule that all depends_on steps must be verified.
+  A condition is a step id (meaning verified), {"step": "s1", "on":
+  "completed" | "verified" | "passed"}, {"all_of": [condition, ...]},
+  {"any_of": [condition, ...]}, or {"k_of": 2, "of": [condition, ...]}.
+  Groups may nest at most 4 levels and contain at most 32 leaves in total;
+  groups must be nonempty, with no repeated step in one group. k_of's k is
+  an integer from 1 to the number of its children. depends_on must list
+  exactly the distinct step ids in ready_when; the usual reference and cycle
+  rules still apply. Conditions cannot refer to review steps.
+  completed means a Worker has reported completed (even during review), or
+  a gate/wait has closed. verified means accepted work or a closed gate/wait.
+  passed means accepted work, a passed gate, or a wait closed ready/resumed;
+  cancellation and timeout proceed do not pass. Failed/skipped dependencies
+  cannot satisfy a condition. all_of needs every child, any_of one, k_of k.
+  After any_of becomes satisfied, the other branches continue running:
+  they are not cancelled, and the task waits for every step to finish.
+  Use alternatives only when either result really suffices. Started steps'
+  conditions cannot change in a replan. If a condition cannot ever be met,
+  Looper asks you in a CHAT turn to add_steps, replan or choose none to skip
+  the blocked step, then checks its dependents again.
+"""
+
+
 def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = False, gates: bool = False,
-                   room: bool = False, wait_commands: bool = False, wait_limits: WaitLimits = WaitLimits()) -> str:
+                   room: bool = False, wait_commands: bool = False, wait_limits: WaitLimits = WaitLimits(),
+                   conditions: bool = False) -> str:
     """The reply contract for a project whose steps may be retried ``max_retries`` times; with ``roles``, whose
     Planners may define the roles their steps run as; with ``gates``, for a task that may open user gates or has
     one that is not closed; with ``room``, whose agents share a room. Waits use ``wait_limits``;
@@ -1508,11 +1555,14 @@ def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = Fal
                                     f"at least {wait_limits.min_check_seconds}, default {max(wait_limits.min_check_seconds, 600)}")
     wait_rules = wait_rules.replace("at most 604800", f"at most {wait_limits.max_wait_seconds}")
     wait_rules = wait_rules.replace('"new_comments").', '"new_comments")' + command + '.')
-    return _REPLY_CONTRACT.format(
+    contract = _REPLY_CONTRACT.format(
         wait_rules=wait_rules, max_retries=max_retries, roles=_ROLE_RULES if roles else "", kinds=_KINDS[(gates, room)],
         gate_rules=_GATE_RULES if gates else "", gate_changes=_GATE_CHANGES if gates else "",
         chat_gates=_CHAT_GATES if gates else "", gate_section=_GATE_SECTION if gates else "",
         room_section=_ROOM_SECTION if room else "")
+    if conditions:
+        contract = contract.replace("- review: true when", _CONDITION_RULES + "- review: true when", 1)
+    return contract
 
 
 REPLY_CONTRACT = reply_contract()

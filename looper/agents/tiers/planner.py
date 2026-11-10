@@ -193,6 +193,7 @@ from ..message import (
     worker_address,
 )
 from . import journal
+from .conditions import State, StepOutcome, evaluate, leaves, parse as parse_condition, render, to_json
 from .journal import JournalEntry, JournalKind, LearningScope
 from .planner_protocol import (
     ChatAction,
@@ -434,6 +435,7 @@ class PlanStep:
     validation_commands: list[str] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)  # step_ids
+    ready_when: dict | str | None = None  # persisted with step ids
     review: bool = False  # a Reviewer must pass the step before it is accepted
     # "pending" | "dispatched" | "deciding" | "completed" (in review) | "verified" | "failed" | "skipped"
     status: str = "pending"
@@ -534,8 +536,18 @@ class TaskPlan:
         done = {s.step_id for s in self.steps if s.status == "verified"}
         return [
             s for s in self.steps
-            if s.status == "pending" and all(d in done for d in s.depends_on)
+            if s.status == "pending" and (all(d in done for d in s.depends_on) if s.ready_when is None
+                                          else self.ready_state(s) is State.SATISFIED)
         ]
+
+    def ready_state(self, step: PlanStep) -> State:
+        return evaluate(parse_condition(step.ready_when, "ready_when"),
+                        lambda sid: StepOutcome.from_step(self.step(sid)))
+
+    def condition_text(self, step: PlanStep) -> str:
+        labels = self.labels()
+        cond = parse_condition(step.ready_when, "ready_when")
+        return render(parse_condition(to_json(cond, lambda sid: labels.get(sid, sid)), "ready_when"))
 
     def step(self, step_id: str) -> PlanStep | None:
         return next((s for s in self.steps if s.step_id == step_id), None)
@@ -614,6 +626,7 @@ def _step_row(step: PlanStep) -> dict[str, Any]:
         "validation_commands": step.validation_commands,
         "acceptance_criteria": step.acceptance_criteria,
         "depends_on": step.depends_on,
+        "ready_when": step.ready_when,
         "review": step.review,
         "status": step.status,
         "result": step.result,
@@ -895,6 +908,7 @@ class PlannerAgent:
         self._agent_settings: AgentSettings | None = None
         # The project's execution settings as last read; everything inherits until the project is read.
         self._execution = ProjectExecution()
+        self._condition_attempts: set[str] = set()
         # What the running Claude was started with (None before the first start).
         self._process: _Process | None = None
         # Why the session was last dropped and the handoff its old session wrote, until the new session's first
@@ -1049,6 +1063,7 @@ class PlannerAgent:
             await self._fail_plan(self._plan, reason=str(exc), model_closeout=False)
 
     async def _handle_event(self, envelope: MessageEnvelope) -> None:
+        self._condition_attempts.clear()
         # The running run is read again for this event, once, before its first wait check.
         self._run_deadline = None
         self._run_deadline_read = False
@@ -1093,6 +1108,10 @@ class PlannerAgent:
             await self._deliver_room_messages(self._plan)
             if self._plan.status in _LIVE:
                 await self._deliver_waits(self._plan)
+            if await self._blocked_conditions(self._plan):
+                await self._settle_plan(self._plan)
+            elif self._plan.status in _LIVE and any(s.ready_when is not None for s in self._plan.ready_steps()):
+                await self._dispatch_ready(self._plan)
 
     # --- Planning ---
 
@@ -1132,7 +1151,7 @@ class PlannerAgent:
             reply = await self._ask(TurnKind.PLAN, self._plan_message(plan, await self._template_lines(plan)),
                                     lambda text: parse_plan(
                                         text, self._roles, gate_policy=self._gate_policy,
-                                        wait_policy=self._wait_policy()))
+                                        wait_policy=self._wait_policy(), conditions=self._execution.conditions_on))
         except PlannerTurnError as exc:
             await self._fail_plan(plan, reason=f"Planning failed: {exc}")
             return
@@ -1198,6 +1217,8 @@ class PlannerAgent:
             changed.append(step)
         for spec, step in zip(specs, changed):
             step.depends_on = [by_label[label].step_id for label in spec.depends_on]
+            step.ready_when = (to_json(spec.ready_when, lambda label: by_label[label].step_id)
+                               if spec.ready_when is not None else None)
         return changed
 
     def _describe(self, plan: TaskPlan, steps: list[PlanStep]) -> str:
@@ -1205,7 +1226,9 @@ class PlannerAgent:
         parts = []
         for step in steps:
             notes = []
-            if step.depends_on:
+            if step.ready_when is not None:
+                notes.append("after " + plan.condition_text(step))
+            elif step.depends_on:
                 notes.append("after " + "+".join(labels.get(d, d) for d in step.depends_on))
             if step.review:
                 notes.append(" + ".join(["review", *(item.label for item in step.review_roles)]))
@@ -1785,6 +1808,7 @@ class PlannerAgent:
         finish the task, or start what is ready. A failure keeps the reason already stored on the plan."""
         if plan.status not in _LIVE:
             return
+        await self._blocked_conditions(plan)
         await self._report_progress(plan)
         if plan.has_failed:
             await self._fail_plan(plan, reason=plan.fail_reason)
@@ -2490,6 +2514,7 @@ class PlannerAgent:
             entry = self._step_entry(JournalKind.STEP_FAILED, step, f"{outcome}. {note}" if note else outcome)
         # An accept's summary or a fail's reason, and the journal entry.
         await self._save(plan, step, plan_row=True, entries=[entry] if entry else [])
+        await self._blocked_conditions(plan)
         await self._report_progress(plan)
         if plan.has_failed:
             await self._fail_plan(plan)
@@ -2498,6 +2523,54 @@ class PlannerAgent:
         elif await self._within_budget(plan):
             # The last adopted run may have ended with a review blocked at the cap and no ready steps.
             await self._dispatch_ready(plan)
+
+    async def _blocked_conditions(self, plan: TaskPlan) -> bool:
+        """Offer impossible starts to the Planner; failed turns retry on the next event."""
+        changed = False
+        while plan.status in _LIVE and not plan.has_failed:
+            blocked = next((s for s in plan.steps if s.status == "pending" and s.ready_when is not None
+                            and s.step_id not in self._condition_attempts
+                            and plan.ready_state(s) is State.UNSATISFIABLE), None)
+            if blocked is None:
+                break
+            self._condition_attempts.add(blocked.step_id)
+            condition = plan.condition_text(blocked)
+            marker = f"Condition handled: {condition}. "
+            reasons = []
+            for sid in sorted(leaves(parse_condition(blocked.ready_when, "ready_when"))):
+                source = plan.step(sid)
+                outcome = StepOutcome.from_step(source)
+                if outcome.reason:
+                    reasons.append(f"{source.label if source else sid}: {outcome.reason}")
+            message = (f"Step {blocked.label} can no longer start: {condition} cannot be met "
+                       f"({'; '.join(reasons)}).")
+            if not any(e.step_id == blocked.step_id and e.kind is JournalKind.CONDITION_BLOCKED
+                       for e in plan.journal):
+                await self._save(plan, entries=[JournalEntry(blocked.step_id, blocked.label, message,
+                                                           kind=JournalKind.CONDITION_BLOCKED)])
+            view = self._checked(plan.view())
+
+            def check(text: str) -> ChatReply:
+                reply = parse_chat(text, view)
+                if reply.action not in (ChatAction.NONE, ChatAction.ADD_STEPS, ChatAction.REPLAN) or reply.gates or reply.waits:
+                    raise ProtocolError("Use none, add_steps or replan to resolve the blocked condition")
+                return reply
+
+            try:
+                reply = await self._ask(TurnKind.CHAT, "[CHAT] " + message + "\n" + "\n".join(self._plan_lines(plan))
+                                        + "\nAllowed actions: none (skip this step), add_steps, replan.", check)
+            except PlannerTurnError as exc:
+                await self._activity("error", f"Planner could not resolve condition for {blocked.label}: {exc}"[:500])
+                continue
+            if reply.action is ChatAction.NONE:
+                self._skip(blocked)
+            await self._save(plan, blocked, entries=[JournalEntry(
+                blocked.step_id, blocked.label, journal.clip(marker +
+                    ("skipped. " if reply.action is ChatAction.NONE else "") + reply.reply, journal.SUMMARY_MAX_CHARS),
+                kind=JournalKind.DECISION)])
+            await self._apply_chat(plan, reply, None, at=f"blocked condition for {blocked.label}")
+            changed = True
+        return changed
 
     @classmethod
     def _accepted_entry(cls, plan: TaskPlan, step: PlanStep) -> JournalEntry | None:
@@ -2654,6 +2727,7 @@ class PlannerAgent:
                         "%d decision(s) resumed", self._task_id, redispatched, adopted, decisions)
         if plan.status not in _LIVE:
             return
+        await self._blocked_conditions(plan)
         await self._report_progress(plan)
         if plan.has_failed:
             await self._fail_plan(plan)
@@ -3345,7 +3419,8 @@ class PlannerAgent:
 
     def _checked(self, view: PlanView) -> PlanView:
         """``view`` with the task's roles as last read and whether it may open gates, for checking a reply."""
-        return replace(view, roles=self._roles, gate_policy=self._gate_policy, wait_policy=self._wait_policy())
+        return replace(view, roles=self._roles, gate_policy=self._gate_policy, wait_policy=self._wait_policy(),
+                       conditions=self._execution.conditions_on)
 
     def _wait_policy(self) -> WaitPolicy:
         """System limits, command permission, and this event's scheduled-run stop time."""
@@ -3921,7 +3996,7 @@ class PlannerAgent:
                                     gates=self._gate_policy is GatePolicy.ALLOWED
                                     or any(s.gate is not None and not s.gate.state.closed for s in plan.steps),
                                     room=self._room is not None, wait_commands=self._execution.wait_commands_on,
-                                    wait_limits=waits.limits())
+                                    wait_limits=waits.limits(), conditions=self._execution.conditions_on)
             + ("\n" + self._ops.guide_for(roles=self._execution.roles_on, room=self._room is not None,
                                          vault=planner_guide(self._vault) if self._vault else "")
                if self._ops else ""),
@@ -3934,12 +4009,13 @@ class PlannerAgent:
         labels = plan.labels()
         lines = ["Plan:"]
         for step in plan.steps:
-            deps = ", ".join(labels.get(d, d) for d in step.depends_on) or "none"
+            deps = (plan.condition_text(step) if step.ready_when is not None else
+                    ", ".join(labels.get(d, d) for d in step.depends_on) or "none")
             if step.gate is not None:
                 lines += self._gate_lines(step, deps)
                 continue
             if step.wait is not None:
-                lines.append(self._wait_line(step))
+                lines.append(self._wait_line(step) + (f" (depends on: {deps})" if step.ready_when is not None else ""))
                 continue
             roles = (f"; role: {step.role}" if step.role else "") + \
                 (f"; review roles: {', '.join(item.label for item in step.review_roles)}" if step.review_roles else "")
@@ -4916,6 +4992,7 @@ class PlannerAgent:
                 validation_commands=list(sd.get("validation_commands") or []),
                 acceptance_criteria=list(sd.get("acceptance_criteria") or []),
                 depends_on=list(sd.get("depends_on") or []),
+                ready_when=sd.get("ready_when"),
                 review=bool(sd.get("review")),
                 status=forced_status or sd.get("status") or "pending",
                 result=sd.get("result"),

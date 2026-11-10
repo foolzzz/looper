@@ -36,6 +36,8 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   ``STEP_RETRIES_MAX`` (``DEFAULT_STEP_RETRIES`` when unset);
 - ``planner_roles``: whether the project's Planners may define the roles their
   steps run as (``on``) or not (``off``, also when unset; ``task_roles``);
+- ``dependency_conditions``: whether Planners may compose typed step readiness
+  conditions (``on``) or not (``off``, also when unset);
 - ``wait_commands``: whether a wait step of the project's Planners may run a
   shell command as its check (``on``) or not (``off``, also when unset;
   ``waits``): the command runs as the server's user;
@@ -145,6 +147,11 @@ class PlannerRoles(str, Enum):
     ON = "on"
 
 
+class DependencyConditions(str, Enum):
+    OFF = "off"
+    ON = "on"
+
+
 class WaitCommands(str, Enum):
     OFF = "off"
     ON = "on"
@@ -195,6 +202,7 @@ class ProjectExecution:
     vault: VaultMode | None = None
     max_step_retries: int | None = None
     planner_roles: PlannerRoles | None = None
+    dependency_conditions: DependencyConditions | None = None
     wait_commands: WaitCommands | None = None
     role_text_max_chars: int | None = None
     user_gates: UserGates | None = None
@@ -252,6 +260,10 @@ class ProjectExecution:
     def roles_on(self) -> bool:
         """Whether the project's Planners may define the roles their steps run as."""
         return self.planner_roles is PlannerRoles.ON
+
+    @property
+    def conditions_on(self) -> bool:
+        return self.dependency_conditions is DependencyConditions.ON
 
     @property
     def wait_commands_on(self) -> bool:
@@ -351,6 +363,8 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, VaultMode)
     if field == "planner_roles":
         return _choice(field, raw, PlannerRoles)
+    if field == "dependency_conditions":
+        return _choice(field, raw, DependencyConditions)
     if field == "wait_commands":
         return _choice(field, raw, WaitCommands)
     if field == "user_gates":

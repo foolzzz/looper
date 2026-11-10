@@ -217,6 +217,18 @@ describe("Knowledge vault settings", () => {
     expect(executionChanges(changed, project)).toEqual({ vault: vault === "on" ? "off" : "on" });
   });
 
+  it.each([null, "off", "on"] as const)("round trips dependency conditions, off by default (%s)", async (dependency_conditions) => {
+    const project = { dependency_conditions } as Project;
+    let draft = executionDraft(project);
+    await act(async () => root.render(<ProjectExecutionFields idPrefix="project" draft={draft}
+      onChange={(value) => { draft = value; }} />));
+    const control = container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Dependency conditions"]')!;
+    expect(control.getAttribute("aria-checked")).toBe(String(dependency_conditions === "on"));
+    expect(executionChanges(draft, project)).toEqual({});
+    await act(async () => control.click());
+    expect(executionChanges(draft, project)).toEqual({ dependency_conditions: dependency_conditions === "on" ? "off" : "on" });
+  });
+
   it.each([null, "off", "on"] as const)("round trips wait commands, off by default (%s)", async (wait_commands) => {
     const project = { wait_commands } as Project;
     let draft = executionDraft(project);

@@ -70,14 +70,21 @@ def wait_view(row: Mapping[str, Any]) -> dict[str, Any]:
         "checks": row.get("checks") or 0, "last_output": row.get("last_output") or "",
         "last_error": row.get("last_error") or "", "resolution": row.get("resolution") or "",
         "depends_on": list(row.get("depends_on") or []),
+        "ready_when": row.get("ready_when"), "ready_state": None,
     }
     # Keep the same timestamp format through HTTP and the Manager's tool serializer.
     return {key: value.isoformat() if isinstance(value, datetime) else value for key, value in view.items()}
 
 
-async def waits_view(task_id: str) -> list[dict[str, Any]]:
+async def waits_view(task_id: str, *, compact: bool = False) -> list[dict[str, Any]]:
     """The task's waits in plan order."""
-    return [wait_view(row) for row in await db_waits.list_for_task(task_id)]
+    views = [wait_view(row) for row in await db_waits.list_for_task(task_id)]
+    if compact:
+        for view in views:
+            if view["ready_when"] is None:
+                view.pop("ready_when")
+                view.pop("ready_state")
+    return views
 
 
 async def resume(task_id: str, label: str, *, has_planner: bool, bus: MessageBus,

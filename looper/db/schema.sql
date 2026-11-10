@@ -190,6 +190,7 @@ CREATE TABLE IF NOT EXISTS projects (
     room_consults_per_task INTEGER
     CHECK (room_consults_per_task >= 0 AND room_consults_per_task <= 100),
     wait_commands TEXT CHECK (wait_commands IN ('off', 'on')),
+    dependency_conditions TEXT CHECK (dependency_conditions IN ('off', 'on')),
     distill_lessons TEXT NOT NULL DEFAULT 'off' CONSTRAINT projects_distill_lessons_check
         CHECK (distill_lessons IN ('off', 'draft', 'write'))
 );
@@ -314,6 +315,7 @@ CREATE TABLE IF NOT EXISTS task_steps (
     completed_at     TIMESTAMPTZ,
     step_key TEXT NOT NULL DEFAULT '',
     depends_on TEXT[] NOT NULL DEFAULT '{}',
+    ready_when JSONB,
     review BOOLEAN NOT NULL DEFAULT false,
     validation_commands TEXT[] NOT NULL DEFAULT '{}',
     acceptance_criteria TEXT[] NOT NULL DEFAULT '{}',
@@ -405,7 +407,7 @@ CREATE TABLE IF NOT EXISTS task_journal (
                     'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement',
                     'session_switch', 'handoff', 'progress', 'profile_choice', 'concurrency_change',
                     'role_defined', 'gate_opened', 'gate_updated', 'gate_cancelled', 'gate_closed',
-                    'wait_opened', 'wait_extended', 'wait_closed')),
+                    'wait_opened', 'wait_extended', 'wait_closed', 'condition_blocked')),
     summary     TEXT NOT NULL DEFAULT '',
     learnings   TEXT[] NOT NULL DEFAULT '{}',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),

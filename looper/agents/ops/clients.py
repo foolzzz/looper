@@ -60,7 +60,7 @@ async def _pipeline(call: Call) -> dict[str, Any]:
                    "instruction": clip(s.get("instruction") or "", 200)}
                   for s in task.get("steps") or []],
         "gates": [_gate_listed(g) for g in await db_user_gates.list_for_task(task_id) if g.get("state") != "pending"],
-        "waits": await waits_view(task_id),
+        "waits": await waits_view(task_id, compact=True),
     }
 
 

@@ -28,6 +28,8 @@ TASK_WAIT = _object({
     "checks": _INT, "last_result": _enum(waits.CheckResult, nullable=True),
     **dict.fromkeys(("last_output", "last_error", "resolution"), _STR),
     "notice": {"type": ["string", "null"], "enum": ["sent", "dashboard", "failed", None]},
+    "ready_when": {"oneOf": [{"type": "null"}, _STR, {"type": "object"}]},
+    "ready_state": {"type": ["string", "null"], "enum": ["satisfied", "pending", "unsatisfiable", None]},
     "depends_on": _array(_STR)})
 _WAIT_RESULT = _object({"task_id": _STR, "wait": TASK_WAIT})
 
