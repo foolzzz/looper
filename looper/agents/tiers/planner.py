@@ -1219,7 +1219,7 @@ class PlannerAgent:
             step.role = (spec.role or (self._workflow or {}).get("work_role")
                          if spec.gate is None and spec.wait is None else None)
             step.review = (spec.gate is None and spec.wait is None
-                           and (spec.review or self._execution.review_all)
+                           and (spec.review or (self._execution.review_all and not self._is_verification(step)))
                            and not (self._panel_on and self._is_verification(step)))
             step.review_roles = [StepReviewRole(item.role, item.required) for item in spec.review_roles]
             if spec.gate is not None:
@@ -2734,7 +2734,7 @@ class PlannerAgent:
         project reviews every step."""
         if self._panel_on and self._is_verification(step):
             return False
-        return step.review or self._execution.review_all
+        return step.review or (self._execution.review_all and not self._is_verification(step))
 
     def _is_verification(self, step: PlanStep) -> bool:
         rule = (self._workflow or {}).get("verification")

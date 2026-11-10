@@ -573,7 +573,7 @@ def test_adjudication_must_address_current_blocking_with_a_bounded_reason(tmp_pa
 
 @pytest.mark.parametrize("panel", [False, True], ids=["without-panel", "with-panel"])
 @pytest.mark.parametrize("review_all", [False, True], ids=["explicit-review", "review-all"])
-def test_verification_review_exemption_requires_a_panel(planner_claude, agent_db, monkeypatch, panel, review_all):
+def test_verification_review_policy_with_and_without_a_panel(planner_claude, agent_db, monkeypatch, panel, review_all):
     from dataclasses import replace
 
     configure(agent_db, monkeypatch, review_all=review_all,
@@ -584,8 +584,9 @@ def test_verification_review_exemption_requires_a_panel(planner_claude, agent_db
     rows.append({**rows[0], "role_key": "verify_staging", "kind": "work", "role_prompt": "Verify the change."})
     monkeypatch.setattr(task_roles, "get", AsyncMock(side_effect=lambda _, key, *args: next(
         row for row in rows if row["role_key"] == key)))
+    needs_review = not panel and not review_all
     decisions = [decide("review"), decide("accept")]
-    decisions.extend([decide("accept")] if panel else [decide("review"), decide("accept")])
+    decisions.extend(([decide("review")] if needs_review else []) + [decide("accept")])
     claude = planner_claude(plan(step("work", review=not review_all),
                                 {**step("s1", "work", review=not review_all), "role": "verify_staging"}),
                             *decisions)
@@ -598,18 +599,19 @@ def test_verification_review_exemption_requires_a_panel(planner_claude, agent_db
         await h.start()
         await h.until(lambda: len(h.held) == 1)
         verification = h.planner._plan.steps[1]
-        assert verification.review is (not panel)
+        assert verification.review is needs_review
         # Restored steps may predate review_all and still have review=False.
-        assert h.planner._needs_review(replace(verification, review=False)) is (review_all and not panel)
+        assert h.planner._needs_review(replace(verification, review=False)) is False
+        assert h.planner._needs_review(replace(verification, review=True)) is (not panel)
         await h.release(WORK_OK)
         await h.finished()
 
     h = drive(claude, outcome, scenario)
     assert h.final().payload["status"] == "completed"
     work, verification = h.planner._plan.steps[:2]
-    assert len(h.reviews) == (len(MEMBERS) if panel else 2)
+    assert len(h.reviews) == (len(MEMBERS) if panel else 1 + needs_review)
     assert {envelope.payload["step_key"] for envelope in h.reviews} == (
-        {work.label} if panel else {work.label, verification.label})
-    assert verification.review is (not panel)
+        {work.label, verification.label} if needs_review else {work.label})
+    assert verification.review is needs_review
     assert verification.accept_when is None
     assert h.work_items[-1].payload["verification"] is True
