@@ -37,6 +37,7 @@ import os
 import re
 import shlex
 import shutil
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -583,6 +584,29 @@ async def freeze_review(workspace: StepWorkspace, *, step_key: str) -> StepWorks
     except _Unmerged as exc:
         raise GitError(str(exc)) from None
     return frozen
+
+
+async def snapshot_review(repo: Repo, *, task_id: str, step_key: str) -> str:
+    """Freeze shared output without changing the workers' HEAD, index or working tree."""
+    with tempfile.TemporaryDirectory(prefix="looper-review-index-") as directory:
+        env = {"GIT_INDEX_FILE": str(Path(directory) / "index")}
+        await _git(repo.toplevel, "read-tree", repo.head, env=env)
+        # An explicitly named ignored directory makes `git add` fail, even when it
+        # contains tracked files. Select tracked and non-ignored files first.
+        paths = await _git(repo.toplevel, "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+                           "--", repo.subdir or ".", env=env)
+        if paths.stdout:
+            pathspec = Path(directory) / "paths"
+            pathspec.write_bytes(paths.stdout)
+            # Force only this selected set so tracked files under ignored parents update too.
+            await _git(repo.toplevel, "--literal-pathspecs", "add", "-A", "-f", "--pathspec-file-nul",
+                       f"--pathspec-from-file={pathspec}", env=env)
+        tree = (await _git(repo.toplevel, "write-tree", env=env)).text
+    if tree == (await _git(repo.toplevel, "rev-parse", f"{repo.head}^{{tree}}")).text:
+        return repo.head
+    return (await _git(repo.toplevel, "commit-tree", "--no-gpg-sign", tree, "-p", repo.head,
+                       "-m", f"looper: review snapshot for step {step_key}" + _trailers(task_id, step_key),
+                       identity=True)).text
 
 
 async def merge(workspace: StepWorkspace, *, step_key: str, title: str,

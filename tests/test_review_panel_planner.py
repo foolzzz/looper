@@ -297,6 +297,111 @@ def test_isolated_review_keeps_its_workspace_without_blocking_accepted_downstrea
     drive(claude, outcome, scenario)
 
 
+@pytest.mark.parametrize("mode,commit_output", [("shared", True), ("shared", False), ("worktree", False)])
+def test_panel_reviews_use_independent_commits_while_another_step_commits(
+    planner_claude, agent_db, monkeypatch, tmp_path, mode, commit_output,
+):
+    from pathlib import Path
+    from fake_claude import fake_claude
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+    from tests.test_review_panel_workspaces import git
+    from tests.test_planner_workspaces import init_repo
+
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    configure(agent_db, monkeypatch)
+    agent_db.get_task_project.return_value["step_workspaces"] = mode
+    claude = planner_claude(plan(step("s1", review=True), step("s2")),
+                            decide("review"), decide("accept"), decide("accept"))
+
+    def outcome(envelope):
+        if envelope.message_type == MessageType.WORK_ITEM and envelope.payload["step_key"] == "s1":
+            directory = Path(envelope.payload["context"]["work_dir"])
+            (directory / "result.txt").write_text("reviewed output\n")
+            if commit_output:
+                git(directory, "add", "result.txt")
+                git(directory, "commit", "-qm", "Deliver result")
+            return {**WORK_OK, "head": git(directory, "rev-parse", "HEAD")}
+        return None
+
+    async def scenario(h):
+        init_repo(h.work_dir)
+        await h.start()
+        await h.until(lambda: len(h.reviews) == 3)
+        if mode == "shared" and not commit_output:
+            assert "result.txt" in git(h.work_dir, "status", "--porcelain")
+            assert git(h.work_dir, "diff", "--cached") == ""
+            assert git(h.work_dir, "rev-parse", "HEAD") != h.reviews[0].payload["head"]
+        other = next(e for e in h.work_items if e.payload["step_key"] == "s2")
+        other_dir = other.payload["context"]["work_dir"]
+        # The reviewer runs a real check; an independent worker commits during that run.
+        executable = fake_claude(tmp_path / "review", "import json, subprocess\nfrom pathlib import Path\n"
+            "before = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()\n"
+            "assert Path('result.txt').read_text() == 'reviewed output\\n'\n"
+            "assert not Path('review-output.txt').exists()\n"
+            "Path('review-output.txt').write_text('test output')\n"
+            f"subprocess.run(['git', '-C', {other_dir!r}, '-c', 'user.name=Example', "
+            "'-c', 'user.email=dev@example.org', 'commit', '--allow-empty', '-qm', 'Other step'], check=True)\n"
+            "after = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()\n"
+            "print(json.dumps({'type': 'result', 'subtype': 'success', 'result': json.dumps("
+            "{'passed': before == after, 'findings': []})}), flush=True)\n")
+        pool = WorkerPool(config=WorkerConfig(claude_bin=executable), runtime_root=tmp_path / "runtime")
+        directories = [Path(e.payload["context"]["work_dir"]) for e in h.reviews]
+        for envelope in h.reviews:
+            result = await pool._execute(envelope, is_verify=True)
+            assert result["passed"] is True, result
+            assert "failure" not in result
+            assert git(envelope.payload["context"]["work_dir"], "rev-parse", "HEAD") == envelope.payload["head"]
+            h.held.remove(envelope)
+            await h.answer(envelope, result)
+        assert len(set(directories)) == 3
+        assert all(d != h.work_dir and str(d) != other_dir for d in directories)
+        assert not (h.work_dir / "review-output.txt").exists()
+        h.held.remove(other)
+        await h.answer(other, WORK_OK)
+        assert (await h.finished()).payload["status"] == "completed"
+        assert all(s.status == "verified" for s in h.planner._plan.steps)
+        assert all(not directory.exists() for directory in directories)
+    drive(claude, outcome, scenario)
+
+
+def test_panel_retry_discards_old_snapshots_and_reviews_the_new_output(planner_claude, agent_db, monkeypatch):
+    from pathlib import Path
+    from tests.test_review_panel_workspaces import git
+    from tests.test_planner_workspaces import init_repo
+
+    configure(agent_db, monkeypatch)
+    claude = planner_claude(plan(step("s1", review=True)), decide("review"),
+                            decide("retry", feedback="Fix the output"), decide("review"), decide("accept"))
+
+    def outcome(envelope):
+        if envelope.message_type == MessageType.WORK_ITEM:
+            directory = Path(envelope.payload["context"]["work_dir"])
+            (directory / "output.txt").write_text(str(envelope.payload["attempt"]))
+            return {**WORK_OK, "head": git(directory, "rev-parse", "HEAD")}
+        return None
+
+    async def scenario(h):
+        init_repo(h.work_dir)
+        await h.start()
+        await h.until(lambda: len(h.reviews) == 3)
+        old = [Path(e.payload["context"]["work_dir"]) for e in h.reviews]
+        old_head = h.reviews[0].payload["head"]
+        await h.release(BLOCK)
+        await h.release(REVIEW_PASS)
+        await h.until(lambda: len(h.reviews) == 6)
+        assert all(not directory.exists() for directory in old)
+        for envelope in h.reviews[3:]:
+            directory = Path(envelope.payload["context"]["work_dir"])
+            assert directory not in old
+            assert (directory / "output.txt").read_text() == "2"
+            assert envelope.payload["head"] == git(directory, "rev-parse", "HEAD") != old_head
+        for _ in MEMBERS:
+            await h.release(REVIEW_PASS)
+        assert (await h.finished()).payload["status"] == "completed"
+    drive(claude, outcome, scenario)
+
+
 def test_review_chosen_after_work_still_uses_the_fixed_panel(planner_claude, agent_db, monkeypatch):
     configure(agent_db, monkeypatch)
     claude = planner_claude(plan(step("s1")), decide("review"), decide("accept"))

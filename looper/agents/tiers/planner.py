@@ -2018,7 +2018,7 @@ class PlannerAgent:
         start (None: none of them needs one)."""
         repo = await self._task_repo(plan)
         decided = workspaces.plan_round(in_flight=[
-            (plan.step(s.reviews).workspace is not None if s.reviews else s.isolated)
+            s.isolated
             for s in plan.steps if s.status in _IN_FLIGHT],
                                         ready=[s.isolated for s in ready], repo=repo)
         if decided.note and decided.note != self._round_note:
@@ -2359,8 +2359,21 @@ class PlannerAgent:
                 {"severity": "blocking", "where": "", "text": f"Cannot read role {step.role}"}]})
             return
         context = {"work_dir": plan.work_dir}
-        if target.workspace is not None:
-            context = {"work_dir": target.workspace.work_dir, "workspace": target.workspace.context()}
+        head = target.workspace.result_commit if target.workspace is not None else (target.result or {}).get("head")
+        if head:
+            # Each seat checks the same commit in its own checkout. Tests may write files, and other
+            # steps may commit in the task directory while a required or advisory review is running.
+            repo = await workspaces.inspect(plan.work_dir)
+            base = _RoundBase(repo=repo, commit=head) if isinstance(repo, Repo) else _RoundBase(error=repo.reason)
+            try:
+                await self._open_workspace(plan, step, base)
+            except _NoWorkspace as exc:
+                await self._review_done(plan, step, {"passed": False, "failure": "snapshot_unavailable",
+                    "findings": [{"severity": "blocking", "where": "HEAD", "text": str(exc)}]})
+                return
+            context = {"work_dir": step.workspace.work_dir}
+            if target.workspace is not None:
+                context["workspace"] = {**step.workspace.context(), "base_commit": target.workspace.base_commit}
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address, target=worker_address(step.reviewer_id), message_type=MessageType.VERIFY_REQUEST,
             payload={"task_id": step.step_id, "parent_task_id": self._task_id, "plan_id": plan.plan_id,
@@ -2368,7 +2381,7 @@ class PlannerAgent:
                      "step_key": target.label, "instruction": target.instruction,
                      "work_result": target.result or {}, "acceptance_criteria": target.acceptance_criteria,
                      **({"feedback": list(target.feedback)} if target.feedback else {}), "context": context,
-                     "severity": True, "head": (target.result or {}).get("head"),
+                     "severity": True, "head": head,
                      "worker_runtime_id": (target.result or {}).get("runtime_id"),
                      **({"task_role": role.payload()} if role else {})},
             correlation_id=plan.correlation_id, metadata={"origin_channel_id": plan.origin_channel_id}))
@@ -2424,6 +2437,8 @@ class PlannerAgent:
         for seat in seats:
             if seat.status == "dispatched":
                 await self._kill_worker(seat, run_id=seat.reviewer_id)
+            if seat.workspace is not None:
+                seat.workspace = await self._discard(seat.workspace)
             seat.status = "skipped" if drop else "pending"
             seat.result = None
             seat.worker_id = seat.reviewer_id = None
@@ -2648,15 +2663,23 @@ class PlannerAgent:
             seats = self._expand_reviews(plan, [step])
             await self._save(plan, step, *seats)
         if step.accept_when is not None:
-            if step.isolated and step.workspace is not None:
-                try:
+            try:
+                if step.isolated and step.workspace is not None:
                     step.workspace = await workspaces.freeze_review(step.workspace, step_key=step.label)
-                except workspaces.GitError as exc:
-                    await self._attempt_failed(plan, step, f"Cannot freeze review workspace: {exc}")
-                    return
-                await self._save_workspace(step.workspace)
-                step.result = {**(step.result or {}), "worker_head": (step.result or {}).get("head"),
-                               "head": step.workspace.result_commit}
+                    await self._save_workspace(step.workspace)
+                    head = step.workspace.result_commit
+                else:
+                    repo = await workspaces.inspect(plan.work_dir)
+                    if isinstance(repo, Repo):
+                        head = await workspaces.snapshot_review(repo, task_id=self._task_id, step_key=step.label)
+                    elif repo.repository:
+                        raise workspaces.GitError(repo.reason)
+                    else:
+                        head = None
+            except workspaces.GitError as exc:
+                await self._attempt_failed(plan, step, f"Cannot freeze review workspace: {exc}")
+                return
+            step.result = {**(step.result or {}), "worker_head": (step.result or {}).get("head"), "head": head}
             await self._save(plan, step)
             await update_task_phase(self._task_id, "verifying")
             await self._settle_reviews(plan, step)
