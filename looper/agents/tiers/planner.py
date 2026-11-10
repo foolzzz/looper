@@ -2528,16 +2528,22 @@ class PlannerAgent:
         """Offer impossible starts to the Planner; failed turns retry on the next event."""
         changed = False
         while plan.status in _LIVE and not plan.has_failed:
-            blocked = next((s for s in plan.steps if s.status == "pending" and s.ready_when is not None
+            blocked = next((s for s in plan.steps if s.status == "pending"
                             and s.step_id not in self._condition_attempts
-                            and plan.ready_state(s) is State.UNSATISFIABLE), None)
+                            and (plan.ready_state(s) is State.UNSATISFIABLE if s.ready_when is not None else
+                                 any(source is None or source.status == "skipped"
+                                     for source in (plan.step(sid) for sid in s.depends_on)))), None)
             if blocked is None:
                 break
             self._condition_attempts.add(blocked.step_id)
-            condition = plan.condition_text(blocked)
+            labels = plan.labels()
+            condition = (plan.condition_text(blocked) if blocked.ready_when is not None else
+                         "all of (" + ", ".join(labels.get(sid, sid) for sid in blocked.depends_on) + ")")
             marker = f"Condition handled: {condition}. "
             reasons = []
-            for sid in sorted(leaves(parse_condition(blocked.ready_when, "ready_when"))):
+            dependencies = (leaves(parse_condition(blocked.ready_when, "ready_when"))
+                            if blocked.ready_when is not None else blocked.depends_on)
+            for sid in sorted(dependencies):
                 source = plan.step(sid)
                 outcome = StepOutcome.from_step(source)
                 if outcome.reason:

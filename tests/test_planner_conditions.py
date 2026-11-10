@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from looper.agents.tiers.planner import PlanStep, TaskPlan
 from tests.test_planner_agent import REVIEW_PASS, WORK_OK, _project, always, chat, decide, drive, plan, step
 
@@ -80,24 +82,53 @@ def test_completed_condition_starts_while_the_source_is_being_reviewed(planner_c
     assert h.final().payload["status"] == "completed"
 
 
-def test_skipping_an_impossible_condition_cascades_to_its_dependents(planner_claude: Any, agent_db: Any) -> None:
+@pytest.mark.parametrize("explicit_condition", [True, False])
+def test_skipping_an_impossible_condition_cascades_to_its_dependents(
+    planner_claude: Any, agent_db: Any, explicit_condition: bool,
+) -> None:
     agent_db.get_task_project.return_value = {**_project(), "dependency_conditions": "on", "user_gates": "on"}
     gate = {"id": "g1", "kind": "gate", "topic": "Choose source", "depends_on": [],
             "agenda": [{"question": "Which source?"}]}
+    dependent = step("s5", "s4")
+    if explicit_condition:
+        dependent["ready_when"] = "s4"
     claude = planner_claude(
         plan(step("s1"), gate, {**step("s4", "g1"), "ready_when": {"step": "g1", "on": "passed"}},
-             {**step("s5", "s4"), "ready_when": "s4"}),
+             dependent, step("s6", "s5")),
         decide("accept", gates=[{"id": "g1", "action": "cancel", "resolution": "Source unavailable"}]),
-        chat("Skip s4."), chat("Skip s5 too."),
+        chat("Skip s4."), chat("Skip s5 too."), chat("Skip s6 too."),
     )
     h = drive(claude, always(WORK_OK))
     assert h.final().payload["status"] == "completed"
     assert [item.payload["step_key"] for item in h.work_items] == ["s1"]
     assert "Step s4 can no longer start" in claude.turns()[2]["text"]
     assert "Step s5 can no longer start" in claude.turns()[3]["text"]
+    assert "s4: step is skipped" in claude.turns()[3]["text"]
+    assert "Step s6 can no longer start" in claude.turns()[4]["text"]
     rows = {row["key"]: row for row in agent_db.store.steps["t1"].values()}
-    assert rows["s4"]["status"] == rows["s5"]["status"] == "skipped"
-    assert sum(entry["kind"] == "condition_blocked" for entry in agent_db.store.journal["t1"]) == 2
+    assert rows["s4"]["status"] == rows["s5"]["status"] == rows["s6"]["status"] == "skipped"
+    assert sum(entry["kind"] == "condition_blocked" for entry in agent_db.store.journal["t1"]) == 3
+
+
+def test_a_missing_ordinary_dependency_asks_before_skipping(agent_db: Any, monkeypatch: Any, tmp_path: Any) -> None:
+    import asyncio
+
+    from looper.agents.tiers.planner import PlannerAgent
+
+    blocked = PlanStep("dependent", 0, "Needs missing output", depends_on=["missing"])
+    plan_ = TaskPlan("p", "g", "build", "", steps=[blocked], status="executing")
+    agent = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+
+    async def answer(kind: Any, text: str, check: Any) -> Any:
+        assert "[CHAT] Step dependent can no longer start" in text
+        assert "missing: step no longer exists" in text
+        assert blocked.status == "pending"
+        return check(chat("Skip the step without its required output."))
+
+    monkeypatch.setattr(agent, "_ask", answer)
+    assert asyncio.run(agent._blocked_conditions(plan_))
+    assert plan_.is_complete and blocked.status == "skipped"
+    assert [entry["kind"] for entry in agent_db.store.journal["t1"]] == ["condition_blocked", "decision"]
 
 
 def test_a_failed_condition_turn_remains_pending_and_retries_on_the_next_event(planner_claude: Any, agent_db: Any) -> None:
