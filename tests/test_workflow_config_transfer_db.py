@@ -58,6 +58,57 @@ def test_workflow_export_roundtrip_through_http_import(tmp_path, monkeypatch, ro
     run_db(test, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("route", ["import_upload", "import_preview"])
+def test_workflow_import_requires_operator_identity(tmp_path, monkeypatch, route):
+    async def test(pool):
+        await workflows.put(Workflow.from_dict({"key": "reviewed", "name": "Reviewed", "review_all": True}), pool=pool)
+        before = await workflows.list_workflows(pool=pool)
+        document = {"format": "looper-config/v4", "workflows": [
+            {"key": "reviewed", "name": "Reviewed", "review_all": False}]}
+        body = {"document": document} if route == "import_preview" else document
+        async with v1_api(tmp_path, pool) as call:
+            status, refused = await call(f"config.{route}", body, client=True)
+            assert status == 403 and refused["error"]["code"] == "forbidden", refused
+            assert await workflows.list_workflows(pool=pool) == before
+            assert not list((tmp_path / "config-imports").glob("*.json"))
+            # The same valid document still lets the operator replace the preset.
+            status, staged = await call(f"config.{route}", body)
+            assert status == 200, staged
+            assert await workflows.list_workflows(pool=pool) == before
+            status, applied = await call("config.import_apply", {"import_id": staged["result"]["import_id"]})
+            assert status == 200 and applied["result"]["plan"]["applied"], applied
+            saved = Workflow.from_row(await workflows.get("reviewed", pool=pool))
+            assert saved.review_all is False
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("action", ["config.import_apply", "confirm"])
+def test_client_workflow_import_is_rechecked_before_execution(tmp_path, monkeypatch, action):
+    async def test(pool):
+        await workflows.put(Workflow.from_dict({"key": "reviewed", "name": "Reviewed", "review_all": True}), pool=pool)
+        before = await workflows.list_workflows(pool=pool)
+        document = {"format": "looper-config/v4", "workflows": [],
+                    "settings": {"scheduler": {"min_interval_seconds": 73}}}
+        async with v1_api(tmp_path, pool) as call:
+            status, staged = await call("config.import_preview", {"document": document}, client=True)
+            assert status == 200, staged
+            import_id = staged["result"]["import_id"]
+            body = {"import_id": import_id}
+            if action == "confirm":
+                status, confirmation = await call("config.import_apply", body, client=True)
+                assert status == 202, confirmation
+                body = {"confirmation_id": confirmation["confirmation_id"]}
+            document["workflows"] = [{"key": "reviewed", "name": "Reviewed", "review_all": False}]
+            (tmp_path / "config-imports" / f"{import_id}.json").write_text(json.dumps(document))
+            status, refused = await call(action, body, client=True)
+            assert status == 403 and refused["error"]["code"] == "forbidden", refused
+            assert await workflows.list_workflows(pool=pool) == before
+            assert await pool.fetchval("SELECT value FROM system_settings WHERE key='scheduler.min_interval_seconds'") is None
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_workflow_and_project_defaults_roundtrip_into_fresh_installation():
     async def test():
         async with fresh_schema() as source, fresh_schema() as destination:
