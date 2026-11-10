@@ -2070,6 +2070,14 @@ export async function fetchTaskRoom(
  * it opened. */
 export type GateState = "pending" | "open" | "discussing" | "passed" | "cancelled" | "skipped";
 
+/** JSON dependency conditions, with step ids as leaves. */
+export type Condition = string
+  | { step: string; on: "completed" | "verified" | "passed" }
+  | { all_of: Condition[] }
+  | { any_of: Condition[] }
+  | { k_of: number; of: Condition[] };
+export type ConditionState = "satisfied" | "pending" | "unsatisfiable";
+
 export interface TaskWait {
   step: string;
   step_id: string;
@@ -2092,6 +2100,8 @@ export interface TaskWait {
   notice: "sent" | "dashboard" | "failed" | null;
   closed_at: string | null;
   depends_on: string[];
+  ready_when?: Condition | null;
+  ready_state?: ConditionState | null;
 }
 
 async function moveWait(taskId: string, step: string, action: "resume" | "cancel"): Promise<TaskWait> {
@@ -2168,6 +2178,8 @@ export interface UserGate {
   plan_change: { added: string[]; dropped: string[]; stopped: string[] } | null;
   /** The ids of the steps it waits for before it opens. */
   depends_on: string[];
+  ready_when?: Condition | null;
+  ready_state?: ConditionState | null;
   /** While it waits: for the user's word, or for the Planner to take the user's messages; null otherwise. */
   waiting_on: "user" | "planner" | null;
   /** How many of the user's messages a failed Planner turn had and no later turn has taken. While no newer message
@@ -2427,6 +2439,8 @@ export interface TaskStep {
   target_files: string[];
   /** The ids of the steps it needs before it starts. */
   depends_on: string[];
+  ready_when?: Condition | null;
+  ready_state?: ConditionState | null;
   /** pending, dispatched, deciding, completed (in review), verified, failed or skipped (dropped by a replan); a gate
    * is waiting_user while it waits, verified once it passed or was cancelled. A wait is waiting until the Planner
    * settles it, then verified, failed or skipped. */

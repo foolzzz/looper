@@ -4,9 +4,11 @@ import { historyHref } from "@/pages/agent-history";
 import { gateWaitsOn } from "@/lib/gates";
 import { waitCheckText } from "@/lib/waits";
 import { MERGE_ERRORS, shortCommit, workspaceState } from "@/lib/workspaces";
+import { isPlainAllOf } from "@/lib/pipeline-layout";
 import {
   reviewingRole,
   runProfile,
+  type Condition,
   type GateAgendaItem,
   type LlmRecord,
   type TaskRole,
@@ -204,11 +206,27 @@ export interface StepCardContext {
   runs?: TaskRuns;
 }
 
+function dependencySections(step: TaskStep, stepsById: Map<string, TaskStep>, lookOf: StepCardContext["lookOf"]): CardSection[] {
+  const name = (id: string) => stepsById.get(id)?.step_key || id;
+  const render = (condition: Condition): string => {
+    if (typeof condition === "string") return name(condition);
+    if ("step" in condition) return name(condition.step) +
+      (condition.on === "completed" ? " 完成" : condition.on === "passed" ? " 通过" : "");
+    const children = "all_of" in condition ? condition.all_of : "any_of" in condition ? condition.any_of : condition.of;
+    const label = "all_of" in condition ? "全部" : "any_of" in condition ? "任一" : `${condition.k_of}/${children.length}`;
+    return `${label}（${children.map(render).join("，")}）`;
+  };
+  if (step.ready_when && !isPlainAllOf(step.ready_when)) return text("Depends on", render(step.ready_when));
+  const deps = (step.depends_on ?? []).map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
+  return deps.length
+    ? [{ kind: "steps", title: "Depends on", steps: deps.map((d) => ({ name: d.step_key || d.id, look: lookOf(d) })) }]
+    : [];
+}
+
 /** A step's card: what it does, how it is checked, what it waits for, who ran it and what came of it. */
 export function stepCard(
   step: TaskStep, { taskId, active, look, lookOf, stepsById, skippedBecause, workspaces, room, runs }: StepCardContext,
 ): NodeCard {
-  const deps = (step.depends_on ?? []).map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
   const span = stepSpan(step, active);
   // completed_at is the last time the step went to review or ended; a step running again still has it.
   const finished = step.completed_at && !["pending", "dispatched", "deciding"].includes(step.status) &&
@@ -221,9 +239,7 @@ export function stepCard(
       ...text("Instruction", step.instruction),
       ...list("Acceptance criteria", step.acceptance_criteria),
       ...list("Files", step.target_files, true),
-      ...(deps.length
-        ? [{ kind: "steps" as const, title: "Depends on", steps: deps.map((d) => ({ name: d.step_key || d.id, look: lookOf(d) })) }]
-        : []),
+      ...dependencySections(step, stepsById, lookOf),
       ...facts("Runs", [
         step.worker_id && { label: "Worker", value: step.worker_id, href: historyHref(step.worker_id, taskId) },
         step.worker_id && agentFact(runs?.worker, step.id, "worker-agent"),
@@ -263,7 +279,6 @@ export function waitCard(
   step: TaskStep, wait: TaskWait | undefined,
   { look, lookOf, stepsById }: Pick<StepCardContext, "look" | "lookOf" | "stepsById">,
 ): NodeCard {
-  const deps = step.depends_on.map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
   return {
     name: step.step_key || `step ${step.step_index + 1}`, look, roles: [],
     sections: [
@@ -271,7 +286,7 @@ export function waitCard(
       ...(wait ? text("Check", waitCheckText(wait.check)) : []),
       ...text("Resolution", wait?.resolution),
       ...text("Last error", wait?.last_error, { tone: "destructive" }),
-      ...(deps.length ? [{ kind: "steps" as const, title: "Depends on", steps: deps.map((s) => ({ name: s.step_key || s.id, look: lookOf(s) })) }] : []),
+      ...dependencySections(step, stepsById, lookOf),
       ...facts("Timing", [
         wait?.due_at && { label: "Earliest resume", value: formatWhen(wait.due_at) },
         wait?.deadline_at && { label: "Deadline", value: formatWhen(wait.deadline_at) },
@@ -290,7 +305,6 @@ export function gateCard(
   { look, lookOf, stepsById, active }: Omit<StepCardContext, "taskId" | "skippedBecause"> & { active: boolean },
 ): NodeCard {
   const waitsOn = gate && gateWaitsOn(gate, active);
-  const deps = (step.depends_on ?? []).map((id) => stepsById.get(id)).filter((s): s is TaskStep => !!s);
   const notDelivered = gate?.not_delivered ?? 0;
   return {
     name: step.step_key || `step ${step.step_index + 1}`,
@@ -310,9 +324,7 @@ export function gateCard(
       ...list("Assumptions", gate?.summary?.assumptions),
       ...list("Still open", gate?.summary?.open),
       ...(gate?.state === "cancelled" ? text("Cancelled", gate.resolution || "Cancelled by the Planner") : []),
-      ...(deps.length
-        ? [{ kind: "steps" as const, title: "Depends on", steps: deps.map((d) => ({ name: d.step_key || d.id, look: lookOf(d) })) }]
-        : []),
+      ...dependencySections(step, stepsById, lookOf),
       ...facts("Timing", [
         gate?.opened_at && { label: "Opened", value: formatWhen(gate.opened_at) },
         gate?.closed_at && { label: "Closed", value: formatWhen(gate.closed_at) },
