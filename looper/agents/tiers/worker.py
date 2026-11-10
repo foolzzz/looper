@@ -38,6 +38,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -463,6 +464,14 @@ class RunContext:
     verification: dict[str, Any] | None = None
 
 
+def _verification_paths(work_dir: str) -> tuple[Path, list[str]]:
+    root = subprocess.run(["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
+                          capture_output=True, check=True, timeout=5).stdout.decode().strip()
+    paths = subprocess.run(["git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                           capture_output=True, check=True, timeout=5).stdout
+    return Path(root), sorted(set(os.fsdecode(p) for p in paths.split(b"\0") if p))
+
+
 def _verification_snapshot(work_dir: str) -> dict[str, Any]:
     def git(*args: str) -> subprocess.CompletedProcess:
         return subprocess.run(["git", "-C", work_dir, *args], capture_output=True, timeout=5)
@@ -473,10 +482,103 @@ def _verification_snapshot(work_dir: str) -> dict[str, Any]:
         head, status = git("rev-parse", "--verify", "HEAD"), git("status", "--porcelain")
         if status.returncode:
             return {"git": True, "head": None, "status_sha256": None, "error": "git_status_unavailable"}
+        root, paths = _verification_paths(work_dir)
+        content = hashlib.sha256()
+        for name in paths:
+            path = root / name
+            if any((root / parent).is_symlink() for parent in Path(name).parents):
+                raise OSError("verification path crosses a symlink")
+            content.update(os.fsencode(name) + b"\0")
+            if path.is_symlink():
+                content.update(b"link\0" + hashlib.sha256(os.fsencode(os.readlink(path))).digest())
+            elif path.is_file():
+                content.update(str(path.stat().st_mode).encode() + b"\0")
+                with path.open("rb") as source:
+                    content.update(hashlib.file_digest(source, "sha256").digest())
+            elif path.exists():
+                raise OSError("unsupported verification path")
+            else:
+                content.update(b"missing")
+        index = git("diff", "--cached", "--binary", "--no-ext-diff")
+        if index.returncode:
+            raise OSError("cannot read verification index")
         return {"git": True, "head": head.stdout.decode().strip() if head.returncode == 0 else None,
-                "status_sha256": hashlib.sha256(status.stdout).hexdigest()}
-    except (OSError, subprocess.TimeoutExpired):
+                "status_sha256": hashlib.sha256(status.stdout).hexdigest(),
+                "content_sha256": content.hexdigest(), "index_sha256": hashlib.sha256(index.stdout).hexdigest()}
+    except (OSError, subprocess.SubprocessError):
         return {"git": False, "head": None, "status_sha256": None, "error": "git_snapshot_unavailable"}
+
+
+def _verification_baseline(work_dir: str, backup: Path) -> dict[str, Any]:
+    """Keep the first attempt's baseline on disk, including uncommitted work and the index."""
+    manifest = backup / "baseline.json"
+    current = _verification_snapshot(work_dir)
+    if manifest.exists():
+        before = json.loads(manifest.read_text())["snapshot"]
+        return before if current == before else {**before, "error": "verification_baseline_changed"}
+    if not current["git"] or current.get("error"):
+        return current
+    root, paths = _verification_paths(work_dir)
+    backup.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for name in paths:
+        source = root / name
+        if source.is_symlink() or source.is_file():
+            target = backup / "files" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target, follow_symlinks=False)
+            saved.append(name)
+    index = Path(subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-path", "index"],
+                               check=True, capture_output=True, timeout=5).stdout.decode().strip())
+    if index.exists():
+        shutil.copy2(index, backup / "index")
+    ref = subprocess.run(["git", "-C", str(root), "symbolic-ref", "-q", "HEAD"],
+                         capture_output=True, timeout=5).stdout.decode().strip()
+    if _verification_snapshot(work_dir) != current:
+        return {**current, "error": "verification_baseline_changed"}
+    manifest.write_text(json.dumps({"snapshot": current, "paths": saved, "ref": ref}))
+    return current
+
+
+def _restore_verification(work_dir: str, backup: Path) -> bool:
+    """Undo only the verifier's changes; preserve the developer's dirty files and staging."""
+    try:
+        before = json.loads((backup / "baseline.json").read_text())
+        root, paths = _verification_paths(work_dir)
+        saved = set(before["paths"])
+        for name in sorted(set(paths) | saved, reverse=True):
+            path = root / name
+            for parent in reversed(Path(name).parents):
+                ancestor = root / parent
+                if ancestor.is_symlink():
+                    ancestor.unlink()
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+        for name in before["paths"]:
+            target = root / name
+            if target.is_dir():
+                target.rmdir()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(backup / "files" / name, target, follow_symlinks=False)
+        def git(*args: str) -> bytes:
+            return subprocess.run(["git", "-C", str(root), *args], check=True,
+                                  capture_output=True, timeout=5).stdout
+        ref, head = before["ref"], before["snapshot"]["head"]
+        if ref:
+            git("symbolic-ref", "HEAD", ref)
+        if head is not None:
+            git("update-ref", *([ref, head] if ref else ["--no-deref", "HEAD", head]))
+        elif ref:
+            git("update-ref", "-d", ref)
+        index = Path(git("rev-parse", "--path-format=absolute", "--git-path", "index").decode().strip())
+        if (backup / "index").exists():
+            shutil.copy2(backup / "index", index)
+        else:
+            index.unlink(missing_ok=True)
+        return _verification_snapshot(work_dir) == before["snapshot"]
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        logger.exception("cannot restore verification baseline")
+        return False
 
 
 @dataclass(frozen=True)
@@ -1339,8 +1441,17 @@ class WorkerPool:
                 return {"passed": False, "findings": [problem], "summary": problem}
             return {"status": "failed", "error": problem}
 
-        verification = (await asyncio.to_thread(_verification_snapshot, work_dir)
-                        if payload.get("verification") is True and not is_verify else None)
+        verification = None
+        if payload.get("verification") is True and not is_verify:
+            try:
+                verification = await asyncio.to_thread(_verification_baseline, work_dir,
+                    self._verification_backup(parent_task_id, payload.get("task_id"), work_dir))
+            except (OSError, ValueError, subprocess.SubprocessError):
+                verification = {"git": True, "error": "git_snapshot_unavailable"}
+            if verification.get("error"):
+                error = "Verification changed the code: repository baseline unavailable or changed"
+                return {"status": "failed", "failure": "verification_changed_code", "error": error,
+                        "summary": error, "verification": verification}
         if is_verify:
             prompt = self._build_verify_prompt(payload)
         else:
@@ -2021,7 +2132,8 @@ class WorkerPool:
         before = ctx.verification
         assert before is not None
         after = await asyncio.to_thread(_verification_snapshot, ctx.work_dir)
-        details = {**before, "head_after": after["head"], "status_sha256_after": after["status_sha256"]}
+        details = {**before, "head_after": after["head"], "status_sha256_after": after["status_sha256"],
+                   "content_sha256_after": after.get("content_sha256")}
         reported = report if report is not None else result
         reasons = []
         if any(source.get("changed_files") or source.get("deleted_files") for source in (reported, result)):
@@ -2032,7 +2144,14 @@ class WorkerPool:
             reasons.append("HEAD changed")
         if before["git"] and before["status_sha256"] != after["status_sha256"]:
             reasons.append("working tree changed")
+        if before["git"] and any(before.get(key) != after.get(key) for key in ("content_sha256", "index_sha256")):
+            reasons.append("file contents or index changed")
         if reasons:
+            if before["git"]:
+                details["restored"] = await asyncio.to_thread(_restore_verification, ctx.work_dir,
+                    self._verification_backup(ctx.parent_task_id, ctx.step_id, ctx.work_dir))
+                if not details["restored"]:
+                    reasons.append("baseline restoration failed; repair required")
             error = "Verification changed the code: " + "; ".join(reasons)
             result = {**result, "status": "failed", "failure": "verification_changed_code",
                       "error": error, "summary": error}
@@ -2042,6 +2161,10 @@ class WorkerPool:
             note = "Verification guard: report only (working directory is not a Git repository)."
             result = {**result, "summary": f"{result.get('summary') or ''}\n{note}".strip()}
         return {**result, "verification": details}
+
+    def _verification_backup(self, task_id: str, step_id: str | None, work_dir: str) -> Path:
+        key = hashlib.sha256(json.dumps([task_id, step_id, str(Path(work_dir).resolve())]).encode()).hexdigest()
+        return self._runtime_root / ".local" / "verification" / key
 
     @staticmethod
     def _run_limits(launch: Launch, project: dict[str, Any] | None,

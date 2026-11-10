@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper.agents.task_roles import RoleKind
+from looper.agents.message import MessageEnvelope, MessageType, TASK_ROUTER_ADDRESS
+from looper.agents.tiers.planner import PlannerAgent
 from looper.agents.tiers.planner_protocol import (
     Decision, DecisionContext, PlanView, ProtocolError, ResultKind, parse_decision, parse_plan,
 )
@@ -164,14 +166,14 @@ def test_workflow_prerequisites_cannot_be_bypassed_by_any_of(rule):
 
 
 @pytest.mark.parametrize("on", [True, False])
-def test_failed_escalation_decision_cannot_accept_an_unreviewed_result(
+def test_failed_decision_at_retry_limit_still_requires_review_with_escalation(
     planner_claude, agent_db, monkeypatch, on,
 ):
     configure(agent_db, monkeypatch, False, max_step_retries=0, escalate_on_exhaustion=on)
     claude = planner_claude(plan(step("s1", review=True)), "<error>")
-    h = drive(claude, always(WORK_OK))
-    assert h.final().payload["status"] == ("failed" if on else "completed")
-    assert not h.reviews
+    h = drive(claude, always(WORK_OK, REVIEW_PASS))
+    assert h.final().payload["status"] == "completed"
+    assert len(h.reviews) == int(on)
 
 
 @pytest.mark.parametrize("on", [True, False])
@@ -211,3 +213,136 @@ def test_verification_start_failures_also_exhaust_rounds(planner_claude, agent_d
     assert len(rounds) == (2 if on else 0)
     assert len(h.work_items) == 1
     assert h.planner._plan.steps[1].retries == (1 if on else 2)
+
+
+@pytest.mark.parametrize("retries", [0, 1])
+def test_success_at_retry_limit_still_enters_first_review(planner_claude, agent_db, monkeypatch, retries):
+    configure(agent_db, monkeypatch, False, review_all=True, max_step_retries=retries,
+              escalate_on_exhaustion=True)
+    replies = [plan(step("s1"))]
+    if retries:
+        replies.append(decide("retry", feedback="Fix the failure"))
+    replies += [decide("review"), decide("accept")]
+    h = drive(planner_claude(*replies), lambda e: REVIEW_PASS if e.message_type is MessageType.VERIFY_REQUEST else
+              (WORK_FAILED if retries and e.payload["attempt"] == 1 else WORK_OK))
+    assert h.final().payload["status"] == "completed"
+    assert len(h.work_items) == retries + 1
+    assert len(h.reviews) == 1
+
+
+@pytest.mark.parametrize("bypass", ["retry", "replace", "unreviewed", "verification_repair", "condition"])
+def test_verification_code_change_requires_reviewed_repair(planner_claude, agent_db, monkeypatch, bypass):
+    configure(agent_db, monkeypatch)
+    repair = step("fix", "s1", review=True)
+    verification = {**step("v2", "fix"), "role": VERIFY}
+    candidates = {
+        "retry": decide("retry", feedback="Try the dirty baseline"),
+        "replace": decide("replan", steps=[{**step("v2", "s1"), "role": VERIFY}]),
+        "unreviewed": decide("replan", steps=[step("fix", "s1"), verification]),
+        "verification_repair": decide("replan", steps=[{**repair, "role": VERIFY}, verification]),
+        "condition": decide("replan", steps=[repair, {**verification, "depends_on": ["s1", "fix"],
+                                      "ready_when": {"any_of": ["s1", "fix"]}}]),
+    }
+    if bypass == "condition":
+        agent_db.get_task_project.return_value["task_workflow"]["dependency_conditions"] = True
+    claude = planner_claude(plan(step("s1"), {**step("v1", "s1"), "role": VERIFY}), decide("accept"),
+                            candidates[bypass], decide("replan", steps=[repair, verification]),
+                            decide("review"), decide("accept"), decide("accept"))
+
+    def outcome(e):
+        if e.message_type is MessageType.VERIFY_REQUEST:
+            return REVIEW_PASS
+        if e.payload["step_key"] == "v1":
+            return {**WORK_FAILED, "failure": "verification_changed_code"}
+        return WORK_OK
+
+    h = drive(claude, outcome)
+    assert h.final().payload["status"] == "completed"
+    assert [e.payload["step_key"] for e in h.work_items] == ["s1", "v1", "fix", "v2"]
+    assert [e.payload["step_key"] for e in h.reviews] == ["fix"]
+    rounds = [json.loads(e["summary"]) for e in agent_db.store.journal["t1"]
+              if e["kind"] == "verification_round"]
+    assert rounds[0]["failure"] == "verification_changed_code"
+
+
+def test_verification_repair_requirement_survives_replan_and_restart(planner_claude, agent_db, monkeypatch):
+    configure(agent_db, monkeypatch)
+    repair = step("fix", "s1", review=True)
+    verification = {**step("v2", "fix"), "role": VERIFY}
+    claude = planner_claude(plan(step("s1"), {**step("v1", "s1"), "role": VERIFY}), decide("accept"),
+                            decide("replan", steps=[repair, verification]),
+                            decide("review"), decide("accept"), decide("accept"))
+    resumed = False
+
+    def outcome(e):
+        if e.message_type is MessageType.VERIFY_REQUEST:
+            return REVIEW_PASS
+        if e.payload["step_key"] == "v1":
+            return {**WORK_FAILED, "failure": "verification_changed_code"}
+        if e.payload["step_key"] == "fix" and not resumed:
+            return None
+        return WORK_OK
+
+    async def scenario(h):
+        nonlocal resumed
+        await h.start()
+        await h.until(lambda: len(h.held) == 1)
+        await h.planner.stop()
+        saved = {s["key"]: s for s in agent_db.store.steps["t1"].values()}
+        assert saved["v1"]["status"] == "skipped"
+        agent_db.store.tasks["t1"] = {"requirement": "build the calc package", "work_dir": str(h.work_dir)}
+        h.held.clear()
+        resumed = True
+        h.planner = PlannerAgent(task_id="t1", runtime_root=h.work_dir.parent, claude_bin=claude.bin)
+        # Pause the resumed repair so admission is checked against the reloaded, unresolved violation.
+        h.outcome = lambda e: None if e.payload["step_key"] == "fix" else outcome(e)
+        await h.planner.start(h.bus)
+        await h.bus.publish(MessageEnvelope.create(source=TASK_ROUTER_ADDRESS, target=h.planner.agent_address,
+            message_type=MessageType.TASK_RESUME, payload={"task_id": "t1"}, correlation_id="corr-1"))
+        await h.until(lambda: len(h.held) == 1)
+        await h.planner._read_roles()
+        checked = h.planner._checked(h.planner._plan.view())
+        assert checked.verification_repair_required is True
+        with pytest.raises(ProtocolError, match="repair step"):
+            parse_decision(decide("replan", steps=[{**step("v3", "s1"), "role": VERIFY}]),
+                           DecisionContext("fix", ResultKind.WORK, False, True, 0), checked)
+        h.outcome = outcome
+        await h.release(WORK_OK)
+        await h.finished()
+        assert h.planner._checked(h.planner._plan.view()).verification_repair_required is False
+
+    h = drive(claude, outcome, scenario)
+    assert h.final().payload["status"] == "completed"
+    assert [e.payload["step_key"] for e in h.reviews] == ["fix"]
+    assert [e.payload["step_key"] for e in h.work_items].count("v1") == 1
+
+
+def test_skipping_repair_cannot_complete_task(planner_claude, agent_db, monkeypatch):
+    configure(agent_db, monkeypatch)
+    claude = planner_claude(plan(step("s1"), {**step("v1", "s1"), "role": VERIFY}), decide("accept"),
+                            decide("replan", steps=[step("fix", "s1", review=True)]))
+
+    async def scenario(h):
+        await h.start()
+        await h.until(lambda: len(h.held) == 1)
+        # A conditional branch or a user cancellation may skip the repair after admission.
+        h.planner._skip(h.planner._plan.steps[-1])
+        await h.planner._complete_plan(h.planner._plan)
+        await h.finished()
+
+    h = drive(claude, lambda e: None if e.payload["step_key"] == "fix" else
+              ({**WORK_FAILED, "failure": "verification_changed_code"} if e.payload["step_key"] == "v1"
+               else WORK_OK), scenario)
+    assert h.final().payload["status"] == "failed"
+    assert not h.reviews
+
+
+def test_failed_review_at_retry_limit_still_escalates(planner_claude, agent_db, monkeypatch):
+    from tests.test_planner_agent import REVIEW_FAIL
+
+    configure(agent_db, monkeypatch, False, review_all=True, max_step_retries=0, escalate_on_exhaustion=True)
+    claude = planner_claude(plan(step("s1")), decide("review"), decide("review"), decide("fail", reason="Stop"))
+    h = drive(claude, always(WORK_OK, REVIEW_FAIL))
+    assert h.final().payload["status"] == "failed"
+    assert len(h.reviews) == 1
+    assert "review is not allowed" in claude.turns()[-1]["text"]

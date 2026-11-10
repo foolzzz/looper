@@ -2386,10 +2386,14 @@ class PlannerAgent:
                 "role": step.role, "attempt": step.retries + 1, "head": evidence.get("head"),
                 "git": evidence.get("git", False), "status": "completed" if context.succeeded else "failed",
                 "summary": summary.split(". ", 1)[0].splitlines()[0][:300] if summary else "",
+                **({"failure": "verification_changed_code", "repair_after_index": max(s.index for s in plan.steps)}
+                   if result.get("failure") == "verification_changed_code" else {}),
             }), kind=JournalKind.VERIFICATION_ROUND))
+        if self._is_verification(step) and self._verification_repair_required(plan, entries):
+            context = replace(context, succeeded=False, verification_repair_required=True)
         if self._is_verification(step) and not context.succeeded and self._verification_exhausted(plan, entries):
             context = replace(context, max_retries=min(context.max_retries, context.retries))
-        if (self._workflow or {}).get("escalate_on_exhaustion") and not context.acceptable \
+        if (self._workflow or {}).get("escalate_on_exhaustion") and not context.succeeded \
                 and context.retries >= context.max_retries:
             context = replace(context, escalate=True)
         step.status = "deciding"
@@ -2403,13 +2407,15 @@ class PlannerAgent:
                 TurnKind.DECISION, message, lambda text: parse_decision(text, context, self._checked(view)),
             )
         except PlannerTurnError as exc:
-            if self._execution.review_all and self._needs_review(step) and not context.escalate \
+            if (self._execution.review_all or (self._workflow or {}).get("escalate_on_exhaustion")
+                    or self._verification_repair_required(plan)) \
+                    and self._needs_review(step) and not context.escalate \
                     and context.result is ResultKind.WORK and context.succeeded:
-                # The project reviews every step, so a Worker's own success never accepts one.
+                # Mandatory review still runs when the decision turn fails.
                 await self._activity(
                     "error",
                     f"Warning: the Planner could not decide on step {step.index + 1} ({step.label}): {exc}. "
-                    "This project reviews every step: it goes to a Reviewer.",
+                    "This step requires review: it goes to a Reviewer.",
                 )
                 await self._send_to_review(plan, step)
                 return
@@ -2516,6 +2522,20 @@ class PlannerAgent:
         failures = sum(entry.kind is JournalKind.VERIFICATION_ROUND
                        and json.loads(entry.summary).get("status") == "failed" for entry in [*plan.journal, *entries])
         return failures >= rule["max_rounds"]
+
+    def _verification_repair_required(self, plan: TaskPlan, entries: Sequence[JournalEntry] = ()) -> bool:
+        """A violation survives retries, replacement steps and restarts until new work passes review."""
+        for entry in [*plan.journal, *entries]:
+            if entry.kind is not JournalKind.VERIFICATION_ROUND:
+                continue
+            violation = json.loads(entry.summary)
+            if violation.get("failure") != "verification_changed_code":
+                continue
+            if not any(s.index > violation["repair_after_index"] and s.status == "verified" and s.review
+                       and not self._is_verification(s) and (s.result or {}).get("verify_passed") is True
+                       and self._roles_acceptable(s) for s in plan.steps):
+                return True
+        return False
 
     @staticmethod
     def _skip(step: PlanStep) -> None:
@@ -3522,7 +3542,8 @@ class PlannerAgent:
                        conditions=self._execution.conditions_on, isolate_steps=self._execution.isolate_steps,
                        verification_role=((self._workflow or {}).get("verification") or {}).get("role"),
                        work_role=(self._workflow or {}).get("work_role"),
-                       verification_exhausted=bool(self._plan and self._verification_exhausted(self._plan)))
+                       verification_exhausted=bool(self._plan and self._verification_exhausted(self._plan)),
+                       verification_repair_required=bool(self._plan and self._verification_repair_required(self._plan)))
 
     def _wait_policy(self) -> WaitPolicy:
         """System limits, command permission, and this event's scheduled-run stop time."""
@@ -4444,6 +4465,9 @@ class PlannerAgent:
 
     async def _complete_plan(self, plan: TaskPlan) -> None:
         assert self._bus is not None
+        if self._verification_repair_required(plan):
+            await self._fail_plan(plan, reason="Verification changed the code; a new repair must pass review")
+            return
         if await self._late_messages_taken(plan):
             return  # its steps run, and their decisions complete the task
         plan.status = "completed"

@@ -377,6 +377,7 @@ class PlanView:
     verification_role: str | None = None
     work_role: str | None = None
     verification_exhausted: bool = False
+    verification_repair_required: bool = False
 
     def dropping(self, step: str) -> PlanView:
         """This plan once ``step``, a started step, is dropped."""
@@ -400,6 +401,7 @@ class DecisionContext:
     # last open step); None otherwise.
     open_gates: frozenset[str] | None = None
     escalate: bool = False
+    verification_repair_required: bool = False
 
     @property
     def acceptable(self) -> bool:
@@ -408,7 +410,7 @@ class DecisionContext:
         return self.succeeded and not self.review_required
 
     def allowed(self) -> tuple[Decision, ...]:
-        if self.escalate:
+        if self.escalate or self.verification_repair_required:
             return (Decision.REPLAN, Decision.FAIL)
         allowed = []
         if self.acceptable:
@@ -803,7 +805,9 @@ def _progress(data: Mapping[str, Any]) -> ProgressNote | None:
 
 def _refusal(decision: Decision, context: DecisionContext) -> str:
     allowed = ", ".join(d.value for d in context.allowed())
-    if decision is Decision.RETRY:
+    if context.verification_repair_required:
+        why = "verification_changed_code requires a replan with a reviewed non-verification repair"
+    elif decision is Decision.RETRY:
         why = f"step {context.step} has used its {context.max_retries} retries"
     elif decision is Decision.ACCEPT and context.result is ResultKind.WORK and context.succeeded:
         why = f"step {context.step} needs a passing review before it can be accepted"
@@ -857,6 +861,14 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
     for step in verification:
         if not work.intersection(step.depends_on) or not _requires_steps(step, work):
             raise ProtocolError(f"verification step {step.id} must depend on at least one work step")
+    if plan.verification_repair_required:
+        repairs = {s.id for s in steps if s.id not in plan.pending and s.gate is None and s.wait is None and s.review
+                   and (s.role or plan.work_role) != plan.verification_role}
+        if not repairs:
+            raise ProtocolError("verification_changed_code requires a non-verification repair step with review: true")
+        for step in verification:
+            if not repairs.intersection(step.depends_on) or not _requires_steps(step, repairs):
+                raise ProtocolError(f"verification step {step.id} must depend on the reviewed repair")
     if escalate:
         _require_new_gate(steps, plan, steps)
     elif plan.verification_exhausted and verification:

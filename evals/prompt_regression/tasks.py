@@ -584,7 +584,7 @@ TASKS: tuple[EvalTask, ...] = (
                 {**_step("s2", "Check answer.txt read-only.", ["answer.txt holds correct"], depends_on=["s1"]),
                  "role": "verify_staging"}],
             "decision_replans": {"s2": [
-                _step("s3", "Correct answer.txt.", ["answer.txt holds correct"], depends_on=["s1"]),
+                _step("s3", "Correct answer.txt.", ["answer.txt holds correct"], depends_on=["s1"], review=True),
                 {**_step("s4", "Check answer.txt read-only.", ["answer.txt holds correct"], depends_on=["s3"]),
                  "role": "verify_staging"}]},
             "attempts": {
