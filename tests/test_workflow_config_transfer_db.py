@@ -8,7 +8,7 @@ from looper.agents.config_transfer import Action, export_chunks, run_import
 from looper.agents.workflows import Workflow
 from looper.db import projects, workflows
 from looper.db.connection import ensure_schema
-from tests.db_support import DSN, fresh_schema, run_db
+from tests.db_support import DSN, fresh_schema, run_db, v1_api
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
@@ -24,6 +24,38 @@ async def exported(pool):
 async def imported(pool, data, *, apply=True):
     async with pool.acquire() as conn:
         return await run_import(conn, {"format": "looper-config/v4", **data}, apply=apply)
+
+
+@pytest.mark.parametrize("route", ["import_upload", "import_preview"])
+def test_workflow_export_roundtrip_through_http_import(tmp_path, monkeypatch, route):
+    async def test(pool):
+        async with v1_api(tmp_path, pool) as call:
+            status, created = await call("workflows.put", {
+                "key": "reviewed", "name": "Reviewed", "review_all": True})
+            assert status == 200, created
+            status, exported = await call("config.export")
+            assert status == 200, exported
+            document = exported["result"]["document"]
+            assert document["workflows"][0]["key"] == "reviewed"
+            await pool.execute("DELETE FROM workflows")
+            body = {"document": document} if route == "import_preview" else document
+            status, staged = await call(f"config.{route}", body)
+            assert status == 200, staged
+            assert not staged["result"]["plan"]["applied"]
+            assert await pool.fetchval("SELECT count(*) FROM workflows") == 0
+            status, applied = await call("config.import_apply", {
+                "import_id": staged["result"]["import_id"]})
+            assert status == 200, applied
+            assert applied["result"]["plan"]["applied"]
+            status, restored = await call("workflows.get", {"key": "reviewed"})
+            assert status == 200, restored
+            assert {k: v for k, v in restored["result"]["workflow"].items() if k != "updated_at"} == {
+                k: v for k, v in created["result"]["workflow"].items() if k != "updated_at"}
+            status, reexported = await call("config.export")
+            assert status == 200, reexported
+            assert reexported["result"]["document"]["workflows"] == document["workflows"]
+
+    run_db(test, monkeypatch, timeout=30)
 
 
 def test_workflow_and_project_defaults_roundtrip_into_fresh_installation():

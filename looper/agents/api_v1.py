@@ -205,6 +205,7 @@ _CONFIG_PROPERTIES = {
     "format": _STR, "looper_version": _STR, "exported_at": _STR, "secrets": _STR,
     "runtimes": _array(), "providers": _array(), "models": _array(), "profiles": _array(),
     "settings": _OBJ, "channels": _array(), "catalog": _array(), "installs": _array(), "projects": _array(),
+    "workflows": _array(),
     "gateway": _object({"aliases": _array(_object({"alias": _STR,
         "model": _object({"provider": _STR, "name": _STR, "protocol": {"const": "openai-chat", "type": "string"}}, closed=True)},
         closed=True))}, [], closed=True),
