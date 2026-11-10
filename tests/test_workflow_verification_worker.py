@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -423,9 +424,14 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
     if editable.startswith("strict-"):
         (source / "build").symlink_to(developer / "build", target_is_directory=True)
         runtime_paths.append("build")
-    (source / "src" / "checkout_probe" / "__init__.py").write_text("VALUE = 0\n")
+    source_package = source / "src" / "checkout_probe" / "__init__.py"
+    source_package.write_text("VALUE = 0\n")
+    # Same-size edits within one timestamp tick must not reuse the developer's bytecode.
+    package_stat = (package / "__init__.py").stat()
+    os.utime(source_package, ns=(package_stat.st_atime_ns, package_stat.st_mtime_ns))
     checkout = Path(worker._verification_checkout(str(source), tmp_path / "backup", runtime_paths))
-    assert not list((checkout / ".venv").rglob("*.pyc"))
+    for runtime_path in runtime_paths:
+        assert not list((checkout / runtime_path).rglob("*.pyc"))
     assert all(not path.stat().st_mode & 0o222 for path in (checkout / ".venv").rglob("*") if path.is_file())
     prefix = run(checkout, ["python", "-c", "import sys; print(sys.prefix)"])
     assert prefix.returncode == 0, prefix.stderr
