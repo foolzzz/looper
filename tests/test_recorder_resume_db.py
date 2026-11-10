@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from looper.agents.claude_cli import ClaudeRunRecorder
+from looper.agents.runtimes import CLAUDE_CODE
 from looper.db import llm_records
 from tests.db_support import DSN, run_db
 
@@ -25,7 +26,7 @@ def test_resume_appends_after_the_last_persisted_event(monkeypatch: pytest.Monke
         assert isinstance(state["created_at"], datetime)
         recorder = await ClaudeRunRecorder.resume(
             record_id, agent_id="worker-kept", task_id=None, command=["claude"], cwd="/tmp", step_id=None,
-            launch=SimpleNamespace(price=None, model="m", max_budget_usd=None), max_budget_usd=None,
+            launch=SimpleNamespace(price=None, model="m", max_budget_usd=None, runtime=CLAUDE_CODE), max_budget_usd=None,
         )
         async with recorder:
             await recorder.record({"type": "result", "subtype": "success"})

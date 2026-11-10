@@ -955,7 +955,9 @@ def _session_with(agent_db: Any, body: str, messages: list[str]) -> dict[str, An
     starts = [(call.kwargs, record_id) for call, record_id in
               zip(agent_db.start_record.await_args_list, range(1, 100))]
     finishes = {call.args[0]: call.kwargs for call in agent_db.finish_record.await_args_list}
-    chat["runs"] = [{**start, **finishes[record_id]} for start, record_id in starts]
+    chat["runs"] = [{**start, **finishes[record_id], "metadata": {
+        **start["metadata"], **finishes[record_id].get("metadata", {}),
+    }} for start, record_id in starts]
     return chat
 
 

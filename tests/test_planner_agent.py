@@ -780,8 +780,11 @@ class TestReadOnly:
 
         assert h.final() is not None and h.final().payload["status"] == "completed"
         notes = [c.kwargs.get("metadata") for c in agent_db.finish_record.await_args_list]
+        assert [n["model_reported"] for n in notes] == ["fake", "fake"]
+        assert notes[1:] == [{"model_reported": "fake"}]
         # The plan turn's record keeps both calls; on Claude Code no turn needs a directory check.
-        (kept,) = [n for n in notes if n]
+        (kept,) = [{k: v for k, v in n.items() if k != "model_reported"}
+                   for n in notes if "permission_denials" in n]
         assert list(kept) == ["permission_denials"]
         assert [(d["tool"], d["id"]) for d in kept["permission_denials"]] == [("Bash", "t1"), ("Bash", "t2")]
         # The activity shows each call shortened, a known secret masked.

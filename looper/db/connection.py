@@ -552,12 +552,13 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _profile_fallback_pending(conn):
             await conn.execute("ALTER TABLE agent_profiles ADD COLUMN fallback_profile_id TEXT "
                                "REFERENCES agent_profiles(id) ON DELETE RESTRICT")
-            constraint = await conn.fetchval(
-                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-                "WHERE conrelid = to_regclass('task_journal') AND conname = 'task_journal_kind_check'")
+            # Use the fresh schema's canonical check so upgraded catalogs match it.
+            constraint = re.search(
+                r"CONSTRAINT task_journal_kind_check (CHECK \(kind IN \(.*?\)\))", sql, re.S,
+            ).group(1)
             await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
             await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check "
-                               + "CHECK (" + constraint.removeprefix("CHECK ") + " OR kind = 'profile_fallback')")
+                               + constraint)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROFILE_FALLBACK)
         if await _cursor_login_pending(conn):
             await conn.execute(_CURSOR_LOGIN_DDL)

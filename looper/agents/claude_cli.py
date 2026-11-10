@@ -1713,7 +1713,8 @@ class ClaudeRunRecorder:
         try:
             cost = self._runtime().cost(usage, self._provider())
             usage = cost.usage
-            metadata = {"model_reported": self._model_reported, **(metadata or {})}
+            if self._model_reported:
+                metadata = {"model_reported": self._model_reported, **(metadata or {})}
             if self._model_display:
                 metadata = {"model_display": self._model_display, **(metadata or {})}
             fields = {

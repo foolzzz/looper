@@ -59,7 +59,7 @@ def test_resume_uses_the_manifest_cap_with_the_rebuilt_prices(monkeypatch: pytes
     }))
     monkeypatch.setattr(llm_records, "max_event_seq", AsyncMock(return_value=0))
     launch = SimpleNamespace(price=lambda model, usage: (usage.input_tokens or 0) / 1_000_000,
-                             model="m", max_budget_usd=10)
+                             model="m", max_budget_usd=10, runtime=CLAUDE_CODE)
 
     async def run() -> None:
         recorder = await ClaudeRunRecorder.resume(41, agent_id="worker-kept", task_id=None, command=["claude"],

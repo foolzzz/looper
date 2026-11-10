@@ -293,7 +293,7 @@ def test_registry_price_edits_and_deletion_do_not_reprice_a_run_or_its_history(
         ended = await llm_records.get_record(recorder.record_id, pool=pool)
         assert ended["cost_usd"] == 6.4 and ended["input_tokens"] == ended["output_tokens"] == 1_000_000
         assert ended["model"] == "glm-5.3-20261001[1m]"
-        assert ended["metadata"] == opened["metadata"]
+        assert ended["metadata"] == {**opened["metadata"], "model_reported": "glm-5.3-20261001[1m]"}
         assert await llm_records.get_record(historical_id, pool=pool) == historical
 
     run_db(test, monkeypatch)
