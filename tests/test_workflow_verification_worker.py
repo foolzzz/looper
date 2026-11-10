@@ -299,6 +299,38 @@ def test_verification_copies_only_declared_runtime_state(tmp_path, monkeypatch, 
     asyncio.run(asyncio.wait_for(scenario(), 10))
 
 
+@pytest.mark.parametrize("parent_field", ["workspace_links", "verification_paths"])
+def test_verification_overlapping_runtime_paths_run_private_python(tmp_path, monkeypatch, verification_runtime,
+                                                                  parent_field):
+    runs, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+    (root / ".gitignore").write_text(".venv/\n")
+    environment = root / ".venv"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+    interpreter = environment / "bin" / "python"
+    assert interpreter.is_symlink()
+    command = ["-c", "import sys; print(sys.prefix)"]
+    original = subprocess.run([str(interpreter), *command], capture_output=True, text=True, timeout=5)
+    assert original.returncode == 0, original.stderr
+    assert Path(original.stdout.strip()) == environment
+    child_field = "verification_paths" if parent_field == "workspace_links" else "workspace_links"
+    monkeypatch.setattr(worker.db_projects, "get_task_project", AsyncMock(return_value={
+        "id": "project", parent_field: [".venv"], child_field: [".venv/bin/python"]}))
+    runs.append(_completed_run(hold=False))
+    pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+    result = asyncio.run(asyncio.wait_for(pool._execute(_item(root)), 10))
+    assert result["status"] == "completed", result
+    checkout = Path(launches[0]["cwd"])
+    copied = checkout / ".venv" / "bin" / "python"
+    assert copied.is_file()
+    assert not copied.samefile(interpreter)
+    private = subprocess.run([str(copied), *command], cwd=checkout,
+                             capture_output=True, text=True, timeout=5)
+    assert private.returncode == 0, private.stderr
+    assert Path(private.stdout.strip()) == checkout / ".venv"
+    assert interpreter.is_symlink()
+
+
 def test_verification_seed_manifest_does_not_expose_source(tmp_path):
     root = _repo(tmp_path / "repo")
     (root / "alias").symlink_to(root / "tracked")

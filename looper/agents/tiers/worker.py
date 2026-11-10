@@ -789,6 +789,10 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
         relative = Path(name)
         if relative.is_absolute() or not relative.parts or any(p in ("..", ".git") for p in relative.parts):
             raise OSError("invalid verification runtime path")
+        # Covered children must not become relocation roots: an external venv
+        # interpreter would otherwise be mapped back onto itself.
+        if any(relative.is_relative_to(parent) for parent, _, _ in declared):
+            continue
         declared.append((name, (source / relative).resolve(strict=True), target / relative))
 
     def copy(path: Path, destination: Path, boundary: Path, private: Path, ancestors: frozenset[Path]) -> None:
@@ -836,8 +840,6 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
 
     for name, resolved, destination in declared:
         relative = Path(name)
-        if any(relative.is_relative_to(previous) for previous in copied):
-            continue
         origin = source / relative
         if not origin.exists():
             raise OSError("declared verification runtime path is missing")
