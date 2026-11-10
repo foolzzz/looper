@@ -51,7 +51,7 @@ import { useEventWindow } from "@/lib/use-event-window";
 import { startPolling } from "@/lib/polling";
 import { useTaskRuns } from "@/lib/use-task-runs";
 import { type NodeCard, type TaskRuns, gateCard, waitCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
-import { FIT_PADDING, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
+import { FIT_PADDING, conditionNodes, conditionState, dependencyEdges, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
 import { workspacesByStep } from "@/lib/workspaces";
 import { type RoomFilter, roomNote } from "@/lib/room";
@@ -66,6 +66,7 @@ import {
   Controls,
   Handle,
   Position,
+  useUpdateNodeInternals,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useProjects } from "@/lib/use-projects";
@@ -92,6 +93,7 @@ import {
   type Supplement,
   type ManagerAction,
   type TaskStep,
+  type ConditionState,
   type PlannerRole,
   type RoleStats,
   type JournalEntry,
@@ -1711,7 +1713,7 @@ function nodeStyle(look: NodeLook) {
 /** Nodes that name their card (`NodeCards`) for assistive technology, where focus lands: on the node, or on a gate's
  * button (`GateNode`). */
 const described = (nodes: Node[]): Node[] =>
-  nodes.map((node) => (node.type === "gate" ? node : { ...node, domAttributes: { "aria-details": nodeCardId(node.id) } }));
+  nodes.map((node) => ((node.type === "gate" || node.type === "condition") ? node : { ...node, domAttributes: { "aria-details": nodeCardId(node.id) } }));
 
 function NodeLabel({
   name,
@@ -1791,7 +1793,36 @@ function GateNode({ id, data }: NodeProps<Node<GateNodeData, "gate">>) {
   );
 }
 
-const NODE_TYPES = { gate: GateNode };
+const CONDITION_STATES = {
+  satisfied: { label: "已满足", Icon: CheckCircle2, color: "text-success" },
+  pending: { label: "等待中", Icon: Clock, color: "text-muted-foreground" },
+  unsatisfiable: { label: "无法满足", Icon: AlertCircle, color: "text-destructive" },
+};
+
+function ConditionJunction({ data }: NodeProps<Node<{ label: string; state: ConditionState }>>) {
+  const { label, Icon, color } = CONDITION_STATES[data.state];
+  return (
+    <div className="flex h-full items-center justify-center">
+      <Handle type="target" position={Position.Top} />
+      <Badge variant="outline" className={cn("gap-2 bg-card px-2 py-2", color)}>
+        {data.label}<Icon className="size-3" aria-hidden="true" />{label}
+      </Badge>
+      <Handle type="source" position={Position.Bottom} />
+    </div>
+  );
+}
+
+const NODE_TYPES = { gate: GateNode, condition: ConditionJunction };
+
+function PipelineMeasurements({ nodes }: { nodes: Node[] }) {
+  const updateNodeInternals = useUpdateNodeInternals();
+  useEffect(() => {
+    // Async reads replace node objects without changing their size. Refresh the
+    // handle measurements too, even when ResizeObserver sees no size change.
+    updateNodeInternals(nodes.map((node) => node.id));
+  }, [nodes, updateNodeInternals]);
+  return null;
+}
 
 /** The plan as its dependency graph: each step a node under the steps it depends on (steps without dependencies
  * under the Planner), the steps nothing live depends on leading to the result; a user gate is a hexagon that opens
@@ -1849,19 +1880,45 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
       const turn = gate && gateTurn(gate, active);
       return turn ? GATE_TURN_LOOKS[turn] : GATE_LOOKS[gateState(step, gate)];
     };
+    const junctions = conditionNodes(steps);
     const levels = stepLevels(steps);
     const why = droppedBecause(task.journal || [], all);
     const worktrees = workspacesByStep(task);
     const x = stepColumns(steps, levels, NODE_W + GAP_X);
     const depth = steps.length ? Math.max(...levels.values()) : -1;
 
+    for (const node of junctions) {
+      const step = byId.get(node.stepId)!;
+      const state = node.id === `${step.id}:c0` && step.ready_state != null ? step.ready_state
+        : conditionState(node.condition, all, task.gates ?? [], task.waits ?? []);
+      ns.push({
+        id: node.id, type: "condition", focusable: true,
+        className: "rounded-md focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2",
+        ariaLabel: `${step.step_key || step.id}：${node.label}，${CONDITION_STATES[state].label}`,
+        position: { x: (x.get(node.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(node.id) ?? 0)) },
+        data: { label: node.label, state },
+        style: { width: NODE_W, height: NODE_H, padding: 0, background: "transparent", border: "none" },
+      });
+    }
+    const junctionById = new Map(junctions.map((node) => [node.id, node]));
+    for (const { source, target, on } of dependencyEdges(steps)) {
+      const step = byId.get(target) ?? byId.get(junctionById.get(target)!.stepId)!;
+      const fromLive = source === "planner" || (byId.get(source) ?? junctionById.get(source))?.status !== "skipped";
+      const running = step.status === "dispatched";
+      es.push({ id: `dep:${source}->${target}`, source, target, animated: running,
+        style: edgeStyle(step.status !== "skipped" && fromLive, running),
+        ...(on === "completed" || on === "passed" ? {
+          label: on === "completed" ? "完成" : "通过",
+          labelStyle: { fill: "var(--color-foreground)" }, labelBgStyle: { fill: "var(--color-card)" },
+        } : {}),
+      });
+    }
+
     const dependedOn = new Set(steps.filter((s) => s.status !== "skipped").flatMap((s) => s.depends_on ?? []));
     const ends = steps.filter((s) => s.status !== "skipped" && !dependedOn.has(s.id));
     for (const step of steps) {
       const name = step.step_key || `step ${step.step_index + 1}`;
-      const deps = (step.depends_on ?? []).filter((d) => byId.has(d));
       const position = { x: (x.get(step.id) ?? 0) - NODE_W / 2, y: ROW_H * (1 + (levels.get(step.id) ?? 0)) };
-      const live = step.status !== "skipped";
       if (step.kind === "gate" || step.kind === "wait") {
         const look = lookOf(step);
         ns.push({
@@ -1872,12 +1929,6 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
         cards[step.id] = step.kind === "wait"
           ? waitCard(step, waits.get(step.id), { look, lookOf, stepsById: allById })
           : gateCard(step, gates.get(step.id), { look, lookOf, stepsById: allById, active });
-      }
-      for (const source of deps.length ? deps : ["planner"]) {
-        const fromLive = source === "planner" || byId.get(source)?.status !== "skipped";
-        const running = step.status === "dispatched";
-        es.push({ id: `dep:${source}->${step.id}`, source, target: step.id, animated: running,
-                  style: edgeStyle(live && fromLive, running) });
       }
       if (step.kind === "gate" || step.kind === "wait") continue;
       const look = stepLook(step.status);
@@ -1942,6 +1993,7 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
       >
         <Background color="var(--color-border)" gap={20} />
         <Controls showInteractive={false} />
+        <PipelineMeasurements nodes={nodes} />
         <NodeCards cards={cards} />
         <PipelineToolbar skipped={skipped} hideSkipped={hideSkipped} onHideSkipped={changeHideSkipped}
                          full={full !== "off"} onToggleFull={toggleFull} />

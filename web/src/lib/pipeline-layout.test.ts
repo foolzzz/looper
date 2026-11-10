@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   FIT_PADDING,
+  conditionNodes,
+  dependencyEdges,
+  conditionState,
   fitPadding,
   shownSteps,
   stepColumns,
@@ -8,7 +11,7 @@ import {
   storeHideSkipped,
   storedHideSkipped,
 } from "@/lib/pipeline-layout";
-import type { TaskStep } from "@/lib/api";
+import type { Condition, TaskStep, TaskWait, UserGate } from "@/lib/api";
 
 const step = (id: string, index: number, status: string, depends_on: string[] = []) =>
   ({ id, step_index: index, step_key: id, status, depends_on }) as TaskStep;
@@ -113,5 +116,107 @@ describe("fitPadding", () => {
     expect(fitPadding({ left: 0, top: 0, width: 390, height: 844 }, [{ left: 244, top: 15, width: 131, height: 52 },
                                                                      { left: 67, top: 765, width: 308, height: 64 }]))
       .toEqual({ top: "75px", right: 0.12, left: "56px", bottom: "87px" });
+  });
+});
+
+const dependencyPlan = (ready_when: TaskStep["ready_when"]): TaskStep[] => [
+  step("dev", 0, "verified"), step("review_a", 1, "pending"),
+  { ...step("verify_staging", 2, "pending", ["dev", "review_a"]), ready_when },
+];
+
+describe("dependency conditions", () => {
+  it("preserves the legacy nodes, edges and positions for plain all_of", () => {
+    const legacy = dependencyPlan(null);
+    const plain = dependencyPlan({ all_of: ["dev", { all_of: ["review_a"] }] });
+    expect(conditionNodes(plain)).toEqual([]);
+    expect(dependencyEdges(plain)).toEqual([
+      { source: "planner", target: "dev" }, { source: "planner", target: "review_a" },
+      { source: "dev", target: "verify_staging" }, { source: "review_a", target: "verify_staging" },
+    ]);
+    expect(layout(plain)).toEqual(layout(legacy));
+    expect(layout(plain)).toEqual({ dev: [0, -X / 2], review_a: [0, X / 2], verify_staging: [1, 0] });
+  });
+
+  it("places an any_of junction between its children and the target", () => {
+    const plan = dependencyPlan({ any_of: ["dev", { step: "review_a", on: "passed" }] });
+    expect(conditionNodes(plan).map((n) => [n.id, n.label])).toEqual([["verify_staging:c0", "任一"]]);
+    expect(Object.fromEntries(stepLevels(plan))).toEqual({ dev: 0, review_a: 0, "verify_staging:c0": 1, verify_staging: 2 });
+    expect(stepColumns(plan, stepLevels(plan), X).get("verify_staging:c0")).toBe(0);
+    expect(dependencyEdges(plan).slice(2)).toEqual([
+      { source: "verify_staging:c0", target: "verify_staging" },
+      { source: "dev", target: "verify_staging:c0" },
+      { source: "review_a", target: "verify_staging:c0", on: "passed" },
+    ]);
+  });
+
+  it("routes nested groups through distinct junctions in dependency order", () => {
+    const plan = dependencyPlan({ any_of: [{ all_of: ["dev", { step: "review_a", on: "completed" }] }, "review_b"] });
+    plan.splice(2, 0, step("review_b", 2, "pending"));
+    expect(conditionNodes(plan).map((n) => [n.id, n.label])).toEqual([
+      ["verify_staging:c0.0", "全部"], ["verify_staging:c0", "任一"],
+    ]);
+    const levels = stepLevels(plan);
+    expect([levels.get("verify_staging:c0.0"), levels.get("verify_staging:c0"), levels.get("verify_staging")]).toEqual([1, 2, 3]);
+    expect(dependencyEdges(plan)).toContainEqual({ source: "verify_staging:c0.0", target: "verify_staging:c0" });
+  });
+
+  it("keeps explicit single-leaf requirements visible", () => {
+    const plan = dependencyPlan({ step: "dev", on: "completed" });
+    expect(conditionNodes(plan).map((n) => n.label)).toEqual(["全部"]);
+    expect(dependencyEdges(plan)).toContainEqual({ source: "dev", target: "verify_staging:c0", on: "completed" });
+  });
+
+  it("does not turn a hidden dropped dependency into a new root step", () => {
+    const plan = dependencyPlan({ any_of: ["dev", "review_a"] });
+    plan[1].status = "skipped";
+    const visible = shownSteps(plan, true).steps;
+    expect(dependencyEdges(visible)).not.toContainEqual({ source: "review_a", target: "verify_staging:c0" });
+    expect(stepLevels(visible).get("verify_staging")).toBe(2);
+  });
+
+  it.each([
+    ["verified", null, "passed", "satisfied"],
+    ["completed", null, "completed", "satisfied"],
+    ["completed", null, "verified", "pending"],
+    ["deciding", { status: "completed" }, "completed", "satisfied"],
+    ["deciding", { status: "failed" }, "completed", "pending"],
+    ["failed", null, "completed", "unsatisfiable"],
+    ["skipped", null, "verified", "unsatisfiable"],
+  ] as const)("reads %s outcomes for %s / %s", (status, result, on, state) => {
+    expect(conditionState({ step: "dev", on }, [{ ...step("dev", 0, status), result }], [], [])).toBe(state);
+  });
+
+  it.each([
+    ["passed", "passed", "satisfied"],
+    ["cancelled", "passed", "unsatisfiable"],
+    ["cancelled", "verified", "satisfied"],
+    ["open", "completed", "pending"],
+  ] as const)("reads gate %s for %s", (state, on, expected) => {
+    const gate = { step_id: "dev", state } as UserGate;
+    expect(conditionState({ step: "dev", on }, [step("dev", 0, "verified")], [gate], [])).toBe(expected);
+  });
+
+  it.each([
+    ["done", "ready", "passed", "satisfied"],
+    ["done", "resumed", "passed", "satisfied"],
+    ["done", "proceeded", "passed", "unsatisfiable"],
+    ["done", "cancelled", "completed", "satisfied"],
+    ["waiting", null, "completed", "pending"],
+  ] as const)("reads wait %s / %s for %s", (state, outcome, on, expected) => {
+    const wait = { step_id: "dev", state, outcome } as TaskWait;
+    expect(conditionState({ step: "dev", on }, [step("dev", 0, "verified")], [], [wait])).toBe(expected);
+  });
+
+  it("shows a missing dependency as impossible", () => {
+    expect(conditionState("dev", [], [], [])).toBe("unsatisfiable");
+  });
+
+  it.each([
+    [{ k_of: 1, of: ["dev", "review_a"] }, "satisfied"],
+    [{ k_of: 2, of: ["dev", "review_a"] }, "pending"],
+    [{ k_of: 3, of: ["dev", "review_a", "review_b"] }, "unsatisfiable"],
+  ] satisfies [Condition, string][])("evaluates threshold boundaries", (condition, state) => {
+    const steps = [step("dev", 0, "verified"), step("review_a", 1, "pending"), step("review_b", 2, "failed")];
+    expect(conditionState(condition, steps, [], [])).toBe(state);
   });
 });

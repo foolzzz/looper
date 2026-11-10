@@ -13,7 +13,7 @@ import {
   stepSpan,
   type TaskRuns,
 } from "@/lib/node-cards";
-import type { LlmRecord, StepWorkspace, TaskDetail, TaskStep, TaskWait, UserGate } from "@/lib/api";
+import type { Condition, LlmRecord, StepWorkspace, TaskDetail, TaskStep, TaskWait, UserGate } from "@/lib/api";
 
 const look = (label: string): CardLook => ({ label, border: "b", borderStyle: "solid", background: "bg", color: "c" });
 const LOOKS: Record<string, CardLook> = { verified: look("Done"), failed: look("Failed"), pending: look("Not started") };
@@ -62,6 +62,40 @@ function run(id: number, extra: { step?: string; runtime?: string; model?: strin
 const NO_RUNS: TaskRuns = { planner: [], worker: [], reviewer: [] };
 const titles = (sections: CardSection[]) => sections.map((section) => section.title);
 const section = (sections: CardSection[], title: string) => sections.find((s) => s.title === title);
+
+describe("dependency conditions", () => {
+  const deps = [step("a", { step_key: "dev", status: "verified" }),
+                step("b", { step_key: "review_a" }), step("c", { step_key: "review_b" })];
+  const context = { taskId: "t1", active: true, look: LOOKS.pending, lookOf: (s: TaskStep) => LOOKS[s.status],
+                    stepsById: new Map(deps.map((s) => [s.id, s])) };
+  const dependency = (kind: TaskStep["kind"], ready_when?: Condition | null) => {
+    const s = step("target", { kind, depends_on: deps.map((d) => d.id), ready_when });
+    const card = kind === "gate" ? gateCard(s, undefined, context)
+      : kind === "wait" ? waitCard(s, undefined, context) : stepCard(s, context);
+    return section(card.sections, "Depends on");
+  };
+
+  it.each(["work", "gate", "wait"] as const)("describes nested conditions on a %s card", (kind) => {
+    expect(dependency(kind, { any_of: [{ step: "a", on: "completed" },
+      { k_of: 2, of: [{ step: "b", on: "passed" }, "c"] }] })).toEqual({
+      kind: "text", title: "Depends on", text: "任一（dev 完成，2/2（review_a 通过，review_b））",
+    });
+  });
+
+  it.each([
+    [{ all_of: [{ step: "a", on: "passed" }, "b"] }, "全部（dev 通过，review_a）"],
+    [{ step: "a", on: "verified" }, "dev"],
+    [{ step: "missing", on: "completed" }, "missing 完成"],
+  ] satisfies [Condition, string][])("renders an explicit condition and falls back to an unknown id", (condition, expected) => {
+    expect(dependency("work", condition)).toEqual({ kind: "text", title: "Depends on", text: expected });
+  });
+
+  it.each(["work", "gate", "wait"] as const)("keeps ordinary and pure all_of %s cards byte-identical", (kind) => {
+    const previous = JSON.stringify(dependency(kind));
+    expect(JSON.stringify(dependency(kind, null))).toBe(previous);
+    expect(JSON.stringify(dependency(kind, { all_of: ["a", { all_of: ["b", "c"] }] }))).toBe(previous);
+  });
+});
 
 function worktree(id: number, extra: Partial<StepWorkspace> = {}): StepWorkspace {
   return {

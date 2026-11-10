@@ -158,8 +158,10 @@ export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
     if (!root) return;
     let press: PointerAt | null = null;
     const inCard = (target: EventTarget | null) => target instanceof Node && !!cardRef.current?.contains(target);
-    const nodeElement = (target: EventTarget | null) =>
-      target instanceof Element && root.contains(target) ? target.closest<HTMLElement>(".react-flow__node") : null;
+    const nodeElement = (target: EventTarget | null) => {
+      const node = target instanceof Element && root.contains(target) ? target.closest<HTMLElement>(".react-flow__node") : null;
+      return node?.dataset.id && cards[node.dataset.id] ? node : null;
+    };
     const nodeOf = (target: EventTarget | null) => nodeElement(target)?.dataset.id ?? null;
     const at = (event: PointerEvent): PointerAt => ({
       node: nodeOf(event.target), x: event.clientX, y: event.clientY, at: event.timeStamp, pointerType: event.pointerType,
@@ -236,7 +238,7 @@ export function NodeCards({ cards }: { cards: Record<string, NodeCard> }) {
       stopKeys();
       document.removeEventListener("pointerdown", down, true);
     };
-  }, [root, control]);
+  }, [root, control, cards]);
 
   // Beside its node, inside the part of the graph in sight: the window, and every ancestor that clips (up to a
   // fixed one, such as the full-screen overlay); hidden while the node is out of sight. Set on the element, so

@@ -1,6 +1,6 @@
 /** Where the Pipeline tab draws a plan's steps: a row per depth in the dependency graph, and a place in it. */
 import type { FitViewOptions } from "@xyflow/react";
-import type { TaskStep } from "@/lib/api";
+import type { Condition, ConditionState, TaskStep, TaskWait, UserGate } from "@/lib/api";
 
 type Padding = Exclude<NonNullable<FitViewOptions["padding"]>, number | string>;
 
@@ -39,10 +39,101 @@ export function shownSteps(steps: TaskStep[], hideSkipped: boolean): { steps: Ta
   return { steps: shown, hidden: steps.length - shown.length };
 }
 
+/** Shorthand AND dependencies keep the original graph and details cards. */
+export function isPlainAllOf(condition: Condition): boolean {
+  return typeof condition === "string" || "all_of" in condition && condition.all_of.every(isPlainAllOf);
+}
+
+type Dependency = { source: string; target: string; on?: "completed" | "verified" | "passed" };
+type LayoutItem = Pick<TaskStep, "id" | "step_index" | "status" | "depends_on">;
+export interface ConditionNode extends LayoutItem {
+  stepId: string;
+  condition: Condition;
+  label: string;
+  inputs: Dependency[];
+}
+
+/** Post-order junctions: path 0 is the root, 0.1 its second child group. */
+export function conditionNodes(steps: TaskStep[]): ConditionNode[] {
+  const nodes: ConditionNode[] = [];
+  for (const step of steps) {
+    if (step.ready_when == null || isPlainAllOf(step.ready_when)) continue;
+    const visit = (condition: Condition, path: string): string => {
+      const id = `${step.id}:c${path}`;
+      const children = typeof condition === "string" || "step" in condition ? [condition]
+        : "all_of" in condition ? condition.all_of : "any_of" in condition ? condition.any_of : condition.of;
+      const label = typeof condition === "string" || "step" in condition || "all_of" in condition ? "全部"
+        : "any_of" in condition ? "任一" : `${condition.k_of}/${children.length}`;
+      const inputs = children.map((child, index): Dependency => {
+        if (typeof child === "string") return { source: child, target: id };
+        if ("step" in child) return { source: child.step, target: id, on: child.on };
+        return { source: visit(child, `${path}.${index}`), target: id };
+      });
+      nodes.push({ id, stepId: step.id, condition, label, inputs,
+        depends_on: inputs.map((input) => input.source), step_index: step.step_index, status: step.status });
+      return id;
+    };
+    visit(step.ready_when, "0");
+  }
+  return nodes;
+}
+
+function layoutItems(steps: TaskStep[]): LayoutItem[] {
+  const nodes = conditionNodes(steps);
+  const roots = new Map(nodes.map((node) => [node.stepId, node.id]));
+  return [...steps.map((step) => roots.has(step.id) ? { ...step, depends_on: [roots.get(step.id)!] } : step), ...nodes];
+}
+
+/** The same edges drive layering and drawing, omitting only dependencies hidden by the viewer. */
+export function dependencyEdges(steps: TaskStep[]): Dependency[] {
+  const items = layoutItems(steps);
+  const ids = new Set(items.map((item) => item.id));
+  return items.flatMap((item) => {
+    const inputs: Dependency[] = "inputs" in item ? (item as ConditionNode).inputs
+      : item.depends_on.map((source) => ({ source, target: item.id }));
+    const shown = inputs.filter((input) => ids.has(input.source));
+    return shown.length ? shown : [{ source: "planner", target: item.id }];
+  });
+}
+
+/** Mirror the API's outcome rules for nested groups (the API reports only the root state). */
+export function conditionState(condition: Condition, steps: TaskStep[], gates: UserGate[], waits: TaskWait[]): ConditionState {
+  const byId = new Map(steps.map((step) => [step.id, step]));
+  const leaf = (id: string, on: "completed" | "verified" | "passed"): ConditionState => {
+    const step = byId.get(id);
+    if (!step || step.status === "failed" || step.status === "skipped") return "unsatisfiable";
+    const gate = gates.find((item) => item.step_id === id);
+    if (gate) {
+      if (gate.state !== "passed" && gate.state !== "cancelled") return "pending";
+      return on === "passed" && gate.state !== "passed" ? "unsatisfiable" : "satisfied";
+    }
+    const wait = waits.find((item) => item.step_id === id);
+    if (wait) {
+      if (wait.state !== "done") return "pending";
+      return on === "passed" && wait.outcome !== "ready" && wait.outcome !== "resumed" ? "unsatisfiable" : "satisfied";
+    }
+    if (step.status === "verified") return "satisfied";
+    return on === "completed" && (step.status === "completed" || step.status === "deciding" && step.result?.status === "completed")
+      ? "satisfied" : "pending";
+  };
+  const evaluate = (cond: Condition): ConditionState => {
+    if (typeof cond === "string") return leaf(cond, "verified");
+    if ("step" in cond) return leaf(cond.step, cond.on);
+    const children = "all_of" in cond ? cond.all_of : "any_of" in cond ? cond.any_of : cond.of;
+    const k = "all_of" in cond ? children.length : "any_of" in cond ? 1 : cond.k_of;
+    const states = children.map(evaluate);
+    const satisfied = states.filter((state) => state === "satisfied").length;
+    if (satisfied >= k) return "satisfied";
+    return satisfied + states.filter((state) => state === "pending").length < k ? "unsatisfiable" : "pending";
+  };
+  return evaluate(condition);
+}
+
 /** Each step's depth in the plan's dependency graph: 0 without dependencies, else one more than its deepest. A
  * dependency outside `steps` does not count. */
 export function stepLevels(steps: TaskStep[]): Map<string, number> {
-  const byId = new Map(steps.map((s) => [s.id, s]));
+  const items = layoutItems(steps);
+  const byId = new Map(items.map((s) => [s.id, s]));
   const levels = new Map<string, number>();
   const visiting = new Set<string>();
   const level = (id: string): number => {
@@ -56,7 +147,7 @@ export function stepLevels(steps: TaskStep[]): Map<string, number> {
     levels.set(id, value);
     return value;
   };
-  steps.forEach((s) => level(s.id));
+  items.forEach((s) => level(s.id));
   return levels;
 }
 
@@ -64,10 +155,11 @@ export function stepLevels(steps: TaskStep[]): Map<string, number> {
  * order. The live steps are centred and the dropped ones follow on their right, so no live edge runs behind a
  * dropped step. */
 export function stepColumns(steps: TaskStep[], levels: Map<string, number>, stepX: number): Map<string, number> {
+  const items = layoutItems(steps);
   const x = new Map<string, number>();
   const depth = Math.max(...levels.values());
   for (let row = 0; row <= depth; row++) {
-    const placed = steps
+    const placed = items
       .filter((s) => levels.get(s.id) === row)
       .map((s) => {
         const parents = (s.depends_on ?? []).map((d) => x.get(d)).filter((v): v is number => v !== undefined);
