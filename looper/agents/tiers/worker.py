@@ -48,7 +48,7 @@ from enum import Enum, StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..agent_settings import AgentType, Launch, load_agent_settings, load_task_limit
+from ..agent_settings import AgentSettings, AgentType, Launch, fallback_settings, load_agent_settings, load_task_limit
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
 from .. import proc_tree, reported_files, vault
@@ -456,6 +456,8 @@ class RunContext:
     # Preparation already constructs the handle and prompt; keep their ownership unchanged.
     handle: RunHandle | None = None
     system_prompt: SystemPrompt | None = None
+    model_events: int = 0
+    fallback_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1244,7 +1246,7 @@ class WorkerPool:
                     await self._end_room_run(worker_id, parent_task_id, seat)
 
             if wp.handle is not None and (missed := wp.handle.dropped_input()):
-                wp.result = {**(wp.result or {}), "missed_input": missed}
+                wp.result = {**(wp.result or {}), "missed_input": (wp.result or {}).get("missed_input", []) + missed}
 
             result_type = MessageType.VERIFY_RESULT if is_verify else MessageType.WORK_RESULT
             await self._bus.publish(MessageEnvelope.create(
@@ -1280,6 +1282,8 @@ class WorkerPool:
         *,
         is_verify: bool = False,
         started_at: datetime | None = None,
+        agent_settings: AgentSettings | None = None,
+        fallbacks: list[dict[str, str]] | None = None,
     ) -> RunContext | dict[str, Any]:
         """Execute a runtime run with streaming progress; ``started_at`` is the run's start (now without
         one): commits made since count as its work (``judge_result``)."""
@@ -1330,11 +1334,17 @@ class WorkerPool:
                                        task_role.items if task_role is not None else ())
         # The task's own choice of Agent Profile for this role wins over the layers, then its Planner's for this step,
         # then its Planner's for the rest of the task.
-        agent_settings = await load_agent_settings(
+        agent_settings = agent_settings or await load_agent_settings(
             agent, project_id, parent_task_id or None, step_id=payload.get("task_id") or None,
             task_role=(task_role.key, task_role.version) if task_role is not None and parent_task_id else None)
+        fallbacks = fallbacks if fallbacks is not None else []
+        while agent_settings.profile_error:
+            next_settings = await self._fallback_profile(agent_settings, agent, fallbacks, "profile_error",
+                                                         parent_task_id, worker_id)
+            if next_settings is None:
+                break
+            agent_settings = next_settings
         if agent_settings.profile_error:
-            # The step fails with the reason rather than run another agent.
             logger.error("worker %s: %s", worker_id, agent_settings.profile_error)
             if parent_task_id:
                 await self._activity(parent_task_id, worker_id, "error", agent_settings.profile_error[:500])
@@ -1494,6 +1504,12 @@ class WorkerPool:
             logger.error("worker %s: %s", worker_id, problem)
             if parent_task_id:
                 await self._activity(parent_task_id, worker_id, "error", problem[:500])
+            next_settings = await self._fallback_profile(agent_settings, agent, fallbacks, "start_error",
+                                                         parent_task_id, worker_id)
+            if next_settings is not None:
+                await self._end_room_run(worker_id)
+                return await self._prepare(envelope, is_verify=is_verify, started_at=started_at,
+                                           agent_settings=next_settings, fallbacks=fallbacks)
             return _verify_failed(problem) if is_verify else _work_failed(problem)
 
         command = handle.command
@@ -1517,11 +1533,68 @@ class WorkerPool:
 
     async def _execute(self, envelope: MessageEnvelope, *, is_verify: bool = False,
                        started_at: datetime | None = None) -> dict[str, Any]:
-        ctx = await self._prepare(envelope, is_verify=is_verify, started_at=started_at)
-        if isinstance(ctx, dict):
-            return ctx
+        fallbacks: list[dict[str, str]] = []
+        missed_input: list[str] = []
+        settings = None
+        while True:
+            ctx = await self._prepare(envelope, is_verify=is_verify, started_at=started_at,
+                                      agent_settings=settings, fallbacks=fallbacks)
+            if isinstance(ctx, dict):
+                result = ctx
+                break
+            timeout = None
+            try:
+                result = await self._execute_once(ctx, fallbacks)
+            except asyncio.TimeoutError as exc:
+                timeout = exc
+            except Exception as exc:
+                if not fallbacks:
+                    raise
+                result = _verify_failed(str(exc)) if is_verify else _work_failed(str(exc))
+                break
+            if ctx.fallback_reason is None:
+                if timeout is not None:
+                    if not fallbacks:
+                        raise timeout
+                    result = _verify_failed(str(timeout)) if is_verify else _work_failed(str(timeout))
+                break
+            settings = await self._fallback_profile(ctx.launch.settings, ctx.launch.role, fallbacks,
+                                                    ctx.fallback_reason, ctx.parent_task_id, ctx.worker_id)
+            if settings is None:
+                if timeout is not None:
+                    if not fallbacks:
+                        raise timeout
+                    result = _verify_failed(str(timeout)) if is_verify else _work_failed(str(timeout))
+                break
+            if isinstance(ctx.handle, KeptRun):
+                ctx.handle.release()
+            if ctx.handle is not None:
+                missed_input.extend(ctx.handle.dropped_input())
+            self._reminders.pop(ctx.worker_id, None)
+            await self._end_room_run(ctx.worker_id)
+        if missed_input:
+            result = {**result, "missed_input": missed_input + result.get("missed_input", [])}
+        return {**result, "fallback": fallbacks} if fallbacks else result
+
+    async def _fallback_profile(self, settings: AgentSettings, role: AgentType,
+                                fallbacks: list[dict[str, str]], reason: str,
+                                task_id: str, worker_id: str) -> AgentSettings | None:
+        target = settings.profile.fallback_profile_id
+        if not target or len(fallbacks) >= 3 or target in {entry["from"] for entry in fallbacks} \
+                or target == settings.profile.id:
+            return None
+        next_settings = await fallback_settings(settings, role)
+        if next_settings is not None:
+            fallbacks.append({"from": settings.profile.id, "to": next_settings.profile.id, "reason": reason})
+            if task_id:
+                await self._activity(task_id, worker_id, "phase",
+                                     f"Agent Profile fallback: {settings.profile.name} → {next_settings.profile.name} ({reason})")
+        return next_settings
+
+    async def _execute_once(self, ctx: RunContext, fallbacks: list[dict[str, str]]) -> dict[str, Any]:
         worker_id, parent_task_id, work_dir, prompt = ctx.worker_id, ctx.parent_task_id, ctx.work_dir, ctx.prompt
         command, launch, runtime, hosted, handle = ctx.command, ctx.launch, ctx.runtime, ctx.hosted, ctx.handle
+        is_verify = ctx.is_verify
         role = "reviewer" if is_verify else "worker"
         task_step = _task_step_log(parent_task_id, ctx.step_id)
         assert handle is not None
@@ -1537,6 +1610,10 @@ class WorkerPool:
             whole_process=True,
         )
         async with self._record_run(worker_id, recorder):
+            if fallbacks:
+                await recorder.annotate({"fallback_from": fallbacks[-1]["from"]})
+                if ctx.seat is not None and self.room_ops is not None:
+                    await self.room_ops.room.presence_changed(parent_task_id, ctx.seat, online=True)
             logger.info("%s %s%s starting run: %s (cwd=%s)", role, worker_id, task_step, command[0], work_dir)
             try:
                 if isinstance(handle, KeptRun):
@@ -1549,11 +1626,14 @@ class WorkerPool:
                     if isinstance(handle, ProcessRun):
                         wp.process = handle.process
             except RuntimeUnsupported as exc:
+                ctx.fallback_reason = "start_error"
+                await handle.end()
                 error = f"Cannot prepare {runtime.label}: {exc}"
                 await recorder.finish(output_text=None, result_event=None, error=error,
                                       outcome=RunOutcome.RUN_FAILED.value)
                 return _verify_failed(error) if is_verify else _work_failed(error)
             except RunStartError as exc:
+                ctx.fallback_reason = "start_error"
                 if hosted:
                     await handle.end()
                 logger.error("worker %s failed to start run: %s", worker_id, exc)
@@ -1601,6 +1681,7 @@ class WorkerPool:
         async def _read_stream() -> None:
             nonlocal result_event, finished, last_result, replay_events
             async for event in channel.events():
+                ctx.model_events += int(runtime.is_model_event(event))
                 replaying = isinstance(handle, KeptRun) and handle.replaying
                 if replaying:
                     recorder.account(event)
@@ -1816,6 +1897,8 @@ class WorkerPool:
             await recorder.finish(output_text=None, result_event=result_event, error=error,
                                   outcome=RunOutcome.RUN_FAILED.value, status=ended_by(exc))
             if timed_out:
+                if runtime.first_event_known and ctx.model_events == 0:
+                    ctx.fallback_reason = "no_model_events"
                 raise asyncio.TimeoutError(error) from exc
             raise
         finally:
@@ -1837,6 +1920,8 @@ class WorkerPool:
             and not result_event.get("is_error")
             and result_event.get("subtype") == "success"
         )
+        if return_code != 0 and runtime.first_event_known and ctx.model_events == 0 and not result_ok:
+            ctx.fallback_reason = "no_model_events"
         detail = (runtime.failure_detail(result_event, launch=launch, command=command, pid=handle.pid)
                   if not result_ok else None)
         # A run stopped at its spend cap exits non-zero too; its result says why.

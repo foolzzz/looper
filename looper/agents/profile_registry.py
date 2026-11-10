@@ -373,7 +373,7 @@ class ResolvedModel:
 
 @dataclass(frozen=True)
 class AgentProfile:
-    """A runtime and model reference, with only the profile's three runtime options."""
+    """A runtime and model reference, its runtime options and optional fallback."""
 
     id: str
     name: str
@@ -382,12 +382,16 @@ class AgentProfile:
     effort: str | None = None
     agent_teams: bool = False
     custom_prompt: str = ""
+    fallback_profile_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", entry_name(self.name, "Agent Profile"))
         if not isinstance(self.model_id, str) or not self.model_id or _CONTROL.search(self.model_id):
             raise RegistryError("an Agent Profile needs a model_id")
         object.__setattr__(self, "effort", _effort(self.effort, self.runtime))
+        if self.fallback_profile_id is not None and (not isinstance(self.fallback_profile_id, str)
+                or not self.fallback_profile_id or _CONTROL.search(self.fallback_profile_id)):
+            raise RegistryError("fallback_profile_id must be a registered profile id or null")
         _agent_teams(self.agent_teams)
         check_agent_teams(self.runtime, self.agent_teams)
         object.__setattr__(self, "custom_prompt", _custom_prompt(self.custom_prompt))
@@ -404,7 +408,7 @@ class AgentProfile:
                               frozenset(Capability(c) for c in row.get("runtime_capabilities") or () if c in known),
                               Launcher(row.get("runtime_launcher") or "native"), row.get("runtime_version"))
         return cls(row["id"], row["name"], runtime, row.get("model_id"), row.get("effort"),
-                   row.get("agent_teams", False), row.get("custom_prompt", ""))
+                   row.get("agent_teams", False), row.get("custom_prompt", ""), row.get("fallback_profile_id"))
 
     def record(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "model_id": self.model_id, "custom_prompt": self.custom_prompt,
@@ -430,7 +434,7 @@ class ResolvedAgentProfile(AgentProfile):
         model = ModelSpec.from_entry({name: row["model"][name] for name in ModelSpec.__dataclass_fields__})
         resolved = ResolvedModel(model, provider_spec(row["provider"]), Endpoint.from_entry(row["endpoint"]))
         return cls(profile.id, profile.name, profile.runtime, profile.model_id, profile.effort,
-                   profile.agent_teams, profile.custom_prompt, resolved_model=resolved)
+                   profile.agent_teams, profile.custom_prompt, profile.fallback_profile_id, resolved_model=resolved)
 
     @property
     def model(self) -> str:
@@ -1110,6 +1114,7 @@ def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED,
                      "vendor_type": provider["vendor_type"], "auth": provider["auth"],
                      "enabled": provider.get("enabled", True)},
         "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt,
+        "fallback_profile_id": spec.fallback_profile_id,
         "roles": servable_roles(spec.runtime.capabilities, spec.runtime.type), "used_by": dict(used_by),
         "cost": cost_basis(cost_profile), "warnings": profile_warnings(cost_profile),
     }
@@ -1713,7 +1718,7 @@ async def delete_model(model_id: str) -> dict[str, Any]:
 
 # --- Agent Profiles ---
 
-_PROFILE_FIELDS = ("name", "runtime_id", "model_id", "effort", "agent_teams", "custom_prompt")
+_PROFILE_FIELDS = ("name", "runtime_id", "model_id", "effort", "agent_teams", "custom_prompt", "fallback_profile_id")
 
 
 async def _existing_profile(profile_id: str, conn: Any = None) -> dict[str, Any]:
@@ -1737,6 +1742,30 @@ async def _parts(runtime_id: Any, model_id: Any, conn: Any) -> tuple[RuntimeSpec
     return runtime_spec(runtime), _resolved_model(row)
 
 
+async def _check_fallbacks(conn: Any, candidate: AgentProfile) -> None:
+    """Check incoming and outgoing chains, including edits to a target's roles."""
+    from ..db import profile_registry as db
+
+    profiles = {row["id"]: AgentProfile.from_row(row) for row in await db.list_profiles(pool=conn)}
+    profiles[candidate.id] = candidate
+    for source in profiles.values():
+        seen = {source.id}
+        current = source
+        hops = 0
+        while target_id := current.fallback_profile_id:
+            if target_id in seen:
+                raise RegistryError("Profile fallback chains cannot contain a cycle")
+            hops += 1
+            if hops > 3:
+                raise RegistryError("Profile fallback chains allow at most 3 hops")
+            target = profiles.get(target_id)
+            if target is None:
+                raise RegistryError(f"no fallback Agent Profile {target_id!r}")
+            check_roles(target, servable_roles(current.runtime.capabilities, current.runtime.type))
+            seen.add(target_id)
+            current = target
+
+
 async def create_profile(data: Any, *, manager_id: str | None = None) -> dict[str, Any]:
     """Register a profile (agent teams on for Claude Code); refuse settings
     its runtime cannot run. ``manager_id``: the answer's usage as ``registry_view``'s."""
@@ -1749,16 +1778,19 @@ async def create_profile(data: Any, *, manager_id: str | None = None) -> dict[st
     fields = {"name": entry_name(data.get("name"), "profile"), "runtime_id": data.get("runtime_id"),
               "model_id": data.get("model_id"),
               "effort": _effort(data.get("effort")),
-              "custom_prompt": _custom_prompt(data.get("custom_prompt", ""))}
+              "custom_prompt": _custom_prompt(data.get("custom_prompt", "")),
+              "fallback_profile_id": data.get("fallback_profile_id")}
     try:
         async with transaction() as conn:
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext('looper.profile_fallbacks'))")
             runtime, model = await _parts(fields["runtime_id"], fields["model_id"], conn)
             check_profile_model(model)
             fields["agent_teams"] = (_agent_teams(data["agent_teams"]) if "agent_teams" in data
                                      else default_agent_teams(runtime))
             model.check_runtime(runtime, fields["effort"])
-            AgentProfile("draft", fields["name"], runtime, model.model.id, fields["effort"],
-                         fields["agent_teams"], fields["custom_prompt"])
+            checked = AgentProfile("draft", fields["name"], runtime, model.model.id, fields["effort"],
+                                   fields["agent_teams"], fields["custom_prompt"], fields["fallback_profile_id"])
+            await _check_fallbacks(conn, checked)
             profile_id = await db.insert_profile(fields, pool=conn)
     except asyncpg.UniqueViolationError:
         raise RegistryConflict(f"an Agent Profile named {fields['name']!r} already exists") from None
@@ -1806,11 +1838,12 @@ async def update_profile(profile_id: str, data: Any, *, manager_id: str | None =
         fields["agent_teams"] = _agent_teams(data["agent_teams"])
     if "custom_prompt" in data:
         fields["custom_prompt"] = _custom_prompt(data["custom_prompt"])
-    for name in ("runtime_id", "model_id"):
+    for name in ("runtime_id", "model_id", "fallback_profile_id"):
         if name in data:
             fields[name] = data[name]
     try:
         async with transaction() as conn:
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext('looper.profile_fallbacks'))")
             runtime, model = await _parts(fields.get("runtime_id", row["runtime_id"]),
                                            fields.get("model_id", row["model_id"]), conn)
             await conn.execute("SELECT 1 FROM agent_profiles WHERE id = $1 FOR UPDATE", profile_id)
@@ -1825,7 +1858,9 @@ async def update_profile(profile_id: str, data: Any, *, manager_id: str | None =
             checked = AgentProfile(profile_id, fields.get("name", current["name"]), runtime,
                                    model.model.id, fields.get("effort", current["effort"]),
                                    fields.get("agent_teams", current["agent_teams"]),
-                                   fields.get("custom_prompt", current["custom_prompt"]))
+                                   fields.get("custom_prompt", current["custom_prompt"]),
+                                   fields.get("fallback_profile_id", current.get("fallback_profile_id")))
+            await _check_fallbacks(conn, checked)
             check_roles(checked, await _selected_roles(profile_id, conn))
             await db.update_profile(profile_id, fields, pool=conn)
     except asyncpg.UniqueViolationError:
@@ -1840,6 +1875,8 @@ async def deletable_profile(profile_id: str) -> dict[str, Any]:
 
     row = await _existing_profile(profile_id)
     _not_builtin(row, "profile")
+    if any(row.get("fallback_profile_id") == profile_id for row in await db.list_profiles()):
+        raise RegistryConflict("this Agent Profile is a fallback target: remove those references first")
     used_by = (await db.profile_usage(profile_id)).get(profile_id)
     if used_by:
         how = ("; switch the Manager's session with /profile or start a new one with /new"

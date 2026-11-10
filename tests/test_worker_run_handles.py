@@ -397,3 +397,115 @@ def test_kept_handle_is_fenced_before_the_activity_write_returns(tmp_path, monke
             await bus.shutdown()
 
     asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
+@pytest.mark.parametrize("review", [False, True])
+def test_profile_error_uses_fallback_without_an_extra_dispatch(tmp_path, monkeypatch, agent_db, review):
+    async def scenario():
+        events = _events()
+        if review:
+            events[-1]["result"] = json.dumps({"passed": True, "summary": "checked", "findings": []})
+        run = ScriptedRun(events)
+        async with _pool(tmp_path, monkeypatch, run) as (pool, _, results):
+            good = builtin_launch().settings
+            bad = replace(good, profile=replace(good.profile, id="dev", fallback_profile_id=good.profile.id),
+                          profile_error="profile unavailable")
+            monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=bad))
+            monkeypatch.setattr(worker, "fallback_settings", AsyncMock(return_value=good), raising=False)
+            item = _item(tmp_path)
+            if review:
+                item = replace(item, message_type=MessageType.VERIFY_REQUEST)
+                pool._bus.subscribe_topic(MessageType.VERIFY_RESULT, results.append)
+            await pool._dispatch(item)
+            await pool._tasks["w1"]
+            assert len(results) == 1
+            assert results[0].payload["passed"] if review else results[0].payload["status"] == "completed"
+            assert results[0].payload["fallback"] == [{"from": "dev", "to": good.profile.id,
+                                                        "reason": "profile_error"}]
+            assert agent_db.add_metadata.await_args.args[1]["fallback_from"] == "dev"
+            assert agent_db.start_record.await_count == 1
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
+@pytest.mark.parametrize("trigger", ["exit", "timeout", "start"])
+def test_failed_run_before_first_model_event_repeats_the_same_attempt(tmp_path, monkeypatch, agent_db, trigger):
+    class FailedRun(ScriptedRun):
+        async def wait(self):
+            self.wait_calls += 1
+            return 2
+
+    first = FailedRun([], hold=trigger == "timeout",
+                      launch_error=RunStartError("unavailable") if trigger == "start" else None)
+    second = ScriptedRun(_events())
+
+    async def scenario():
+        async with _pool(tmp_path, monkeypatch, first, second,
+                         timeout=1 if trigger == "timeout" else 0) as (pool, calls, results):
+            monkeypatch.setattr(ADAPTERS["claude-code"], "first_event_known", True, raising=False)
+            good = builtin_launch().settings
+            bad = replace(good, profile=replace(good.profile, id="dev", fallback_profile_id=good.profile.id))
+            monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=bad))
+            monkeypatch.setattr(worker, "fallback_settings", AsyncMock(return_value=good), raising=False)
+            await _finish(pool, tmp_path)
+            assert len(results) == 1 and results[0].payload["status"] == "completed"
+            assert len(calls) == 2 and second.launch_calls == 1
+            records = agent_db.start_record.await_args_list
+            assert len(records) == 2 and {c.kwargs["agent_id"] for c in records} == {"w1"}
+            assert {c.kwargs["metadata"]["step_id"] for c in records} == {"s1"}
+            assert first.prompt == second.prompt if trigger != "start" else second.prompt
+            assert agent_db.add_metadata.await_args.args[1]["fallback_from"] == "dev"
+            if trigger != "exit":
+                assert first.end_calls == 1
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
+@pytest.mark.parametrize("boundary", ["unknown", "model_event", "zero_exit", "no_fallback"])
+def test_runs_outside_the_fallback_boundary_are_not_repeated(tmp_path, monkeypatch, agent_db, boundary):
+    class FailedRun(ScriptedRun):
+        async def wait(self):
+            self.wait_calls += 1
+            return 0 if boundary == "zero_exit" else 2
+
+    events = [{"type": "system", "subtype": "init", "model": "example-model"}] \
+        if boundary == "model_event" else []
+    first, second = FailedRun(events), ScriptedRun(_events())
+
+    async def scenario():
+        async with _pool(tmp_path, monkeypatch, first, second) as (pool, calls, results):
+            monkeypatch.setattr(ADAPTERS["claude-code"], "first_event_known", boundary != "unknown", raising=False)
+            good = builtin_launch().settings
+            bad = replace(good, profile=replace(good.profile, id="dev",
+                          fallback_profile_id=None if boundary == "no_fallback" else good.profile.id))
+            monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=bad))
+            monkeypatch.setattr(worker, "fallback_settings", AsyncMock(
+                return_value=None if boundary == "no_fallback" else good), raising=False)
+            await _finish(pool, tmp_path)
+            assert len(calls) == 1 and second.launch_calls == 0
+            assert results[0].payload["status"] == "failed" and "fallback" not in results[0].payload
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
+@pytest.mark.parametrize("last_failure", ["timeout", "after_model_event"])
+def test_fallback_history_survives_final_timeout(tmp_path, monkeypatch, agent_db, last_failure):
+    async def scenario():
+        first = ScriptedRun([], launch_error=RunStartError("unavailable"), dropped_input=["keep this"])
+        events = [{"type": "system", "subtype": "init", "model": "example-model"}] \
+            if last_failure == "after_model_event" else []
+        second = ScriptedRun(events, hold=True, dropped_input=["and this"])
+        async with _pool(tmp_path, monkeypatch, first, second, timeout=1) as (pool, _, results):
+            monkeypatch.setattr(ADAPTERS["claude-code"], "first_event_known", True)
+            good = builtin_launch().settings
+            bad = replace(good, profile=replace(good.profile, id="dev", fallback_profile_id=good.profile.id))
+            monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=bad))
+            monkeypatch.setattr(worker, "fallback_settings", AsyncMock(return_value=good))
+            await _finish(pool, tmp_path)
+            assert results[0].payload["status"] == "failed"
+            assert results[0].payload["fallback"] == [{"from": "dev", "to": good.profile.id,
+                                                        "reason": "start_error"}]
+            assert results[0].payload["missed_input"] == ["keep this", "and this"]
+            assert second.end_calls == 1
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))

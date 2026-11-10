@@ -230,6 +230,10 @@ class CursorAgentRuntime(RuntimeAdapter):
     can_replace_system_prompt = False
     loads_operator_config = True
 
+    def reported_model(self, event: Mapping[str, Any]) -> str | None:
+        model = event.get("model_display") if event.get("type") == "system" and event.get("subtype") == "init" else None
+        return model if isinstance(model, str) and model.strip() else None
+
     def ttadk_problem(self) -> ttadk.TtadkProblem | None:
         return ttadk.TtadkProblem.WRONG_TOOL if ttadk.tool_command("cursor-cli") != "agent" else None
 

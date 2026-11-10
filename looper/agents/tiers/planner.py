@@ -103,6 +103,7 @@ system limits apply.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -116,7 +117,7 @@ from typing import Any, TypeVar
 from ..bus import MessageBus
 from ..supervisor import cancel_and_wait
 from ..kept_run import AdoptOutcome, AdoptResult, RunHold
-from ..agent_settings import AgentSettings, AgentType, Harness, Launch, load_agent_settings
+from ..agent_settings import AgentSettings, AgentType, Harness, Launch, fallback_settings, load_agent_settings
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
     AutonomousHandler,
@@ -2149,6 +2150,14 @@ class PlannerAgent:
 
     # --- Results and decisions ---
 
+    async def _record_profile_fallbacks(self, plan: TaskPlan, role: str, changes: Sequence[Mapping[str, Any]],
+                                       step: PlanStep | None = None) -> None:
+        entries = [JournalEntry(step.step_id if step else "", step.label if step else "",
+                    json.dumps({"role": role, "step": step.label if step else "", **change}),
+                    kind=JournalKind.PROFILE_FALLBACK) for change in changes]
+        if entries:
+            await self._save(plan, entries=entries)
+
     async def _handle_work_result(self, envelope: MessageEnvelope) -> None:
         result = envelope.payload
         plan = self._plan
@@ -2159,6 +2168,7 @@ class PlannerAgent:
             logger.info("planner %s ignores a result that is not for a running step", self.agent_id)
             return
 
+        await self._record_profile_fallbacks(plan, step.role or "worker", result.get("fallback") or [], step)
         step.result = result
         if blocked := result.get("prompt_blocked"):
             step.status = "failed"
@@ -2244,6 +2254,8 @@ class PlannerAgent:
             logger.info("planner %s ignores a review that is not for a step in review", self.agent_id)
             return
 
+        item = self._reviewing_role(step)
+        await self._record_profile_fallbacks(plan, item.role if item else "reviewer", result.get("fallback") or [], step)
         # This run ended; a following review must check the task cap without deferring to it.
         self._adopted_runs.discard(envelope.source.agent_id)
         if blocked := result.get("prompt_blocked"):
@@ -3419,8 +3431,18 @@ class PlannerAgent:
             library = await self._ops.library_with_server(library, self._runtime_root, self._token)
             self._token_files.add(library.mcp_config)
         agent_settings = await self._load_agent_settings(plan)
+        visited = {agent_settings.profile.id}
+        changes = []
+        while agent_settings.profile_error and len(changes) < 3:
+            following = await fallback_settings(agent_settings, AgentType.PLANNER)
+            if following is None or following.profile.id in visited:
+                break
+            changes.append({"from": agent_settings.profile.id, "to": following.profile.id, "reason": "profile_error"})
+            visited.add(following.profile.id)
+            agent_settings = following
+        await self._record_profile_fallbacks(plan, "planner", changes)
+        self._fallback_from = changes[-1]["from"] if changes else None
         if agent_settings.profile_error:
-            # The task fails with the reason rather than run another agent.
             raise PlannerTurnError(agent_settings.profile_error)
         try:
             self._vault = await vault.active() if self._execution.vault_on else None
@@ -3453,6 +3475,8 @@ class PlannerAgent:
             # A rejected launch has no command yet, but still belongs in this task's run history.
             recorder = self._recorder(plan, message, _Process([], None, system_prompt, launch))
             await recorder.start()
+            if self._fallback_from:
+                await recorder.annotate({"fallback_from": self._fallback_from})
             await recorder.finish(output_text=None, result_event=None, error=error)
             raise PlannerTurnError(error) from None
         # The command carries the model, the effort, the installed items' directories (each named by its
@@ -3580,6 +3604,8 @@ class PlannerAgent:
         assert plan is not None
         recorder = self._recorder(plan, text, process)
         async with recorder:  # however the turn ends, its task's stop cutting it off too, its record ends
+            if fallback_from := getattr(self, "_fallback_from", None):
+                await recorder.annotate({"fallback_from": fallback_from})
             # Where the runtime cannot keep the Planner from changing files, the task directory as the turn starts.
             watched = await self._watch_files(plan, process.launch)
 

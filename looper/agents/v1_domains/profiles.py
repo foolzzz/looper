@@ -7,7 +7,7 @@ from .global_settings import ROLE
 from .registry import AGENT_PROFILE, PROFILE_MODEL, PROFILE_PROVIDER, RUNTIME_TYPE
 
 _FIELDS = {"name": _STR, "runtime_id": _STR, "model_id": _STR, "effort": _NULL_STR,
-           "agent_teams": _BOOL, "custom_prompt": _STR}
+           "agent_teams": _BOOL, "custom_prompt": _STR, "fallback_profile_id": _NULL_STR}
 PROFILE_PATCH = {**_object(_FIELDS, [], closed=True), "minProperties": 1,
                  "anyOf": [{"required": [name]} for name in _FIELDS]}
 PROFILE_RESULT = _object({"profile": AGENT_PROFILE, "warnings": _array(_STR)}, closed=True)

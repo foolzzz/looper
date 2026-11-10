@@ -23,7 +23,7 @@ TASK_RUN_ROW = _object({
 _RECORD_FIELDS = {
     "id": _INT, "agent_id": _STR, "status": _STATUS,
     **dict.fromkeys(("task_id", "session_id", "input_summary", "output_summary", "input_text", "output_text",
-                     "model", "error", "finished_at", "last_output_at"), _NULL_STR),
+                     "model", "model_requested", "model_reported", "error", "finished_at", "last_output_at"), _NULL_STR),
     **dict.fromkeys(("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
                      "context_tokens", "duration_ms"), _NULL_INT),
     "cost_usd": _NULL_NUMBER, "cost_source": {"type": ["string", "null"], "enum": ["runtime", "provider_price", None]},
@@ -66,6 +66,17 @@ OPERATIONS = (
 )
 
 
+def _model_fields(record):
+    metadata = record.get("metadata") or {}
+    profile = metadata.get("profile") or metadata.get("agent") or {}
+    runtime = (profile.get("runtime") or {}).get("type")
+    reported = (metadata["model_reported"] if "model_reported" in metadata else
+                metadata.get("model_display") if runtime == "cursor-agent" else
+                None if runtime in ("codex", "grok") else record.get("model"))
+    return {**record, "model_requested": (metadata.get("model_choice") or {}).get("model") or profile.get("model"),
+            "model_reported": reported}
+
+
 async def run(server, operation, arguments, principal, headers):
     # Retain the shared historical role projection, including the absence of a built-in task_role.
     from ..http_server import _with_run_role
@@ -75,12 +86,12 @@ async def run(server, operation, arguments, principal, headers):
         if action == "for_task":
             result = {"runs": await llm_records.task_run_rows(arguments["task_id"])}
         elif action == "list":
-            result = {"records": [_with_run_role(row) for row in await llm_records.list_records(**arguments)]}
+            result = {"records": [_model_fields(_with_run_role(row)) for row in await llm_records.list_records(**arguments)]}
         elif action == "get":
             row = await llm_records.get_record(arguments["record_id"])
             if row is None:
                 raise OpError(ErrorCode.NOT_FOUND, "llm record not found")
-            result = {"record": _with_run_role(row)}
+            result = {"record": _model_fields(_with_run_role(row))}
         elif action == "events":
             result = {"events": await llm_records.list_events(arguments["record_id"],
                 after_seq=arguments.get("after", 0), limit=arguments.get("limit", 1000))}

@@ -148,3 +148,16 @@ def test_usage_totals_session_and_utc_days_preserve_unpriced_and_null_values(
             assert [row["id"] for row in limited["turns"]] == [second]
             assert limited["latest_context_tokens"] is None and limited["total"] == usage["total"]
     run_db(run, monkeypatch, timeout=30)
+
+
+def test_run_models_round_trip_as_separate_facts(tmp_path, monkeypatch):
+    async def run(pool):
+        record_id = await _record(pool, model="reported-model", metadata={
+            "model_choice": {"model": "requested-model"}, "model_reported": "reported-model"})
+        async with _api(tmp_path, pool, client=False) as call:
+            record = (await call("get", {"record_id": record_id}))["record"]
+            listed = (await call("list", {"task_id": "task-one"}))["records"][0]
+            for row in (record, listed):
+                assert row["model_requested"] == "requested-model"
+                assert row["model_reported"] == "reported-model"
+    run_db(run, monkeypatch, timeout=30)

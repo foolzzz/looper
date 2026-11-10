@@ -510,7 +510,7 @@ class AgentSettings:
     system_prompt_mode: SystemPromptMode = SystemPromptMode.APPEND
     error: str | None = field(default=None, compare=False)  # why the layers could not be read
     # Why the profile cannot run this role (its runtime and provider no longer pair, or the runtime lacks a
-    # capability the role needs): the run fails with it rather than run another profile.
+    # capability the role needs): only an explicitly configured fallback can replace it.
     profile_error: str | None = field(default=None, compare=False)
     # Raw model settings for this run; effective fallback prices are never saved as overrides.
     pricing_catalog: tuple[ModelSpec, ...] = ()
@@ -757,7 +757,29 @@ async def load_agent_settings(
             return replace(settings, profile=builtin_resolved_profile(),
                            profile_error=f"cannot read the built-in model binding ({type(exc).__name__})")
         settings = replace(settings, profile=profile)
-    problem = profile_problem(settings.profile, AgentType(role))
+    return await _check_profile_settings(settings, AgentType(role))
+
+
+async def fallback_settings(settings: AgentSettings, role: AgentType) -> AgentSettings | None:
+    """Resolve one configured fallback, retaining the run's other settings and launch checks."""
+    from ..db import profile_registry
+
+    target = settings.profile.fallback_profile_id
+    if not target:
+        return None
+    try:
+        row = await profile_registry.get_profile(target)
+    except Exception:
+        logger.warning("cannot read fallback Agent Profile %s", target, exc_info=True)
+        return None
+    if row is None:
+        return None
+    return await _check_profile_settings(replace(settings, profile=_stored_profile(row),
+                                                 profile_error=None, pricing_catalog=()), role)
+
+
+async def _check_profile_settings(settings: AgentSettings, role: AgentType) -> AgentSettings:
+    problem = profile_problem(settings.profile, role)
     if problem is None and settings.profile.provider.auth is AuthKind.API_KEY:
         settings, problem = await _with_api_key(settings)
     elif problem is None:
