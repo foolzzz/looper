@@ -1858,7 +1858,20 @@ Manager tools.
   captures model identity and pricing; historical rows and totals are not rewritten.
 - **Agent Profiles** (`agent_profiles`) save `runtime_id`, `model_id`,
   `effort` (null: the runtime's), `agent_teams` (Claude Code only, on by
-  default there) and `custom_prompt`. Provider and protocol are derived from
+  default there), `custom_prompt` and optional `fallback_profile_id`. Fallback
+  chains are acyclic, allow at most three hops and preserve every supported
+  role; edits also validate incoming chains. Referenced targets cannot be deleted.
+  Planner follows the chain only for a profile configuration error. Worker and
+  Reviewer also fall back after a launch failure, or a nonzero exit or timeout
+  before any model event when the adapter's `first_event_known` is verified.
+  Unverified adapters leave that detection disabled. Each switch stays within
+  the same step attempt, without consuming a retry, and records activity,
+  `profile_fallback` journal entries and `metadata.fallback_from` on the next run.
+  Manager sessions do not follow fallback chains. Settings exposes the target;
+  the same operator Profile API serves the CLI, without channel-specific settings.
+  `runs.get` and `runs.list` expose `model_requested` and `model_reported`
+  separately; unreported model identities remain null rather than reusing the request.
+  Provider and protocol are derived from
   the model. Profiles do not own a system-prompt mode: role defaults and task
   overrides still select append/replace. API profile views return `model` as
   `{model_id, name, protocol, provider_id}` and derived `provider` information.

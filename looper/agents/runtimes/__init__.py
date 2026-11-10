@@ -392,6 +392,8 @@ class RuntimeAdapter(ABC):
     # Planner's nudge, an agent room reminder. A runtime that reads only its prompt has False.
     run_input: ClassVar[bool] = False
     keepable: ClassVar[bool] = False  # a keeper may hold its run across a control-plane restart
+    # Enable only after real CLI checks confirm its first model event on success and absence on startup failure.
+    first_event_known: ClassVar[bool] = False
     # How it keeps a run that must not change files from changing them (``Launch.read_only``).
     read_only: ClassVar[ReadOnly] = ReadOnly.CHECK
     # Whether a run priced by the runtime's own figure (``CostSource.RUNTIME``) stops at its per-run spend cap:
@@ -406,6 +408,33 @@ class RuntimeAdapter(ABC):
     # the user can stop the Manager's reply. A session run per turn has no such channel: a stop is refused, never
     # turned into a kill (``ResidentSession.can_interrupt`` says it of a running session).
     can_interrupt: ClassVar[bool] = False
+
+    def is_model_event(self, event: Mapping[str, Any]) -> bool:
+        """A model initialization, response or nonzero token usage; progress and empty results are not evidence."""
+        if event.get("type") == "result":
+            from ..run_usage import reported_totals
+
+            usage = reported_totals(dict(event)).to_dict()
+            return any(value and value > 0 for name, value in usage.items() if name != "cost_usd")
+        if event.get("is_error") or event.get("error"):
+            return False
+        kind = event.get("type")
+        if kind == "system" and event.get("subtype") == "init":
+            return isinstance(event.get("model"), str) and bool(event["model"].strip())
+        if kind == "assistant":
+            message = event.get("message")
+            if isinstance(message, Mapping):
+                if message.get("model") == "<synthetic>":
+                    return False
+                model, content = message.get("model"), message.get("content")
+                return (isinstance(model, str) and bool(model.strip())) or (
+                    isinstance(content, list) and any(isinstance(block, Mapping) and
+                        block.get("type") in {"text", "thinking", "tool_use"} for block in content))
+        return False
+
+    def reported_model(self, event: Mapping[str, Any]) -> str | None:
+        """Only model identifiers actually reported by the runtime; normalized requested models are unknown."""
+        return None
 
     # --- Registration ---
 

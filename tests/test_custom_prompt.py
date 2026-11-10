@@ -122,8 +122,8 @@ def test_manager_profile_tool_exposes_and_returns_custom_prompt() -> None:
             "effort": None, "model_path": "direct", "agent_teams": False,
             "custom_prompt": "CUSTOM", "roles": [], "builtin": False,
             "used_by": {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": []}}
-    assert _profile_listed(view)["custom_prompt"] == "CUSTOM"
-    assert _profile_listed(view)["model_path"] == "direct"
+    assert _profile_listed(view, [view])["custom_prompt"] == "CUSTOM"
+    assert _profile_listed(view, [view])["model_path"] == "direct"
     assert replace(builtin_resolved_profile(), custom_prompt="CUSTOM").record()["custom_prompt"] == "CUSTOM"
 
 

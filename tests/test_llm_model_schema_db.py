@@ -48,7 +48,7 @@ def test_fresh_target_schema_and_second_initialization() -> None:
                                    "WHERE table_schema = current_schema()")
         profile = {r['column_name'] for r in columns if r['table_name'] == 'agent_profiles'}
         assert profile == {'id', 'name', 'runtime_id', 'model_id', 'effort', 'agent_teams', 'custom_prompt',
-                           'builtin', 'created_at', 'updated_at'}
+                           'builtin', 'created_at', 'updated_at', 'fallback_profile_id'}
         provider = {r['column_name'] for r in columns if r['table_name'] == 'llm_providers'}
         assert 'vendor_type' in provider and not provider & {'protocols', 'base_url', 'models'}
         assert await conn.fetchval("SELECT count(*) FROM llm_model_migration_map") == 0

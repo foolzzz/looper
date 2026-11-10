@@ -64,7 +64,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -154,6 +154,16 @@ class ClaudeCodeRuntime(RuntimeAdapter):
                                     *BACKGROUND_MODEL_VARS})
     # A read-only run refuses what would change files and reports each refusal (claude_cli.read_only_args).
     read_only = ReadOnly.PERMISSIONS
+
+    def reported_model(self, event: Mapping[str, Any]) -> str | None:
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            model = event.get("model")
+        elif (event.get("type") == "assistant" and not event.get("parent_tool_use_id")
+              and isinstance(event.get("message"), Mapping)):
+            model = event["message"].get("model")
+        else:
+            return None
+        return model if isinstance(model, str) and model.strip() and model != "<synthetic>" else None
 
     def api_model(self, model: str) -> str:
         from ..model_names import parse_model_name

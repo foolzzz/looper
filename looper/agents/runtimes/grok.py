@@ -143,6 +143,13 @@ class GrokRuntime(RuntimeAdapter):
     resident_transport = ResidentTransport.ACP
     can_interrupt = True  # ACP's ``session/cancel`` (not once the session has fallen back to per turn)
 
+    def reported_model(self, event: Mapping[str, Any]) -> str | None:
+        if (event.get("type") != "assistant" or event.get("parent_tool_use_id")
+                or not isinstance(event.get("message"), Mapping)):
+            return None
+        model = event["message"].get("model")
+        return model if isinstance(model, str) and model.strip() and model not in ("unknown", "<synthetic>") else None
+
     def probe(self, executable: str) -> Probe:
         """``<executable> --version``, with an empty ``GROK_HOME`` of its own so nothing of the operator's is read."""
         home = tempfile.mkdtemp(prefix="looper-grok-probe-")

@@ -72,9 +72,10 @@ async def read_profiles(conn: asyncpg.Connection) -> list[dict[str, Any]]:
     """Every Agent Profile, its runtime by name and its model's complete natural key."""
     rows = await conn.fetch(
         "SELECT a.id, a.name, r.name AS runtime, p.name AS provider, m.name AS model, m.protocol, a.effort, a.agent_teams, "
-        "a.custom_prompt, a.builtin "
+        "a.custom_prompt, a.builtin, fallback.name AS fallback "
         "FROM agent_profiles a JOIN agent_runtimes r ON r.id = a.runtime_id "
         "JOIN llm_models m ON m.id = a.model_id JOIN llm_providers p ON p.id = m.provider_id "
+        "LEFT JOIN agent_profiles fallback ON fallback.id = a.fallback_profile_id "
         "ORDER BY a.name COLLATE \"C\""
     )
     return [dict(row) for row in rows]

@@ -126,3 +126,40 @@ def test_generated_cli_sends_the_declared_ordinary_read(tmp_path, capsys, action
         assert "202" not in api_v1.document()["paths"][f"/runs/{action}"]["post"]["responses"]
     finally:
         server.close()
+
+
+@pytest.mark.parametrize("action", ["get", "list"])
+@pytest.mark.parametrize("metadata,reported,requested", [
+    ({"model_choice": {"model": "requested-model"}}, "reported-model", "requested-model"),
+    ({"profile": {"model": "legacy-model"}}, None, "legacy-model"),
+    (None, None, None),
+])
+def test_run_reads_distinguish_requested_and_reported_models(tmp_path, monkeypatch, action, metadata, reported, requested):
+    record = {"id": 1, "metadata": metadata, "model": reported, "status": "completed"}
+    monkeypatch.setattr(llm_records, "get_record" if action == "get" else "list_records",
+                        AsyncMock(return_value=record if action == "get" else [record]))
+    async def run():
+        async with _serving(tmp_path) as server:
+            status, _, answer = await post(server, action, {"record_id": 1} if action == "get" else {})
+            assert status == 200
+            row = answer["result"]["record"] if action == "get" else answer["result"]["records"][0]
+            assert row["model_requested"] == requested
+            assert row["model_reported"] == reported
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("metadata,reported", [
+    ({"model_reported": None}, None),
+    ({"model_reported": "reported-model"}, "reported-model"),
+    ({"profile": {"runtime": {"type": "codex"}}}, None),
+    *[({"profile": {"runtime": {"type": runtime}}}, None) for runtime in ("pi", "omp", "dsh", "grok")],
+    ({"profile": {"runtime": {"type": "cursor-agent"}}, "model_display": "reported-model"}, "reported-model"),
+])
+def test_run_get_preserves_model_report_evidence(tmp_path, monkeypatch, metadata, reported):
+    monkeypatch.setattr(llm_records, "get_record", AsyncMock(return_value={
+        "id": 1, "metadata": metadata, "model": "requested-model", "status": "completed"}))
+    async def run():
+        async with _serving(tmp_path) as server:
+            status, _, answer = await post(server, "get", {"record_id": 1})
+            assert status == 200 and answer["result"]["record"]["model_reported"] == reported
+    asyncio.run(run())

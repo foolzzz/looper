@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents import keeper, kept_dirs, proc_tree
+from looper.agents import agent_settings, keeper, kept_dirs, proc_tree
 from looper.agents.agent_settings import AgentSettings, AgentType
 from looper.agents.bus import MessageBus
 from looper.agents.drain import DrainScope, DrainState
@@ -109,7 +109,7 @@ async def _stored(db, count: int) -> None:
 
 
 @asynccontextmanager
-async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None, rooms=False):
+async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None, rooms=False, fallback=False, review=False):
     run_dir = _short_directory()
     run_id = run_dir.name
     saved = {}
@@ -139,6 +139,18 @@ async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None, rooms=False)
         )
         settings = AgentSettings(profile=profile, max_budget_usd=cap)
     load = AsyncMock(side_effect=lambda *args, **kwargs: settings)
+    if fallback:
+        await db.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id, fallback_profile_id) "
+                         "SELECT 'profile-middle', 'Middle', 'rt-claude-code', id, 'agent-claude-code-opus' "
+                         "FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'sonnet'")
+        await db.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id, fallback_profile_id) "
+                         "SELECT 'profile-primary', 'Primary', 'rt-claude-code', id, 'profile-middle' "
+                         "FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'sonnet'")
+        await db.execute("INSERT INTO agent_setting_layers (scope, role, profile_id) VALUES "
+                         "('role', $1, 'profile-primary')", 'reviewer' if review else 'worker')
+        monkeypatch.setattr(agent_settings, '_login_problem', AsyncMock(side_effect=lambda profile:
+                            'profile cannot start' if profile.id in ('profile-primary', 'profile-middle') else None))
+        load = agent_settings.load_agent_settings
     monkeypatch.setattr(worker, 'KeptRun', ShortKeptRun)
     monkeypatch.setattr(worker, 'load_agent_settings', load)
     monkeypatch.setattr(worker, 'load_task_limit', AsyncMock(return_value=1))
@@ -147,10 +159,12 @@ async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None, rooms=False)
     await db.execute("INSERT INTO projects (id, name) VALUES ('project-adopt', 'Adoption test')")
     await db.execute("INSERT INTO tasks (id, requirement, work_dir, project_id) "
                      "VALUES ('task-adopt', 'hold a run', $1, 'project-adopt')", str(tmp_path))
-    executable = fake_claude(tmp_path / 'claude', BODY)
+    body = BODY.replace("{'status': 'completed', 'summary': 'done', 'changed_files': {}}",
+                        "{'passed': True, 'summary': 'done', 'findings': []}") if review else BODY
+    executable = fake_claude(tmp_path / 'claude', body)
     bus = MessageBus(runtime_root=tmp_path / 'runtime')
     results = []
-    bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
+    bus.subscribe_topic(MessageType.VERIFY_RESULT if review else MessageType.WORK_RESULT, results.append)
     drains = [DrainState(), DrainState()]
     pools = [worker.WorkerPool(config=worker.WorkerConfig(claude_bin=executable),
                                runtime_root=tmp_path / 'runtime', drain=drains[i], keeper=KeeperSettings(i + 1))
@@ -160,14 +174,16 @@ async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None, rooms=False)
             pool.room_ops = RoomOps(RoomService(worker_pool=pool, batch_seconds=0), url='http://127.0.0.1:9')
     envelope = MessageEnvelope.create(
         source=planner_address('original-planner'), target=worker_address(run_id),
-        message_type=MessageType.WORK_ITEM, correlation_id='dispatch-correlation', metadata={'dispatch': 'original'},
+        message_type=MessageType.VERIFY_REQUEST if review else MessageType.WORK_ITEM,
+        correlation_id='dispatch-correlation', metadata={'dispatch': 'original'},
         payload={'task_id': 'step-adopt', 'parent_task_id': 'task-adopt', 'plan_id': 'plan-adopt',
                  'step_key': 'implement', 'instruction': 'finish the held work',
                  'context': {'work_dir': str(tmp_path)}},
     )
     case = SimpleNamespace(a=pools[0], b=pools[1], run_dir=run_dir, run_id=run_id, results=results,
                            settings=settings, load=load, saved=saved, envelope=envelope,
-                           expect=RunHold('task-adopt', 'step-adopt', AgentType.WORKER), db=db, root=tmp_path)
+                           expect=RunHold('task-adopt', 'step-adopt', AgentType.REVIEWER if review else AgentType.WORKER),
+                           db=db, root=tmp_path)
     try:
         for pool in pools:
             await pool.start(bus)
@@ -227,6 +243,42 @@ async def _finished(case):
     assert result.payload['plan_id'] == 'plan-adopt'
     assert not case.b._inputs and not case.b._slots
     return result
+
+
+@pytest.mark.parametrize('review', [False, True])
+@pytest.mark.parametrize('primary_error', [False, True])
+def test_a_fallback_run_survives_control_plane_restart(tmp_path, monkeypatch, review, primary_error):
+    async def run(db):
+        async with _pools(db, tmp_path, monkeypatch, fallback=True, review=review) as case:
+            record = (await llm_records.list_records())[0]
+            assert record['metadata']['profile']['id'] == 'agent-claude-code-opus'
+            history = [{'from': 'profile-primary', 'to': 'profile-middle', 'reason': 'profile_error'},
+                       {'from': 'profile-middle', 'to': 'agent-claude-code-opus', 'reason': 'profile_error'}]
+            assert record['metadata']['fallback_from'] == 'profile-middle'
+            assert record['metadata']['fallback'] == history
+            await _detach(case)
+            # Adoption follows the run's profile even if the configured chain was edited.
+            await db.execute("UPDATE agent_profiles SET fallback_profile_id = NULL WHERE id = 'profile-primary'")
+            if not primary_error:
+                monkeypatch.setattr(agent_settings, '_login_problem', AsyncMock(return_value=None))
+            await _adopt(case)
+            assert keeper.read_json(case.run_dir / keeper.STATE)['child_pid'] == case.identity['child_pid']
+            assert _live(case.identity['child_pid'])
+            (tmp_path / 'release').touch()
+            result = await _finished(case)
+            assert result.payload['passed'] if review else result.payload['status'] == 'completed'
+            assert result.payload['fallback'] == history
+            records = await llm_records.list_records()
+            assert len(records) == 1
+            assert records[0]['id'] == record['id']
+            assert records[0]['status'] == 'completed'
+            assert records[0]['metadata']['profile'] == record['metadata']['profile']
+            assert records[0]['metadata']['fallback'] == history
+            from tests.test_api_v1_run_records_db import _api
+            async with _api(tmp_path, db, client=False) as call:
+                loaded = (await call('get', {'record_id': record['id']}))['record']
+                assert loaded['metadata']['fallback'] == history
+    run_db(run, monkeypatch, timeout=35)
 
 
 def test_an_adopted_run_continues_its_record(tmp_path, monkeypatch):
