@@ -744,11 +744,19 @@ class WorkerPool:
             task_role = TaskRole.from_payload(manifest.get("task_role"))
             if manifest.get("task_role") is not None and (task_role is None or task_role.kind.agent is not agent):
                 raise ValueError("invalid run task role")
+            record = await db_llm_records.get_record(record_id)
+            if record is None:
+                raise RecordNotResumable(f"record {record_id} does not exist")
             try:
+                # The kept child may have started on a fallback, rather than the current selection.
+                profile_id = record["metadata"]["profile"]["id"]
+                if not isinstance(profile_id, str) or not profile_id:
+                    raise ValueError("the run has no recorded Agent Profile")
                 project = await self._task_project(task_id, run_id)
                 project_id = str((project or {}).get("id") or "") or None
                 settings = await load_agent_settings(
                     agent, project_id, task_id, step_id=step_id,
+                    profile_id=profile_id,
                     task_role=(task_role.key, task_role.version) if task_role is not None else None)
                 launch = Launch(settings, role=agent)
                 if settings.profile_error or (launch.runtime.type, launch.profile.provider.id, launch.model,

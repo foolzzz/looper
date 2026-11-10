@@ -725,13 +725,15 @@ async def load_task_limit(role: AgentType, task_id: str | None) -> int:
 async def load_agent_settings(
     role: AgentType | str, project_id: str | None = None, task_id: str | None = None, step_id: str | None = None,
     task_role: tuple[str, int] | None = None, manager_session: bool = True, manager_id: str = "manager",
+    *, profile_id: str | None = None,
 ) -> AgentSettings:
     """``role``'s settings in ``project_id`` (or outside any project) and, with ``task_id``, the profile that task
     and its Planner chose for it (with ``step_id``, the Planner's choice for that step too; with ``task_role``, a
     role's key and version, the profile of that role of the task), read now; the built-in defaults, with ``error``
     set, when the layers cannot be read. The Manager ``manager_id``'s settings include the profile of its definition and, unless
-    ``manager_session`` is False, the profile chosen for its session."""
-    from ..db import agent_setting_layers
+    ``manager_session`` is False, the profile chosen for its session. ``profile_id`` pins an existing run's
+    recorded profile when adopting it, ahead of the current selection."""
+    from ..db import agent_setting_layers, profile_registry
 
     extra: dict[str, Any] = {}
     if AgentType(role) is AgentType.MANAGER and (manager_session or manager_id != "manager"):
@@ -747,9 +749,12 @@ async def load_agent_settings(
         return replace(resolve(role, {}, project_id), profile=builtin_resolved_profile(),
                        error=f"cannot read the agent settings ({type(exc).__name__})")
     settings = resolve(role, index_layers(rows, project_id), project_id)
-    if settings.profile_source is Layer.BUILTIN:
-        from ..db import profile_registry
-
+    if profile_id is not None:
+        row = await profile_registry.get_profile(profile_id)
+        if row is None:
+            raise SettingsError(f"the run's Agent Profile {profile_id!r} no longer exists")
+        settings = replace(settings, profile=_stored_profile(row), profile_error=None, pricing_catalog=())
+    elif settings.profile_source is Layer.BUILTIN:
         try:
             row = await profile_registry.get_profile(BUILTIN_PROFILE.id)
             profile = ResolvedAgentProfile.from_row(row) if row else builtin_resolved_profile()
