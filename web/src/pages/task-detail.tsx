@@ -1072,11 +1072,12 @@ function TaskProcessRecord({ task }: { task: TaskDetail }) {
     <section aria-labelledby="task-process-record-title">
       <h3 id="task-process-record-title" className="mb-2 text-sm font-semibold">Process record</h3>
       <div className="space-y-4 rounded-lg border border-border bg-card px-4 py-3 text-sm">
-        {(["Roles", "Reviews", "Verification", "Escalations"] as const).map((name) => (
+        {(["Roles", "Reviews", "Verification", "Escalations", "Runs"] as const)
+          .filter((name) => name !== "Runs" || (record.sections.Runs?.length ?? 0) > 0).map((name) => (
           <div key={name}>
             <h4 className="mb-1 text-xs font-medium text-muted-foreground">{name}</h4>
             <ul className="space-y-1">
-              {record.sections[name].map((entry, index) => (
+              {(record.sections[name] ?? []).map((entry, index) => (
                 <li key={index} className="whitespace-pre-wrap break-words">{entry}</li>
               ))}
             </ul>

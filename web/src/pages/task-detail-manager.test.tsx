@@ -87,6 +87,31 @@ describe("TaskDetailRoute manager attribution", () => {
       .toEqual(["Roles", "Reviews", "Verification", "Escalations"]);
   });
 
+  it("shows grouped runs separately from the role assignments", async () => {
+    await show({ process_record: {
+      sections: { Roles: ["- dev: cursor-agent / actual-model"], Reviews: [], Verification: [], Escalations: [],
+        Runs: ["- 12 worker runs on actual-model", "- worker: fallback from first-profile"] },
+      remote_safety: "Remote-environment safety (read-only / dry run) is not enforced by Looper",
+      omitted: 0,
+    } });
+    const record = container.querySelector('[aria-labelledby="task-process-record-title"]');
+    expect(record?.textContent).toContain("dev: cursor-agent / actual-model");
+    expect(record?.textContent).toContain("12 worker runs on actual-model");
+    expect(record?.textContent).toContain("worker: fallback from first-profile");
+    expect(Array.from(record?.querySelectorAll("h4") ?? []).map((h) => h.textContent))
+      .toEqual(["Roles", "Reviews", "Verification", "Escalations", "Runs"]);
+  });
+
+  it("hides an empty runs section", async () => {
+    await show({ process_record: {
+      sections: { Roles: [], Reviews: [], Verification: [], Escalations: [], Runs: [] },
+      remote_safety: "Remote-environment safety (read-only / dry run) is not enforced by Looper", omitted: 0,
+    } });
+    const record = container.querySelector('[aria-labelledby="task-process-record-title"]');
+    expect(Array.from(record?.querySelectorAll("h4") ?? []).map((h) => h.textContent))
+      .toEqual(["Roles", "Reviews", "Verification", "Escalations"]);
+  });
+
   const action = (extra: Record<string, unknown>) => ({
     manager_id: "manager", created_at: "2026-10-17T08:00:00Z", channel: "web", tool: "looper_task_control",
     arguments: { task_id: "task-a", action: "stop" }, risk: "write", status: "ok", confirmation_id: null, ...extra,

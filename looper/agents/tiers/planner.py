@@ -4783,7 +4783,7 @@ class PlannerAgent:
             summary += "\n\n## Review adjudications\n" + "\n".join(f"- {e.step}: {e.summary}" for e in judgments)
         process = await self._process_record(plan)
         if process is not None:
-            summary += "\n\nProcess record: see the task page"
+            summary += "\n\n" + workflows.process_record_summary(process)
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,
             target=TASK_ROUTER_ADDRESS,
@@ -4944,7 +4944,7 @@ class PlannerAgent:
         process = await self._process_record(plan)
         summary = closing_note(plan.fail_reason or "A step failed and the Planner could not go on.",
                                ((s.label, s.status, s.result) for s in plan.steps),
-                               process="Process record: see the task page" if process is not None else "")
+                               process=workflows.process_record_summary(process) if process is not None else "")
 
         await self._bus.publish(MessageEnvelope.create(
             source=self.agent_address,

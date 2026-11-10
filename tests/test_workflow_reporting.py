@@ -68,17 +68,21 @@ def test_workflow_delivery_stores_separate_process_record(planner_claude, agent_
     monkeypatch.setattr(llm_records, "process_record_runs", AsyncMock(return_value=[{
         "role": "worker", "model": "reported-model", "metadata": {
             "profile": {"name": "dev", "runtime": {"type": "codex"}},
-            "model_choice": {"model": "requested-model"}, "fallback_from": "first-profile"}}]), raising=False)
+            "model_choice": {"model": "requested-model"}, "model_reported": "reported-model",
+            "fallback_from": "first-profile"}}]), raising=False)
     replies = [plan(step("s1")), decide("fail", reason="Stop") if failed else decide("accept")]
     h = drive(planner_claude(*replies), always(WORK_FAILED if failed else WORK_OK))
     summary = h.final().payload["summary"]
-    assert summary.endswith("Process record: see the task page")
-    assert "## Process record" not in summary
+    assert summary.endswith("Full record: task page / looper_tasks get")
+    appendix = summary.split("## Process record", 1)[1]
+    assert len("## Process record" + appendix) <= 1200
+    assert all(text in appendix for text in ("Roles:", "codex", "reported-model", "first-profile",
+                                           "Reviews:", "Verification:", "Escalations:"))
     record = process_record_text(h.final().payload["process_record"])
     assert all(text in record for text in ("Roles", "Reviews", "Verification", "Escalations", "dev",
                                             "reported-model", "requested-model", "first-profile"))
     if not failed:
-        assert summary == FINAL_RESULT + "\n\nProcess record: see the task page"
+        assert summary.startswith(FINAL_RESULT + "\n\n## Process record\n")
 
 
 @pytest.mark.parametrize("failed", [False, True])

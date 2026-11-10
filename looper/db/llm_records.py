@@ -431,9 +431,14 @@ async def process_record_runs(task_id: str, *, pool: asyncpg.Pool | None = None)
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"""SELECT id, {_TASK_ROLE} AS role, model,
-            jsonb_build_object('profile', COALESCE(metadata->'profile', metadata->'agent'),
+            jsonb_build_object('profile',
+                COALESCE(NULLIF(NULLIF(metadata->'profile', 'null'::jsonb), '{{}}'::jsonb), metadata->'agent'),
                 'model_choice', metadata->'model_choice', 'fallback_from', metadata->'fallback_from',
-                'prompt_layers', jsonb_build_object('task_role', metadata->'prompt_layers'->'task_role')) AS metadata
+                'prompt_layers', jsonb_build_object('task_role', metadata->'prompt_layers'->'task_role'))
+            || CASE WHEN metadata ? 'model_reported' THEN
+                jsonb_build_object('model_reported', metadata->'model_reported') ELSE '{{}}'::jsonb END
+            || CASE WHEN metadata ? 'model_display' THEN
+                jsonb_build_object('model_display', metadata->'model_display') ELSE '{{}}'::jsonb END AS metadata
             FROM llm_records WHERE task_id = $1 AND {TASK_RUN} ORDER BY created_at, id""", task_id)
     return [{**dict(row), "metadata": json.loads(row["metadata"])} for row in rows]
 

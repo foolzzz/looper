@@ -78,8 +78,11 @@ def test_workflow_record_is_persisted_by_serve(monkeypatch):
                     assert time.monotonic() < deadline, detail['status']
                     time.sleep(.2)
                 assert detail['status'] == 'completed', detail.get('error')
-                assert detail['result_summary'].endswith('Process record: see the task page')
-                assert '## Process record' not in detail['result_summary']
+                assert detail['result_summary'].endswith('Full record: task page / looper_tasks get')
+                appendix = detail['result_summary'].split('## Process record', 1)[1]
+                assert len('## Process record' + appendix) <= 1200
+                assert all(text in appendix for text in ('Roles:', 'stand-in', 'Reviews:', '第 1 轮',
+                                                        'Verification:', 'Escalations:'))
                 from looper.agents.workflow_reporting import process_record_text
                 result = process_record_text(detail['process_record'])
                 manager_view = api.post('/api/v1/ops/tasks/get', {'task_id': task['task_id']})['result']
