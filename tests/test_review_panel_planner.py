@@ -1,6 +1,8 @@
 """Review panels settle through dependency conditions on the Planner's bus path."""
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -128,6 +130,82 @@ def test_late_blocking_gets_a_decision_that_can_retry(condition, planner_claude,
             await h.release(REVIEW_PASS)
         assert (await h.finished()).payload["status"] == "completed"
     drive(claude, held_reviews, scenario)
+
+
+@pytest.mark.parametrize("condition", [{"all_of": MEMBERS[:2]}, {"k_of": 2, "of": MEMBERS}])
+@pytest.mark.parametrize("removed", [False, True], ids=["retained-worktree", "removed-worktree"])
+def test_late_blocker_retries_merged_work_in_a_fresh_workspace(
+    condition, removed, planner_claude, agent_db, monkeypatch,
+):
+    from looper.agents.step_workspaces import StepWorkspaceState
+
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    configure(agent_db, monkeypatch, review_panel={"members": MEMBERS, "accept_when": condition})
+    agent_db.get_task_project.return_value["step_workspaces"] = "worktree"
+    claude = planner_claude(plan(step("s1", review=True), step("s2")),
+        decide("review"), decide("accept"), decide("retry", feedback="Fix the late blocker"),
+        decide("review"), decide("accept"), decide("accept"))
+    attempts = []
+
+    def git(where, *args):
+        return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", *args],
+            cwd=where, check=True, capture_output=True, text=True, timeout=10).stdout.strip()
+
+    def outcome(envelope):
+        if envelope.message_type == MessageType.VERIFY_REQUEST or envelope.payload["step_key"] == "s2":
+            return None
+        context = envelope.payload["context"]
+        directory = Path(context["work_dir"])
+        attempts.append({"context": context, "head": git(directory, "rev-parse", "HEAD"),
+                         "other": (directory / "other.txt").exists()})
+        (directory / "output.txt").write_text(f"attempt {len(attempts)}\n")
+        return WORK_OK
+
+    async def scenario(h):
+        h.work_dir.mkdir()
+        git(h.work_dir, "init", "-q", "-b", "main")
+        git(h.work_dir, "config", "user.name", "Example")
+        git(h.work_dir, "config", "user.email", "dev@example.org")
+        git(h.work_dir, "commit", "--allow-empty", "-qm", "Initial")
+        await h.start()
+        await h.until(lambda: len(h.reviews) == 3)
+        # Keep the parallel worker running while the panel accepts the first attempt.
+        parallel = next(e for e in h.held if e.message_type == MessageType.WORK_ITEM)
+        h.held.remove(parallel)
+        await h.release(REVIEW_PASS)
+        await h.release(REVIEW_PASS)
+        target = h.planner._plan.steps[0]
+        await h.until(lambda: target.status == "verified")
+        old = target.workspace
+        assert old.state is StepWorkspaceState.MERGED and Path(old.path).exists()
+        assert (h.work_dir / "output.txt").read_text() == "attempt 1\n"
+        if removed:
+            target.workspace = await h.planner._remove_workspace(old)
+        # The retry must include work that landed after the first attempt was merged.
+        (h.work_dir / "other.txt").write_text("later work\n")
+        git(h.work_dir, "add", "other.txt")
+        git(h.work_dir, "commit", "-qm", "Later work")
+        latest = git(h.work_dir, "rev-parse", "HEAD")
+        await h.release(BLOCK)
+        await h.until(lambda: len(h.reviews) == 6)
+        fresh = target.workspace
+        assert fresh.id != old.id and fresh.state is StepWorkspaceState.ACTIVE
+        assert fresh.base_commit == attempts[1]["head"] == latest
+        assert attempts[1]["other"] and not Path(old.path).exists()
+        assert fresh.result_commit != old.result_commit
+        for review in h.reviews[3:]:
+            assert review.payload["head"] == fresh.result_commit
+            assert git(review.payload["context"]["work_dir"], "show", "HEAD:output.txt") == "attempt 2"
+        for _ in MEMBERS:
+            await h.release(REVIEW_PASS)
+        await h.until(lambda: target.status == "verified")
+        assert (h.work_dir / "output.txt").read_text() == "attempt 2\n"
+        assert git(h.work_dir, "show", "HEAD:output.txt") == "attempt 2"
+        await h.answer(parallel, WORK_OK)
+        assert (await h.finished()).payload["status"] == "completed"
+
+    drive(claude, outcome, scenario)
 
 
 def test_suggestions_are_merged_shown_and_recorded_without_losing_delivery(planner_claude, agent_db, monkeypatch):

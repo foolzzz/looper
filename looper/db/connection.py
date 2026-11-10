@@ -681,6 +681,12 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             ).group(1)
             await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
             await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check " + constraint)
+            # Released workflow presets allowed panels without distinct runtimes. Bring those presets
+            # under the panel invariant before readers validate them; existing task snapshots stay fixed.
+            await conn.execute("UPDATE workflows SET definition = jsonb_set(definition, "
+                               "'{distinct_reviewer_runtime}', 'true'::jsonb) "
+                               "WHERE jsonb_typeof(definition->'review_panel') = 'object' "
+                               "AND definition->'distinct_reviewer_runtime' IS DISTINCT FROM 'true'::jsonb")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _REVIEW_PANEL)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.

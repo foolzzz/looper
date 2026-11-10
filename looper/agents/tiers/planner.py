@@ -2058,8 +2058,8 @@ class PlannerAgent:
 
     async def _open_workspace(self, plan: TaskPlan, step: PlanStep, base: _RoundBase | None) -> None:
         """Give ``step`` its worktree: the one it works in, or a new one from ``base`` (a retry after a merge that
-        failed gets one from the branch as it is now; the old branch stays for its commits). Nothing for a step
-        that works in the task directory. Raises ``_NoWorkspace``."""
+        failed or a late review gets one from the branch as it is now; an unmerged branch stays for its commits).
+        Nothing for a step that works in the task directory. Raises ``_NoWorkspace``."""
         current = step.workspace
         if current is not None and current.state is StepWorkspaceState.ACTIVE:
             try:
@@ -2067,8 +2067,13 @@ class PlannerAgent:
             except workspaces.GitError as exc:
                 raise _NoWorkspace(str(exc)) from None
             return
-        if current is not None and current.state is StepWorkspaceState.UNMERGED:
-            step.workspace = await self._discard(current, keep_branch=True)
+        if current is not None and current.state in (StepWorkspaceState.UNMERGED, StepWorkspaceState.MERGED):
+            if current.state is StepWorkspaceState.UNMERGED:
+                step.workspace = await self._discard(current, keep_branch=True)
+            else:
+                # A late blocker can reopen merged work. Keep its historical state, but never reuse
+                # its frozen result or checkout for the next attempt; the commits are already on target.
+                step.workspace = await self._remove_workspace(current)
             if base is None:
                 repo = await self._task_repo(plan)
                 base = await self._round_base(repo) if isinstance(repo, Repo) else _RoundBase(error=repo.reason)

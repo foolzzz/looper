@@ -1,4 +1,5 @@
 """Review-panel persistence and task-facing acceptance state."""
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -52,10 +53,23 @@ def test_review_panel_persists_acceptance_and_task_readback(monkeypatch):
     run_db(test, monkeypatch, timeout=30)
 
 
-def test_review_panel_upgrade_is_named_and_idempotent(monkeypatch):
+@pytest.mark.parametrize("distinct", [None, False, True])
+def test_review_panel_upgrade_is_named_and_idempotent(tmp_path, monkeypatch, distinct):
     from looper.db import connection
+    from looper.db import projects, tasks
+    from tests.db_support import v1_api
 
     async def test(pool):
+        legacy = {"review_panel": {"members": ["builtin"], "accept_when": "builtin"}}
+        if distinct is not None:
+            legacy["distinct_reviewer_runtime"] = distinct
+        await pool.execute("INSERT INTO workflows (key, name, definition) VALUES ('legacy', 'Legacy', $1::jsonb), "
+                           "('plain', 'Plain', '{\"distinct_reviewer_runtime\": false}')", json.dumps(legacy))
+        project = await projects.create_project(name="Legacy project", work_dir=str(tmp_path),
+                                                execution={"task_workspaces": "in_place"})
+        await pool.execute("UPDATE projects SET default_workflow='legacy' WHERE id=$1", project["id"])
+        await tasks.create_task(task_id="old-task", requirement="Existing task", project_id=project["id"],
+                                workflow=legacy)
         await pool.execute("ALTER TABLE task_steps DROP COLUMN accept_when, DROP COLUMN reviews")
         await pool.execute("DELETE FROM schema_migrations WHERE name='review_panel'")
         await pool.execute("ALTER TABLE task_steps DROP CONSTRAINT task_steps_kind_check")
@@ -76,5 +90,20 @@ def test_review_panel_upgrade_is_named_and_idempotent(monkeypatch):
                                        "AND connamespace=current_schema()::regnamespace")
         text = " ".join(row["definition"] for row in constraints)
         assert all(f"'{kind}'" in text for kind in ("review", "review_round", "late_review", "review_adjudicated"))
+        assert json.loads(await pool.fetchval("SELECT definition FROM workflows WHERE key='legacy'")) == {
+            **legacy, "distinct_reviewer_runtime": True}
+        assert json.loads(await pool.fetchval("SELECT definition FROM workflows WHERE key='plain'")) == {
+            "distinct_reviewer_runtime": False}
+        assert (await tasks.get_task("old-task"))["workflow"] == legacy
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("workflows.list")
+            assert status == 200, answer
+            assert [row["key"] for row in answer["result"]["workflows"]] == ["legacy", "plain"]
+            status, answer = await call("workflows.get", {"key": "legacy"})
+            assert status == 200 and answer["result"]["workflow"]["distinct_reviewer_runtime"] is True
+            status, answer = await call("tasks.create", {"project_id": project["id"], "requirement": "Build"})
+            assert status == 200, answer
+            snapshot = (await tasks.get_task(answer["result"]["task_id"]))["workflow"]
+            assert snapshot["key"] == "legacy" and snapshot["distinct_reviewer_runtime"] is True
 
     run_db(test, monkeypatch, timeout=30)
