@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.117] - 2026-11-10
+
+### Added
+
+- **Review panel built on dependency conditions.** ([#1183](https://github.com/foolzzz/looper/pull/1183))
+  - A workflow `review_panel` gives each step needing review one parallel review step per member and an `accept_when` condition over them, evaluated by the dependency-condition evaluator. Suggestion findings do not block, late verdicts are journaled and a late blocker reopens the step.
+  - Findings carry `blocking` or `suggestion` severity and are merged per issue. With `adjudication`, the Planner may downgrade a blocking finding with a reason. Developer and reviewers must use different runtimes, and every seat reviews the same frozen commit.
+  - Database: `task_steps.accept_when` and `reviews`, step kind `review`, journal kinds `review_round`, `late_review` and `review_adjudicated`, and stored presets with a panel get `distinct_reviewer_runtime` true; migrated on start. Tasks without a workflow panel are unchanged.
+
 ## [2.14.116] - 2026-11-10
 
 ### Added
