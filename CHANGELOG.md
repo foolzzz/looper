@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.123] - 2026-11-10
+
+### Fixed
+
+- **Workflow delivery summary in channel notices; latest verdicts first; the model actually routed.** ([#1201](https://github.com/foolzzz/looper/pull/1201), issue #1197)
+  - For tasks with a workflow, the code-generated delivery summary (`delivery_summary`) is appended, bounded to 1200 characters, to the Telegram and Lark completion notice and to the web-chat completion message, after their existing clips. Tasks without a workflow are unchanged.
+  - Reviews and Verification keep the latest entries and list failed ones first, so a late failure is no longer dropped; a late review verdict is recorded in arrival order. Escalations appear as a short label, gate state and clipped reason.
+  - A Cursor run on auto reports the model it was routed to (`routed_model`) as its reported model, in the delivery summary and in `runs.get` / `runs.list`.
+
 ## [2.14.122] - 2026-11-10
 
 ### Fixed
