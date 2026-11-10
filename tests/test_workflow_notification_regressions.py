@@ -15,6 +15,39 @@ from tests.test_planner_agent import REVIEW_PASS, WORK_OK, always, decide, drive
 from tests.test_review_panel_planner import BLOCK, MEMBERS, configure, held_reviews
 
 
+@pytest.mark.parametrize("notices", [True, False])
+def test_web_plan_created_notice_replaces_task_accepted_line(agent_db, tmp_path, notices):
+    async def run():
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        metadata = {"origin_channel_id": "channel-web", "origin_thread": "task-origin-thread",
+                    "task_title": "计算器"}
+        text = phase_text(Phase.PLAN_CREATED, {"workflow": {},
+            "steps": [SimpleNamespace(label="s1", instruction="Build the calculator")]})
+        try:
+            await manager._handle_task_accepted(MessageEnvelope.create(
+                source=TASK_ROUTER_ADDRESS, target=manager.agent_address,
+                message_type=MessageType.TASK_ACCEPTED,
+                payload={"step_count": 1, "phase_notices": notices}, metadata=metadata))
+            if notices:
+                assert bus.get_queue("channel-web").empty()
+                await manager._handle_goal_status(MessageEnvelope.create(
+                    source=TASK_ROUTER_ADDRESS, target=manager.agent_address,
+                    message_type=MessageType.GOAL_STATUS,
+                    payload={"status": "executing", "phase_text": text}, metadata=metadata))
+            delivered = bus.get_queue("channel-web").get_nowait()
+            assert delivered.message_type is MessageType.AGENT_REPLY
+            assert delivered.payload == {"chat_session_id": "task-origin-thread", "text": text if notices
+                else "任务「计算器」已分解为 1 个步骤，开始执行。"}
+            assert bus.get_queue("channel-web").empty()
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
 def test_web_phase_notice_uses_task_origin_thread(agent_db, tmp_path):
     async def run():
         bus = MessageBus(runtime_root=tmp_path)

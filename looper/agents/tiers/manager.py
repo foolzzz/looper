@@ -1701,6 +1701,8 @@ class ManagerAgent:
         ))
 
     async def _handle_task_accepted(self, envelope: MessageEnvelope) -> None:
+        if envelope.payload.get("phase_notices"):
+            return  # The plan-created phase report supplies the role table and breakdown.
         origin = envelope.metadata.get("origin_channel_id")
         thread = envelope.metadata.get("origin_thread")
         if thread:
@@ -1708,8 +1710,6 @@ class ManagerAgent:
             step_count = envelope.payload.get("step_count", 0)
             await self._web_thread_reply(envelope, thread, f"任务「{title}」已分解为 {step_count} 个步骤，开始执行。")
         elif origin:
-            if envelope.payload.get("phase_notices"):
-                return  # The plan-created phase report supplies the role table and breakdown.
             step_count = envelope.payload.get("step_count", 0)
             await self._task_progress(envelope, f"任务已分解为 {step_count} 个步骤，开始执行...")
 

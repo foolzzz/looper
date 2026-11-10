@@ -3932,20 +3932,41 @@ enforced. Tasks without a workflow retain their prompt and execution paths.
 Review panels and verification guards run from this immutable snapshot. With
 `phase_notices` enabled, typed plan-created, review-round, verification-start
 and result, escalation and blocked-condition events send deterministic Chinese
-notices through the Manager to Telegram and Lark. The plan-created notice lists
-roles and the step breakdown, then work starts without an additional gate.
+notices through the Manager to the originating dashboard chat, Telegram or Lark.
+The plan-created notice replaces the count-only task-accepted line, lists roles
+and the step breakdown, then work starts without an additional gate.
 Disabling notices retains the existing count-based progress messages.
 
-Completed and failed workflow tasks append `## Process record` to their result.
-It records configured Profiles and each run's runtime, requested and reported
-model, fallbacks, review rounds and seats, adjudications, late reviews,
-verification HEADs and outcomes, and gate topics and conclusions. The section
-is capped at 6000 characters by omitting whole entries and reporting the count;
-the remote-environment safety disclaimer is always retained. Runtime/model
-read failures are marked explicitly. Tasks without a workflow keep their result
-bytes and do not query these additional run records. Dashboard and CLI task
-reads expose the stored result through their existing fields; no new channel
-command or dashboard aggregation is added.
+Completed and failed workflow tasks store a separate `tasks.process_record`
+JSONB field, exposed by task detail reads. Its `sections` contain configured
+Profiles and distinct actual role/runtime/model combinations (`Roles`), review
+rounds and seats, adjudications and late reviews (`Reviews`), verification HEADs
+and outcomes (`Verification`), gate topics and conclusions (`Escalations`), and
+run evidence (`Runs`). Repeated ordinary runs with the same role, Profile,
+runtime and models share a counted entry (for example, `12 worker runs on
+<model>`); fallback runs remain separate. Requested and reported models follow
+the Runs API rules: explicit `model_reported` takes precedence (including null),
+Cursor otherwise uses `model_display`, and runtimes without report evidence do
+not substitute the requested model. Runtime/model read failures are explicit.
+
+The result text ends with a code-generated `## Process record` delivery summary,
+at most 1200 characters: one line each for actual roles/runtime/models and
+fallbacks, latest review rounds and outcomes, latest verification outcomes, and
+escalations. It points to the task page or `looper_tasks` get for the full record.
+The bounded summary is also stored as `process_record.delivery_summary`; it is
+computed from evidence before detail truncation, so an oversized verification
+explanation cannot hide its final outcome.
+
+The stored record is capped at 60000 JSON characters; the `looper_tasks` get
+text view is capped at 6000 characters. Both reserve a separate budget for each
+section and omit whole entries rather than cutting characters. The text view
+always retains the remote-environment safety disclaimer and an omitted-entry
+count, including omissions already made when storing the record. The dashboard
+shows the stored sections, disclaimer and storage omission count. Legacy records
+without `Runs` remain readable. Tasks without a workflow keep their result
+bytes and do not query these additional run records. The shared delivery path
+carries the summary to dashboard, Telegram, Lark and CLI task reads; no new
+channel command is added.
 
 ### A task's Planner's tools
 

@@ -1865,7 +1865,7 @@ export interface TaskDetail extends TaskInfo {
   origin_channel_id: string;
   result_summary: string | null;
   process_record?: {
-    sections: Record<"Roles" | "Reviews" | "Verification" | "Escalations", string[]>;
+    sections: Record<"Roles" | "Reviews" | "Verification" | "Escalations", string[]> & { Runs?: string[] };
     remote_safety: string;
     omitted: number;
   } | null;

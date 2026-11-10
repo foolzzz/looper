@@ -66,9 +66,9 @@ def test_router_record_reaches_task_detail_and_manager_get(monkeypatch, tmp_path
                 assert "process_record" not in compact
             else:
                 text = compact["process_record"]
-                assert 1000 < len(text) <= 6000
-                assert "Profile evidence" in text
-                assert text.endswith("…truncated") if record_size > 6000 else "tail-evidence" in text
+                assert len(text) <= 6000
+                assert "Profile evidence" not in text and "tail-evidence" not in text
+                assert REMOTE_SAFETY in text and "已省略 1 条记录。" in text
 
             # Completed tasks cannot restart; failed tasks start over without a stale outcome.
             monkeypatch.setattr(router, "_start", AsyncMock())
@@ -109,5 +109,40 @@ def test_process_record_baseline_upgrade_is_additive_and_runs_once(monkeypatch):
         assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'task_process_record'") == 1
         async with pool.acquire() as conn:
             assert not await connection.schema_change_pending(conn)
+
+    run_db(run, monkeypatch, timeout=30)
+
+
+def test_process_record_runs_preserve_reported_model_metadata(monkeypatch):
+    from looper.agents.v1_domains.runs import _model_fields
+    from looper.db import llm_records
+
+    async def run(pool):
+        cases = [({}, None), ({"model_display": "cursor-actual"}, "cursor-actual"),
+                 ({"model_display": "cursor-display", "model_reported": "cursor-reported"}, "cursor-reported"),
+                 ({"model_display": "cursor-display", "model_reported": None}, None),
+                 ({"model_display": None}, None),
+                 *[({"model_display": "cursor-legacy", "profile": empty,
+                     "agent": {"runtime": {"type": "cursor-agent"}}}, "cursor-legacy")
+                   for empty in (None, {})]]
+        expected = []
+        for fields, reported in cases:
+            metadata = {"profile": {"runtime": {"type": "cursor-agent"}},
+                        "model_choice": {"model": "auto"}, **fields, "system_prompt": "Excluded prompt"}
+            rid = await llm_records.start_record(agent_id="worker-model", task_id="task-model",
+                                                 metadata=metadata, pool=pool)
+            await llm_records.finish_record(rid, status="completed", model="auto", pool=pool)
+            expected.append((rid, fields, reported))
+
+        rows = await llm_records.process_record_runs("task-model", pool=pool)
+        assert len(rows) == len(expected)
+        for row, (rid, fields, reported) in zip(rows, expected):
+            assert row["id"] == rid and row["model"] == "auto"
+            assert {key: row["metadata"][key] for key in ("model_display", "model_reported")
+                    if key in row["metadata"]} == {key: fields[key] for key in ("model_display", "model_reported")
+                                                 if key in fields}
+            assert row["metadata"]["model_choice"] == {"model": "auto"}
+            assert "system_prompt" not in row["metadata"]
+            assert _model_fields(row)["model_reported"] == reported
 
     run_db(run, monkeypatch, timeout=30)
