@@ -1,7 +1,7 @@
 """Full dashboard task creation through the shared task core; no Manager Tool changes."""
 
-from ...db import agent_setting_layers, tasks
-from .. import projects
+from ...db import agent_setting_layers, tasks, workflows as db_workflows
+from .. import projects, workflows
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops import ErrorCode, OpError
 from ..ops.config import answered
@@ -52,7 +52,7 @@ NEW_PROJECT_FIELDS = _object({
 REQUEST = {**_object({
     "requirement": {"type": "string", "minLength": 1, "maxLength": 32_000, "pattern": r"\S"},
     "project_id": {"type": "string", "minLength": 1}, "project": NEW_PROJECT_FIELDS,
-    "work_dir": _STR, "config": {"type": "object"}, "goal_id": _STR,
+    "work_dir": _STR, "config": {"type": "object"}, "goal_id": _STR, "workflow": _STR,
     "profile_overrides": _object({role: _STR
                                   for role in projects.TASK_PROFILE_ROLES}, [], closed=True),
     "workspace_mode": WORKSPACE_MODE, "base": {"type": "string", "maxLength": projects.BASE_MAX_CHARS}},
@@ -72,14 +72,29 @@ async def impact(server, operation, arguments, principal, headers):
 
 
 async def _impact(arguments):
-    if "project" not in arguments:
-        return None
     # Validate without creating rows before registering a client's confirmation.
-    fields = projects._project_fields(arguments["project"], update=False)
+    new_project = "project" in arguments
+    if new_project:
+        fields = projects._project_fields(arguments["project"], update=False)
+        execution = ProjectExecution.from_row(fields.get("execution"))
+    else:
+        fields = await projects._existing_project(arguments["project_id"])
+        execution = ProjectExecution.from_row(fields)
+    selected = arguments.get("workflow", fields.get("default_workflow"))
+    workflow = None
+    if selected and selected != "none":
+        row = await db_workflows.get(selected)
+        if row is None:
+            raise OpError(ErrorCode.INVALID, f"no workflow {selected!r}")
+        try:
+            workflow = workflows.Workflow.from_row(row).snapshot()
+        except workflows.WorkflowError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
+    if not new_project and not workflow:
+        return None
     await answered(projects._profile_overrides(arguments.get("profile_overrides")))
     default_dir = fields.get("work_dir", "")
     root = projects.projects_root()
-    execution = ProjectExecution.from_row(fields.get("execution"))
     if not default_dir and root and not (arguments.get("work_dir") or "").strip():
         work_dir = "项目默认目录"  # The core allocates and checks it only after confirmation.
     else:
@@ -88,8 +103,17 @@ async def _impact(arguments):
             arguments, work_dir=work_dir, named=bool(arguments.get("work_dir", "").strip()), project_dir=default_dir,
             project_mode=execution.task_mode))
     shown_default = default_dir or (f"由 {root} 自动分配" if root else "无")
-    effect = f"新建项目「{fields['name']}」（默认目录 {shown_default}），并在里面创建任务（工作目录 {work_dir}）。"
-    return effect + "\n" + _execution_impact(execution, arguments["project"])
+    effect = (f"新建项目「{fields['name']}」（默认目录 {shown_default}），并在里面创建任务（工作目录 {work_dir}）。"
+              if new_project else f"在项目「{fields['name']}」里创建任务（工作目录 {work_dir}）。")
+    submitted = arguments.get("project", {})
+    if workflow:
+        execution_row = execution.view()
+        if workflow.get("budget_usd") is not None:
+            execution_row["task_budget_usd"] = workflow["budget_usd"]
+        execution = ProjectExecution.from_row(execution_row).overlaid(workflow)
+        effect += f"\n- 工作流：{workflow['name']}（{workflow['key']}）"
+        submitted = execution.view()
+    return effect + "\n" + _execution_impact(execution, submitted)
 
 
 def _execution_impact(execution: ProjectExecution, submitted: dict) -> str:
@@ -150,7 +174,8 @@ async def run(server, operation, arguments, principal, headers):
                 "workspace_base": arguments.get("base", "").strip(), "manager_id": "manager",
                 "client_id": principal.client_id}
     if (stored is None or any(stored[key] != value for key, value in expected.items())
-            or {role: profile["id"] for role, profile in profiles.items()} != chosen):
+            or {role: profile["id"] for role, profile in profiles.items()} != {
+                **chosen, **(stored.get("workflow") or {}).get("profiles", {})}):
         raise OpError(ErrorCode.UNAVAILABLE, "the created task could not be verified; refresh tasks before retrying")
     return {"task_id": stored["id"], "status": stored["status"], "created_at": stored["created_at"],
             "project_id": stored["project_id"], "workspace": result["workspace"]}

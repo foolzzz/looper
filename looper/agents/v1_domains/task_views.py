@@ -28,7 +28,7 @@ TASK_INFO = _object({
                      "project_id", "project_name", "work_dir", "manager_id", "created_at"), _STR),
     **dict.fromkeys(("planner_id", "completed_at", "schedule_id", "schedule_name", "manager_name"), _NULL_STR),
     "group": _GROUP, "continues_schedule_session": _BOOL, "cost": _nullable(TASK_COST),
-    "template": _nullable(_TEMPLATE)}, closed=True)
+    "workflow": _nullable(_OBJ), "template": _nullable(_TEMPLATE)}, closed=True)
 _STEP = _object({
     **dict.fromkeys(("id", "task_id", "step_key", "kind", "instruction", "status", "created_at", "updated_at"), _STR),
     **dict.fromkeys(("step_index", "retries"), _INT), "review": _BOOL,

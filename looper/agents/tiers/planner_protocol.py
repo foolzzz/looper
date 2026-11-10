@@ -1437,6 +1437,19 @@ _ROLE_RULES = """\
   Worker and Reviewer. The five keys above are in every step.
 """
 
+_WORKFLOW_ROLE_RULES = """\
+- Roles: a step may also have "role", a fixed workflow work role that its
+  Worker runs as, and, when "review" is true, "review_roles", fixed workflow
+  review roles that review the step after the built-in Reviewer, in that
+  order: each item is a role's id (its review must pass too) or
+  {"role": "<id>", "required": false} (its verdict is advice to you).
+  The built-in Reviewer still must pass. Use only the roles listed in the
+  Task section; their definitions cannot change. Leave out "role" to use the
+  workflow's default work role, or the built-in Worker when it has none;
+  leave out "review_roles" for the built-in Reviewer alone.
+  The five keys above are in every work step.
+"""
+
 
 # What the contract says of gates, where a task may open them or still has one that is not closed.
 _GATE_RULES = """\
@@ -1558,7 +1571,7 @@ _CONDITION_RULES = """- ready_when (optional on work, gate and wait steps): a de
 
 def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = False, gates: bool = False,
                    room: bool = False, wait_commands: bool = False, wait_limits: WaitLimits = WaitLimits(),
-                   conditions: bool = False) -> str:
+                   conditions: bool = False, workflow_roles: bool = False) -> str:
     """The reply contract for a project whose steps may be retried ``max_retries`` times; with ``roles``, whose
     Planners may define the roles their steps run as; with ``gates``, for a task that may open user gates or has
     one that is not closed; with ``room``, whose agents share a room. Waits use ``wait_limits``;
@@ -1570,7 +1583,8 @@ def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = Fal
     wait_rules = wait_rules.replace("at most 604800", f"at most {wait_limits.max_wait_seconds}")
     wait_rules = wait_rules.replace('"new_comments").', '"new_comments")' + command + '.')
     contract = _REPLY_CONTRACT.format(
-        wait_rules=wait_rules, max_retries=max_retries, roles=_ROLE_RULES if roles else "", kinds=_KINDS[(gates, room)],
+        wait_rules=wait_rules, max_retries=max_retries,
+        roles=_ROLE_RULES if roles else _WORKFLOW_ROLE_RULES if workflow_roles else "", kinds=_KINDS[(gates, room)],
         gate_rules=_GATE_RULES if gates else "", gate_changes=_GATE_CHANGES if gates else "",
         chat_gates=_CHAT_GATES if gates else "", gate_section=_GATE_SECTION if gates else "",
         room_section=_ROOM_SECTION if room else "")

@@ -886,6 +886,7 @@ class PlannerAgent:
         self._plan: TaskPlan | None = None
         # What the task's template said when the task was created (None for a task from none); it never changes.
         self._template: Mapping[str, Any] | None = None
+        self._workflow: Mapping[str, Any] | None = None
         self._loop_task: asyncio.Task[Any] | None = None
         self._running = False
         self._claude = CLAUDE_CODE.resident_session(self.agent_id)
@@ -1206,7 +1207,8 @@ class PlannerAgent:
             # A gate or a wait is never reviewed, whatever the project's review policy.
             step.review = (spec.gate is None and spec.wait is None
                            and (spec.review or self._execution.review_all))
-            step.role = spec.role
+            step.role = (spec.role or (self._workflow or {}).get("work_role")
+                         if spec.gate is None and spec.wait is None else None)
             step.review_roles = [StepReviewRole(item.role, item.required) for item in spec.review_roles]
             if spec.gate is not None:
                 step.gate = Gate(spec.gate.topic, spec.gate.agenda, spec.gate.findings)
@@ -3460,7 +3462,7 @@ class PlannerAgent:
     async def _read_roles(self) -> None:
         """Read the task's roles by key (``self._roles``) where its project lets its Planner define them; a failed
         read keeps the last ones read."""
-        if not self._execution.roles_on:
+        if not self._execution.roles_on and not (self._workflow or {}).get("roles"):
             self._roles = None
             return
         try:
@@ -3470,7 +3472,9 @@ class PlannerAgent:
                            exc_info=True)
             self._roles = self._roles or {}
             return
-        self._roles = {row["role_key"]: RoleKind(row["kind"]) for row in rows}
+        workflow_keys = {role["key"] for role in (self._workflow or {}).get("roles", [])}
+        self._roles = {row["role_key"]: RoleKind(row["kind"]) for row in rows
+                       if self._execution.roles_on or row["role_key"] in workflow_keys}
 
     def _checked(self, view: PlanView) -> PlanView:
         """``view`` with the task's roles as last read and whether it may open gates, for checking a reply."""
@@ -4058,11 +4062,13 @@ class PlannerAgent:
             task=plan_task_section(
                 task_id=self._task_id, requirement=plan.requirement, project_name=plan.project_name,
                 project_description=_clip(plan.project_description, 300), work_dir=plan.work_dir,
-                template=self._template,
+                template=self._template, workflow=self._workflow,
             ),
             contract_name="REPLY_CONTRACT",
             # With its platform tools, how to use them follows the reply contract.
-            contract=reply_contract(self._execution.step_retries, roles=self._execution.roles_on,
+            contract=reply_contract(self._execution.step_retries,
+                                    roles=self._execution.roles_on,
+                                    workflow_roles=bool((self._workflow or {}).get("roles")),
                                     gates=self._gate_policy is GatePolicy.ALLOWED
                                     or any(s.gate is not None and not s.gate.state.closed for s in plan.steps),
                                     room=self._room is not None, wait_commands=self._execution.wait_commands_on,
@@ -4641,7 +4647,8 @@ class PlannerAgent:
         plan.project_description = str(project.get("description") or "")
         plan.project_background = str(project.get("background") or "")
         plan.project_work_dir = str(project.get("work_dir") or "")
-        self._execution = ProjectExecution.from_row(project)
+        self._workflow = project.get("task_workflow")
+        self._execution = ProjectExecution.from_row(project).overlaid(self._workflow)
         self._template = project.get("task_template")
         self._scheduled = project.get("task_schedule_id") is not None
         self._schedule_id = project.get("task_schedule_id")
@@ -4661,7 +4668,8 @@ class PlannerAgent:
                            exc_info=True)
             return self._execution
         if project is not None:
-            self._execution = ProjectExecution.from_row(project)
+            self._workflow = project.get("task_workflow")
+            self._execution = ProjectExecution.from_row(project).overlaid(self._workflow)
         return self._execution
 
     # --- The task's spend cap ---

@@ -81,6 +81,7 @@ async def get_task_project(task_id: str, *, pool: asyncpg.Pool | None = None) ->
     row = await pool.fetchrow(
         "SELECT p.*, t.budget_usd AS task_own_budget_usd, t.schedule_id AS task_schedule_id, "
         "t.planner_session_label AS task_planner_session_label, t.template AS task_template, "
+        "t.workflow AS task_workflow, "
         "s.user_gates AS task_schedule_user_gates "
         "FROM tasks t JOIN projects p ON p.id = t.project_id LEFT JOIN schedules s ON s.id = t.schedule_id "
         "WHERE t.id = $1", task_id,
@@ -92,6 +93,8 @@ async def get_task_project(task_id: str, *, pool: asyncpg.Pool | None = None) ->
         project["task_budget_usd"] = own
     if isinstance(project.get("task_template"), str):
         project["task_template"] = json.loads(project["task_template"])
+    if isinstance(project.get("task_workflow"), str):
+        project["task_workflow"] = json.loads(project["task_workflow"])
     return project
 
 

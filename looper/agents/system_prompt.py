@@ -179,9 +179,34 @@ def _template_lines(template: Mapping[str, Any] | None) -> list[str]:
     return lines
 
 
+def _workflow_lines(workflow: Mapping[str, Any] | None) -> list[str]:
+    if not workflow:
+        return []
+    lines = [f"Workflow: {workflow['name']} (set by the operator for this task)",
+             "Workflow rules (code enforces these):"]
+    if workflow.get("max_step_retries") is not None:
+        lines.append(f"- At most {workflow['max_step_retries']} retries per step.")
+    lines.append("- Every work step requires review." if workflow.get("review_all")
+                 else "- The Planner chooses which work steps require review.")
+    lines.append("- Dependency conditions are enabled." if workflow.get("dependency_conditions")
+                 else "- Dependency conditions are disabled.")
+    if workflow.get("budget_usd") is not None:
+        lines.append(f"- Task spending cap: USD {workflow['budget_usd']}.")
+    if workflow.get("escalate_on_exhaustion"):
+        lines.append("- User gates are enabled.")
+    if roles := workflow.get("roles"):
+        lines.append("- Workflow roles are fixed: " + ", ".join(f"{r['key']} ({r['kind']})" for r in roles) + ".")
+    if workflow.get("work_role"):
+        lines.append(f"- Work steps without a role use {workflow['work_role']}.")
+    if instructions := str(workflow.get("planner_instructions") or "").strip():
+        lines += ["Workflow instructions (follow them; they are the operator's):", instructions]
+    return lines
+
+
 def plan_task_section(
     *, task_id: str, requirement: str, project_name: str, work_dir: str, project_description: str = "",
     template: Mapping[str, Any] | None = None,
+    workflow: Mapping[str, Any] | None = None,
 ) -> str:
     """The Planner's task: the whole task it plans and sees through. ``template`` is what the task template it was
     created from said then (its name, inputs and Planner instructions); a task from none has no such lines."""
@@ -194,6 +219,7 @@ def plan_task_section(
         f"Project: {project}",
         f"Working directory: {prompt_name(work_dir)}",
         *_template_lines(template),
+        *_workflow_lines(workflow),
         "Requirement:",
         _requirement(requirement),
     ])
