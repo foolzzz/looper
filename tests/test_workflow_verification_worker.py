@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
+import py_compile
 import shutil
 import subprocess
 import sys
@@ -392,6 +394,7 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
         (linked_package / "__init__.py").symlink_to(
             package / "__init__.py" if editable == "strict-absolute" else
             "../../../src/checkout_probe/__init__.py")
+        py_compile.compile(str(linked_package / "__init__.py"), doraise=True)
         (site / "checkout_probe.pth").write_text(str(linked_package.parent) + "\n")
     else:
         (site / "__editable___checkout_probe_finder.py").write_text(
@@ -423,8 +426,15 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
     if editable.startswith("strict-"):
         (source / "build").symlink_to(developer / "build", target_is_directory=True)
         runtime_paths.append("build")
-    (source / "src" / "checkout_probe" / "__init__.py").write_text("VALUE = 0\n")
+    source_package = source / "src" / "checkout_probe" / "__init__.py"
+    source_package.write_text("VALUE = 0\n")
+    # A same-size edit within a timestamp tick must not reuse the developer's bytecode.
+    original_stat = (package / "__init__.py").stat()
+    os.utime(source_package, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
     checkout = Path(worker._verification_checkout(str(source), tmp_path / "backup", runtime_paths))
+    if editable.startswith("strict-"):
+        assert list((developer / "build").rglob("*.pyc"))
+        assert not list((checkout / "build").rglob("*.pyc"))
     assert not list((checkout / ".venv").rglob("*.pyc"))
     assert all(not path.stat().st_mode & 0o222 for path in (checkout / ".venv").rglob("*") if path.is_file())
     prefix = run(checkout, ["python", "-c", "import sys; print(sys.prefix)"])

@@ -789,6 +789,9 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
         resolved = path.resolve(strict=True)
         if resolved in ancestors or ".git" in resolved.parts:
             raise OSError("verification runtime path crosses its declared tree")
+        if resolved.is_file() and path.suffix == ".pyc":
+            # Editable link trees can cache code from a different worktree too.
+            return
         if (path.is_symlink() and not resolved.is_relative_to(boundary)
                 and (resolved.is_file() or resolved.is_dir())):
             for origin in sorted(relocations, key=len, reverse=True):
