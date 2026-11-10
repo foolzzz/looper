@@ -317,7 +317,8 @@ class TestProjectEndpoints:
                              "room_broadcasts_per_run", "room_message_max_chars", "room_messages_per_task",
                              "room_ping_pong_rounds", "room_wait_max_seconds", "room_consult_budget_usd",
                              "room_consult_timeout_seconds", "room_consults_per_task", "task_workspaces",
-                             "operator_notes", "vault"}
+                             "operator_notes", "vault", "dependency_conditions"}
+        assert body["dependency_conditions"] is None
 
     def test_work_dir_is_optional(self, store: _Store) -> None:
         status, body = _call("POST", "/api/v1/project_admin/create", {"name": "notes"})

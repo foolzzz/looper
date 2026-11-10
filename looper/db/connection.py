@@ -609,14 +609,16 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE llm_providers ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT true")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROVIDER_ENABLED)
         if await _dependency_conditions_pending(conn):
-            from .journal import KINDS
             await conn.execute("ALTER TABLE task_steps ADD COLUMN ready_when JSONB")
             await conn.execute("ALTER TABLE projects ADD COLUMN dependency_conditions TEXT "
                                "CHECK (dependency_conditions IN ('off', 'on'))")
             await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
-            kinds = (*KINDS, "wait_opened", "wait_extended", "wait_closed")
-            await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check "
-                               f"CHECK (kind IN {kinds!r})")
+            # Freeze this upgrade's constraint in the same order as the fresh schema.
+            await conn.execute("""ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check CHECK (kind IN (
+                'step_accepted', 'step_failed', 'step_retry', 'decision', 'supplement',
+                'session_switch', 'handoff', 'progress', 'profile_choice', 'concurrency_change',
+                'role_defined', 'gate_opened', 'gate_updated', 'gate_cancelled', 'gate_closed',
+                'wait_opened', 'wait_extended', 'wait_closed', 'condition_blocked'))""")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _DEPENDENCY_CONDITIONS)
         # Current databases never replay initialization DDL. Missing builtins
         # are inserted without changing any saved choice or creation time.

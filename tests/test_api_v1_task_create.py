@@ -27,12 +27,14 @@ def test_create_declares_the_full_closed_request_and_workspace_result():
     assert "202" in document["responses"] and "x-looper-cli-hand" not in document
 
 
-@pytest.mark.parametrize("choice", [{"project_id": "proj-a"}, {"project": {"name": "Example"}}])
+@pytest.mark.parametrize("choice", [{"project_id": "proj-a"}, {
+    "project": {"name": "Example", "dependency_conditions": "on"}}])
 def test_generated_cli_preserves_the_full_json_request(choice):
     import json
 
     payload = {"requirement": "Build", **choice, "config": {"nested": [False, 3]},
                "profile_overrides": {"worker": "profile-a"}, "workspace_mode": "worktree", "base": "main"}
+    api_v1.validate_arguments(api_v1.find("POST", PATH).request, payload)
     flags = ["tasks", "create"]
     for key, value in payload.items():
         flags += ["--" + key.replace("_", "-"), value if isinstance(value, str) else json.dumps(value)]

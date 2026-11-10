@@ -45,7 +45,7 @@ NEW_PROJECT_FIELDS = _object({
     "step_workspaces": _choice("shared", "worktree"), "task_workspaces": _choice("in_place", "worktree"),
     "workspace_links": _inherit("array", items=_STR),
     **{field: _choice("on", "off") for field in (
-        "operator_notes", "vault", "planner_roles", "wait_commands", "user_gates", "agent_room")},
+        "operator_notes", "vault", "planner_roles", "dependency_conditions", "wait_commands", "user_gates", "agent_room")},
     **{field: _inherit("integer") for field in (
         "supervise_interval_seconds", "max_step_retries", "role_text_max_chars", "gate_reminder_hours", *ROOM_LIMITS)},
     "room_consult_budget_usd": _inherit("number")}, ["name"], closed=True)
@@ -107,6 +107,7 @@ def _execution_impact(execution: ProjectExecution, submitted: dict) -> str:
         "workspace_links": ("worktree 链接回原目录的相对路径", ", ".join(execution.link_paths) or "无"),
         "max_step_retries": ("每步重试次数", execution.step_retries),
         "planner_roles": ("Planner 定义步骤角色", execution.roles_on),
+        "dependency_conditions": ("Planner 组合步骤就绪条件", execution.conditions_on),
         "wait_commands": ("等待步骤以服务端用户身份执行 shell 命令", execution.wait_commands_on),
         "role_text_max_chars": ("角色提示词及 harness 各自的字符上限", execution.role_text_limit),
         "user_gates": ("Planner 向用户发起决策门", execution.gates_on),
