@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.121] - 2026-11-10
+
+### Fixed
+
+- **Workflow verification checkout and write guard.** ([#1189](https://github.com/foolzzz/looper/pull/1189))
+  - The private verification checkout gets read-only copies of the ignored runtime files a project declares (`workspace_links` and the new `verification_paths`, at most 20; new nullable `projects.verification_paths` column, added once by `ensure_schema`); virtualenv paths are relocated to the checkout.
+  - The guard records writes to tracked sources while the verifier runs (inotify or kqueue), so a change that is restored is still detected; monitoring failures fail closed and are not retried through a profile fallback.
+  - The seed manifest no longer points at the developer repository; verification runs are not kept and cannot be re-attached after a control-plane restart.
+  - Tasks without a workflow verification role are unchanged.
+
 ## [2.14.120] - 2026-11-10
 
 ### Fixed
