@@ -466,18 +466,20 @@ def main(argv: list[str]) -> int:
     with open(scenarios_path, encoding="utf-8") as handle:
         scenarios = json.load(handle)
     script = scenarios.get(os.path.realpath(os.getcwd())) or scenarios.get(_main_checkout(), {})
-    if not script:
-        # Verification clones have independent Git metadata; their local origin identifies the same scenario.
-        origin = subprocess.run(["git", "config", "--get", "remote.origin.url"], capture_output=True,
-                                text=True, timeout=5).stdout.strip()
-        if os.path.isabs(origin):
-            script = scenarios.get(os.path.realpath(origin), {})
     system_prompt = ""
     # The prompt file comes with --append-system-prompt-file, or --system-prompt-file in a profile's replace mode.
     flag = next((f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in args), None)
     if flag:
         with open(args[args.index(flag) + 1], encoding="utf-8") as handle:
             system_prompt = handle.read()
+    if not script:
+        # Private verification clones have no source remote. Bind the scripted run to its task context instead.
+        for candidate in scenarios.values():
+            requirement = candidate.get("_eval_requirement")
+            if requirement and ("The whole task, for context (your step is only part of it):\n"
+                                + requirement + "\n") in system_prompt:
+                script = candidate
+                break
     review = re.search(r"^The step under review:", system_prompt, re.MULTILINE)
     real = os.environ.get(REAL_CLAUDE_ENV)
     if real and (review or not script.get("real_reviewer")):

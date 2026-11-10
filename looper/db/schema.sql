@@ -863,6 +863,8 @@ CREATE TABLE IF NOT EXISTS task_user_gates (
     topic              TEXT NOT NULL CHECK (topic <> ''),
     agenda             JSONB NOT NULL DEFAULT '[]',
     findings           TEXT NOT NULL DEFAULT '',
+    purpose            TEXT NOT NULL DEFAULT 'discussion'
+                       CHECK (purpose IN ('discussion', 'exhaustion', 'verification_exhaustion')),
     state              TEXT NOT NULL DEFAULT 'pending'
                        CHECK (state IN ('pending', 'open', 'discussing', 'passed', 'cancelled', 'skipped')),
     summary            JSONB,

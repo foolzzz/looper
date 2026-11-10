@@ -361,3 +361,127 @@ def test_failed_review_at_retry_limit_still_escalates(planner_claude, agent_db, 
     assert h.final().payload["status"] == "failed"
     assert len(h.reviews) == 1
     assert "review is not allowed" in claude.turns()[-1]["text"]
+
+
+@pytest.mark.parametrize("rule", ["verification", "escalation"])
+@pytest.mark.parametrize("pending", [True, False])
+def test_exhaustion_gate_cannot_be_cancelled_by_parallel_result(
+    planner_claude, agent_db, monkeypatch, rule, pending,
+):
+    from looper.agents.user_gates import Gate
+    from tests.test_planner_gates import _write, gate_reply, SETTLED, SUMMARY
+
+    verification = rule == "verification"
+    configure(agent_db, monkeypatch, verification, max_step_retries=0, escalate_on_exhaustion=not verification,
+              **({"verification": {"role": VERIFY, "max_rounds": 1}} if verification else {}))
+    failed = {**step("failed", "s1"), **({"role": VERIFY} if verification else {})}
+    following = {**step("following", "s1", "g1"), **({"role": VERIFY} if verification else {})}
+    gate = {**GATE, "depends_on": ["check"] if pending else []}
+    cancel = [{"id": "g1", "action": "cancel", "resolution": "Parallel check passed"}]
+    claude = planner_claude(
+        plan(step("s1"), step("check"), failed), decide("accept"),
+        decide("replan", steps=[gate, following], reason="Ask before more work"),
+        decide("accept", gates=cancel), decide("accept"),
+        gate_reply("Continue", "close", SETTLED, summary=SUMMARY), decide("accept"),
+    )
+
+    def outcome(envelope):
+        key = envelope.payload["step_key"]
+        return None if key == "check" else WORK_FAILED if key == "failed" else WORK_OK
+
+    async def scenario(h):
+        await h.start()
+        await h.until(lambda: bool(agent_db.store.gates.get("t1")))
+        saved = next(iter(agent_db.store.gates["t1"].values()))
+        assert saved["state"] == ("pending" if pending else "open")
+        await h.release(WORK_OK)
+        await h.until(lambda: len(claude.turns()) >= 5 and (h.final() or h.planner._plan.waiting_gates()))
+        assert [e.payload["step_key"] for e in h.work_items] == ["s1", "check", "failed"]
+        assert "cannot cancel" in claude.turns()[4]["text"]
+        # Readback must retain the protection even if the Planner is restarted.
+        restored = Gate.from_row(next(iter(agent_db.store.gates["t1"].values())))
+        assert restored.row(saved["step_id"])["purpose"] == (
+            "verification_exhaustion" if verification else "exhaustion")
+        await _write(h, agent_db, "Continue after the exhausted attempts")
+        await h.finished()
+
+    h = drive(claude, outcome, scenario)
+    assert h.final().payload["status"] == "completed"
+    assert [e.payload["step_key"] for e in h.work_items] == ["s1", "check", "failed", "following"]
+    assert next(iter(agent_db.store.gates["t1"].values()))["state"] == "passed"
+
+
+@pytest.mark.parametrize("condition", [None, {"all_of": ["s1", "g1"]}])
+def test_exhaustion_gate_dependency_requires_passed_not_cancelled(condition, tmp_path):
+    from looper.agents.tiers.conditions import State
+
+    view = PlanView(started={"s1": ()}, pending={}, roles=ROLES, gate_policy=GatePolicy.ALLOWED,
+                    conditions=True, verification_role=VERIFY, verification_exhausted=True)
+    candidate = {**step("v2", "s1", "g1"), "role": VERIFY}
+    if condition is not None:
+        candidate["ready_when"] = condition
+    parsed = parse_decision(decide("replan", steps=[GATE, candidate]),
+                            DecisionContext("old", ResultKind.WORK, False, False, 0), view)
+    agent = PlannerAgent(task_id="t1", runtime_root=tmp_path)
+    from looper.agents.tiers.planner import PlanStep, TaskPlan
+    from looper.agents.user_gates import GateState
+
+    task = TaskPlan(goal_id="goal", plan_id="plan", requirement="verify", work_dir=str(tmp_path),
+                    steps=[PlanStep("s1", 0, "work", key="s1", status="verified")])
+    gate, verify = agent._add_steps(task, parsed.steps)
+    gate.status, gate.gate.state = "verified", GateState.CANCELLED
+    assert verify not in task.ready_steps()
+    assert task.ready_state(verify) is State.UNSATISFIABLE
+    gate.gate.state = GateState.PASSED
+    assert verify in task.ready_steps()
+
+
+@pytest.mark.parametrize("purpose", ["exhaustion", "verification_exhaustion"])
+@pytest.mark.parametrize("turn", ["decision", "chat"])
+@pytest.mark.parametrize("state", ["pending", "open"])
+def test_restored_exhaustion_gate_refuses_planner_cancellation(turn, state, purpose):
+    from looper.agents.tiers.planner_protocol import parse_chat
+    from looper.agents.user_gates import Gate, GateView
+    from tests.test_planner_agent import chat
+
+    gate = Gate.from_row({"topic": "Continue?", "state": state, "purpose": purpose})
+    view = PlanView(started={"s1": ()}, pending={"g1": ()},
+                    gates={"g1": GateView(gate.state, gate.agenda, gate.purpose)})
+    cancel = [{"id": "g1", "action": "cancel", "resolution": "The check passed"}]
+    with pytest.raises(ProtocolError, match="cannot cancel exhaustion gate"):
+        if turn == "chat":
+            parse_chat(chat("Continue", gates=cancel), view)
+        else:
+            parse_decision(decide("accept", gates=cancel),
+                           DecisionContext("s1", ResultKind.WORK, True, False, 0), view)
+
+
+def test_replan_cannot_drop_or_downgrade_a_pending_exhaustion_gate():
+    from looper.agents.tiers.planner_protocol import parse_chat
+    from looper.agents.user_gates import GatePurpose, GateState, GateView
+    from tests.test_planner_agent import chat
+
+    view = PlanView(started={"s1": ()}, pending={"g1": ()}, gate_policy=GatePolicy.ALLOWED,
+                    gates={"g1": GateView(GateState.PENDING, purpose=GatePurpose.EXHAUSTION)})
+    with pytest.raises(ProtocolError, match="keep the exhaustion gate"):
+        parse_chat(chat("Replace the plan", "replan", steps=[step("s2")]), view)
+    parsed = parse_chat(chat("Keep the decision", "replan", steps=[GATE, step("s2", "g1")]), view)
+    assert parsed.steps[0].gate.purpose is GatePurpose.EXHAUSTION
+    from looper.agents.tiers.conditions import to_json
+
+    assert to_json(parsed.steps[1].ready_when, lambda label: label) == {
+        "all_of": [{"step": "g1", "on": "passed"}]}
+
+
+@pytest.mark.parametrize("action", ["add_steps", "replan"])
+def test_later_chat_cannot_add_ungated_work_while_escalation_waits(action):
+    from looper.agents.tiers.planner_protocol import parse_chat
+    from looper.agents.user_gates import GatePurpose, GateState, GateView
+    from tests.test_planner_agent import chat
+
+    view = PlanView(started={"s1": ()}, pending={"g1": (), "following": ("g1",)},
+                    gate_policy=GatePolicy.ALLOWED,
+                    gates={"g1": GateView(GateState.PENDING, purpose=GatePurpose.EXHAUSTION)})
+    steps = [GATE, step("following")] if action == "replan" else [step("replacement")]
+    with pytest.raises(ProtocolError, match="exhaustion gate"):
+        parse_chat(chat("Continue without authorization", action, steps=steps), view)

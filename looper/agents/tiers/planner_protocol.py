@@ -61,6 +61,7 @@ from ..user_gates import (
     AgendaStatus,
     GateAction,
     GatePolicy,
+    GatePurpose,
     GateState,
     GateSummary,
     GateVerdict,
@@ -74,7 +75,7 @@ from ..waits import (
     CommandCheck, GithubPrCheck, ReadyWhen, WaitAction, WaitChangeAction,
     WaitLimits, WaitPolicy, WaitSpec, WaitState, WaitView,
 )
-from .conditions import Condition, Leaf, On, State, StepOutcome, evaluate, leaves, parse as parse_condition
+from .conditions import Condition, KOf, Leaf, On, State, StepOutcome, evaluate, leaves, parse as parse_condition
 from .journal import HANDOFF_MAX_CHARS, LESSONS_MAX_CHARS, kept_text
 
 # A progress note's fields and a final summary's, in the order they are shown, and what each keeps of a field.
@@ -197,6 +198,7 @@ class GateSpec:
     topic: str
     agenda: tuple[AgendaItem, ...]
     findings: str = ""
+    purpose: GatePurpose = GatePurpose.DISCUSSION  # assigned by validation, never supplied by the Planner
 
 
 @dataclass(frozen=True)
@@ -460,7 +462,7 @@ def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
     steps = _step_list(data.get("steps"), "steps", conditions=conditions)
     if not steps:
         raise ProtocolError("steps must list at least one step")
-    _check_new_steps(steps, PlanView(started={}, pending={}, roles=roles, gate_policy=gate_policy,
+    steps = _check_new_steps(steps, PlanView(started={}, pending={}, roles=roles, gate_policy=gate_policy,
                                                wait_policy=wait_policy, conditions=conditions,
                                                isolate_steps=isolate_steps, verification_role=verification_role,
                                                work_role=work_role), replace_pending=True)
@@ -501,7 +503,7 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView) -> Decis
             raise ProtocolError(
                 f"step {context.step} cannot be accepted, so a replan must list the steps that replace it"
             )
-        _check_new_steps(steps, plan if context.acceptable else plan.dropping(context.step), replace_pending=True,
+        steps = _check_new_steps(steps, plan if context.acceptable else plan.dropping(context.step), replace_pending=True,
                          escalate=context.escalate)
     progress = _progress(data)
     final = FinalSummary(**_fields(data["final"], FINAL_FIELDS, "final", FINAL_FIELD_MAX_CHARS)) \
@@ -711,14 +713,14 @@ def _chat_action(data: Mapping[str, Any], plan: PlanView) -> ChatReply:
         steps = _step_list(data.get("steps"), "steps", conditions=plan.conditions)
         if not steps:
             raise ProtocolError("add_steps must list at least one step")
-        _check_new_steps(steps, plan, replace_pending=False)
+        steps = _check_new_steps(steps, plan, replace_pending=False)
     elif action is ChatAction.REPLAN:
         steps = _step_list(data.get("steps", []), "steps", conditions=plan.conditions)
         stop = _stop_list(data.get("stop", []), plan)
         after = plan
         for label in stop:
             after = after.dropping(label)
-        _check_new_steps(steps, after, replace_pending=True)
+        steps = _check_new_steps(steps, after, replace_pending=True)
         if not steps and not set(after.started) - after.done:
             raise ProtocolError("after this replan no step would be left to run; list the steps that replace the "
                                 "ones not started (or stop fewer running steps)")
@@ -821,7 +823,7 @@ def _refusal(decision: Decision, context: DecisionContext) -> str:
 
 
 def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pending: bool,
-                     escalate: bool = False) -> None:
+                     escalate: bool = False) -> tuple[StepSpec, ...]:
     """Check steps that join ``plan``: replacing its pending steps, or added to them."""
     kept = dict(plan.started) if replace_pending else {**plan.started, **plan.pending}
     seen: set[str] = set()
@@ -870,9 +872,9 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
             if not repairs.intersection(step.depends_on) or not _requires_steps(step, repairs):
                 raise ProtocolError(f"verification step {step.id} must depend on the reviewed repair")
     if escalate:
-        _require_new_gate(steps, plan, steps)
+        steps = _require_new_gate(steps, plan, steps)
     elif plan.verification_exhausted and verification:
-        _require_new_gate(steps, plan, verification)
+        steps = _require_new_gate(steps, plan, verification, purpose=GatePurpose.VERIFICATION_EXHAUSTION)
     for step in steps:
         for dependency in step.depends_on:
             if dependency == step.id:
@@ -884,13 +886,48 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
     cycle = _find_cycle(graph)
     if cycle:
         raise ProtocolError("depends_on has a cycle: " + " -> ".join(cycle))
+    # A replan cannot downgrade a pending escalation into an ordinary discussion.
+    protected = {label for label, gate in plan.gates.items() if gate.purpose is not GatePurpose.DISCUSSION}
+    if replace_pending and any(label in plan.pending and label not in seen for label in protected):
+        raise ProtocolError("a replan must keep the exhaustion gate until the operator decides")
+    steps = tuple(replace(s, gate=replace(s.gate, purpose=plan.gates[s.id].purpose))
+                  if s.id in protected and s.gate is not None else s for s in steps)
+    # Exhaustion authorization applies across replies, even if the Planner replaces the downstream step's id.
+    for label, gate in plan.gates.items():
+        if gate.purpose is GatePurpose.EXHAUSTION and not gate.state.closed:
+            for step in steps:
+                if step.id != label and (label not in step.depends_on or not _requires_steps(step, {label})):
+                    raise ProtocolError(f"step {step.id} must depend on exhaustion gate {label} until the operator decides")
+    protected |= {s.id for s in steps if s.gate is not None and s.gate.purpose is not GatePurpose.DISCUSSION}
+    return tuple(_require_passed_gates(s, protected) for s in steps)
 
 
-def _require_new_gate(steps: tuple[StepSpec, ...], plan: PlanView, targets: Iterable[StepSpec]) -> None:
+def _require_new_gate(steps: tuple[StepSpec, ...], plan: PlanView,
+                      targets: Iterable[StepSpec], *,
+                      purpose: GatePurpose = GatePurpose.EXHAUSTION) -> tuple[StepSpec, ...]:
     gates = [s for s in steps if s.gate is not None and s.id not in plan.pending and s.id not in plan.started]
-    if not any(all(s.id == gate.id or (gate.id in s.depends_on and _requires_steps(s, {gate.id}))
-                   for s in targets) for gate in gates):
-        raise ProtocolError("exhausted workflow requires a new gate in this reply, with the new steps depending on it")
+    targets = tuple(targets)
+    for gate in gates:
+        if all(s.id == gate.id or (gate.id in s.depends_on and _requires_steps(s, {gate.id})) for s in targets):
+            return tuple(replace(s, gate=replace(s.gate, purpose=purpose))
+                         if s.id == gate.id else s for s in steps)
+    raise ProtocolError("exhausted workflow requires a new gate in this reply, with the new steps depending on it")
+
+
+def _require_passed_gates(step: StepSpec, protected: set[str]) -> StepSpec:
+    required = protected.intersection(step.depends_on)
+    if not required:
+        return step
+    if not all(_requires_steps(step, {label}) for label in required):
+        raise ProtocolError(f"step {step.id} must require its exhaustion gate to pass")
+
+    def passed(condition: Condition) -> Condition:
+        if isinstance(condition, Leaf):
+            return replace(condition, on=On.PASSED, shorthand=False) if condition.step in required else condition
+        return replace(condition, of=tuple(passed(child) for child in condition.of))
+
+    condition = step.ready_when or KOf(len(step.depends_on), tuple(Leaf(label) for label in step.depends_on), "all_of")
+    return replace(step, ready_when=passed(condition))
 
 
 def _requires_steps(step: StepSpec, required: set[str]) -> bool:
@@ -1322,6 +1359,8 @@ def _gate_changes(data: Mapping[str, Any], plan: PlanView) -> tuple[GateChange, 
             raise ProtocolError(f'{where}.action must be "update" or "cancel"; got {item.get("action")!r}') from None
         gate = plan.gates[label]
         if action is GateAction.CANCEL:
+            if gate.purpose is not GatePurpose.DISCUSSION:
+                raise ProtocolError(f"{where}: cannot cancel exhaustion gate {label}; the operator must decide")
             if set(item) - {"id", "action", "resolution"}:
                 raise ProtocolError(f"{where}: cancel takes only resolution")
             changes.append(GateChange(label, action, resolution=_limited_text(

@@ -49,6 +49,12 @@ THREAD_MAX_CHARS = 8_000
 RETRY_WAIT_SEC = (60, 300)
 
 
+class GatePurpose(str, Enum):
+    DISCUSSION = "discussion"
+    EXHAUSTION = "exhaustion"  # only the operator can authorize continuing after exhausted attempts
+    VERIFICATION_EXHAUSTION = "verification_exhaustion"  # only further verification needs authorization
+
+
 class GateState(str, Enum):
     PENDING = "pending"  # its dependencies are not done
     OPEN = "open"  # it waits for the user, who has not written yet
@@ -269,6 +275,7 @@ class Gate:
     closed_at: datetime | None = None
     # Not the Planner's: the API sets it with the user's first message.
     first_reply_at: datetime | None = field(default=None, compare=False)
+    purpose: GatePurpose = GatePurpose.DISCUSSION
 
     def retry_at(self, waits: Sequence[float] = RETRY_WAIT_SEC) -> datetime | None:
         """When its failed [GATE] turn is tried again on its own (after ``waits``, one for each retry); None when no
@@ -283,7 +290,7 @@ class Gate:
                 "ended_by_user": self.ended_by_user, "delivered_through": self.delivered_through,
                 "turns": self.turns, "failures": self.failures, "failed_through": self.failed_through,
                 "failed_at": self.failed_at, "plan_change": self.plan_change, "opened_at": self.opened_at,
-                "closed_at": self.closed_at}
+                "closed_at": self.closed_at, "purpose": self.purpose.value}
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> Gate:
@@ -304,6 +311,7 @@ class Gate:
             opened_at=row.get("opened_at"),
             closed_at=row.get("closed_at"),
             first_reply_at=row.get("first_reply_at"),
+            purpose=GatePurpose(row.get("purpose") or GatePurpose.DISCUSSION.value),
         )
 
 
@@ -313,3 +321,4 @@ class GateView:
 
     state: GateState
     agenda: tuple[AgendaItem, ...] = ()
+    purpose: GatePurpose = GatePurpose.DISCUSSION

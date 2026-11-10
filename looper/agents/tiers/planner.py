@@ -571,7 +571,8 @@ class TaskPlan:
             retired=frozenset(s.label for s in dropped),
             running=frozenset(s.label for s in live if s.status == "dispatched"),
             done=frozenset(s.label for s in live if s.started and s.status == "verified"),
-            gates={s.label: GateView(s.gate.state, s.gate.agenda) for s in live if s.gate is not None},
+            gates={s.label: GateView(s.gate.state, s.gate.agenda, s.gate.purpose)
+                   for s in live if s.gate is not None},
             waits={s.label: WaitView(s.wait.state) for s in live if s.wait is not None},
         )
 
@@ -1213,7 +1214,7 @@ class PlannerAgent:
                            and (spec.review or (self._execution.review_all and not self._is_verification(step))))
             step.review_roles = [StepReviewRole(item.role, item.required) for item in spec.review_roles]
             if spec.gate is not None:
-                step.gate = Gate(spec.gate.topic, spec.gate.agenda, spec.gate.findings)
+                step.gate = Gate(spec.gate.topic, spec.gate.agenda, spec.gate.findings, purpose=spec.gate.purpose)
             if spec.wait is not None:
                 # Freeze the check interval now, so a later change of the system limits does not rewrite it.
                 step.wait = Wait(replace(spec.wait, every_seconds=effective_every(spec.wait, waits.limits())))

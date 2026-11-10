@@ -253,6 +253,64 @@ def _item(root, run="v1", *, verification=True):
             "verification": verification, "context": {"work_dir": str(root)}})
 
 
+@pytest.mark.parametrize("submodule", [False, True])
+def test_verification_cannot_push_to_developer_branch(tmp_path, verification_runtime, submodule):
+    runs, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+    _git(root, "branch", "-M", "main")
+    if submodule:
+        upstream = _repo(tmp_path / "upstream")
+        _git(root, "-c", "protocol.file.allow=always", "submodule", "add", str(upstream), "module")
+        _git(root, "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-am", "module")
+    source = root / "module" if submodule else root
+    _git(source, "branch", "staging")
+    before = _git(source, "rev-parse", "staging")
+    runs.append(_completed_run())
+
+    async def scenario():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+        task = asyncio.create_task(pool._execute(_item(root)))
+        await runs[0].started.wait()
+        checkout = Path(launches[0]["cwd"])
+        execution = checkout / "module" if submodule else checkout
+        (execution / "tracked").write_text("verifier commit")
+        _git(execution, "add", "tracked")
+        _git(execution, "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-m", "verification")
+        pushed = subprocess.run(["git", "-C", str(execution), "push", "origin", "HEAD:staging"],
+                                capture_output=True, timeout=5)
+        runs[0].release.set()
+        result = await task
+        assert result["failure"] == "verification_changed_code"
+        assert result["verification"]["restored"] is True
+        assert _git(source, "rev-parse", "staging") == before
+        assert pushed.returncode != 0
+        assert _git(execution, "remote") == ""
+        alternates = Path(_git(execution, "rev-parse", "--path-format=absolute", "--git-path",
+                               "objects/info/alternates"))
+        assert not alternates.exists()
+
+    asyncio.run(asyncio.wait_for(scenario(), 15))
+
+
+@pytest.mark.parametrize("shared_source", [False, True])
+def test_verification_checkout_keeps_uncommitted_staged_objects(tmp_path, shared_source):
+    root = tmp_path / "repo"
+    if shared_source:
+        upstream = _repo(tmp_path / "upstream")
+        _git(tmp_path, "clone", "--shared", str(upstream), str(root))
+    else:
+        _repo(root)
+    (root / "new").write_text("staged content")
+    _git(root, "add", "new")
+    (root / "new").write_text("unstaged content")
+    checkout = Path(worker._verification_checkout(str(root), tmp_path / "backup"))
+    assert _git(checkout, "show", ":new") == "staged content"
+    assert (checkout / "new").read_text() == "unstaged content"
+    assert worker._verification_snapshot(str(checkout)) == worker._verification_snapshot(str(root))
+    assert not Path(_git(checkout, "rev-parse", "--path-format=absolute", "--git-path",
+                         "objects/info/alternates")).exists()
+
+
 @pytest.mark.parametrize("restart", [False, True])
 def test_verification_new_attempt_sees_current_head_and_fallback_reuses_checkout(
         tmp_path, monkeypatch, verification_runtime, restart):

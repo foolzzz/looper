@@ -614,7 +614,7 @@ def _restore_verification(work_dir: str, backup: Path, *, detached: bool = False
 def _verification_checkout(work_dir: str, backup: Path) -> str:
     """Seed a private Git checkout with the source's staged, unstaged and untracked files.
 
-    Only immutable objects are shared: rollback and commits must never update a developer's refs or index.
+    Objects and refs are private, with no remote pointing back to the developer's repository.
     """
     root, _ = _verification_paths(work_dir)
     tree = backup / "checkout"
@@ -627,8 +627,12 @@ def _verification_checkout(work_dir: str, backup: Path) -> str:
             raise OSError(snapshot.get("error") or "git_snapshot_unavailable")
 
         def clone(source: Path, target: Path, saved: Path) -> None:
-            subprocess.run(["git", "clone", "--shared", "--no-checkout", "--", str(source), str(target)],
+            # Copy even uncommitted index objects, without hardlinks or inherited alternates.
+            subprocess.run(["git", "clone", "--no-hardlinks", "--dissociate", "--no-checkout", "--",
+                            str(source), str(target)],
                            check=True, capture_output=True, timeout=30)
+            subprocess.run(["git", "-C", str(target), "remote", "remove", "origin"],
+                           check=True, capture_output=True, timeout=5)
             manifest = json.loads((saved / "baseline.json").read_text())
             for name in manifest.get("submodules", []):
                 clone(source / name, target / name, saved / "submodules" / name)

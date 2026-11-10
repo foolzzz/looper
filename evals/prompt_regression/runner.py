@@ -1018,7 +1018,7 @@ def run(
     try:
         scenarios = root / "scenarios.json"
         work_dirs = {(task.id, rep): root / "work" / task.id / str(rep) for rep in range(1, reps + 1) for task in tasks}
-        fake = {task.id: task.fake for task in tasks}
+        fake = {task.id: {**task.fake, "_eval_requirement": task.requirement} for task in tasks}
         scenarios.write_text(json.dumps({os.path.realpath(path): fake[task_id]
                                          for (task_id, _), path in work_dirs.items()}), encoding="utf-8")
         install_claude(root / "bin", mode=mode, scenarios=scenarios,
