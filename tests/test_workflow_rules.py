@@ -230,6 +230,21 @@ def test_success_at_retry_limit_still_enters_first_review(planner_claude, agent_
     assert len(h.reviews) == 1
 
 
+def test_unavailable_verification_snapshot_allows_retry_without_repair(planner_claude, agent_db, monkeypatch):
+    configure(agent_db, monkeypatch)
+    verify = {**step("v1", "s1"), "role": VERIFY}
+    claude = planner_claude(plan(step("s1"), verify), decide("accept"),
+                            decide("retry", feedback="Retry repository snapshot"), decide("accept"))
+    h = drive(claude, lambda e: {**WORK_FAILED, "failure": "verification_unavailable"}
+              if e.payload.get("verification") and e.payload["attempt"] == 1 else WORK_OK)
+    assert h.final().payload["status"] == "completed"
+    assert len(h.work_items) == 3
+    rounds = [json.loads(e["summary"]) for e in agent_db.store.journal["t1"]
+              if e["kind"] == "verification_round"]
+    assert len(rounds) == 2
+    assert all("repair_after_index" not in r for r in rounds)
+
+
 @pytest.mark.parametrize("bypass", ["retry", "replace", "unreviewed", "verification_repair", "condition"])
 def test_verification_code_change_requires_reviewed_repair(planner_claude, agent_db, monkeypatch, bypass):
     configure(agent_db, monkeypatch)

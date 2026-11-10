@@ -466,6 +466,12 @@ def main(argv: list[str]) -> int:
     with open(scenarios_path, encoding="utf-8") as handle:
         scenarios = json.load(handle)
     script = scenarios.get(os.path.realpath(os.getcwd())) or scenarios.get(_main_checkout(), {})
+    if not script:
+        # Verification clones have independent Git metadata; their local origin identifies the same scenario.
+        origin = subprocess.run(["git", "config", "--get", "remote.origin.url"], capture_output=True,
+                                text=True, timeout=5).stdout.strip()
+        if os.path.isabs(origin):
+            script = scenarios.get(os.path.realpath(origin), {})
     system_prompt = ""
     # The prompt file comes with --append-system-prompt-file, or --system-prompt-file in a profile's replace mode.
     flag = next((f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in args), None)
