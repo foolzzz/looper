@@ -310,19 +310,14 @@ def test_verification_seed_manifest_does_not_expose_source(tmp_path):
     assert (backup / "seed" / "files" / "alias").resolve() == checkout / "tracked"
 
 
-@pytest.mark.parametrize("invalid", ["external_directory", "metadata", "missing", "tracked"])
+@pytest.mark.parametrize("invalid", ["metadata", "missing", "tracked"])
 def test_verification_rejects_unsafe_runtime_inputs(tmp_path, monkeypatch, verification_runtime, invalid):
     _, launches = verification_runtime
     root = _repo(tmp_path / "repo")
     (root / ".gitignore").write_text("local/\n")
     local = root / "local"
     local.mkdir()
-    if invalid == "external_directory":
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        (outside / "secret").write_text("do not copy")
-        (local / "link").symlink_to(outside)
-    elif invalid == "metadata":
+    if invalid == "metadata":
         (local / ".git").mkdir()
     path = {"missing": "missing", "tracked": "tracked"}.get(invalid, "local")
     monkeypatch.setattr(worker.db_projects, "get_task_project", AsyncMock(return_value={
@@ -334,26 +329,80 @@ def test_verification_rejects_unsafe_runtime_inputs(tmp_path, monkeypatch, verif
     assert (root / "tracked").read_text() == "committed"
 
 
-def test_runtime_file_links_are_copied_without_exposing_their_source(tmp_path):
+@pytest.mark.parametrize("directory", [False, True])
+@pytest.mark.parametrize("outside_checkout", [False, True])
+def test_runtime_skips_and_reports_undeclared_external_links(tmp_path, caplog, directory, outside_checkout):
+    source = _repo(tmp_path / "source")
+    (source / ".gitignore").write_text("workspace/\nundeclared\n")
+    workspace = source / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside" if outside_checkout else source / "undeclared"
+    if directory:
+        outside.mkdir()
+    else:
+        outside.write_text("must stay outside")
+    (workspace / "link").symlink_to(outside, target_is_directory=directory)
+    (workspace / "regular").write_text("copied")
+    destination = Path(worker._verification_checkout(str(source), tmp_path / "backup", ["workspace"]))
+    assert not (destination / "workspace" / "link").is_symlink()
+    assert not (destination / "workspace" / "link").exists()
+    assert (destination / "workspace" / "regular").read_text() == "copied"
+    assert "workspace/link" in caplog.text
+
+
+def test_runtime_links_between_declared_paths_stay_private(tmp_path):
     source, destination = tmp_path / "source", tmp_path / "checkout"
     source.mkdir()
     destination.mkdir()
-    workspace = source / "venv"
+    workspace = tmp_path / "external-workspace"
     workspace.mkdir()
-    interpreter = tmp_path / "interpreter"
-    interpreter.write_text("executable fixture")
-    interpreter.chmod(0o755)
-    (workspace / "python").symlink_to(interpreter)
-    assert worker._copy_verification_runtime(source, destination, ["venv"]) == ["venv"]
-    copied = destination / "venv" / "python"
-    assert copied.read_text() == interpreter.read_text()
-    assert not copied.is_symlink()
-    assert copied.stat().st_mode & 0o111
-    assert not copied.stat().st_mode & 0o222
-    assert interpreter.stat().st_mode & 0o200
+    (source / "workspace").symlink_to(workspace, target_is_directory=True)
+    (source / "dependency").mkdir()
+    (source / "dependency" / "value").write_text("declared")
+    (workspace / "link").symlink_to(source / "dependency", target_is_directory=True)
+    worker._copy_verification_runtime(source, destination, ["workspace", "dependency"])
+    link = destination / "workspace" / "link"
+    assert link.is_symlink()
+    assert not Path(link.readlink()).is_absolute()
+    assert link.resolve() == destination / "dependency"
+    assert (link / "value").read_text() == "declared"
 
 
-@pytest.mark.parametrize("editable", ["pth", "finder", "strict-relative", "strict-absolute"])
+@pytest.mark.installed
+@pytest.mark.parametrize("absolute", [False, True])
+def test_verification_runtime_preserves_package_bin_links(tmp_path, absolute):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+    source = _repo(tmp_path / "source")
+    (source / ".gitignore").write_text("node_modules/\n")
+    modules = source / "node_modules"
+    (modules / ".bin").mkdir(parents=True)
+    package = modules / "pkg"
+    (package / "bin").mkdir(parents=True)
+    (package / "value.js").write_text("module.exports = 'private package';\n")
+    script = package / "bin" / "x.js"
+    script.write_text("console.log(require('../value.js'));\n")
+    (modules / ".bin" / "x").symlink_to(script if absolute else "../pkg/bin/x.js")
+
+    def run(root):
+        return subprocess.run([node, "node_modules/.bin/x"], cwd=root,
+                              capture_output=True, text=True, timeout=5)
+
+    original = run(source)
+    assert original.returncode == 0, original.stderr
+    checkout = Path(worker._verification_checkout(str(source), tmp_path / "backup", ["node_modules"]))
+    link = checkout / "node_modules" / ".bin" / "x"
+    assert link.is_symlink()
+    assert not Path(link.readlink()).is_absolute()
+    assert link.resolve() == checkout / "node_modules" / "pkg" / "bin" / "x.js"
+    (package / "value.js").write_text("throw new Error('source must not be used');\n")
+    result = run(checkout)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == original.stdout
+
+
+@pytest.mark.parametrize("editable", ["pth", "finder", "strict-relative", "strict-absolute", "strict-aliased"])
 def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatch, editable):
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.delenv("PYTHONPATH", raising=False)
@@ -390,7 +439,7 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
         linked_package = developer / "build" / "__editable__.checkout_probe" / "checkout_probe"
         linked_package.mkdir(parents=True)
         (linked_package / "__init__.py").symlink_to(
-            package / "__init__.py" if editable == "strict-absolute" else
+            package / "__init__.py" if editable in {"strict-absolute", "strict-aliased"} else
             "../../../src/checkout_probe/__init__.py")
         (site / "checkout_probe.pth").write_text(str(linked_package.parent) + "\n")
     else:
@@ -424,7 +473,13 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
         (source / "build").symlink_to(developer / "build", target_is_directory=True)
         runtime_paths.append("build")
     (source / "src" / "checkout_probe" / "__init__.py").write_text("VALUE = 0\n")
-    checkout = Path(worker._verification_checkout(str(source), tmp_path / "backup", runtime_paths))
+    runtime = tmp_path
+    if editable == "strict-aliased":
+        runtime = tmp_path / "runtime-alias"
+        canonical = tmp_path / "nested" / "runtime"
+        canonical.mkdir(parents=True)
+        runtime.symlink_to(canonical, target_is_directory=True)
+    checkout = Path(worker._verification_checkout(str(source), runtime / "backup", runtime_paths)).resolve()
     assert not list((checkout / ".venv").rglob("*.pyc"))
     assert all(not path.stat().st_mode & 0o222 for path in (checkout / ".venv").rglob("*") if path.is_file())
     prefix = run(checkout, ["python", "-c", "import sys; print(sys.prefix)"])
