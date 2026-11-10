@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.113] - 2026-11-10
+
+### Added
+
+- **Workflow presets: operator-defined workflows snapshotted into tasks.** ([#1176](https://github.com/foolzzz/looper/pull/1176))
+  - Operators store named workflows (role profiles, fixed work and review roles, task-level execution rules, Planner instructions) through the operator-only `workflows` operations (`list`, `get`, `put`, `delete`) and the generated `loopercli workflows` commands. `loopercli create --workflow <key>` (or `none`) and the `workflow` field of task creation select one.
+  - A task keeps an independent snapshot taken at creation. Workflow roles become task roles (`via: workflow`) that the Planner cannot redefine; the review-all, dependency-conditions, retry-limit, user-gate and budget settings overlay the project's for that task; the Planner's task section and reply contract state the workflow.
+  - New `workflows` table, `projects.default_workflow`, `tasks.workflow` and the `workflow` task-role origin, added by an automatic startup migration. Tasks created without a workflow are unchanged.
+
 ## [2.14.112] - 2026-11-10
 
 ### Changed
