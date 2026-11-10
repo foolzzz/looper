@@ -162,6 +162,9 @@ def _decide(script: dict[str, Any], message: str, retried: dict[str, int]) -> di
                 "final": FINAL, **({"gates": gates} if gates else {})}
     if "review" in allowed and "needs a passing review" in message:
         return {"decision": "review", "reason": "the step asks for an independent review"}
+    replacement = (script.get("decision_replans") or {}).get(step.group(1) if step else "")
+    if replacement and "replan" in allowed:
+        return {"decision": "replan", "reason": "verification needs a reviewed repair", "steps": replacement}
     if "retry" in allowed:
         label = step.group(1) if step else ""
         notes = (script.get("retry_feedback") or {}).get(label) or []

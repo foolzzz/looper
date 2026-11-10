@@ -39,7 +39,10 @@ def test_task_section_only_claims_the_workflow_rules_that_are_enforced() -> None
     assert "Work steps without a role use dev" in text
     assert "Workflow roles are fixed: dev (work)" in text
     assert "Workflow instructions (follow them; they are the operator's):\nKeep the changes focused." in text
-    assert "review_a" not in text and "verify_staging" not in text
+    assert "review_a" not in text
+    assert "Verification role: verify_staging" in text
+    assert "After 2 failed verification attempts" in text
+    assert "only fail or replan is allowed" in text
 
 
 @pytest.mark.parametrize("explicit_role", [False, True])

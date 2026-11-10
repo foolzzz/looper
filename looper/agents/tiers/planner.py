@@ -1154,7 +1154,9 @@ class PlannerAgent:
                                     lambda text: parse_plan(
                                         text, self._roles, gate_policy=self._gate_policy,
                                         wait_policy=self._wait_policy(), conditions=self._execution.conditions_on,
-                                        isolate_steps=self._execution.isolate_steps))
+                                        isolate_steps=self._execution.isolate_steps,
+                                        verification_role=((self._workflow or {}).get("verification") or {}).get("role"),
+                                        work_role=(self._workflow or {}).get("work_role")))
         except PlannerTurnError as exc:
             await self._fail_plan(plan, reason=f"Planning failed: {exc}")
             return
@@ -1205,10 +1207,10 @@ class PlannerAgent:
             step.instruction = spec.instruction
             step.acceptance_criteria = list(spec.acceptance_criteria)
             # A gate or a wait is never reviewed, whatever the project's review policy.
-            step.review = (spec.gate is None and spec.wait is None
-                           and (spec.review or self._execution.review_all))
             step.role = (spec.role or (self._workflow or {}).get("work_role")
                          if spec.gate is None and spec.wait is None else None)
+            step.review = (spec.gate is None and spec.wait is None
+                           and (spec.review or (self._execution.review_all and not self._is_verification(step))))
             step.review_roles = [StepReviewRole(item.role, item.required) for item in spec.review_roles]
             if spec.gate is not None:
                 step.gate = Gate(spec.gate.topic, spec.gate.agenda, spec.gate.findings)
@@ -1940,6 +1942,7 @@ class PlannerAgent:
                 "acceptance_criteria": step.acceptance_criteria,
                 "feedback": list(step.feedback),
                 "attempt": step.retries + 1,
+                **({"verification": True} if self._is_verification(step) else {}),
                 # Its first user turn: what the steps it depends on reported, and the task journal's findings.
                 "dependencies": self._dependency_reports(plan, step),
                 "findings": journal.worker_section(plan.journal, step.depends_on),
@@ -2115,7 +2118,8 @@ class PlannerAgent:
         context = DecisionContext(step=step.label, result=ResultKind.WORK, succeeded=False,
                                   review_required=self._needs_review(step), retries=step.retries,
                                   max_retries=self._execution.step_retries)
-        await self._decide(plan, step, context, self._merge_report(step, failed, outcome.files))
+        await self._decide(plan, step, context, self._merge_report(step, failed, outcome.files),
+                           record_verification=False)
 
     @staticmethod
     def _merge_report(step: PlanStep, failed: StepWorkspace, files: Sequence[str]) -> list[str]:
@@ -2362,7 +2366,8 @@ class PlannerAgent:
         it, or none of them would have reviewed it); an advisory one's never blocks."""
         return all(r.get("passed") is True for r in _role_reviews(step.result or {}) if r.get("required") is not False)
 
-    async def _decide(self, plan: TaskPlan, step: PlanStep, context: DecisionContext, report: list[str]) -> None:
+    async def _decide(self, plan: TaskPlan, step: PlanStep, context: DecisionContext, report: list[str], *,
+                      record_verification: bool = True) -> None:
         """Ask the Planner's Claude what to do with ``step``'s result, then do it.
 
         Without a valid decision the step's own verdict decides, and no
@@ -2372,18 +2377,34 @@ class PlannerAgent:
         others = [s for s in plan.steps if s is not step and s.status not in ("verified", "skipped")]
         open_gates = frozenset(s.label for s in others) if others and all(s.gate for s in others) else None
         context = replace(context, last_open=plan.last_open(step), open_gates=open_gates)
+        entries = []
+        if record_verification and context.result is ResultKind.WORK and self._is_verification(step):
+            result = step.result or {}
+            evidence = result.get("verification") or {}
+            summary = str(result.get("summary") or result.get("error") or "")
+            entries.append(JournalEntry(step.step_id, step.label, json.dumps({
+                "role": step.role, "attempt": step.retries + 1, "head": evidence.get("head"),
+                "git": evidence.get("git", False), "status": "completed" if context.succeeded else "failed",
+                "summary": summary.split(". ", 1)[0].splitlines()[0][:300] if summary else "",
+            }), kind=JournalKind.VERIFICATION_ROUND))
+        if self._is_verification(step) and not context.succeeded and self._verification_exhausted(plan, entries):
+            context = replace(context, max_retries=min(context.max_retries, context.retries))
+        if (self._workflow or {}).get("escalate_on_exhaustion") and not context.acceptable \
+                and context.retries >= context.max_retries:
+            context = replace(context, escalate=True)
         step.status = "deciding"
         report = [*report, *await self._room_lines(step)]
-        message = self._decision_message(plan, step, context, report)
         # Saved with its result and the late messages, so a restart can take the decision again.
-        await self._save(plan, step)
+        await self._save(plan, step, entries=entries)
+        message = self._decision_message(plan, step, context, report)
         step.missed_messages.clear()
         try:
             reply = await self._ask(
                 TurnKind.DECISION, message, lambda text: parse_decision(text, context, self._checked(view)),
             )
         except PlannerTurnError as exc:
-            if self._execution.review_all and context.result is ResultKind.WORK and context.succeeded:
+            if self._execution.review_all and self._needs_review(step) and not context.escalate \
+                    and context.result is ResultKind.WORK and context.succeeded:
                 # The project reviews every step, so a Worker's own success never accepts one.
                 await self._activity(
                     "error",
@@ -2393,9 +2414,10 @@ class PlannerAgent:
                 await self._send_to_review(plan, step)
                 return
             whose = "Reviewer's" if context.result is ResultKind.REVIEW else "Worker's own"
-            if context.succeeded and not await self._merged(plan, step):
+            succeeded = context.acceptable if context.escalate else context.succeeded
+            if succeeded and not await self._merged(plan, step):
                 return
-            step.status = "verified" if context.succeeded else "failed"
+            step.status = "verified" if succeeded else "failed"
             await self._activity(
                 "error",
                 f"Warning: the Planner could not decide on step {step.index + 1} ({step.label}): {exc}. "
@@ -2459,7 +2481,7 @@ class PlannerAgent:
             step.status = "verified" if context.acceptable else "skipped"
             if step.status == "skipped":
                 await self._drop_workspace(step)
-            await self._replan(plan, reply.steps, step, reply.reason)
+            await self._replan(plan, reply.steps, step, reply.reason, escalate=context.escalate)
         elif decision is Decision.FAIL:
             step.status = "failed"
             plan.fail_reason = reply.reason
@@ -2481,7 +2503,19 @@ class PlannerAgent:
     def _needs_review(self, step: PlanStep) -> bool:
         """Whether ``step`` needs a passing review before it is accepted: the Planner asked for one, or the
         project reviews every step."""
-        return step.review or self._execution.review_all
+        return step.review or (self._execution.review_all and not self._is_verification(step))
+
+    def _is_verification(self, step: PlanStep) -> bool:
+        rule = (self._workflow or {}).get("verification")
+        return bool(rule and step.gate is None and step.wait is None and step.role == rule["role"])
+
+    def _verification_exhausted(self, plan: TaskPlan, entries: Sequence[JournalEntry] = ()) -> bool:
+        rule = (self._workflow or {}).get("verification")
+        if not rule:
+            return False
+        failures = sum(entry.kind is JournalKind.VERIFICATION_ROUND
+                       and json.loads(entry.summary).get("status") == "failed" for entry in [*plan.journal, *entries])
+        return failures >= rule["max_rounds"]
 
     @staticmethod
     def _skip(step: PlanStep) -> None:
@@ -2492,7 +2526,8 @@ class PlannerAgent:
         if step.wait is not None:
             step.wait.state = WaitState.SKIPPED
 
-    async def _replan(self, plan: TaskPlan, specs: tuple[StepSpec, ...], decided: PlanStep, reason: str) -> None:
+    async def _replan(self, plan: TaskPlan, specs: tuple[StepSpec, ...], decided: PlanStep, reason: str, *,
+                      escalate: bool = False) -> None:
         """Replace every step that has not started with ``specs``; saved with the ``decided`` step and the
         decision's journal entry at once."""
         keep = {spec.id for spec in specs}
@@ -2512,7 +2547,12 @@ class PlannerAgent:
         else:
             entry = JournalEntry(decided.step_id, decided.label, journal.clip(note, journal.SUMMARY_MAX_CHARS),
                                  kind=JournalKind.DECISION)
-        await self._save(plan, decided, *dropped, *steps, entries=[entry])
+        entries = [entry]
+        if escalate:
+            entries.append(JournalEntry(decided.step_id, decided.label, json.dumps({
+                "reason": reason, "gates": [s.id for s in specs if s.gate is not None],
+            }), kind=JournalKind.ESCALATION))
+        await self._save(plan, decided, *dropped, *steps, entries=entries)
         await self._activity("phase", summary)
 
     async def _step_settled(self, plan: TaskPlan, step: PlanStep, *, note: str = "") -> None:
@@ -2815,7 +2855,7 @@ class PlannerAgent:
             review_required=self._needs_review(step), retries=step.retries,
             max_retries=self._execution.step_retries,
         )
-        await self._decide(plan, step, context, report)
+        await self._decide(plan, step, context, report, record_verification=False)
 
     # --- Restarting a task that ended: stopped, failed or cancelled ---
 
@@ -3479,7 +3519,10 @@ class PlannerAgent:
     def _checked(self, view: PlanView) -> PlanView:
         """``view`` with the task's roles as last read and whether it may open gates, for checking a reply."""
         return replace(view, roles=self._roles, gate_policy=self._gate_policy, wait_policy=self._wait_policy(),
-                       conditions=self._execution.conditions_on, isolate_steps=self._execution.isolate_steps)
+                       conditions=self._execution.conditions_on, isolate_steps=self._execution.isolate_steps,
+                       verification_role=((self._workflow or {}).get("verification") or {}).get("role"),
+                       work_role=(self._workflow or {}).get("work_role"),
+                       verification_exhausted=bool(self._plan and self._verification_exhausted(self._plan)))
 
     def _wait_policy(self) -> WaitPolicy:
         """System limits, command permission, and this event's scheduled-run stop time."""
@@ -4286,6 +4329,13 @@ class PlannerAgent:
             lines += [f"- {_clip(m, 500)}" for m in step.missed_messages]
         if context.result is ResultKind.WORK and context.succeeded and context.review_required:
             lines += ["", "This step needs a passing review before it can be accepted."]
+        if context.escalate:
+            lines += ["", "Escalation required: retries are exhausted and this result cannot be accepted. "
+                      "Only replan or fail is allowed. A replan must add a new user gate in this reply; "
+                      "every other new step must depend on it."]
+        if self._is_verification(step) and self._verification_exhausted(plan):
+            lines += ["", "The verification failure limit is exhausted: no retry after a failed verification. "
+                      "Any new verification step must depend on a new user gate added in the same reply."]
         if context.last_open:
             lines += ["", "This is the task's last open step: a decision that completes the task (accept, or replan "
                           'with no new steps) must carry "final", the task\'s final summary.']

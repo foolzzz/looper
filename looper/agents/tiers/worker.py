@@ -35,9 +35,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import shutil
+import subprocess
 import time
 import uuid
 from collections import Counter
@@ -458,6 +460,23 @@ class RunContext:
     system_prompt: SystemPrompt | None = None
     model_events: int = 0
     fallback_reason: str | None = None
+    verification: dict[str, Any] | None = None
+
+
+def _verification_snapshot(work_dir: str) -> dict[str, Any]:
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", work_dir, *args], capture_output=True, timeout=5)
+
+    try:
+        if git("rev-parse", "--is-inside-work-tree").stdout.strip() != b"true":
+            return {"git": False, "head": None, "status_sha256": None, "limitation": "report_only"}
+        head, status = git("rev-parse", "--verify", "HEAD"), git("status", "--porcelain")
+        if status.returncode:
+            return {"git": True, "head": None, "status_sha256": None, "error": "git_status_unavailable"}
+        return {"git": True, "head": head.stdout.decode().strip() if head.returncode == 0 else None,
+                "status_sha256": hashlib.sha256(status.stdout).hexdigest()}
+    except (OSError, subprocess.TimeoutExpired):
+        return {"git": False, "head": None, "status_sha256": None, "error": "git_snapshot_unavailable"}
 
 
 @dataclass(frozen=True)
@@ -776,7 +795,7 @@ class WorkerPool:
             if seat is None and self.room_ops is not None and manifest.get("room_seat"):
                 seat = run_seat(manifest, is_verify=is_verify, run=run_id)
             ctx = RunContext(run_id, task_id, step_id, work_dir, "", is_verify, launch, launch.runtime, seat,
-                             run_timeout, started_at, False, command)
+                             run_timeout, started_at, False, command, verification=manifest.get("verification"))
             wp = WorkerProcess(worker_id=run_id, task_id=step_id, plan_id=manifest.get("plan_id") or "",
                                role=agent, parent_task_id=task_id, step=manifest.get("step_key") or "",
                                instruction=manifest.get("instruction") or "", task_role=run_role(manifest.get("task_role")),
@@ -1320,6 +1339,8 @@ class WorkerPool:
                 return {"passed": False, "findings": [problem], "summary": problem}
             return {"status": "failed", "error": problem}
 
+        verification = (await asyncio.to_thread(_verification_snapshot, work_dir)
+                        if payload.get("verification") is True and not is_verify else None)
         if is_verify:
             prompt = self._build_verify_prompt(payload)
         else:
@@ -1504,6 +1525,8 @@ class WorkerPool:
                                     "launcher": launch.profile.runtime.launcher.value,
                                     "max_budget_usd": launch.max_budget_usd},
                     })
+                    if verification is not None:
+                        handle.manifest["verification"] = verification
                     if (wp := self._active.get(worker_id)) is not None:
                         wp.keepable = True
                         wp.handle = handle  # register before activity and record writes can lose the lock
@@ -1541,19 +1564,27 @@ class WorkerPool:
 
         return RunContext(worker_id, parent_task_id, payload.get("task_id") or None, work_dir, prompt,
                           is_verify, launch, runtime, seat, run_timeout, started_at, hosted, command,
-                          handle, system_prompt)
+                          handle, system_prompt, verification=verification)
 
     async def _execute(self, envelope: MessageEnvelope, *, is_verify: bool = False,
                        started_at: datetime | None = None) -> dict[str, Any]:
         fallbacks: list[dict[str, str]] = []
         missed_input: list[str] = []
         settings = None
+        verification = None
+        verification_ctx = None
         while True:
             ctx = await self._prepare(envelope, is_verify=is_verify, started_at=started_at,
                                       agent_settings=settings, fallbacks=fallbacks)
             if isinstance(ctx, dict):
                 result = ctx
                 break
+            if ctx.verification is not None:
+                verification = verification if verification is not None else ctx.verification
+                ctx.verification = verification
+                verification_ctx = ctx
+                if isinstance(ctx.handle, KeptRun):
+                    ctx.handle.manifest["verification"] = verification
             timeout = None
             try:
                 result = await self._execute_once(ctx, fallbacks)
@@ -1584,6 +1615,8 @@ class WorkerPool:
                 missed_input.extend(ctx.handle.dropped_input())
             self._reminders.pop(ctx.worker_id, None)
             await self._end_room_run(ctx.worker_id)
+        if verification_ctx is not None and "verification" not in result:
+            result = await self._verification_result(verification_ctx, result)
         if missed_input:
             result = {**result, "missed_input": missed_input + result.get("missed_input", [])}
         return {**result, "fallback": fallbacks} if fallbacks else result
@@ -1964,6 +1997,9 @@ class WorkerPool:
 
         outcome = await asyncio.to_thread(judge_result, result_event, work_dir=Path(work_dir), is_verify=is_verify,
                                           started_at=started_at, runtime_label=runtime.label, failure_detail=detail)
+        if ctx.verification is not None:
+            report = extract_report(str((result_event or {}).get("result") or ""), "status")
+            outcome = await self._verification_result(ctx, outcome, report=report)
         if (elsewhere := reported_files.locations(outcome.get("found_elsewhere"))) and parent_task_id:
             places = []
             for item in elsewhere:
@@ -1979,6 +2015,33 @@ class WorkerPool:
         await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                               outcome=run_outcome(result_event, outcome, is_verify=is_verify).value)
         return outcome
+
+    async def _verification_result(self, ctx: RunContext, result: dict[str, Any], *,
+                                   report: dict[str, Any] | None = None) -> dict[str, Any]:
+        before = ctx.verification
+        assert before is not None
+        after = await asyncio.to_thread(_verification_snapshot, ctx.work_dir)
+        details = {**before, "head_after": after["head"], "status_sha256_after": after["status_sha256"]}
+        reported = report if report is not None else result
+        reasons = []
+        if any(source.get("changed_files") or source.get("deleted_files") for source in (reported, result)):
+            reasons.append("reported file changes")
+        if before.get("error") or (before["git"] and (not after["git"] or after.get("error"))):
+            reasons.append("repository state unavailable")
+        if before["git"] and before["head"] != after["head"]:
+            reasons.append("HEAD changed")
+        if before["git"] and before["status_sha256"] != after["status_sha256"]:
+            reasons.append("working tree changed")
+        if reasons:
+            error = "Verification changed the code: " + "; ".join(reasons)
+            result = {**result, "status": "failed", "failure": "verification_changed_code",
+                      "error": error, "summary": error}
+            if ctx.parent_task_id:
+                await self._activity(ctx.parent_task_id, ctx.worker_id, "error", error)
+        if before.get("limitation") == "report_only":
+            note = "Verification guard: report only (working directory is not a Git repository)."
+            result = {**result, "summary": f"{result.get('summary') or ''}\n{note}".strip()}
+        return {**result, "verification": details}
 
     @staticmethod
     def _run_limits(launch: Launch, project: dict[str, Any] | None,

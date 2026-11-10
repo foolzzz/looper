@@ -74,7 +74,7 @@ from ..waits import (
     CommandCheck, GithubPrCheck, ReadyWhen, WaitAction, WaitChangeAction,
     WaitLimits, WaitPolicy, WaitSpec, WaitState, WaitView,
 )
-from .conditions import Condition, Leaf, On, leaves, parse as parse_condition
+from .conditions import Condition, Leaf, On, State, StepOutcome, evaluate, leaves, parse as parse_condition
 from .journal import HANDOFF_MAX_CHARS, LESSONS_MAX_CHARS, kept_text
 
 # A progress note's fields and a final summary's, in the order they are shown, and what each keeps of a field.
@@ -374,6 +374,9 @@ class PlanView:
     wait_policy: WaitPolicy = WaitPolicy()
     conditions: bool = False
     isolate_steps: bool = False
+    verification_role: str | None = None
+    work_role: str | None = None
+    verification_exhausted: bool = False
 
     def dropping(self, step: str) -> PlanView:
         """This plan once ``step``, a started step, is dropped."""
@@ -396,6 +399,7 @@ class DecisionContext:
     # When every other open step is a gate: those gates (cancelling all of them in the reply leaves this one the
     # last open step); None otherwise.
     open_gates: frozenset[str] | None = None
+    escalate: bool = False
 
     @property
     def acceptable(self) -> bool:
@@ -404,6 +408,8 @@ class DecisionContext:
         return self.succeeded and not self.review_required
 
     def allowed(self) -> tuple[Decision, ...]:
+        if self.escalate:
+            return (Decision.REPLAN, Decision.FAIL)
         allowed = []
         if self.acceptable:
             allowed.append(Decision.ACCEPT)
@@ -445,7 +451,8 @@ def extract_reply(text: str) -> dict[str, Any]:
 
 def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
                gate_policy: GatePolicy = GatePolicy.OFF, wait_policy: WaitPolicy = WaitPolicy(),
-               conditions: bool = False, isolate_steps: bool = False) -> PlanReply:
+               conditions: bool = False, isolate_steps: bool = False,
+               verification_role: str | None = None, work_role: str | None = None) -> PlanReply:
     data = extract_reply(text)
     _only_keys(data, {"steps"}, "the PLAN reply")
     steps = _step_list(data.get("steps"), "steps", conditions=conditions)
@@ -453,7 +460,8 @@ def parse_plan(text: str, roles: Mapping[str, RoleKind] | None = None, *,
         raise ProtocolError("steps must list at least one step")
     _check_new_steps(steps, PlanView(started={}, pending={}, roles=roles, gate_policy=gate_policy,
                                                wait_policy=wait_policy, conditions=conditions,
-                                               isolate_steps=isolate_steps), replace_pending=True)
+                                               isolate_steps=isolate_steps, verification_role=verification_role,
+                                               work_role=work_role), replace_pending=True)
     return PlanReply(steps)
 
 
@@ -491,7 +499,8 @@ def parse_decision(text: str, context: DecisionContext, plan: PlanView) -> Decis
             raise ProtocolError(
                 f"step {context.step} cannot be accepted, so a replan must list the steps that replace it"
             )
-        _check_new_steps(steps, plan if context.acceptable else plan.dropping(context.step), replace_pending=True)
+        _check_new_steps(steps, plan if context.acceptable else plan.dropping(context.step), replace_pending=True,
+                         escalate=context.escalate)
     progress = _progress(data)
     final = FinalSummary(**_fields(data["final"], FINAL_FIELDS, "final", FINAL_FIELD_MAX_CHARS)) \
         if "final" in data else None
@@ -807,7 +816,8 @@ def _refusal(decision: Decision, context: DecisionContext) -> str:
     return f"{decision.value} is not allowed: {why}; allowed now: {allowed}"
 
 
-def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pending: bool) -> None:
+def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pending: bool,
+                     escalate: bool = False) -> None:
     """Check steps that join ``plan``: replacing its pending steps, or added to them."""
     kept = dict(plan.started) if replace_pending else {**plan.started, **plan.pending}
     seen: set[str] = set()
@@ -839,6 +849,18 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
         seen.add(step.id)
         _check_roles(step, plan.roles)
     graph = {**kept, **{s.id: s.depends_on for s in steps}}
+    work = (set(kept) - set(plan.gates) - set(plan.waits)) | {
+        s.id for s in steps if s.gate is None and s.wait is None}
+    verification = [s for s in steps if plan.verification_role is not None
+                    and (s.role or plan.work_role) == plan.verification_role
+                    and s.gate is None and s.wait is None]
+    for step in verification:
+        if not work.intersection(step.depends_on) or not _requires_steps(step, work):
+            raise ProtocolError(f"verification step {step.id} must depend on at least one work step")
+    if escalate:
+        _require_new_gate(steps, plan, steps)
+    elif plan.verification_exhausted and verification:
+        _require_new_gate(steps, plan, verification)
     for step in steps:
         for dependency in step.depends_on:
             if dependency == step.id:
@@ -850,6 +872,19 @@ def _check_new_steps(steps: tuple[StepSpec, ...], plan: PlanView, *, replace_pen
     cycle = _find_cycle(graph)
     if cycle:
         raise ProtocolError("depends_on has a cycle: " + " -> ".join(cycle))
+
+
+def _require_new_gate(steps: tuple[StepSpec, ...], plan: PlanView, targets: Iterable[StepSpec]) -> None:
+    gates = [s for s in steps if s.gate is not None and s.id not in plan.pending and s.id not in plan.started]
+    if not any(all(s.id == gate.id or (gate.id in s.depends_on and _requires_steps(s, {gate.id}))
+                   for s in targets) for gate in gates):
+        raise ProtocolError("exhausted workflow requires a new gate in this reply, with the new steps depending on it")
+
+
+def _requires_steps(step: StepSpec, required: set[str]) -> bool:
+    """Even if every other dependency passes, the condition must still wait for a prerequisite."""
+    return step.ready_when is None or evaluate(step.ready_when, lambda key: StepOutcome() if key in required
+        else StepOutcome(*(State.SATISFIED,) * 3)) is not State.SATISFIED
 
 
 def _check_isolated_condition(condition: Condition, step: str) -> None:

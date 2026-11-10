@@ -3914,8 +3914,27 @@ on current project execution settings; escalation enables user gates. A
 work step without a role uses `work_role` when set. Only the Planner receives
 the workflow instructions, in its Task section alongside the rules already
 enforced. Tasks without a workflow retain their prompt and execution paths.
-Review panels and verification rules are validated and stored here; their
-execution, workflow settings UI and configuration transfer are separate work.
+Review panel execution, workflow settings UI and configuration transfer are
+separate work.
+
+When the snapshot selects a verification role, its work steps must depend on
+at least one work step. They skip automatic review unless `review: true` is
+explicit. Their dispatch payload sets `verification: true`: the Worker records
+HEAD and a SHA-256 of `git status --porcelain` before and after the run. Reported
+changed or deleted files, a moved HEAD or a changed workspace status fail the
+step with `failure: verification_changed_code`, which cannot be accepted.
+Outside Git only the report is checked, and the result states that limitation.
+Each attempt records its HEAD, result and first summary sentence in a
+`verification_round` journal entry. Verification failures count across steps
+and restarts; at `max_rounds`, a failed verification cannot retry. Adding a new
+verification step then requires a new user gate in the same reply and a
+dependency on it.
+
+With `escalate_on_exhaustion`, an unacceptable result with no retries left
+allows only `replan` or `fail`. The replan must add a user gate and every other
+new step must depend on it. An accepted escalation is recorded as an
+`escalation` journal entry. These rules and their Planner instructions apply
+only when the corresponding snapshot fields are enabled.
 
 ### A task's Planner's tools
 

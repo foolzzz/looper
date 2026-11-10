@@ -542,7 +542,14 @@ def run_task(
         project["vault"] = "on"
     before = snapshot(work_dir)
     started = time.monotonic()
-    created = api.post("/api/v1/tasks/create", {"requirement": task.requirement, "project": project})["result"]
+    workflow = {}
+    if task.workflow is not None:
+        suffix = uuid.uuid4().hex[:12]
+        definition = {**task.workflow, "key": "eval-" + suffix,
+                      "name": str(task.workflow["name"])[:47] + " " + suffix}
+        api.post("/api/v1/workflows/put", definition)
+        workflow = {"workflow": definition["key"]}
+    created = api.post("/api/v1/tasks/create", {"requirement": task.requirement, "project": project, **workflow})["result"]
     task_id = created["task_id"]
     try:
         if task.planner_may_choose:
