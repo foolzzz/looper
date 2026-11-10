@@ -2575,6 +2575,10 @@ class PlannerAgent:
                     ("skipped. " if reply.action is ChatAction.NONE else "") + reply.reply, journal.SUMMARY_MAX_CHARS),
                 kind=JournalKind.DECISION)])
             await self._apply_chat(plan, reply, None, at=f"blocked condition for {blocked.label}")
+            if blocked.status == "pending" and not any(s.status == "dispatched" for s in plan.steps):
+                # A legal reply may leave this condition impossible with no Worker event to retry it.
+                # Let this loop check the updated condition and ask again instead of leaving the task idle.
+                self._condition_attempts.discard(blocked.step_id)
             changed = True
         return changed
 

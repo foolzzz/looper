@@ -52,6 +52,41 @@ def test_cancelled_gate_asks_before_skipping_a_passed_dependent(planner_claude: 
     assert any(entry["kind"] == "decision" and entry["step_id"] == rows["s4"]["id"] for entry in journal)
 
 
+@pytest.mark.parametrize("action", ["replan", "add_steps"])
+def test_an_unresolved_condition_reply_retries_without_another_event(
+    planner_claude: Any, agent_db: Any, action: str,
+) -> None:
+    agent_db.get_task_project.return_value = {**_project(), "dependency_conditions": "on", "user_gates": "on"}
+    gate = {"id": "g1", "kind": "gate", "topic": "Choose source", "depends_on": [],
+            "agenda": [{"question": "Which source?"}]}
+    blocked = {**step("s2", "g1"), "ready_when": {"step": "g1", "on": "passed"}}
+    claude = planner_claude(
+        plan(gate, blocked),
+        chat("Cancel the source gate.", gates=[
+            {"id": "g1", "action": "cancel", "resolution": "Source unavailable"}]),
+        chat("Keep the blocked branch.", action, steps=[blocked] if action == "replan" else [step("s3", "s2")]),
+        chat("Skip s2 because the gate cannot pass."),
+        *([chat("Skip s3 because s2 was skipped.")] if action == "add_steps" else []),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: h.planner._plan is not None and h.planner._plan.waiting_gates())
+        await h.say("Cancel g1.")
+        await h.finished()
+
+    h = drive(claude, always(WORK_OK), scenario)
+    assert h.final().payload["status"] == "completed"
+    assert h.work_items == []
+    assert all("[CHAT] Step s2 can no longer start" in claude.turns()[i]["text"] for i in (2, 3))
+    rows = {row["key"]: row for row in agent_db.store.steps["t1"].values()}
+    assert rows["s2"]["status"] == "skipped"
+    if action == "add_steps":
+        assert rows["s3"]["status"] == "skipped"
+    assert sum(entry["kind"] == "condition_blocked" and entry["step_id"] == rows["s2"]["id"]
+               for entry in agent_db.store.journal["t1"]) == 1
+
+
 def test_unconditional_ready_steps_keep_all_verified_semantics() -> None:
     source = PlanStep("a", 0, "source", status="completed")
     dependent = PlanStep("b", 1, "dependent", depends_on=["a"])
