@@ -43,7 +43,7 @@ NEW_PROJECT_FIELDS = _object({
                         "enum": ["off", "draft", "write", "", True, False, None],
                         "description": "Lessons mode; true maps to write, false, null and empty string map to off."},
     "step_workspaces": _choice("shared", "worktree"), "task_workspaces": _choice("in_place", "worktree"),
-    "workspace_links": _inherit("array", items=_STR),
+    **dict.fromkeys(("workspace_links", "verification_paths"), _inherit("array", items=_STR)),
     **{field: _choice("on", "off") for field in (
         "operator_notes", "vault", "planner_roles", "dependency_conditions", "wait_commands", "user_gates", "agent_room")},
     **{field: _inherit("integer") for field in (
@@ -129,6 +129,7 @@ def _execution_impact(execution: ProjectExecution, submitted: dict) -> str:
         "distill_lessons": ("经验沉淀", execution.distill_lessons.value),
         "step_workspaces": ("并行步骤工作区", "worktree" if execution.isolate_steps else "shared"),
         "workspace_links": ("worktree 链接回原目录的相对路径", ", ".join(execution.link_paths) or "无"),
+        "verification_paths": ("验证 checkout 额外复制的忽略路径", ", ".join(execution.verification_paths or ()) or "无"),
         "max_step_retries": ("每步重试次数", execution.step_retries),
         "planner_roles": ("Planner 定义步骤角色", execution.roles_on),
         "dependency_conditions": ("Planner 组合步骤就绪条件", execution.conditions_on),

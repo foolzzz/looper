@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS projects (
     review_policy TEXT CHECK (review_policy IN ('planner', 'all')),
     step_workspaces TEXT CHECK (step_workspaces IN ('shared', 'worktree')),
     workspace_links TEXT[] CHECK (cardinality(workspace_links) <= 20),
+    verification_paths TEXT[] CHECK (cardinality(verification_paths) <= 20),
     task_workspaces TEXT CHECK (task_workspaces IN ('in_place', 'worktree')),
     operator_notes TEXT CHECK (operator_notes IN ('off', 'on')),
     vault TEXT CHECK (vault IN ('off', 'on')),

@@ -12,7 +12,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 EXECUTION = {
     "task_budget_usd": 2.5, "task_budget_action": "wrap_up", "supervise_interval_seconds": 60,
     "review_policy": "all", "distill_lessons": "draft", "step_workspaces": "worktree",
-    "workspace_links": [".venv", ".env"], "task_workspaces": "in_place", "operator_notes": "off",
+    "workspace_links": [".venv", ".env"], "verification_paths": ["staging/config"], "task_workspaces": "in_place", "operator_notes": "off",
     "vault": "on", "max_step_retries": 3, "planner_roles": "on", "wait_commands": "on",
     "role_text_max_chars": 500, "user_gates": "off", "gate_reminder_hours": 12, "agent_room": "off",
     "room_post_per_minute": 4, "room_broadcasts_per_run": 2, "room_message_max_chars": 500,
@@ -278,4 +278,23 @@ def test_existing_tool_operations_keep_compact_list_full_project_and_name_deleti
                 else:
                     assert result["project"]["name"] == "Example" and result["project"]["project_id"]
                     assert result["project"]["background"] == ("Changed" if action == "update" else "Background")
+    run_db(run, monkeypatch, timeout=30)
+
+
+def test_verification_paths_upgrade_preserves_projects_and_runs_once(monkeypatch):
+    from looper.db import connection
+
+    async def run(pool):
+        made = await projects.create_project(name="Keep", pool=pool)
+        async with pool.acquire() as conn:
+            await conn.execute("ALTER TABLE projects DROP COLUMN verification_paths")
+            assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert not await connection.schema_change_pending(conn)
+            await conn.execute("UPDATE projects SET verification_paths = ARRAY['.env'] WHERE id = $1", made["id"])
+            await connection.ensure_schema(conn)
+            row = dict(await conn.fetchrow("SELECT * FROM projects WHERE id = $1", made["id"]))
+            assert row["name"] == "Keep" and row["verification_paths"] == [".env"]
+            assert await conn.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'verification_paths'") == 1
+
     run_db(run, monkeypatch, timeout=30)

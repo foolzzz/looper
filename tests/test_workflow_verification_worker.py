@@ -16,6 +16,7 @@ from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
 from looper.agents.runtimes import ADAPTERS
 from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+from looper.agents.runtimes.channel import RunStartError
 from looper.agents.tiers import worker
 from tests.run_handle_support import ScriptedRun
 from tests.runtime_model_helpers import builtin_launch
@@ -251,6 +252,222 @@ def _item(root, run="v1", *, verification=True):
     return MessageEnvelope.create(source=planner_address("t1"), target=worker_address(run),
         message_type=MessageType.WORK_ITEM, payload={"parent_task_id": "t1", "task_id": run,
             "verification": verification, "context": {"work_dir": str(root)}})
+
+
+def test_verification_copies_only_declared_runtime_state(tmp_path, monkeypatch, verification_runtime, agent_db):
+    runs, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+    (root / ".gitignore").write_text(".env\nworkspace\nstaging/\nprivate/\n")
+    (root / ".env").write_text("MODE=verification\n")
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / "fixture.json").write_text('{"ready": true}')
+    (root / "workspace").symlink_to(linked, target_is_directory=True)
+    (root / "staging").mkdir()
+    (root / "staging" / "settings.json").write_text('{"mode": "staging"}')
+    (root / "private").mkdir()
+    (root / "private" / "secret").write_text("must stay outside")
+    monkeypatch.setattr(worker.db_projects, "get_task_project", AsyncMock(return_value={
+        "id": "project", "workspace_links": ["workspace"], "verification_paths": [".env", "staging"]}))
+    runs.append(_completed_run())
+
+    async def scenario():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+        task = asyncio.create_task(pool._execute(_item(root)))
+        await runs[0].started.wait()
+        checkout = Path(launches[0]["cwd"])
+        try:
+            for name in (".env", "workspace/fixture.json", "staging/settings.json"):
+                copied = checkout / name
+                assert copied.read_bytes() == (root / name).read_bytes()
+                assert not copied.stat().st_mode & 0o222
+                assert copied.resolve().is_relative_to(checkout)
+            assert not (checkout / "private").exists()
+            assert not (checkout / "workspace").is_symlink()
+        finally:
+            runs[0].release.set()
+            result = await task
+        assert result["status"] == "completed"
+        activities = [call.kwargs["summary"] for call in agent_db.insert_activity.await_args_list]
+        assert any(all(name in entry for name in (".env", "workspace", "staging")) for entry in activities)
+        assert (linked / "fixture.json").read_text() == '{"ready": true}'
+
+    asyncio.run(asyncio.wait_for(scenario(), 10))
+
+
+def test_verification_seed_manifest_does_not_expose_source(tmp_path):
+    root = _repo(tmp_path / "repo")
+    (root / "alias").symlink_to(root / "tracked")
+    backup = tmp_path / "backup"
+    checkout = Path(worker._verification_checkout(str(root), backup))
+    for manifest in (backup / "seed").rglob("baseline.json"):
+        raw = manifest.read_text()
+        assert "root" not in json.loads(raw)
+        assert str(root) not in raw
+    assert (backup / "seed" / "files" / "alias").resolve() == checkout / "tracked"
+
+
+@pytest.mark.parametrize("invalid", ["external_directory", "metadata", "missing", "tracked"])
+def test_verification_rejects_unsafe_runtime_inputs(tmp_path, monkeypatch, verification_runtime, invalid):
+    _, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+    (root / ".gitignore").write_text("local/\n")
+    local = root / "local"
+    local.mkdir()
+    if invalid == "external_directory":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret").write_text("do not copy")
+        (local / "link").symlink_to(outside)
+    elif invalid == "metadata":
+        (local / ".git").mkdir()
+    path = {"missing": "missing", "tracked": "tracked"}.get(invalid, "local")
+    monkeypatch.setattr(worker.db_projects, "get_task_project", AsyncMock(return_value={
+        "id": "project", "verification_paths": [path]}))
+    pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+    result = asyncio.run(asyncio.wait_for(pool._execute(_item(root)), 10))
+    assert result["failure"] == "verification_unavailable"
+    assert not launches
+    assert (root / "tracked").read_text() == "committed"
+
+
+def test_runtime_file_links_are_copied_without_exposing_their_source(tmp_path):
+    source, destination = tmp_path / "source", tmp_path / "checkout"
+    source.mkdir()
+    destination.mkdir()
+    workspace = source / "venv"
+    workspace.mkdir()
+    interpreter = tmp_path / "interpreter"
+    interpreter.write_text("executable fixture")
+    interpreter.chmod(0o755)
+    (workspace / "python").symlink_to(interpreter)
+    assert worker._copy_verification_runtime(source, destination, ["venv"]) == ["venv"]
+    copied = destination / "venv" / "python"
+    assert copied.read_text() == interpreter.read_text()
+    assert not copied.is_symlink()
+    assert copied.stat().st_mode & 0o111
+    assert not copied.stat().st_mode & 0o222
+    assert interpreter.stat().st_mode & 0o200
+
+
+@pytest.mark.parametrize("change", ["rewrite", "replace", "submodule"])
+def test_verification_detects_modify_then_restore(tmp_path, verification_runtime, change):
+    runs, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+    if change == "submodule":
+        upstream = _repo(tmp_path / "upstream")
+        _git(root, "-c", "protocol.file.allow=always", "submodule", "add", str(upstream), "module")
+        _git(root, "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-am", "module")
+    runs.append(_completed_run())
+
+    async def scenario():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+        task = asyncio.create_task(pool._execute(_item(root)))
+        await runs[0].started.wait()
+        checkout = Path(launches[0]["cwd"])
+        before = worker._verification_snapshot(str(checkout))
+        target = checkout / "module" / "tracked" if change == "submodule" else checkout / "tracked"
+        original = target.read_bytes()
+        if change == "replace":
+            target.unlink()
+        target.write_text("temporary verification fix")
+        target.write_bytes(original)
+        assert worker._verification_snapshot(str(checkout)) == before
+        runs[0].release.set()
+        result = await task
+        assert result["failure"] == "verification_changed_code"
+        assert result["verification"]["written_paths"]
+        assert result["verification"]["restored"] is True
+        assert (root / "tracked").read_text() == "committed"
+
+    asyncio.run(asyncio.wait_for(scenario(), 10))
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_verifier_launch_failure_drains_writes_and_closes_monitor(
+        tmp_path, monkeypatch, verification_runtime, interrupted):
+    runs, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+    monitors = []
+    monitor_type = worker.VerificationWrites
+
+    def monitor(*args):
+        instance = monitor_type(*args)
+        monitors.append(instance)
+        return instance
+
+    monkeypatch.setattr(worker, "VerificationWrites", monitor)
+
+    class FailedLaunch(ScriptedRun):
+        async def launch(self):
+            target = Path(launches[-1]["cwd"]) / "tracked"
+            original = target.read_bytes()
+            target.write_text("temporary launch edit")
+            target.write_bytes(original)
+            self.started.set()
+            if interrupted:
+                await self.release.wait()
+            raise RunStartError("launch failed after editing")
+
+    runs.append(FailedLaunch([]))
+
+    async def scenario():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+        task = asyncio.create_task(pool._execute(_item(root)))
+        if interrupted:
+            await runs[0].started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            result = await task
+            assert result["failure"] == "verification_changed_code"
+            assert result["verification"]["written_paths"] == ["tracked"]
+        assert runs[0].end_calls >= 1
+        assert monitors and all(instance._closed for instance in monitors)
+        assert (Path(launches[-1]["cwd"]) / "tracked").read_text() == "committed"
+        assert (root / "tracked").read_text() == "committed"
+
+    asyncio.run(asyncio.wait_for(scenario(), 10))
+
+
+def test_monitor_failure_cannot_be_hidden_by_profile_fallback(tmp_path, monkeypatch, verification_runtime):
+    runs, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+    runs.append(ScriptedRun([], launch_error=RunStartError("start failed")))
+
+    def failed_monitor(self):
+        raise OSError("notification queue overflowed")
+
+    monkeypatch.setattr(worker.VerificationWrites, "finish", failed_monitor)
+    pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+    fallback = AsyncMock()
+    monkeypatch.setattr(pool, "_fallback_profile", fallback)
+    result = asyncio.run(asyncio.wait_for(pool._execute(_item(root)), 10))
+    assert result["failure"] == "verification_unavailable"
+    assert result["verification"]["monitoring_error"] is True
+    assert len(launches) == 1
+    fallback.assert_not_awaited()
+
+
+def test_verification_records_writes_until_run_cleanup_finishes(tmp_path, verification_runtime):
+    runs, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+
+    class WritesOnEnd(ScriptedRun):
+        async def end(self):
+            target = Path(launches[-1]["cwd"]) / "tracked"
+            original = target.read_bytes()
+            target.write_text("child writes while being stopped")
+            target.write_bytes(original)
+            await super().end()
+
+    runs.append(WritesOnEnd(_completed_run(hold=False)._events))
+    pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+    result = asyncio.run(asyncio.wait_for(pool._execute(_item(root)), 10))
+    assert result["failure"] == "verification_changed_code"
+    assert result["verification"]["written_paths"] == ["tracked"]
+    assert result["verification"]["restored"] is True
 
 
 @pytest.mark.parametrize("submodule", [False, True])

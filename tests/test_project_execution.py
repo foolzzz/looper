@@ -175,6 +175,10 @@ class TestProjectApi:
         ("workspace_links", ["x" * 256], "must be 1 to 255 characters"),
         ("workspace_links", ["a\\b"], "without line breaks or backslashes"),
         ("workspace_links", ["a\nb"], "without line breaks or backslashes"),
+        ("verification_paths", ".env", "declared schema"),
+        ("verification_paths", ["../.env"], "must not have empty, . or .. parts"),
+        ("verification_paths", [".git"], "must not be or be in .git"),
+        ("verification_paths", ["staging", "staging/.env"], "overlaps"),
         ("max_step_retries", -1, "from 0 to 20"),
         ("max_step_retries", 21, "from 0 to 20"),
         ("max_step_retries", "3", "declared schema"),
@@ -222,6 +226,17 @@ class TestProjectApi:
         assert status == 200 and body["workspace_links"] == stored == store.projects["proj-a"].get(
             "workspace_links")
         assert ProjectExecution.from_row(store.projects["proj-a"]).link_paths == links
+
+    @pytest.mark.parametrize("paths, expected", [([" .env ", "staging/config"], [".env", "staging/config"]),
+                                                ([], None), (None, None)])
+    def test_verification_paths_round_trip_through_project_settings(self, store: _Store, paths, expected) -> None:
+        store.add_project("proj-a", "calc")
+        store.projects["proj-a"]["verification_paths"] = ["old"]
+        status, body = _call("POST", "/api/v1/project_admin/update", {
+            "project_id": "proj-a", "fields": {"verification_paths": paths}})
+        assert status == 200 and body["verification_paths"] == expected
+        assert ProjectExecution.from_row(store.projects["proj-a"]).view()["verification_paths"] == expected
+        assert _call("POST", "/api/v1/project_admin/list", {})[1]["projects"][0]["verification_paths"] == expected
 
     def test_step_workspaces_are_off_until_a_project_turns_them_on(self, store: _Store) -> None:
         store.add_project("proj-a", "calc")

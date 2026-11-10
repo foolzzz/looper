@@ -24,6 +24,9 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
   link back to the directory they come from (its ignored local state, such
   as ``.venv`` or ``.env``): a task's worktree to its workspace, a step's to
   its task directory; none when unset;
+- ``verification_paths``: extra ignored paths, relative to the verification
+  source directory, copied into its private checkout alongside ``workspace_links``;
+  copies are read-only and no other ignored paths are included; none when unset;
 - ``task_workspaces``: where a task runs: in its workspace (``in_place``, also
   when unset) or in a git worktree of it, on a branch of its own
   (``worktree``, ``task_workspaces``); a new project gets ``worktree``;
@@ -197,6 +200,7 @@ class ProjectExecution:
     distill_lessons: LessonsMode = LessonsMode.OFF
     step_workspaces: StepWorkspaces | None = None
     workspace_links: tuple[str, ...] | None = None
+    verification_paths: tuple[str, ...] | None = None
     task_workspaces: TaskWorkspaces | None = None
     operator_notes: OperatorNotesMode | None = None
     vault: VaultMode | None = None
@@ -368,8 +372,8 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, ReviewPolicy)
     if field == "step_workspaces":
         return _choice(field, raw, StepWorkspaces)
-    if field == "workspace_links":
-        return _links(raw)
+    if field in ("workspace_links", "verification_paths"):
+        return _links(raw, field=field)
     if field == "task_workspaces":
         return _choice(field, raw, TaskWorkspaces)
     if field == "operator_notes":
@@ -433,12 +437,12 @@ def _lessons_mode(raw: Any) -> LessonsMode:
         raise ValueError("distill_lessons must be one of off, draft, write, or null for off") from None
 
 
-def _links(raw: Any) -> tuple[str, ...] | None:
-    """``workspace_links``: distinct relative paths in the task directory, none inside another; [] is none."""
+def _links(raw: Any, *, field: str = "workspace_links") -> tuple[str, ...] | None:
+    """Distinct relative paths in the task directory, none inside another; [] is none."""
     if not isinstance(raw, (list, tuple)) or not all(isinstance(item, str) for item in raw):
-        raise ValueError("workspace_links must be a list of paths relative to the task directory, or null")
+        raise ValueError(f"{field} must be a list of paths relative to the task directory, or null")
     if len(raw) > WORKSPACE_LINKS_MAX:
-        raise ValueError(f"workspace_links may have at most {WORKSPACE_LINKS_MAX} paths, not {len(raw)}")
+        raise ValueError(f"{field} may have at most {WORKSPACE_LINKS_MAX} paths, not {len(raw)}")
     paths: list[str] = []
     for item in raw:
         text = item.strip()
@@ -460,7 +464,7 @@ def _links(raw: Any) -> tuple[str, ...] | None:
                 paths.append(text)
                 continue
             problem = f"overlaps {nested!r}: a link cannot be inside another"
-        raise ValueError(f"workspace_links: {item!r} {problem}")
+        raise ValueError(f"{field}: {item!r} {problem}")
     return tuple(paths) or None
 
 

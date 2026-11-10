@@ -2582,7 +2582,10 @@ workspaces](#step-workspaces)); `task_workspaces` (`in_place`, also when null,
 or `worktree`; a new project gets `worktree`), where a task that names no
 directory of its own runs, `workspace_links` (up to 20 relative paths, null for
 none), what Looper's worktrees of the project link back to the directory they
-come from, and `operator_notes` (`on`, also when null, or `off`), whether the
+come from; `verification_paths` (up to 20 relative paths, null for none), extra
+ignored state copied read-only into a workflow verification checkout alongside
+`workspace_links` (relative to its source directory; other ignored paths are not
+copied); and `operator_notes` (`on`, also when null, or `off`), whether the
 project's agents get the operator's notes for their directory ([Task
 workspaces](#task-workspaces)); `max_step_retries` (0 to 20, null for 2),
 how many times the Planner may retry one step: its reply contract and each
@@ -2612,6 +2615,16 @@ A task can also have a spend cap of its own (`tasks.budget_usd`, a scheduled
 run's `run_budget_usd`), which replaces its project's `task_budget_usd` for it
 (`get_task_project` reads it in its place). Continuing such a task at its cap
 raises only its own cap.
+
+Workflow verification copies only its declared runtime paths; files lose write
+permission and links are copied rather than exposing the source. Missing inputs,
+repository metadata and nested directory links outside a declared tree are
+rejected. The activity names the copied paths. On macOS and Linux, kernel file
+notifications reject tracked writes even if the original bytes are restored;
+monitoring failures cannot fall back to an accepted result. Verification runs
+do not use keepers or resume across a control-plane restart, since that would
+leave a monitoring gap. On macOS a missing tracked file requires conservatively
+watching its parent, and exhausting watch resources fails the run before launch.
 
 ### Step workspaces
 

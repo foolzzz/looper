@@ -23,7 +23,7 @@ EXECUTION = {
     **dict.fromkeys(("planner_roles", "wait_commands", "user_gates", "agent_room", "operator_notes", "vault",
                     "dependency_conditions"),
                     _choice("off", "on")),
-    "workspace_links": {"type": ["array", "null"], "items": _STR},
+    **dict.fromkeys(("workspace_links", "verification_paths"), {"type": ["array", "null"], "items": _STR}),
     "distill_lessons": {"type": "string", "enum": ["off", "draft", "write"]},
 }
 assert set(EXECUTION) == set(FIELDS)
@@ -39,7 +39,7 @@ for field, schema in EXECUTION.items():
         schema = {"type": ["string", "boolean", "null"],
                   "enum": ["off", "draft", "write", "", True, False, None],
                   "description": "Lessons mode; true maps to write, false, null and empty string map to off."}
-    elif "enum" in schema or field == "workspace_links":
+    elif "enum" in schema or field in ("workspace_links", "verification_paths"):
         schema = {"anyOf": [schema, {"const": ""}]}
     INPUT_EXECUTION[field] = schema
 PATCH_FIELDS = {"name": _STR, "description": _STR, "work_dir": _STR, "background": _STR,
