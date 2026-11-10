@@ -2419,7 +2419,7 @@ _MISBEHAVING = EvalTask(
 
 
 # What each fake-mode task is run through: (steps, retries, reviews, chat turns), and how its steps sit side by side.
-_FLOW = {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
+_FLOW = {"panel_merge": (3, 1, 4, 0), "panel_adjudicate": (3, 0, 2, 0), "single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_steps": (9, 0, 0, 0),
          "wait_pr_rereview": (3, 0, 0, 0), "wait_not_needed": (2, 0, 0, 0),
          "any_of_ready": (3, 0, 0, 0), "conditions_not_needed": (2, 0, 0, 0),
          "parallel_parts": (3, 0, 0, 0),
@@ -2448,7 +2448,7 @@ _FLOW = {"single_step": (1, 0, 0, 0), "dependent_steps": (2, 0, 0, 0), "many_ste
          "reviewer_elsewhere_wrong": (1, 1, 2, 0)}
 # (independent pairs, bracketed pairs, parallel workers): only the parts that need nothing of each other run side by
 # side; interface_first's sit between its interface step and its integration step.
-_SHAPE = {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
+_SHAPE = {"panel_merge": (1, 0, 1), "panel_adjudicate": (1, 0, 1), "single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": (0, 0, 1),
           "wait_pr_rereview": (0, 0, 1), "wait_not_needed": (0, 0, 1),
           "any_of_ready": (1, 0, 2), "conditions_not_needed": (0, 0, 1),
           "parallel_parts": (1, 0, 2),
@@ -2480,7 +2480,8 @@ _SHAPE = {"single_step": (0, 0, 1), "dependent_steps": (0, 0, 1), "many_steps": 
 # accepted.
 _ROLE_KEYS = ("roles_defined", "role_runs", "role_profile_runs", "role_reviews", "role_prompt_mismatches",
               "role_boundary_misses", "gate_breaches", "advisory_role_fails")
-_ROLES = {"roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0, 0),
+_ROLES = {"panel_merge": (3, 6, 4, 4, 0, 0, 0, 0), "panel_adjudicate": (3, 3, 2, 2, 0, 0, 0, 0),
+          "roles_tester_docs": (2, 2, 1, 0, 0, 0, 0, 0), "roles_security_review": (1, 1, 0, 1, 0, 0, 0, 0),
           "workflow_verify_loop": (2, 4, 0, 0, 0, 0, 0, 0),
           "roles_advisory_review": (1, 1, 0, 1, 0, 0, 0, 1),
           "roles_two_reviews": (2, 2, 0, 2, 0, 0, 0, 0),
@@ -2496,7 +2497,8 @@ _COUNTS = {
     # Only the multi-platform task's disciplines each get a role that names their conventions, and its four platform
     # steps are built on its interface step (the tester's and the doc writer's on the module).
     "discipline_roles": {"roles_multi_platform": 4},
-    "interface_dependents": {"roles_tester_docs": 2, "roles_multi_platform": 4, "workflow_verify_loop": 2},
+    "interface_dependents": {"roles_tester_docs": 2, "roles_multi_platform": 4, "workflow_verify_loop": 2,
+                             "panel_merge": 2, "panel_adjudicate": 2},
     # Only the task whose project lets its Planner choose a profile runs a Worker on the one it chose.
     "planner_profile_runs": {"profile_choice": 1},
     # Only the two changes that make the second step wrong change the plan.
@@ -2890,6 +2892,35 @@ def _the_calls_of(dialog_id: str, row: dict[str, Any]) -> None:
     if dialog_id in _DIALOG_TURN_CALLS:
         index, calls = _DIALOG_TURN_CALLS[dialog_id]
         assert row["turns"][index]["calls"] == calls
+
+
+@pytest.mark.parametrize("changed", [None, "providers", "runtimes", "models", "profiles"])
+def test_refused_model_configuration_allows_login_probe_progress_only(monkeypatch, changed):
+    from evals.prompt_regression import dialogs
+
+    before = {"providers": [{"name": "cursor-login", "env": [],
+                             "login": {"state": "checking", "detail": "checking the Cursor login"}}],
+              "runtimes": [{"capabilities": ["run"]}],
+              "models": [{"input_usd_per_mtok": 1}], "profiles": [{"model_id": "model-a"}]}
+    after = json.loads(json.dumps(before))
+    after["providers"][0]["login"] = {"state": "unknown", "detail": "cursor-agent is not available in tests"}
+    if changed:
+        # Even a change absent from the action trail must fail the snapshot check.
+        field, value = {"providers": ("env", [{"key": "MODE", "value": "changed"}]),
+                        "runtimes": ("capabilities", []), "models": ("input_usd_per_mtok", 2),
+                        "profiles": ("model_id", "model-b")}[changed]
+        after[changed][0][field] = value
+
+    class Api:
+        def post(self, path, body):
+            assert path == "/api/v1/registry/view"
+            return {"result": after}
+
+    monkeypatch.setattr(dialogs, "_trail", lambda *_: [
+        {"risk": "read", "status": "ok", "tool": "looper_agent_profiles", "arguments": {"action": "list"}}])
+    look = dialogs.Look(Api(), None, "Not compatible", "disposable", 0, frozenset(), True,
+                        registry_before=before)
+    assert dialogs._model_refused(look) == ("a refused configuration changed the registry" if changed else None)
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")

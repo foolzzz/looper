@@ -161,6 +161,8 @@ class Workflow:
                 return conditions.KOf(cond.k, tuple(passed(child) for child in cond.of), cond.form)
 
             data["review_panel"] = ReviewPanel(tuple(members), passed(accept))
+            if not data.get("distinct_reviewer_runtime"):
+                raise WorkflowError("review_panel requires distinct_reviewer_runtime to be true")
         verification = data.get("verification")
         if verification is not None:
             if not isinstance(verification, dict) or set(verification) != {"role", "max_rounds"}:

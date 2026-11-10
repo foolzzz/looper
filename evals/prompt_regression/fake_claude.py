@@ -66,7 +66,9 @@ The task is found by the process's working directory in ``scenarios.json``
 
 In real mode (``REAL_CLAUDE_ENV`` names Claude Code) every run goes to Claude
 Code, but for a task whose script sets ``real_reviewer``: its Planner and
-Workers play the script, and only its Reviewers are Claude Code's.
+Workers play the script, and only its Reviewers are Claude Code's. With
+``real_planner``, only its Planner uses Claude Code and the execution/review
+fixtures remain scripted.
 """
 
 from __future__ import annotations
@@ -157,6 +159,9 @@ def _decide(script: dict[str, Any], message: str, retried: dict[str, int]) -> di
     allowed = {item.split(" ")[0] for item in (allowed_line.group(1).split(", ") if allowed_line else [])}
     step = re.match(r"\[DECISION\] Step (\S+)", message)
     gates = (script.get("decision_gates") or {}).get(step.group(1) if step else "")
+    if script.get("panel_adjudications") and "review_a (required): FAIL" in message:
+        return {"decision": "accept", "reason": "the blocking finding contradicts the requirement",
+                "adjudications": script["panel_adjudications"], "final": FINAL}
     if "accept" in allowed:
         return {"decision": "accept", "reason": "meets the acceptance criteria", "summary": "The step is done.",
                 "final": FINAL, **({"gates": gates} if gates else {})}
@@ -385,7 +390,12 @@ def _reviewer(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None
             failed = True
     else:
         failed = failed or (attempt is not None and int(attempt.group(1)) in failing)
-    if failed:
+    panel = next((rounds for member, rounds in script.get("panel_findings", {}).items()
+                  if f"Review panel member {member}." in system_prompt), None)
+    if panel is not None:
+        findings = panel[min(int(attempt.group(1)) if attempt else 1, len(panel)) - 1]
+        verdict = {"passed": not findings, "findings": findings, "summary": "Checked the requested file."}
+    elif failed:
         verdict = {"passed": False, "findings": ["the reported file does not meet the criteria" if read else
                                                "the greeting is not what this role asks for"],
                    "summary": "The file is missing or incomplete." if read else "Not to this role's liking."}
@@ -482,7 +492,9 @@ def main(argv: list[str]) -> int:
                 break
     review = re.search(r"^The step under review:", system_prompt, re.MULTILINE)
     real = os.environ.get(REAL_CLAUDE_ENV)
-    if real and (review or not script.get("real_reviewer")):
+    scripted = (script.get("real_reviewer") and not review) or (script.get("real_planner") and
+                (review or re.search(r"^Your step:", system_prompt, re.MULTILINE)))
+    if real and not scripted:
         # Real mode: Claude Code runs it, with every argument it came with (the budget flags included).
         os.execv(real, [real, *args])
     stdin = _Stdin()

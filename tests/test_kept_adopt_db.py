@@ -31,7 +31,7 @@ from looper.agents.room import MemberKind, RoomService, Seat
 from looper.agents.runtimes import ApiProtocol, AuthKind
 from looper.agents.runtimes.channel import DeliveryResult
 from looper.agents.tiers import worker
-from looper.agents.tiers.planner import PlannerAgent
+from looper.agents.tiers.planner import PlanStep, PlannerAgent
 from looper.db import llm_records
 from tests.db_support import DSN, run_db, until
 from tests.fake_claude import fake_claude
@@ -415,7 +415,8 @@ def test_failed_adoption_waits_for_keeper_end_before_repeating_the_step(tmp_path
 
             planner = PlannerAgent(task_id='task-adopt', runtime_root=tmp_path / 'runtime', adopter=adopt)
             planner._bus = case.b._bus
-            step = SimpleNamespace(step_id='step-adopt', status='dispatched', worker_id=case.run_id)
+            step = PlanStep(step_id='step-adopt', index=0, instruction='finish the held work',
+                            status='dispatched', worker_id=case.run_id)
             planner._plan = SimpleNamespace(status='executing', steps=[step], has_failed=False,
                                             is_complete=False, progress_summary=lambda: 'running')
             for name in ('_activity', '_dispatch_step', '_dispatch_ready', '_report_progress'):

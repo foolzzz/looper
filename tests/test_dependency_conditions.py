@@ -50,9 +50,16 @@ def test_step_outcome_truth_table(status, result, gate, wait, expected):
         assert evaluate(parse({'step': 'a', 'on': on.value}, 'condition'), lambda _: outcome) == State(state)
 
 
-def test_review_outcomes_remain_pending():
-    step = SimpleNamespace(kind='review', status='verified', gate=None, wait=None)
-    assert StepOutcome.from_step(step) == StepOutcome()
+@pytest.mark.parametrize(('status', 'result', 'expected'), [
+    ('pending', None, ('pending',) * 3),
+    ('verified', {'passed': True}, ('satisfied',) * 3),
+    ('verified', {'passed': False}, ('satisfied', 'satisfied', 'unsatisfiable')),
+    ('verified', {'status': 'passed_by_adjudication'}, ('satisfied',) * 3),
+    ('skipped', {'passed': True}, ('unsatisfiable',) * 3),
+])
+def test_review_outcomes(status, result, expected):
+    outcome = StepOutcome.from_step(SimpleNamespace(kind='review', status=status, result=result))
+    assert tuple(outcome.for_on(on).value for on in On) == expected
 
 
 def test_nested_conditions_preserve_shape_and_rename():

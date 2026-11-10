@@ -34,6 +34,7 @@ _STEP = _object({
     **dict.fromkeys(("step_index", "retries"), _INT), "review": _BOOL,
     **dict.fromkeys(("worker_id", "reviewer_id", "role_key", "review_stage", "started_at", "completed_at"), _NULL_STR),
     "ready_when": _CONDITION, "ready_state": _READY,
+    "accept_when": _CONDITION, "accept_state": _READY, "reviews": _NULL_STR,
     "role_version": _NULL_INT, "review_position": _NULL_INT, "result": _nullable(_OBJ),
     **{key: _array(_STR) for key in ("acceptance_criteria", "target_files", "depends_on")},
     "review_roles": _array(_object({"role": _STR, "required": _BOOL, "version": _NULL_INT}))})

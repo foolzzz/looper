@@ -6,7 +6,7 @@ Tells you whether a change to a recommended role prompt, a code-owned contract
 (`REPLY_CONTRACT`, `WORK_CONTRACT`, `REVIEW_CONTRACT`) or the way the system
 prompt is put together makes the agents worse.
 
-It runs a fixed set of small tasks through a disposable `looper serve` (a new
+It runs small tasks through a disposable `looper serve` (a new
 PostgreSQL database, a free port, a temporary runtime root and working
 directories), one at a time over the HTTP API:
 
@@ -18,6 +18,8 @@ directories), one at a time over the HTTP API:
 | `parallel_parts` | two parts that need nothing of each other, then one that needs both: the plan must leave the two independent and their Workers must run at the same time |
 | `interface_first` | a service and its client that must agree on a request format the requirement leaves open: the plan must have a step both parts depend on (the interface), the two parts independent and running at the same time, and a step that depends on both (the integration); the client must work |
 | `reviewed_step` | a step an independent Reviewer must pass |
+| `panel_merge` | a workflow supplies two required review steps with blocking findings at different locations; the Planner's retry feedback must cover both files |
+| `panel_adjudicate` | a workflow enables adjudication and one reviewer incorrectly claims that 2 + 2 is 5; the Planner must give a reasoned adjudication or retry |
 | `retry_after_failure` | a step that fails once (a flaky `build.sh`) and is retried |
 | `workflow_verify_loop` | a failed read-only verification is replaced with a reviewed development repair and a separate dependent verification, without retrying the verification to edit files |
 | `chat_correction` | a correction sent to the task's Planner mid-task |
@@ -165,6 +167,16 @@ Only tasks with `wait_resume_after_s` set let the runner manually resume waits: 
 Each row records successful resumes in `wait_resumes` (step label to timestamp, on the database clock).
 With the field unset (`None`), as in `wait_pr_rereview`, the runner never resumes waits. Flow expectations
 include `min_waits_opened`, `max_waits_opened`, `min_wait_github_checks` and `min_wait_dependents`.
+
+For `panel_merge` and `panel_adjudicate`, real mode runs only the Planner on the
+selected model. Workers and Reviewers are scripted so both runs receive the same
+findings, through real workflow creation, review dispatch and acceptance conditions.
+The fixture gives the scripted reviews a separate runtime identity using the same
+protocol; this tests orchestration, not independence between actual runtimes.
+The merge check reads the Planner's retry feedback for both locations; the
+adjudication check requires a nonempty reason or retry feedback. Run these cases
+with sonnet `--reps 2` and opus `--reps 1`, using `--tasks panel_merge,panel_adjudicate`.
+A real run still needs authorized model credentials; a fake pass is not model evidence.
 
 ### Fake mode: the flow, free
 

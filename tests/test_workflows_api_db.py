@@ -14,6 +14,7 @@ PRESET = {"key": "reviewed", "name": "Reviewed", "description": "Independent rev
     "roles": [{"key": "dev", "kind": "work", "role_prompt": "Implement the requested change."},
               {"key": "review_a", "kind": "review", "role_prompt": "Check the acceptance criteria."}],
     "work_role": "dev", "review_panel": {"members": ["review_a"], "accept_when": "review_a"},
+    "distinct_reviewer_runtime": True,
     "max_step_retries": 3, "review_all": True, "dependency_conditions": True}
 
 
@@ -69,6 +70,22 @@ def test_workflow_validation_failure_leaves_no_preset(tmp_path, monkeypatch):
             assert status == 400 and answer["error"]["code"] == "invalid", answer
             assert await pool.fetchval("SELECT count(*) FROM workflows") == 0
 
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("distinct", [False, None])
+def test_panel_without_distinct_runtimes_is_not_saved(tmp_path, monkeypatch, distinct):
+    async def test(pool):
+        async with v1_api(tmp_path, pool) as call:
+            assert (await call("workflows.put", PRESET))[0] == 200
+            body = {**PRESET, "distinct_reviewer_runtime": distinct}
+            if distinct is None:
+                body.pop("distinct_reviewer_runtime")
+            status, answer = await call("workflows.put", body)
+            assert status == 400 and answer["error"]["code"] == "invalid", answer
+            assert "distinct_reviewer_runtime" in answer["error"]["message"]
+            saved = (await call("workflows.get", {"key": PRESET["key"]}))[1]["result"]["workflow"]
+            assert saved["distinct_reviewer_runtime"] is True
     run_db(test, monkeypatch, timeout=30)
 
 

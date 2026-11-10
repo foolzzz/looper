@@ -57,8 +57,9 @@ def test_resume_adopts_or_repeats_the_same_attempt(tmp_path, caplog, review, out
         adopter = AsyncMock(return_value=AdoptResult(outcome, failure)) if outcome is not None else None
         planner = PlannerAgent(task_id='task-resume', runtime_root=tmp_path, adopter=adopter)
         planner._bus = SimpleNamespace()
-        step = SimpleNamespace(step_id='step-resume', status='completed' if review else 'dispatched',
-                               worker_id='worker-original', reviewer_id='reviewer-original')
+        step = PlanStep(step_id='step-resume', index=0, instruction='finish the held work',
+                        status='completed' if review else 'dispatched',
+                        worker_id='worker-original', reviewer_id='reviewer-original')
         planner._plan = SimpleNamespace(status='executing', steps=[step], has_failed=False, is_complete=False,
                                         progress_summary=lambda: 'running')
         planner._activity = AsyncMock()
@@ -91,8 +92,9 @@ def test_resume_adopts_or_repeats_the_same_attempt(tmp_path, caplog, review, out
             assert run_id in planner._ending_runs
             # Cleanup releases only this run; another step can already be running or awaiting a decision.
             planner._plan.steps.extend([
-                SimpleNamespace(step_id='step-other', status='dispatched', worker_id='worker-other'),
-                SimpleNamespace(step_id='step-deciding', status='deciding', workspace=None),
+                PlanStep(step_id='step-other', index=1, instruction='finish independent work',
+                         status='dispatched', worker_id='worker-other'),
+                PlanStep(step_id='step-deciding', index=2, instruction='decide on saved work', status='deciding'),
             ])
             planner._decide_again = AsyncMock()
             adopter.return_value = AdoptResult(AdoptOutcome.NOT_CANDIDATE)

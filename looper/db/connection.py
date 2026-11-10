@@ -101,6 +101,7 @@ _PROFILE_FALLBACK = "profile_fallback"
 _CURSOR_LOGIN = "cursor_login"
 _DEPENDENCY_CONDITIONS = "dependency_conditions"
 _WORKFLOWS = "workflows"
+_REVIEW_PANEL = "review_panel"
 _WORKFLOW_RULES = "workflow_rules"
 _GATE_PURPOSE = "gate_purpose"
 _COMMAND_SCHEDULES = "command_schedules"
@@ -467,6 +468,15 @@ async def _workflows_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval("SELECT to_regclass('workflows') IS NOT NULL")
 
 
+async def _review_panel_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _REVIEW_PANEL):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('task_steps') AND attname = 'accept_when' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
 async def _workflow_rules_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _WORKFLOW_RULES):
         return False
@@ -682,6 +692,23 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                 ALTER TABLE task_roles ADD CONSTRAINT task_roles_via_check
                     CHECK (via IN ('planner', 'user', 'template', 'workflow'));""")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _WORKFLOWS)
+        if await _review_panel_pending(conn):
+            await conn.execute("ALTER TABLE task_steps ADD COLUMN accept_when JSONB, ADD COLUMN reviews TEXT")
+            await conn.execute("ALTER TABLE task_steps DROP CONSTRAINT task_steps_kind_check")
+            await conn.execute("ALTER TABLE task_steps ADD CONSTRAINT task_steps_kind_check "
+                               "CHECK (kind IN ('work', 'gate', 'wait', 'review'))")
+            constraint = re.search(
+                r"CONSTRAINT task_journal_kind_check (CHECK \(kind IN \(.*?\)\))", sql, re.S,
+            ).group(1)
+            await conn.execute("ALTER TABLE task_journal DROP CONSTRAINT task_journal_kind_check")
+            await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check " + constraint)
+            # Released workflow presets allowed panels without distinct runtimes. Bring those presets
+            # under the panel invariant before readers validate them; existing task snapshots stay fixed.
+            await conn.execute("UPDATE workflows SET definition = jsonb_set(definition, "
+                               "'{distinct_reviewer_runtime}', 'true'::jsonb) "
+                               "WHERE jsonb_typeof(definition->'review_panel') = 'object' "
+                               "AND definition->'distinct_reviewer_runtime' IS DISTINCT FROM 'true'::jsonb")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _REVIEW_PANEL)
         if await _workflow_rules_pending(conn):
             constraint = re.search(
                 r"CONSTRAINT task_journal_kind_check (CHECK \(kind IN \(.*?\)\))", sql, re.S,
@@ -734,4 +761,5 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _chat_binding_senders_pending(conn)
             or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)
             or await _dependency_conditions_pending(conn) or await _workflows_pending(conn)
+            or await _review_panel_pending(conn)
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)))
