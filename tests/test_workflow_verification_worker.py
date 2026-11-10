@@ -331,7 +331,7 @@ def test_verification_rejects_unsafe_runtime_inputs(tmp_path, monkeypatch, verif
 
 @pytest.mark.parametrize("directory", [False, True])
 @pytest.mark.parametrize("outside_checkout", [False, True])
-def test_runtime_skips_and_reports_undeclared_external_links(tmp_path, caplog, directory, outside_checkout):
+def test_runtime_copies_external_files_but_skips_directory_links(tmp_path, caplog, directory, outside_checkout):
     source = _repo(tmp_path / "source")
     (source / ".gitignore").write_text("workspace/\nundeclared\n")
     workspace = source / "workspace"
@@ -340,14 +340,24 @@ def test_runtime_skips_and_reports_undeclared_external_links(tmp_path, caplog, d
     if directory:
         outside.mkdir()
     else:
-        outside.write_text("must stay outside")
+        outside.write_text("private file copy")
+        outside.chmod(0o755)
     (workspace / "link").symlink_to(outside, target_is_directory=directory)
     (workspace / "regular").write_text("copied")
     destination = Path(worker._verification_checkout(str(source), tmp_path / "backup", ["workspace"]))
-    assert not (destination / "workspace" / "link").is_symlink()
-    assert not (destination / "workspace" / "link").exists()
+    link = destination / "workspace" / "link"
+    assert not link.is_symlink()
+    if directory:
+        assert not link.exists()
+        assert "workspace/link" in caplog.text
+    else:
+        assert link.read_bytes() == outside.read_bytes()
+        assert link.stat().st_mode & 0o777 == 0o555
+        assert not link.samefile(outside)
+        outside.write_text("source changed")
+        assert link.read_text() == "private file copy"
+        assert outside.stat().st_mode & 0o777 == 0o755
     assert (destination / "workspace" / "regular").read_text() == "copied"
-    assert "workspace/link" in caplog.text
 
 
 def test_runtime_links_between_declared_paths_stay_private(tmp_path):
@@ -403,7 +413,8 @@ def test_verification_runtime_preserves_package_bin_links(tmp_path, absolute):
 
 
 @pytest.mark.parametrize("editable", ["pth", "finder", "strict-relative", "strict-absolute", "strict-aliased"])
-def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatch, editable):
+@pytest.mark.parametrize("symlinks", [False, True])
+def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatch, editable, symlinks):
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.delenv("PYTHONPATH", raising=False)
     developer = _repo(tmp_path / "developer")
@@ -421,7 +432,9 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
     _git(developer, "add", ".gitignore", "src", "test_probe.py")
     _git(developer, "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-m", "package")
     environment = developer / ".venv" if editable == "pth" else tmp_path / "environment"
-    venv.EnvBuilder(with_pip=False).create(environment)
+    # The venv CLI uses symlinks by default; EnvBuilder's default hides that path.
+    venv.EnvBuilder(with_pip=False, symlinks=symlinks).create(environment)
+    assert (environment / "bin" / "python").is_symlink() == symlinks
     if editable != "pth":
         (developer / ".venv").symlink_to(environment, target_is_directory=True)
     site = environment / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
@@ -480,6 +493,12 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
         canonical.mkdir(parents=True)
         runtime.symlink_to(canonical, target_is_directory=True)
     checkout = Path(worker._verification_checkout(str(source), runtime / "backup", runtime_paths)).resolve()
+    for interpreter in (environment / "bin").glob("python*"):
+        copied = checkout / ".venv" / "bin" / interpreter.name
+        assert copied.is_file()
+        assert not copied.samefile(interpreter)
+        assert copied.read_bytes() == interpreter.read_bytes()
+        assert copied.stat().st_mode & 0o111 == interpreter.stat().st_mode & 0o111
     assert not list((checkout / ".venv").rglob("*.pyc"))
     assert all(not path.stat().st_mode & 0o222 for path in (checkout / ".venv").rglob("*") if path.is_file())
     prefix = run(checkout, ["python", "-c", "import sys; print(sys.prefix)"])

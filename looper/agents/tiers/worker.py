@@ -777,9 +777,9 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
     """Copy declared local state, never exposing a writable link to the source.
 
     Explicit workspace links are copied; nested links stay relative to private
-    copies of declared paths or checkout files. Undeclared external links are
-    reported and skipped. Repository metadata and special files are never
-    runtime inputs.
+    copies of declared paths or checkout files. External file links become
+    private read-only files; external directory links are reported and skipped.
+    Repository metadata and special files are never runtime inputs.
     """
     copied = []
     source, target = source.resolve(), target.resolve()
@@ -808,9 +808,12 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
                     if relocated.exists():
                         destination.symlink_to(os.path.relpath(relocated.resolve(), destination.parent.resolve()))
                         return
-            logger.warning("skipping verification runtime symlink outside declared paths: %s",
-                           destination.relative_to(target))
-            return
+            if not resolved.is_file():
+                logger.warning("skipping verification runtime symlink outside declared paths: %s",
+                               destination.relative_to(target))
+                return
+            # Venv interpreters commonly link outside the environment. Copy
+            # their bytes below, preserving execution without exposing the source.
         if resolved in ancestors:
             raise OSError("verification runtime path crosses its declared tree")
         if resolved.is_dir():
