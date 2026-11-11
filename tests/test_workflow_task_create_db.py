@@ -20,6 +20,132 @@ PRESET = {"key": "reviewed", "name": "Reviewed", "planner_instructions": "Keep c
           "escalate_on_exhaustion": True}
 
 
+@pytest.mark.parametrize("profile_source", ["role", "workflow", "selection"])
+def test_confirmation_and_form_preview_share_workflow_roles_panel_and_verification(
+    tmp_path, monkeypatch, profile_source,
+):
+    from looper.agents.agent_settings import Layer, load_agent_settings
+    from tests.test_ops_tasks_db import _Chat
+
+    async def test(pool):
+        async with v1_api(tmp_path, pool) as call:
+            project = await setup(pool, call, tmp_path)
+            preset = {**PRESET, "profiles": {}, "roles": [
+                {"key": key, "kind": kind, "role_prompt": "Check the change.", "profile_id": profile}
+                for key, kind, profile in (
+                    ("dev", "work", "workflow-profile"),
+                    ("review_codex", "review", "codex-review-profile"),
+                    ("review_grok", "review", "grok-review-profile"),
+                    ("suggest", "review", "suggestion-profile"),
+                    ("verify", "work", "agent-claude-code-opus"))],
+                "review_panel": {"members": ["review_codex", "review_grok", "suggest"],
+                                 "accept_when": {"all_of": ["review_codex", "review_grok"]}},
+                "distinct_reviewer_runtime": True, "verification": {"role": "verify", "max_rounds": 2}}
+            await pool.execute("INSERT INTO agent_runtimes (id, name, type, capabilities) "
+                               "SELECT 'rt-codex', 'Codex', 'codex', capabilities FROM agent_runtimes "
+                               "WHERE id = 'rt-claude-code'")
+            await pool.executemany("INSERT INTO agent_profiles (id, name, runtime_id, model_id) "
+                                  "SELECT $1, $2, 'rt-codex', id "
+                                  "FROM llm_models WHERE provider_id = 'prov-codex-login' LIMIT 1", [
+                                      ("codex-review-profile", "Codex review"),
+                                      ("grok-review-profile", "Second review"),
+                                      ("suggestion-profile", "Suggestions")])
+            await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id, fallback_profile_id) "
+                               "SELECT 'backup-profile', 'Backup profile', runtime_id, model_id, "
+                               "'agent-claude-code-opus' FROM agent_profiles WHERE id = 'workflow-profile'")
+            await pool.execute("UPDATE agent_profiles SET fallback_profile_id = 'backup-profile' "
+                               "WHERE id = 'workflow-profile'")
+            selected = {"worker": "agent-claude-code-opus"}
+            if profile_source == "workflow":
+                preset["profiles"] = selected
+            choices = {"profiles": selected} if profile_source == "selection" else {}
+            assert (await call("workflows.put", preset))[0] == 200
+            status, preview = await call("workflows.preview", {
+                "key": "reviewed", "project_id": project["id"], **choices})
+            assert status == 200, preview
+            assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+            api_v1.validate_arguments(api_v1.find("POST", "/api/v1/workflows/preview").result, preview["result"])
+
+            chat = _Chat(tmp_path)
+            (answer,) = await chat.say("Create it", ("looper_task_create", {
+                "requirement": "Build", "title": "Build", "project": "Example", "workflow": "reviewed", **choices}))
+            assert answer["status"] == "ok", answer
+            effective = await load_agent_settings("worker", project["id"], answer["result"]["task_id"],
+                                                  task_role=("dev", 1))
+            assert effective.error is None
+            assert effective.profile.id == ("workflow-profile" if profile_source == "role"
+                                             else selected["worker"])
+            assert effective.profile_source is (Layer.TASK_ROLE if profile_source == "role" else Layer.TASK)
+            (block,) = chat.turns[0].blocks
+            lines = block.splitlines()
+            if profile_source == "role":
+                assert any(line.startswith("- dev：Workflow profile（claude-code/sonnet）")
+                           and "回落至 Backup profile（claude-code/sonnet），回落至 claude-code/opus" in line
+                           for line in lines)
+            else:
+                assert "- dev：claude-code/opus（claude-code/opus）" in lines
+            for key, name in (("review_codex", "Codex review"), ("review_grok", "Second review"),
+                              ("suggest", "Suggestions")):
+                assert any(line.startswith(f"- {key}：{name}（codex/") for line in lines)
+            assert any(line.startswith("- verify：claude-code/opus（claude-code/opus）") and "只读" in line
+                       for line in lines)
+            for line in preview["result"]["lines"]:
+                assert line in block
+            assert any("必需席位：review_codex、review_grok" in line and "建议席位：suggest" in line
+                       and "全部通过" in line for line in lines)
+            assert "- Worker：" not in block and "- Reviewer：" not in block
+            assert "每一步都要 Reviewer 评审通过" not in block
+            assert len(lines) <= 12
+            row = await tasks.get_task(answer["result"]["task_id"])
+            assert row["workflow"]["review_panel"]["members"] == ["review_codex", "review_grok", "suggest"]
+    run_db(test, monkeypatch, timeout=30)
+
+
+def test_without_workflow_confirmation_retains_existing_role_and_review_lines(tmp_path, monkeypatch):
+    from tests.test_ops_tasks_db import _Chat
+
+    async def test(pool):
+        async with v1_api(tmp_path, pool) as call:
+            await setup(pool, call, tmp_path)
+            chat = _Chat(tmp_path)
+            (answer,) = await chat.say("Create it", ("looper_task_create", {
+                "requirement": "Build", "title": "Build", "project": "Example", "workflow": "none"}))
+            assert answer["status"] == "ok", answer
+            (block,) = chat.turns[0].blocks
+            assert "- Worker：claude-code/opus（effort 默认，来源：内置默认），agent teams 开" in block
+            assert "- Reviewer：claude-code/opus（effort 默认，来源：内置默认），agent teams 开" in block
+            assert "- 评审：由 Planner 决定哪些步骤要 Reviewer 评审" in block
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("source", ["project", "selection", "workflow"])
+def test_preview_resolves_inherited_profiles_and_refuses_invalid_selections(tmp_path, monkeypatch, source):
+    async def test(pool):
+        async with v1_api(tmp_path, pool) as call:
+            project = await setup(pool, call, tmp_path)
+            preset = {**PRESET, "profiles": {"worker": "workflow-profile"} if source == "workflow" else {},
+                      "roles": [{"key": "dev", "kind": "work", "role_prompt": "Implement."}]}
+            assert (await call("workflows.put", preset))[0] == 200
+            await agent_setting_layers.put_layer("role_project", "worker", project["id"],
+                                                {"profile_id": "workflow-profile"})
+            body = {"key": "reviewed", "project_id": project["id"]}
+            if source == "selection":
+                body["profiles"] = {"worker": "agent-claude-code-opus"}
+            status, answer = await call("workflows.preview", body)
+            assert status == 200, answer
+            model = "opus" if source == "selection" else "sonnet"
+            assert any(line.startswith("- dev：") and f"claude-code/{model}" in line
+                       for line in answer["result"]["lines"])
+            assert (await call("workflows.preview", {**body, "project_id": "missing"}))[0] == 404
+            assert (await call("workflows.preview", {**body, "key": "missing"}))[0] == 404
+            assert (await call("workflows.preview", {**body, "profiles": {"worker": "missing"}}))[0] == 400
+            if source == "workflow":
+                assert (await call("workflows.preview", {
+                    **body, "profiles": {"worker": "agent-claude-code-opus"}}))[0] == 400
+            assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
+    run_db(test, monkeypatch, timeout=30)
+
+
 async def setup(pool, call, tmp_path):
     await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) "
                        "SELECT 'workflow-profile', 'Workflow profile', 'rt-claude-code', id "
@@ -190,11 +316,11 @@ def test_manager_start_confirmation_shows_effective_workflow_controls(tmp_path, 
             assert ("- 评审：每一步都要 Reviewer 评审通过" if effective.review_all else
                     "- 评审：由 Planner 决定哪些步骤要 Reviewer 评审") in block
             from looper.agents.project_execution import format_usd
-            assert f"- 每个任务的花费上限：${format_usd(effective.task_budget_usd)}，达到时再让 Planner 总结一轮后结束" in block
+            assert f"每个任务的花费上限：${format_usd(effective.task_budget_usd)}，达到时再让 Planner 总结一轮后结束" in block
             if selection != "none":
-                assert "- 工作流：Reviewed（reviewed）" in block
-                assert f"- 每步重试次数：{effective.step_retries}" in block
-                assert f"- 依赖条件：{'开' if effective.conditions_on else '关'}" in block
+                assert "工作流：Reviewed（reviewed）" in block
+                assert f"每步重试次数：{effective.step_retries}" in block
+                assert f"依赖条件：{'开' if effective.conditions_on else '关'}" in block
             else:
                 assert "工作流" not in block and "每步重试次数" not in block and "依赖条件" not in block
     run_db(test, monkeypatch, timeout=30)

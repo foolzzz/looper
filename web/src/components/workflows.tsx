@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { SELECT, EDIT_BOX } from "@/components/registry-ui";
-import { deleteWorkflow, fetchWorkflows, putWorkflow, type Condition, type Workflow } from "@/lib/api";
+import { deleteWorkflow, fetchWorkflows, previewWorkflow, putWorkflow, type Condition, type TaskRole, type Workflow } from "@/lib/api";
 import type { V1PendingConfirmation } from "@/lib/v1";
 
 export function useWorkflows() {
@@ -25,18 +25,33 @@ function passRule(condition: Condition): string {
   return `${rule} (${items.map(passRule).join(", ")})`;
 }
 
-export function WorkflowField({ rows, value, onChange, label = "Workflow" }: {
+export function WorkflowField({ rows, value, onChange, label = "Workflow", preview }: {
   rows: Workflow[]; value: string; onChange: (key: string) => void; label?: string;
+  preview?: { projectId: string | null; profiles: Partial<Record<TaskRole, string>> };
 }) {
-  if (!rows.length) return null;
   const selected = rows.find((row) => row.key === value);
+  const request = selected && preview ? JSON.stringify({ key: value, projectId: preview.projectId,
+    profiles: Object.fromEntries(Object.entries(preview.profiles).filter(([role, id]) => id && !selected.profiles[role as TaskRole])) }) : "";
+  const [summary, setSummary] = useState<{ request: string; lines?: string[]; error?: string } | null>(null);
+  useEffect(() => {
+    if (!request) return;
+    let alive = true;
+    const { key, projectId, profiles } = JSON.parse(request);
+    previewWorkflow(key, projectId, profiles).then((lines) => { if (alive) setSummary({ request, lines }); })
+      .catch((err) => { if (alive) setSummary({ request, error: String(err.message ?? err) }); });
+    return () => { alive = false; };
+  }, [request, selected]);
+  if (!rows.length) return null;
+  const current = summary?.request === request ? summary : null;
   return <div className="space-y-1">
     <label className="text-sm font-medium text-muted-foreground" htmlFor="workflow-choice">{label}</label>
     <select id="workflow-choice" className={SELECT} value={value} onChange={(event) => onChange(event.target.value)}>
       <option value="none">None</option>
       {rows.map((row) => <option value={row.key} key={row.key}>{row.name}</option>)}
     </select>
-    {selected && <p className="text-xs text-muted-foreground">Development: {selected.work_role ?? "default worker"}; review: {selected.review_panel
+    {selected && preview && (current?.error ? <p role="alert" className="text-xs text-destructive">{current.error}</p>
+      : <p className="whitespace-pre-wrap break-words text-xs text-muted-foreground">{current?.lines?.join("\n") ?? "正在读取工作流配置…"}</p>)}
+    {selected && !preview && <p className="text-xs text-muted-foreground">Development: {selected.work_role ?? "default worker"}; review: {selected.review_panel
       ? `${selected.review_panel.members.join(", ")} · ${passRule(selected.review_panel.accept_when)}` : "default review"}; retries: {selected.max_step_retries ?? "project default"}; verification: {selected.verification ? `${selected.verification.role} (${selected.verification.max_rounds} rounds)` : "none"}.</p>}
   </div>;
 }

@@ -43,6 +43,10 @@ OPERATIONS = (
         _object({"workflows": _array(WORKFLOW)}, closed=True)),
     _op("get", "Read a workflow preset.", _object({"key": _KEY}, closed=True),
         _object({"workflow": WORKFLOW}, closed=True)),
+    _op("preview", "Preview effective workflow roles, review seats and verification without creating a task.",
+        _object({"key": _KEY, "project_id": _NULL_STR,
+                 "profiles": _object(dict.fromkeys(("planner", "worker", "reviewer"), _STR), [], closed=True)},
+                ["key"], closed=True), _object({"lines": _array(_STR)}, closed=True)),
     _op("put", "Create or replace a workflow preset; existing task snapshots stay unchanged.",
         _object({**_FIELDS, **_READ_ONLY}, ["key", "name"], closed=True),
         _object({"workflow": WORKFLOW}, closed=True), "write"),
@@ -74,6 +78,31 @@ async def run(server, operation, arguments, principal, headers):
         return {"workflows": [_view(row) for row in await db_workflows.list_workflows()]}
     if action == "get":
         return {"workflow": _view(await _get(arguments["key"]))}
+    if action == "preview":
+        from ...db import agent_setting_layers, profile_registry, projects
+        from ..agent_settings import TASK_ROLES, index_layers, resolve
+        from ..projects import RequestError, profile_choices
+        from ..project_execution import ProjectExecution
+
+        workflow = workflows.Workflow.from_row(await _get(arguments["key"]))
+        project_id = arguments.get("project_id")
+        project = await projects.get_project(project_id) if project_id else {}
+        if project_id and project is None:
+            raise OpError(ErrorCode.NOT_FOUND, "project not found")
+        try:
+            profiles = await profile_choices(arguments.get("profiles"), clearing=False)
+        except RequestError as exc:
+            raise OpError(ErrorCode.INVALID, str(exc)) from None
+        rows = await agent_setting_layers.list_layers(project_id)
+        for role, profile_id in profiles.items():
+            if role in workflow.profiles and workflow.profiles[role] != profile_id:
+                raise OpError(ErrorCode.INVALID, f"the workflow sets the {role}'s Agent Profile")
+            rows.append({"scope": "task", "role": role, "profile_id": profile_id,
+                         "profile": await profile_registry.get_profile(profile_id)})
+        layers = index_layers(rows, project_id)
+        return {"lines": await workflows.configuration_lines(workflow.snapshot(), {
+            role: resolve(role, layers, project_id) for role in TASK_ROLES},
+            review_all=ProjectExecution.from_row(project).overlaid(workflow.snapshot()).review_all)}
     if action == "put":
         try:
             workflow = workflows.Workflow.from_dict({k: v for k, v in arguments.items() if k not in _READ_ONLY})
