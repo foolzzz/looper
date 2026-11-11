@@ -18,6 +18,25 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.123] - 2026-11-10
+
+### Fixed
+
+- **Workflow delivery summary in channel notices; latest verdicts first; the model actually routed.** ([#1201](https://github.com/foolzzz/looper/pull/1201), issue #1197)
+  - For tasks with a workflow, the code-generated delivery summary (`delivery_summary`) is appended, bounded to 1200 characters, to the Telegram and Lark completion notice and to the web-chat completion message, after their existing clips. Tasks without a workflow are unchanged.
+  - Reviews and Verification keep the latest entries and list failed ones first, so a late failure is no longer dropped; a late review verdict is recorded in arrival order. Escalations appear as a short label, gate state and clipped reason.
+  - A Cursor run on auto reports the model it was routed to (`routed_model`) as its reported model, in the delivery summary and in `runs.get` / `runs.list`.
+
+## [2.14.122] - 2026-11-10
+
+### Fixed
+
+- **Profile fallback history and honest `api` model reporting.** ([#1203](https://github.com/foolzzz/looper/pull/1203), issue #1172)
+  - A run records its whole profile fallback chain, in order, as `{from, to, reason}` entries in `metadata.fallback` (including a failed launch); `metadata.fallback_from` keeps the last hop's source. A handoff from an older Planner session carries no fallback metadata.
+  - The `api` runtime reports a model (`model_reported`) only when the model itself reported one; a gateway alias is no longer shown as the reported model (null otherwise). `runs.list` follows the same rule as `runs.get`.
+  - The verification checkout no longer copies `.pyc` files from any declared runtime path (not only from the virtualenv), so bytecode of another worktree's code is not reused.
+  - Runs without fallbacks are unchanged.
+
 ## [2.14.121] - 2026-11-10
 
 ### Fixed

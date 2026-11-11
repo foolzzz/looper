@@ -68,6 +68,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ... import child_env
@@ -107,7 +108,29 @@ RUN_HOME_IDLE_SEC = 24 * 3600
 _HASHED = re.compile(r"[0-9a-f]{64}")
 
 
+@dataclass(frozen=True)
+class CodexHome:
+    """The CLI-specific names of an isolated Codex-family home.
+
+    The login module owns its link's parent directories when LOGIN_FILE contains a slash.
+    """
+
+    env: str
+    config: str
+    state: str
+    local: str
+    layout_id: str
+    login: ModuleType
+    runtime: str
+    top_config: tuple[str, ...] = ()
+    features: tuple[str, ...] = ()
+
+
+CODEX = CodexHome("CODEX_HOME", "config.toml", "", "codex", HOME_LAYOUT_ID, codex_login, "codex")
+
+
 class CodexRuntime(RuntimeAdapter):
+    home: ClassVar[CodexHome] = CODEX
     can_replace_system_prompt = True
     type = "codex"
     label = "Codex"
@@ -127,7 +150,7 @@ class CodexRuntime(RuntimeAdapter):
     # A read-only run (a Planner's, a consult) has Codex's read-only sandbox, where a write fails (``launch_args``).
     read_only = ReadOnly.SANDBOX
     # Set by the binding and the run's home: a provider's own variables cannot set them.
-    provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, "CODEX_HOME"})
+    provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, CODEX.env})
 
     def auth_kinds_for(self, launcher: Launcher) -> frozenset[AuthKind]:
         return frozenset({AuthKind.OAUTH}) if launcher is Launcher.TTADK else self.auth_kinds
@@ -154,7 +177,7 @@ class CodexRuntime(RuntimeAdapter):
         home = tempfile.mkdtemp(prefix="looper-codex-probe-")
         try:
             done = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                  timeout=_PROBE_TIMEOUT_SEC, check=False, env={**child_env.inherited(), "CODEX_HOME": home})
+                                  timeout=_PROBE_TIMEOUT_SEC, check=False, env={**child_env.inherited(), self.home.env: home})
         except FileNotFoundError:
             return Probe(None, self.capabilities, f"{executable!r} was not found")
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -176,7 +199,7 @@ class CodexRuntime(RuntimeAdapter):
                     schema = subprocess.run(
                         [executable, "app-server", "generate-json-schema", "--out", str(root / "schema")],
                         capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SEC, check=False,
-                        env={**child_env.inherited(), "CODEX_HOME": str(home)},
+                        env={**child_env.inherited(), self.home.env: str(home)},
                     )
                     if schema.returncode == 0 and '"turn/steer"' in (root / "schema" / "ClientRequest.json").read_text(
                         encoding="utf-8",
@@ -204,7 +227,7 @@ class CodexRuntime(RuntimeAdapter):
             raise RuntimeUnsupported("Codex requires one resolved model matching the launch model")
         args = ("-m", model, *(("-c", f"model_reasoning_effort={_toml_value(effort)}") if effort else ()))
         if provider.auth is AuthKind.OAUTH:
-            return ProviderBinding(args=args, env=provider.env, unset=codex_login.ENV_UNSET)
+            return ProviderBinding(args=args, env=provider.env, unset=self.home.login.ENV_UNSET)
         if not provider.api_key:
             raise RuntimeUnsupported(f"provider {provider.name!r} has no API key: set one in Settings")
         return ProviderBinding(args=args, env=(*provider.env, (KEY_ENV, provider.api_key)))
@@ -237,19 +260,22 @@ class CodexRuntime(RuntimeAdapter):
 
     def _command(self, executable: str, prompt_file: Path, launch: Launch) -> list[str]:
         local = _local_dir(prompt_file)
-        login = codex_login.login_file() if launch.profile.provider.auth is AuthKind.OAUTH else None
+        login = self.home.login.login_file() if launch.profile.provider.auth is AuthKind.OAUTH else None
         agents = agents_md(prompt_file, launch)
         instructions = None
         if launch.system_prompt_mode is SystemPromptMode.REPLACE:
-            instructions = write_instructions(local, agents)
+            instructions = write_instructions(local, agents, home=self.home)
             agents = ""
-        config = config_toml(launch, shell_home=_shell_home(local) if login else None,
-                             model_instructions_file=instructions)
-        home = write_home(local, config, agents, login=login)
+        config = config_toml(launch, shell_home=_shell_home(local, home=self.home) if login else None,
+                             model_instructions_file=instructions, home=self.home)
+        home = write_home(local, config, agents, login=login, home=self.home)
         args = ["exec", *self.launch_args(launch)]
         if launch.profile.runtime.launcher is Launcher.TTADK:
             ttadk.check_args(args)
-        return ["env", f"CODEX_HOME={home}", *self._program(executable, launch), *args]
+        return ["env", f"{self.home.env}={home}", *self._program(executable, launch), *args]
+
+    def _home_arg(self, command: list[str]) -> Path:
+        return Path(command[1].removeprefix(f"{self.home.env}="))
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
         looper = PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch),
@@ -279,24 +305,24 @@ class CodexRuntime(RuntimeAdapter):
         command = self._command(executable, prompt_file, launch)
         if session_dir is None:
             return [*command, "--ephemeral", "-"]
-        _sync_home(Path(command[1].removeprefix("CODEX_HOME=")), session_dir)
-        return ["env", f"CODEX_HOME={session_dir}", *command[2:], "-"]
+        _sync_home(self._home_arg(command), session_dir, home=self.home)
+        return ["env", f"{self.home.env}={session_dir}", *command[2:], "-"]
 
     def steer_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                       max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
         """An app-server run with the same home and instructions as ``run_command``. ``--add-dir`` mounts are
         not passed: the run has no sandbox. The thread request carries the model and permissions."""
         command = self._command(executable, prompt_file, launch)
-        home = Path(command[1].removeprefix("CODEX_HOME="))
+        home = self._home_arg(command)
         if session_dir is not None:
-            _sync_home(home, session_dir)
+            _sync_home(home, session_dir, home=self.home)
             home = session_dir
         binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
         effort_args = list(binding.args[2:])
         args = ["app-server", *effort_args]
         if launch.profile.runtime.launcher is Launcher.TTADK:
             ttadk.check_args(args)
-        return ["env", f"CODEX_HOME={home}", *self._program(executable, launch), *args]
+        return ["env", f"{self.home.env}={home}", *self._program(executable, launch), *args]
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
                     session_dir: Path | None = None, prompt_file: Path | None = None) -> RunChannel:
@@ -315,16 +341,16 @@ class CodexRuntime(RuntimeAdapter):
         resume <id> -``), so the original stays as it was. Nothing else of the run's home is copied: not its
         ``auth.json``, and not Codex's state databases, which name the run's own rollout file by its absolute path,
         so that the consult would write to it (seen with Codex 0.162.0); without them Codex finds the copy's."""
-        sessions = None if session_dir is None else session_dir / SESSIONS_DIR
+        sessions = None if session_dir is None else session_dir / self.home.state / SESSIONS_DIR
         if sessions is None or not sessions.is_dir():
             raise RuntimeUnsupported("the run kept no session to resume")
-        shutil.copytree(sessions, fork_dir / SESSIONS_DIR, symlinks=True, dirs_exist_ok=False)
+        shutil.copytree(sessions, fork_dir / self.home.state / SESSIONS_DIR, symlinks=True, dirs_exist_ok=False)
         command = self._command(executable, prompt_file, launch)
-        _sync_home(Path(command[1].removeprefix("CODEX_HOME=")), fork_dir)
-        return ["env", f"CODEX_HOME={fork_dir}", *command[2:], "resume", session_id, "-"]
+        _sync_home(self._home_arg(command), fork_dir, home=self.home)
+        return ["env", f"{self.home.env}={fork_dir}", *command[2:], "resume", session_id, "-"]
 
     def resident_session(self, label: str) -> ResidentCodex:
-        return ResidentCodex(label=label)
+        return ResidentCodex(label=label, home=self.home, runtime_label=self.label)
 
     async def write_turn(self, stdin: asyncio.StreamWriter, text: str, *, uuid: str | None = None) -> None:
         """Write a run's prompt and close stdin, which is how Codex knows the prompt ended. There is no second
@@ -337,7 +363,7 @@ class CodexRuntime(RuntimeAdapter):
 
     def parse(self, stdout: asyncio.StreamReader, *, model: str | None = None) -> AsyncIterator[dict[str, Any]]:
         """A run's events; Codex does not name the model, so the run's (``model``) names its tokens."""
-        return CodexStream(model=model).events(stdout)
+        return CodexStream(model=model, runtime=self.home.runtime).events(stdout)
 
     def tool_summary(self, tool_name: str, tool_input: dict[str, Any]) -> str:
         if tool_name == SHELL_TOOL:
@@ -364,19 +390,19 @@ class CodexRuntime(RuntimeAdapter):
 
     async def login_problem(self, provider: ProviderSpec) -> str | None:
         """Why a run with Codex's own login cannot start now (``codex_login.launch_problem``)."""
-        return await codex_login.launch_problem() if provider.auth is AuthKind.OAUTH else None
+        return await self.home.login.launch_problem() if provider.auth is AuthKind.OAUTH else None
 
     async def after_run(self, launch: Launch, command: list[str]) -> list[str]:
         """After a run with Codex's own login: every home under the run's ``codex`` directory whose login link is
         not intact, its copy removed and the problem recorded (``codex_login.inspect_homes``)."""
         if launch.profile.provider.auth is not AuthKind.OAUTH:
             return []
-        home = next((arg.partition("=")[2] for arg in command[:2] if arg.startswith("CODEX_HOME=")), "")
+        home = next((arg.partition("=")[2] for arg in command[:2] if arg.startswith(f"{self.home.env}=")), "")
         if not home:
             return []
-        problems = await asyncio.to_thread(codex_login.inspect_homes, Path(home).parent.parent,
-                                           codex_login.login_file())
-        return [await codex_login.record_problems(problems)] if problems else []
+        problems = await asyncio.to_thread(self.home.login.inspect_homes, Path(home).parent.parent,
+                                           self.home.login.login_file())
+        return [await self.home.login.record_problems(problems)] if problems else []
 
     def instruction_files(self, cwd: str | Path) -> tuple[InstructionFile, ...]:
         """One file a directory of the project, ``AGENTS.md`` else ``CLAUDE.md`` (``FALLBACK_NAMES``), which Codex
@@ -470,16 +496,16 @@ def mcp_servers(library: AgentLibrary) -> tuple[list[tuple[str, dict[str, Any]]]
 
 
 def config_toml(launch: Launch, *, shell_home: Path | None = None,
-                model_instructions_file: Path | None = None) -> str:
+                model_instructions_file: Path | None = None, home: CodexHome = CODEX) -> str:
     """The ``config.toml`` of a run's home: isolation, the project's CLAUDE.md where it has no AGENTS.md, the
     provider, and the MCP servers. With Codex's own login (``shell_home``, the ``CODEX_HOME`` the agent's shell
     commands get), see ``_login_config``."""
     launch.runtime.bind_provider(launch.profile.provider, launch.model, launch.effort)
     if launch.profile.provider.auth is AuthKind.OAUTH:
         assert shell_home is not None
-        lines = _login_config(shell_home, launcher=launch.profile.runtime.launcher)
+        lines = _login_config(shell_home, launcher=launch.profile.runtime.launcher, home=home)
         if model_instructions_file is not None:
-            lines.insert(lines.index(codex_login.CONFIG_MARKER) + 1,
+            lines.insert(lines.index(home.login.CONFIG_MARKER) + 1 + len(home.top_config),
                          f"model_instructions_file = {_toml_value(str(model_instructions_file))}")
         return _with_mcp(lines, launch)
     provider = launch.profile.provider
@@ -511,14 +537,15 @@ def config_toml(launch: Launch, *, shell_home: Path | None = None,
     return _with_mcp(lines, launch)
 
 
-def _login_config(shell_home: Path, *, launcher: Launcher = Launcher.NATIVE) -> list[str]:
+def _login_config(shell_home: Path, *, launcher: Launcher = Launcher.NATIVE, home: CodexHome = CODEX) -> list[str]:
     """A login home's config: Codex's built-in OpenAI provider (no ``model_provider``) and its login read from
     this home's ``auth.json`` (a link to the operator's login file), ChatGPT's apps off, and a ``CODEX_HOME``
     without the login for the agent's shell commands."""
     return [
         "# Written by Looper for its Codex runs. Only this file, AGENTS.md and the auth.json link come from Looper.",
         "# Codex's own login: auth.json here links to the operator's login file, never a copy.",
-        codex_login.CONFIG_MARKER,
+        home.login.CONFIG_MARKER,
+        *home.top_config,
         *_instruction_lines(),
         "",
         "# Codex's own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
@@ -529,12 +556,13 @@ def _login_config(shell_home: Path, *, launcher: Launcher = Launcher.NATIVE) -> 
         "[features]",
         "plugins = false",
         "apps = false",
+        *home.features,
         "",
-        "# The agent's shell commands get a CODEX_HOME without the login, so a codex command there cannot use it",
+        f"# The agent's shell commands get a {home.env} without the login, so a codex command there cannot use it",
         "# or log it out.",
         "[shell_environment_policy]",
         *(['exclude = ["TTADK_OPENAI_API_KEY"]'] if launcher is Launcher.TTADK else []),
-        f"set = {_toml_value({'CODEX_HOME': str(shell_home)})}",
+        f"set = {_toml_value({home.env: str(shell_home)})}",
     ]
 
 
@@ -638,18 +666,18 @@ def _prompt_text(looper_prompt: str, launch: Launch) -> str:
     return runtime_prompt_text(launch, looper_prompt, runtime_notes(materialize(launch.library)))
 
 
-def _codex_dir(local: Path) -> Path:
+def _home_dir(local: Path, *, home: CodexHome = CODEX) -> Path:
     """``<runtime_root>/.local/codex``, readable by this user only: its configs hold MCP servers' values."""
-    directory = local / "codex"
+    directory = local / home.local
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
     return directory
 
 
-def _shell_home(local: Path) -> Path:
+def _shell_home(local: Path, *, home: CodexHome = CODEX) -> Path:
     """``<runtime_root>/.local/codex/shell-home``: the ``CODEX_HOME`` a login run's shell commands get, empty of
     any login of Looper's."""
-    directory = _codex_dir(local) / codex_login.SHELL_HOME
+    directory = _home_dir(local, home=home) / home.login.SHELL_HOME
     directory.mkdir(exist_ok=True)
     return directory
 
@@ -666,7 +694,7 @@ def _write_private(path: Path, text: str) -> None:
         raise
 
 
-def _remove_idle_homes(runs: Path, now: float) -> None:
+def _remove_idle_homes(runs: Path, now: float, *, home: CodexHome = CODEX) -> None:
     """Remove the run homes in ``runs`` that nothing has written to for ``RUN_HOME_IDLE_SEC``.
 
     A home in use is written to all along (Codex keeps its state and logs
@@ -675,19 +703,19 @@ def _remove_idle_homes(runs: Path, now: float) -> None:
     run's command line names its home only through ``env``, which is gone
     once Codex runs.
     """
-    for home in runs.iterdir():
-        if not _HASHED.fullmatch(home.name) or not home.is_dir() or home.is_symlink():
+    for directory in runs.iterdir():
+        if not _HASHED.fullmatch(directory.name) or not directory.is_dir() or directory.is_symlink():
             continue
         try:
-            newest = max([home.stat().st_mtime, *(path.lstat().st_mtime for path in home.rglob("*"))])
+            newest = max([directory.stat().st_mtime, *(path.lstat().st_mtime for path in directory.rglob("*"))])
         except OSError:
             continue
         if now - newest > RUN_HOME_IDLE_SEC:
-            shutil.rmtree(home, ignore_errors=True)
-    _remove_idle_instructions(runs.parent, now)
+            shutil.rmtree(directory, ignore_errors=True)
+    _remove_idle_instructions(runs.parent, now, home=home)
 
 
-def _remove_idle_instructions(codex: Path, now: float) -> None:
+def _remove_idle_instructions(codex: Path, now: float, *, home: CodexHome = CODEX) -> None:
     """Reclaim old instructions only after removing idle runs; resident session references never expire."""
     directory = codex / "instructions"
     if not directory.is_dir():
@@ -695,7 +723,7 @@ def _remove_idle_instructions(codex: Path, now: float) -> None:
     referenced: set[Path] = set()
     try:
         for root in (codex / "runs", codex / "sessions"):
-            for config in root.rglob("config.toml"):
+            for config in root.rglob(home.config):
                 value = tomllib.loads(config.read_text(encoding="utf-8")).get("model_instructions_file")
                 if isinstance(value, str):
                     path = Path(value)
@@ -713,9 +741,9 @@ def _remove_idle_instructions(codex: Path, now: float) -> None:
             continue
 
 
-def write_instructions(local: Path, text: str) -> Path:
+def write_instructions(local: Path, text: str, *, home: CodexHome = CODEX) -> Path:
     """Keep replacing instructions outside run homes, so resident config copies retain a stable target."""
-    directory = _codex_dir(local) / "instructions"
+    directory = _home_dir(local, home=home) / "instructions"
     directory.mkdir(exist_ok=True)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     target = directory / (digest + ".md")
@@ -728,25 +756,25 @@ def write_instructions(local: Path, text: str) -> Path:
     return target
 
 
-def write_home(local: Path, config: str, agents: str, *, login: Path | None = None) -> Path:
+def write_home(local: Path, config: str, agents: str, *, login: Path | None = None, home: CodexHome = CODEX) -> Path:
     """The home of the runs of this ``config.toml`` and ``AGENTS.md``: ``<local>/codex/runs/<sha256>``, written
     once; Codex keeps its own state there too. With ``login`` (the operator's login file), its ``auth.json`` is a
     link to it (``codex_login.link_login``). Writing a new one removes the idle ones (``_remove_idle_homes``)."""
-    named = f"{HOME_LAYOUT_ID}\n{config}\0{agents}" + (f"\0{login}" if login is not None else "")
+    named = f"{home.layout_id}\n{config}\0{agents}" + (f"\0{login}" if login is not None else "")
     key = hashlib.sha256(named.encode("utf-8")).hexdigest()
-    runs = _codex_dir(local) / "runs"
+    runs = _home_dir(local, home=home) / "runs"
     target = runs / key
     if (target / "AGENTS.md").is_file():
         if login is not None:
-            codex_login.link_login(target, login)
+            home.login.link_login(target, login)
         return target
     runs.mkdir(exist_ok=True)
     building = Path(tempfile.mkdtemp(prefix=".building.", dir=runs))
     try:
-        _write_private(building / "config.toml", config)
+        _write_private(building / home.config, config)
         _write_private(building / "AGENTS.md", agents)
         if login is not None:
-            codex_login.link_login(building, login)
+            home.login.link_login(building, login)
         try:
             os.rename(building, target)
         except OSError:
@@ -758,27 +786,27 @@ def write_home(local: Path, config: str, agents: str, *, login: Path | None = No
         if building is not None:
             shutil.rmtree(building, ignore_errors=True)
     # Publish the new config before reclaiming instructions: it may reference an old file itself.
-    _remove_idle_homes(runs, time.time())
+    _remove_idle_homes(runs, time.time(), home=home)
     return target
 
 
-def _sync_home(source: Path, home: Path) -> None:
-    """Give a session's ``home`` the ``config.toml``, the ``AGENTS.md`` and the login link (or none) of the run
+def _sync_home(source: Path, destination: Path, *, home: CodexHome = CODEX) -> None:
+    """Give a session's ``destination`` the config, the ``AGENTS.md`` and the login link (or none) of the run
     home ``source``. The link comes before a login config and goes after an API key one, so a home with a
     login config always has it (``codex_login.inspect_homes``)."""
-    home.mkdir(parents=True, exist_ok=True)
-    os.chmod(home, 0o700)
-    link = source / codex_login.LOGIN_FILE
+    destination.mkdir(parents=True, exist_ok=True)
+    os.chmod(destination, 0o700)
+    link = source / home.login.LOGIN_FILE
     login = Path(os.readlink(link)) if link.is_symlink() else None
     if login is not None:
-        codex_login.link_login(home, login)
-    for name in ("config.toml", "AGENTS.md"):
+        home.login.link_login(destination, login)
+    for name in (home.config, "AGENTS.md"):
         text = (source / name).read_text(encoding="utf-8")
-        target = home / name
+        target = destination / name
         if not target.is_file() or target.read_text(encoding="utf-8") != text:
             _write_private(target, text)
     if login is None:
-        codex_login.unlink_login(home)
+        home.login.unlink_login(destination)
 
 
 # --- Events ---
@@ -835,6 +863,7 @@ class CodexStream:
     session_id: str | None = None
     _last_text: str = ""
     _open: set[str] = field(default_factory=set)
+    runtime: str = "codex"
 
     async def events(self, stdout: asyncio.StreamReader) -> AsyncIterator[dict[str, Any]]:
         from ..claude_cli import stream_events
@@ -850,7 +879,7 @@ class CodexStream:
         kind = raw.get("type")
         if kind == "thread.started":
             self.session_id = str(raw.get("thread_id") or "") or None
-            return [{"type": "system", "subtype": "init", **self._base(), "runtime": "codex"}]
+            return [{"type": "system", "subtype": "init", **self._base(), "runtime": self.runtime}]
         if kind == "turn.started":
             self._last_text = ""
             return []
@@ -969,10 +998,16 @@ class ResidentCodex(PerTurnSession):
     """
 
     runtime_label = "Codex"
+    home: CodexHome = CODEX
+
+    def __init__(self, *, label: str, home: CodexHome = CODEX, runtime_label: str = "Codex") -> None:
+        super().__init__(label=label)
+        self.home = home
+        self.runtime_label = runtime_label
 
     def _split(self, command: list[str]) -> tuple[list[str], str | None, str]:
-        if len(command) < 4 or command[0] != "env" or not command[1].startswith("CODEX_HOME="):
-            raise ValueError("a resident Codex command starts with env CODEX_HOME=<home> <codex> exec")
+        if len(command) < 4 or command[0] != "env" or not command[1].startswith(f"{self.home.env}="):
+            raise ValueError(f"a resident {self.runtime_label} command starts with env {self.home.env}=<home> <codex> exec")
         if len(command) >= 2 and command[-2] == "resume":
             return command[:-2], command[-1], command[2]
         return command, None, command[2]
@@ -980,13 +1015,14 @@ class ResidentCodex(PerTurnSession):
     def _turn_argv(self) -> list[str]:
         source = Path(self._base[1].partition("=")[2])
         home = source.parent.parent / "sessions" / session_dir_name(self._label)
-        _sync_home(source, home)
+        _sync_home(source, home, home=self.home)
         resume = ["resume", self._session] if self._session else []
-        return ["env", f"CODEX_HOME={home}", *self._base[2:], *resume, "-"]
+        return ["env", f"{self.home.env}={home}", *self._base[2:], *resume, "-"]
 
     def _stream(self) -> CodexStream:
         base = self._base
-        return CodexStream(model=base[base.index("-m") + 1] if "-m" in base else None, before=self._totals)
+        return CodexStream(model=base[base.index("-m") + 1] if "-m" in base else None, before=self._totals,
+                           runtime=self.home.runtime)
 
     def turn_usage(self, result_event: dict[str, Any] | None) -> Usage:
         """A turn's own tokens: its result's running totals less the previous ones."""

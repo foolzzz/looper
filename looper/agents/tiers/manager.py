@@ -1649,7 +1649,14 @@ class ManagerAgent:
         if thread and (ends_task(status) or status == "cancelled"):
             # A web task's end goes into the thread it was asked in: the answer stream is long closed.
             title = envelope.metadata.get("task_title") or ""
-            summary = (envelope.payload.get("summary") or "")[:2000]
+            summary = envelope.payload.get("summary") or ""
+            delivery_summary = envelope.payload.get("delivery_summary") or ""
+            if delivery_summary:
+                # The persisted result includes the appendix; append it once, outside the chat's result clip.
+                summary = summary.removesuffix("\n\n" + delivery_summary)
+            summary = summary[:2000]
+            if delivery_summary:
+                summary += "\n\n" + delivery_summary
             if status == "completed":
                 text = f"任务「{title}」已完成：{summary}"
             elif status == "failed":

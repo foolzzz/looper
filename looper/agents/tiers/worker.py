@@ -746,9 +746,6 @@ def _relocate_verification_venv(source: Path, target: Path, repository_roots: tu
     for path in target.rglob("*"):
         if path.is_symlink() or not path.is_file():
             continue
-        if path.suffix == ".pyc":
-            path.unlink()  # Cached editable finders may still contain the developer's paths.
-            continue
         raw = path.read_bytes()
         if b"\0" in raw:
             continue
@@ -799,6 +796,9 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
         resolved = path.resolve(strict=True)
         if ".git" in resolved.parts:
             raise OSError("verification runtime path crosses its declared tree")
+        if path.suffix == ".pyc" and resolved.is_file():
+            # Editable link trees outside the venv can cache another worktree's code too.
+            return
         if path.is_symlink() and destination != private:
             # Prefer this copied tree, then other declarations, then checkout files.
             for origin, relocated_root in [(boundary, private), *[(origin, dest) for _, origin, dest in declared]]:

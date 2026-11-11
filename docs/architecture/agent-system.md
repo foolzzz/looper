@@ -1283,7 +1283,8 @@ Manager tools.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
   providers that serve `openai-responses`, or with Codex's own ChatGPT
-  login (below). Each process gets a `CODEX_HOME`
+  login (below). Its home layout is defined by the frozen `CodexHome` value.
+  Each process gets a `CODEX_HOME`
   of Looper's own under `<runtime_root>/.local/codex`, named on its command
   line (`env CODEX_HOME=... codex exec ...`) and holding only the generated
   `config.toml` (the provider as `[model_providers.looper]`, its key only in
@@ -1866,11 +1867,14 @@ Manager tools.
   before any model event when the adapter's `first_event_known` is verified.
   Unverified adapters leave that detection disabled. Each switch stays within
   the same step attempt, without consuming a retry, and records activity,
-  `profile_fallback` journal entries and `metadata.fallback_from` on the next run.
+  `profile_fallback` journal entries and the ordered `{from, to, reason}` chain in
+  `metadata.fallback` on the target run, including failed launches. `metadata.fallback_from`
+  retains the last hop's source for compatibility. An old session's HANDOFF has no fallback metadata.
   Manager sessions do not follow fallback chains. Settings exposes the target;
   the same operator Profile API serves the CLI, without channel-specific settings.
   `runs.get` and `runs.list` expose `model_requested` and `model_reported`
-  separately; unreported model identities remain null rather than reusing the request.
+  separately; unreported model identities remain null rather than reusing the request,
+  including gateway model aliases in the `api` runtime.
   Provider and protocol are derived from
   the model. Profiles do not own a system-prompt mode: role defaults and task
   overrides still select append/replace. API profile views return `model` as

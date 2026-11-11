@@ -2421,6 +2421,11 @@ class PlannerAgent:
                 # Quorum acceptance can leave referenced seats running too. Every member's late blocker
                 # reopens the decision so the Planner can retry the work, not merely acknowledge a chat.
                 target.status = "completed"
+        else:
+            # Preserve arrival order before quorum snapshots repeat seats in plan order.
+            entries.append(JournalEntry(target.step_id, target.label, json.dumps({
+                "round": target.retries, "reviews": {seat.label: {"status": seat.status, "result": result}},
+            }), kind=JournalKind.REVIEW_ROUND))
         # Persist the reopened target with the late verdict: a restart must take its decision too.
         await self._save(plan, seat, target, entries=entries)
         if target.status == "completed":
@@ -3902,7 +3907,6 @@ class PlannerAgent:
             visited.add(following.profile.id)
             agent_settings = following
         await self._record_profile_fallbacks(plan, "planner", changes)
-        self._fallback_from = changes[-1]["from"] if changes else None
         if agent_settings.profile_error:
             raise PlannerTurnError(agent_settings.profile_error)
         try:
@@ -3936,8 +3940,8 @@ class PlannerAgent:
             # A rejected launch has no command yet, but still belongs in this task's run history.
             recorder = self._recorder(plan, message, _Process([], None, system_prompt, launch))
             await recorder.start()
-            if self._fallback_from:
-                await recorder.annotate({"fallback_from": self._fallback_from})
+            if changes:
+                await recorder.annotate({"fallback_from": changes[-1]["from"], "fallback": changes})
             await recorder.finish(output_text=None, result_event=None, error=error)
             raise PlannerTurnError(error) from None
         # The command carries the model, the effort, the installed items' directories (each named by its
@@ -4015,6 +4019,8 @@ class PlannerAgent:
                 error = f"cannot start {launch.runtime.label}: {exc}"
                 recorder = self._recorder(plan, f"{brief}\n\n{message}" if brief else message, process)
                 await recorder.start()
+                if changes:
+                    await recorder.annotate({"fallback_from": changes[-1]["from"], "fallback": changes})
                 await recorder.finish(output_text=None, result_event=None, error=error)
                 raise PlannerTurnError(error) from None
             self._process = process
@@ -4026,7 +4032,8 @@ class PlannerAgent:
 
         try:
             return await self._exchange(f"{brief}\n\n{message}" if brief else message, process,
-                                        settings.timeout_seconds, resuming=None if retried else resuming)
+                                        settings.timeout_seconds, resuming=None if retried else resuming,
+                                        fallbacks=changes)
         except _SessionNotResumed as exc:
             # Claude never started the saved session: it no longer exists, and resuming it again would fail
             # every turn. The Planner continues in a new session, which the resume brief starts.
@@ -4057,7 +4064,8 @@ class PlannerAgent:
             launch=process.launch,
         )
 
-    async def _exchange(self, text: str, process: _Process, limit: int, *, resuming: str | None = None) -> str:
+    async def _exchange(self, text: str, process: _Process, limit: int, *, resuming: str | None = None,
+                        fallbacks: Sequence[Mapping[str, Any]] = ()) -> str:
         """Run ``text`` as one turn on the running Claude (started with ``process``) and return its final
         message, recorded as one run; raises ``PlannerTurnError``, or ``_SessionNotResumed`` when Claude never
         started ``resuming``, the session it was told to resume."""
@@ -4065,8 +4073,9 @@ class PlannerAgent:
         assert plan is not None
         recorder = self._recorder(plan, text, process)
         async with recorder:  # however the turn ends, its task's stop cutting it off too, its record ends
-            if fallback_from := getattr(self, "_fallback_from", None):
-                await recorder.annotate({"fallback_from": fallback_from})
+            # Only the target turn owns this chain; an old session's HANDOFF uses the empty default.
+            if fallbacks:
+                await recorder.annotate({"fallback_from": fallbacks[-1]["from"], "fallback": list(fallbacks)})
             # Where the runtime cannot keep the Planner from changing files, the task directory as the turn starts.
             watched = await self._watch_files(plan, process.launch)
 
@@ -4796,7 +4805,8 @@ class PlannerAgent:
                 "status": "completed",
                 "progress": plan.progress_summary(),
                 "summary": summary,
-                **({"process_record": process} if process is not None else {}),
+                **({"process_record": process, "delivery_summary": workflows.process_record_summary(process)}
+                   if process is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},
@@ -4959,7 +4969,8 @@ class PlannerAgent:
                 "progress": plan.progress_summary(),
                 "summary": summary,
                 "fail_kind": fail_kind.value if fail_kind else None,
-                **({"process_record": process} if process is not None else {}),
+                **({"process_record": process, "delivery_summary": workflows.process_record_summary(process)}
+                   if process is not None else {}),
             },
             correlation_id=plan.correlation_id,
             metadata={"origin_channel_id": plan.origin_channel_id},

@@ -231,7 +231,8 @@ class CursorAgentRuntime(RuntimeAdapter):
     loads_operator_config = True
 
     def reported_model(self, event: Mapping[str, Any]) -> str | None:
-        model = event.get("model_display") if event.get("type") == "system" and event.get("subtype") == "init" else None
+        model = (event.get("routed_model") if event.get("type") == "result" else
+                 event.get("model_display") if event.get("type") == "system" and event.get("subtype") == "init" else None)
         return model if isinstance(model, str) and model.strip() else None
 
     def ttadk_problem(self) -> ttadk.TtadkProblem | None:

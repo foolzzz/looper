@@ -323,6 +323,8 @@ def drive(
     claude: Any,
     outcome: Outcome,
     scenario: Callable[[Harness], Awaitable[Any]] | None = None,
+    *,
+    timeout: float = 30,
 ) -> Harness:
     """Run ``scenario`` (default: start the task and wait until it ends), then stop the Planner."""
 
@@ -334,7 +336,7 @@ def drive(
         with tempfile.TemporaryDirectory() as tmp:
             h = Harness(Path(tmp), claude, outcome)
             try:
-                await asyncio.wait_for((scenario or _default)(h), 30)
+                await asyncio.wait_for((scenario or _default)(h), timeout)
             finally:
                 await h.planner.stop()
                 await h.bus.shutdown()

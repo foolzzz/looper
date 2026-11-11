@@ -5,6 +5,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import py_compile
 import shutil
 import subprocess
 import sys
@@ -488,6 +489,7 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
         (linked_package / "__init__.py").symlink_to(
             package / "__init__.py" if editable in {"strict-absolute", "strict-aliased"} else
             "../../../src/checkout_probe/__init__.py")
+        py_compile.compile(str(linked_package / "__init__.py"), doraise=True)
         (site / "checkout_probe.pth").write_text(str(linked_package.parent) + "\n")
     else:
         (site / "__editable___checkout_probe_finder.py").write_text(
@@ -539,9 +541,10 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
         assert not copied.samefile(interpreter)
         assert copied.read_bytes() == interpreter.read_bytes()
         assert copied.stat().st_mode & 0o111 == interpreter.stat().st_mode & 0o111
-    assert not list((checkout / ".venv").rglob("*.pyc"))
     if editable.startswith("strict-"):
-        assert not list((checkout / "build").rglob("*.pyc"))
+        assert list((developer / "build").rglob("*.pyc"))
+    for runtime_path in runtime_paths:
+        assert not list((checkout / runtime_path).rglob("*.pyc"))
     assert all(not path.stat().st_mode & 0o222 for path in (checkout / ".venv").rglob("*") if path.is_file())
     prefix = run(checkout, ["python", "-c", "import sys; print(sys.prefix)"])
     assert prefix.returncode == 0, prefix.stderr
