@@ -14,7 +14,9 @@ def items() -> list[PlanItem]:
             for label, state in zip("abcde", states)]
 
 
-PROGRESS = ["Progress and findings:", "The dependency was checked."]
+PROGRESS = ["Progress and findings:", "- The dependency was checked."]
+CHANGE_HEADER = ('Plan (changes since the previous turn\'s message; steps not listed in full are unchanged '
+                 'since then, with current status below):')
 
 
 def test_first_view_keeps_full_lines_and_progress() -> None:
@@ -35,11 +37,9 @@ def test_change_lists_all_statuses_but_only_changed_item_and_removed_id() -> Non
     result = render([plan[0], changed, *plan[2:4]], PROGRESS, shown, full_reason=None)
     assert result.mode == "changes" and result.reason == "changes"
     assert result.lines == [
-        'Plan (changes since the full plan you were given 1 turn(s) ago; '
-        'a step not listed under "Changed or new" is as it was then):',
+        CHANGE_HEADER,
         "Steps by status: verified: a; dispatched: b; gate: pending: c; wait pending: d",
-        "Changed or new:", changed.text, "Removed: step-e", "",
-        "Progress and findings: unchanged since then.",
+        "Changed or new:", changed.text, "Removed: step-e",
     ]
     assert result.shown.turns_since_full == 1
     assert result.shown.items[changed.step_id] == changed.text
@@ -80,7 +80,7 @@ def test_twenty_change_views_are_followed_by_a_full_view() -> None:
     for n in range(1, PLAN_FULL_EVERY_TURNS + 1):
         result = render(plan, [], shown, full_reason=None)
         assert result.mode == "changes"
-        assert f"{n} turn(s) ago" in result.lines[0]
+        assert result.lines[0] == CHANGE_HEADER
         shown = result.shown
     result = render(plan, [], shown, full_reason=None)
     assert result.mode == "full" and result.reason == "periodic"
@@ -106,16 +106,16 @@ def test_same_id_with_new_summary_is_changed() -> None:
     assert result.lines[2:] == ["Changed or new:", updated.text]
 
 
-def test_progress_changes_are_sent_in_full_and_remembered() -> None:
+def test_only_new_progress_entries_are_sent_and_remembered() -> None:
     plan = items()
     shown = render(plan, PROGRESS, None, full_reason=None).shown
-    progress = [*PROGRESS, "The next dependency is ready."]
+    progress = [PROGRESS[0], "- The next dependency is ready.", PROGRESS[1]]
     result = render(plan, progress, shown, full_reason=None)
     assert result.mode == "changes"
-    assert result.lines[2:] == ["No step changed.", "", *progress]
+    assert result.lines[2:] == ["No step changed.", "", "New progress:", progress[1]]
     assert result.shown.progress == tuple(progress)
     cleared = render(plan, [], result.shown, full_reason=None)
-    assert cleared.lines[2:] == ["No step changed.", ""]
+    assert cleared.lines[2:] == ["No step changed."]
     assert cleared.shown.progress == ()
     assert render(plan, [], cleared.shown, full_reason=None).lines[-1] == "No step changed."
 
@@ -146,7 +146,29 @@ def test_gate_and_wait_transitions_change_only_their_item(index: int, state: str
     plan[index] = updated
     result = render(plan, [], shown, full_reason=None)
     assert result.mode == "changes"
+    assert result.lines[0] == CHANGE_HEADER
     assert result.lines[2:] == ["Changed or new:", updated.text]
     next_view = render(plan, [], result.shown, full_reason=None)
+    assert next_view.lines[0] == CHANGE_HEADER
     assert next_view.lines[-1] == "No step changed."
     assert next_view.shown.turns_since_full == 2
+
+
+def test_consecutive_change_views_list_only_changes_since_previous_message() -> None:
+    plan = items()
+    shown = render(plan, [], None, full_reason=None).shown
+    for index in (1, 4):
+        plan[index] = replace(plan[index], state="verified", text=plan[index].text.replace("pending", "verified"))
+        result = render(plan, [], shown, full_reason=None)
+        assert result.mode == "changes"
+        assert result.lines[0] == CHANGE_HEADER
+        assert result.lines[2:] == ["Changed or new:", plan[index].text]
+        assert f"verified: {', '.join(item.label for item in plan if item.state == 'verified')}" in result.lines[1]
+        shown = result.shown
+
+
+def test_new_progress_preserves_duplicate_entry_counts_without_repeating_old_entries() -> None:
+    plan = items()
+    shown = render(plan, PROGRESS, None, full_reason=None).shown
+    result = render(plan, [*PROGRESS, PROGRESS[1]], shown, full_reason=None)
+    assert result.lines[2:] == ["No step changed.", "", "New progress:", PROGRESS[1]]

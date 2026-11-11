@@ -1,6 +1,7 @@
 """Render a full plan or the changes since its last successful presentation."""
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -50,8 +51,8 @@ def render(items: Sequence[PlanItem], progress: Sequence[str], shown: PlanShown 
         for item in items:
             groups.setdefault(item.state, []).append(item.label)
         changes = [
-            f"Plan (changes since the full plan you were given {shown.turns_since_full + 1} turn(s) ago; "
-            'a step not listed under "Changed or new" is as it was then):',
+            "Plan (changes since the previous turn's message; steps not listed in full are unchanged "
+            "since then, with current status below):",
             "Steps by status: " + "; ".join(f"{state}: {', '.join(labels)}" for state, labels in groups.items()),
         ]
         changed = [item.text for item in items if shown.items.get(item.step_id) != item.text]
@@ -59,10 +60,16 @@ def render(items: Sequence[PlanItem], progress: Sequence[str], shown: PlanShown 
         removed = [step_id for step_id in shown.items if step_id not in current]
         if removed:
             changes.append("Removed: " + ", ".join(removed))
-        if current_progress != shown.progress:
-            changes.extend(["", *progress])
-        elif progress:
-            changes.extend(["", "Progress and findings: unchanged since then."])
+        previous = Counter(shown.progress)
+        new_progress = []
+        for line in progress:
+            if previous[line]:
+                previous[line] -= 1
+            elif line.startswith("- "):
+                # Journal sections reorder entries and change their headings as they grow.
+                new_progress.append(line)
+        if new_progress:
+            changes.extend(["", "New progress:", *new_progress])
         if len("\n".join(changes)) > len("\n".join(full)) / 2:
             reason = "large change"
 

@@ -280,6 +280,8 @@ ROOM_RETRY_SEC = 600
 ROOM_BATCH_MAX_CHARS = 12_000
 PLAN_VIEW = "\x00plan-view\x00"
 PLAN_VIEW_CLIPPED = "\x00plan-view-clipped\x00"
+# CHAT and RESTART carry the journal separately, with new supplements removed from it.
+PLAN_VIEW_STEPS = "\x00plan-view-steps\x00"
 # How much of a refused call's input the task's activity shows (the run's record keeps more).
 DENIAL_SHOWN_CHARS = 80
 # Why an accepted step's branch could not be merged, for the decision turn.
@@ -4097,21 +4099,10 @@ class PlannerAgent:
             suffix = f" ({', '.join(details)})" if details else ""
             await self._activity("phase", f"Planner {process.launch.runtime.label} started{suffix}")
 
-        text = message
-        annotation = None
-        if PLAN_VIEW in message or PLAN_VIEW_CLIPPED in message:
-            full_reason = ("new session" if brief else "new process" if started_process else
-                           "no compaction events" if Capability.COMPACTION_EVENTS not in
-                           process.launch.runtime.capabilities else None)
-            clipped = PLAN_VIEW_CLIPPED in message
-            result = render_plan_view(self._plan_items(plan), self._progress_lines(plan)[1:], self._plan_shown,
-                                      full_reason=full_reason,
-                                      max_chars=ROOM_BATCH_MAX_CHARS // 3 if clipped else None)
-            text = message.replace(PLAN_VIEW_CLIPPED if clipped else PLAN_VIEW, "\n".join(result.lines))
-            self._plan_staged = result.shown
-            if result.shown is None:
-                self._plan_shown = None
-            annotation = {"plan_view": result.mode, "plan_view_reason": result.reason}
+        full_reason = ("new session" if brief else "new process" if started_process else
+                       "no compaction events" if Capability.COMPACTION_EVENTS not in
+                       process.launch.runtime.capabilities else None)
+        text, annotation = self._render_plan_message(plan, message, full_reason=full_reason)
         try:
             return await self._exchange(f"{brief}\n\n{text}" if brief else text, process,
                                         settings.timeout_seconds, resuming=None if retried else resuming,
@@ -4133,7 +4124,29 @@ class PlannerAgent:
                 profile=launch.profile.id))
             return await self._run_turn(message, retried=True)
 
+    def _render_plan_message(self, plan: TaskPlan, message: str, *,
+                             full_reason: str | None) -> tuple[str, dict[str, str] | None]:
+        annotation = None
+        for marker in (PLAN_VIEW, PLAN_VIEW_CLIPPED, PLAN_VIEW_STEPS):
+            if marker not in message:
+                continue
+            progress = self._progress_lines(plan)[1:]
+            result = render_plan_view(self._plan_items(plan), [] if marker == PLAN_VIEW_STEPS else progress,
+                                      self._plan_shown, full_reason=full_reason,
+                                      max_chars=ROOM_BATCH_MAX_CHARS // 3 if marker == PLAN_VIEW_CLIPPED else None)
+            message = message.replace(marker, "\n".join(result.lines))
+            self._plan_staged = result.shown
+            if result.shown is None:
+                self._plan_shown = None
+            elif marker == PLAN_VIEW_STEPS:
+                # All journal entries were presented, including supplements in the changes section.
+                self._plan_staged = replace(result.shown, progress=tuple(progress))
+            annotation = {"plan_view": result.mode, "plan_view_reason": result.reason}
+        return message, annotation
+
     def _recorder(self, plan: TaskPlan, text: str, process: _Process) -> ClaudeRunRecorder:
+        # Launch failures record before the normal exchange renders the placeholders.
+        text, _ = self._render_plan_message(plan, text, full_reason="new process")
         return ClaudeRunRecorder(
             agent_id=self.agent_id,
             task_id=self._task_id,
@@ -4786,12 +4799,14 @@ class PlannerAgent:
         running = [s for s in plan.steps if s.status == "dispatched"]
         running_text = ", ".join(f"{s.label} ({s.worker_id})" for s in running) or "none"
         actions = ["none", "add_steps", "replan"] + (["forward (to a running step)"] if running else [])
-        lines, _ = self._change_lines(plan, changes)
+        lines, progress = self._change_lines(plan, changes)
         return "\n".join([
             "[CHAT] The task changed.",
             *lines,
             "",
-            PLAN_VIEW,
+            PLAN_VIEW_STEPS,
+            *(["", *progress] if progress else []),
+            "",
             f"Running now: {running_text}",
             "",
             "Decide whether the plan still fits the task as it is now.",
@@ -4803,7 +4818,7 @@ class PlannerAgent:
         """A RESTART turn's message: why the task ended, the task's changes the Planner has not had, the plan as
         it is now and the journal."""
         self._plan_shown = None
-        lines, _ = self._change_lines(plan, changes)
+        lines, progress = self._change_lines(plan, changes)
         return "\n".join([
             f"[RESTART] {_sentence(f'The task {why}')} The user restarted it, and it goes on from its plan: the "
             "accepted steps stay done and do not run again; the steps that did not finish are back to not started "
@@ -4814,7 +4829,8 @@ class PlannerAgent:
             "with none used.",
             *lines,
             "",
-            PLAN_VIEW,
+            PLAN_VIEW_STEPS,
+            *(["", *progress] if progress else []),
             *(["", *templates] if templates else []),
             "",
             "Build on what is done: decide whether the steps not started still fit the task as it is now.",

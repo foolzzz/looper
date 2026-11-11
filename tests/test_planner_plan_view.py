@@ -60,7 +60,7 @@ def test_second_decision_sends_changes_and_records_view(agent_db, planner_claude
     assert "Changed or new:\n- part-0 [verified]" in second
     assert "summary: The checks passed" in second
     assert "- part-1 [pending]" not in second
-    assert "Progress and findings: unchanged since then." in second
+    assert "Progress and findings" not in second
     assert len(second) < len(first)
     assert all("\x00" not in turn["text"] for turn in claude.turns())
     assert _annotations(agent_db) == [
@@ -128,7 +128,7 @@ def test_twenty_change_turns_then_periodic_full(agent_db, planner_claude, tmp_pa
     texts = [turn["text"] for turn in claude.turns()]
     assert "\nPlan:\n" in texts[0]
     assert all("Plan (changes since" in text for text in texts[1:21])
-    assert "20 turn(s) ago" in texts[20]
+    assert "changes since the previous turn's message" in texts[20]
     assert "\nPlan:\n" in texts[21]
     assert _annotations(agent_db)[21]["plan_view_reason"] == "periodic"
 
@@ -193,7 +193,7 @@ def test_turn_without_view_leaves_view_unchanged(agent_db, planner_claude, tmp_p
 
     _run(exercise)
     assert claude.turns()[1]["text"] == "[LESSONS] Record what was learned."
-    assert "1 turn(s) ago" in claude.turns()[2]["text"]
+    assert "changes since the previous turn's message" in claude.turns()[2]["text"]
     assert len(_annotations(agent_db)) == 2
 
 
@@ -376,3 +376,121 @@ def test_full_view_preserves_five_step_plan_with_gate_wait_and_summary(tmp_path)
     assert [item.step_id for item in items] == [step.step_id for step in steps]
     assert items[0].text.endswith("\n  summary: All checked")
     assert [item.state for item in items] == ["verified", "pending", "skipped", "gate: pending", "wait pending"]
+
+
+def test_serial_decisions_send_only_new_progress_under_half_the_full_view(
+    agent_db, planner_claude, tmp_path,
+):
+    from looper.agents.tiers.plan_view import render
+
+    claude = planner_claude("ack")
+    agent = _agent(tmp_path, claude, count=9)
+    agent._plan.journal = []
+    for previous, step in zip(agent._plan.steps, agent._plan.steps[1:]):
+        step.depends_on = [previous.step_id]
+    full_sizes = []
+
+    async def exercise():
+        try:
+            for index, step in enumerate(agent._plan.steps):
+                step.status = "completed"
+                step.result = {"summary": f"Verified behavior for {step.label}."}
+                if index:
+                    previous = agent._plan.steps[index - 1]
+                    previous.status = "verified"
+                    agent._plan.journal.append(JournalEntry(previous.step_id, previous.label,
+                                                            previous.result["summary"]))
+                full = render(agent._plan_items(agent._plan), agent._progress_lines(agent._plan)[1:],
+                              None, full_reason=None)
+                full_sizes.append(len("\n".join(full.lines)))
+                context = DecisionContext(step.label, ResultKind.WORK, True, False, 0)
+                await agent._turn(agent._decision_message(agent._plan, step, context, ["Worker: done"]))
+        finally:
+            await agent._claude.stop()
+
+    _run(exercise)
+    texts = [turn["text"] for turn in claude.turns()]
+    assert "\nPlan:\n" in texts[0]
+    for index, text in enumerate(texts[1:], 1):
+        view = text.split("\n\n", 1)[1].split("\n\nWorker: done", 1)[0]
+        assert "Plan (changes since" in view
+        assert len(view) < full_sizes[index] / 2
+        progress = view.split("New progress:\n", 1)[1]
+        assert progress == f"- part-{index - 1}: Verified behavior for part-{index - 1}."
+        assert view.count(progress) == 1
+    assert [item["plan_view"] for item in _annotations(agent_db)] == ["full", *["changes"] * 8]
+
+
+@pytest.mark.parametrize("restart", [False, True], ids=["chat", "restart"])
+@pytest.mark.parametrize("already_shown", [False, True])
+def test_new_supplement_is_sent_once_with_the_remaining_journal(
+    agent_db, planner_claude, tmp_path, restart, already_shown,
+):
+    from looper.agents.tiers.journal import JournalKind
+    from looper.db.task_changes import Supplement
+
+    claude = planner_claude("ack")
+    agent = _agent(tmp_path, claude)
+    supplement = Supplement(42, "Also check the cancellation behavior.", "web")
+    changes = p.TaskChanges(supplements=(supplement,))
+
+    async def exercise():
+        try:
+            if already_shown:
+                await agent._turn(_decision(agent))
+            agent._plan.journal.append(JournalEntry("", "", supplement.text,
+                                                    kind=JournalKind.SUPPLEMENT, id=supplement.id))
+            message = (agent._restart_message(agent._plan, "failed", changes) if restart else
+                       agent._change_message(agent._plan, changes))
+            await agent._turn(message)
+            await agent._turn(_decision(agent))
+        finally:
+            await agent._claude.stop()
+
+    _run(exercise)
+    text = claude.turns()[-2]["text"]
+    assert text.count(supplement.text) == 1
+    assert text.count("Established the expected behavior") == 1
+    assert "\x00" not in text
+    if not restart:
+        assert "\n\nRunning now:" in text
+    following = claude.turns()[-1]["text"]
+    assert supplement.text not in following
+    assert "New progress:" not in following
+
+
+@pytest.mark.parametrize("failure", ["command", "start"])
+@pytest.mark.parametrize("marker", [p.PLAN_VIEW, p.PLAN_VIEW_CLIPPED, p.PLAN_VIEW_STEPS],
+                         ids=["plan", "clipped", "steps"])
+def test_launch_failure_records_a_rendered_message(
+    agent_db, planner_claude, tmp_path, monkeypatch, failure, marker,
+):
+    from unittest.mock import AsyncMock, Mock
+
+    claude = planner_claude("ack")
+    agent = _agent(tmp_path, claude)
+    if failure == "command":
+        monkeypatch.setattr(agent, "_claude_command", Mock(side_effect=p.RuntimeUnsupported("unavailable")))
+    else:
+        agent._plan.session_id = None  # also exercise a failed launch with a resume brief
+        monkeypatch.setattr(agent._claude, "start", AsyncMock(side_effect=OSError("unavailable")))
+    message = _decision(agent).replace(p.PLAN_VIEW, marker)
+
+    async def exercise():
+        try:
+            with pytest.raises(p.PlannerTurnError, match="cannot start.*unavailable"):
+                await agent._turn(message)
+        finally:
+            await agent._claude.stop()
+
+    _run(exercise)
+    agent_db.start_record.assert_awaited_once()
+    stored = agent_db.start_record.await_args.kwargs["input_text"]
+    assert "\x00" not in stored
+    assert "\nPlan:\n" in stored
+    assert "- part-0 [pending]" in stored
+    assert stored.startswith("[RESUME]") is (failure == "start")
+    agent_db.finish_record.assert_awaited_once()
+    assert agent_db.finish_record.await_args.kwargs["status"] == "failed"
+    assert "unavailable" in agent_db.finish_record.await_args.kwargs["error"]
+    assert agent._plan_shown is None and agent._plan_staged is None
