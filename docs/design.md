@@ -126,7 +126,7 @@ Task 是系统的一等实体，代表一个完整的用户需求。
 长程运行的成本和上下文增长都可以看到（RFC 第 8 节，M2；`looper/agents/run_usage.py`）。每次运行（`llm_records`）记录以下内容：
 
 - **自身的花费和 token**：`cost_usd`、`input_tokens`、`output_tokens`、`cache_read_tokens`、`cache_creation_tokens`。Claude Code 在每个 `result` 里报告会话的累计值：`total_cost_usd` 和 `modelUsage`，后者覆盖所有请求，包括压缩时的摘要请求和子 agent 的请求。一次运行自己的份额是累计值的增量。`result.usage` 只算本轮主循环的请求，漏掉了压缩和子 agent，所以不用它（只在没有 `modelUsage` 时兜底）。
-  - Worker 和 Reviewer 一次运行就是一个进程，增量就是进程的累计值。
+  - 新建 Worker 和 Reviewer 一次运行就是一个进程，增量就是进程的累计值。Claude Code consult 从其他运行的会话 fork，其 result 包含历史累计用量，因此只累加本次流中的请求，按 message id 去重、按启动时冻结的价格计费；独立 `--resume` 的 Worker/Reviewer 同样处理。consult 的预算检查使用该运行记录的成本，用量或价格未知时不回退到历史累计值。
   - Manager、Planner 的每个 turn 减去上一个 turn 结束时的累计值。用 `--resume` 起的新进程会接着会话原来的累计值报告：已核实，一个已花 $0.01046 的会话续接后，第一轮报 $0.01279，其中本轮只花了 $0.00232。所以会话的累计值和会话 id 存在一起：Manager 存在 `session.json`，Planner 存在计划文件。续接时以存下的值为起点；会话因为无法续接被丢弃时，累计值一起清零。
   - 修复前，续接后的第一轮会把整个会话以前的花费再记一遍。重启服务、改 prompt 或设置导致进程重启，都会触发这个问题。
 - **结束时的上下文规模**（`context_tokens`）：本轮最后一个主循环请求的 prompt 大小，即 input + cache read + cache creation，不算子 agent 的请求。

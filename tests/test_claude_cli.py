@@ -28,7 +28,7 @@ def _priced_launch() -> Any:
     from tests.runtime_model_helpers import resolved_profile
 
     provider = ProviderSpec("prov-x", "x", AuthKind.API_KEY, frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
-                            base_url="https://example.invalid/anthropic",
+                            base_url="https://example.invalid/anthropic", api_key="test-key",
                             catalog=(CatalogModel("m-main", input_usd_per_mtok=2.0, output_usd_per_mtok=10.0),))
     runtime = RuntimeSpec("rt-claude-code", "claude-code", "claude-code", "", adapter("claude-code").capabilities)
     return Launch(AgentSettings(profile=resolved_profile("agent-x", "claude-code/m-main", runtime, provider, "m-main")))
@@ -300,6 +300,106 @@ def test_prompt_block_survives_cancellation_during_process_cleanup(tmp_path: Pat
 
 
 class TestClaudeRunRecorder:
+    @pytest.mark.parametrize("session", ["consult", "resume", "fresh"])
+    @pytest.mark.parametrize("close_from", ["finish", "end_left_open"])
+    @pytest.mark.parametrize("provider_priced", [False, True])
+    @pytest.mark.parametrize("partial", [False, True])
+    def test_inherited_sessions_record_only_their_own_requests(
+        self, agent_db: Any, tmp_path: Path, session: str, close_from: str, provider_priced: bool, partial: bool,
+    ) -> None:
+        from dataclasses import replace
+        from looper.agents.claude_cli import ClaudeRunRecorder
+
+        launch = _priced_launch() if provider_priced else _builtin_launch()
+        launch = replace(launch, consult=session == "consult", settings=replace(launch.settings, max_budget_usd=2))
+        model = "m-main" if provider_priced else "claude-sonnet-5-5"
+        own = {"input_tokens": 100_000, "output_tokens": 10_000,
+               "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        events = [{"type": "system", "subtype": "init", "model": model, "session_id": "new-session"}]
+        # Each request has partial usage, an assistant snapshot, then final usage.
+        # Replaying the same message id must not charge it again.
+        for message_id in ("request-1", "request-1", "request-2"):
+            if not partial:
+                events.append({"type": "assistant", "message": {"id": message_id, "model": model, "usage": own}})
+                continue
+            events += [
+                {"type": "stream_event", "event": {"type": "message_start", "message": {
+                    "id": message_id, "model": model, "usage": {**own, "output_tokens": 0}}}},
+                {"type": "assistant", "message": {"id": message_id, "model": model,
+                    "usage": {**own, "output_tokens": 0}, "content": [{"type": "text", "text": "answer"}]}},
+                {"type": "stream_event", "event": {"type": "message_delta", "usage": {"output_tokens": 10_000}}},
+                {"type": "stream_event", "event": {"type": "message_stop"}},
+            ]
+        result = {"type": "result", "subtype": "success", "session_id": "new-session", "total_cost_usd": 37,
+                  "modelUsage": {model: {"inputTokens": 10_000_000, "outputTokens": 1_000_000,
+                                        "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}}}
+        events.append(result)
+        executable = fake_claude(tmp_path / "usage-claude", "import sys\nsys.stdin.readline()\n" +
+                                 "\n".join(f"print({json.dumps(event)!r}, flush=True)" for event in events))
+        command = [executable, *([] if session == "fresh" else ["--resume", "source-session"]),
+                   *(["--fork-session"] if session == "consult" else [])]
+        recorder = ClaudeRunRecorder(agent_id="worker-usage", task_id=None, command=command, cwd=str(tmp_path),
+                                     input_text="question", launch=launch, whole_process=True)
+
+        async def run() -> None:
+            if session == "consult" and close_from == "finish":
+                from looper.agents.consult import ConsultService
+                from looper.agents.system_prompt import SystemPrompt
+
+                service = ConsultService(room=None, worker_pool=None, runtime_root=tmp_path)
+                final, started, timed_out = await service._execute(
+                    "task", {"id": "step"}, "consult-usage", command, str(tmp_path),
+                    "question", SystemPrompt("consult", {}), launch, 5)
+                assert final == result and started and not timed_out
+                return
+            async with recorder:
+                process = await asyncio.create_subprocess_exec(
+                    *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+                try:
+                    await launch.runtime.write_turn(process.stdin, "question")
+                    async for event in launch.runtime.parse_process(process, launch=launch):
+                        await recorder.record(event)
+                    await asyncio.wait_for(process.wait(), 5)
+                    assert recorder.cap_stop is None  # own $0.60 is below the $2 cap
+                    if close_from == "finish":
+                        await recorder.finish(output_text="answer", result_event=result)
+                finally:
+                    if process.returncode is None:
+                        process.kill()
+                    await process.wait()
+
+        asyncio.run(asyncio.wait_for(run(), 10))
+        saved = agent_db.finish_record.await_args.kwargs
+        inherited = session != "fresh"
+        assert (saved["input_tokens"], saved["output_tokens"], saved["cache_read_tokens"],
+                saved["cache_creation_tokens"]) == ((200_000, 20_000, 0, 0) if inherited else
+                                                    (10_000_000, 1_000_000, 0, 0))
+        assert saved["cost_usd"] == pytest.approx(0.6 if inherited else (30 if provider_priced else 37))
+        assert saved["cost_source"] == ("provider_price" if inherited or provider_priced else "runtime")
+
+    @pytest.mark.parametrize("has_request", [False, True])
+    def test_inherited_usage_gaps_are_never_filled_from_session_totals(self, agent_db: Any, has_request: bool) -> None:
+        from looper.agents.claude_cli import ClaudeRunRecorder
+        from looper.agents.run_usage import Usage
+        from looper.agents.runtimes.pricing import usage_event
+
+        recorder = ClaudeRunRecorder(agent_id="consult-usage", task_id=None, command=["claude", "--resume", "source"],
+                                     cwd="/tmp", input_text="question", launch=_builtin_launch(consult=True),
+                                     whole_process=True)
+
+        async def run() -> None:
+            async with recorder:
+                if has_request:
+                    await recorder.record(usage_event("unknown-model", Usage(input_tokens=12, output_tokens=3)))
+                await recorder.finish(output_text="answer", result_event={
+                    "type": "result", "subtype": "success", "total_cost_usd": 37,
+                    "usage": {"input_tokens": 1_000_000, "output_tokens": 100_000}})
+
+        asyncio.run(run())
+        saved = agent_db.finish_record.await_args.kwargs
+        assert saved["cost_usd"] is None
+        assert (saved["input_tokens"], saved["output_tokens"]) == ((12, 3) if has_request else (None, None))
+
     def _recorder(self) -> Any:
         from looper.agents.claude_cli import ClaudeRunRecorder
 

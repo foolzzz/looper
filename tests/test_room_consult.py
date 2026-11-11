@@ -150,6 +150,51 @@ def _pi_launch(**kwargs: Any) -> Any:
     return Launch(AgentSettings(profile=profile), **kwargs)
 
 
+@pytest.mark.parametrize("cost", [0.01, None, 1.0])
+def test_claude_consult_budget_checks_own_recorded_cost(
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cost: float | None,
+) -> None:
+    from looper.agents import consult
+    from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+    from looper.agents.profile_registry import builtin_resolved_profile
+    from looper.agents.room import FallbackReason, MemberKind
+
+    launch = Launch(AgentSettings(profile=builtin_resolved_profile()), role=AgentType.WORKER, consult=True)
+    room = SimpleNamespace(finish_consult=AsyncMock())
+    service = ConsultService(room=room, worker_pool=None, runtime_root=tmp_path)
+    record = {"id": 1, "status": "completed", "session_id": "source-session",
+              "metadata": {"profile": launch.profile.record(), "cwd": str(tmp_path)}}
+    monkeypatch.setattr(consult.db_room, "get_consult", AsyncMock(return_value={
+        "source_record": 1, "source_run": "worker-source", "questions": [17]}))
+    monkeypatch.setattr(consult.db_room, "run_record", AsyncMock(return_value=record))
+    monkeypatch.setattr(consult.db_room, "latest_run", AsyncMock(return_value=record))
+    monkeypatch.setattr(consult.db_room, "get", AsyncMock(return_value={
+        "id": 17, "sender_seat": "worker@s2", "body": "question"}))
+    monkeypatch.setattr(consult.db_room, "messages", AsyncMock(return_value=[]))
+    monkeypatch.setattr(consult.db_tasks, "get_task", AsyncMock(return_value={"work_dir": str(tmp_path)}))
+    monkeypatch.setattr(consult, "load_agent_settings", AsyncMock(return_value=launch.settings))
+    monkeypatch.setattr(consult, "_run_cost", AsyncMock(return_value=cost))
+    monkeypatch.setattr(service, "_note", AsyncMock())
+    monkeypatch.setattr(service, "_execute", AsyncMock(return_value=({
+        "type": "result", "subtype": "success", "total_cost_usd": 37 if cost == 0.01 else 0.1,
+        "result": '{"answers":[{"reply_to":17,"body":"answer"}]}',
+    }, True, False)))
+
+    async def run() -> None:
+        call = service._consult(1, "task", "worker@s1", MemberKind.WORK, AgentType.WORKER,
+                                {"id": "s1", "step_key": "s1", "status": "verified"}, "consult-usage")
+        if cost is None or cost > 0.5:
+            with pytest.raises(consult._Failed) as failed:
+                await call
+            assert failed.value.reason is FallbackReason.BUDGET
+            room.finish_consult.assert_not_awaited()
+        else:
+            await call
+            assert room.finish_consult.await_args.kwargs["columns"]["cost_usd"] == cost
+
+    asyncio.run(run())
+
+
 def _pi_session(directory: Path, session_id: str = "source-session", name: str = "timestamp_session.jsonl") -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name

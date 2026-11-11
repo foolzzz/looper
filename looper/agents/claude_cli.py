@@ -276,7 +276,8 @@ def user_stop_result() -> dict[str, Any]:
             "errors": ["stopped by the user"]}
 
 
-def _request_usage(event: dict[str, Any], requests: dict[Any, dict[str, Any]]) -> dict[str, Any] | None:
+def _request_usage(event: dict[str, Any], requests: dict[Any, dict[str, Any]],
+                   seen: set[str]) -> dict[str, Any] | None:
     """The internal usage event of the model request ``event`` ends, if it ends one.
 
     Verified against Claude Code 2.1.285 with ``--include-partial-messages``:
@@ -284,8 +285,18 @@ def _request_usage(event: dict[str, Any], requests: dict[Any, dict[str, Any]]) -
     a ``message_delta`` with the final usage and a ``message_stop``; an
     assistant event's usage is a snapshot with its output still at 0. The
     requests of the main loop and of each subagent (``parent_tool_use_id``)
-    are told apart.
+    are told apart. Without partial events, assistant usage is the available
+    observation. Message ids prevent replayed messages from being charged twice.
     """
+    from .runtimes.pricing import usage_event
+
+    key = event.get("parent_tool_use_id")
+    if event.get("type") == "assistant" and key not in requests:
+        message = event.get("message") if isinstance(event.get("message"), dict) else {}
+        message_id = message.get("id")
+        if isinstance(message_id, str) and message_id not in seen and isinstance(message.get("usage"), dict):
+            seen.add(message_id)
+            return usage_event(message.get("model"), request_tokens(message.get("usage")), parent_tool_use_id=key)
     if event.get("type") != "stream_event" or not isinstance(event.get("event"), dict):
         return None
     inner, key = event["event"], event.get("parent_tool_use_id")
@@ -293,13 +304,15 @@ def _request_usage(event: dict[str, Any], requests: dict[Any, dict[str, Any]]) -
     if kind == "message_start":
         message = inner.get("message") if isinstance(inner.get("message"), dict) else {}
         usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
-        requests[key] = {"model": message.get("model"), "usage": dict(usage)}
+        requests[key] = {"id": message.get("id"), "model": message.get("model"), "usage": dict(usage)}
     elif kind == "message_delta" and key in requests and isinstance(inner.get("usage"), dict):
         requests[key]["usage"].update({k: v for k, v in inner["usage"].items() if v is not None})
     elif kind == "message_stop" and key in requests:
-        from .runtimes.pricing import usage_event
-
         request = requests.pop(key)
+        if isinstance(message_id := request["id"], str):
+            if message_id in seen:
+                return None
+            seen.add(message_id)
         model = request["model"] if isinstance(request["model"], str) else None
         return usage_event(model, request_tokens(request["usage"]), parent_tool_use_id=key)
     return None
@@ -448,6 +461,7 @@ async def stream_events(stream: asyncio.StreamReader) -> AsyncIterator[dict[str,
     """Claude's stream-json events on ``stream``, in order, each model request followed by its internal usage
     event (``_request_usage``); a line that is not a JSON object is skipped."""
     requests: dict[Any, dict[str, Any]] = {}
+    seen: set[str] = set()
     async for raw_line in iter_lines(stream):
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line:
@@ -461,7 +475,7 @@ async def stream_events(stream: asyncio.StreamReader) -> AsyncIterator[dict[str,
                 # Hooks can echo the full input; discard it before callbacks or run records see it.
                 event["content"] = f"UserPromptSubmit operation blocked by hook: {blocked.reason}"
             yield event
-            if (usage := _request_usage(event, requests)) is not None:
+            if (usage := _request_usage(event, requests, seen)) is not None:
                 yield usage
 
 
@@ -1385,10 +1399,13 @@ class ClaudeRunRecorder:
     ) -> None:
         self._agent_id = agent_id
         self._autonomous = autonomous
-        # The run is a whole process (a Worker's or Reviewer's): its last result reports the run's own usage.
+        # A fresh whole process reports its own totals; a fork/resume also reports its inherited history.
         self._whole_process = whole_process
         self._result: dict[str, Any] | None = None  # that result, once it came
         self._launch = launch
+        self._inherited_session = self._runtime().type == "claude-code" and (
+            (launch is not None and launch.consult) or
+            (whole_process and any(flag in command for flag in ("--resume", "--continue", "--fork-session"))))
         self._task_id = task_id or None
         self._command = command
         self._cwd = cwd
@@ -1415,10 +1432,17 @@ class ClaudeRunRecorder:
         # What the run spent so far at its provider's prices, from its usage events, against its per-run cap;
         # None when its runtime's own figure is its cost.
         self._spend: RunSpend | None = None
-        if launch is not None and launch.price is not None:
+        price = launch.price if launch is not None else None
+        if self._inherited_session and price is None:
+            from .runtimes.pricing import pricer
+
+            price = pricer(launch.settings.resolved_model, catalog=launch.settings.pricing_catalog) \
+                if launch is not None else pricer(self._provider())
+        if price is not None:
             from .runtimes.pricing import RunSpend
 
-            self._spend = RunSpend(launch.price, launch.model, launch.max_budget_usd)
+            self._spend = RunSpend(price, launch.model if launch is not None else "",
+                                   launch.max_budget_usd if launch is not None else None)
 
     @classmethod
     async def resume(
@@ -1621,7 +1645,8 @@ class ClaudeRunRecorder:
         outcome: str | None = None,
         status: RecordStatus | None = None,
     ) -> None:
-        """Close the record with the run's own ``usage``; without one, all the result reports is the run's.
+        """Close with the run's own ``usage``, or its result totals for a fresh process.
+        A whole process inheriting a Claude session uses only its streamed request usage.
         ``outcome`` is how a Worker's report or a Reviewer's verdict read (``worker.RunOutcome``); ``status``,
         when given, replaces the one its result gives (``ended_by``, for a run that was stopped). The tool calls
         the runtime refused (``RuntimeAdapter.permission_denials``) are kept as ``permission_denials``.
@@ -1639,7 +1664,10 @@ class ClaudeRunRecorder:
         await self._after_run()
         result = result_event or {}
         succeeded = error is None and result.get("subtype") == "success" and not result.get("is_error")
-        if usage is None:
+        if self._inherited_session:
+            # Never fill missing fields from a result that includes another run's history.
+            usage = self._usage_so_far
+        elif usage is None:
             usage = run_usage(result_event, price=self._launch.price if self._launch is not None else None)
         if result_event is None or result.get(SOFT_CAP) or result.get(USER_STOP):
             # No result reported the run's spend: what its usage events add up to is what is known.
@@ -1675,7 +1703,7 @@ class ClaudeRunRecorder:
 
     async def end_left_open(self, exc: BaseException | None = None, *, output_text: str | None = None) -> None:
         """Close the record if the run left it open, ended as ``ended_by(exc)`` says, with what the run's usage
-        events added up to, or, for a whole process whose result came, what that result reports; nothing for a
+        events added up to, or, for a fresh whole process whose result came, what that result reports; nothing for a
         record closed already. ``output_text`` retains what the owner handled before being interrupted."""
         if self._detached:
             return
@@ -1689,7 +1717,7 @@ class ClaudeRunRecorder:
         else:
             why = "the run ended without its outcome recorded"
         usage = self._usage_so_far
-        if self._result is not None:
+        if self._result is not None and not self._inherited_session:
             usage = run_usage(self._result, price=self._launch.price if self._launch is not None else None) \
                 .filled_from(usage)
         await self._close(ended_by(exc), output_text=output_text, session_id=(self._result or {}).get("session_id"),
@@ -1712,6 +1740,10 @@ class ClaudeRunRecorder:
         release(self._record_id, end_route=self._whole_process)
         try:
             cost = self._runtime().cost(usage, self._provider())
+            if self._inherited_session:
+                from .runtimes import CostSource
+
+                cost = replace(cost, source=CostSource.PROVIDER_PRICE)
             usage = cost.usage
             if self._model_reported:
                 metadata = {"model_reported": self._model_reported, **(metadata or {})}

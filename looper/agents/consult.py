@@ -433,7 +433,8 @@ class ConsultService:
                 raise _Failed(FallbackReason.BUDGET, f"it reached its spend cap of {budget:g} USD (room_consult_budget_usd)")
             if (failure := _unsuccessful(result)) is not None:
                 raise _Failed(FallbackReason.CONTRACT, failure)
-            if cost is None and isinstance(result.get("total_cost_usd"), (int, float)):
+            # Claude's fork result includes earlier runs; only its own recorded cost can check this cap.
+            if cost is None and runtime.type != "claude-code" and isinstance(result.get("total_cost_usd"), (int, float)):
                 cost = float(result["total_cost_usd"])
             if cost is None:
                 raise _Failed(FallbackReason.BUDGET, f"its cost is unknown, so its cap of {budget:g} USD "
