@@ -4742,11 +4742,21 @@ class PlannerAgent:
     def _decision_message(
         self, plan: TaskPlan, step: PlanStep, context: DecisionContext, report: list[str],
     ) -> str:
+        from .planner_protocol import ADJUDICATED_ACCEPT, ADJUDICATION_RULES
+        from .review_adjudication import can_accept
         who = "Reviewer" if context.result is ResultKind.REVIEW else "Worker"
+        adjudicated_accept = (
+            bool((self._workflow or {}).get("adjudication")) and context.result is ResultKind.REVIEW
+            and not context.succeeded and step.accept_when is not None
+            and Decision.ACCEPT in replace(context, succeeded=True).allowed() and can_accept(plan, step)
+        )
+        choices = replace(context, succeeded=True).allowed() if adjudicated_accept else context.allowed()
         allowed = []
-        for decision in context.allowed():
+        for decision in choices:
             if decision is Decision.RETRY:
                 allowed.append(f"retry ({context.max_retries - context.retries} left)")
+            elif decision is Decision.ACCEPT and adjudicated_accept:
+                allowed.append(ADJUDICATED_ACCEPT)
             else:
                 allowed.append(decision.value)
         lines = [
@@ -4764,6 +4774,8 @@ class PlannerAgent:
         if step.accept_when is not None and context.result is ResultKind.REVIEW:
             lines += ["", "Suggestions do not block acceptance. For each suggestion, take or decline it and record "
                       "the choice and reason in summary (or retry feedback / replan reason)."]
+        if adjudicated_accept:
+            lines += ["", ADJUDICATION_RULES]
         if context.escalate:
             lines += ["", "Escalation required: retries are exhausted and this result cannot be accepted. "
                       "Only replan or fail is allowed. A replan must add a new user gate in this reply; "

@@ -5,11 +5,23 @@ from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 from .planner_protocol import ProtocolError
-from .review_panel import blocking
+from .review_panel import State, blocking, state
 
 
 if TYPE_CHECKING:
     from .planner import PlanStep, TaskPlan
+
+
+def can_accept(plan: TaskPlan, target: PlanStep) -> bool:
+    """Whether downgrading eligible findings alone can satisfy acceptance, without changing the plan."""
+    proposals = [
+        {"member": seat.role or "builtin", "finding": index, "level": "suggestion", "reason": "Eligibility check only"}
+        for seat in plan.steps if seat.reviews == target.step_id and seat.status == "verified"
+        and not (seat.result or {}).get("refused") and not (seat.result or {}).get("failure")
+        for index, finding in enumerate((seat.result or {}).get("findings", []))
+        if finding.get("severity") == "blocking"
+    ]
+    return bool(proposals) and state(plan, target, adjudicate(plan, target, proposals)) is State.SATISFIED
 
 
 def adjudicate(plan: TaskPlan, target: PlanStep, proposals: Any) -> dict[str, dict[str, Any]]:

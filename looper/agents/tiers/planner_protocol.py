@@ -1664,6 +1664,18 @@ _CONDITION_RULES = """- ready_when (optional on work, gate and wait steps): a de
 """
 
 
+ADJUDICATED_ACCEPT = "accept (downgrade named blocking findings to suggestions with a reason each, then accept)"
+ADJUDICATION_RULES = (
+    'On a REVIEW decision only, you may downgrade named blocking findings to suggestions with a reason each, then accept: '
+    '{"decision": "accept", "adjudications": '
+    '[{"member": "review_a", "finding": 0, "level": "suggestion", "reason": "..."}]}. '
+    'member names a review seat; finding is a zero-based index of an existing blocking finding in this round; '
+    'level must be "suggestion"; reason must be nonempty and at most 500 characters. '
+    'Accept only if the resulting acceptance condition passes. A failed review cannot be accepted without '
+    'the necessary adjudications in the same reply. Include "final" when this decision completes the task.'
+)
+
+
 def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = False, gates: bool = False,
                    room: bool = False, wait_commands: bool = False, wait_limits: WaitLimits = WaitLimits(),
                    conditions: bool = False, workflow_roles: bool = False, review_panel: bool = False, adjudication: bool = False) -> str:
@@ -1689,10 +1701,7 @@ def reply_contract(max_retries: int = DEFAULT_STEP_RETRIES, *, roles: bool = Fal
     if review_panel:
         contract += "\nThe workflow fixes the review panel. Do not write review_roles, review steps or accept_when."
     if adjudication:
-        contract += ('\nOn a REVIEW decision only, you may give adjudications: '
-                     '[{"member": "review_a", "finding": 0, "level": "suggestion", "reason": "..."}]. '
-                     'finding is a zero-based index of an existing blocking finding in this round; reason must be '
-                     'nonempty and at most 500 characters. Accept only if the resulting acceptance condition passes.')
+        contract += "\n" + ADJUDICATION_RULES
     return contract
 
 

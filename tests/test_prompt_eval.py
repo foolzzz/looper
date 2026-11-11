@@ -705,6 +705,29 @@ def _result(text: str) -> list[dict[str, Any]]:
     return [{"seq": 1, "event": {"type": "result", "subtype": "success", "result": text}}]
 
 
+@pytest.mark.parametrize("case", ["accept", "retry", "bare", "no-offer", "no-journal", "empty-reason"])
+def test_panel_adjudicate_requires_offered_accept_and_journaled_downgrade(case):
+    from looper.agents.tiers.planner_protocol import ADJUDICATED_ACCEPT
+    from tests.test_planner_agent import decide
+
+    task = task_list.select(["panel_adjudicate"])[0]
+    proposal = {**task.fake["panel_adjudications"][0]}
+    if case == "empty-reason":
+        proposal["reason"] = " "
+    detail = {"steps": [{"id": "s1", "kind": "work", "accept_when": {"all_of": ["a", "b"]}},
+                        {"id": "a", "kind": "review", "reviews": "s1", "role_key": "review_a"},
+                        {"id": "b", "kind": "review", "reviews": "s1", "role_key": "review_b"}],
+              "journal": [] if case == "no-journal" else [
+                  {"kind": "review_adjudicated", "summary": json.dumps(proposal)}]}
+    output = decide("retry", feedback="Please check again") if case == "retry" else decide(
+        "accept", **({} if case == "bare" else {"adjudications": [proposal]}))
+    records = [{**_record(1, "planner-task", input_text="" if case == "no-offer" else
+                        f"[DECISION]\nAllowed decisions now: {ADJUDICATED_ACCEPT}, retry, replan, fail."),
+                "output_text": output}]
+    assert (task.flow_check(detail, records, {}) is None) == (case == "accept")
+    assert task.expect["max_retries"] == 0
+
+
 def test_task_metrics_preserve_actual_runtime_and_unknown_usage(tmp_path):
     record = _record(1, "planner-task")
     record.update(session_id="session", metadata={
