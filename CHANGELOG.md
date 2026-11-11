@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.139] - 2026-11-11
+
+### Changed
+
+- **A Grok Planner gets the full plan view.** ([#1244](https://github.com/foolzzz/looper/pull/1244))
+  - A Grok session cannot report compaction on its ACP resident path, so the Planner treats a `grok` runtime as one without compaction events and sends the full plan and progress every turn. Other runtimes do not change.
+  - Model-visible: a Grok Planner's turn messages carry the full view.
+- **Workflow delivery: the completion keeps its open issues, reviews are listed once, notices are not repeated.** ([#1238](https://github.com/foolzzz/looper/pull/1238))
+  - A web-thread completion over 2000 characters clips the middle, keeps the last 600 characters and states the omission. An identical consecutive progress notice is not posted twice to the same thread.
+  - The Process record lists each review seat's verdict once per round and renders line by line; the Lark notice and the web Markdown view show agent text in it literally.
+  - Model-visible: the Planner's "Progress and findings" shows review rounds as compact lines, rounds counted from 1.
+
 ## [2.14.138] - 2026-11-11
 
 ### Changed
