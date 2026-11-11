@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from enum import Enum
 from typing import Any, Iterable, Mapping, TYPE_CHECKING
 
@@ -29,6 +30,10 @@ def _data(entry: JournalEntry) -> Mapping[str, Any]:
     except (TypeError, ValueError):
         return {}
     return value if isinstance(value, Mapping) else {}
+
+
+def _markdown(value: str) -> str:
+    return re.sub(r'([\\`*_~\[\]<>])', r'\\\1', value)
 
 
 def _verdict(member: str, result: Mapping[str, Any] | None, status: str = '', *, details: bool = True) -> str:
@@ -118,6 +123,7 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
     reviews, verification, escalations = (sections[name] for name in ('Reviews', 'Verification', 'Escalations'))
     reviewed: set[str] = set()
     rounds: dict[str, int] = {}
+    review_positions: dict[tuple[str, int, str], int] = {}
     for entry in journal:
         data, label = _data(entry), _line(entry.step)
         if entry.kind is JournalKind.PROFILE_FALLBACK:
@@ -132,7 +138,11 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
                 wrapped = isinstance(seat, Mapping) and 'result' in seat
                 verdict = _verdict(member, seat.get('result') if wrapped else seat,
                                    seat.get('status', '') if wrapped else '')
-                reviews.append(f'- {label} 第 {round_no} 轮 / {verdict}')
+                review_key = (entry.step_id, round_no, member)
+                if review_key not in review_positions:
+                    review_positions[review_key] = len(reviews)
+                    reviews.append('')
+                reviews[review_positions[review_key]] = f'- {label} 第 {round_no} 轮 / {verdict}'
                 result = seat.get('result') if wrapped else seat
                 key = f'{entry.step_id}/{member}'
                 _remember_outcome(summary_reviews, key,
@@ -253,7 +263,8 @@ def process_record_text(record: Mapping[str, Any], max_chars: int = PROCESS_RECO
     parts = ["## Process record"]
     omitted = record.get("omitted", 0)
     for name in SECTIONS:
-        kept, dropped = _fit_entries(sections.get(name, []), budget, "\n")
+        items = ['- ' + _markdown(item.removeprefix('- ')) for item in sections.get(name, [])]
+        kept, dropped = _fit_entries(items, budget, "\n")
         omitted += dropped
         parts.append(f"### {name}" + ("\n" + "\n".join(kept) if kept else ""))
     parts.extend((safety, f'已省略 {omitted} 条记录。'))
@@ -265,15 +276,15 @@ def _summary_text(sections: Mapping[str, list[str]]) -> str:
     pointer = "Full record: task page / looper_tasks get"
     total = sum(map(len, sections.values()))
     marker = f'（另 {total} 条，完整记录见下）'
-    reserved = len("## Process record\n" + pointer) + sum(len(name) + 3 + len(marker) for name in names)
+    reserved = len("## Process record\n\n\n\n" + pointer) + sum(len(name) + 5 + len(marker) for name in names)
     budget = (PROCESS_RECORD_SUMMARY_MAX_CHARS - reserved) // len(names)
-    lines = ["## Process record"]
+    lines = ["## Process record", ""]
     for name in names:
-        items = sections.get(name, [])
+        items = [_markdown(item) for item in sections.get(name, [])]
         kept, omitted = _fit_entries(items, budget, "; ")
         value = "; ".join(kept) or ("未记录" if not omitted else "详见完整记录")
-        lines.append(f'{name}: {value}' + (f'（另 {omitted} 条，完整记录见下）' if omitted else ''))
-    return "\n".join([*lines, pointer])
+        lines.append(f'- {name}: {value}' + (f'（另 {omitted} 条，完整记录见下）' if omitted else ''))
+    return "\n".join([*lines, '', pointer])
 
 
 def process_record_summary(record: Mapping[str, Any]) -> str:

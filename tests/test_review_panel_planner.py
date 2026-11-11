@@ -20,13 +20,13 @@ PANEL = {"key": "panel", "name": "Review panel", "review_panel": {
 BLOCK = {"passed": False, "summary": "Needs a fix", "findings": [
     {"severity": "blocking", "where": "calc.py:4", "text": "Handle empty input"}]}
 PASSED_PANEL_SUMMARY = (
-    "## Process record\n"
-    "Roles: 未记录\n"
-    "Reviews: s1 第 1 轮 / s1/review_c: 通过, 0 blocking; "
-    "s1 第 1 轮 / s1/review_b: 通过, 0 blocking; "
-    "s1 第 1 轮 / s1/review_a: 通过, 0 blocking\n"
-    "Verification: 未记录\n"
-    "Escalations: 未记录\n"
+    "## Process record\n\n"
+    "- Roles: 未记录\n"
+    "- Reviews: s1 第 1 轮 / s1/review\\_c: 通过, 0 blocking; "
+    "s1 第 1 轮 / s1/review\\_b: 通过, 0 blocking; "
+    "s1 第 1 轮 / s1/review\\_a: 通过, 0 blocking\n"
+    "- Verification: 未记录\n"
+    "- Escalations: 未记录\n\n"
     "Full record: task page / looper_tasks get"
 )
 
@@ -44,6 +44,26 @@ def configure(agent_db: Any, monkeypatch: pytest.MonkeyPatch, **changes: Any) ->
 
 def held_reviews(envelope):
     return None if envelope.message_type == MessageType.VERIFY_REQUEST else WORK_OK
+
+
+def test_decision_prompt_lists_compact_readable_review_rounds_once(planner_claude, agent_db, monkeypatch):
+    configure(agent_db, monkeypatch, review_panel={'members': MEMBERS, 'accept_when': {'all_of': MEMBERS}})
+    claude = planner_claude(plan(step('s1', review=True)), decide('review'), decide('accept'))
+
+    async def scenario(h):
+        await h.start()
+        await h.until(lambda: len(h.reviews) == 3)
+        for _ in MEMBERS:
+            await h.release({**REVIEW_PASS, 'summary': '边界检查通过 ' + '说明' * 300})
+        await h.finished()
+        prompt = claude.turns()[-1]['text']
+        section = prompt.split('Review rounds:', 1)[1].split('\n\n', 1)[0]
+        for member in MEMBERS:
+            assert section.count(f'round 1 · s1/{member} · passed · 0 blocking: 边界检查通过') == 1
+        assert 'round 0' not in section and '"round"' not in section and r'\u' not in section
+        assert '…' in section and len(section) < 1200
+
+    drive(claude, held_reviews, scenario)
 
 
 def test_required_reviews_release_accept_before_advisory_but_delivery_waits(

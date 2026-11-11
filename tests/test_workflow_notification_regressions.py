@@ -72,6 +72,33 @@ def test_web_phase_notice_uses_task_origin_thread(agent_db, tmp_path):
     asyncio.run(run())
 
 
+def test_progress_notices_deduplicate_only_within_the_same_task_and_thread(agent_db, tmp_path):
+    async def run():
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+        text = '进度更新: 0/2 完成, 1 执行中'
+        changed = '进度更新: 1/2 完成, 1 执行中'
+        try:
+            for task_id, thread, summary in [('task-a', 'chat-a', text), ('task-a', 'chat-a', text),
+                    ('task-b', 'chat-a', text), ('task-a', 'chat-b', text),
+                    ('task-a', 'chat-a', changed), ('task-a', 'chat-a', text)]:
+                await manager._handle_goal_status(MessageEnvelope.create(
+                    source=TASK_ROUTER_ADDRESS, target=manager.agent_address,
+                    message_type=MessageType.GOAL_STATUS,
+                    payload={'task_id': task_id, 'status': 'executing', 'summary': summary},
+                    metadata={'origin_channel_id': 'channel-web', 'origin_thread': thread}))
+            queue = bus.get_queue('channel-web')
+            messages = [queue.get_nowait().payload for _ in range(queue.qsize())]
+            assert messages == [{'text': value, 'chat_session_id': thread} for value, thread in
+                [(text, 'chat-a'), (text, 'chat-a'), (text, 'chat-b'), (changed, 'chat-a'), (text, 'chat-a')]]
+        finally:
+            await manager.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
 @pytest.mark.parametrize("event,data,expected", [
     (Phase.PLAN_CREATED, {"workflow": {}, "steps": [SimpleNamespace(label="s1", instruction=
         "First\n\t  second " + "completeword " * 10)]}, "First second completeword completeword completeword…"),

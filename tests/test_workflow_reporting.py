@@ -119,7 +119,8 @@ def test_web_completion_keeps_result_clip_and_separate_workflow_summary(tmp_path
     from looper.agents.workflow_reporting import process_record_summary, process_record
 
     delivery = process_record_summary(process_record(TaskPlan('plan', 'goal', 'Deliver', ''), [], [])) if workflow else ''
-    body = 'Result ' * (400 if long else 1)
+    tail = '\n\n## Verification\nChecks passed.\n\n## Open issues\nOne boundary still needs review.'
+    body = 'Result ' + 'x' * (5000 - len('Result ') - len(tail)) + tail if long else 'Result'
     appendix = '\n\n' + delivery if workflow else ''
 
     async def scenario():
@@ -139,7 +140,21 @@ def test_web_completion_keeps_result_clip_and_separate_workflow_summary(tmp_path
             await bus.shutdown()
 
     text = asyncio.run(scenario())
-    assert text.endswith(body[:2000] + appendix)
+    if workflow:
+        assert text.endswith(appendix)
+    if long:
+        result = text.split('：', 1)[1].removesuffix(appendix) if appendix else text.split('：', 1)[1]
+        import re
+        marker = re.search(r'\n… \((\d+) characters omitted; full result on the task page\)\n', result)
+        assert marker is not None
+        head, end = result[:marker.start()], result[marker.end():]
+        assert body.startswith(head) and body.endswith(end)
+        assert len(head) > 0 and len(end) >= 600
+        assert int(marker[1]) == len(body) - len(head) - len(end)
+        assert len(result) <= 2000 and result.endswith(tail)
+    else:
+        assert text.endswith(body + appendix)
+        assert 'characters omitted' not in text
     assert text.count('## Process record') == int(workflow)
 
 
@@ -233,11 +248,11 @@ def test_delivery_keeps_first_seats_late_result_before_earlier_quorum_passes(
         await h.until(lambda: h.planner._plan.steps[0].status == 'verified')
         await h.answer(first, BLOCK if blocking else REVIEW_PASS)
         final = await h.finished()
-        reviews = final.payload['delivery_summary'].splitlines()[2]
-        assert reviews.startswith(f'Reviews: {label} 第 1 轮 / {label}/review_a: ')
+        reviews = final.payload['delivery_summary'].splitlines()[3]
+        assert reviews.startswith(rf'- Reviews: {label} 第 1 轮 / {label}/review\_a: ')
         assert ('失败, 1 blocking' if blocking else '通过, 0 blocking') in reviews
         latest, earlier = ('b', 'c') if reverse_passes else ('c', 'b')
-        assert f'{label}/review_{latest}: 通过' in reviews and f'{label}/review_{earlier}:' not in reviews
+        assert rf'{label}/review\_{latest}: 通过' in reviews and rf'{label}/review\_{earlier}:' not in reviews
         assert '另 1 条' in reviews
         assert len(final.payload['delivery_summary']) <= 1200
 

@@ -67,8 +67,9 @@ knowledge when they arrive.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -245,11 +246,45 @@ def merged_learnings(*groups: Iterable[str]) -> tuple[str, ...]:
 
 
 def _entry_text(entry: JournalEntry) -> str:
+    if entry.kind is JournalKind.REVIEW_ROUND:
+        data = json.loads(entry.summary)
+        lines = []
+        for member, seat in data.get('reviews', {}).items():
+            wrapped = isinstance(seat, Mapping) and 'result' in seat
+            result = (seat.get('result') if wrapped else seat) or {}
+            count = sum(f.get('severity') == 'blocking' if isinstance(f, Mapping)
+                        else isinstance(f, str) and result.get('passed') is not True
+                        for f in result.get('findings') or [])
+            outcome = ('passed_by_adjudication' if result.get('status') == 'passed_by_adjudication' else
+                       'passed' if result.get('passed') is True and not count else 'failed') if result else (
+                       seat.get('status', 'pending') if wrapped else 'pending')
+            lines.append(f'- {entry.step} / round {data.get("round", 0) + 1} · {member} · {outcome} · '
+                         f'{count} blocking: {clip(result.get("summary") or result.get("failure"), 160)}')
+        if data.get('stale'):
+            lines.append(f'- {entry.step} / round {data.get("round", 0) + 1} · stale: '
+                         + ', '.join(data['stale']))
+        return '\n'.join(lines)
     limit = SECTION_DETAIL_MAX_CHARS if entry.kind in _DETAILED else SECTION_SUMMARY_MAX_CHARS
     summary = clip(entry.summary, limit) or "(no summary)"
     lines = [f"- {entry.step}: {summary}" if entry.step else f"- {summary}"]
     lines += [f"  - {item}" for item in entry.learnings]
     return "\n".join(lines)
+
+
+def review_rounds(entries: Sequence[JournalEntry]) -> list[JournalEntry]:
+    """Project arrivals and snapshots into one latest verdict per step, round and seat."""
+    rounds: dict[tuple[str, int], tuple[JournalEntry, dict[str, Any]]] = {}
+    for entry in entries:
+        if entry.kind is not JournalKind.REVIEW_ROUND:
+            continue
+        data = json.loads(entry.summary)
+        key = (entry.step_id, data.get('round', 0))
+        if key in rounds:
+            _, previous = rounds[key]
+            data = {**previous, **data, 'reviews': {**previous.get('reviews', {}), **data.get('reviews', {})}}
+        rounds[key] = entry, data
+    return [replace(entry, summary=json.dumps(data, ensure_ascii=False))
+            for entry, data in sorted(rounds.values(), key=lambda item: item[1].get('round', 0))]
 
 
 def _supplement_text(entry: JournalEntry) -> str:
@@ -291,7 +326,10 @@ def _by_kind(title: str, order: Sequence[JournalEntry], max_chars: int, kinds: S
     kept, omitted = _pack(order, budget)
     lines = [_omitted(title, omitted, noun)]
     for kind in kinds:
-        entries = [_entry_text(entry) for at, entry in enumerate(order) if at in kept and entry.kind is kind]
+        selected = [entry for at, entry in enumerate(order) if at in kept and entry.kind is kind]
+        if kind is JournalKind.REVIEW_ROUND:
+            selected.sort(key=lambda entry: json.loads(entry.summary).get('round', 0))
+        entries = [_entry_text(entry) for entry in selected]
         if entries:
             lines += [f"{_HEADINGS[kind]}:", *entries]
     return lines
@@ -340,6 +378,7 @@ def supplement_texts(entries: Sequence[JournalEntry]) -> list[str]:
 def planner_section(entries: Sequence[JournalEntry]) -> list[str]:
     """What the Planner's DECISION, SUPERVISE and CHAT turns get of the journal: the user's instructions, then
     "Progress and findings"; nothing when the journal has neither."""
+    entries = [e for e in entries if e.kind is not JournalKind.REVIEW_ROUND] + review_rounds(entries)
     lines = supplements(
         entries, title="Supplements (what the user added to the task while it ran, oldest first; each stands "
                        "unless a later one changes it)")
