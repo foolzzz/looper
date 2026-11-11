@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import re
 from enum import Enum
 from typing import Any, Iterable, Mapping, TYPE_CHECKING
 
@@ -30,10 +29,6 @@ def _data(entry: JournalEntry) -> Mapping[str, Any]:
     except (TypeError, ValueError):
         return {}
     return value if isinstance(value, Mapping) else {}
-
-
-def _markdown(value: str) -> str:
-    return re.sub(r'([\\`*_~\[\]<>])', r'\\\1', value)
 
 
 def _verdict(member: str, result: Mapping[str, Any] | None, status: str = '', *, details: bool = True) -> str:
@@ -263,7 +258,7 @@ def process_record_text(record: Mapping[str, Any], max_chars: int = PROCESS_RECO
     parts = ["## Process record"]
     omitted = record.get("omitted", 0)
     for name in SECTIONS:
-        items = ['- ' + _markdown(item.removeprefix('- ')) for item in sections.get(name, [])]
+        items = ['- ' + item.removeprefix('- ') for item in sections.get(name, [])]
         kept, dropped = _fit_entries(items, budget, "\n")
         omitted += dropped
         parts.append(f"### {name}" + ("\n" + "\n".join(kept) if kept else ""))
@@ -280,7 +275,7 @@ def _summary_text(sections: Mapping[str, list[str]]) -> str:
     budget = (PROCESS_RECORD_SUMMARY_MAX_CHARS - reserved) // len(names)
     lines = ["## Process record", ""]
     for name in names:
-        items = [_markdown(item) for item in sections.get(name, [])]
+        items = sections.get(name, [])
         kept, omitted = _fit_entries(items, budget, "; ")
         value = "; ".join(kept) or ("未记录" if not omitted else "详见完整记录")
         lines.append(f'- {name}: {value}' + (f'（另 {omitted} 条，完整记录见下）' if omitted else ''))

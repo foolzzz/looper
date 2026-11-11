@@ -88,7 +88,7 @@ def test_workflow_record_is_persisted_by_serve(monkeypatch):
                 manager_view = api.post('/api/v1/ops/tasks/get', {'task_id': task['task_id']})['result']
                 assert manager_view['process_record'] == result
                 assert '报告模型 stand-in' in result
-                for text in ('dev', r'review\_a', 'codex', '请求模型', '报告模型', '第 1 轮', '0 blocking',
+                for text in ('dev', 'review_a', 'codex', '请求模型', '报告模型', '第 1 轮', '0 blocking',
                              'Remote-environment safety (read-only / dry run) is not enforced by Looper'):
                     assert text in result
                 assert not any(str(path) in result for path in (root, home, work))

@@ -22,9 +22,9 @@ BLOCK = {"passed": False, "summary": "Needs a fix", "findings": [
 PASSED_PANEL_SUMMARY = (
     "## Process record\n\n"
     "- Roles: 未记录\n"
-    "- Reviews: s1 第 1 轮 / s1/review\\_c: 通过, 0 blocking; "
-    "s1 第 1 轮 / s1/review\\_b: 通过, 0 blocking; "
-    "s1 第 1 轮 / s1/review\\_a: 通过, 0 blocking\n"
+    "- Reviews: s1 第 1 轮 / s1/review_c: 通过, 0 blocking; "
+    "s1 第 1 轮 / s1/review_b: 通过, 0 blocking; "
+    "s1 第 1 轮 / s1/review_a: 通过, 0 blocking\n"
     "- Verification: 未记录\n"
     "- Escalations: 未记录\n\n"
     "Full record: task page / looper_tasks get"

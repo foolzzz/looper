@@ -258,8 +258,9 @@ def _entry_text(entry: JournalEntry) -> str:
             outcome = ('passed_by_adjudication' if result.get('status') == 'passed_by_adjudication' else
                        'passed' if result.get('passed') is True and not count else 'failed') if result else (
                        seat.get('status', 'pending') if wrapped else 'pending')
+            summary = clip(result.get('summary') or result.get('failure'), 160)
             lines.append(f'- {entry.step} / round {data.get("round", 0) + 1} · {member} · {outcome} · '
-                         f'{count} blocking: {clip(result.get("summary") or result.get("failure"), 160)}')
+                         f'{count} blocking' + (f': {summary}' if summary else ''))
         if data.get('stale'):
             lines.append(f'- {entry.step} / round {data.get("round", 0) + 1} · stale: '
                          + ', '.join(data['stale']))
@@ -328,7 +329,7 @@ def _by_kind(title: str, order: Sequence[JournalEntry], max_chars: int, kinds: S
     for kind in kinds:
         selected = [entry for at, entry in enumerate(order) if at in kept and entry.kind is kind]
         if kind is JournalKind.REVIEW_ROUND:
-            selected.sort(key=lambda entry: json.loads(entry.summary).get('round', 0))
+            selected.sort(key=lambda entry: json.loads(entry.summary).get('round', 0), reverse=True)
         entries = [_entry_text(entry) for entry in selected]
         if entries:
             lines += [f"{_HEADINGS[kind]}:", *entries]
