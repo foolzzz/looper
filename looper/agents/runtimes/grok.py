@@ -124,6 +124,7 @@ class GrokRuntime(RuntimeAdapter):
     label = "Grok"
     default_executable = "grok"
     # Headless Grok: one process per turn, resumed; MCP; compaction events; its cost, once a run ends.
+    # COMPACTION_EVENTS describes the headless stream; ACP resident sessions do not report compaction.
     capabilities = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capability.RESUME, Capability.MCP,
                               Capability.COMPACTION_EVENTS, Capability.COST_REPORT})
     # Its login's models answer on the Responses API (Grok's model catalog, api_backend "responses").

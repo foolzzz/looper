@@ -197,6 +197,11 @@ def _tokens(uncached: int, output: int, cached: int) -> Usage:
     return Usage(input_tokens=uncached, output_tokens=output, cache_read_tokens=cached, cache_creation_tokens=0)
 
 
+def test_headless_compaction_events_pass_through() -> None:
+    event = {"type": "system", "subtype": "compact_boundary", "compact_metadata": {"trigger": "auto"}}
+    assert GrokStream().translate(event) == [event]
+
+
 def test_a_turn_is_init_its_reply_and_a_result_with_groks_cost() -> None:
     events = _events("turn")
     init = events[0]

@@ -4104,9 +4104,11 @@ class PlannerAgent:
             suffix = f" ({', '.join(details)})" if details else ""
             await self._activity("phase", f"Planner {process.launch.runtime.label} started{suffix}")
 
+        # Grok reports compaction in its headless stream only; its ACP resident path has no verified
+        # compaction signal. Keep unchanged steps in every turn, including after a silent compaction.
         full_reason = ("new session" if brief else "new process" if started_process else
-                       "no compaction events" if Capability.COMPACTION_EVENTS not in
-                       process.launch.runtime.capabilities else None)
+                       "no compaction events" if process.launch.runtime.type == "grok" or
+                       Capability.COMPACTION_EVENTS not in process.launch.runtime.capabilities else None)
         text, annotation = self._render_plan_message(plan, message, full_reason=full_reason)
         try:
             return await self._exchange(f"{brief}\n\n{text}" if brief else text, process,
