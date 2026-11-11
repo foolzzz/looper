@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.127] - 2026-11-10
+
+### Fixed
+
+- **Review panel edge cases: force-added files, continue after the spend cap, checkout errors.** ([#1206](https://github.com/foolzzz/looper/pull/1206), issue #1190)
+  - Only for tasks with a review panel. The review snapshot includes files added with `git add -f` under ignored paths, and keeps staged new files that were removed from disk.
+  - Continuing after the spend cap keeps the round's original review snapshot instead of freezing a new one, so the remaining reviews no longer report `head_moved`.
+  - A git error while freezing the snapshot (for example a detached HEAD, a merge in progress or an oversized checkout in shared mode) or while opening a seat's checkout opens a gate "Restore the checkout for review of ...", keeps the finished work and no longer fails the step; a verdict cannot bypass an open gate. Tasks without a panel are unchanged.
+
 ## [2.14.126] - 2026-11-10
 
 ### Added
