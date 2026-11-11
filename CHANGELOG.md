@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.128] - 2026-11-10
+
+### Added
+
+- **A native `coco` runtime for Workers and Reviewers.** ([#1213](https://github.com/foolzzz/looper/pull/1213))
+  - New runtime type `coco` (Coco, the TRAE CLI; `rt-coco` when `coco` is on the PATH), paired only with the `coco login` provider; it runs in a private `TRAE_HOME` linking the operator's login without reading it. Workers' commits keep coco's `Co-authored-by: TRAE CLI` trailer (`commit_attribution: trae` in the run record).
+  - Refused before the process starts: a missing login, a model the machine lacks, an effort level, and the Manager, Planner, steering and consult. Coco runs report no model and are unpriced; the recording proxy marks them `not_covered`.
+  - The coco login probe cache is kept per executable; run `AGENTS.md` runtime notes name the runtime. Codex's behavior is unchanged.
+
 ## [2.14.127] - 2026-11-10
 
 ### Fixed
