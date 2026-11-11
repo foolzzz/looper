@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.144] - 2026-11-11
+
+### Changed
+
+- **Adjudication: a repair keeps earlier downgrades and names only what the acceptance rule needs.** ([#1255](https://github.com/foolzzz/looper/pull/1255), fixes #1253)
+  - The repair message of a refused adjudicated reply names every finding the repaired reply must downgrade, including ones the refused reply already downgraded; a repaired reply is judged on its own complete set.
+  - The offered adjudicated accept names only the findings the rule needs (`all_of`: all; `any_of`: the seat with the fewest; `k_of`: the k seats with the fewest), through the new `required_downgrades`.
+  - Model-visible: the decision message gains a "downgrading these findings suffices" line and the refusal text for a refused accept changes.
+
 ## [2.14.143] - 2026-11-11
 
 ### Changed
