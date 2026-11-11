@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.131] - 2026-11-10
+
+### Changed
+
+- **`looper_task_profile_set` refuses a choice that a task role or the task's own choice would still override, instead of reporting a change that does not apply.** ([#1220](https://github.com/foolzzz/looper/pull/1220))
+  - Before storing anything, the tool resolves the profile the next run would get, for the step and for each task role of the same agent kind in its chain. When the winning layer is `task_role` or `task`, it answers `forbidden`, names the layer and the profile, writes no choice and no `profile_choice` journal entry, and points to the dashboard (task → Roles) or a user gate. Precedence is unchanged.
+  - An accepted choice returns `next_run` from the same pre-write resolution.
+  - Model-visible: the `looper_task_profile_set` tool description and the matching Planner prompt paragraph change.
+
 ## [2.14.130] - 2026-11-10
 
 ### Changed
