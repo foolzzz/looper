@@ -25,7 +25,7 @@ def test_resume_keeps_the_record_sequence_and_original_duration(monkeypatch: pyt
                         ("touch_record", None), ("finish_record", None)):
         mocks[name] = AsyncMock(return_value=value)
         monkeypatch.setattr(llm_records, name, mocks[name])
-    launch = SimpleNamespace(price=None, model="m", max_budget_usd=None, runtime=CLAUDE_CODE,
+    launch = SimpleNamespace(price=None, model="m", max_budget_usd=None, runtime=CLAUDE_CODE, consult=False,
                              profile=SimpleNamespace(provider=BUILTIN_PROVIDER))
 
     async def run() -> None:
@@ -59,7 +59,7 @@ def test_resume_uses_the_manifest_cap_with_the_rebuilt_prices(monkeypatch: pytes
     }))
     monkeypatch.setattr(llm_records, "max_event_seq", AsyncMock(return_value=0))
     launch = SimpleNamespace(price=lambda model, usage: (usage.input_tokens or 0) / 1_000_000,
-                             model="m", max_budget_usd=10, runtime=CLAUDE_CODE)
+                             model="m", max_budget_usd=10, runtime=CLAUDE_CODE, consult=False)
 
     async def run() -> None:
         recorder = await ClaudeRunRecorder.resume(41, agent_id="worker-kept", task_id=None, command=["claude"],

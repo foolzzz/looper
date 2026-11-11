@@ -18,6 +18,8 @@ import pytest
 from looper import child_env
 from looper.agents.consult import CONSULT_CONTRACT
 from looper.agents.room import FallbackReason, RoomService
+from looper.agents.run_usage import Usage
+from looper.agents.runtimes.pricing import usage_event
 from looper.agents.runtimes.runner.protocol import ErrorCode
 from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
 from tests.db_support import DSN, run_db, until
@@ -49,15 +51,22 @@ import json, os, re, sys, time, subprocess
 from pathlib import Path
 mode = os.environ.get("CONSULT_MODE", "answer")
 fork = "11111111-1111-4111-8111-111111111111"
+def request_usage():
+    # Haiku's output price is $5/M tokens; these are this fork's own tokens.
+    if mode != "no_cost":
+        print(json.dumps({"type": "assistant", "message": {"id": "consult-request", "model": "claude-haiku-4-5",
+            "usage": {"input_tokens": 0, "output_tokens": round(float(os.environ.get("CONSULT_COST", "0.01")) * 200_000),
+                      "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}, "content": []}}), flush=True)
 if mode in ("fast_exit_child", "cancel_in_record"):
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     Path(os.environ["CHILD_PID"]).write_text(str(child.pid))
     print(json.dumps({"type": "system", "subtype": "init", "session_id": fork}), flush=True)
+    request_usage()
     text = json.dumps({"answers": [{"reply_to": int(os.environ["QUESTION_ID"]), "body": "the field is qty"}],
                        "unsure": ""})
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text,
-                      "total_cost_usd": 0.01}), flush=True)
+                      "total_cost_usd": 37.01}), flush=True)
     os._exit(0)
 if mode == "no_stdin":
     print(json.dumps({"type": "system", "subtype": "init", "session_id": fork}), flush=True)
@@ -100,7 +109,9 @@ else:
     write.write_text("written")
 result = {"type": "result", "subtype": "success", "is_error": False, "result": text, "permission_denials": denials}
 if mode != "no_cost":
-    result["total_cost_usd"] = float(os.environ.get("CONSULT_COST", "0.01"))
+    # The result includes $37 from the source session, unlike request_usage().
+    result["total_cost_usd"] = 37 + float(os.environ.get("CONSULT_COST", "0.01"))
+request_usage()
 print(json.dumps(result), flush=True)
 if mode == "wait_exit":
     os.close(1)
@@ -196,7 +207,9 @@ def test_hosted_consult_answers_from_a_fork(monkeypatch: pytest.MonkeyPatch, tmp
         question = await _question(pool, "qty?")
         handle = ScriptedRun([
             {"type": "system", "subtype": "init", "session_id": "consult-fork"},
-            {"type": "result", "subtype": "success", "total_cost_usd": 0.01,
+            usage_event("claude-haiku-4-5", Usage(input_tokens=0, output_tokens=2000,
+                                                 cache_read_tokens=0, cache_creation_tokens=0)),
+            {"type": "result", "subtype": "success", "total_cost_usd": 37.01,
              "result": json.dumps({"answers": [{"reply_to": question["id"], "body": "the field is qty"}]})},
         ])
         calls = _host_consults(monkeypatch, handle)
@@ -227,6 +240,8 @@ def test_hosted_consult_answers_from_a_fork(monkeypatch: pytest.MonkeyPatch, tmp
             assert answer["reply_to"] == question["id"] and answer["body"] == "the field is qty"
             record = await pool.fetchrow("SELECT * FROM llm_records WHERE agent_id = $1", row["consult_run"])
             assert record["status"] == "completed"
+            assert record["cost_usd"] == row["cost_usd"] == pytest.approx(0.01)
+            assert record["cost_source"] == "provider_price"
             assert json.loads(record["metadata"])["command"] == handle.command
             assert handle.launch_calls == handle.wait_calls == handle.end_calls == 1
             assert f"#{question['id']} from" in handle.prompt
@@ -272,7 +287,9 @@ def test_hosted_consult_distinguishes_unopened_fork_from_invalid_answer(
         else:
             events = [
                 {"type": "system", "subtype": "init", "session_id": "consult-fork", "model": "model"},
-                {"type": "result", "subtype": "success", "total_cost_usd": 0.01, "result": "plain prose"},
+                usage_event("claude-haiku-4-5", Usage(input_tokens=0, output_tokens=2000,
+                                                     cache_read_tokens=0, cache_creation_tokens=0)),
+                {"type": "result", "subtype": "success", "total_cost_usd": 37.01, "result": "plain prose"},
             ]
         handle = ScriptedRun(events)
         _host_consults(monkeypatch, handle)
@@ -385,16 +402,14 @@ def test_a_consult_checks_its_result_cost_when_the_recorded_cost_lookup_fails(
         try:
             question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
             row = await _settled(pool)
-            if mode == "no_cost":
-                assert (row["state"], row["fallback_reason"]) == ("failed", "budget")
-                assert "cost is unknown" in row["detail"]
-                assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE kind = 'answer'") == 0
-                escalation = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'escalation'")
-                assert escalation["reply_to"] == question["id"] and escalation["planner_pending"]
-            else:
-                assert row["state"] == "answered" and row["cost_usd"] == pytest.approx(0.01)
-                answer = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'answer'")
-                assert answer["sender_seat"] == "backend_rd@s1" and answer["reply_to"] == question["id"]
+            # A fork's result cost includes inherited history and cannot replace the failed lookup.
+            assert (row["state"], row["fallback_reason"]) == ("failed", "budget")
+            assert "cost is unknown" in row["detail"] and "answers are dropped" in row["detail"]
+            assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE kind = 'answer'") == 0
+            escalation = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'escalation'")
+            assert escalation["reply_to"] == question["id"] and escalation["planner_pending"]
+            cost = await pool.fetchval("SELECT cost_usd FROM llm_records WHERE agent_id=$1", row["consult_run"])
+            assert cost == (pytest.approx(0.01) if mode == "answer" else None)
             assert any(record.exc_info and "cost lookup failed" in str(record.exc_info[1])
                        for record in caplog.records if record.name == "looper.agents.consult")
         finally:
@@ -527,6 +542,8 @@ def test_a_question_for_a_seat_whose_run_ended_is_answered_by_a_fork_of_its_sess
         assert record["prompt"].startswith("[CONSULT] You are backend_rd@s1") and "qty or quantity?" in record["prompt"]
         run = await pool.fetchrow("SELECT agent_id, cost_usd FROM llm_records WHERE agent_id LIKE 'consult-%'")
         assert run is not None and run["agent_id"] == consult["consult_run"]
+        assert run["cost_usd"] == pytest.approx(0.01)
+        assert consult["cost_usd"] == pytest.approx(0.01)
         # The consult was a run of a Worker's kind under the task's limit, and it is gone now.
         assert not room.worker_pool._active
 
@@ -1389,7 +1406,9 @@ def test_a_consult_keeps_its_execution_bounds_and_cleans_its_children(
                 escalation = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'escalation'")
                 assert escalation["reply_to"] == question["id"] and escalation["planner_pending"]
             if mode == "over_budget":
-                assert "0.0500 USD" in row["detail"] and "answers are dropped" in row["detail"]
+                assert "reached its spend cap of 0.01 USD" in row["detail"]
+                assert await pool.fetchval("SELECT cost_usd FROM llm_records WHERE agent_id=$1",
+                                           row["consult_run"]) == pytest.approx(0.05)
             if mode in ("no_stdin", "wait_exit", "cancel_in_record"):
                 assert time.monotonic() - began < 15
             if mode == "no_result":
@@ -1508,7 +1527,9 @@ def test_queued_consult_waits_then_answers_once_after_cancel(monkeypatch: pytest
         question = await _question(pool, "qty?")
         handle = ScriptedRun([
             {"type": "system", "subtype": "init", "session_id": "consult-fork"},
-            {"type": "result", "subtype": "success", "total_cost_usd": 0.01,
+            usage_event("claude-haiku-4-5", Usage(input_tokens=0, output_tokens=2000,
+                                                 cache_read_tokens=0, cache_creation_tokens=0)),
+            {"type": "result", "subtype": "success", "total_cost_usd": 37.01,
              "result": json.dumps({"answers": [{"reply_to": question["id"], "body": "qty"}]})},
         ], hold=True)
         calls = _host_consults(monkeypatch, handle)

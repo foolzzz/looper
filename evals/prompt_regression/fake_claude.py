@@ -126,7 +126,8 @@ def _user_text(line: str) -> str:
     return str(content)
 
 
-def _answer(session_id: str, text: str, cost: float, *, writes: dict[str, str] | None = None) -> None:
+def _answer(session_id: str, text: str, cost: float, *, writes: dict[str, str] | None = None,
+            request_usage: dict[str, Any] | None = None) -> None:
     _emit({"type": "system", "subtype": "init", "session_id": session_id, "model": "fake"})
     for name, content in (writes or {}).items():
         path = os.path.join(os.getcwd(), name)
@@ -136,7 +137,7 @@ def _answer(session_id: str, text: str, cost: float, *, writes: dict[str, str] |
         _write(os.getcwd(), {name: content})
         time.sleep(0.5)  # well before the Worker that follows, as a real turn would be
     _emit({"type": "assistant", "session_id": session_id,
-           "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}})
+           "message": {"role": "assistant", "content": [{"type": "text", "text": text}], **(request_usage or {})}})
     _emit({"type": "result", "subtype": "success", "is_error": False, "result": text, "session_id": session_id,
            "total_cost_usd": round(cost, 6), "usage": {"input_tokens": 10, "output_tokens": 10}})
 
@@ -361,7 +362,10 @@ def _consult(script: dict[str, Any], stdin: _Stdin) -> None:
     prompt = _user_text(stdin.readline() or "{}")
     ids = [int(i) for i in re.findall(r"^- #(\d+) from", prompt, re.MULTILINE)]
     reply = {"answers": [{"reply_to": i, "body": script.get("consult_answer", "I do not know.")} for i in ids]}
-    _answer("fake-consult", "Here.\n" + json.dumps(reply), REVIEWER_RUN_COST)
+    _answer("fake-consult", "Here.\n" + json.dumps(reply), WORKER_RUN_COST + REVIEWER_RUN_COST,
+            request_usage={"id": "consult-request", "model": "claude-haiku-4-5",
+                           "usage": {"input_tokens": 0, "output_tokens": 200,
+                                     "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}})
 
 
 def _reviewer(script: dict[str, Any], system_prompt: str, stdin: _Stdin) -> None:
