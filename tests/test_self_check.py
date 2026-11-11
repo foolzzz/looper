@@ -241,7 +241,7 @@ def test_database_facts_classify_before_reading_required_columns(monkeypatch, pa
 
 
 @pytest.mark.parametrize(('profiles', 'problem', 'state', 'expected', 'detail'), [
-    (0, None, None, self_check.OK, 'not used'),
+    (0, None, None, self_check.SKIP, 'not checked: no Agent Profile uses the coco login'),
     (1, {'at': 'now', 'detail': 'replaced link'}, None, self_check.FAIL, 'replaced link'),
     (1, None, 'not_logged_in', self_check.FAIL, 'coco is not logged in'),
     (1, None, 'unknown', self_check.WARN, 'probe failed'),

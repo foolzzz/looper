@@ -227,7 +227,7 @@ def check_coco_login(profiles: int | None, problem: dict[str, str] | None,
         return Check("coco_login", "coco login", SKIP,
                      "not checked: the Agent Profiles are stored in PostgreSQL, which is unreachable")
     if not profiles:
-        return Check("coco_login", "coco login", OK, "not used")
+        return Check("coco_login", "coco login", SKIP, "not checked: no Agent Profile uses the coco login")
     if problem is not None:
         return Check("coco_login", "coco login", FAIL,
                      f"unavailable since {problem.get('at') or '?'}: {problem.get('detail')}", PROBLEM_FIX)

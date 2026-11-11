@@ -375,6 +375,17 @@ class ResolvedModel:
             self.provider.api_key,
         )
 
+    async def check_available_runtime(self, runtime: RuntimeSpec, effort: str | None = None) -> None:
+        """Save-time pairing check; reads use only the structural ``check_runtime`` rules."""
+        self.check_runtime(runtime, effort)
+        if runtime.type == "coco":
+            from .runtimes.coco import model_problem, native_executable
+
+            problem = await asyncio.to_thread(model_problem, self.model.name,
+                                             native_executable(runtime.executable, runtime.launcher))
+            if problem:
+                raise RegistryError(problem, field="model")
+
 
 @dataclass(frozen=True)
 class AgentProfile:
@@ -1214,9 +1225,11 @@ def _probe_executable(runtime_type: str, executable: str, server_claude: str,
     return server_claude if adapter is runtimes.CLAUDE_CODE else adapter.default_executable
 
 
-async def _warm_coco_models(executable: str) -> None:
+async def _warm_coco_models(executable: str, launcher: Launcher = Launcher.NATIVE) -> None:
     from .runtimes import coco_login
+    from .runtimes.coco import native_executable
 
+    executable = native_executable(executable, launcher)
     if await coco_login.launch_problem(executable) is None:
         await asyncio.to_thread(coco_login.available_models, executable)
 
@@ -1231,7 +1244,7 @@ async def _probe(runtime_type: str, executable: str, server_claude: str,
         # abandons the thread's real result, which is the only probe the registry should persist.
         probe = await asyncio.to_thread(adapter.probe_for, executable, launcher)
         if runtime_type == "coco":
-            await _warm_coco_models(executable)
+            await _warm_coco_models(executable, launcher)
     finally:
         name = adapter.ttadk_runtime_name if launcher is Launcher.TTADK else adapter.type
         logging.getLogger(__name__).info("probed runtime %s in %.3f s", name, time.monotonic() - started)
@@ -1253,7 +1266,7 @@ async def _detected_runtime(adapter: runtimes.RuntimeAdapter,
         # Startup skips saved probes, but the process-local model catalog is cold after a restart.
         if adapter.type == "coco":
             await _warm_coco_models(_probe_executable(adapter.type, current["executable"],
-                                                     adapter.default_executable, launcher))
+                                                     adapter.default_executable, launcher), launcher)
         return None
     probe = await _probe(adapter.type, "", adapter.default_executable, launcher)
     if adapter.in_process and probe["probe_error"]:
@@ -1448,7 +1461,8 @@ async def _check_provider_profiles(conn: Any, provider: Mapping[str, Any]) -> No
         profile = AgentProfile.from_row(row)
         try:
             model = ModelSpec.from_entry({k: row["model"][k] for k in ModelSpec.__dataclass_fields__})
-            ResolvedModel(model, spec, Endpoint.from_entry(row["endpoint"])).check_runtime(profile.runtime, profile.effort)
+            await ResolvedModel(model, spec, Endpoint.from_entry(row["endpoint"])).check_available_runtime(
+                profile.runtime, profile.effort)
             check_agent_teams(profile.runtime, profile.agent_teams)
         except RegistryError as exc:
             raise RegistryError(f"Agent Profile {profile.name!r} uses this provider: {exc}") from None
@@ -1712,7 +1726,7 @@ async def update_model(model_id: str, data: Any) -> dict[str, Any]:
                 continue
             try:
                 profile = AgentProfile.from_row(profile_row)
-                resolved.check_runtime(profile.runtime, profile.effort)
+                await resolved.check_available_runtime(profile.runtime, profile.effort)
                 check_roles(profile, await _selected_roles(profile.id, conn))
             except RegistryError as exc:
                 raise RegistryError(f"Agent Profile {profile_row['name']!r} uses this model: {exc}") from None
@@ -1809,7 +1823,7 @@ async def create_profile(data: Any, *, manager_id: str | None = None) -> dict[st
             check_profile_model(model)
             fields["agent_teams"] = (_agent_teams(data["agent_teams"]) if "agent_teams" in data
                                      else default_agent_teams(runtime))
-            model.check_runtime(runtime, fields["effort"])
+            await model.check_available_runtime(runtime, fields["effort"])
             checked = AgentProfile("draft", fields["name"], runtime, model.model.id, fields["effort"],
                                    fields["agent_teams"], fields["custom_prompt"], fields["fallback_profile_id"])
             await _check_fallbacks(conn, checked)
@@ -1876,7 +1890,7 @@ async def update_profile(profile_id: str, data: Any, *, manager_id: str | None =
                 raise RegistryConflict("Agent Profile changed concurrently: reload it before updating")
             if "agent_teams" not in fields and runtime.type != current["runtime_type"]:
                 fields["agent_teams"] = default_agent_teams(runtime)
-            model.check_runtime(runtime, fields.get("effort", current["effort"]))
+            await model.check_available_runtime(runtime, fields.get("effort", current["effort"]))
             checked = AgentProfile(profile_id, fields.get("name", current["name"]), runtime,
                                    model.model.id, fields.get("effort", current["effort"]),
                                    fields.get("agent_teams", current["agent_teams"]),

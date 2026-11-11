@@ -544,13 +544,13 @@ def _login_config(shell_home: Path, *, launcher: Launcher = Launcher.NATIVE, hom
     this home's ``auth.json`` (a link to the operator's login file), ChatGPT's apps off, and a ``CODEX_HOME``
     without the login for the agent's shell commands."""
     return [
-        "# Written by Looper for its Codex runs. Only this file, AGENTS.md and the auth.json link come from Looper.",
-        "# Codex's own login: auth.json here links to the operator's login file, never a copy.",
+        f"# Written by Looper for its {home.title} runs. Only this file, AGENTS.md and the auth.json link come from Looper.",
+        f"# {home.title}'s own login: auth.json here links to the operator's login file, never a copy.",
         home.login.CONFIG_MARKER,
         *home.top_config,
         *_instruction_lines(),
         "",
-        "# Codex's own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
+        f"# {home.title}'s own skill list always includes $HOME/.agents/skills; Looper lists the run's skills itself.",
         "[skills]",
         "include_instructions = false",
         "",
@@ -560,7 +560,7 @@ def _login_config(shell_home: Path, *, launcher: Launcher = Launcher.NATIVE, hom
         "apps = false",
         *home.features,
         "",
-        f"# The agent's shell commands get a {home.env} without the login, so a codex command there cannot use it",
+        f"# The agent's shell commands get a {home.env} without the login, so a {home.runtime} command there cannot use it",
         "# or log it out.",
         "[shell_environment_policy]",
         *(['exclude = ["TTADK_OPENAI_API_KEY"]'] if launcher is Launcher.TTADK else []),

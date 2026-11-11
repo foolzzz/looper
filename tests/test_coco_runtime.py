@@ -109,6 +109,10 @@ def test_run_uses_its_own_home_config_login_link_and_permissions(tmp_path, read_
                        *permissions, "-m", "GPT-5.5", "--ephemeral", "-"]
     text = (home / "traecli.toml").read_text()
     config = tomllib.loads(text)
+    assert "# Written by Looper for its Coco (TRAE CLI) runs." in text
+    assert "# Coco (TRAE CLI)'s own login:" in text
+    assert "# Coco (TRAE CLI)'s own skill list" in text
+    assert "so a coco command there cannot use it" in text
     assert coco_login.CONFIG_MARKER in text.splitlines()
     assert config["check_for_update_on_startup"] is False
     assert config["skills"] == {"include_instructions": False}
@@ -183,7 +187,7 @@ def test_probe_checks_only_version_in_a_disposable_home(tmp_path):
     assert not Path(recorded.read_text()).exists()
 
 
-def test_pairing_and_launch_check_the_selected_executable_catalog_without_case_sensitivity(tmp_path, monkeypatch):
+def test_only_launch_checks_the_selected_executable_catalog_without_case_sensitivity(tmp_path, monkeypatch):
     executable = fake_claude(tmp_path / "coco", (
         "import sys\nassert sys.argv[1:] == ['models', '--json']\n"
         "print('[{\"name\": \"GPT-5.5\", \"config_name\": \"gpt-5.5\"}]')\n"
@@ -195,8 +199,8 @@ def test_pairing_and_launch_check_the_selected_executable_catalog_without_case_s
         assert asyncio.run(COCO.login_problem(profile.provider, executable=executable)) is None
     profile = _launch(model="GPT-9", executable=executable).profile
     provider = profile.resolved_model.binding_provider()
-    with pytest.raises(RuntimeUnsupported, match="GPT-9.*GPT-5.5"):
-        COCO.check_pairing(provider, profile.model, executable=executable)
+    COCO.check_pairing(provider, profile.model, executable=executable)
+    assert profile.provider == provider
     assert "GPT-9" in asyncio.run(COCO.login_problem(provider, executable=executable))
 
 
@@ -216,8 +220,7 @@ def test_cold_pairing_never_starts_the_slow_catalog_probe(tmp_path):
     assert not ran.exists()
     assert coco_login.available_models(executable) == {"gpt-5.5": "GPT-5.5"}
     assert ran.exists()
-    with pytest.raises(RuntimeUnsupported, match="GPT-9.*GPT-5.5"):
-        COCO.check_pairing(provider, "GPT-9", executable=executable)
+    COCO.check_pairing(provider, "GPT-9", executable=executable)
 
 
 def test_launch_checks_a_cold_catalog_off_the_event_loop(tmp_path, monkeypatch):
