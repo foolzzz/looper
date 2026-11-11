@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.145] - 2026-11-11
+
+### Changed
+
+- **Profile fallbacks: a launch that ends without a result falls back even when TTADK exits 0.** ([#1256](https://github.com/foolzzz/looper/pull/1256))
+  - Codex, coco and Cursor Agent through TTADK fall back when they end without a result and before any model event, because TTADK's exit code is unreliable.
+  - Codex error results without a turn count qualify as launch refusals before any model event, with the native or the TTADK launcher, even at exit 0; their error text is kept, redacted and bounded to 500 characters.
+  - A native runtime that exits 0 without a result now fails early with the redacted stderr head (a native exit 0 alone does not trigger fallback); nonzero exits without a usable result carry the redacted stderr head, and TTADK keeps head and tail.
+  - Stderr fragments and fallback reasons are redacted before clipping; a reason stays within 299 characters including its prefix.
+
 ## [2.14.144] - 2026-11-11
 
 ### Changed
