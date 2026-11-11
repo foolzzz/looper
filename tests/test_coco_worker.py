@@ -133,7 +133,7 @@ def test_worker_keeps_coco_unknown_model_stderr_in_its_failure(
     _prepare(tmp_path, monkeypatch, fail=True, catalog_failure=catalog_failure)
     result = _run(tmp_path)
     assert result["status"] == "failed"
-    assert result["error"] == "Coco (TRAE CLI) exited with code 1"
+    assert result["error"] == f"Coco (TRAE CLI) exited with code 1: {MODEL_ERROR}"
     assert result["stderr"].strip() == MODEL_ERROR
 
 

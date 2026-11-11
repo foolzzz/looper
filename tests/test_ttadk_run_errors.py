@@ -64,7 +64,7 @@ def failed_ttadk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     ))
 
 
-def _assert_diagnostic(error: str, agent_db: Any) -> None:
+def _assert_diagnostic(error: str, agent_db: Any, *, activity: bool = True) -> None:
     assert SIGN_IN_ERROR in error
     assert SECRET not in error and "synthetic-api-token" not in error
     assert "model is not available" in error and "omitted" in error
@@ -73,7 +73,7 @@ def _assert_diagnostic(error: str, agent_db: Any) -> None:
     assert recorded == error
     activities = [call.kwargs["summary"] for call in agent_db.insert_activity.call_args_list
                   if call.kwargs.get("kind") == "error"]
-    assert any(SIGN_IN_ERROR in line for line in activities)
+    assert any(SIGN_IN_ERROR in line for line in activities) is activity
     assert all(SECRET not in line and "synthetic-api-token" not in line for line in activities)
 
 
@@ -90,11 +90,9 @@ def test_ttadk_step_without_result_records_sign_in_stderr(
 
     result = asyncio.run(asyncio.wait_for(run(), 8))
     assert result["status"] == "failed"
-    _assert_diagnostic(result["error"], agent_db)
+    _assert_diagnostic(result["error"], agent_db, activity=False)
     assert SECRET not in result["stderr"] and "synthetic-api-token" not in result["stderr"]
     assert len(result["stderr"]) == 1000 and result["error"].endswith(result["stderr"])
-    assert any(call.kwargs.get("summary") == result["error"]
-               for call in agent_db.insert_activity.await_args_list)
 
     agent = planner.PlannerAgent(task_id="t1", runtime_root=tmp_path / "runtime")
     step = planner.PlanStep(step_id="s1", index=0, instruction="Inspect", worker_id="w1", reviewer_id="r1",
@@ -117,6 +115,9 @@ def test_ttadk_step_without_result_records_sign_in_stderr(
         assert SIGN_IN_ERROR in text
         assert SECRET not in text and "synthetic-api-token" not in text
     assert activity["kind"] == "error"
+    _assert_diagnostic(result["error"], agent_db)
+    assert sum(SIGN_IN_ERROR in call.kwargs["summary"]
+               for call in agent_db.insert_activity.await_args_list) == 1
     if verify:
         assert step.result["verify_passed"] is False
         assert step.result["verify_summary"] == result["error"]
