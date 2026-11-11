@@ -142,7 +142,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # Verified against Claude Code 2.1.285 (claude_cli); its replies follow Looper's contracts by prompt, so no
     # structured_output.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})
-    run_input = True  # stdin stays open until the run's first result
+    run_input = True  # stdin can stay open between a Worker's waiting turns
     keepable = True
     can_interrupt = True  # its resident session's control request ``interrupt``
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})
