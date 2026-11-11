@@ -10,11 +10,12 @@ import pytest
 
 from fake_claude import fake_claude
 from looper.agents.agent_settings import AgentSettings
+from looper.agents.message import MessageEnvelope, MessageType, worker_address
 from looper.agents.profile_registry import (
     Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
 )
 from looper.agents.runtimes import ADAPTERS, ApiProtocol, AuthKind, Capability, Launcher, VendorType
-from looper.agents.tiers import worker
+from looper.agents.tiers import planner, worker
 from test_agent_planner_worker import _step_envelope, _worker_row
 
 
@@ -91,8 +92,10 @@ def run_primary(agent_db, tmp_path, monkeypatch):
     backup = replace(backup, profile=replace(backup.profile, id="backup", name="Backup"))
     monkeypatch.setattr(worker, "fallback_settings", AsyncMock(return_value=backup))
 
-    def run(runtime, launcher=Launcher.NATIVE, *, events=(), exit_code=1, wait=False, steer=False, error=ERROR):
-        transcript = "Launcher ready\n" + "\n".join(json.dumps(e) for e in [*_launch_lines(runtime), *events])
+    def run(runtime, launcher=Launcher.NATIVE, *, events=(), exit_code=1, wait=False, steer=False,
+            error=ERROR, startup=True):
+        transcript = "Launcher ready\n" + "\n".join(json.dumps(e) for e in [
+            *(_launch_lines(runtime) if startup else []), *events])
         body = f'''
 import sys, time
 print({transcript!r}, flush=True)
@@ -137,7 +140,7 @@ for line in sys.stdin:
 
 
 @pytest.mark.parametrize(("runtime", "launcher"), LAUNCHES)
-def test_nonzero_exit_before_model_event_uses_recorded_fallback(run_primary, runtime, launcher):
+def test_nonzero_exit_before_model_event_uses_recorded_fallback(run_primary, agent_db, runtime, launcher):
     result, records = run_primary(runtime, launcher)
     assert result["status"] == "completed"
     expected = [{"from": "primary", "to": "backup", "reason": "exited before any model event: Unknown model"}]
@@ -145,13 +148,48 @@ def test_nonzero_exit_before_model_event_uses_recorded_fallback(run_primary, run
     assert [r["metadata"]["profile"]["id"] for r in records] == ["primary", "backup"]
     assert records[1]["metadata"]["fallback"] == expected
     assert records[1]["metadata"]["fallback_from"] == "primary"
+    assert "Unknown model" in agent_db.finish_record.await_args_list[0].kwargs["error"]
+
+
+@pytest.mark.parametrize("runtime", ["cursor-agent", "codex", "coco"])
+def test_ttadk_zero_exit_without_result_uses_bounded_recorded_fallback(
+    run_primary, agent_db, monkeypatch, tmp_path, runtime,
+):
+    refusal = "Cannot use this model: unavailable-model. Available models: " + "available-model, " * 140
+    result, records = run_primary(runtime, Launcher.TTADK, exit_code=0, startup=False, error=refusal)
+    assert result["status"] == "completed"
+    assert [r["metadata"]["profile"]["id"] for r in records] == ["primary", "backup"]
+    change, = result["fallback"]
+    reason = change["reason"]
+    assert change["from"] == "primary" and change["to"] == "backup"
+    assert reason.startswith("exited before any model event: Cannot use this model:")
+    assert len(reason) < 300
+    assert records[1]["metadata"]["fallback"] == [change]
+    assert records[1]["metadata"]["fallback_from"] == "primary"
+    assert refusal[:100] in agent_db.finish_record.await_args_list[0].kwargs["error"]
+    activity = [c.kwargs["summary"] for c in agent_db.insert_activity.await_args_list
+                if "Agent Profile fallback:" in c.kwargs["summary"]]
+    assert len(activity) == 1 and activity[0].endswith(f"({reason})")
+
+    agent = planner.PlannerAgent(task_id="task-1", runtime_root=tmp_path / "runtime")
+    step = planner.PlanStep("s1", 0, "Inspect", status="dispatched", worker_id="worker-1")
+    agent._plan = planner.TaskPlan("p1", "goal", "Inspect", str(tmp_path), steps=[step], status="executing")
+    monkeypatch.setattr(agent, "_decide", AsyncMock())
+    envelope = MessageEnvelope.create(
+        source=worker_address("worker-1"), target=agent.agent_address, message_type=MessageType.WORK_RESULT,
+        payload={**result, "task_id": "s1"})
+    asyncio.run(asyncio.wait_for(agent._handle_work_result(envelope), 5))
+    entries = [row for row in agent_db.store.journal["task-1"] if row["kind"] == "profile_fallback"]
+    assert [json.loads(row["summary"])["reason"] for row in entries] == [reason]
+    assert step.retries == 0
 
 
 @pytest.mark.parametrize(("runtime", "launcher"), LAUNCHES)
-def test_one_model_event_then_nonzero_exit_never_falls_back(run_primary, runtime, launcher):
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_one_model_event_then_exit_never_falls_back(run_primary, runtime, launcher, exit_code):
     event = ({"type": "item.started", "item": {"id": "call", "type": "command_execution", "command": "pwd"}}
              if runtime in ("codex", "coco") else ASSISTANT)
-    result, records = run_primary(runtime, launcher, events=[event])
+    result, records = run_primary(runtime, launcher, events=[event], exit_code=exit_code)
     assert result["status"] == "failed"
     assert "fallback" not in result
     assert len(records) == 1
@@ -178,10 +216,13 @@ def test_reported_usage_without_answer_prevents_fallback(run_primary, runtime):
     assert len(records) == 1
 
 
-def test_zero_exit_without_model_event_does_not_fall_back(run_primary):
-    result, records = run_primary("claude-code", exit_code=0)
+@pytest.mark.parametrize("runtime", [runtime for runtime, launcher in LAUNCHES if launcher is Launcher.NATIVE])
+def test_native_zero_exit_without_model_event_does_not_fall_back(run_primary, agent_db, runtime):
+    result, records = run_primary(runtime, exit_code=0)
     assert result["status"] == "failed" and "fallback" not in result
     assert len(records) == 1
+    assert "Unknown model" in result["error"]
+    assert agent_db.finish_record.await_args.kwargs["error"] == result["error"]
 
 
 def test_timeout_without_model_event_does_not_fall_back(run_primary, monkeypatch):

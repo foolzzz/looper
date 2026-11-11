@@ -1948,15 +1948,19 @@ Manager tools.
   role; edits also validate incoming chains. Referenced targets cannot be deleted.
   Planner follows the chain only for a profile configuration error. Worker and
   Reviewer also fall back after a launch failure, or a nonzero exit (or a
-  model refusal reporting zero turns) before any model event. Timeouts do not
-  trigger this detection. It is enabled for Claude Code, Codex, coco, Cursor
-  Agent (native and TTADK) and Grok, with recorded samples and stand-in streams
-  covering their event boundaries. Launcher banners, session/turn starts and
+  model refusal reporting zero turns) before any model event. Codex, coco and
+  Cursor Agent through TTADK also fall back when they end without a result,
+  even with exit code 0; TTADK's exit code is unreliable. Timeouts do not
+  trigger this detection. It is enabled for native Claude Code and Grok, and
+  for Codex, coco and Cursor Agent with either the native or TTADK launcher,
+  with recorded samples and stand-in streams covering their event boundaries.
+  Launcher banners, session/turn starts and
   model names echoed at initialization are not model events. Responses, tool
   calls, partial model output and nonzero token usage prevent fallback.
   OMP, Pi, DSH and API keep `first_event_known` disabled until their first
   model events are verified. The exit reason is
-  `exited before any model event: <first line of the error>`. Each switch stays within
+  `exited before any model event: <first line of the error>`, clipped to 299
+  characters including the prefix. Each switch stays within
   the same step attempt, without consuming a retry, and records activity,
   `profile_fallback` journal entries and the ordered `{from, to, reason}` chain in
   `metadata.fallback` on the target run, including failed launches. `metadata.fallback_from`

@@ -2656,29 +2656,33 @@ class WorkerPool:
         # A launcher can report a model refusal as a zero-turn error even when it exits 0.
         launch_refused = (result_event is not None and result_event.get("is_error") is True
                           and type(result_event.get("num_turns")) is int and result_event["num_turns"] == 0)
-        if ((return_code != 0 or launch_refused) and runtime.first_event_known and ctx.model_events == 0
+        launch_ended_without_result = not launch.exit_code_reliable and result_event is None
+        if ((return_code != 0 or launch_refused or launch_ended_without_result)
+                and runtime.first_event_known and ctx.model_events == 0
                 and not result_ok and runtime.budget_error(result_event) is None):
             stderr = stderr if stderr is not None else await handle.error_output()
             errors = (result_event or {}).get("errors") or []
             message = (detail or (str(errors[0]) if errors else "") or stderr or "").strip()
             message = message or f"{runtime.label} exited with code {return_code}"
-            ctx.fallback_reason = f"exited before any model event: {message.splitlines()[0]}"
+            ctx.fallback_reason = f"exited before any model event: {message.splitlines()[0]}"[:299]
         # A run stopped at its spend cap exits non-zero too; its result says why.
-        if ((return_code != 0 or not launch.exit_code_reliable or first_stderr is not None) and not result_ok
+        if ((return_code != 0 or not launch.exit_code_reliable or result_event is None or first_stderr is not None)
+                and not result_ok
                 and runtime.budget_error(result_event) is None and not detail):
             stderr = stderr if stderr is not None else await handle.error_output()
-            error = (f"{runtime.label} exited with code {return_code}" if launch.exit_code_reliable
-                     else f"{runtime.label} through TTADK ended without a result")
+            error = (f"{runtime.label} through TTADK ended without a result" if not launch.exit_code_reliable
+                     else f"{runtime.label} ended without a result" if return_code == 0 and result_event is None
+                     else f"{runtime.label} exited with code {return_code}")
             if not launch.exit_code_reliable:
                 from ..runtimes.ttadk import error_tail
 
                 stderr = error_tail(stderr)
                 if stderr:
                     error += f": {stderr}"
-                if parent_task_id:
-                    await self._activity(parent_task_id, worker_id, "error", error)
             elif first_stderr is not None:
                 error += f": {stderr}"
+            elif stderr.strip():
+                error += f": {stderr.strip()[:500]}"
             await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                                   outcome=RunOutcome.RUN_FAILED.value)
             return {"status": "failed", "error": error,
