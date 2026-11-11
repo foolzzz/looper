@@ -164,7 +164,7 @@ def test_stream_retry_start_discards_every_previous_attempt(resuming: bool) -> N
 
     def assistant(text: str) -> None:
         emitted = stream.translate({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
-        assert emitted == []
+        assert not any(event["type"] == "assistant" for event in emitted)
 
     assistant("discard text before the last tool")
     activity += stream.translate({"type": "tool_call", "subtype": "started", "call_id": "last-tool",

@@ -171,6 +171,8 @@ class CodexChannel:
                         token_usage = params.get("tokenUsage")
                         total = token_usage.get("total") if isinstance(token_usage, dict) else None
                         usage = total if isinstance(total, dict) else {}
+                        # Totals are charged once at turn completion; retain early work evidence separately.
+                        yield {"type": "system", "subtype": "codex_usage", "usage": dict(usage)}
                     if method == "turn/completed":
                         self._turn_id = None
                     try:

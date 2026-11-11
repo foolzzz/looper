@@ -119,6 +119,7 @@ READ_ONLY_TOOLS = "read_file,grep,list_dir"
 
 
 class GrokRuntime(RuntimeAdapter):
+    first_event_known = True
     can_replace_system_prompt = True
     type = "grok"
     label = "Grok"
