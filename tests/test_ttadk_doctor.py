@@ -50,7 +50,7 @@ def test_doctor_waits_for_cold_ttadk_sign_in_and_fails_when_signed_out(tmp_path,
     (1, ttadk.TtadkProblem.NOT_FOUND, self_check.FAIL),
     (1, ttadk.TtadkProblem.NOT_SIGNED_IN, self_check.FAIL),
     (1, ttadk.TtadkProblem.CHECK_FAILED, self_check.WARN),
-    (1, ttadk.TtadkProblem.CHECKING, self_check.WARN),
+    (1, ttadk.TtadkProblem.CHECKING, self_check.PENDING),
 ], ids=["no-database", "no-profile", "signed-in", "missing", "signed-out", "check-failed", "checking"])
 def test_ttadk_check_reports_usage_and_noninteractive_sign_in(monkeypatch, profiles, problem, status):
     calls = []
@@ -80,6 +80,17 @@ def test_ttadk_check_reports_usage_and_noninteractive_sign_in(monkeypatch, profi
     assert calls == ([("custom-ttadk", "codex")] if profiles else [])
     if problem is not None:
         assert check.detail == problem.message("codex")
+
+
+def test_pending_ttadk_check_does_not_log_a_failure_or_empty_fix(monkeypatch, caplog):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(ttadk, 'sign_in_problem', AsyncMock(return_value=ttadk.TtadkProblem.CHECKING))
+    check = asyncio.run(self_check.check_ttadk([{'type': 'codex', 'executable': ''}], wait=False))
+    self_check.log_problems([check])
+    assert check.status == self_check.PENDING
+    assert self_check.format_checks([check]).startswith('pending TTADK')
+    assert 'cannot run' not in caplog.text and 'Fix:' not in caplog.text
 
 
 def test_system_status_refreshes_the_ttadk_startup_check(monkeypatch):
@@ -127,7 +138,7 @@ def test_system_status_does_not_wait_for_ttadk_and_launch_shares_refresh(previou
             start = time.monotonic()
             result = await AgentHTTPServer._checks_now(server)
             assert time.monotonic() - start < 0.2
-            expected = self_check.WARN if previous == "cold" else self_check.FAIL if previous else self_check.OK
+            expected = self_check.PENDING if previous == "cold" else self_check.FAIL if previous else self_check.OK
             assert result[0]["status"] == expected
             assert await asyncio.to_thread(entered.wait, 1)
             assert await AgentHTTPServer._checks_now(server) == result

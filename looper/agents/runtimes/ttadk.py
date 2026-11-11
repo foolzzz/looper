@@ -20,11 +20,13 @@ from . import RuntimeUnsupported
 
 
 def error_tail(stderr: str) -> str:
-    """Redact credentials before retaining the last 1000 characters for a run and its activity."""
+    """Redact credentials, then retain the diagnostic's head and tail within 1000 characters."""
     from ..log_redaction import redact
     from .omp import safe_error
 
-    return safe_error(redact(stderr), limit=None)[-1000:]
+    text = safe_error(redact(stderr), limit=None)
+    marker = "\n… (output omitted) …\n"
+    return text if len(text) <= 1000 else text[:400] + marker + text[-(600 - len(marker)):]
 
 
 class TtadkProblem(str, Enum):

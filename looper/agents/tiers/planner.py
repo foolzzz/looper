@@ -1315,10 +1315,10 @@ class PlannerAgent:
 
     async def _dispatch_ready_impl(self, plan: TaskPlan) -> None:
         # Every ready gate and wait opens; every ready work step starts, and the worker pool runs the work
-        # within its project's Worker limit. A wait takes no Worker and joins no workspace round. Progress is
-        # reported once the work is in flight, so an open wait does not report the task as waiting first.
+        # within its project's Worker limit. Gates announce their opening. A wait takes no Worker and joins no
+        # workspace round; its progress is reported once the work is in flight so it does not report waiting first.
         ready = plan.ready_steps(isolate_steps=self._execution.isolate_steps)
-        opened = False
+        opened_wait = False
         for step in [s for s in ready if s.gate is not None or s.wait is not None]:
             if plan.status not in _LIVE:
                 return
@@ -1326,7 +1326,7 @@ class PlannerAgent:
                 await self._open_gate(plan, step)
             else:
                 await self._open_wait(plan, step)
-            opened = True
+                opened_wait = True
         for step in [s for s in ready if s.reviews]:
             if step.status == "pending" and plan.status in _LIVE:
                 await self._dispatch_review(plan, step)
@@ -1339,7 +1339,7 @@ class PlannerAgent:
                 break  # the task stopped at its spend cap
             if step.status == "pending":  # a decision on an earlier step of the round may have started it
                 await self._dispatch_step(plan, step, base=base)
-        if opened:
+        if opened_wait:
             await self._report_progress(plan)
 
     # --- User gates ---
@@ -1356,6 +1356,10 @@ class PlannerAgent:
         await self._save(plan, step, entries=[entry],
                          gate_messages=[self._looper_message(step, MessageKind.OPENED, f"Gate opened: {gate.topic}")])
         await self._activity("phase", f"Gate {step.label} opened: {gate.topic}"[:500])
+        await self._report_progress(plan, gate_opened={
+            "step_id": step.step_id, "step_key": step.label, "topic": gate.topic,
+            "question": _clip("; ".join(item.question for item in gate.agenda), 500),
+        })
 
     async def _open_wait(self, plan: TaskPlan, step: PlanStep) -> None:
         """The steps ``step``, a wait, depends on are done: it opens and waits."""
@@ -2264,7 +2268,7 @@ class PlannerAgent:
     async def _record_profile_fallbacks(self, plan: TaskPlan, role: str, changes: Sequence[Mapping[str, Any]],
                                        step: PlanStep | None = None) -> None:
         entries = [JournalEntry(step.step_id if step else "", step.label if step else "",
-                    json.dumps({"role": role, "step": step.label if step else "", **change}),
+                    json.dumps({"role": role, "step": step.label if step else "", **change}, ensure_ascii=False),
                     kind=JournalKind.PROFILE_FALLBACK) for change in changes]
         if entries:
             await self._save(plan, entries=entries)
@@ -2439,7 +2443,8 @@ class PlannerAgent:
         target.result = {**(target.result or {}), **merged(plan, target)}
         entries = []
         if target.status == "verified":
-            entries.append(JournalEntry(seat.step_id, seat.label, json.dumps(result), kind=JournalKind.LATE_REVIEW))
+            entries.append(JournalEntry(seat.step_id, seat.label,
+                json.dumps(result, ensure_ascii=False), kind=JournalKind.LATE_REVIEW))
             if blocking(result):
                 # Quorum acceptance can leave referenced seats running too. Every member's late blocker
                 # reopens the decision so the Planner can retry the work, not merely acknowledge a chat.
@@ -2448,7 +2453,7 @@ class PlannerAgent:
             # Preserve arrival order before quorum snapshots repeat seats in plan order.
             entries.append(JournalEntry(target.step_id, target.label, json.dumps({
                 "round": target.retries, "reviews": {seat.label: {"status": seat.status, "result": result}},
-            }), kind=JournalKind.REVIEW_ROUND))
+            }, ensure_ascii=False), kind=JournalKind.REVIEW_ROUND))
         # Persist the reopened target with the late verdict: a restart must take its decision too.
         await self._save(plan, seat, target, entries=entries)
         if target.status == "completed":
@@ -2467,7 +2472,7 @@ class PlannerAgent:
         target.result = {**(target.result or {}), "review_round": target.retries}
         await self._save(plan, target, entries=[JournalEntry(target.step_id, target.label,
             json.dumps({"round": target.retries, "reviews": {s.label: {"status": s.status, "result": s.result} for s in plan.steps
-                        if s.reviews == target.step_id}}), kind=JournalKind.REVIEW_ROUND)])
+                        if s.reviews == target.step_id}}, ensure_ascii=False), kind=JournalKind.REVIEW_ROUND)])
         await self._report_progress(plan, phase=Phase.REVIEW_ROUND, data={"step": target.label,
             "attempt": target.retries + 1, "reviews": {s.label: {"result": s.result} for s in plan.steps
                                                        if s.reviews == target.step_id}})
@@ -2480,7 +2485,7 @@ class PlannerAgent:
         if any(s.status == "dispatched" for s in seats) and (target.result or {}).get("review_round") != target.retries:
             await self._save(plan, entries=[JournalEntry(target.step_id, target.label, json.dumps({
                 "round": target.retries, "stale": [s.label for s in seats if s.status == "dispatched"],
-                "reviews": {s.label: s.result for s in seats}}), kind=JournalKind.REVIEW_ROUND)])
+                "reviews": {s.label: s.result for s in seats}}, ensure_ascii=False), kind=JournalKind.REVIEW_ROUND)])
             await self._report_progress(plan, phase=Phase.REVIEW_ROUND, data={"step": target.label,
                 "attempt": target.retries + 1, "reviews": {s.label: {"result": s.result} for s in seats}})
         for seat in seats:
@@ -2611,14 +2616,14 @@ class PlannerAgent:
                 "summary": journal.clip(summary.split(". ", 1)[0], 300) if summary else "",
                 **({"failure": "verification_changed_code", "repair_after_index": max(s.index for s in plan.steps)}
                    if result.get("failure") == "verification_changed_code" else {}),
-            }), kind=JournalKind.VERIFICATION_ROUND))
+            }, ensure_ascii=False), kind=JournalKind.VERIFICATION_ROUND))
         if self._workflow and record_verification and context.result is ResultKind.REVIEW and step.accept_when is None:
             result = step.result or {}
             reviews = {"builtin": {"passed": result.get("verify_passed"),
                                     "findings": result.get("verify_findings", [])}}
             reviews.update({r["role"]: r for r in _role_reviews(result)})
             entries.append(JournalEntry(step.step_id, step.label,
-                json.dumps({"round": step.retries, "reviews": reviews}), kind=JournalKind.REVIEW_ROUND))
+                json.dumps({"round": step.retries, "reviews": reviews}, ensure_ascii=False), kind=JournalKind.REVIEW_ROUND))
         if self._is_verification(step) and self._verification_repair_required(plan, entries):
             context = replace(context, succeeded=False, verification_repair_required=True)
         if self._is_verification(step) and not context.succeeded and self._verification_exhausted(plan, entries):
@@ -2695,7 +2700,7 @@ class PlannerAgent:
             for seat_id, result in changed.items():
                 plan.step(seat_id).result = result
             step.result = {**(step.result or {}), **merged(plan, step)}
-            entries = [JournalEntry(step.step_id, step.label, json.dumps(item), kind=JournalKind.REVIEW_ADJUDICATED)
+            entries = [JournalEntry(step.step_id, step.label, json.dumps(item, ensure_ascii=False), kind=JournalKind.REVIEW_ADJUDICATED)
                        for item in reply.adjudications]
             await self._save(plan, step, *(plan.step(sid) for sid in changed), entries=entries)
             context = replace(context, succeeded=self._accept_state(plan, step) is State.SATISFIED)
@@ -2882,7 +2887,7 @@ class PlannerAgent:
         if escalate:
             entries.append(JournalEntry(decided.step_id, decided.label, json.dumps({
                 "reason": reason, "gates": [s.id for s in specs if s.gate is not None],
-            }), kind=JournalKind.ESCALATION))
+            }, ensure_ascii=False), kind=JournalKind.ESCALATION))
         await self._save(plan, decided, *dropped, *steps, entries=entries)
         if escalate:
             await self._report_progress(plan, phase=Phase.ESCALATION,
@@ -4708,7 +4713,11 @@ class PlannerAgent:
         if not rows:
             lines.append("  - (no activity yet)")
         for row in rows:
-            lines.append(f"  - [{row.get('kind')}] {_clip(row.get('summary'), 160)}")
+            work_dir = step.workspace.work_dir if step.workspace is not None else plan.work_dir
+            summary = str(row.get('summary') or '')
+            if work_dir:
+                summary = summary.replace(work_dir.rstrip('/') + '/', '')
+            lines.append(f"  - [{row.get('kind')}] {_clip_ends(summary, 160)}")
         lines += [f"  - {line}" for line in await self._room_lines(step)]
         return lines
 
@@ -5104,7 +5113,8 @@ class PlannerAgent:
         return workflows.process_record(plan, plan.journal, runs, workflow=self._workflow)
 
     async def _report_progress(self, plan: TaskPlan, *, phase: Phase | None = None,
-                               data: Mapping[str, Any] | None = None) -> None:
+                               data: Mapping[str, Any] | None = None,
+                               gate_opened: Mapping[str, str] | None = None) -> None:
         if phase is not None and not (self._workflow or {}).get("phase_notices"):
             return
         assert self._bus is not None
@@ -5122,6 +5132,7 @@ class PlannerAgent:
                 "status": _reported_status(plan),
                 "progress": plan.progress_summary(),
                 "summary": f"进度更新: {plan.progress_summary()}",
+                **({"gate_opened": gate_opened} if gate_opened is not None else {}),
                 **({"phase_text": workflows.phase_text(phase, data or {})} if phase is not None else {}),
             },
             correlation_id=plan.correlation_id,

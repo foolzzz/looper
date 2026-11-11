@@ -54,12 +54,15 @@ def test_decision_prompt_lists_compact_readable_review_rounds_once(planner_claud
         await h.start()
         await h.until(lambda: len(h.reviews) == 3)
         for _ in MEMBERS:
-            await h.release({**REVIEW_PASS, 'summary': '边界检查通过 ' + '说明' * 300})
+            await h.release({**REVIEW_PASS, 'summary': '边界检查通过 ' + '说明' * 300,
+                             'findings': [{'severity': 'suggestion', 'where': 'calc.py:4', 'text': '检查中文边界'}]})
         await h.finished()
         prompt = claude.turns()[-1]['text']
         section = prompt.split('Review rounds:', 1)[1].split('\n\n', 1)[0]
         for member in MEMBERS:
             assert section.count(f'round 1 · s1/{member} · passed · 0 blocking: 边界检查通过') == 1
+        stored = [entry['summary'] for entry in agent_db.store.journal['t1'] if entry['kind'] == 'review_round']
+        assert stored and all('检查中文边界' in text and '边界检查通过' in text and '\\u' not in text for text in stored)
         assert 'round 0' not in section and '"round"' not in section and r'\u' not in section
         assert '…' in section and len(section) < 1200
 

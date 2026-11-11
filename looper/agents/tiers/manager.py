@@ -1673,6 +1673,13 @@ class ManagerAgent:
             else:
                 text = f"任务「{title}」已取消。"
             await self._web_thread_reply(envelope, thread, text)
+        elif thread and (gate := envelope.payload.get("gate_opened")):
+            text = gate_commands.web_notice(thread, envelope.payload['task_id'], gate,
+                name=envelope.metadata.get('task_title') or '', manager_id=self.agent_id, token=envelope.message_id)
+            await self._web_thread_reply(envelope, thread, text)
+            gate_commands.settle(envelope.message_id, True)
+        elif envelope.payload.get("gate_opened"):
+            return  # Telegram and Lark post the gate's discussion through GateCourier.
         elif thread and (progress_text := envelope.payload.get("phase_text") or envelope.payload.get("summary")):
             key = (envelope.payload.get('task_id') or goal_id or envelope.correlation_id, thread)
             if self._last_task_progress.get(key) == progress_text:

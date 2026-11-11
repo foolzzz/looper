@@ -16,6 +16,82 @@ from tests.test_review_panel_planner import configure
 from looper.agents.workflow_reporting import process_record_text
 
 
+@pytest.mark.parametrize('long_question', [False, True])
+def test_open_gate_notice_reaches_web_thread_with_a_working_reply_number(
+    tmp_path, monkeypatch, agent_db, long_question,
+):
+    import asyncio
+    import re
+    from looper.agents import gate_commands
+    from looper.agents.bus import MessageBus
+    from looper.agents.channels.web import WebChannelAdapter
+    from looper.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
+    from looper.agents.user_gates import AgendaItem, Gate
+    from looper.db import chat
+
+    monkeypatch.setattr(gate_commands, '_snapshots', {})
+    monkeypatch.setattr(gate_commands, '_pending', {})
+    saved, posted = AsyncMock(), AsyncMock(return_value={'delivered': 'sent'})
+    monkeypatch.setattr(chat, 'save_message', saved)
+    monkeypatch.setattr(gate_commands, 'post_message', posted)
+    question = '请选择存储方案？' + ('详细要求' * 200 if long_question else '')
+
+    async def scenario():
+        bus = MessageBus(runtime_root=tmp_path)
+        planner = PlannerAgent(task_id='task', runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        monkeypatch.setattr(gate_commands.db_tasks, 'get_task', AsyncMock(return_value={'manager_id': manager.agent_id}))
+        planner._bus = manager._bus = bus
+        channel = WebChannelAdapter()
+        steps = [PlanStep(f'gate-{n}', n, 'Storage', key=f'g{n}',
+                         gate=Gate('Storage', (AgendaItem('q1', question),))) for n in range(2)]
+        plan = TaskPlan('plan', 'goal', 'Choose storage', str(tmp_path), steps=steps, status='executing')
+        try:
+            for gate in steps:
+                await planner._open_gate(plan, gate)
+                await planner._report_progress(plan)
+                queue = bus.get_queue(TASK_ROUTER_ADDRESS.agent_id)
+                while not queue.empty():
+                    report = queue.get_nowait()
+                    if report.payload.get('gate_opened'):
+                        await manager._handle_goal_status(MessageEnvelope.create(
+                            source=TASK_ROUTER_ADDRESS, target=manager.agent_address,
+                            message_type=MessageType.GOAL_STATUS, payload=report.payload,
+                            metadata={'origin_channel_id': 'channel-telegram'}))
+                        assert bus.get_queue('channel-telegram').empty()
+                    await manager._handle_goal_status(MessageEnvelope.create(
+                        source=TASK_ROUTER_ADDRESS, target=manager.agent_address,
+                        message_type=MessageType.GOAL_STATUS, payload=report.payload,
+                        metadata={'origin_channel_id': 'channel-web', 'origin_thread': 'web-thread'}))
+                web = bus.get_queue('channel-web')
+                while not web.empty():
+                    assert (await channel.deliver(web.get_nowait())).success
+            messages = [call.kwargs['content'] for call in saved.await_args_list]
+            notices = [text for text in messages if '/gate ' in text]
+            assert len(notices) == 2
+            assert all(question[:100] in text for text in notices)
+            assert all(len(text) < 700 for text in notices)
+            assert all(call.kwargs['session_id'] == 'web-thread' for call in saved.await_args_list)
+            assert any(text.startswith('进度更新: ') for text in messages)
+            if long_question:
+                assert all(question not in text and '…' in text for text in notices)
+            numbers = [re.search(r'/gate (\d+) ', text)[1] for text in notices]
+            assert len(set(numbers)) == 2
+            for number, gate in zip(numbers, steps):
+                inbound = MessageEnvelope.create(source=channel._address, target=manager.agent_address,
+                    message_type=MessageType.USER_MESSAGE,
+                    payload={'channel_context': {'session_id': 'web-thread'}})
+                await gate_commands.handle(inbound, f'/gate {number} PostgreSQL', has_planner=lambda _: True,
+                                           bus=bus, source=manager.agent_address, manager_id=manager.agent_id)
+                assert posted.await_args.args[:2] == ('task', gate.label)
+        finally:
+            await planner.stop()
+            await manager.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
 def test_coco_delivery_keeps_the_requested_model_separate_from_the_missing_report():
     from looper.agents.tiers.planner import TaskPlan
     from looper.agents.workflow_reporting import process_record

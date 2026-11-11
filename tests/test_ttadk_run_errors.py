@@ -57,7 +57,7 @@ def failed_ttadk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     return fake_claude(tmp_path / "ttadk", (
         "import sys\n"
         "sys.stdin.read()\n"
-        "print('discarded-prefix-' + 'x' * 2000, file=sys.stderr)\n"
+        "print('model is not available\\n' + 'x' * 2000, file=sys.stderr)\n"
         f"print('TTADK_OPENAI_API_KEY=synthetic-api-token {SECRET}', file=sys.stderr)\n"
         f"print({SIGN_IN_ERROR!r}, file=sys.stderr)\n"
         "sys.exit(0)\n"
@@ -67,7 +67,7 @@ def failed_ttadk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
 def _assert_diagnostic(error: str, agent_db: Any) -> None:
     assert SIGN_IN_ERROR in error
     assert SECRET not in error and "synthetic-api-token" not in error
-    assert "discarded-prefix" not in error
+    assert "model is not available" in error and "omitted" in error
     assert len(error) <= 1200
     recorded = agent_db.finish_record.call_args.kwargs["error"]
     assert recorded == error
