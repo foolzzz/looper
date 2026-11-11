@@ -31,7 +31,8 @@ def test_translated_profile_and_dialect_settings(tmp_path, staged_dashboard_dir)
         "runtime_name": "Claude Code", "runtime_type": "claude-code", "model_id": "example-model",
         "model_path": "translated", "model": model, "provider": provider, "agent_teams": True, "effort": None,
         "custom_prompt": "", "builtin": False, "roles": ["worker"], "warnings": [],
-        "used_by": {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": []},
+        "used_by": {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": [],
+                    "workflows": ["Reviewed"]},
         "cost": {"source": "provider_price", "equivalent": False, "unpriced": []},
     }
     data = {
@@ -67,6 +68,9 @@ def test_translated_profile_and_dialect_settings(tmp_path, staged_dashboard_dir)
             page.route("**/*", route)
             page.goto("http://settings.example/#settings/profiles", wait_until="networkidle", timeout=15000)
             expect(page.get_by_text("via local gateway", exact=True)).to_be_visible()
+            expect(page.get_by_role("link", name="workflow Reviewed", exact=True)).to_have_attribute(
+                "href", "#settings/workflows")
+            expect(page.get_by_role("button", name="Delete Agent Profile Example worker:", exact=False)).to_be_disabled()
             page.get_by_role("button", name="Edit Agent Profile Example worker", exact=True).click()
             runtime = page.get_by_label("Runtime", exact=True)
             expect(runtime).to_have_value("rt-claude-code")

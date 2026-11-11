@@ -3926,7 +3926,10 @@ replacement or deletion affects future tasks only; deletion clears project
 defaults. `start_over` restores roles from the snapshot. Workflow roles may
 run even with `planner_roles` off; the Planner cannot change them. Their fixed
 Profiles are operator choices, independent of the project's list of Profiles
-the Planner may choose.
+the Planner may choose. Editing a task role's prompt or harness keeps its
+snapshot's exact Profile grant, even after replacing or deleting the preset.
+Preset Profile references, including custom roles, appear in Profile usage
+and block deletion until the preset is replaced or removed.
 
 The snapshot overlays retry limits, review policy and dependency conditions
 on current project execution settings; escalation enables user gates. A

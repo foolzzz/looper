@@ -369,9 +369,12 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
     the projects whose Planners may choose it (a Planner's choice counts only while its project allows it, so it is
     not counted), ``manager_session``, whether any Manager's current session selects it, ``manager_sessions``, those Managers' ids, ``managers``, the names of the Managers
     it is the profile of, and ``manager_templates``, the templates (``"<template> of <Manager>"``) that
-    choose it. A profile nothing selects is not in the result. With ``manager_id``, what only Managers and their
+    choose it, and ``workflows``, the names of operator presets that select it (including custom roles).
+    A profile nothing selects is not in the result. With ``manager_id``, what only Managers and their
     tasks own is that Manager's alone: its tasks, session, own profile and templates; schedules belong to no
     Manager and are not counted."""
+    from .workflows import profile_references
+
     pool = pool or get_pool()
     layers = await pool.fetch(
         "SELECT l.profile_id, l.scope, l.role, l.project_id, p.name AS project_name FROM agent_setting_layers l "
@@ -418,7 +421,7 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
     def use(profile: str) -> dict[str, Any]:
         return uses.setdefault(profile, {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": [],
                                          "manager_session": False, "manager_sessions": [], "managers": [],
-                                         "manager_templates": []})
+                                         "manager_templates": [], "workflows": []})
 
     for row in layers:
         use(row["profile_id"])["layers"].append({k: row[k] for k in ("scope", "role", "project_id", "project_name")})
@@ -438,7 +441,20 @@ async def profile_usage(profile_id: str | None = None, *, pool: asyncpg.Pool | a
         label = f"{row['template']} of {row['manager']}"
         if label not in use(row["profile_id"])["manager_templates"]:
             use(row["profile_id"])["manager_templates"].append(label)
+    for row in await profile_references(profile_id, pool=pool):
+        names = use(row["profile_id"])["workflows"]
+        if row["name"] not in names:
+            names.append(row["name"])
     return uses
+
+
+async def _delete_profile(conn: asyncpg.Connection, profile_id: str) -> bool:
+    from .workflows import profile_references
+
+    # Preset JSON has no FK. The caller holds FOR UPDATE, paired with put's KEY SHARE.
+    if await profile_references(profile_id, pool=conn):
+        raise asyncpg.ForeignKeyViolationError("an Agent Profile is still selected by a workflow")
+    return await conn.execute("DELETE FROM agent_profiles WHERE id = $1", profile_id) == "DELETE 1"
 
 
 async def delete_profile_unchosen(profile_id: str, statuses: list[str], *, pool: asyncpg.Pool | None = None,
@@ -454,11 +470,13 @@ async def delete_profile_unchosen(profile_id: str, statuses: list[str], *, pool:
         await conn.fetchval("SELECT id FROM agent_profiles WHERE id = $1 FOR UPDATE", profile_id)
         if chosen := await open_planner_choices(profile_id, statuses, pool=conn):
             return chosen
-        await conn.execute("DELETE FROM agent_profiles WHERE id = $1", profile_id)
+        await _delete_profile(conn, profile_id)
     return []
 
 
 async def delete_profile(profile_id: str, *, pool: asyncpg.Pool | None = None) -> bool:
     """Raises ``asyncpg.ForeignKeyViolationError`` while a layer or a task selects it."""
     pool = pool or get_pool()
-    return await pool.execute("DELETE FROM agent_profiles WHERE id = $1", profile_id) == "DELETE 1"
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.fetchval("SELECT id FROM agent_profiles WHERE id = $1 FOR UPDATE", profile_id)
+        return await _delete_profile(conn, profile_id)

@@ -78,13 +78,25 @@ def _fields(data: Mapping[str, Any], allowed: tuple[str, ...]) -> None:
         raise RequestError(HTTP_400, f"unknown field {unknown[0]!r}; the fields are {', '.join(allowed)}")
 
 
-async def _profile_id(project_id: str | None, wanted: Any, kind: RoleKind) -> str | None:
-    """The profile a template or an edit names, by id or name, checked against the project's list; None for none."""
+async def _profile_id(project_id: str | None, wanted: Any, kind: RoleKind, *,
+                      workflow_profile: str | None = None) -> str | None:
+    """The profile named by id or name, allowed by the project's list or this role's workflow grant; None for none."""
     if wanted is None or wanted == "":
         return None
     if not isinstance(wanted, str):
         raise RequestError(HTTP_400, "profile_id must be an Agent Profile's id or name, or null for none")
     try:
+        if workflow_profile:
+            from ..db import profile_registry as db_profiles
+            from .profile_registry import RegistryError, check_selection
+
+            profile = await db_profiles.get_profile(workflow_profile)
+            if profile and (wanted == workflow_profile or wanted.strip().casefold() == profile["name"].casefold()):
+                try:
+                    await check_selection(workflow_profile, [kind.agent.value])
+                except RegistryError as exc:
+                    raise RoleError(str(exc)) from None
+                return workflow_profile
         return str((await allowed_profile(project_id, wanted, kind))["id"])
     except RoleError as exc:
         raise RequestError(HTTP_400, f"profile_id: {exc}") from None
@@ -179,7 +191,10 @@ async def edit_task_role(
                                                  ProjectExecution.from_row(project).role_text_limit)
     except RoleError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
-    profile_id = await _profile_id(task.get("project_id"), data.get("profile_id"), kind)
+    workflow_profile = next((r.get("profile_id") for r in (task.get("workflow") or {}).get("roles", [])
+                             if r["key"] == key and r["kind"] == kind.value), None)
+    profile_id = await _profile_id(task.get("project_id"), data.get("profile_id"), kind,
+                                   workflow_profile=workflow_profile)
     items = await _items(task.get("project_id"), data["items"]) if "items" in data else before.items
     changed = _changed(before, prompt, harness, profile_id, items)
     if not changed:

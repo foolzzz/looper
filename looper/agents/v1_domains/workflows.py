@@ -83,6 +83,8 @@ async def run(server, operation, arguments, principal, headers):
             raise OpError(ErrorCode.INVALID, str(exc)) from None
         except asyncpg.UniqueViolationError:
             raise OpError(ErrorCode.INVALID, "a workflow with that name already exists") from None
+        except asyncpg.ForeignKeyViolationError:
+            raise OpError(ErrorCode.CONFLICT, "a workflow's Agent Profile was removed meanwhile; reload the profiles") from None
         return {"workflow": _view(row)}
     if not await db_workflows.delete(arguments["key"]):
         raise OpError(ErrorCode.NOT_FOUND, f"no workflow {arguments['key']!r}")

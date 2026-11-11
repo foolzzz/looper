@@ -26,6 +26,7 @@ import asyncpg
 from .profile_registry import PROFILE_JOIN, PROFILE_JSON
 from .connection import get_pool
 from .projects import profile_allowed_sql
+from .workflows import role_profile_allowed_sql
 
 FIELDS = ("harness_prompt", "profile_id", "env", "run_budget_usd", "max_concurrency", "boundaries",
           "system_prompt_mode")
@@ -55,7 +56,7 @@ async def list_layers(
     chose a profile or a concurrency limit for, and a ``planner_task`` row per role its Planner chose a profile for
     the rest of the task (one its project allows); with ``step_id`` too, a ``planner_step`` row per role its
     Planner chose one for that step; with ``task_role`` too (a role's key and version), a ``task_role`` row for the
-    role's kind when that version of the role has a profile its project allows; with ``manager_id``, a
+    role's kind when that version's profile is allowed by its project or its workflow snapshot; with ``manager_id``, a
     ``session`` row for that Manager when the user chose a profile for its current session (unless ``with_session``
     is False) and, for a Manager other than ``manager``, a ``manager`` row when its definition has a profile."""
     pool = pool or get_pool()
@@ -110,7 +111,7 @@ async def list_layers(
                 f"tr.profile_id, (SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = tr.profile_id) AS profile "
                 "FROM task_roles tr JOIN tasks k ON k.id = tr.task_id "
                 "WHERE tr.task_id = $1 AND tr.role_key = $2 AND tr.version = $3 "
-                f"AND (tr.via = 'workflow' OR {profile_allowed_sql('k.project_id', 'tr.profile_id')})",
+                f"AND ({role_profile_allowed_sql('k', 'tr')} OR {profile_allowed_sql('k.project_id', 'tr.profile_id')})",
                 task_id, task_role[0], task_role[1],
             )
             layers += [{"task_id": task_id, **_row(r)} for r in role]
