@@ -6,7 +6,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
-from .agent_settings import AgentSettings, AgentType, SettingsError, budget_usd
+from .agent_settings import AgentSettings, AgentType, Layer, SettingsError, budget_usd
 from .task_roles import RoleError, RoleKind, check_definition, role_key
 from .task_templates import KEY_PATTERN
 from .tiers import conditions
@@ -236,7 +236,9 @@ async def configuration_lines(workflow: Mapping[str, Any], settings: Mapping[Age
         return "，回落至 ".join(chain)
 
     async def role_line(key: str, agent: AgentType, pinned: str | None = None) -> str:
-        selected = pinned or (workflow.get("profiles") or {}).get(agent.value) or settings[agent].profile.id
+        selected = ((workflow.get("profiles") or {}).get(agent.value)
+                    or (settings[agent].profile.id if settings[agent].profile_source is Layer.TASK else None)
+                    or pinned or settings[agent].profile.id)
         verification = workflow.get("verification") or {}
         purpose = (f"；验证：只读，最多 {verification['max_rounds']} 轮" if key == verification.get("role") else "")
         return f"- {key}：{await describe(selected)}{purpose}"

@@ -20,7 +20,11 @@ PRESET = {"key": "reviewed", "name": "Reviewed", "planner_instructions": "Keep c
           "escalate_on_exhaustion": True}
 
 
-def test_confirmation_and_form_preview_share_workflow_roles_panel_and_verification(tmp_path, monkeypatch):
+@pytest.mark.parametrize("profile_source", ["role", "workflow", "selection"])
+def test_confirmation_and_form_preview_share_workflow_roles_panel_and_verification(
+    tmp_path, monkeypatch, profile_source,
+):
+    from looper.agents.agent_settings import Layer, load_agent_settings
     from tests.test_ops_tasks_db import _Chat
 
     async def test(pool):
@@ -51,21 +55,35 @@ def test_confirmation_and_form_preview_share_workflow_roles_panel_and_verificati
                                "'agent-claude-code-opus' FROM agent_profiles WHERE id = 'workflow-profile'")
             await pool.execute("UPDATE agent_profiles SET fallback_profile_id = 'backup-profile' "
                                "WHERE id = 'workflow-profile'")
+            selected = {"worker": "agent-claude-code-opus"}
+            if profile_source == "workflow":
+                preset["profiles"] = selected
+            choices = {"profiles": selected} if profile_source == "selection" else {}
             assert (await call("workflows.put", preset))[0] == 200
-            status, preview = await call("workflows.preview", {"key": "reviewed", "project_id": project["id"]})
+            status, preview = await call("workflows.preview", {
+                "key": "reviewed", "project_id": project["id"], **choices})
             assert status == 200, preview
             assert await pool.fetchval("SELECT count(*) FROM tasks") == 0
             api_v1.validate_arguments(api_v1.find("POST", "/api/v1/workflows/preview").result, preview["result"])
 
             chat = _Chat(tmp_path)
             (answer,) = await chat.say("Create it", ("looper_task_create", {
-                "requirement": "Build", "title": "Build", "project": "Example", "workflow": "reviewed"}))
+                "requirement": "Build", "title": "Build", "project": "Example", "workflow": "reviewed", **choices}))
             assert answer["status"] == "ok", answer
+            effective = await load_agent_settings("worker", project["id"], answer["result"]["task_id"],
+                                                  task_role=("dev", 1))
+            assert effective.error is None
+            assert effective.profile.id == ("workflow-profile" if profile_source == "role"
+                                             else selected["worker"])
+            assert effective.profile_source is (Layer.TASK_ROLE if profile_source == "role" else Layer.TASK)
             (block,) = chat.turns[0].blocks
             lines = block.splitlines()
-            assert any(line.startswith("- dev：Workflow profile（claude-code/sonnet）")
-                       and "回落至 Backup profile（claude-code/sonnet），回落至 claude-code/opus" in line
-                       for line in lines)
+            if profile_source == "role":
+                assert any(line.startswith("- dev：Workflow profile（claude-code/sonnet）")
+                           and "回落至 Backup profile（claude-code/sonnet），回落至 claude-code/opus" in line
+                           for line in lines)
+            else:
+                assert "- dev：claude-code/opus（claude-code/opus）" in lines
             for key, name in (("review_codex", "Codex review"), ("review_grok", "Second review"),
                               ("suggest", "Suggestions")):
                 assert any(line.startswith(f"- {key}：{name}（codex/") for line in lines)
