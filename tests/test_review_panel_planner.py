@@ -517,6 +517,59 @@ def test_panel_reviews_use_independent_commits_while_another_step_commits(
     drive(claude, outcome, scenario)
 
 
+@pytest.mark.parametrize("staged_path,add_flags", [
+    ("staged.txt", ()), ("cache/staged\t[output]\n.txt", ("-f",)),
+])
+def test_shared_panel_reviews_missing_staged_output_without_a_checkout_gate(
+    planner_claude, agent_db, monkeypatch, staged_path, add_flags,
+):
+    from tests.test_planner_workspaces import init_repo
+    from tests.test_review_panel_workspaces import git
+
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    configure(agent_db, monkeypatch)
+    agent_db.get_task_project.return_value["step_workspaces"] = "shared"
+    claude = planner_claude(plan(step("s1", review=True)), decide("review"), decide("accept"))
+
+    def outcome(envelope):
+        if envelope.message_type == MessageType.VERIFY_REQUEST:
+            return None
+        directory = Path(envelope.payload["context"]["work_dir"])
+        (directory / "result.txt").write_text("worker output\n")
+        (directory / "shared.txt").unlink()
+        return WORK_OK
+
+    async def scenario(h):
+        head = init_repo(h.work_dir)
+        (h.work_dir / ".gitignore").write_text("cache/\n")
+        staged = h.work_dir / staged_path
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_text("staged output\n")
+        git(h.work_dir, "add", *add_flags, "--", staged_path)
+        staged.unlink()  # An AD entry left in the shared index before this worker starts.
+        index = (h.work_dir / ".git" / "index").read_bytes()
+        await h.start()
+        await h.until(lambda: len(h.reviews) == 3 or (h.planner._plan and h.planner._plan.waiting_gates()))
+        assert len(h.reviews) == 3
+        assert not h.planner._plan.waiting_gates()
+        for envelope in h.reviews:
+            directory = Path(envelope.payload["context"]["work_dir"])
+            assert git(directory, "rev-parse", "HEAD") == envelope.payload["head"]
+            assert (directory / staged_path).read_text() == "staged output\n"
+            assert (directory / "result.txt").read_text() == "worker output\n"
+            assert not (directory / "shared.txt").exists()
+        for _ in MEMBERS:
+            await h.release(REVIEW_PASS)
+        assert (await h.finished()).payload["status"] == "completed"
+        assert git(h.work_dir, "rev-parse", "HEAD") == head
+        assert (h.work_dir / ".git" / "index").read_bytes() == index
+        assert not staged.exists()
+        assert (h.work_dir / "result.txt").read_text() == "worker output\n"
+
+    drive(claude, outcome, scenario)
+
+
 def test_panel_retry_discards_old_snapshots_and_reviews_the_new_output(planner_claude, agent_db, monkeypatch):
     from pathlib import Path
     from tests.test_review_panel_workspaces import git
