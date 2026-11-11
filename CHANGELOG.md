@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.125] - 2026-11-10
+
+### Fixed
+
+- **Workflow verification copies keep internal links.** ([#1202](https://github.com/foolzzz/looper/pull/1202), issue #1199)
+  - Copying declared runtime state such as `node_modules` keeps internal symlinks (for example `.bin` entries) as links inside the private copy, and the runtime root and copy targets are canonicalized (macOS `/var` vs `/private/var`); a Node toolchain command and a strict editable Python import work from the copy.
+  - `__pycache__` directories are not copied; external directory links are skipped with a warning. Tasks without a workflow are unchanged.
+
 ## [2.14.124] - 2026-11-10
 
 ### Fixed
