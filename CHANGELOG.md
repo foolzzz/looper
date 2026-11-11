@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.138] - 2026-11-11
+
+### Changed
+
+- **Planner turns carry plan changes instead of the whole plan.** ([#1235](https://github.com/foolzzz/looper/pull/1235))
+  - A Planner turn after the first carries every step's label by status, the full lines of changed or new steps, removed step ids and new progress lines. The full plan returns on the first view, a new session or process, after compaction, a failed or autonomous turn, after 20 change turns, when the changes exceed half the full view, and every turn on runtimes without compaction events.
+  - In WAIT and GATE messages "Running now" moves before the plan view; the condition CHAT turn carries progress with a full view. Planner run records gain `plan_view` and `plan_view_reason`. Reply contracts, decisions and dispatching do not change.
+  - Model-visible: the Planner's turn messages change as described.
+- **SUPERVISE accepts the review steps it lists, the final answers in the user's language.** ([#1240](https://github.com/foolzzz/looper/pull/1240))
+  - The steps a SUPERVISE prompt lists as running are exactly the steps its reply may name, review steps included. A stopped running step with reviews fails its review through its panel.
+  - Model-visible: the Planner protocol says `final` is written in the user's language.
+
 ## [2.14.137] - 2026-11-11
 
 ### Changed
