@@ -415,8 +415,18 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   followed under `looper serve` by how to use its own tools
   (`ops.planner.TOOLS_GUIDE`, [A task's Planner's tools](#a-tasks-planners-tools));
   the project is read before each event's turns. The turns themselves carry
-  only what changed: the plan's progress, results, chat and supervision
-  observations. When the prompt changes (a config edit, a new background,
+  a plan change view: every step's label grouped by status, full lines for
+  changed or new steps, removed step ids, and progress and findings only
+  when that section changed. A full view is sent on the first view, on a new
+  session or process, after compaction, a failed or autonomous turn, after
+  20 change turns, or when the change view exceeds half the full view's
+  length. Runtimes without compaction events receive the full view every
+  turn. Room turns keep their bounded plan context; clipping discards the
+  saved view so the next turn starts full. Run annotations record `plan_view`
+  (`full` or `changes`) and `plan_view_reason`. WAIT and GATE messages put
+  `Running now` before the plan view; condition CHAT turns also carry progress
+  when receiving a full view. Results, chat and supervision observations
+  still accompany their turns. When the prompt changes (a config edit, a new background,
   knowledge or harness, a task moved to another project) its file and hash
   change, or the model, effort, per-run cap, environment, installed plugins and
   skills or mounted knowledge directories change, the Planner stops
@@ -2143,8 +2153,9 @@ for work under way).
   Manager session with something to say) starts with a `[RESUME]` brief: why
   the session is new, where the task is (steps accepted, under way, failed)
   and the handoff, or that there is none and the journal is what remains.
-  The Planner's request after it carries the plan, the supplements and the
-  journal as every turn does; `REPLY_CONTRACT` says a brief may come
+  The Planner's request after it carries the full plan view, the supplements
+  and the journal; later turns carry the change view described above.
+  `REPLY_CONTRACT` says a brief may come
   first. The Manager's brief adds the recent conversations. The brief is
   given once: until the new session reports its id.
 
