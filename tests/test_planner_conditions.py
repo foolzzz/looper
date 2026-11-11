@@ -193,6 +193,69 @@ def test_completed_condition_starts_while_the_source_is_being_reviewed(planner_c
     assert h.final().payload["status"] == "completed"
 
 
+def test_enabling_worktrees_delays_a_stored_completed_condition_until_acceptance(
+    planner_claude: Any, agent_db: Any, monkeypatch: Any,
+) -> None:
+    from looper.agents.message import MessageType
+    from looper.agents.tiers.planner import PlannerAgent
+
+    settings = {**_project(), "dependency_conditions": "on"}
+    agent_db.get_task_project.return_value = settings
+    # Exercise readiness independently of the workspace round's shared-directory guard.
+    async def in_task_directory(self: Any, plan_: Any, ready: Any) -> Any:
+        return ready, None
+
+    monkeypatch.setattr(PlannerAgent, "_plan_round", in_task_directory)
+    claude = planner_claude(
+        plan(step("s1", review=True), {**step("s2", "s1"), "ready_when": {
+            "all_of": [{"any_of": [{"step": "s1", "on": "completed"}]}],
+        }}), decide("review"), decide("accept"), decide("accept"),
+    )
+
+    async def scenario(h: Any) -> None:
+        await h.start()
+        await h.until(lambda: len(h.held) == 1)
+        settings["step_workspaces"] = "worktree"
+        await h.release(WORK_OK)
+        await h.until(lambda: len(h.reviews) == 1 and not h.planner._handling_message)
+        assert h.planner._execution.isolate_steps
+        assert h.planner._plan.steps[0].status == "completed"
+        assert [item.payload["step_key"] for item in h.work_items] == ["s1"]
+        assert h.planner._plan.steps[1].status == "pending"
+        await h.release(REVIEW_PASS)
+        await h.until(lambda: len(h.work_items) == 2)
+        assert h.planner._plan.steps[0].status == "verified"
+        assert h.held[0].message_type is MessageType.WORK_ITEM
+        await h.release(WORK_OK)
+        assert (await h.finished()).payload["status"] == "completed"
+
+    drive(claude, lambda _: None, scenario)
+
+
+@pytest.mark.parametrize("shape", [
+    {"step": "a", "on": "completed"},
+    {"all_of": [{"step": "a", "on": "completed"}, "b"]},
+    {"any_of": [{"step": "a", "on": "completed"}, "b"]},
+    {"k_of": 2, "of": [{"step": "a", "on": "completed"}, "b", "c"]},
+])
+def test_worktree_readiness_uses_verified_outcomes_for_completed_leaves(shape: Any) -> None:
+    from looper.agents.tiers.conditions import State
+
+    sources = [PlanStep(key, index, key, status="completed" if key == "a" else "dispatched", result=WORK_OK)
+               for index, key in enumerate("abc")]
+    dependent = PlanStep("d", 3, "dependent", ready_when=shape)
+    plan_ = TaskPlan("p", "g", "build", "", steps=[*sources, dependent])
+    assert plan_.ready_state(dependent, isolate_steps=True) is State.PENDING
+    if "any_of" in shape:
+        sources[1].status = "verified"  # A verified alternate still releases the OR.
+    else:
+        sources[0].status = sources[1].status = "verified"
+    assert plan_.ready_steps(isolate_steps=True) == [dependent]
+    sources[0].status, sources[1].status, sources[2].status = "failed", "skipped", "failed"
+    assert plan_.ready_state(dependent, isolate_steps=True) is State.UNSATISFIABLE
+    assert dependent.ready_when == shape
+
+
 @pytest.mark.parametrize("on", ["completed", "verified", "passed"])
 def test_worktree_plan_checks_nested_condition_leaves_before_dispatch(
     planner_claude: Any, agent_db: Any, monkeypatch: Any, on: str,

@@ -540,18 +540,20 @@ class TaskPlan:
         """Whether settling ``step`` leaves only panel reviews, which need no delivery summary of their own."""
         return all(s.status in ("verified", "skipped") for s in self.steps if s is not step and not s.reviews)
 
-    def ready_steps(self) -> list[PlanStep]:
+    def ready_steps(self, *, isolate_steps: bool = False) -> list[PlanStep]:
         """Steps whose dependencies are all verified."""
         done = {s.step_id for s in self.steps if s.status == "verified"}
         return [
             s for s in self.steps
             if s.status == "pending" and (all(d in done for d in s.depends_on) if s.ready_when is None
-                                          else self.ready_state(s) is State.SATISFIED)
+                                          else self.ready_state(s, isolate_steps=isolate_steps) is State.SATISFIED)
         ]
 
-    def ready_state(self, step: PlanStep) -> State:
+    def ready_state(self, step: PlanStep, *, isolate_steps: bool = False) -> State:
+        # Panel seats review the Worker's snapshot before acceptance; waiting for verified would deadlock it.
         return evaluate(parse_condition(step.ready_when, "ready_when"),
-                        lambda sid: StepOutcome.from_step(self.step(sid)))
+                        lambda sid: StepOutcome.from_step(self.step(sid)),
+                        isolate_steps=isolate_steps and not step.reviews)
 
     def condition_text(self, step: PlanStep) -> str:
         labels = self.labels()
@@ -1123,7 +1125,8 @@ class PlannerAgent:
                 await self._deliver_waits(self._plan)
             if await self._blocked_conditions(self._plan):
                 await self._settle_plan(self._plan)
-            elif self._plan.status in _LIVE and any(s.ready_when is not None for s in self._plan.ready_steps()):
+            elif self._plan.status in _LIVE and any(s.ready_when is not None for s in self._plan.ready_steps(
+                    isolate_steps=self._execution.isolate_steps)):
                 await self._dispatch_ready(self._plan)
 
     # --- Planning ---
@@ -1300,7 +1303,7 @@ class PlannerAgent:
         # Every ready gate and wait opens; every ready work step starts, and the worker pool runs the work
         # within its project's Worker limit. A wait takes no Worker and joins no workspace round. Progress is
         # reported once the work is in flight, so an open wait does not report the task as waiting first.
-        ready = plan.ready_steps()
+        ready = plan.ready_steps(isolate_steps=self._execution.isolate_steps)
         opened = False
         for step in [s for s in ready if s.gate is not None or s.wait is not None]:
             if plan.status not in _LIVE:
