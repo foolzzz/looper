@@ -2373,12 +2373,21 @@ class PlannerAgent:
         verification = (self._workflow or {}).get("verification") or {}
         if self._panel_on and step.role == verification.get("role", "") and data.get("decision") == "review":
             raise ProtocolError("verification steps are not reviewed")
+        offered = self._offers_adjudicated_accept(plan, step, context)
         enabled = bool((self._workflow or {}).get("adjudication")) and context.result is ResultKind.REVIEW
+        results = {}
         if "adjudications" in data and enabled and step.accept_when is not None:
             results = adjudicate(plan, step, data["adjudications"])
             context = replace(context, succeeded=state(plan, step, results) is State.SATISFIED)
-            return parse_decision(text, context, view, adjudications=True)
-        return parse_decision(text, context, view)
+        if offered and not context.succeeded:
+            required = leaves(parse_condition(step.accept_when, "accept_when"))
+            context = replace(context, adjudication_findings=tuple(
+                (seat.role or "builtin", index) for seat in plan.steps
+                if seat.step_id in required and seat.reviews == step.step_id and seat.status == "verified"
+                and not (seat.result or {}).get("refused") and not (seat.result or {}).get("failure")
+                for index, finding in enumerate(results.get(seat.step_id, seat.result or {}).get("findings", []))
+                if finding.get("severity") == "blocking"))
+        return parse_decision(text, context, view, adjudications=enabled and step.accept_when is not None)
 
     async def _dispatch_review(self, plan: TaskPlan, step: PlanStep, *, same_attempt: bool = False) -> None:
         if not await self._within_budget(plan):
@@ -4739,17 +4748,20 @@ class PlannerAgent:
         ]
         return "\n".join(lines)
 
-    def _decision_message(
-        self, plan: TaskPlan, step: PlanStep, context: DecisionContext, report: list[str],
-    ) -> str:
-        from .planner_protocol import ADJUDICATED_ACCEPT, ADJUDICATION_RULES
+    def _offers_adjudicated_accept(self, plan: TaskPlan, step: PlanStep, context: DecisionContext) -> bool:
         from .review_adjudication import can_accept
-        who = "Reviewer" if context.result is ResultKind.REVIEW else "Worker"
-        adjudicated_accept = (
+        return (
             bool((self._workflow or {}).get("adjudication")) and context.result is ResultKind.REVIEW
             and not context.succeeded and step.accept_when is not None
             and Decision.ACCEPT in replace(context, succeeded=True).allowed() and can_accept(plan, step)
         )
+
+    def _decision_message(
+        self, plan: TaskPlan, step: PlanStep, context: DecisionContext, report: list[str],
+    ) -> str:
+        from .planner_protocol import ADJUDICATED_ACCEPT
+        who = "Reviewer" if context.result is ResultKind.REVIEW else "Worker"
+        adjudicated_accept = self._offers_adjudicated_accept(plan, step, context)
         choices = replace(context, succeeded=True).allowed() if adjudicated_accept else context.allowed()
         allowed = []
         for decision in choices:
@@ -4774,8 +4786,6 @@ class PlannerAgent:
         if step.accept_when is not None and context.result is ResultKind.REVIEW:
             lines += ["", "Suggestions do not block acceptance. For each suggestion, take or decline it and record "
                       "the choice and reason in summary (or retry feedback / replan reason)."]
-        if adjudicated_accept:
-            lines += ["", ADJUDICATION_RULES]
         if context.escalate:
             lines += ["", "Escalation required: retries are exhausted and this result cannot be accepted. "
                       "Only replan or fail is allowed. A replan must add a new user gate in this reply; "
@@ -4794,7 +4804,8 @@ class PlannerAgent:
             lines += ["", f"The task's other open steps are gates ({', '.join(sorted(context.open_gates))}): a "
                           "decision that cancels all of them and completes the task (accept, or replan with no new "
                           'steps) must carry "final", the task\'s final summary.']
-        lines += ["", f"Allowed decisions now: {', '.join(allowed)}.", "Reply with the DECISION JSON."]
+        separator = "; " if adjudicated_accept else ", "
+        lines += ["", f"Allowed decisions now: {separator.join(allowed)}.", "Reply with the DECISION JSON."]
         return "\n".join(lines)
 
     def _gate_message(self, plan: TaskPlan, step: PlanStep, messages: list[dict[str, Any]],

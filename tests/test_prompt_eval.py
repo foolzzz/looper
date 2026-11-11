@@ -705,7 +705,7 @@ def _result(text: str) -> list[dict[str, Any]]:
     return [{"seq": 1, "event": {"type": "result", "subtype": "success", "result": text}}]
 
 
-@pytest.mark.parametrize("case", ["accept", "retry", "bare", "no-offer", "no-journal", "empty-reason"])
+@pytest.mark.parametrize("case", ["accept", "repair", "repair-no-offer", "retry", "bare", "no-offer", "no-journal", "empty-reason"])
 def test_panel_adjudicate_requires_offered_accept_and_journaled_downgrade(case):
     from looper.agents.tiers.planner_protocol import ADJUDICATED_ACCEPT
     from tests.test_planner_agent import decide
@@ -722,9 +722,15 @@ def test_panel_adjudicate_requires_offered_accept_and_journaled_downgrade(case):
     output = decide("retry", feedback="Please check again") if case == "retry" else decide(
         "accept", **({} if case == "bare" else {"adjudications": [proposal]}))
     records = [{**_record(1, "planner-task", input_text="" if case == "no-offer" else
-                        f"[DECISION]\nAllowed decisions now: {ADJUDICATED_ACCEPT}, retry, replan, fail."),
+                        f"[DECISION]\nAllowed decisions now: {ADJUDICATED_ACCEPT}; retry; replan; fail."),
                 "output_text": output}]
-    assert (task.flow_check(detail, records, {}) is None) == (case == "accept")
+    if case.startswith("repair"):
+        records[0]["input_text"] = "[DECISION]\nAllowed decisions now: retry, replan, fail."
+        records.append({**_record(2, "planner-task", input_text=
+            "[DECISION] Your last reply broke the reply contract: accept is not allowed; allowed now: "
+            + (f"{ADJUDICATED_ACCEPT}; retry; replan; fail" if case == "repair" else "retry, replan, fail")),
+            "output_text": output})
+    assert (task.flow_check(detail, records, {}) is None) == (case in {"accept", "repair"})
     assert task.expect["max_retries"] == 0
 
 

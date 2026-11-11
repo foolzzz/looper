@@ -406,6 +406,8 @@ class DecisionContext:
     open_gates: frozenset[str] | None = None
     escalate: bool = False
     verification_repair_required: bool = False
+    # Findings still blocking after any proposed downgrades, when adjudicated accept was offered.
+    adjudication_findings: tuple[tuple[str, int], ...] = ()
 
     @property
     def acceptable(self) -> bool:
@@ -811,12 +813,18 @@ def _progress(data: Mapping[str, Any]) -> ProgressNote | None:
 
 def _refusal(decision: Decision, context: DecisionContext) -> str:
     allowed = ", ".join(d.value for d in context.allowed())
+    if context.adjudication_findings:
+        allowed = "; ".join([ADJUDICATED_ACCEPT, *(d.value for d in context.allowed())])
     if context.verification_repair_required:
         why = "verification_changed_code requires a replan with a reviewed non-verification repair"
     elif decision is Decision.RETRY:
         why = f"step {context.step} has used its {context.max_retries} retries"
     elif decision is Decision.ACCEPT and context.result is ResultKind.WORK and context.succeeded:
         why = f"step {context.step} needs a passing review before it can be accepted"
+    elif decision is Decision.ACCEPT and context.adjudication_findings:
+        findings = ", ".join(f"{member} finding {index}" for member, index in context.adjudication_findings)
+        why = (f"step {context.step} still has blocking findings: {findings}; "
+               "include downgrades to suggestion with a reason each in adjudications so acceptance passes")
     elif decision is Decision.ACCEPT:
         why = f"step {context.step} did not succeed, so it cannot be accepted"
     elif context.result is ResultKind.REVIEW:

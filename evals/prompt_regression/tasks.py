@@ -1714,6 +1714,7 @@ def _panel_flow(detail, records, _events, *, adjudication=False):
     if adjudication:
         judgments = [json.loads(entry["summary"]) for entry in detail.get("journal", [])
                      if entry.get("kind") == "review_adjudicated"]
+        missing_offer = False
         for record in records:
             if role(record) != "planner":
                 continue
@@ -1722,11 +1723,14 @@ def _panel_flow(detail, records, _events, *, adjudication=False):
             if reply.get("decision") != "accept" or not proposals:
                 continue
             if ADJUDICATED_ACCEPT not in str(record.get("input_text") or ""):
-                return "the decision turn did not offer adjudicated accept"
+                missing_offer = True
+                continue
             if (any(item.get("member") == "review_a" and item.get("finding") == 0
                     and item.get("level") == "suggestion" for item in proposals)
                     and all(str(item.get("reason") or "").strip() and item in judgments for item in proposals)):
                 return None
+        if missing_offer:
+            return "the decision turn did not offer adjudicated accept"
         return "the out-of-scope blocking finding was not accepted with a journaled reasoned adjudication"
     replies = [extract_report(str(record.get("output_text") or ""), "decision") for record in records
                if role(record) == "planner"]

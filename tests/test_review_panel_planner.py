@@ -344,10 +344,12 @@ def test_retry_stops_old_reviews_and_resets_the_round(planner_claude, agent_db, 
     drive(claude, held_reviews, scenario)
 
 
-def test_adjudication_requires_reason_then_rechecks_acceptance(planner_claude, agent_db, monkeypatch):
+@pytest.mark.parametrize("invalid", ["bare", "empty-reason"])
+def test_adjudication_repairs_invalid_accept_then_rechecks_acceptance(planner_claude, agent_db, monkeypatch, invalid):
     configure(agent_db, monkeypatch, adjudication=True)
     judgment = {"member": "review_a", "finding": 0, "level": "suggestion", "reason": "Already covered by validation"}
     claude = planner_claude(plan(step("s1", review=True)), decide("review"),
+                            decide("accept") if invalid == "bare" else
                             decide("accept", adjudications=[{**judgment, "reason": " "}]),
                             decide("accept", adjudications=[judgment]))
 
@@ -359,7 +361,7 @@ def test_adjudication_requires_reason_then_rechecks_acceptance(planner_claude, a
         await h.until(lambda: h.planner._plan.steps[0].status == "verified")
         prompt = claude.turns()[2]["text"]
         assert "Allowed decisions now: accept (downgrade named blocking findings to suggestions with a reason each, then accept)" in prompt
-        assert '"decision": "accept", "adjudications": [' in prompt
+        assert '"decision": "accept", "adjudications": [' in claude.prompts()[-1]
         assert h.planner._plan.steps[1].result["status"] == "passed_by_adjudication"
         assert h.planner._plan.steps[0].result["verify_findings"][0]["severity"] == "suggestion"
         assert h.planner._plan.steps[0].result["verify_passed"] is True
@@ -367,6 +369,10 @@ def test_adjudication_requires_reason_then_rechecks_acceptance(planner_claude, a
         assert [json.loads(e["summary"]) for e in stored["journal"]
                 if e["kind"] == "review_adjudicated"] == [judgment]
         assert "reason" in claude.turns()[-1]["text"]
+        if invalid == "bare":
+            from looper.agents.tiers.planner_protocol import ADJUDICATED_ACCEPT
+            assert ADJUDICATED_ACCEPT in claude.turns()[-1]["text"]
+            assert "review_a finding 0" in claude.turns()[-1]["text"]
         await h.release(REVIEW_PASS)
         await h.finished()
     drive(claude, held_reviews, scenario)
@@ -390,7 +396,7 @@ def test_failed_panel_cannot_be_accepted_without_adjudication(planner_claude, ag
     drive(claude, held_reviews, scenario)
 
 
-@pytest.mark.parametrize("case", ["blocking", "multiple", "off", "pending", "refused", "failure",
+@pytest.mark.parametrize("case", ["blocking", "multiple", "advisory", "off", "pending", "refused", "failure",
                                   "no-findings", "escalate", "verification-repair", "work"])
 def test_decision_offers_adjudicated_accept_only_when_downgrades_can_pass(tmp_path, case):
     from copy import deepcopy
@@ -406,6 +412,8 @@ def test_decision_offers_adjudicated_accept_only_when_downgrades_can_pass(tmp_pa
              PlanStep("seat_b", 2, "Review", reviews="work", role="review_b", status="verified", result=deepcopy(REVIEW_PASS))]
     if case == "multiple":
         seats[1].result = deepcopy(BLOCK)
+    elif case == "advisory":
+        seats.append(PlanStep("seat_c", 3, "Review", reviews="work", role="review_c", status="verified", result=deepcopy(BLOCK)))
     elif case == "pending":
         seats[1].status, seats[1].result = "dispatched", None
     elif case in {"refused", "failure"}:
@@ -423,23 +431,46 @@ def test_decision_offers_adjudicated_accept_only_when_downgrades_can_pass(tmp_pa
     before = deepcopy([seat.result for seat in seats])
     prompt = agent._decision_message(task, target, context, [])
     choices = prompt.split("Allowed decisions now: ", 1)[1].split("\n", 1)[0]
-    assert ("accept (downgrade named blocking findings" in choices) == (case in {"blocking", "multiple"})
+    assert ("accept (downgrade named blocking findings" in choices) == (case in {"blocking", "multiple", "advisory"})
+    from looper.agents.tiers.planner_protocol import ADJUDICATED_ACCEPT, ADJUDICATION_RULES, reply_contract
+    offered = case in {"blocking", "multiple", "advisory"}
+    expected = [d.value if d.value != "retry" else "retry (2 left)" for d in context.allowed()]
+    if offered:
+        expected.insert(0, ADJUDICATED_ACCEPT)
+    assert choices.removesuffix(".").split("; " if offered else ", ") == expected
+    assert ADJUDICATION_RULES not in prompt
+    assert reply_contract(review_panel=True, adjudication=True).count(ADJUDICATION_RULES) == 1
     assert [seat.result for seat in seats] == before
-    if case in {"blocking", "multiple"}:
-        with pytest.raises(ProtocolError, match="accept is not allowed"):
-            agent._panel_decision(decide("accept"), task, target, context, task.view())
+    with pytest.raises(ProtocolError, match="accept is not allowed") as refused:
+        agent._panel_decision(decide("accept"), task, target, context, task.view())
+    if offered:
+        assert f"allowed now: {ADJUDICATED_ACCEPT}; retry; replan; fail" in str(refused.value)
+        assert "review_a finding 0" in str(refused.value)
+        assert "reason" in str(refused.value)
+        assert ("review_b finding 0" in str(refused.value)) == (case == "multiple")
+        assert "review_c finding 0" not in str(refused.value)
+    else:
+        from looper.agents.tiers.planner_protocol import parse_decision
+        with pytest.raises(ProtocolError) as original:
+            parse_decision(decide("accept"), context, task.view())
+        assert str(refused.value) == str(original.value)
+    if offered:
         judgments = [{"member": seat.role, "finding": 0, "level": "suggestion", "reason": "Outside the requested scope"}
-                     for seat in seats if seat.result.get("findings")]
+                     for seat in seats[:2] if seat.result.get("findings")]
         parsed = agent._panel_decision(decide("accept", adjudications=judgments), task, target, context, task.view())
         assert parsed.decision.value == "accept" and parsed.adjudications == tuple(judgments)
-        if case == "blocking":
+        if case != "multiple":
             from looper.agents.tiers.planner_protocol import ADJUDICATION_RULES
             from tests.test_planner_agent import reply
             example = json.JSONDecoder().raw_decode(ADJUDICATION_RULES.split(": ", 1)[1])[0]
             assert agent._panel_decision(reply(example), task, target, context, task.view()).decision.value == "accept"
         else:
-            with pytest.raises(ProtocolError, match="accept is not allowed"):
+            with pytest.raises(ProtocolError, match="accept is not allowed") as incomplete:
                 agent._panel_decision(decide("accept", adjudications=judgments[:1]), task, target, context, task.view())
+            assert ADJUDICATED_ACCEPT in str(incomplete.value)
+            assert "review_b finding 0" in str(incomplete.value)
+            assert "review_a finding 0" not in str(incomplete.value)
+            assert [seat.result for seat in seats] == before
 
 
 @pytest.mark.parametrize("review_roles", [[], ["review_a"]])
