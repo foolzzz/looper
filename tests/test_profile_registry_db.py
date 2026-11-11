@@ -303,9 +303,16 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
         assert (runtime["builtin"], runtime["executable"], runtime["version"]) == (True, "", None)
         assert set(runtime["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
         # Each CLI's own login, with the models it offers as suggestions.
-        claude, codex, cursor, grok = registry["providers"]
+        claude, coco, codex, cursor, grok = registry["providers"]
         assert (claude["name"], claude["auth"], claude["oauth_runtime_type"], claude["api_key"]) == (
             "claude-subscription", "oauth", "claude-code", None)
+        assert (coco["provider_id"], coco["name"], coco["builtin"], coco["auth"], coco["oauth_runtime_type"],
+                coco["api_key"], coco["endpoints"], coco["model_count"], coco["suggested_models"]) == (
+            "prov-coco-login", "coco login", True, "oauth", "coco", None,
+            [{"provider_id": "prov-coco-login", "protocol": "openai-responses", "base_url": "",
+              "use_runtime_default": False}], 0, [])
+        assert coco["login"]["state"] == "not_logged_in"
+        assert await db.list_models(provider_id="prov-coco-login") == []
         assert (codex["provider_id"], codex["name"], codex["builtin"], codex["auth"], codex["oauth_runtime_type"],
                 [e["protocol"] for e in codex["endpoints"]], codex["model_count"]) == (
             "prov-codex-login", "codex-login", True, "oauth", "codex", ["openai-responses"], 7)
@@ -1366,7 +1373,10 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
         unlimited = (await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider['provider_id'], "fields": {"max_concurrency": None}}))
         assert unlimited["provider"]["max_concurrency"] is None
         builtins = [p for p in (await _registry())["providers"] if p["builtin"]]
-        assert all(b["max_concurrency"] is None and b["model_count"] > 0 for b in builtins)
+        # Coco discovers its catalog from the CLI; the other logins have pinned models.
+        assert {b["provider_id"]: (b["max_concurrency"], b["model_count"]) for b in builtins} == {
+            "prov-claude-subscription": (None, 3), "prov-coco-login": (None, 0),
+            "prov-codex-login": (None, 7), "prov-cursor-login": (None, 5), "prov-grok-login": (None, 4)}
 
     run_db(_test, monkeypatch)
 

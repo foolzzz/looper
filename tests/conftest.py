@@ -56,6 +56,25 @@ def _no_real_cursor_agent(tmp_path_factory: pytest.TempPathFactory):
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _no_real_coco(tmp_path_factory: pytest.TempPathFactory):
+    """Keep every coco probe away from the operator's installed CLI and login."""
+    directory = tmp_path_factory.mktemp("coco-guard")
+    executable = directory / "coco"
+    executable.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        '  "login status") echo "Not logged in"; exit 1 ;;\n'
+        '  "models --json") echo "[]"; exit 0 ;;\n'
+        '  *) exit 3 ;;\n'
+        "esac\n"
+    )
+    executable.chmod(0o755)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("PATH", str(directory) + os.pathsep + os.environ.get("PATH", ""))
+        yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _staged_dashboard_environment():
     # All serve subprocesses must inherit this, including independent installed smokes.
     with pytest.MonkeyPatch.context() as patch:

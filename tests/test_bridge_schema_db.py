@@ -120,17 +120,19 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                 elif table in ("llm_providers", "llm_provider_endpoints", "llm_models"):
                     # New builtins and additive defaults must leave every historical field intact.
                     key = "id" if table == "llm_providers" else "provider_id"
-                    cursor_rows = [r for r in after[table] if r[key] == "prov-cursor-login"]
-                    expected = [r for r in fresh_rows[table] if r[key] == "prov-cursor-login"]
-                    assert len(expected) == (5 if table == "llm_models" else 1)
-                    expected = [{**r, "created_at": upgraded_at, "updated_at": upgraded_at}
-                                if "created_at" in r else r for r in expected]
-                    assert cursor_rows == expected, table
+                    new_providers = {"prov-cursor-login": 5, "prov-coco-login": 0}
+                    for provider_id, model_count in new_providers.items():
+                        added_rows = [r for r in after[table] if r[key] == provider_id]
+                        expected = [r for r in fresh_rows[table] if r[key] == provider_id]
+                        assert len(expected) == (model_count if table == "llm_models" else 1)
+                        expected = [{**r, "created_at": upgraded_at, "updated_at": upgraded_at}
+                                    if "created_at" in r else r for r in expected]
+                        assert added_rows == expected, (table, provider_id)
                     historical = [{**r, "enabled": True} for r in before[table]] \
                         if table == "llm_providers" else before[table]
                     if table == "llm_models":
                         historical = [{**r, "chat_dialect": None} for r in historical]
-                    assert [r for r in after[table] if r[key] != "prov-cursor-login"] == historical, table
+                    assert [r for r in after[table] if r[key] not in new_providers] == historical, table
                 else:
                     assert after[table] == before[table], table
             assert json.loads(after["tasks"][0]["config"]) == {"worker": {"max_turns": 9}}
