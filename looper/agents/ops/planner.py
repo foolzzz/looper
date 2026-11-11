@@ -24,10 +24,10 @@ logged.
   empty, the default), the profile of the task's Workers or Reviewers for the
   rest of the task or for one step, and writes a ``profile_choice`` journal
   entry with it (``task_planner_profiles``). The WorkerPool reads it when the
-  role's next run starts, under the user's choice for the task
-  (``agent_settings.Layer.PLANNER_TASK``, ``PLANNER_STEP``), and only while the
-  project still allows the profile. No confirmation: the project's setting
-  (an empty list included) is the maintainer's consent in advance.
+  role's next run starts (``agent_settings.Layer.PLANNER_TASK``, ``PLANNER_STEP``),
+  and only while the project still allows the profile. No confirmation: the project's setting
+  (an empty list included) is the maintainer's consent in advance. A choice
+  overridden by the task or the step's task role is refused before writing.
 - **Concurrency.** ``looper_task_concurrency`` changes the task's own Worker
   and Reviewer limits, through the Manager's code
   (``concurrency.set_task_limits``), at once; each change is a
@@ -67,7 +67,7 @@ from .. import vault
 from . import vault as vault_ops
 from .vault import TOOL_NAMES as VAULT_TOOL_NAMES, VaultUsage
 from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, PLANNER_CHOICE_ROLES, AgentType, Layer, index_layers
-from ..agent_settings import resolve
+from ..agent_settings import LayerValues, resolve
 from ..links import task_link
 from ..message import MessageEnvelope, MessageType, channel_address, planner_address
 from ..project_execution import ProjectExecution
@@ -113,8 +113,9 @@ steps.
   dispatches the step (the plan, a retry, a replan); a run already started
   keeps its own. Before your plan exists only the rest of the task can be
   chosen; a step not started yet can be chosen in a later turn. You never
-  choose the Planner's own profile, and a profile the user chose for this
-  task wins over yours.
+  choose the Planner's own profile. Refused if the task or step's task role
+  pins the profile; the operator can change it in the dashboard (task → Roles),
+  or you can ask through a user gate.
 - looper_task_concurrency: how many of this task's Workers or Reviewers run
   at once. Lower it when steps that run at the same time would get in each
   other's way (one build, one database, one port) or when the requirement or
@@ -484,10 +485,6 @@ async def _profile_set(call: PlannerCall) -> dict[str, Any]:
     task = await _task(call.task_id)
     project_id = task.get("project_id")
     allowed, restricted = await choosable_profiles(project_id)
-    users = await db_layers.profile_overrides(call.task_id)
-    if role.value in users:
-        raise OpError(ErrorCode.FORBIDDEN, f"the user chose {users[role.value]['name']} for this task's "
-                                           f"{_label(role)}; their choice stands over yours")
     step = await _step(call.task_id, arguments["step"]) if arguments.get("step") else None
     where = f"step {step.get('step_key') or step['id']}" if step else "the rest of the task"
     wanted = arguments.get("profile_id")
@@ -502,6 +499,26 @@ async def _profile_set(call: PlannerCall) -> dict[str, Any]:
         except RegistryError as exc:
             raise OpError(ErrorCode.INVALID, str(exc)) from None
     step_id = step["id"] if step else None
+    task_role = None
+    if step and step.get("role_key"):
+        # A new attempt takes the current definition, as the Planner's dispatch does.
+        defined = await db_roles.get(call.task_id, step["role_key"])
+        if defined is not None and RoleKind(defined["kind"]).agent is role:
+            task_role = (defined["role_key"], defined["version"])
+    layers = index_layers(await db_layers.list_layers(project_id, task_id=call.task_id, step_id=step_id,
+                                                      task_role=task_role), project_id)
+    choice = (Layer.PLANNER_STEP if step else Layer.PLANNER_TASK, role)
+    if profile is None:
+        layers.pop(choice, None)
+    else:
+        layers[choice] = LayerValues.from_row({"profile": profile})
+    runs = resolve(role, layers, project_id)
+    if runs.profile_source in (Layer.TASK_ROLE, Layer.TASK):
+        owner = (f"the user chose {runs.profile.name} for this task's {_label(role)}; their choice stands over yours"
+                 if runs.profile_source is Layer.TASK else f"the task role pins {runs.profile.name}")
+        raise OpError(ErrorCode.FORBIDDEN, f"{owner} ({runs.profile_source.value} layer). Nothing changed. "
+                                           "The operator can change the profile in the dashboard "
+                                           "(task → Roles), or you can ask through a user gate.")
     before = next((c for c in await db_layers.planner_profiles(call.task_id)
                    if c["role"] == role.value and c["step_id"] == step_id), None)
     if profile is None and before is None:
@@ -519,8 +536,6 @@ async def _profile_set(call: PlannerCall) -> dict[str, Any]:
     except asyncpg.ForeignKeyViolationError:
         raise OpError(ErrorCode.CONFLICT, "the step or the profile was removed meanwhile; look again") from None
     await _activity(call.task_id, f"Planner chose the Agent Profile: {summary}")
-    layers = index_layers(await db_layers.list_layers(project_id, task_id=call.task_id, step_id=step_id), project_id)
-    runs = resolve(role, layers, project_id)
     return {"role": role.value, "for": where, "profile": profile["name"] if profile else None, "changed": True,
             "next_run": {"name": runs.profile.name, "source": runs.profile_source.value},
             "note": f"the {_label(role)}' runs that start from now on use it, a retry included; a run already "
@@ -779,11 +794,11 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         name="looper_task_profile_set",
-        description="Choose the Agent Profile of this task's Workers or Reviewers, from the profiles "
-                    "looper_task_profiles lists as allowed: for the rest of the task, or with step for that step "
-                    "(each attempt of it). profile_id null clears your choice. The role's runs that start after "
-                    "the call use it; a run already started keeps its own. The user's choice for the task wins "
-                    "over yours.",
+        description="Choose an allowed Agent Profile from looper_task_profiles for this task's Workers or "
+                    "Reviewers: for the rest of the task, or with step for each attempt of that step. profile_id "
+                    "null clears your choice. Applies to new runs; next_run gives the resolved profile. Refused "
+                    "when task or task_role pins it: ask through a user gate or have the operator change the "
+                    "profile in the dashboard (task → Roles).",
         schema={"type": "object", "required": ["role"], "additionalProperties": False, "properties": {
             "role": _ROLE,
             "profile_id": {"type": "string", "minLength": 1,
