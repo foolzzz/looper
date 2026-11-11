@@ -608,3 +608,35 @@ def test_serve_checks_bot_credentials_and_allowlist_before_building_the_adapter(
     assert "example-secret" not in caplog.text
     if starts:
         assert "HelperBot" in caplog.text and "cli_example" in caplog.text
+
+
+@pytest.mark.parametrize('target', [USER, GROUP])
+def test_delivery_record_is_escaped_only_at_lark_markdown_rendering(tmp_path, target):
+    from looper.agents.task_notice import NotifyChannel, notice_text
+    from looper.agents.tiers.journal import JournalKind
+    from looper.agents.workflow_reporting import process_record
+    from tests.test_workflow_process_record import entry, task
+
+    fragment = 'write_api `run_cmd` __main__'
+    summary = process_record(task(), [entry(JournalKind.ESCALATION, reason=fragment)], [])['delivery_summary']
+    text = notice_text('t1', 'Delivery', 'completed', '**Done**', channel=NotifyChannel.LARK_BOT,
+                       dashboard_url='https://example.org', delivery_summary=summary)
+    assert fragment in text and '\\' not in text
+
+    async def run():
+        transport = StubTransport()
+        adapter = _adapter(tmp_path, transport)
+        try:
+            receipt = await adapter.deliver(_envelope('notice', MessageType.CHAT_NOTICE, channel='lark_bot',
+                kind=target.kind.value, chat=target.id, mention=target.mention, text=text))
+            assert receipt.success
+            rendered = transport.calls[-1][1]['markdown']
+            assert r'write\_api \`run\_cmd\` \_\_main\_\_' in rendered
+            assert '**Done**' in rendered and '## Process record\n\n- Roles:' in rendered
+            assert '[https://example.org/#tasks/t1](https://example.org/#tasks/t1)' in rendered
+            if target.mention:
+                assert rendered.startswith(f'<at user_id="{OPEN_ID}"></at> ')
+        finally:
+            await adapter.stop()
+
+    asyncio.run(run())

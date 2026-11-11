@@ -235,7 +235,12 @@ class LarkChannelAdapter(ChannelAdapter):
         """Send a task's end notice as Markdown, like an answer: to a user in a direct message, or to a group chat
         @-mentioning the requester."""
         try:
-            await self._send_target(target, text)
+            # Rich-text posts render Markdown; keep the durable notice unchanged.
+            rendered = re.sub(
+                r'(^## Process record\n\n)((?:- (?:Roles|Reviews|Verification|Escalations): .*\n?)+)',
+                lambda block: block[1] + re.sub(r'([\\`*_~\[\]<>])', r'\\\1', block[2]),
+                text, flags=re.MULTILINE)
+            await self._send_target(target, rendered)
         except LarkCliError as exc:
             logger.warning("%s: a task's end notice to %s failed: %s", self.channel_id, target.id, exc)
             return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))

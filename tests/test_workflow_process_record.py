@@ -30,8 +30,8 @@ def test_roles_keep_configured_profiles_requested_and_reported_models_and_fallba
                                           **{'from': 'primary', 'to': 'backup', 'reason': 'profile_error'})], runs,
                             workflow={'roles': [{'key': 'dev', 'profile_id': 'primary'},
                                                 {'key': 'review_a', 'profile_id': 'review-profile'}]}))
-    for text in ('dev', 'primary', 'review_a', 'review-profile', 'Backup', 'example-runtime',
-                 'requested-model', 'reported-model', '回落', 'profile_error'):
+    for text in ('dev', 'primary', r'review_a', 'review-profile', 'Backup', 'example-runtime',
+                 'requested-model', 'reported-model', '回落', r'profile_error'):
         assert text in record
 
 
@@ -46,16 +46,70 @@ def test_review_rounds_keep_each_seat_adjudications_late_results_and_stale_seats
                      reason='The caller validates input'),
                entry(JournalKind.LATE_REVIEW, 's1/review_b', passed=True, findings=[])]
     record = process_record_text(process_record(task(), entries, []))
-    for text in ('第 2 轮', 's1/review_a', '1 blocking', '失败', 's1/review_b', 'stale', '裁决',
+    for text in ('第 2 轮', r's1/review_a', '1 blocking', '失败', r's1/review_b', 'stale', '裁决',
                  'The caller validates input', '晚到', '通过'):
         assert text in record
+
+
+def test_review_arrivals_and_snapshot_keep_latest_verdict_per_seat_and_round():
+    seats = {name: {'status': 'verified', 'result': {'passed': True, 'findings': []}}
+             for name in ('alpha', 'beta', 'gamma')}
+    entries = [entry(JournalKind.REVIEW_ROUND, round=0, reviews={name: seat}) for name, seat in seats.items()]
+    entries[0] = entry(JournalKind.REVIEW_ROUND, round=0, reviews={'alpha': {'passed': False}})
+    entries.append(entry(JournalKind.REVIEW_ROUND, round=0, reviews=seats))
+    record = process_record(task(), entries, [])
+    assert record['sections']['Reviews'] == [f'- s1 第 1 轮 / {name}: 通过, 0 blocking' for name in seats]
+    entries.extend([entry(JournalKind.REVIEW_ROUND, round=1, reviews=seats),
+                    entry(JournalKind.REVIEW_ROUND, 's2', round=0, reviews=seats)])
+    assert len(process_record(task(), entries, [])['sections']['Reviews']) == 9
+    from looper.agents.tiers.journal import planner_section
+
+    prompt = '\n'.join(planner_section(entries))
+    assert prompt.count('s1 / round 1 · alpha · passed') == 1
+    assert 's1 / round 1 · alpha · failed' not in prompt
+    assert prompt.index('round 2') < prompt.index('round 1')
+
+
+def test_process_record_summary_keeps_agent_text_unescaped_for_channels_and_manager():
+    from looper.agents.task_notice import NotifyChannel, notice_text
+
+    fragment = 'write_api `run_cmd` __main__ *args* ~~removed~~'
+    record = process_record(task(), [entry(JournalKind.ESCALATION, reason=fragment)], [])
+    summary = record['delivery_summary']
+    assert summary.startswith('## Process record\n\n- Roles:')
+    assert all('\n- ' + name + ':' in summary for name in ('Reviews', 'Verification', 'Escalations'))
+    assert '\n\nFull record:' in summary
+    texts = [summary, process_record_text(record), record['sections']['Escalations'][0]]
+    texts += [notice_text('t1', 'Delivery', 'completed', 'Done', channel=channel,
+                          delivery_summary=summary) for channel in (NotifyChannel.TELEGRAM, NotifyChannel.LARK)]
+    for text in texts:
+        assert fragment in text
+        assert "\\" not in text
+    assert len(summary) <= 1200
+
+
+@pytest.mark.parametrize('render', ['planner_section', 'lessons_journal'])
+def test_review_rounds_render_newest_first_without_empty_summary_colons(render):
+    from looper.agents.tiers import journal
+
+    entries = [entry(JournalKind.REVIEW_ROUND, round=number, reviews={
+        'pending': {'status': 'dispatched', 'result': None},
+        'done': {'passed': True},
+        'failed': {'passed': False, 'failure': 'Check input'},
+    }) for number in (0, 1, 2)]
+    text = '\n'.join(getattr(journal, render)(entries))
+    assert text.index('round 3') < text.index('round 2') < text.index('round 1')
+    assert 'pending · dispatched · 0 blocking\n' in text
+    assert 'done · passed · 0 blocking\n' in text
+    assert 'failed · failed · 0 blocking: Check input' in text
+    assert 'blocking: \n' not in text
 
 
 def test_verification_keeps_each_head_result_and_unenforced_remote_safety():
     record = process_record_text(process_record(task(), [entry(JournalKind.VERIFICATION_ROUND, attempt=1, head='abc123',
                                           status='failed', failure='verification_changed_code')], []))
     assert '第 1 轮' in record and 'abc123' in record and 'failed' in record
-    assert 'verification_changed_code' in record and SAFETY in record
+    assert r'verification_changed_code' in record and SAFETY in record
 
 
 def test_all_gates_include_topics_and_conclusions_including_pending():
@@ -72,7 +126,7 @@ def test_legacy_workflow_reviews_are_recorded_without_panel_journal():
     plan = task(PlanStep('s1', 0, 'Build', key='s1', result={'verify_passed': True, 'role_reviews': [
         {'role': 'review_a', 'passed': True, 'findings': []}]}))
     record = process_record_text(process_record(plan, [], []))
-    assert 'review_a' in record and 'builtin' in record and '通过' in record
+    assert r'review_a' in record and 'builtin' in record and '通过' in record
 
 
 def test_record_truncates_whole_entries_and_counts_omissions():
@@ -145,7 +199,7 @@ def test_many_runs_keep_all_sections_whole_entries_safety_and_omissions():
     text = process_record_text(data)
     assert len(text) <= 6000
     assert "72 worker runs on actual" in text
-    assert all(piece in text for piece in ("review_a", "checked-head", "Operator decided", SAFETY))
+    assert all(piece in text for piece in (r"review_a", "checked-head", "Operator decided", SAFETY))
     assert "已省略 1 条记录" in text
     assert "oversized" not in text
     for name, items in data["sections"].items():
@@ -166,7 +220,7 @@ def test_delivery_summary_bounds_each_section_and_keeps_the_pointer():
             for i in range(72)])
     text = process_record_summary(data)
     assert len(text) <= 1200
-    assert len(text.splitlines()) == 6
+    assert len(text.splitlines()) == 8
     assert all(piece in text for piece in ("worker", "claude-code", "actual", "primary", "第 3 轮", "失败",
                                            "第 2 轮", "failed", "Needs approval"))
     assert text.endswith("Full record: task page / looper_tasks get")
@@ -214,10 +268,10 @@ def test_delivery_summary_fits_latest_steps_and_seats_before_older_verdicts():
             entry(JournalKind.VERIFICATION_ROUND, label, attempt=1,
                   status='failed' if number == 4 else 'completed')))
     summary = process_record_summary(process_record(task(), journal, []))
-    reviews, verification = summary.splitlines()[2:4]
-    assert reviews.startswith('Reviews: step-4-check-the-delivery-with-complete-verification 第 1 轮 / review_b: 失败')
-    assert 'review_a: 失败' in reviews
-    assert verification.startswith('Verification: step-4-check-the-delivery-with-complete-verification 第 1 轮: failed')
+    reviews, verification = summary.splitlines()[3:5]
+    assert reviews.startswith(r'- Reviews: step-4-check-the-delivery-with-complete-verification 第 1 轮 / review_b: 失败')
+    assert r'review_a: 失败' in reviews
+    assert verification.startswith('- Verification: step-4-check-the-delivery-with-complete-verification 第 1 轮: failed')
     for line, total in ((reviews, 8), (verification, 4)):
         kept = line.count('第 1 轮')
         assert 0 < kept < total
@@ -236,8 +290,8 @@ def test_delivery_summary_orders_revisited_steps_by_latest_evidence():
                         entry(JournalKind.VERIFICATION_ROUND, label, attempt=1,
                               status='completed' if passed else 'failed')))
     lines = process_record_summary(process_record(task(), journal, [])).splitlines()
-    assert lines[2].startswith('Reviews: s1 第 1 轮 / review_a: 失败')
-    assert lines[3].startswith('Verification: s1 第 1 轮: failed')
+    assert lines[3].startswith(r'- Reviews: s1 第 1 轮 / review_a: 失败')
+    assert lines[4].startswith('- Verification: s1 第 1 轮: failed')
 
 
 @pytest.mark.parametrize('gate', [False, True])
@@ -251,7 +305,7 @@ def test_delivery_summary_shortens_escalation_reason_but_full_record_keeps_it(ga
         state=GateState.OPEN, resolution=reason))) if gate else task()
     journal = [] if gate else [entry(JournalKind.ESCALATION, reason=reason, gates=['g1'])]
     record = process_record(plan, journal, [])
-    line = process_record_summary(record).splitlines()[4]
+    line = process_record_summary(record).splitlines()[5]
     assert ('g1 / Continue?: open' if gate else 's1 升级') in line
     assert reason[:15] in line and '…' in line
     assert 'done!' not in line
@@ -273,7 +327,7 @@ def test_delivery_summary_keeps_escalation_state_and_reason_together():
     journal = [JournalEntry('s1', label, json.dumps({'reason': reason, 'gates': [gate_label]}),
                             kind=JournalKind.ESCALATION)]
     summary = process_record(plan, journal, [])['delivery_summary']
-    escalation = summary.splitlines()[4]
+    escalation = summary.splitlines()[5]
     assert all(piece in escalation for piece in (label, gate_label, 'open', reason[:79] + '…'))
     assert escalation.count(gate_label) == 1
     assert '另 ' not in escalation
@@ -289,7 +343,7 @@ def test_delivery_summary_keeps_latest_failure_before_newer_passes(kind):
                 else {'attempt': 1, 'status': 'completed' if passed else 'failed'})
         journal.append(entry(kind, label, **data))
     summary = process_record(task(), journal, [])['delivery_summary']
-    line = summary.splitlines()[2 if kind is JournalKind.REVIEW_ROUND else 3]
+    line = summary.splitlines()[3 if kind is JournalKind.REVIEW_ROUND else 4]
     assert line.split(': ', 1)[1].startswith('step-1-')
     assert 'step-0-' not in line and 'step-2-' not in line
     assert '另 2 条' in line
@@ -314,7 +368,7 @@ def test_unique_run_history_cannot_starve_other_sections_or_hide_omissions():
     kept = sum(item in text for items in data["sections"].values() for item in items)
     omitted = data["omitted"] + sum(map(len, data["sections"].values())) - kept
     assert omitted > 0 and f'已省略 {omitted} 条记录。' in text
-    assert all(piece in text for piece in ("review_a", "checked", "Approval", SAFETY))
+    assert all(piece in text for piece in (r"review_a", "checked", "Approval", SAFETY))
     assert len(text) <= 6000
     stored_entries = [item for items in data["sections"].values() for item in items]
     assert all(line in stored_entries for line in text.splitlines() if line.startswith('- '))

@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 
 
 @pytest.mark.parametrize("status", ["completed", "failed"])
-@pytest.mark.parametrize("record_size", [None, 1600, 9000])
+@pytest.mark.parametrize("record_size", [None, 200, 1600, 9000])
 def test_router_record_reaches_task_detail_and_manager_get(monkeypatch, tmp_path, status, record_size):
     async def run(pool):
         project = await projects.create_project(name="Reporting", work_dir=str(tmp_path), pool=pool)
@@ -26,7 +26,7 @@ def test_router_record_reaches_task_detail_and_manager_get(monkeypatch, tmp_path
         await tasks.create_task(task_id=task_id, requirement="Check the change", project_id=project["id"],
                                 work_dir=str(tmp_path), status="running", pool=pool)
         record = None if record_size is None else {
-            "sections": {"Roles": ["- Profile " + "evidence " * (record_size // 9) + "tail-evidence"],
+            "sections": {"Roles": ["- Profile write_api `run_cmd` __main__ " + "evidence " * (record_size // 9) + "tail-evidence"],
                          "Reviews": [], "Verification": [], "Escalations": []},
             "remote_safety": REMOTE_SAFETY, "omitted": 0}
         bus = MessageBus(runtime_root=tmp_path)
@@ -67,8 +67,13 @@ def test_router_record_reaches_task_detail_and_manager_get(monkeypatch, tmp_path
             else:
                 text = compact["process_record"]
                 assert len(text) <= 6000
-                assert "Profile evidence" not in text and "tail-evidence" not in text
-                assert REMOTE_SAFETY in text and "已省略 1 条记录。" in text
+                assert REMOTE_SAFETY in text
+                if record_size == 200:
+                    assert 'write_api `run_cmd` __main__' in text and "\\" not in text
+                    assert 'tail-evidence' in text and '已省略 0 条记录。' in text
+                else:
+                    assert 'write_api' not in text and 'tail-evidence' not in text
+                    assert '已省略 1 条记录。' in text
 
             # Completed tasks cannot restart; failed tasks start over without a stale outcome.
             monkeypatch.setattr(router, "_start", AsyncMock())

@@ -18,7 +18,11 @@ export function Markdown({ children }: { children: string }) {
   return (
     <div className="prose prose-invert prose-sm max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_pre]:whitespace-pre-wrap prose-code:before:content-none prose-code:after:content-none">
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={COMPONENTS}>
-        {children}
+        {children.replace(
+          /(^## Process record\n\n)((?:- (?:Roles|Reviews|Verification|Escalations): .*\n?)+)/gm,
+          // These code-owned lists contain agent fragments, which are literal data.
+          (_, heading: string, entries: string) => heading + entries.replace(/[\\`*_~\[\]<>]/g, "\\$&"),
+        )}
       </ReactMarkdown>
     </div>
   );

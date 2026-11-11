@@ -119,7 +119,8 @@ def test_web_completion_keeps_result_clip_and_separate_workflow_summary(tmp_path
     from looper.agents.workflow_reporting import process_record_summary, process_record
 
     delivery = process_record_summary(process_record(TaskPlan('plan', 'goal', 'Deliver', ''), [], [])) if workflow else ''
-    body = 'Result ' * (400 if long else 1)
+    tail = '\n\n## Verification\nChecks passed.\n\n## Open issues\nOne boundary still needs review.'
+    body = 'Result ' + 'x' * (5000 - len('Result ') - len(tail)) + tail if long else 'Result'
     appendix = '\n\n' + delivery if workflow else ''
 
     async def scenario():
@@ -139,7 +140,21 @@ def test_web_completion_keeps_result_clip_and_separate_workflow_summary(tmp_path
             await bus.shutdown()
 
     text = asyncio.run(scenario())
-    assert text.endswith(body[:2000] + appendix)
+    if workflow:
+        assert text.endswith(appendix)
+    if long:
+        result = text.split('：', 1)[1].removesuffix(appendix) if appendix else text.split('：', 1)[1]
+        import re
+        marker = re.search(r'\n… \((\d+) characters omitted; full result on the task page\)\n', result)
+        assert marker is not None
+        head, end = result[:marker.start()], result[marker.end():]
+        assert body.startswith(head) and body.endswith(end)
+        assert len(head) > 0 and len(end) >= 600
+        assert int(marker[1]) == len(body) - len(head) - len(end)
+        assert len(result) <= 2000 and result.endswith(tail)
+    else:
+        assert text.endswith(body + appendix)
+        assert 'characters omitted' not in text
     assert text.count('## Process record') == int(workflow)
 
 
@@ -233,12 +248,46 @@ def test_delivery_keeps_first_seats_late_result_before_earlier_quorum_passes(
         await h.until(lambda: h.planner._plan.steps[0].status == 'verified')
         await h.answer(first, BLOCK if blocking else REVIEW_PASS)
         final = await h.finished()
-        reviews = final.payload['delivery_summary'].splitlines()[2]
-        assert reviews.startswith(f'Reviews: {label} 第 1 轮 / {label}/review_a: ')
+        reviews = final.payload['delivery_summary'].splitlines()[3]
+        assert reviews.startswith(rf'- Reviews: {label} 第 1 轮 / {label}/review_a: ')
         assert ('失败, 1 blocking' if blocking else '通过, 0 blocking') in reviews
         latest, earlier = ('b', 'c') if reverse_passes else ('c', 'b')
-        assert f'{label}/review_{latest}: 通过' in reviews and f'{label}/review_{earlier}:' not in reviews
+        assert rf'{label}/review_{latest}: 通过' in reviews and rf'{label}/review_{earlier}:' not in reviews
         assert '另 1 条' in reviews
         assert len(final.payload['delivery_summary']) <= 1200
 
     drive(planner_claude(*replies), held_reviews, scenario)
+
+
+def test_telegram_delivery_record_plain_text_fallback_has_no_escaping():
+    import asyncio
+    from looper.agents.task_notice import NotifyChannel, notice_text
+    from tests.test_workflow_process_record import entry, task
+    from looper.agents.tiers.journal import JournalKind
+    from looper.agents.workflow_reporting import process_record
+
+    fragment = 'write_api `run_cmd` __main__'
+    summary = process_record(task(), [entry(JournalKind.ESCALATION, reason=fragment)], [])['delivery_summary']
+    text = notice_text('t1', 'Delivery', 'completed', 'Done', channel=NotifyChannel.TELEGRAM,
+                       delivery_summary=summary)
+    sent = []
+
+    async def send_message(**kwargs):
+        sent.append(kwargs)
+        if 'parse_mode' in kwargs:
+            raise ValueError('MarkdownV2 parse failure')
+        return SimpleNamespace(message_id=1)
+
+    async def run():
+        channel = TelegramChannelAdapter(bot_token='0:synthetic', allowlist=SenderAllowlist(
+            'channel-telegram', frozenset({'7'})))
+        channel._app = SimpleNamespace(bot=SimpleNamespace(send_message=send_message))
+        receipt = await channel.deliver(MessageEnvelope.create(
+            source='manager', target='channel-telegram', message_type=MessageType.CHAT_NOTICE,
+            payload={'chat': '7', 'text': text}))
+        assert receipt.success
+
+    asyncio.run(run())
+    assert len(sent) == 2 and 'parse_mode' not in sent[-1]
+    assert sent[-1]['text'] == text
+    assert fragment in sent[-1]['text'] and '\\' not in sent[-1]['text']

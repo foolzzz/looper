@@ -769,6 +769,7 @@ class ManagerAgent:
         # The agent settings the last turn ran with, kept when a turn cannot read them (None before any).
         self._agent_settings: AgentSettings | None = None
         self._goal_snapshots: dict[str, GoalSnapshot] = {}
+        self._last_task_progress: dict[tuple[str, str], str] = {}
         # The resident Claude: started on the first chat message, then fed one
         # user turn per message; restarted when its system prompt changes.
         self._claude = CLAUDE_CODE.resident_session(self.agent_id)
@@ -1647,6 +1648,7 @@ class ManagerAgent:
         thread = envelope.metadata.get("origin_thread")
         status = envelope.payload.get("status", "")
         if thread and (ends_task(status) or status == "cancelled"):
+            self._last_task_progress.pop((envelope.payload.get('task_id') or goal_id or envelope.correlation_id, thread), None)
             # A web task's end goes into the thread it was asked in: the answer stream is long closed.
             title = envelope.metadata.get("task_title") or ""
             summary = envelope.payload.get("summary") or ""
@@ -1654,7 +1656,14 @@ class ManagerAgent:
             if delivery_summary:
                 # The persisted result includes the appendix; append it once, outside the chat's result clip.
                 summary = summary.removesuffix("\n\n" + delivery_summary)
-            summary = summary[:2000]
+            if len(summary) > 2000:
+                # Reserve marker space inside the existing budget, retaining the report's tail.
+                tail = summary[-600:]
+                marker = f'\n… ({len(summary)} characters omitted; full result on the task page)\n'
+                head_size = 2000 - len(tail) - len(marker)
+                omitted = len(summary) - head_size - len(tail)
+                marker = f'\n… ({omitted} characters omitted; full result on the task page)\n'
+                summary = summary[:head_size] + marker + tail
             if delivery_summary:
                 summary += "\n\n" + delivery_summary
             if status == "completed":
@@ -1665,7 +1674,11 @@ class ManagerAgent:
                 text = f"任务「{title}」已取消。"
             await self._web_thread_reply(envelope, thread, text)
         elif thread and (progress_text := envelope.payload.get("phase_text") or envelope.payload.get("summary")):
+            key = (envelope.payload.get('task_id') or goal_id or envelope.correlation_id, thread)
+            if self._last_task_progress.get(key) == progress_text:
+                return
             await self._web_thread_reply(envelope, thread, progress_text)
+            self._last_task_progress[key] = progress_text
         elif notice is not None:
             # A Telegram or Lark task's end goes to who it recorded, instead of its final summary, behind the
             # progress sent before it (``task_notice``).
