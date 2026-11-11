@@ -37,10 +37,11 @@ from looper.agents.tiers.worker import RunOutcome, judge_result, run_outcome
 from tests.test_planner_agent import plan, reply, step
 
 # The built-in harness as main had it before roles. The reply-contract pin is that contract plus the PLAN
-# wait section below (how a wait is written, and how "waits" cancels one). Dropping the section is the previous pin.
+# wait section below (how a wait is written, and how "waits" cancels one). Both reply-contract pins include
+# the final-summary language rule; dropping the wait section isolates the rest of the contract.
 MAIN_HARNESS_SHA256 = "3140e3ed78dceb72af395f9d2e1d9438e1e0cae06abccad6f216f683ce95b340"
-MAIN_REPLY_CONTRACT_SHA256 = "b70ffeae8558158dbf5c765d6b8ffe9fe8ef425d7aede3a1e9ce6f5af5adb588"
-_PREVIOUS_REPLY_CONTRACT_SHA256 = "eaf7d704210243ea908d0dac3b50ab65a5597f1bb35e609ef6eff5ebd4e3bed8"
+MAIN_REPLY_CONTRACT_SHA256 = "2f72cd02be65030f0d1635b2c276dc6debac28eac9d378040c3aa3d5ef6ddc42"
+_PREVIOUS_REPLY_CONTRACT_SHA256 = "d7f9c49c63f1e67a3b3df28395926d5987ef2de8a2fea91c23b0bb1c5966339d"
 _PLAN_WAIT_SECTION = """\
 - Waits: when something outside the task must happen before some steps can
   run (a pull request's author pushes fixes, CI finishes, another system's

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from hashlib import sha256
 from typing import Any
 
 import pytest
@@ -307,8 +308,14 @@ class TestProgressAndFinal:
 def test_final_summary_uses_the_users_language() -> None:
     from looper.agents.tiers.planner_protocol import reply_contract
 
-    final = reply_contract().split("- final (", 1)[1].split("[CHAT]", 1)[0]
-    assert "Write final in the user's language; headings may stay as the protocol defines them." in final
+    contract = reply_contract()
+    language_rule = "  Write final in the user's language; headings may stay as the protocol defines them.\n"
+    final = contract.split("- final (", 1)[1].split("[CHAT]", 1)[0]
+    assert language_rule in final
+    assert contract.count(language_rule) == 1
+    # The language rule is the only change to the previously pinned default contract.
+    assert sha256(contract.replace(language_rule, "", 1).encode()).hexdigest() == (
+        "b70ffeae8558158dbf5c765d6b8ffe9fe8ef425d7aede3a1e9ce6f5af5adb588")
 
 
 def test_contract_examples_parse() -> None:
