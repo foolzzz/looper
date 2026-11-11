@@ -300,6 +300,38 @@ def test_verification_copies_only_declared_runtime_state(tmp_path, monkeypatch, 
     asyncio.run(asyncio.wait_for(scenario(), 10))
 
 
+@pytest.mark.parametrize("parent_field", ["workspace_links", "verification_paths"])
+def test_verification_overlapping_runtime_paths_run_private_python(tmp_path, monkeypatch, verification_runtime,
+                                                                  parent_field):
+    runs, launches = verification_runtime
+    root = _repo(tmp_path / "repo")
+    (root / ".gitignore").write_text(".venv/\n")
+    environment = root / ".venv"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+    interpreter = environment / "bin" / "python"
+    assert interpreter.is_symlink()
+    command = ["-c", "import sys; print(sys.prefix)"]
+    original = subprocess.run([str(interpreter), *command], capture_output=True, text=True, timeout=5)
+    assert original.returncode == 0, original.stderr
+    assert Path(original.stdout.strip()) == environment
+    child_field = "verification_paths" if parent_field == "workspace_links" else "workspace_links"
+    monkeypatch.setattr(worker.db_projects, "get_task_project", AsyncMock(return_value={
+        "id": "project", parent_field: [".venv"], child_field: [".venv/bin/python"]}))
+    runs.append(_completed_run(hold=False))
+    pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+    result = asyncio.run(asyncio.wait_for(pool._execute(_item(root)), 10))
+    assert result["status"] == "completed", result
+    checkout = Path(launches[0]["cwd"])
+    copied = checkout / ".venv" / "bin" / "python"
+    assert copied.is_file()
+    assert not copied.samefile(interpreter)
+    private = subprocess.run([str(copied), *command], cwd=checkout,
+                             capture_output=True, text=True, timeout=5)
+    assert private.returncode == 0, private.stderr
+    assert Path(private.stdout.strip()) == checkout / ".venv"
+    assert interpreter.is_symlink()
+
+
 def test_verification_seed_manifest_does_not_expose_source(tmp_path):
     root = _repo(tmp_path / "repo")
     (root / "alias").symlink_to(root / "tracked")
@@ -312,19 +344,14 @@ def test_verification_seed_manifest_does_not_expose_source(tmp_path):
     assert (backup / "seed" / "files" / "alias").resolve() == checkout / "tracked"
 
 
-@pytest.mark.parametrize("invalid", ["external_directory", "metadata", "missing", "tracked"])
+@pytest.mark.parametrize("invalid", ["metadata", "missing", "tracked"])
 def test_verification_rejects_unsafe_runtime_inputs(tmp_path, monkeypatch, verification_runtime, invalid):
     _, launches = verification_runtime
     root = _repo(tmp_path / "repo")
     (root / ".gitignore").write_text("local/\n")
     local = root / "local"
     local.mkdir()
-    if invalid == "external_directory":
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        (outside / "secret").write_text("do not copy")
-        (local / "link").symlink_to(outside)
-    elif invalid == "metadata":
+    if invalid == "metadata":
         (local / ".git").mkdir()
     path = {"missing": "missing", "tracked": "tracked"}.get(invalid, "local")
     monkeypatch.setattr(worker.db_projects, "get_task_project", AsyncMock(return_value={
@@ -336,29 +363,95 @@ def test_verification_rejects_unsafe_runtime_inputs(tmp_path, monkeypatch, verif
     assert (root / "tracked").read_text() == "committed"
 
 
-def test_runtime_file_links_are_copied_without_exposing_their_source(tmp_path):
+@pytest.mark.parametrize("directory", [False, True])
+@pytest.mark.parametrize("outside_checkout", [False, True])
+def test_runtime_copies_external_files_but_skips_directory_links(tmp_path, caplog, directory, outside_checkout):
+    source = _repo(tmp_path / "source")
+    (source / ".gitignore").write_text("workspace/\nundeclared\n")
+    workspace = source / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside" if outside_checkout else source / "undeclared"
+    if directory:
+        outside.mkdir()
+    else:
+        outside.write_text("private file copy")
+        outside.chmod(0o755)
+    (workspace / "link").symlink_to(outside, target_is_directory=directory)
+    (workspace / "regular").write_text("copied")
+    destination = Path(worker._verification_checkout(str(source), tmp_path / "backup", ["workspace"]))
+    link = destination / "workspace" / "link"
+    assert not link.is_symlink()
+    if directory:
+        assert not link.exists()
+        assert "workspace/link" in caplog.text
+    else:
+        assert link.read_bytes() == outside.read_bytes()
+        assert link.stat().st_mode & 0o777 == 0o555
+        assert not link.samefile(outside)
+        outside.write_text("source changed")
+        assert link.read_text() == "private file copy"
+        assert outside.stat().st_mode & 0o777 == 0o755
+    assert (destination / "workspace" / "regular").read_text() == "copied"
+
+
+def test_runtime_links_between_declared_paths_stay_private(tmp_path):
     source, destination = tmp_path / "source", tmp_path / "checkout"
     source.mkdir()
     destination.mkdir()
-    workspace = source / "venv"
+    workspace = tmp_path / "external-workspace"
     workspace.mkdir()
-    interpreter = tmp_path / "interpreter"
-    interpreter.write_text("executable fixture")
-    interpreter.chmod(0o755)
-    (workspace / "python").symlink_to(interpreter)
-    assert worker._copy_verification_runtime(source, destination, ["venv"]) == ["venv"]
-    copied = destination / "venv" / "python"
-    assert copied.read_text() == interpreter.read_text()
-    assert not copied.is_symlink()
-    assert copied.stat().st_mode & 0o111
-    assert not copied.stat().st_mode & 0o222
-    assert interpreter.stat().st_mode & 0o200
+    (source / "workspace").symlink_to(workspace, target_is_directory=True)
+    (source / "dependency").mkdir()
+    (source / "dependency" / "value").write_text("declared")
+    (workspace / "link").symlink_to(source / "dependency", target_is_directory=True)
+    worker._copy_verification_runtime(source, destination, ["workspace", "dependency"])
+    link = destination / "workspace" / "link"
+    assert link.is_symlink()
+    assert not Path(link.readlink()).is_absolute()
+    assert link.resolve() == destination / "dependency"
+    assert (link / "value").read_text() == "declared"
 
 
-@pytest.mark.parametrize("editable", ["pth", "finder", "strict-relative", "strict-absolute"])
-def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatch, editable):
+@pytest.mark.installed
+@pytest.mark.parametrize("absolute", [False, True])
+def test_verification_runtime_preserves_package_bin_links(tmp_path, absolute):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+    source = _repo(tmp_path / "source")
+    (source / ".gitignore").write_text("node_modules/\n")
+    modules = source / "node_modules"
+    (modules / ".bin").mkdir(parents=True)
+    package = modules / "pkg"
+    (package / "bin").mkdir(parents=True)
+    (package / "value.js").write_text("module.exports = 'private package';\n")
+    script = package / "bin" / "x.js"
+    script.write_text("console.log(require('../value.js'));\n")
+    (modules / ".bin" / "x").symlink_to(script if absolute else "../pkg/bin/x.js")
+
+    def run(root):
+        return subprocess.run([node, "node_modules/.bin/x"], cwd=root,
+                              capture_output=True, text=True, timeout=5)
+
+    original = run(source)
+    assert original.returncode == 0, original.stderr
+    checkout = Path(worker._verification_checkout(str(source), tmp_path / "backup", ["node_modules"]))
+    link = checkout / "node_modules" / ".bin" / "x"
+    assert link.is_symlink()
+    assert not Path(link.readlink()).is_absolute()
+    assert link.resolve() == checkout / "node_modules" / "pkg" / "bin" / "x.js"
+    (package / "value.js").write_text("throw new Error('source must not be used');\n")
+    result = run(checkout)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == original.stdout
+
+
+@pytest.mark.parametrize("editable", ["pth", "finder", "strict-relative", "strict-absolute", "strict-aliased"])
+@pytest.mark.parametrize("symlinks", [False, True])
+def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatch, editable, symlinks):
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
     monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
     developer = _repo(tmp_path / "developer")
     (developer / ".gitignore").write_text(".venv\nbuild\n__pycache__/\n")
     package = developer / "src" / "checkout_probe"
@@ -374,7 +467,9 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
     _git(developer, "add", ".gitignore", "src", "test_probe.py")
     _git(developer, "-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-m", "package")
     environment = developer / ".venv" if editable == "pth" else tmp_path / "environment"
-    venv.EnvBuilder(with_pip=False).create(environment)
+    # The venv CLI uses symlinks by default; EnvBuilder's default hides that path.
+    venv.EnvBuilder(with_pip=False, symlinks=symlinks).create(environment)
+    assert (environment / "bin" / "python").is_symlink() == symlinks
     if editable != "pth":
         (developer / ".venv").symlink_to(environment, target_is_directory=True)
     site = environment / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
@@ -392,7 +487,7 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
         linked_package = developer / "build" / "__editable__.checkout_probe" / "checkout_probe"
         linked_package.mkdir(parents=True)
         (linked_package / "__init__.py").symlink_to(
-            package / "__init__.py" if editable == "strict-absolute" else
+            package / "__init__.py" if editable in {"strict-absolute", "strict-aliased"} else
             "../../../src/checkout_probe/__init__.py")
         py_compile.compile(str(linked_package / "__init__.py"), doraise=True)
         (site / "checkout_probe.pth").write_text(str(linked_package.parent) + "\n")
@@ -419,6 +514,8 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
                               cwd=root, capture_output=True, text=True, timeout=20)
 
     assert run(developer, ["pytest", "-q", "-s", "-p", "no:cacheprovider", "test_probe.py"]).returncode == 0
+    if editable.startswith("strict-"):
+        assert list((linked_package / "__pycache__").glob("*.pyc"))
     source = tmp_path / "task"
     _git(developer, "worktree", "add", "--detach", str(source))
     (source / ".venv").symlink_to(environment, target_is_directory=True)
@@ -426,12 +523,24 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
     if editable.startswith("strict-"):
         (source / "build").symlink_to(developer / "build", target_is_directory=True)
         runtime_paths.append("build")
-    source_package = source / "src" / "checkout_probe" / "__init__.py"
-    source_package.write_text("VALUE = 0\n")
-    # Same-size edits within one timestamp tick must not reuse the developer's bytecode.
-    package_stat = (package / "__init__.py").stat()
-    os.utime(source_package, ns=(package_stat.st_atime_ns, package_stat.st_mtime_ns))
-    checkout = Path(worker._verification_checkout(str(source), tmp_path / "backup", runtime_paths))
+    changed = source / "src" / "checkout_probe" / "__init__.py"
+    changed.write_text("VALUE = 0\n")
+    # Same-size edits in one timestamp tick must not reuse the developer's bytecode.
+    original = (package / "__init__.py").stat()
+    os.utime(changed, ns=(original.st_atime_ns, original.st_mtime_ns))
+    runtime = tmp_path
+    if editable == "strict-aliased":
+        runtime = tmp_path / "runtime-alias"
+        canonical = tmp_path / "nested" / "runtime"
+        canonical.mkdir(parents=True)
+        runtime.symlink_to(canonical, target_is_directory=True)
+    checkout = Path(worker._verification_checkout(str(source), runtime / "backup", runtime_paths)).resolve()
+    for interpreter in (environment / "bin").glob("python*"):
+        copied = checkout / ".venv" / "bin" / interpreter.name
+        assert copied.is_file()
+        assert not copied.samefile(interpreter)
+        assert copied.read_bytes() == interpreter.read_bytes()
+        assert copied.stat().st_mode & 0o111 == interpreter.stat().st_mode & 0o111
     if editable.startswith("strict-"):
         assert list((developer / "build").rglob("*.pyc"))
     for runtime_path in runtime_paths:

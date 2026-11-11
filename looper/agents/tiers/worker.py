@@ -773,37 +773,63 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
                                repository_roots: tuple[Path, Path] | None = None) -> list[str]:
     """Copy declared local state, never exposing a writable link to the source.
 
-    An explicitly declared workspace link may point outside the repository. Links
-    to regular files are dereferenced (for example a virtualenv's interpreter).
-    Links back into a repository worktree are relocated to the private checkout.
-    Other directory links must remain inside the declared tree; repository metadata
-    and special files are never runtime inputs.
+    Explicit workspace links are copied; nested links stay relative to private
+    copies of declared paths or checkout files. External file links become
+    private read-only files; external directory links are reported and skipped.
+    Repository metadata and special files are never runtime inputs.
     """
     copied = []
+    source, target = source.resolve(), target.resolve()
     relocations = _verification_repository_relocations(repository_roots) if repository_roots and paths else {}
+    declared = []
+    for name in sorted(set(paths), key=lambda value: (len(Path(value).parts), value)):
+        relative = Path(name)
+        if relative.is_absolute() or not relative.parts or any(p in ("..", ".git") for p in relative.parts):
+            raise OSError("invalid verification runtime path")
+        # Covered children must not become relocation roots: an external venv
+        # interpreter would otherwise be mapped back onto itself.
+        if any(relative.is_relative_to(parent) for parent, _, _ in declared):
+            continue
+        declared.append((name, (source / relative).resolve(strict=True), target / relative))
 
-    def copy(path: Path, destination: Path, boundary: Path, ancestors: frozenset[Path]) -> None:
+    def copy(path: Path, destination: Path, boundary: Path, private: Path, ancestors: frozenset[Path]) -> None:
         resolved = path.resolve(strict=True)
-        if resolved in ancestors or ".git" in resolved.parts:
+        if ".git" in resolved.parts:
             raise OSError("verification runtime path crosses its declared tree")
         if path.suffix == ".pyc" and resolved.is_file():
             # Editable link trees outside the venv can cache another worktree's code too.
             return
-        if (path.is_symlink() and not resolved.is_relative_to(boundary)
-                and (resolved.is_file() or resolved.is_dir())):
+        if path.is_symlink() and destination != private:
+            # Prefer this copied tree, then other declarations, then checkout files.
+            for origin, relocated_root in [(boundary, private), *[(origin, dest) for _, origin, dest in declared]]:
+                if resolved.is_relative_to(origin):
+                    relocated = relocated_root / resolved.relative_to(origin)
+                    destination.symlink_to(os.path.relpath(relocated.resolve(), destination.parent.resolve()))
+                    return
             for origin in sorted(relocations, key=len, reverse=True):
                 if resolved.is_relative_to(origin):
                     relocated = Path(relocations[origin]) / resolved.relative_to(origin)
-                    destination.symlink_to(os.path.relpath(relocated, destination.parent))
-                    return
-        if resolved.is_dir() and not resolved.is_relative_to(boundary):
+                    if relocated.exists():
+                        destination.symlink_to(os.path.relpath(relocated.resolve(), destination.parent.resolve()))
+                        return
+            if not resolved.is_file():
+                logger.warning("skipping verification runtime symlink outside declared paths: %s",
+                               destination.relative_to(target))
+                return
+            # Venv interpreters commonly link outside the environment. Copy
+            # their bytes below, preserving execution without exposing the source.
+        if resolved in ancestors:
             raise OSError("verification runtime path crosses its declared tree")
         if resolved.is_dir():
             destination.mkdir()
             for child in sorted(resolved.iterdir()):
                 if child.name == ".git":
                     raise OSError("verification runtime paths must not contain repository metadata")
-                copy(child, destination / child.name, boundary, ancestors | {resolved})
+                if child.name == "__pycache__" and child.is_dir():
+                    # Relocated source links can match the old target's mtime and size.
+                    # Recompile from private sources instead of accepting stale bytecode.
+                    continue
+                copy(child, destination / child.name, boundary, private, ancestors | {resolved})
             if (resolved / "pyvenv.cfg").is_file():
                 _relocate_verification_venv(path, destination, repository_roots or (source, target))
         elif resolved.is_file():
@@ -812,13 +838,9 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
         else:
             raise OSError("verification runtime path is not a regular file or directory")
 
-    for name in sorted(set(paths), key=lambda value: (len(Path(value).parts), value)):
+    for name, resolved, destination in declared:
         relative = Path(name)
-        if relative.is_absolute() or not relative.parts or any(p in ("..", ".git") for p in relative.parts):
-            raise OSError("invalid verification runtime path")
-        if any(relative.is_relative_to(previous) for previous in copied):
-            continue
-        origin, destination = source / relative, target / relative
+        origin = source / relative
         if not origin.exists():
             raise OSError("declared verification runtime path is missing")
         if not destination.parent.resolve().is_relative_to(target.resolve()):
@@ -826,8 +848,7 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
         if os.path.lexists(destination):
             raise OSError("verification runtime path would replace repository files")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        resolved = origin.resolve(strict=True)
-        copy(origin, destination, resolved if resolved.is_dir() else resolved.parent, frozenset())
+        copy(origin, destination, resolved if resolved.is_dir() else resolved.parent, destination, frozenset())
         copied.append(name)
     return copied
 
