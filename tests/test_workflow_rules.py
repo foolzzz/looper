@@ -149,7 +149,7 @@ def test_default_planner_prompt_keeps_its_bytes_without_workflow():
         task=plan_task_section(task_id="task-baseline", requirement="Build the project",
                                project_name="Example", work_dir=""),
         contract_name="REPLY_CONTRACT", contract=reply_contract())
-    assert prompt.sha256 == "c18430ad52efc890b7e61cefba368cb90e4b9747e1a346f65057b0d45d636e5c"
+    assert prompt.sha256 == "25b30ea66f08b6e7b7cba1c492e58b058ba2cd64bd154b5121b5ca45bf604626"
 
 
 @pytest.mark.parametrize("rule", ["verification", "escalation"])

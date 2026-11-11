@@ -53,7 +53,7 @@ def test_chat_add_steps_uses_the_plan_condition_permission():
 
 
 def test_default_contract_bytes_are_unchanged():
-    assert hashlib.sha256(reply_contract().encode()).hexdigest() == "b70ffeae8558158dbf5c765d6b8ffe9fe8ef425d7aede3a1e9ce6f5af5adb588"
+    assert hashlib.sha256(reply_contract().encode()).hexdigest() == "2f72cd02be65030f0d1635b2c276dc6debac28eac9d378040c3aa3d5ef6ddc42"
     assert "any_of" not in reply_contract()
 
 

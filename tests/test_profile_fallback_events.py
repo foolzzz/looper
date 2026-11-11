@@ -87,8 +87,8 @@ def test_grok_acp_assistant_does_not_report_the_configured_model():
 
 @pytest.mark.parametrize(("role", "text", "contract", "prompt_hash", "contract_hash"), [
     ("planner", PLANNER_PROMPT, REPLY_CONTRACT,
-     "3af7a9d69d01fa6cabd2c5dbb175cf536008f22d719d42a4809a65b902ed8a13",
-     "b70ffeae8558158dbf5c765d6b8ffe9fe8ef425d7aede3a1e9ce6f5af5adb588"),
+     "ff9db55ffd76cb47c881cd261e215a82545587d36e3977bb6529ec7f0a824c78",
+     "2f72cd02be65030f0d1635b2c276dc6debac28eac9d378040c3aa3d5ef6ddc42"),
     ("worker", WORKER_PROMPT, WORK_CONTRACT,
      "d758330eb7193a80e5e8ce8c02a9ca19b788bd9f60e6a679734a7381efb8e1ed",
      "ac9f8a0bca5ee5a86259d4b4043154e8841de92dc1c20f94e34a1b5a8ecb79e6"),

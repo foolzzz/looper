@@ -168,7 +168,7 @@ class TestInjection:
     def test_supplements_come_first_and_whole_and_pitfalls_outlive_newer_entries(
         self, planner_claude: Any,
     ) -> None:
-        """Three big accepted steps overflow the progress cap; a long supplement and an old retry stay."""
+        """A new process restores the whole supplement and old retry after accepted steps overflow the cap."""
         instruction = "\n".join(f"line {n}: " + "y" * 240 for n in range(10))  # about 2,500 characters
         claude = planner_claude(
             plan(step("s1"), step("s2", "s1"), step("s3", "s2"), step("s4", "s3")),
@@ -178,13 +178,25 @@ class TestInjection:
 
         def outcome(envelope: MessageEnvelope) -> dict[str, Any] | None:
             key, attempt = envelope.payload["step_key"], envelope.payload["attempt"]
-            return None if (key, attempt) == ("s1", 1) else _big(key)
+            return None if (key, attempt) == ("s1", 1) or key == "s4" else _big(key)
 
         async def scenario(h: Harness) -> None:
             await h.start()
             await h.until(lambda: h.held)
             await h.say(instruction)
             await h.release(_failed())
+            await h.until(lambda: h.held and h.held[0].payload["step_key"] == "s4")
+            # Continuing turns send only new entries; a restarted process must get the full journal again.
+            turns = _texts(claude)
+            assert "- " + instruction.replace("\n", "\n  ") in turns[1]
+            assert turns[-1].startswith("[DECISION] Step s3")
+            assert "Plan (changes since" in turns[-1]
+            progress = turns[-1][turns[-1].index("New progress:"):turns[-1].index("Result of step s3")]
+            assert "- s2: s2 done" in progress
+            assert "s1-tip" not in progress and PITFALL not in progress
+            assert "line 0" not in turns[-1]
+            await h.planner._claude.stop()
+            await h.release(_big("s4"))
             await h.finished()
 
         h = drive(claude, outcome, scenario)

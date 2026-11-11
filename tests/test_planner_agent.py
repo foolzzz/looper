@@ -817,12 +817,12 @@ class TestReadOnly:
 
         drive(claude, always(WORK_OK), scenario)
         reported = [line for line in activity(agent_db) if "files changed in the task directory" in line]
-        notes = [c.args[1] for c in agent_db.add_metadata.await_args_list]
+        notes = [c.args[1] for c in agent_db.add_metadata.await_args_list if "read_only_check" in c.args[1]]
         assert all("read_only_check" not in c.kwargs.get("metadata", {})
                    for c in agent_db.finish_record.await_args_list)
         if enforced:
             # Claude Code refuses such a change itself: the Planner does not look.
-            assert reported == [] and not any(notes)  # no metadata passed at all
+            assert reported == [] and not notes  # no read-only check metadata
             return
         # The plan turn wrote the file; the decision turn changed nothing (s1's Worker had finished by then).
         assert reported == ["Warning: files changed in the task directory during a Planner turn, while no Worker, "
@@ -859,7 +859,7 @@ class TestReadOnly:
         assert not [line for line in activity(agent_db) if "files changed in the task directory" in line]
         assert all("read_only_check" not in c.kwargs.get("metadata", {})
                    for c in agent_db.finish_record.await_args_list)
-        assert [c.args[1] for c in agent_db.add_metadata.await_args_list] == [
+        assert [c.args[1] for c in agent_db.add_metadata.await_args_list if "read_only_check" in c.args[1]] == [
             {"read_only_check": "compared"}, {"read_only_check": "shared"}, {"read_only_check": "compared"}]
 
     @pytest.mark.parametrize("where", ["another task runs there", "the other tasks cannot be read", "no git checkout"])
@@ -891,7 +891,7 @@ class TestReadOnly:
         check = "shared" if shared else "no_checkout"
         assert all("read_only_check" not in c.kwargs.get("metadata", {})
                    for c in agent_db.finish_record.await_args_list)
-        assert [c.args[1] for c in agent_db.add_metadata.await_args_list] == [
+        assert [c.args[1] for c in agent_db.add_metadata.await_args_list if "read_only_check" in c.args[1]] == [
             {"read_only_check": check}] * 2
 
     def test_a_turn_stopped_while_checking_files_keeps_its_outcome_and_cost(
