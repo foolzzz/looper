@@ -304,6 +304,13 @@ class TestProgressAndFinal:
         assert parse_decision(decide("accept"), _context(), VIEW).final is None
 
 
+def test_final_summary_uses_the_users_language() -> None:
+    from looper.agents.tiers.planner_protocol import reply_contract
+
+    final = reply_contract().split("- final (", 1)[1].split("[CHAT]", 1)[0]
+    assert "Write final in the user's language; headings may stay as the protocol defines them." in final
+
+
 def test_contract_examples_parse() -> None:
     """The JSON examples the contract shows Claude are valid replies themselves."""
     from looper.agents.tiers.planner_protocol import REPLY_CONTRACT

@@ -3690,12 +3690,13 @@ class PlannerAgent:
         if not running:
             return
         reports = [await self._running_report(plan, s) for s in running]
-        view = plan.view()
+        # SUPERVISE also lists panel reviews; the CHAT plan view only exposes work steps.
+        running_labels = frozenset(s.label for s in running)
         try:
             reply = await self._ask(
                 TurnKind.SUPERVISE,
                 self._supervise_message(plan, running, reports),
-                lambda text: parse_supervise(text, view.running),
+                lambda text: parse_supervise(text, running_labels),
             )
         except PlannerTurnError as exc:
             await self._activity("error", f"Planner could not supervise the running steps: {exc}"[:500])
@@ -3737,15 +3738,19 @@ class PlannerAgent:
             )
 
     async def _kill_and_decide(self, plan: TaskPlan, step: PlanStep, reason: str) -> None:
-        """Stop a drifting step's Worker, then decide what happens to the step.
+        """Stop a drifting run, then decide what happens to the step.
 
-        A killed Worker publishes no result, so the stopped outcome is fed
-        through the normal decision path (the Planner picks retry/replan/fail).
+        A killed run publishes no result, so feed a failed review through its
+        panel or a stopped work result through the normal decision path.
         """
         if not await self._kill_worker(step):
             return  # the Worker already finished; its real result will decide
         await self._activity("error", f"Planner stopped step {step.index + 1} ({step.label}): {reason}"[:300],
                              worker=step.worker_id)
+        if step.reviews:
+            await self._review_done(plan, step, {"passed": False,
+                "summary": f"The Planner stopped this Reviewer: {reason}", "findings": []})
+            return
         result = {"status": "stopped", "summary": f"The Planner stopped this Worker: {reason}"}
         step.result = result
         context = DecisionContext(
