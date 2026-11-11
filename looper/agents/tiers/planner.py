@@ -2367,7 +2367,7 @@ class PlannerAgent:
     def _panel_decision(self, text: str, plan: TaskPlan, step: PlanStep, context: DecisionContext,
                         view: PlanView) -> DecisionReply:
         from .planner_protocol import extract_reply
-        from .review_adjudication import adjudicate
+        from .review_adjudication import adjudicate, required_downgrades
         from .review_panel import state
         data = extract_reply(text)
         verification = (self._workflow or {}).get("verification") or {}
@@ -2375,18 +2375,11 @@ class PlannerAgent:
             raise ProtocolError("verification steps are not reviewed")
         offered = self._offers_adjudicated_accept(plan, step, context)
         enabled = bool((self._workflow or {}).get("adjudication")) and context.result is ResultKind.REVIEW
-        results = {}
         if "adjudications" in data and enabled and step.accept_when is not None:
             results = adjudicate(plan, step, data["adjudications"])
             context = replace(context, succeeded=state(plan, step, results) is State.SATISFIED)
         if offered and not context.succeeded:
-            required = leaves(parse_condition(step.accept_when, "accept_when"))
-            context = replace(context, adjudication_findings=tuple(
-                (seat.role or "builtin", index) for seat in plan.steps
-                if seat.step_id in required and seat.reviews == step.step_id and seat.status == "verified"
-                and not (seat.result or {}).get("refused") and not (seat.result or {}).get("failure")
-                for index, finding in enumerate(results.get(seat.step_id, seat.result or {}).get("findings", []))
-                if finding.get("severity") == "blocking"))
+            context = replace(context, adjudication_findings=required_downgrades(plan, step) or ())
         return parse_decision(text, context, view, adjudications=enabled and step.accept_when is not None)
 
     async def _dispatch_review(self, plan: TaskPlan, step: PlanStep, *, same_attempt: bool = False) -> None:
@@ -4760,6 +4753,7 @@ class PlannerAgent:
         self, plan: TaskPlan, step: PlanStep, context: DecisionContext, report: list[str],
     ) -> str:
         from .planner_protocol import ADJUDICATED_ACCEPT
+        from .review_adjudication import required_downgrades
         who = "Reviewer" if context.result is ResultKind.REVIEW else "Worker"
         adjudicated_accept = self._offers_adjudicated_accept(plan, step, context)
         choices = replace(context, succeeded=True).allowed() if adjudicated_accept else context.allowed()
@@ -4786,6 +4780,9 @@ class PlannerAgent:
         if step.accept_when is not None and context.result is ResultKind.REVIEW:
             lines += ["", "Suggestions do not block acceptance. For each suggestion, take or decline it and record "
                       "the choice and reason in summary (or retry feedback / replan reason)."]
+        if adjudicated_accept:
+            findings = ", ".join(f"{member} finding {index}" for member, index in required_downgrades(plan, step))
+            lines += ["", f"For adjudicated accept, downgrading these findings suffices: {findings}."]
         if context.escalate:
             lines += ["", "Escalation required: retries are exhausted and this result cannot be accepted. "
                       "Only replan or fail is allowed. A replan must add a new user gate in this reply; "

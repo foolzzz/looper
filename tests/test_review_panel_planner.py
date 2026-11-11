@@ -469,8 +469,74 @@ def test_decision_offers_adjudicated_accept_only_when_downgrades_can_pass(tmp_pa
                 agent._panel_decision(decide("accept", adjudications=judgments[:1]), task, target, context, task.view())
             assert ADJUDICATED_ACCEPT in str(incomplete.value)
             assert "review_b finding 0" in str(incomplete.value)
-            assert "review_a finding 0" not in str(incomplete.value)
+            assert "review_a finding 0" in str(incomplete.value)
             assert [seat.result for seat in seats] == before
+
+
+def test_partial_adjudication_repair_requires_a_complete_replacement_reply(tmp_path):
+    from copy import deepcopy
+    from looper.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
+    from looper.agents.tiers.planner_protocol import DecisionContext, ProtocolError, ResultKind
+
+    agent = PlannerAgent(task_id="example", runtime_root=tmp_path)
+    agent._workflow = {"adjudication": True}
+    target = PlanStep("work", 0, "Work", accept_when={"step": "seat", "on": "passed"})
+    result = {**BLOCK, "findings": [BLOCK["findings"][0], {**BLOCK["findings"][0], "where": "calc.py:9"}]}
+    seat = PlanStep("seat", 1, "Review", reviews="work", role="review_a", status="verified", result=result)
+    task = TaskPlan("plan", "goal", "Work", "", steps=[target, seat])
+    context = DecisionContext(target.label, ResultKind.REVIEW, False, True, 0)
+    before = deepcopy(seat.result)
+    judgments = [{"member": "review_a", "finding": i, "level": "suggestion", "reason": "Outside scope"}
+                 for i in range(2)]
+    refusals = []
+    for partial in (judgments[:1], judgments[1:]):
+        with pytest.raises(ProtocolError, match="accept is not allowed") as refused:
+            agent._panel_decision(decide("accept", adjudications=partial), task, target, context, task.view())
+        refusals.append(str(refused.value))
+        assert seat.result == before
+    for refusal in refusals:
+        assert all(f"review_a finding {i}" in refusal for i in range(2))
+        assert "include again" in refusal
+    parsed = agent._panel_decision(decide("accept", adjudications=judgments), task, target, context, task.view())
+    assert parsed.decision.value == "accept" and parsed.adjudications == tuple(judgments)
+
+
+@pytest.mark.parametrize("rule,counts,selected", [
+    ({"any_of": ["a", "b"]}, [1, 3], ["a"]),
+    ({"k_of": 2, "of": ["a", "b", "c"]}, [3, 1, 2], ["b", "c"]),
+    ({"all_of": ["a", "b"]}, [1, 3], ["a", "b"]),
+    ({"any_of": ["a", "b"]}, [1, 1], ["a"]),
+    ({"k_of": 2, "of": ["a", "b", "c"]}, [0, 3, 1], ["c"]),
+    ({"all_of": [{"any_of": ["a", "b"]}, "c"]}, [3, 1, 2], ["b", "c"]),
+])
+def test_adjudicated_accept_names_only_findings_needed_by_the_rule(tmp_path, rule, counts, selected):
+    from looper.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
+    from looper.agents.tiers.planner_protocol import ADJUDICATED_ACCEPT, DecisionContext, ProtocolError, ResultKind
+    from looper.agents.tiers.review_panel import acceptance
+    from looper.agents.tiers.conditions import parse
+
+    agent = PlannerAgent(task_id="example", runtime_root=tmp_path)
+    agent._workflow = {"adjudication": True}
+    names = list("abc"[:len(counts)])
+    target = PlanStep("work", 0, "Work", accept_when=acceptance(parse(rule, "accept_when"), {n: n for n in names}))
+    seats = [PlanStep(name, i + 1, "Review", reviews="work", role=name, status="verified",
+                      result={**BLOCK, "passed": count == 0, "findings": [BLOCK["findings"][0]] * count})
+             for i, (name, count) in enumerate(zip(names, counts))]
+    task = TaskPlan("plan", "goal", "Work", "", steps=[target, *seats])
+    context = DecisionContext(target.label, ResultKind.REVIEW, False, True, 0)
+    prompt = agent._decision_message(task, target, context, [])
+    assert ADJUDICATED_ACCEPT in prompt
+    with pytest.raises(ProtocolError, match="accept is not allowed") as refused:
+        agent._panel_decision(decide("accept"), task, target, context, task.view())
+    for text in (str(refused.value), prompt):
+        for seat in seats:
+            for index in range(len(seat.result["findings"])):
+                assert (f"{seat.role} finding {index}" in text) == (seat.role in selected)
+        assert "suffices" in text
+    judgments = [{"member": seat.role, "finding": index, "level": "suggestion", "reason": "Outside scope"}
+                 for seat in seats if seat.role in selected for index in range(len(seat.result["findings"]))]
+    assert agent._panel_decision(decide("accept", adjudications=judgments), task, target, context,
+                                task.view()).decision.value == "accept"
 
 
 @pytest.mark.parametrize("review_roles", [[], ["review_a"]])

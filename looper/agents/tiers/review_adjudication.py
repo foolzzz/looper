@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from .conditions import Condition, Leaf, StepOutcome, parse
 from .planner_protocol import ProtocolError
-from .review_panel import State, blocking, state
+from .review_panel import State, blocking
 
 
 if TYPE_CHECKING:
@@ -14,6 +16,15 @@ if TYPE_CHECKING:
 
 def can_accept(plan: TaskPlan, target: PlanStep) -> bool:
     """Whether downgrading eligible findings alone can satisfy acceptance, without changing the plan."""
+    return bool(required_downgrades(plan, target))
+
+
+def required_downgrades(plan: TaskPlan, target: PlanStep) -> tuple[tuple[str, int], ...] | None:
+    """A smallest sufficient set from the saved round; refused replies never change that round.
+
+    Conditions cannot repeat seats, so the cheapest k children also minimize the total
+    number of findings. Ties keep the acceptance rule's order.
+    """
     proposals = [
         {"member": seat.role or "builtin", "finding": index, "level": "suggestion", "reason": "Eligibility check only"}
         for seat in plan.steps if seat.reviews == target.step_id and seat.status == "verified"
@@ -21,7 +32,25 @@ def can_accept(plan: TaskPlan, target: PlanStep) -> bool:
         for index, finding in enumerate((seat.result or {}).get("findings", []))
         if finding.get("severity") == "blocking"
     ]
-    return bool(proposals) and state(plan, target, adjudicate(plan, target, proposals)) is State.SATISFIED
+    results = adjudicate(plan, target, proposals) if proposals else {}
+
+    def choose(condition: Condition) -> tuple[tuple[str, int], ...] | None:
+        if isinstance(condition, Leaf):
+            seat = plan.step(condition.step)
+            if StepOutcome.from_step(seat).for_on(condition.on) is State.SATISFIED:
+                return ()
+            if seat.step_id not in results or StepOutcome.from_step(
+                    replace(seat, result=results[seat.step_id])).for_on(condition.on) is not State.SATISFIED:
+                return None
+            return tuple((seat.role or "builtin", index)
+                         for index, finding in enumerate((seat.result or {}).get("findings", []))
+                         if finding.get("severity") == "blocking")
+        choices = [chosen for child in condition.of if (chosen := choose(child)) is not None]
+        if len(choices) < condition.k:
+            return None
+        return tuple(finding for chosen in sorted(choices, key=len)[:condition.k] for finding in chosen)
+
+    return choose(parse(target.accept_when, "accept_when"))
 
 
 def adjudicate(plan: TaskPlan, target: PlanStep, proposals: Any) -> dict[str, dict[str, Any]]:

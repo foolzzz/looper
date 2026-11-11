@@ -406,7 +406,7 @@ class DecisionContext:
     open_gates: frozenset[str] | None = None
     escalate: bool = False
     verification_repair_required: bool = False
-    # Findings still blocking after any proposed downgrades, when adjudicated accept was offered.
+    # A complete sufficient set of downgrades for a replacement reply, from the saved review round.
     adjudication_findings: tuple[tuple[str, int], ...] = ()
 
     @property
@@ -824,7 +824,9 @@ def _refusal(decision: Decision, context: DecisionContext) -> str:
     elif decision is Decision.ACCEPT and context.adjudication_findings:
         findings = ", ".join(f"{member} finding {index}" for member, index in context.adjudication_findings)
         why = (f"step {context.step} still has blocking findings: {findings}; "
-               "include downgrades to suggestion with a reason each in adjudications so acceptance passes")
+               "downgrading this set suffices; include downgrades to suggestion with a reason each in adjudications "
+               "so acceptance passes; the repaired reply is judged on its own, so include again any of these "
+               "downgrades from the refused reply")
     elif decision is Decision.ACCEPT:
         why = f"step {context.step} did not succeed, so it cannot be accepted"
     elif context.result is ResultKind.REVIEW:
