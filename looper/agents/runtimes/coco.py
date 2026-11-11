@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 COCO = CodexHome(env="TRAE_HOME", config="traecli.toml", state="cli", local="coco", layout_id="coco-home/v1",
                  login=coco_login, runtime="coco", top_config=("check_for_update_on_startup = false",),
-                 features=("memories = false",))
+                 features=("memories = false",), title="Coco (TRAE CLI)")
 
 
 class CocoRuntime(CodexRuntime):
@@ -78,11 +78,12 @@ class CocoRuntime(CodexRuntime):
         super().check_pairing(provider, model, effort, executable=executable)
         if effort:
             raise RuntimeUnsupported("coco takes no effort level in Looper yet")
-        if problem := _model_problem(model, executable or self.default_executable):
+        models = coco_login.cached_models(executable or self.default_executable)
+        if problem := _catalog_problem(model, models):
             raise RuntimeUnsupported(problem)
 
     async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None) -> str | None:
-        if problem := await coco_login.launch_problem():
+        if problem := await coco_login.launch_problem(executable or self.default_executable):
             return problem
         # Resolved profiles expose only the selected model in their binding catalog.
         if len(provider.catalog) == 1:
@@ -121,7 +122,10 @@ class CocoRuntime(CodexRuntime):
 
 
 def _model_problem(model: str, executable: str) -> str | None:
-    models = coco_login.available_models(executable)
+    return _catalog_problem(model, coco_login.available_models(executable))
+
+
+def _catalog_problem(model: str, models: dict[str, str] | None) -> str | None:
     if models is not None and model.casefold() not in models:
         return (f"coco has no model {model!r} on this machine; it has: "
                 f"{', '.join(sorted(set(models.values()))[:20])}")

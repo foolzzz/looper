@@ -106,7 +106,7 @@ async def clear_problem() -> None:
     forget_probe()
 
 
-async def launch_problem() -> str | None:
+async def launch_problem(executable: str = "coco") -> str | None:
     try:
         problem = await recorded_problem()
     except Exception as exc:
@@ -114,7 +114,7 @@ async def launch_problem() -> str | None:
     if problem is not None:
         return (f"the coco login is unavailable since {problem.get('at') or '?'}: {problem.get('detail')}. "
                 f"To fix: {PROBLEM_FIX}")
-    status = await asyncio.to_thread(cached_probe)
+    status = await asyncio.to_thread(cached_probe, executable)
     if status.state is LoginState.LOGGED_IN:
         return None
     if status.state is LoginState.NOT_LOGGED_IN:
@@ -169,20 +169,20 @@ def probe_login(executable: str = "coco", target: Path | None = None) -> LoginSt
         return LoginStatus(LoginState.UNKNOWN, f"`coco login status` did not run: {type(exc).__name__}")
 
 
-_probed: tuple[float, LoginStatus] | None = None
+_probed: dict[str, tuple[float, LoginStatus]] = {}
 
 
-def cached_probe() -> LoginStatus:
-    global _probed
+def cached_probe(executable: str = "coco") -> LoginStatus:
     now = time.monotonic()
-    if _probed is None or now - _probed[0] > _PROBE_TTL_SEC:
-        _probed = (now, probe_login())
-    return _probed[1]
+    cached = _probed.get(executable)
+    if cached is None or now - cached[0] > _PROBE_TTL_SEC:
+        cached = (now, probe_login(executable))
+        _probed[executable] = cached
+    return cached[1]
 
 
 def forget_probe() -> None:
-    global _probed
-    _probed = None
+    _probed.clear()
 
 
 async def login_view() -> dict[str, str]:
@@ -197,6 +197,14 @@ async def login_view() -> dict[str, str]:
 
 
 _models: dict[str, tuple[float, dict[str, str] | None]] = {}
+
+
+def cached_models(executable: str) -> dict[str, str] | None:
+    """Return a fresh cached catalog only; never start the CLI."""
+    cached = _models.get(executable)
+    if cached is not None and time.monotonic() - cached[0] <= _MODELS_TTL_SEC:
+        return cached[1]
+    return None
 
 
 def available_models(executable: str = "coco") -> dict[str, str] | None:

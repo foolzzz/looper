@@ -37,7 +37,7 @@ def _settings(executable: str) -> AgentSettings:
 
 
 def _prepare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, stream: str = "", fail: bool = False,
-             logged_in: bool = True) -> Path:
+             logged_in: bool = True, catalog_failure: str | None = None) -> Path:
     capture = tmp_path / "run.json"
     executable = fake_claude(tmp_path / "coco", f'''
 import json, os, sys
@@ -46,8 +46,8 @@ if sys.argv[1:] == ['login', 'status']:
     print({'Logged in using Trae' if logged_in else 'Not logged in'!r})
     raise SystemExit({0 if logged_in else 1})
 if sys.argv[1:] == ['models', '--json']:
-    print('[{{"name":"GPT-5.5","config_name":"gpt-5.5"}}]')
-    raise SystemExit(0)
+    print({'invalid JSON' if catalog_failure == 'invalid-json' else '[{"name":"GPT-5.5","config_name":"gpt-5.5"}]'!r})
+    raise SystemExit({1 if catalog_failure == 'failed-command' else 0})
 if not Path(os.environ['TRAE_HOME'], 'cli', 'auth.json').is_symlink():
     raise SystemExit(3)
 prompt = sys.stdin.read()
@@ -104,8 +104,19 @@ def test_worker_uses_coco_home_and_last_message_as_its_report(
                         if event.get("item", {}).get("type") == "agent_message")
     last_message["text"] = final
     capture = _prepare(tmp_path, monkeypatch, stream="\n".join(json.dumps(event) for event in events) + "\n")
+    path_bin = tmp_path / "path-bin"
+    path_bin.mkdir()
+    path_ran = tmp_path / "path-coco-ran"
+    fake_claude(path_bin / "coco", (
+        "from pathlib import Path\n"
+        f"Path({str(path_ran)!r}).touch()\n"
+        "print('Not logged in')\nraise SystemExit(1)\n"
+    ))
+    # The registered absolute path is outside PATH; neither probe may consult PATH's logged-out CLI.
+    monkeypatch.setenv("PATH", str(path_bin) + os.pathsep + os.defpath)
     result = _run(tmp_path)
     assert result["status"] == "completed" and result["summary"] == "finished the step"
+    assert not path_ran.exists()
     assert json.loads(capture.read_text())["prompt"]
     started = agent_db.start_record.await_args.kwargs["metadata"]
     assert started["profile"]["runtime"]["type"] == "coco" and started["commit_attribution"] == "trae"
@@ -115,10 +126,11 @@ def test_worker_uses_coco_home_and_last_message_as_its_report(
     assert not (finished.get("metadata") or {}).get("model_reported")
 
 
+@pytest.mark.parametrize("catalog_failure", [None, "failed-command", "invalid-json"])
 def test_worker_keeps_coco_unknown_model_stderr_in_its_failure(
-    agent_db: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    agent_db: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, catalog_failure: str | None,
 ) -> None:
-    _prepare(tmp_path, monkeypatch, fail=True)
+    _prepare(tmp_path, monkeypatch, fail=True, catalog_failure=catalog_failure)
     result = _run(tmp_path)
     assert result["status"] == "failed"
     assert result["error"] == "Coco (TRAE CLI) exited with code 1"
@@ -130,7 +142,7 @@ def test_logged_out_coco_is_refused_before_the_worker_starts(
 ) -> None:
     capture = _prepare(tmp_path, monkeypatch, logged_in=False)
     status = coco_login.LoginStatus(coco_login.LoginState.NOT_LOGGED_IN, "not logged in")
-    monkeypatch.setattr(coco_login, "cached_probe", lambda: status)
+    monkeypatch.setattr(coco_login, "cached_probe", lambda executable: status)
     result = _run(tmp_path)
     assert result["status"] == "failed" and "not logged in" in result["error"]
     assert "coco login" in result["error"] and not capture.exists()

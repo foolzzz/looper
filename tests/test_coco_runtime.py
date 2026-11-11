@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import threading
+import time
 import tomllib
 from dataclasses import replace
 from pathlib import Path
@@ -113,7 +115,10 @@ def test_run_uses_its_own_home_config_login_link_and_permissions(tmp_path, read_
         "TRAE_HOME": str(tmp_path / ".local" / "coco" / "shell-home")}
     assert config["mcp_servers"]["probe"]["command"] == "probe-mcp"
     assert "commit_attribution" not in config
-    assert "COCO INSTRUCTIONS" in (home / "AGENTS.md").read_text()
+    notes = (home / "AGENTS.md").read_text()
+    assert notes.startswith("# Runtime notes (Coco (TRAE CLI))\n")
+    assert "Looper runs you through Coco (TRAE CLI)." in notes
+    assert "COCO INSTRUCTIONS" in notes
     assert (home / "cli" / "auth.json").is_symlink()
     assert os.readlink(home / "cli" / "auth.json") == str(coco_login.login_file())
     assert launch.environment().get("HOME") == os.environ.get("HOME")
@@ -189,6 +194,41 @@ def test_pairing_and_launch_check_the_selected_executable_catalog_without_case_s
     provider = profile.resolved_model.binding_provider()
     with pytest.raises(RuntimeUnsupported, match="GPT-9.*GPT-5.5"):
         COCO.check_pairing(provider, profile.model, executable=executable)
+    assert "GPT-9" in asyncio.run(COCO.login_problem(provider, executable=executable))
+
+
+def test_cold_pairing_never_starts_the_slow_catalog_probe(tmp_path):
+    ran = tmp_path / "models-ran"
+    executable = fake_claude(tmp_path / "slow-coco", (
+        "import sys, time\nfrom pathlib import Path\n"
+        "assert sys.argv[1:] == ['models', '--json']\n"
+        f"Path({str(ran)!r}).touch()\n"
+        "time.sleep(5)\n"
+        "print('[{\"name\": \"GPT-5.5\"}]')\n"
+    ))
+    provider = _launch(model="GPT-9", executable=executable).profile.resolved_model.binding_provider()
+    started = time.monotonic()
+    COCO.check_pairing(provider, "GPT-9", executable=executable)
+    assert time.monotonic() - started < 0.5
+    assert not ran.exists()
+    assert coco_login.available_models(executable) == {"gpt-5.5": "GPT-5.5"}
+    assert ran.exists()
+    with pytest.raises(RuntimeUnsupported, match="GPT-9.*GPT-5.5"):
+        COCO.check_pairing(provider, "GPT-9", executable=executable)
+
+
+def test_launch_checks_a_cold_catalog_off_the_event_loop(tmp_path, monkeypatch):
+    executable = fake_claude(tmp_path / "coco", "print('[{\"name\": \"GPT-5.5\"}]')\n")
+    available = coco_login.available_models
+    loop_thread = threading.get_ident()
+
+    def catalog(executable):
+        assert threading.get_ident() != loop_thread
+        return available(executable)
+
+    monkeypatch.setattr(coco_login, "available_models", catalog)
+    monkeypatch.setattr(coco_login, "launch_problem", AsyncMock(return_value=None))
+    provider = _launch(model="GPT-9", executable=executable).profile.resolved_model.binding_provider()
     assert "GPT-9" in asyncio.run(COCO.login_problem(provider, executable=executable))
 
 
