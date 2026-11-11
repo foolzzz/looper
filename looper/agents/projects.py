@@ -1634,6 +1634,7 @@ async def configuration_block(
     if limits:
         lines.append(f"- 并发：这个任务同时最多运行 {limits[0]} 个 Worker、{limits[1]} 个 Reviewer")
     if workflow:
-        lines[controls_start:] = ["- " + "；".join(line.removeprefix("- ") for line in lines[controls_start:])]
-        return "\n".join([*lines, START_QUESTION])
+        lines[controls_start - 1:] = [lines[controls_start - 1] + "；" + "；".join(
+            line.removeprefix("- ") for line in lines[controls_start:])]
+        return "\n".join([*lines, "", START_QUESTION])
     return "\n".join([*lines, "", START_QUESTION])
