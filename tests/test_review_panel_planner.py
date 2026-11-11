@@ -22,9 +22,9 @@ BLOCK = {"passed": False, "summary": "Needs a fix", "findings": [
 PASSED_PANEL_SUMMARY = (
     "## Process record\n"
     "Roles: 未记录\n"
-    "Reviews: s1 第 1 轮 / s1/review_a: 通过, 0 blocking; "
+    "Reviews: s1 第 1 轮 / s1/review_c: 通过, 0 blocking; "
     "s1 第 1 轮 / s1/review_b: 通过, 0 blocking; "
-    "s1 第 1 轮 / s1/review_c: 通过, 0 blocking\n"
+    "s1 第 1 轮 / s1/review_a: 通过, 0 blocking\n"
     "Verification: 未记录\n"
     "Escalations: 未记录\n"
     "Full record: task page / looper_tasks get"
@@ -218,7 +218,8 @@ def test_late_blocker_retries_merged_work_in_a_fresh_workspace(
         await h.answer(parallel, WORK_OK)
         assert (await h.finished()).payload["status"] == "completed"
 
-    drive(claude, outcome, scenario)
+    # Two real git/review/merge rounds plus removal can exceed the ordinary scenario budget.
+    drive(claude, outcome, scenario, timeout=90)
 
 
 def test_suggestions_are_merged_shown_and_recorded_without_losing_delivery(planner_claude, agent_db, monkeypatch):

@@ -88,7 +88,7 @@ PROFILE_USED_BY_LAYER = _object({
 PROFILE_USED_BY = _object({
     "layers": _array(PROFILE_USED_BY_LAYER), "task_count": _INT, "schedule_count": _INT,
     "allowed_in": _STRINGS, "manager_session": _BOOL, "manager_sessions": _STRINGS,
-    "managers": _STRINGS, "manager_templates": _STRINGS,
+    "managers": _STRINGS, "manager_templates": _STRINGS, "workflows": _STRINGS,
 }, ["layers", "task_count", "schedule_count", "allowed_in"], closed=True)
 PROFILE_MODEL = _object({name: MODEL["properties"][name]
                          for name in ("model_id", "name", "protocol", "provider_id")}, closed=True)

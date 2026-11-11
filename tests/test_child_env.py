@@ -32,7 +32,7 @@ from test_pi_runtime import _command as pi_command, _launch as pi_launch, _provi
 
 KEPT = (
     "PATH", "HOME", "LANG", "LC_ALL", "TZ", "HTTPS_PROXY", "https_proxy", "NO_PROXY", "SSL_CERT_FILE",
-    "CLAUDE_CONFIG_DIR", "CODEX_HOME", "ANTHROPIC_API_KEY", "SSH_AUTH_SOCK",
+    "CLAUDE_CONFIG_DIR", "CODEX_HOME", "TRAE_HOME", "ANTHROPIC_API_KEY", "SSH_AUTH_SOCK",
     # Each runtime CLI's own login: Claude Code's API key, token and `claude setup-token` token; Codex's home and the
     # keys `codex exec` reads; Grok's home and keys.
     "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "GROK_HOME",

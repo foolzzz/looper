@@ -980,18 +980,18 @@ def vendor_types_view() -> list[dict[str, Any]]:
 
 
 # Logins whose link can fork in a run and stay unavailable until the operator clears the problem.
-LINKED_LOGINS = frozenset({"codex", "grok"})
+LINKED_LOGINS = frozenset({"codex", "grok", "coco"})
 
 
 def _login_modules() -> dict[str, Any]:
     """The runtimes whose own login the provider views report, by type (each module's ``login_view``)."""
-    from .runtimes import codex_login, cursor_login, grok_login
+    from .runtimes import coco_login, codex_login, cursor_login, grok_login
 
-    return {"codex": codex_login, "grok": grok_login, "cursor-agent": cursor_login}
+    return {"codex": codex_login, "grok": grok_login, "cursor-agent": cursor_login, "coco": coco_login}
 
 
 async def _logins(providers: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, str]]:
-    """The state of each runtime login a listed OAuth provider stands for, by runtime type (Codex's, Grok's and Cursor's:
+    """The state of each runtime login a listed OAuth provider stands for, by runtime type (Codex's, Grok's, Cursor's and coco's:
     their module's ``login_view``; Claude Code's comes from the startup self-check)."""
     types = {row["oauth_runtime_type"] for row in providers if row["auth"] == AuthKind.OAUTH.value}
     return {kind: await module.login_view() for kind, module in _login_modules().items() if kind in types}
@@ -1073,7 +1073,7 @@ def profile_warnings(profile: LegacyAgentProfile) -> list[str]:
 # Where nothing selects a profile.
 NOT_USED: Mapping[str, Any] = {"layers": [], "task_count": 0, "schedule_count": 0, "allowed_in": [],
                                 "manager_session": False, "manager_sessions": [], "managers": [],
-                                "manager_templates": []}
+                                "manager_templates": [], "workflows": []}
 
 
 def _cost_profile(row: Mapping[str, Any], models: Iterable[Mapping[str, Any]] = ()) -> LegacyAgentProfile:
@@ -1137,6 +1137,7 @@ def usage_text(used_by: Mapping[str, Any]) -> str:
                      else f"the current session of Manager(s) {', '.join(ids)}")
     parts += [f"Manager {name}" for name in used_by.get("managers") or ()]
     parts += [f"template {label.replace(' of ', ' of Manager ', 1)}" for label in used_by.get("manager_templates") or ()]
+    parts += [f"workflow {name!r}" for name in used_by.get("workflows") or ()]
     return ", ".join(parts)
 
 
@@ -1488,12 +1489,12 @@ async def update_provider(provider_id: str, data: Any) -> dict[str, Any]:
 
 
 async def clear_login_problem(provider_id: str) -> dict[str, Any]:
-    """Make a runtime's own login (Codex's or Grok's) available to runs again after a run found it forked: the
+    """Make a runtime's own login (Codex's, Grok's or coco's) available to runs again after a run found it forked: the
     operator has checked it on the machine (its module's ``clear_problem``). The provider is one of that login."""
     row = await _existing_provider(provider_id)
     module = _login_modules().get(row["oauth_runtime_type"] or "") if row["auth"] == AuthKind.OAUTH.value else None
     if module is None or row["oauth_runtime_type"] not in LINKED_LOGINS:
-        raise RegistryError(f"provider {row['name']!r} is not the Codex or Grok login")
+        raise RegistryError(f"provider {row['name']!r} is not a linked runtime login")
     await module.clear_problem()
     return await _provider_answer(provider_id)
 

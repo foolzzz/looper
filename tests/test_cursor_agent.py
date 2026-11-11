@@ -126,6 +126,7 @@ def test_cursor_stream_preserves_events_and_uses_only_the_final_attempt(stream: 
         return
     result = events[-1]
     assert result["type"] == "result" and result["routed_model"] == "Grok 4.7"
+    assert CURSOR.reported_model(result) == 'Grok 4.7'
     assert result["result"] == ("pong HOME=/home/user" if stream == "recorded" else "pong")
     assert "usage" not in result
     assert events[-2]["type"] == "usage"
@@ -501,6 +502,7 @@ else:
         assert finish["metadata"]["model_display"] == "Auto Balance"
     if mode not in ("stderr-without-result", "init-without-result"):
         assert finish["output_text"] == final and finish["metadata"]["routed_model"] == "Grok 4.7"
+        assert finish['metadata']['model_reported'] == 'Grok 4.7'
         if mode == "recorded-report":
             messages = [call.kwargs["summary"] for call in agent_db.insert_activity.await_args_list
                         if call.kwargs["kind"] == "text"]

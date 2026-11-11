@@ -99,6 +99,7 @@ _SCHEDULE_USER_GATES = "schedule_user_gates"
 _RUNTIME_LAUNCHER = "runtime_launcher"
 _PROFILE_FALLBACK = "profile_fallback"
 _CURSOR_LOGIN = "cursor_login"
+_COCO_LOGIN = "coco_login"
 _DEPENDENCY_CONDITIONS = "dependency_conditions"
 _WORKFLOWS = "workflows"
 _REVIEW_PANEL = "review_panel"
@@ -284,6 +285,38 @@ ALTER TABLE llm_providers
             AND auth = 'api_key' AND oauth_runtime_type IS NULL)
     );
 """
+
+
+_COCO_LOGIN_DDL = """
+ALTER TABLE llm_providers
+    DROP CONSTRAINT llm_providers_vendor_type_check,
+    DROP CONSTRAINT llm_providers_check1,
+    ADD CONSTRAINT llm_providers_vendor_type_check CHECK (vendor_type IN ('glm-bigmodel', 'glm-zai', 'deepseek', 'kimi-moonshot-cn', 'kimi-moonshot',
+                          'cpa', 'opencode', 'sub2api', 'claude-subscription', 'codex-login', 'grok-login', 'cursor-login', 'coco-login', 'custom')),
+    ADD CONSTRAINT llm_providers_check1 CHECK (
+        (vendor_type = 'claude-subscription' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
+            AND oauth_runtime_type = 'claude-code')
+        OR (vendor_type = 'codex-login' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
+            AND oauth_runtime_type = 'codex')
+        OR (vendor_type = 'grok-login' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
+            AND oauth_runtime_type = 'grok')
+        OR (vendor_type = 'cursor-login' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
+            AND oauth_runtime_type = 'cursor-agent')
+        OR (vendor_type = 'coco-login' AND auth = 'oauth' AND oauth_runtime_type IS NOT NULL
+            AND oauth_runtime_type = 'coco')
+        OR (vendor_type NOT IN ('claude-subscription', 'codex-login', 'grok-login', 'cursor-login', 'coco-login')
+            AND auth = 'api_key' AND oauth_runtime_type IS NULL)
+    );
+"""
+
+
+async def _coco_login_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _COCO_LOGIN):
+        return False
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('llm_providers') "
+        "AND conname = 'llm_providers_vendor_type_check' "
+        "AND strpos(pg_get_constraintdef(oid), $1) = 0)", "'coco-login'")
 
 
 async def _cursor_login_pending(conn: asyncpg.Connection) -> bool:
@@ -633,6 +666,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
         if await _cursor_login_pending(conn):
             await conn.execute(_CURSOR_LOGIN_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CURSOR_LOGIN)
+        if await _coco_login_pending(conn):
+            await conn.execute(_COCO_LOGIN_DDL)
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _COCO_LOGIN)
         if await _runtime_launcher_pending(conn):
             await conn.execute("ALTER TABLE agent_runtimes ADD COLUMN IF NOT EXISTS launcher "
                                "TEXT NOT NULL DEFAULT 'native' CHECK (launcher IN ('native', 'ttadk'))")
@@ -781,6 +817,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         state = await _classify_schema(conn, sql)
         return state == "bridge" or (state == "current" and (
             await _schedule_user_gates_pending(conn) or await _cursor_login_pending(conn)
+            or await _coco_login_pending(conn)
             or await _runtime_launcher_pending(conn) or await _profile_fallback_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
             or await _task_process_record_pending(conn)

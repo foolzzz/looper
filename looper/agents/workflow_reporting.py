@@ -47,6 +47,22 @@ def _blocking_count(result: Mapping[str, Any]) -> int:
                for item in result.get('findings') or [])
 
 
+def _review_failed(result: Mapping[str, Any] | None) -> bool:
+    return result is not None and (result.get('passed') is not True or _blocking_count(result) > 0)
+
+
+def _remember_outcome(outcomes: dict[str, tuple[str, bool]], key: str, text: str, failed: bool) -> None:
+    value = (text, failed)
+    # Round snapshots repeat earlier seats; only new evidence advances their order.
+    if outcomes.get(key) != value:
+        outcomes.pop(key, None)
+        outcomes[key] = value
+
+
+def _outcome_lines(outcomes: dict[str, tuple[str, bool]]) -> list[str]:
+    return [text for text, _ in sorted(reversed(list(outcomes.values())), key=lambda item: not item[1])]
+
+
 def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterable[Mapping[str, Any]] | None, *,
                    workflow: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Collect bounded, structured evidence for workflow tasks, including failures.
@@ -64,8 +80,10 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
         roles.append('- 运行记录读取失败；运行时和模型信息不可用。')
     used_roles: dict[str, None] = {}
     summary_roles: dict[str, None] = {}
-    summary_reviews: dict[str, str] = {}
-    summary_verification: dict[str, str] = {}
+    summary_reviews: dict[str, tuple[str, bool]] = {}
+    summary_verification: dict[str, tuple[str, bool]] = {}
+    summary_escalations: list[str] = []
+    summarized_gates: set[str] = set()
     ordinary_runs: dict[tuple[str, str, str], int] = {}
     for run in runs or []:
         metadata = run.get('metadata') or {}
@@ -74,8 +92,10 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
         role = _line(task_role.get('key') or task_role.get('id') or run.get('role'))
         runtime = profile.get('runtime') or {}
         runtime_type = runtime.get('type')
-        # Match runs API evidence rules: an explicit null is not a missing key.
-        reported = (metadata['model_reported'] if 'model_reported' in metadata else
+        # Older Cursor runs kept the routed model separately from their Auto display label.
+        # Otherwise an explicit null is not a missing key.
+        reported = (metadata['routed_model'] if runtime_type == 'cursor-agent' and metadata.get('routed_model') else
+                    metadata['model_reported'] if 'model_reported' in metadata else
                     metadata.get('model_display') if runtime_type == 'cursor-agent' else
                     None if runtime_type in ('codex', 'grok', 'pi', 'omp', 'dsh') else run.get('model'))
         details = (f'{role}: Profile {_line(profile.get("name") or profile.get("id"))}; 运行时 '
@@ -114,9 +134,11 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
                                    seat.get('status', '') if wrapped else '')
                 reviews.append(f'- {label} 第 {round_no} 轮 / {verdict}')
                 result = seat.get('result') if wrapped else seat
-                summary_reviews[f'{entry.step_id}/{member}'] = (
+                key = f'{entry.step_id}/{member}'
+                _remember_outcome(summary_reviews, key,
                     f'{label} 第 {round_no} 轮 / '
-                    + _verdict(member, result, seat.get('status', '') if wrapped else '', details=False))
+                    + _verdict(member, result, seat.get('status', '') if wrapped else '', details=False),
+                    _review_failed(result))
             if data.get('stale'):
                 reviews.append(f'- {label} 第 {round_no} 轮 / stale: {_line(", ".join(data["stale"]))}')
         elif entry.kind is JournalKind.REVIEW_ADJUDICATED:
@@ -124,8 +146,18 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
                            f'{_line(data.get("level"))}; 理由 {_line(data.get("reason"))}')
         elif entry.kind is JournalKind.LATE_REVIEW:
             reviews.append(f'- 晚到 / 第 {rounds.get(entry.step.rsplit("/", 1)[0], 1)} 轮 / {_verdict(label, data)}')
+            seat = next((s for s in plan.steps if s.step_id == entry.step_id and s.reviews), None)
+            target = plan.step(seat.reviews) if seat else None
+            target_id = target.step_id if target else entry.step.rsplit('/', 1)[0]
+            target_label = target.label if target else target_id
+            key = f'{target_id}/{entry.step}'
+            summary_reviews.pop(key, None)
+            _remember_outcome(summary_reviews, key,
+                f'{target_label} 第 {rounds.get(target_label, 1)} 轮 / ' + _verdict(label, data, details=False),
+                _review_failed(data))
         elif entry.kind is JournalKind.VERIFICATION_ROUND:
-            summary_verification[entry.step_id] = f'{label} 第 {data.get("attempt", "?")} 轮: {_line(data.get("status"))}'
+            _remember_outcome(summary_verification, entry.step_id,
+                f'{label} 第 {data.get("attempt", "?")} 轮: {_line(data.get("status"))}', data.get('status') == 'failed')
             verification.append(f'- {label} 第 {data.get("attempt", "?")} 轮: HEAD {_line(data.get("head"))}; '
                                 f'结果 {_line(data.get("status"))}; git {_line(data.get("git"))}'
                                 + (f'; {_line(data["failure"])}' if data.get('failure') else '')
@@ -133,24 +165,32 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
         elif entry.kind is JournalKind.ESCALATION:
             escalations.append(f'- {label} 升级: {_line(data.get("reason"))}; '
                                f'关卡 {_line(", ".join(data.get("gates") or []))}')
+            gates = [s for s in plan.steps if s.gate is not None and
+                     (s.step_id in (data.get('gates') or []) or s.label in (data.get('gates') or []))]
+            for gate_step in gates:
+                summary_escalations.append(f'{_notice_piece(label, 60)} 升级 / {_notice_piece(gate_step.label, 60)}: '
+                                           f'{gate_step.gate.state.value}; {_notice_piece(data.get("reason"), 80)}')
+                summarized_gates.add(gate_step.step_id)
+            if not gates:
+                summary_escalations.append(f'{_notice_piece(label, 60)} 升级: {_notice_piece(data.get("reason"), 80)}')
     for step in plan.steps:
         # Seats hold the final verdict after adjudication or a late response.
         if step.reviews and step.result is not None:
             target = plan.step(step.reviews)
-            summary_reviews[f'{target.step_id}/{step.label}'] = (
+            _remember_outcome(summary_reviews, f'{target.step_id}/{step.label}',
                 f'{target.label} 第 {rounds.get(target.label, target.retries + 1)} 轮 / '
-                + _verdict(step.label, step.result, details=False))
+                + _verdict(step.label, step.result, details=False), _review_failed(step.result))
         if step.step_id not in reviewed:
             evidence = step.result or {}
             if 'verify_passed' in evidence:
                 result = {'passed': evidence['verify_passed'], 'findings': evidence.get('verify_findings', [])}
                 reviews.append(f'- {step.label} 第 {step.retries + 1} 轮 / {_verdict("builtin", result)}')
-                summary_reviews[f'{step.step_id}/builtin'] = reviews[-1]
+                _remember_outcome(summary_reviews, f'{step.step_id}/builtin', reviews[-1], _review_failed(result))
             for result in (step.result or {}).get('role_reviews') or []:
                 reviews.append(f'- {step.label} 第 {step.retries + 1} 轮 / {_verdict(result.get("role", "builtin"), result)}')
-                summary_reviews[f'{step.step_id}/{result.get("role", "builtin")}'] = (
+                _remember_outcome(summary_reviews, f'{step.step_id}/{result.get("role", "builtin")}',
                     f'{step.label} 第 {step.retries + 1} 轮 / '
-                    + _verdict(result.get("role", "builtin"), result, details=False))
+                    + _verdict(result.get("role", "builtin"), result, details=False), _review_failed(result))
         if step.gate is not None:
             gate = step.gate
             conclusion = []
@@ -162,10 +202,13 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
                 conclusion.append(_line(gate.resolution))
             escalations.append(f'- {step.label} / {_line(gate.topic)}: {gate.state.value}; '
                                + ('; '.join(conclusion) or '尚无结论'))
+            if step.step_id not in summarized_gates:
+                summary_escalations.append(f'{_notice_piece(step.label, 60)} / {_notice_piece(gate.topic, 60)}: '
+                                           f'{gate.state.value}; {_notice_piece("; ".join(conclusion) or "尚无结论", 80)}')
     summary = _summary_text({
         "Roles": list(summary_roles) if runs is not None else ['运行记录读取失败；运行时和模型信息不可用'],
-        "Reviews": list(summary_reviews.values()), "Verification": list(summary_verification.values()),
-        "Escalations": escalations,
+        "Reviews": _outcome_lines(summary_reviews), "Verification": _outcome_lines(summary_verification),
+        "Escalations": summary_escalations,
     })
     record = {"sections": {name: [] for name in sections}, "remote_safety": REMOTE_SAFETY, "omitted": 0,
               "delivery_summary": summary}
@@ -226,7 +269,8 @@ def _summary_text(sections: Mapping[str, list[str]]) -> str:
     budget = (PROCESS_RECORD_SUMMARY_MAX_CHARS - reserved) // len(names)
     lines = ["## Process record"]
     for name in names:
-        kept, omitted = _fit_entries(sections.get(name, []), budget, "; ")
+        items = sections.get(name, [])
+        kept, omitted = _fit_entries(items, budget, "; ")
         value = "; ".join(kept) or ("未记录" if not omitted else "详见完整记录")
         lines.append(f'{name}: {value}' + (f'（另 {omitted} 条，完整记录见下）' if omitted else ''))
     return "\n".join([*lines, pointer])
@@ -247,10 +291,12 @@ class Phase(str, Enum):
 
 
 def _notice_piece(value: Any, limit: int = 160) -> str:
-    from textwrap import shorten
-
-    return shorten(_line(value or ""), width=limit, placeholder="…",
-                   break_long_words=False, break_on_hyphens=False)
+    text = _line(value or "")
+    if len(text) <= limit:
+        return text
+    clipped = text[:limit - 1]
+    boundary = clipped.rfind(' ', max(0, len(clipped) - 15))
+    return (clipped[:boundary] if boundary > 0 else clipped).rstrip() + '…'
 
 
 def phase_text(event: Phase, data: Mapping[str, Any]) -> str:

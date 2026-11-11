@@ -303,9 +303,16 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
         assert (runtime["builtin"], runtime["executable"], runtime["version"]) == (True, "", None)
         assert set(runtime["capabilities"]) == {c.value for c in CLAUDE_CODE.capabilities}
         # Each CLI's own login, with the models it offers as suggestions.
-        claude, codex, cursor, grok = registry["providers"]
+        claude, coco, codex, cursor, grok = registry["providers"]
         assert (claude["name"], claude["auth"], claude["oauth_runtime_type"], claude["api_key"]) == (
             "claude-subscription", "oauth", "claude-code", None)
+        assert (coco["provider_id"], coco["name"], coco["builtin"], coco["auth"], coco["oauth_runtime_type"],
+                coco["api_key"], coco["endpoints"], coco["model_count"], coco["suggested_models"]) == (
+            "prov-coco-login", "coco login", True, "oauth", "coco", None,
+            [{"provider_id": "prov-coco-login", "protocol": "openai-responses", "base_url": "",
+              "use_runtime_default": False}], 0, [])
+        assert coco["login"]["state"] == "not_logged_in"
+        assert await db.list_models(provider_id="prov-coco-login") == []
         assert (codex["provider_id"], codex["name"], codex["builtin"], codex["auth"], codex["oauth_runtime_type"],
                 [e["protocol"] for e in codex["endpoints"]], codex["model_count"]) == (
             "prov-codex-login", "codex-login", True, "oauth", "codex", ["openai-responses"], 7)
@@ -1197,12 +1204,13 @@ def test_where_a_profile_is_selected_is_read_back_and_keeps_it_from_being_delete
             {"scope": "role", "role": "worker", "project_id": None, "project_name": None},
             {"scope": "project", "role": None, "project_id": calc, "project_name": "calc"},
         ], "task_count": 2, "schedule_count": 0, "allowed_in": [], "manager_session": False,
-            "manager_sessions": [], "managers": [], "manager_templates": []}
+            "manager_sessions": [], "managers": [], "manager_templates": [], "workflows": []}
         assert profiles["si/sonnet"]["used_by"]["layers"] == [
             {"scope": "role_project", "role": "reviewer", "project_id": calc, "project_name": "calc"}]
         assert profiles["claude-code/haiku"]["used_by"] == {"layers": [], "task_count": 0, "schedule_count": 0,
                                                             "allowed_in": [], "manager_session": False,
-                                                            "manager_sessions": [], "managers": [], "manager_templates": []}
+                                                            "manager_sessions": [], "managers": [], "manager_templates": [],
+                                                            "workflows": []}
         # What its runtime can run: the stand-in keeps no resident session.
         assert (profiles["claude-code/sonnet"]["roles"], profiles["si/sonnet"]["roles"]) == (
             ["manager", "planner", "worker", "reviewer"], ["worker", "reviewer"])
@@ -1365,7 +1373,10 @@ def test_a_provider_keeps_its_model_catalog_and_concurrency_with_unknowns_as_nul
         unlimited = (await _ok("POST", "/api/v1/provider_accounts/update", {"provider_id": provider['provider_id'], "fields": {"max_concurrency": None}}))
         assert unlimited["provider"]["max_concurrency"] is None
         builtins = [p for p in (await _registry())["providers"] if p["builtin"]]
-        assert all(b["max_concurrency"] is None and b["model_count"] > 0 for b in builtins)
+        # Coco discovers its catalog from the CLI; the other logins have pinned models.
+        assert {b["provider_id"]: (b["max_concurrency"], b["model_count"]) for b in builtins} == {
+            "prov-claude-subscription": (None, 3), "prov-coco-login": (None, 0),
+            "prov-codex-login": (None, 7), "prov-cursor-login": (None, 5), "prov-grok-login": (None, 4)}
 
     run_db(_test, monkeypatch)
 

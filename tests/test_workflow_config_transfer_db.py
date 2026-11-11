@@ -185,9 +185,9 @@ def test_import_rejects_fixed_developer_and_reviewer_using_same_runtime():
     run_db(test, timeout=30)
 
 
-def test_export_keeps_workflows_usable_after_their_profile_is_deleted(monkeypatch):
+def test_export_keeps_workflow_profile_bindings_after_deletion_is_refused(monkeypatch):
     async def test(pool):
-        from looper.agents.profile_registry import delete_profile
+        from looper.agents.profile_registry import RegistryConflict, delete_profile
 
         await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) "
             "SELECT 'transfer-profile', 'Development profile', 'rt-claude-code', id "
@@ -197,8 +197,10 @@ def test_export_keeps_workflows_usable_after_their_profile_is_deleted(monkeypatc
             "roles": [{"key": "dev", "kind": "work", "role_prompt": "Implement the change.",
                        "profile_id": "transfer-profile"}]}), pool=pool)
         assert (await exported(pool))["workflows"][0]["profiles"] == {"worker": "Development profile"}
-        await delete_profile("transfer-profile")
+        with pytest.raises(RegistryConflict):
+            await delete_profile("transfer-profile")
         definition = (await exported(pool))["workflows"][0]
-        assert definition["profiles"] == {} and definition["roles"][0]["profile_id"] is None
+        assert definition["profiles"] == {"worker": "Development profile"}
+        assert definition["roles"][0]["profile_id"] == "Development profile"
         assert Workflow.from_dict(definition).key == "reviewed"
     run_db(test, monkeypatch, timeout=30)

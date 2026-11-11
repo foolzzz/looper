@@ -437,6 +437,7 @@ export function usedByPlaces(used: ProfileUsedBy): { text: string; href?: string
   if (used.task_count) places.push({ text: `${used.task_count} ${used.task_count === 1 ? "task" : "tasks"}` });
   for (const project of used.allowed_in) places.push({ text: `the Planner's list in ${project}` });
   if (used.manager_session) places.push({ text: "the Manager's current session", href: "#chat" });
+  for (const name of used.workflows ?? []) places.push({ text: `workflow ${name}`, href: "#settings/workflows" });
   return places;
 }
 

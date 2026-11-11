@@ -16,6 +16,7 @@ LOGIN_VENDORS = {
     VendorType.CODEX_LOGIN: ("codex", ApiProtocol.OPENAI_RESPONSES),
     VendorType.GROK_LOGIN: ("grok", ApiProtocol.OPENAI_RESPONSES),
     VendorType.CURSOR_LOGIN: ("cursor-agent", ApiProtocol.OPENAI_RESPONSES),
+    VendorType.COCO_LOGIN: ("coco", ApiProtocol.OPENAI_RESPONSES),
 }
 
 

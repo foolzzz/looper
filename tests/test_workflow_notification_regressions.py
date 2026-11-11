@@ -117,13 +117,23 @@ def test_retry_with_running_suggestion_reports_each_round_once(planner_claude, a
         assert len(h.killed) == 1
         for _ in MEMBERS:
             await h.release(REVIEW_PASS)
-        await h.finished()
+        assert (await h.finished()).payload["status"] == "completed"
         texts = [e.payload["phase_text"] for e in h.statuses if "phase_text" in e.payload]
         for attempt in (1, 2):
             assert sum(f"评审第 {attempt} 轮" in text for text in texts) == 1
-            rounds = [e for e in h.planner._plan.journal if e.kind.value == "review_round"
+            rounds = [json.loads(e.summary) for e in h.planner._plan.journal if e.kind.value == "review_round"
                       and json.loads(e.summary)["round"] == attempt - 1]
-            assert len(rounds) == 1
-            assert any(member.endswith("review_c") for member in json.loads(rounds[0].summary)["reviews"])
+            a, b, c = (f"s1/{member}" for member in MEMBERS)
+            # Each arrival is recorded before the single quorum snapshot and notice.
+            assert [list(record["reviews"]) for record in rounds] == [[a], [b], [a, b, c]]
+            for record, member, result in zip(rounds, (a, b), (BLOCK if attempt == 1 else REVIEW_PASS, REVIEW_PASS)):
+                seat = record["reviews"][member]
+                assert seat["status"] == "verified"
+                assert {key: seat["result"][key] for key in result} == result
+            assert rounds[-1]["reviews"] == {
+                **rounds[0]["reviews"], **rounds[1]["reviews"], c: {"status": "dispatched", "result": None}}
+        late = [e for e in h.planner._plan.journal if e.kind.value == "late_review"]
+        assert len(late) == 1 and late[0].step == "s1/review_c"
+        assert json.loads(late[0].summary)["passed"] is True
 
     drive(claude, held_reviews, scenario)

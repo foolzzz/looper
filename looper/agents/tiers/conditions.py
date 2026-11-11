@@ -153,10 +153,12 @@ class StepOutcome:
         return cls()
 
 
-def evaluate(cond: Condition, outcome: Callable[[str], StepOutcome]) -> State:
+def evaluate(cond: Condition, outcome: Callable[[str], StepOutcome], *, isolate_steps: bool = False) -> State:
     if isinstance(cond, Leaf):
-        return outcome(cond.step).for_on(cond.on)
-    states = [evaluate(child, outcome) for child in cond.of]
+        # A worktree starts from the merged base, so a saved completed leaf must wait for acceptance.
+        on = On.VERIFIED if isolate_steps and cond.on is On.COMPLETED else cond.on
+        return outcome(cond.step).for_on(on)
+    states = [evaluate(child, outcome, isolate_steps=isolate_steps) for child in cond.of]
     satisfied = states.count(State.SATISFIED)
     if satisfied >= cond.k:
         return State.SATISFIED

@@ -42,6 +42,7 @@ NETWORK = (
 # model names; Codex: CODEX_HOME (its auth.json) and the key ``codex exec`` reads; Grok: GROK_HOME and its keys. omp
 # runs with API keys only, through the binding (``LOOPER_PROVIDER_API_KEY``), and its directories are Looper's.
 RUNTIMES = (
+    "TRAE_HOME",  # coco's home, for its login file.
     "CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "COPILOT_HOME", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS",
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",

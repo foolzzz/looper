@@ -155,7 +155,7 @@ def lead(summary: str | None) -> str:
 
 
 def notice_text(task_id: str, name: str, status: str, summary: str | None, *, channel: NotifyChannel,
-                dashboard_url: str = "", extra: str | None = None) -> str:
+                dashboard_url: str = "", extra: str | None = None, delivery_summary: str | None = None) -> str:
     """What ended and how, the start of its summary (or closing note), ``extra`` (where a worktree task's work is),
     and the link to the task, as Markdown for ``channel``. ``name`` is what the user asked for, else the
     requirement; the task id when both are empty."""
@@ -165,6 +165,8 @@ def notice_text(task_id: str, name: str, status: str, summary: str | None, *, ch
     lines = [f"{head} · {shown}"]
     if text := lead(summary):
         lines.append(text)
+    if delivery_summary:
+        lines.append(delivery_summary)
     if extra:
         lines.append(extra)
     lines.append(link_line(task_link(dashboard_url, task_id), channel))

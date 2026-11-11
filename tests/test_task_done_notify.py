@@ -76,6 +76,31 @@ def _passed_on(router: TaskRouter, envelope: MessageEnvelope) -> list[dict[str, 
 
 @pytest.mark.usefixtures("agent_db")
 class TestTheNotice:
+    @pytest.mark.parametrize('channel,target', [('telegram', TELEGRAM_CHAT), ('lark', LARK_USER)])
+    @pytest.mark.parametrize('status', ['completed', 'failed'])
+    @pytest.mark.parametrize('long', [False, True])
+    def test_workflow_summary_follows_clipped_lead(self, tmp_path, channel, target, status, long):
+        router = _router(tmp_path)
+        _task(router, channel=f'channel-{channel}', notify=target)
+        delivery = ('## Process record\nRoles: '
+                    + ('r' * 574 if long else 'worker → cursor-agent/model')
+                    + '\nReviews: passed\nVerification: completed\nEscalations: approval: open'
+                    + '\nFull record: task page / looper_tasks get')
+        assert (len(delivery) > 600) is long
+        if long:
+            assert len(delivery) == 709
+        summary = '## Delivered\n' + 'Result ' * 100 + '\n\n## Details\nDetails\n\n' + delivery
+        envelope = _status('task-n1', status, summary)
+        envelope.payload['delivery_summary'] = delivery
+        (passed,) = _passed_on(router, envelope)
+        text = passed['notice']['text']
+        assert '\n' + lead(summary) + '\n## Process record\n' in text
+        assert text.count('## Process record') == 1
+        appendix = text.split('\n## Process record\n', 1)[1].rsplit('\n', 1)[0]
+        assert '## Process record\n' + appendix == delivery
+        assert 'Escalations: approval: open\nFull record: task page / looper_tasks get' in text
+        assert 'Details' not in text
+
     def test_a_completed_telegram_task(self, tmp_path: Path) -> None:
         router = _router(tmp_path)
         _task(router, channel="channel-telegram", notify=TELEGRAM_CHAT)
@@ -344,6 +369,16 @@ def _run_a_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planner_claude:
         bus = h.bus
         channel._bus = bus
         channel._running = True
+        notice_delivered = asyncio.Event()
+        real_deliver = channel.deliver
+
+        async def deliver(envelope: MessageEnvelope) -> Any:
+            receipt = await real_deliver(envelope)
+            if envelope.message_type is MessageType.CHAT_NOTICE:
+                notice_delivered.set()
+            return receipt
+
+        monkeypatch.setattr(channel, "deliver", deliver)
         outbound = asyncio.ensure_future(channel._outbound_loop())  # what start() runs, without polling
         router = TaskRouter(runtime_root=tmp_path, claude_bin=claude.bin, dashboard_url=DASHBOARD)
         await router.start(bus)
@@ -366,7 +401,8 @@ def _run_a_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planner_claude:
                       and next(iter(router._tasks.values())).status == "completed", timeout=30)
         chats = {task.task_id: task.notify for task in router._tasks.values()}
         await h.until(lambda: bus.get_queue("manager").empty() and bus.get_queue(channel.channel_id).empty())
-        await asyncio.sleep(1.0)  # a slow progress send under way finishes
+        # An empty queue can still have a CLI send in flight; wait for the final delivery's receipt.
+        await asyncio.wait_for(notice_delivered.wait(), timeout=30)
         for running in (pumping, outbound):
             running.cancel()
         await asyncio.gather(pumping, outbound, return_exceptions=True)

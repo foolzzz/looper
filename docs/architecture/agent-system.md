@@ -1283,7 +1283,8 @@ Manager tools.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
   providers that serve `openai-responses`, or with Codex's own ChatGPT
-  login (below). Each process gets a `CODEX_HOME`
+  login (below). Its home layout is defined by the frozen `CodexHome` value.
+  Each process gets a `CODEX_HOME`
   of Looper's own under `<runtime_root>/.local/codex`, named on its command
   line (`env CODEX_HOME=... codex exec ...`) and holding only the generated
   `config.toml` (the provider as `[model_providers.looper]`, its key only in
@@ -1348,6 +1349,24 @@ Manager tools.
   `codex_login` self-check, skipped while no Agent Profile uses the login.
   Its runs are priced at the built-in prices as a subscription equivalent;
   the form suggests the models a ChatGPT login offers (`suggested_models`).
+- **The coco login** (`looper/agents/runtimes/coco_login.py`) is the built-in
+  provider `coco-login` (`prov-coco-login`, OAuth). Its `openai-responses`
+  protocol is used only for pairing with `coco`, not for requests. The provider
+  is available in Settings → Providers before a coco runtime is registered.
+  The operator signs in with `coco login` on the server's machine. Looper
+  links `cli/auth.json` to the file in the server's `TRAE_HOME`, defaulting to
+  `~/.trae/cli/auth.json`; it never reads or copies credentials. Probes run
+  `coco login status` in a temporary home containing only that link and cache
+  the answer for 30 seconds. Model discovery runs `coco models --json` in the
+  same kind of home, caching display and configuration names for 10 minutes.
+  CLI 0.214.1 was observed using file credentials; how refresh replaces or
+  updates that file remains unverified. Startup inspects homes under
+  `<runtime_root>/.local/coco` with the shared `linked_login` scheme. A forked
+  link is repaired and recorded under `system_settings.coco_login_fork`;
+  Settings shows it as unavailable until the operator checks `coco login status`
+  and uses "Use the login again". The `coco_login` self-check in `looper doctor`
+  and system status reports login failures, probe errors and recorded forks;
+  with no coco Agent Profiles it reports "not used".
 - **OMP** (`looper/agents/runtimes/omp.py`, oh-my-pi's `omp`, verified against
   omp 18.4.3 in the RFC's section 6) runs `omp -p --mode json` (a Worker or Reviewer with the probed `steer`
   capability runs `omp --mode rpc` instead, `omp_steer`, with `interruptMode` `wait`) with API key
@@ -3925,7 +3944,10 @@ replacement or deletion affects future tasks only; deletion clears project
 defaults. `start_over` restores roles from the snapshot. Workflow roles may
 run even with `planner_roles` off; the Planner cannot change them. Their fixed
 Profiles are operator choices, independent of the project's list of Profiles
-the Planner may choose.
+the Planner may choose. Editing a task role's prompt or harness keeps its
+snapshot's exact Profile grant, even after replacing or deleting the preset.
+Preset Profile references, including custom roles, appear in Profile usage
+and block deletion until the preset is replaced or removed.
 
 The snapshot overlays retry limits, review policy and dependency conditions
 on current project execution settings; escalation enables user gates. A

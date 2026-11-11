@@ -730,10 +730,10 @@ async def _run_agent_system_owned(
             except Exception:
                 logger.exception("could not sweep the task worktrees")
 
-        # A Codex or Grok login that forked in a run the previous server did not see end (before the session
+        # A Codex, Grok or coco login that forked in a run the previous server did not see end (before the session
         # directories it may be in are reclaimed).
-        from .runtimes import codex_login, grok_login
-        for login, label in ((codex_login, "Codex"), (grok_login, "Grok")):
+        from .runtimes import coco_login, codex_login, grok_login
+        for login, label in ((codex_login, "Codex"), (grok_login, "Grok"), (coco_login, "coco")):
             with startup.measure(f"{label.lower()}_login"):
                 try:
                     if problem := await login.inspect_at_start(runtime_root):

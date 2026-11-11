@@ -32,11 +32,27 @@ BEGIN
     END IF;
 END $$;
 
+DO $$
+DECLARE
+    provider_name TEXT := 'coco login';
+    suffix INTEGER := 0;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM llm_providers WHERE id = 'prov-coco-login') THEN
+        WHILE EXISTS (SELECT 1 FROM llm_providers WHERE name = provider_name) LOOP
+            suffix := suffix + 1;
+            provider_name := 'coco login (' || suffix || ')';
+        END LOOP;
+        INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type, builtin)
+        VALUES ('prov-coco-login', provider_name, 'coco-login', 'oauth', 'coco', true);
+    END IF;
+END $$;
+
 INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url)
 VALUES ('prov-claude-subscription', 'anthropic-messages', ''),
        ('prov-codex-login', 'openai-responses', ''),
        ('prov-grok-login', 'openai-responses', ''),
-       ('prov-cursor-login', 'openai-responses', '')
+       ('prov-cursor-login', 'openai-responses', ''),
+       ('prov-coco-login', 'openai-responses', '')
 ON CONFLICT (provider_id, protocol) DO NOTHING;
 
 -- Fixed UUIDv5 ids for the pinned login suggestions, matched by the complete

@@ -69,6 +69,45 @@ def test_conditions_survive_plan_writes_and_api_readback(monkeypatch, tmp_path):
     run_db(test, monkeypatch, timeout=30)
 
 
+def test_stored_completed_readiness_follows_current_worktree_settings(monkeypatch, tmp_path):
+    from looper.agents import projects
+    from looper.agents.ops.clients import PIPELINE_TOOL
+    from looper.agents.tiers.conditions import State
+    from looper.agents.tiers.planner import PlannerAgent
+    from looper.db import plans, projects as db_projects, tasks
+
+    async def test(pool):
+        project = await db_projects.create_project(name="conditions", execution={"dependency_conditions": "on"}, pool=pool)
+        await tasks.create_task(task_id="task-a", requirement="Use upstream output", project_id=project["id"],
+                                status="running", pool=pool)
+        condition = {"step": "step-source", "on": "completed"}
+        await plans.save("task-a", plan={"plan_id": "plan-a", "status": "executing"}, steps=[
+            {"id": "step-source", "index": 0, "instruction": "Source", "status": "completed",
+             "result": {"status": "completed"}},
+            {"id": "step-dependent", "index": 1, "instruction": "Consume", "status": "pending",
+             "depends_on": ["step-source"], "ready_when": condition},
+        ], pool=pool)
+        for mode, status, expected in [(None, "completed", "satisfied"),
+                                       ("worktree", "completed", "pending"),
+                                       ("worktree", "verified", "satisfied"),
+                                       ("worktree", "failed", "unsatisfiable")]:
+            await pool.execute("UPDATE projects SET step_workspaces = $1 WHERE id = $2", mode, project["id"])
+            await pool.execute("UPDATE task_steps SET status = $1 WHERE id = 'step-source'", status)
+            restored = PlannerAgent(task_id="task-a", runtime_root=tmp_path)
+            await restored._load_plan()
+            dependent = restored._plan.step("step-dependent")
+            assert dependent.ready_when == condition
+            assert restored._plan.ready_state(
+                dependent, isolate_steps=restored._execution.isolate_steps) is State(expected)
+            for compact in (False, True):
+                detail = await projects.task_detail("task-a", compact=compact)
+                assert detail["steps"][1]["ready_state"] == expected
+            pipeline = await PIPELINE_TOOL.run(SimpleNamespace(arguments={"task_id": "task-a"}))
+            assert pipeline["steps"][1]["ready_state"] == expected
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_dependency_conditions_upgrade_is_named_and_idempotent(monkeypatch):
     from looper.db import connection
 

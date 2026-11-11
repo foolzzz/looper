@@ -3164,6 +3164,8 @@ export interface ProfileUsedBy {
   allowed_in: string[];
   /** The Manager's current session runs on it. */
   manager_session?: boolean;
+  /** Operator workflows that select this profile, including their custom roles. */
+  workflows?: string[];
 }
 
 export type SystemPromptMode = "append" | "replace";
