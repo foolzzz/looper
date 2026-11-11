@@ -58,8 +58,9 @@ OPERATOR = Principal("operator")
 
 
 def error(code: ErrorCode, message: str, *, details: ErrorDetails | None = None,
-          status: str | None = None) -> tuple[str, dict[str, Any]]:
+          field: str | None = None, status: str | None = None) -> tuple[str, dict[str, Any]]:
     return status or STATUS.get(code, _DEFAULT_STATUS), {"status": "error", "error": {"code": code.value, "message": message,
+        **({"field": field} if field is not None else {}),
         **({"details": details} if details is not None else {})}}
 
 
@@ -550,7 +551,7 @@ def _document(ops: Sequence[Operation]) -> dict[str, Any]:
                 **{name: schema for domain in domains() for name, schema in getattr(domain, "SCHEMAS", {}).items()},
                 "ErrorCode": {"type": "string", "enum": [code.value for code in ErrorCode]},
                 "OpError": _object({"status": {"const": "error"}, "error": _object({
-                    "code": {"$ref": "#/components/schemas/ErrorCode"}, "message": _STR,
+                    "code": {"$ref": "#/components/schemas/ErrorCode"}, "message": _STR, "field": _STR,
                     "details": _object({"manager_id": _STR, "state": _STR, "phase": _NULL_STR,
                                         "method": _NULL_STR}, [], closed=True)}, ["code", "message"])}),
                 "OpOk": _object({"status": {"const": "ok"}, "result": _OBJ, "notes": _array(_STR)},

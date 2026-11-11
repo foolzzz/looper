@@ -485,14 +485,29 @@ it("uses the normalized registry contract throughout", () => {
   expectTypeOf<AgentProfile["model"]>().toHaveProperty("model_id");
 });
 
-it("shows the Cursor sign-in command without offering login-link recovery", async () => {
-  data.providers = [account({ vendor_type: "cursor-login", auth: "oauth", oauth_runtime_type: "cursor-agent",
+it.each([
+  ["cursor-login", "cursor-agent", "cursor-agent login"],
+  ["codex-login", "codex", "codex login"],
+] as const)("keeps the sign-in guidance for %s", async (vendor, runtime, signIn) => {
+  data.providers = [account({ vendor_type: vendor, auth: "oauth", oauth_runtime_type: runtime,
     api_key: null, endpoints: [endpoint("openai-responses", "")],
     login: { state: "not_logged_in", detail: "not signed in" } })];
   await render(false);
   expect(container.textContent).toContain("Login not usable: not signed in");
-  expect(container.textContent).toContain("cursor-agent login");
+  expect(container.textContent).toContain(signIn);
+  expect(container.textContent).not.toContain("Check ");
   expect([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Use the login again"))).toBe(false);
+});
+
+it.each(["not_logged_in", "unavailable"] as const)("explains how to check and sign in to an unusable Coco login (%s)", async (state) => {
+  data.providers = [account({ provider_id: "prov-coco-login", name: "Coco login", vendor_type: "coco-login",
+    auth: "oauth", oauth_runtime_type: "coco", api_key: null, login: { state, detail: "login needs attention" } })];
+  await render(false);
+  const row = container.querySelector('[role="status"]')!;
+  expect(row.textContent).toContain("coco login status");
+  expect([...row.querySelectorAll("code")].map((node) => node.textContent)).toContain("coco login");
+  expect([...row.querySelectorAll("button")].some((button) => button.textContent?.includes("Use the login again")))
+    .toBe(state === "unavailable");
 });
 
 it.each(["logged_in", "not_logged_in", "unknown"] as const)("refreshes a cold Cursor login to %s without user action, then stops", async (state) => {

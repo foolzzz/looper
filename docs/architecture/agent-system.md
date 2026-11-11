@@ -1705,6 +1705,9 @@ Manager tools.
   Looper checks `coco login status` and the cached `coco models --json`
   catalog, refusing missing logins and unknown models; a run without a login
   otherwise hangs. Sign in with `coco login` on the server's machine.
+  Settings → Agent Runtimes shows its detected version and supported roles;
+  Agent Profiles select registered models from `prov-coco-login`. The provider's
+  login row shows `coco login status` and `coco login` when it cannot be used.
   Coco reports tokens only, no actual model or prices, so `model_reported`
   stays empty and usage is unpriced. TRAE's servers make the model requests;
   the recording proxy marks these runs `not_covered`. Consult and steering

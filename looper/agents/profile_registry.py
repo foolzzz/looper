@@ -78,6 +78,10 @@ SECRET_MASK = "***"
 class RegistryError(ValueError):
     """A request the registry refuses (answered with 400)."""
 
+    def __init__(self, message: str, *, field: str | None = None) -> None:
+        super().__init__(message)
+        self.field = field
+
 
 class RegistryNotFound(LookupError):
     """No such runtime, provider or Agent Profile (404)."""
@@ -359,7 +363,7 @@ class ResolvedModel:
         try:
             adapter.check_pairing(self.binding_provider(), self.model.name, effort, executable=runtime.executable)
         except RuntimeUnsupported as exc:
-            raise RegistryError(str(exc)) from None
+            raise RegistryError(str(exc), field=exc.field) from None
 
     def binding_provider(self) -> LegacyProviderSpec:
         """The adapter input: exactly this endpoint and model, never an account catalog."""
@@ -719,7 +723,7 @@ def check_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str
     try:
         adapter.check_pairing(provider, model, effort, executable=runtime.executable)
     except RuntimeUnsupported as exc:
-        raise RegistryError(str(exc)) from None
+        raise RegistryError(str(exc), field=exc.field) from None
 
 
 def default_agent_teams(runtime: RuntimeSpec) -> bool:
@@ -1206,15 +1210,24 @@ def _probe_executable(runtime_type: str, executable: str, server_claude: str,
     return server_claude if adapter is runtimes.CLAUDE_CODE else adapter.default_executable
 
 
+async def _warm_coco_models(executable: str) -> None:
+    from .runtimes import coco_login
+
+    if await coco_login.launch_problem(executable) is None:
+        await asyncio.to_thread(coco_login.available_models, executable)
+
+
 async def _probe(runtime_type: str, executable: str, server_claude: str,
                  launcher: Launcher = Launcher.NATIVE) -> dict[str, Any]:
     adapter = runtimes.adapter(runtime_type)
+    executable = _probe_executable(runtime_type, executable, server_claude, launcher)
     started = time.monotonic()
     try:
         # Adapters bound their subprocesses. An outer timeout also counts executor queue time and
         # abandons the thread's real result, which is the only probe the registry should persist.
-        probe = await asyncio.to_thread(
-            adapter.probe_for, _probe_executable(runtime_type, executable, server_claude, launcher), launcher)
+        probe = await asyncio.to_thread(adapter.probe_for, executable, launcher)
+        if runtime_type == "coco":
+            await _warm_coco_models(executable)
     finally:
         name = adapter.ttadk_runtime_name if launcher is Launcher.TTADK else adapter.type
         logging.getLogger(__name__).info("probed runtime %s in %.3f s", name, time.monotonic() - started)
@@ -1232,7 +1245,11 @@ async def _detected_runtime(adapter: runtimes.RuntimeAdapter,
     executable = "ttadk" if launcher is Launcher.TTADK else adapter.default_executable
     if not adapter.in_process and shutil.which(executable) is None:
         return None
-    if await db.get_runtime(builtin_runtime_id(adapter, launcher)) is not None:
+    if current := await db.get_runtime(builtin_runtime_id(adapter, launcher)):
+        # Startup skips saved probes, but the process-local model catalog is cold after a restart.
+        if adapter.type == "coco":
+            await _warm_coco_models(_probe_executable(adapter.type, current["executable"],
+                                                     adapter.default_executable, launcher))
         return None
     probe = await _probe(adapter.type, "", adapter.default_executable, launcher)
     if adapter.in_process and probe["probe_error"]:

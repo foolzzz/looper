@@ -3196,7 +3196,7 @@ export interface ApiFormat {
 
 export type ApiProtocol = "anthropic-messages" | "openai-chat" | "openai-responses";
 export type VendorKind = "glm-bigmodel" | "glm-zai" | "deepseek" | "kimi-moonshot-cn" | "kimi-moonshot"
-  | "cpa" | "opencode" | "sub2api" | "claude-subscription" | "codex-login" | "grok-login" | "cursor-login" | "custom";
+  | "cpa" | "opencode" | "sub2api" | "claude-subscription" | "codex-login" | "coco-login" | "grok-login" | "cursor-login" | "custom";
 
 export interface ProviderEndpoint {
   provider_id?: string;

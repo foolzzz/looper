@@ -16,6 +16,7 @@ export const RUNTIME_TYPES: Record<string, RuntimeTypeInfo> = {
   api: { kind: "SDK", title: "Model API (SDK)" },
   "claude-code": { kind: "CLI", title: "Claude Code CLI", install: "npm install -g @anthropic-ai/claude-code" },
   codex: { kind: "CLI", title: "Codex CLI", install: "npm install -g @openai/codex" },
+  coco: { kind: "CLI", title: "Coco (TRAE CLI)" },
   "cursor-agent": { kind: "CLI", title: "Cursor CLI", install: "curl https://cursor.com/install -fsS | bash" },
   omp: { kind: "CLI", title: "OMP CLI" },
   grok: { kind: "CLI", title: "Grok CLI" },
@@ -33,11 +34,12 @@ export interface RuntimeLoginHelp {
 
 export const LOGIN_HELP: Record<string, RuntimeLoginHelp> = {
   codex: { check: "codex login status", signIn: "codex login", how: "with ChatGPT" },
+  coco: { check: "coco login status", signIn: "coco login" },
   grok: { signIn: "grok login" },
   "cursor-agent": { check: "cursor-agent status", signIn: "cursor-agent login" },
 };
 
-/** Whether a runtime login the server reports can run: Codex's ChatGPT login, or Grok's signed-in login. */
+/** Whether a runtime login the server reports can run: ChatGPT or a signed-in CLI login. */
 export function loginUsable(state: string): boolean {
   return state === "chatgpt" || state === "logged_in";
 }

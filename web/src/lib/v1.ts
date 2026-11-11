@@ -12,13 +12,15 @@ export class V1Error extends Error {
   readonly status: number;
   readonly code: string;
   readonly details?: V1ErrorDetails;
+  readonly field?: string;
 
-  constructor(status: number, code: string, message: string, details?: V1ErrorDetails) {
+  constructor(status: number, code: string, message: string, details?: V1ErrorDetails, field?: string) {
     super(message);
     this.name = "V1Error";
     this.status = status;
     this.code = code;
     this.details = details;
+    this.field = field;
   }
 }
 
@@ -43,7 +45,7 @@ function request(body: unknown, { signal, session }: V1Options): RequestInit {
 async function failure(response: Response): Promise<never> {
   const body = await response.json().catch(() => null);
   const error = body?.status === "error" ? body.error : null;
-  throw new V1Error(response.status, error?.code ?? "unavailable", error?.message ?? "The request failed.", error?.details);
+  throw new V1Error(response.status, error?.code ?? "unavailable", error?.message ?? "The request failed.", error?.details, error?.field);
 }
 
 async function pendingConfirmation(response: Response, init: RequestInit): Promise<V1PendingConfirmation> {
@@ -61,7 +63,7 @@ export async function callV1<T>(path: string, body: unknown, options: V1Options 
   if (response.status === 202) return pendingConfirmation(response, init);
   const answer = await response.json();
   if (answer.status === "ok") return answer.result as T;
-  if (answer.status === "error") throw new V1Error(response.status, answer.error.code, answer.error.message, answer.error.details);
+  if (answer.status === "error") throw new V1Error(response.status, answer.error.code, answer.error.message, answer.error.details, answer.error.field);
   throw new V1Error(response.status, "unavailable", "The server returned an invalid operation response.");
 }
 
