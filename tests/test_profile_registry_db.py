@@ -665,7 +665,7 @@ def test_codex_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.Monkey
     run_db(_test, monkeypatch)
 
 
-def test_coco_on_path_pairs_only_with_its_own_login_and_runs_workers_and_reviewers(
+def test_coco_on_path_pairs_only_with_its_own_login_and_runs_every_role(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     from looper.agents.profile_registry import register_found_runtimes
@@ -691,7 +691,8 @@ def test_coco_on_path_pairs_only_with_its_own_login_and_runs_workers_and_reviewe
         runtime = _by_name(registry["runtimes"], "coco")
         assert (runtime["runtime_id"], runtime["builtin"], runtime["version"], runtime["type_label"],
                 runtime["protocols"], runtime["roles"]) == (
-            "rt-coco", True, "traecli 0.214.1", "Coco (TRAE CLI)", ["openai-responses"], ["worker", "reviewer"])
+            "rt-coco", True, "traecli 0.214.1", "Coco (TRAE CLI)", ["openai-responses"],
+            ["manager", "planner", "worker", "reviewer"])
         assert await register_found_runtimes() == []
 
         async def profile(provider_id: str, runtime_id: str = "rt-coco") -> tuple[int, Any]:
@@ -701,7 +702,11 @@ def test_coco_on_path_pairs_only_with_its_own_login_and_runs_workers_and_reviewe
 
         status, payload = await profile("prov-coco-login")
         assert status == 201, payload
-        assert payload["profile"]["roles"] == ["worker", "reviewer"]
+        assert payload["profile"]["roles"] == ["manager", "planner", "worker", "reviewer"]
+        profile_id = payload["profile"]["profile_id"]
+        await _ok("PUT", "/api/agent-settings/roles/manager", {"profile_id": profile_id})
+        settings = await _ok("GET", "/api/agent-settings")
+        assert settings["roles"]["manager"]["values"]["profile_id"] == profile_id
         key = await _provider({
             "name": "responses-key", "vendor_type": "custom", "api_key": SECRET,
             "endpoints": [{"protocol": "openai-responses", "base_url": "https://example.invalid/v1"}],

@@ -37,8 +37,8 @@ async def _create(chat: _Chat, *, web: bool) -> dict[str, Any]:
     return answer
 
 
-def test_create_records_the_web_thread_only_for_a_scenario_managers_web_task(monkeypatch: pytest.MonkeyPatch,
-                                                                             tmp_path: Path) -> None:
+def test_create_records_the_web_thread_for_every_managers_web_task(monkeypatch: pytest.MonkeyPatch,
+                                                                  tmp_path: Path) -> None:
     from looper.db import tasks
     from tests.test_scenario_manager_tools_db import _definition, _scoped_chat
     from tests.test_managers_schema_db import _manager
@@ -51,9 +51,8 @@ def test_create_records_the_web_thread_only_for_a_scenario_managers_web_task(mon
         lark = await _create(chat, web=False)
         assert (await tasks.get_task(web["result"]["task_id"], pool=pool))["origin_thread"] == "s-web"
         assert (await tasks.get_task(lark["result"]["task_id"], pool=pool))["origin_thread"] is None
-        # The default Manager's web task keeps the channel's own path: no thread, so no persisted reports.
         default = await _create(_Chat(tmp_path), web=True)
-        assert (await tasks.get_task(default["result"]["task_id"], pool=pool))["origin_thread"] is None
+        assert (await tasks.get_task(default["result"]["task_id"], pool=pool))["origin_thread"] == "s-web"
 
     run_db(test, monkeypatch)
 
@@ -95,37 +94,71 @@ async def _relay(manager: ManagerAgent, adapter: WebChannelAdapter, envelope: Me
     return receipts
 
 
-def test_reports_after_the_answer_ended_reach_the_thread(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from looper.agents.bus import MessageBus
-    from looper.db import chat as db_chat
+@pytest.mark.parametrize("kind,payload,expected", [
+    (MessageType.TASK_ACCEPTED, {"step_count": 3}, "3"),
+    (MessageType.GOAL_STATUS, {"status": "executing", "phase_text": "Review ready"}, "Review ready"),
+    (MessageType.GOAL_STATUS, {"status": "waiting_user", "summary": "进度更新: 1 等待用户"}, "1 等待用户"),
+    (MessageType.GOAL_STATUS, {"status": "completed", "summary": "done\n\nWorkflow delivery summary",
+                              "delivery_summary": "Workflow delivery summary"}, "done\n\nWorkflow delivery summary"),
+], ids=["accepted", "phase", "user-gate", "completed"])
+def test_default_manager_task_reports_after_the_answer_ended_reach_the_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: MessageType, payload: dict[str, Any], expected: str,
+) -> None:
+    from looper.agents.tiers.task import Task, TaskRouter
+    from looper.db import chat as db_chat, tasks
 
     async def test(pool: Any) -> None:
-        bus = MessageBus(runtime_root=tmp_path)
+        await _project(pool)
+        chat = _Chat(tmp_path)
+        bus = chat.bus
         adapter = WebChannelAdapter()
         adapter._bus = bus
         manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
         manager._bus = bus
+        await db_chat.claim_thread("s-web", "manager", pool=pool)
         await db_chat.save_message(session_id="s-web", message_id="m0", role="user", content="go", pool=pool)
+        await adapter.handle_user_message(text="go", session_id="s-web", message_id="m0")
+        envelope = bus.get_queue("manager").get_nowait()
+        turn = Turn(channel="web", chat="s-web", message_id=envelope.message_id, envelope=envelope)
+        chat.ops.begin_turn(turn)
+        try:
+            created = await chat.ops.call("looper_task_create", {
+                "requirement": "build", "title": "计算器", "project": "calc"})
+        finally:
+            chat.ops.end_turn(turn)
+        assert created["status"] == "ok", created
+        task_id = created["result"]["task_id"]
+        task = await tasks.get_task(task_id, pool=pool)
+        assert task["client_id"] is None
 
         # The asking message's stream delivered its answer and was dropped.
-        adapter._sse_queues["c1"] = asyncio.Queue()
-        adapter._sse_queues["c1"].put_nowait({"kind": "answer.final", "payload": {}})
-        async for _ in adapter.iter_sse_events("c1"):
+        assert (await adapter.deliver(MessageEnvelope.create(
+            source=manager.agent_address, target=WEB, message_type=MessageType.AGENT_REPLY,
+            payload={"text": "Task created"}, correlation_id=envelope.correlation_id))).success
+        async for _ in adapter.iter_sse_events(envelope.correlation_id):
             pass
-        assert "c1" not in adapter._sse_queues
+        assert not adapter._sse_queues
 
         live = adapter.iter_chat_events("s-web")  # a page open before the end
-        receipts = [
-            *await _relay(manager, adapter, _report(MessageType.TASK_ACCEPTED, {"task_id": "t", "step_count": 3})),
-            *await _relay(manager, adapter, _report(MessageType.GOAL_STATUS, {
-                "task_id": "t", "goal_id": "g", "status": "completed", "summary": "done"})),
-        ]
-        assert all(r.success for r in receipts) and len(receipts) == 2
+        router = TaskRouter(runtime_root=tmp_path)
+        router._bus = bus
+        router._tasks[task_id] = Task.from_row(task_id, task)
+        report = MessageEnvelope.create(
+            source=TASK_ROUTER_ADDRESS, target=TASK_ROUTER_ADDRESS, message_type=kind,
+            payload={"task_id": task_id, **payload}, correlation_id=envelope.correlation_id,
+            metadata={"origin_channel_id": task["origin_channel_id"]})
+        if kind == MessageType.TASK_ACCEPTED:
+            await router._handle_task_accepted(report)
+        else:
+            await router._handle_planner_status(report)
+        (receipt,) = await _relay(manager, adapter, bus.get_queue("manager").get_nowait())
+        assert receipt.success, receipt.error
         texts = [m["content"] for m in await db_chat.list_messages("s-web", pool=pool) if m["role"] == "assistant"]
-        assert "任务「计算器」已分解为 3 个步骤，开始执行。" in texts[0]
-        assert texts[1] == "任务「计算器」已完成：done"
+        assert len(texts) == 2 and expected in texts[1]
+        if "delivery_summary" in payload:
+            assert texts[1].count(payload["delivery_summary"]) == 1
         pushed = await asyncio.wait_for(live.__anext__(), 2)
-        assert pushed["kind"] == "chat.message" and pushed["payload"]["content"].startswith("任务「计算器」已分解")
+        assert pushed["kind"] == "chat.message" and pushed["payload"]["content"] == texts[1]
         await live.aclose()
 
         # A page opened after the end gets nothing pushed; a refresh reads the stored messages.
@@ -136,7 +169,50 @@ def test_reports_after_the_answer_ended_reach_the_thread(monkeypatch: pytest.Mon
     run_db(test, monkeypatch)
 
 
-def test_a_non_final_status_is_a_stream_status_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("source", ["cli", "web-without-session"])
+def test_a_task_without_a_chat_session_posts_no_chat_messages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, source: str,
+) -> None:
+    from looper.agents.api_v1 import OPERATOR
+    from looper.agents.ops.clients import ClientOps
+    from looper.db import chat as db_chat, tasks
+
+    async def test(pool: Any) -> None:
+        await _project(pool)
+        chat = _Chat(tmp_path)
+        arguments = {"requirement": "build", "title": "计算器", "project": "calc"}
+        if source == "cli":
+            created = await ClientOps(chat.ops.platform).call(OPERATOR, "default", "looper_task_create", arguments)
+        else:
+            envelope = _report(MessageType.USER_MESSAGE, {"text": "go", "channel_context": {}}, origin_thread=None)
+            turn = Turn(channel="web", chat=None, message_id=envelope.message_id, envelope=envelope)
+            chat.ops.begin_turn(turn)
+            try:
+                created = await chat.ops.call("looper_task_create", arguments)
+            finally:
+                chat.ops.end_turn(turn)
+        assert created["status"] == "ok", created
+        task_id = created["result"]["task_id"]
+        task = await tasks.get_task(task_id, pool=pool)
+        assert task["origin_thread"] is None
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = chat.bus
+        adapter = WebChannelAdapter()
+        for payload in ({"status": "executing", "phase_text": "Review ready"},
+                        {"status": "waiting_user", "summary": "Waiting for the user"},
+                        {"status": "completed", "summary": "done", "delivery_summary": "Workflow delivery summary"}):
+            report = _report(MessageType.GOAL_STATUS, payload, origin_channel_id=task["origin_channel_id"],
+                             origin_thread=task["origin_thread"])
+            receipts = await _relay(manager, adapter, report)
+            assert len(receipts) == (0 if source == "cli" else 1)
+            assert all(not receipt.success for receipt in receipts)
+        assert await pool.fetchval("SELECT count(*) FROM chat_messages") == 0
+        assert await db_chat.list_messages("s-web", pool=pool) == []
+
+    run_db(test, monkeypatch)
+
+
+def test_a_status_without_a_thread_is_a_stream_status_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from looper.agents.bus import MessageBus
     from looper.db import chat as db_chat
 
@@ -147,7 +223,7 @@ def test_a_non_final_status_is_a_stream_status_only(monkeypatch: pytest.MonkeyPa
         manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
         manager._bus = bus
         status = _report(MessageType.GOAL_STATUS, {"task_id": "t", "goal_id": "g", "status": "executing",
-                                                   "summary": "half"})
+                                                   "summary": "half"}, origin_thread=None)
         # No stream: dropped, nothing stored.
         (receipt,) = await _relay(manager, adapter, status)
         assert not receipt.success and "no active SSE stream" in (receipt.error or "")

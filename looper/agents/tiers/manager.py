@@ -1664,8 +1664,8 @@ class ManagerAgent:
             else:
                 text = f"任务「{title}」已取消。"
             await self._web_thread_reply(envelope, thread, text)
-        elif thread and envelope.payload.get("phase_text"):
-            await self._web_thread_reply(envelope, thread, envelope.payload["phase_text"])
+        elif thread and (progress_text := envelope.payload.get("phase_text") or envelope.payload.get("summary")):
+            await self._web_thread_reply(envelope, thread, progress_text)
         elif notice is not None:
             # A Telegram or Lark task's end goes to who it recorded, instead of its final summary, behind the
             # progress sent before it (``task_notice``).
