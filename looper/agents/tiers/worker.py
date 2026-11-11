@@ -797,7 +797,7 @@ def _copy_verification_runtime(source: Path, target: Path, paths: Collection[str
         if ".git" in resolved.parts:
             raise OSError("verification runtime path crosses its declared tree")
         if path.suffix == ".pyc" and resolved.is_file():
-            # Editable link trees outside the venv can cache another worktree's code too.
+            # Editable link trees outside the venv can cache same-size, same-mtime code from another worktree.
             return
         if path.is_symlink() and destination != private:
             # Prefer this copied tree, then other declarations, then checkout files.
