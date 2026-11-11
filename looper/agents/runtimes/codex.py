@@ -389,7 +389,8 @@ class CodexRuntime(RuntimeAdapter):
 
         return claude_cli.budget_error(result_event) if (result_event or {}).get(claude_cli.SOFT_CAP) else None
 
-    async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None) -> str | None:
+    async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None,
+                            launcher: Launcher = Launcher.NATIVE) -> str | None:
         """Why a run with Codex's own login cannot start now (``codex_login.launch_problem``)."""
         return await self.home.login.launch_problem() if provider.auth is AuthKind.OAUTH else None
 

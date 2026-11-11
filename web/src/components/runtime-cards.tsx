@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 
 const ROLES: AgentRole[] = ["manager", "planner", "worker", "reviewer"];
 const TTADK_RUNTIMES = [
+  { type: "coco", runtime_id: "rt-ttadk-coco", name: "ttadk-coco" },
   { type: "codex", runtime_id: "rt-ttadk-codex", name: "ttadk-codex" },
   { type: "cursor-agent", runtime_id: "rt-ttadk-cursor-agent", name: "ttadk-cursor-agent" },
 ] as const;

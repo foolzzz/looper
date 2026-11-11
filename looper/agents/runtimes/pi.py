@@ -38,7 +38,7 @@ from ... import child_env
 from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
+    ApiProtocol, AuthKind, Capability, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
     RuntimeUnsupported, instructions, runtime_prompt_text,
 )
 from .channel import RunChannel
@@ -204,7 +204,7 @@ class PiRuntime(RuntimeAdapter):
         return list(_ISOLATION_FLAGS)
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
-                      executable: str | None = None) -> None:
+                      executable: str | None = None, launcher: Launcher = Launcher.NATIVE) -> None:
         if effort and effort not in self.effort_levels:
             raise RuntimeUnsupported(f"pi thinking must be one of {', '.join(self.effort_levels)}, or empty")
 

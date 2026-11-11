@@ -74,7 +74,7 @@ from ... import child_env
 from ..run_usage import Usage, request_tokens, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Probe, PromptBlock, ProviderBinding, ReadOnly, ResidentTransport,
+    ApiProtocol, AuthKind, Capability, CostSource, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, ResidentTransport,
     RunCost, RuntimeAdapter, RuntimeUnsupported, grok_login, instructions, runtime_prompt_text,
 )
 from .codex import _HASHED, _toml_key, _toml_value
@@ -321,7 +321,8 @@ class GrokRuntime(RuntimeAdapter):
         """None: Grok has no spend cap of its own, and a run priced by its own figure has no soft cap."""
         return None
 
-    async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None) -> str | None:
+    async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None,
+                            launcher: Launcher = Launcher.NATIVE) -> str | None:
         """Why a run with Grok's own login cannot start now (``grok_login.launch_problem``)."""
         return await grok_login.launch_problem()
 

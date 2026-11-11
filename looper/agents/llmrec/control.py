@@ -36,7 +36,7 @@ NOT_COVERED_DETAILS = {
     ("cursor-agent", "oauth"): "Cursor's servers make the model requests",
     ("coco", "oauth"): "TRAE's servers make the model requests",
     **{(runtime, auth): "TTADK manages its own provider"
-       for runtime in ("ttadk-claude-code", "ttadk-codex", "ttadk-cursor-agent")
+       for runtime in ("ttadk-claude-code", "ttadk-codex", "ttadk-cursor-agent", "ttadk-coco")
        for auth in ("oauth", "api_key")},
 }
 

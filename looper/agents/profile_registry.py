@@ -357,7 +357,8 @@ class ResolvedModel:
                 raise RegistryError(_ttadk_pairing_problem(runtime, self.provider.name, adapter))
             raise RegistryError("runtime does not support the provider's auth kind")
         try:
-            adapter.check_pairing(self.binding_provider(), self.model.name, effort, executable=runtime.executable)
+            adapter.check_pairing(self.binding_provider(), self.model.name, effort,
+                                  executable=runtime.executable, launcher=runtime.launcher)
         except RuntimeUnsupported as exc:
             raise RegistryError(str(exc)) from None
 
@@ -677,6 +678,9 @@ def _listed(values: Iterable[Any]) -> str:
 
 
 def _ttadk_pairing_problem(runtime: RuntimeSpec, provider_name: str, adapter: runtimes.RuntimeAdapter) -> str:
+    if runtime.type == "coco":
+        return (f"runtime {runtime.name} launches {adapter.label} through TTADK with coco's own login: "
+                f"provider {provider_name}'s key would not be used. Use the coco-login provider")
     return (f"runtime {runtime.name} launches {adapter.label} through TTADK, which replaces the provider with "
             f"TTADK's gateway: provider {provider_name}'s key would not be used. "
             f"Use the {runtime.type}-login provider, or the {runtime.type} runtime")
@@ -717,7 +721,7 @@ def check_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str
         raise RegistryError(f"provider {provider.name!r} lists the models {', '.join(provider.models)}; "
                             f"{model!r} is not one of them")
     try:
-        adapter.check_pairing(provider, model, effort, executable=runtime.executable)
+        adapter.check_pairing(provider, model, effort, executable=runtime.executable, launcher=runtime.launcher)
     except RuntimeUnsupported as exc:
         raise RegistryError(str(exc)) from None
 
