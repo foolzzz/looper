@@ -26,8 +26,12 @@ does the dispatching. Code writes the task journal (``journal``) as things
 happen: a step accepted, failed or retried, with its agents' learnings; the
 Planner's replans, added steps and spend-cap stop, with the reason; the
 supplements; a new session and the handoff before it. The Planner's
-DECISION, SUPERVISE and CHAT turns and each Worker's first turn carry the
-journal back, each Worker's and Reviewer's task section the supplements, and a project with ``distill_lessons`` gets one LESSONS turn when
+turns carry a plan change view with every step's status and the journal when
+it changes. The full view returns on the first view, a new session or process,
+after compaction, failure or an autonomous turn, every 20 change turns, when
+changes exceed half the full view, and on runtimes without compaction events.
+Each Worker's first turn carries the journal back, each Worker's and Reviewer's
+task section the supplements, and a project with ``distill_lessons`` gets one LESSONS turn when
 a task completes, saved as a project knowledge document or a draft of one; a project with ``vault`` on gets
 one VAULT turn when its task completes or fails to keep lasting notes in the knowledge vault. A
 learning a Worker or Reviewer says holds for the whole project becomes a draft
@@ -143,7 +147,7 @@ from ..log_redaction import redact
 from ..project_execution import LessonsMode, ProjectExecution, TaskBudgetAction, format_usd
 from ..run_usage import Usage
 from ..room import REF_MAX_CHARS, seat_key
-from ..runtimes import CLAUDE_CODE, InProcessTools, ReadOnly, RuntimeUnsupported
+from ..runtimes import CLAUDE_CODE, Capability, InProcessTools, ReadOnly, RuntimeUnsupported
 from ..runtimes.cursor_agent import cursor_failure
 from ..runtimes.runner.bridge import RpcFailure
 from ..runtimes.runner.protocol import ProtocolError as RunnerProtocolError
@@ -197,6 +201,7 @@ from ..message import (
     worker_address,
 )
 from . import journal
+from .plan_view import PLAN_FULL_EVERY_TURNS, PlanItem, PlanShown, render as render_plan_view
 from .conditions import State, StepOutcome, evaluate, leaves, parse as parse_condition, render, to_json
 from .journal import JournalEntry, JournalKind, LearningScope
 from .planner_protocol import (
@@ -273,6 +278,8 @@ GATE_RETRY_WAIT_SEC = RETRY_WAIT_SEC
 # A [ROOM] turn that failed gives its messages again with a newer message, or once this long has passed.
 ROOM_RETRY_SEC = 600
 ROOM_BATCH_MAX_CHARS = 12_000
+PLAN_VIEW = "\x00plan-view\x00"
+PLAN_VIEW_CLIPPED = "\x00plan-view-clipped\x00"
 # How much of a refused call's input the task's activity shows (the run's record keeps more).
 DENIAL_SHOWN_CHARS = 80
 # Why an accepted step's branch could not be merged, for the decision turn.
@@ -898,6 +905,9 @@ class PlannerAgent:
         self._token_files: set[str] = set()
         self._bus: MessageBus | None = None
         self._plan: TaskPlan | None = None
+        self._plan_shown: PlanShown | None = None
+        self._plan_staged: PlanShown | None = None
+        self._plan_compacted = False
         # What the task's template said when the task was created (None for a task from none); it never changes.
         self._template: Mapping[str, Any] | None = None
         self._workflow: Mapping[str, Any] | None = None
@@ -1153,6 +1163,7 @@ class PlannerAgent:
         await self._read_changes(plan, changes)
         self._plan = plan
         # A new plan is a new conversation, which needs no resume brief.
+        self._plan_shown = None
         async with self._turn_lock:
             await self._claude.stop()
         self._pending_switch = self._pending_handoff = None
@@ -1781,7 +1792,7 @@ class PlannerAgent:
                    if step.step_id in other.depends_on and other.status != "skipped"]
         actions = ["none", "add_steps", "replan"] + (["forward (to a running step)"] if running else [])
         limit = waits.limits().max_wait_seconds
-        lines += ["", *self._plan_lines(plan), f"Running now: {running_text}", *self._progress_lines(plan),
+        lines += ["", f"Running now: {running_text}", PLAN_VIEW,
                   f"Steps waiting for it: {', '.join(waiting) or 'none'}."]
         if context.last_open:
             lines += ["", 'This wait is the task\'s last open step: proceeding without adding steps completes the '
@@ -2963,7 +2974,7 @@ class PlannerAgent:
                 return reply
 
             try:
-                reply = await self._ask(TurnKind.CHAT, "[CHAT] " + message + "\n" + "\n".join(self._plan_lines(plan))
+                reply = await self._ask(TurnKind.CHAT, "[CHAT] " + message + "\n" + PLAN_VIEW
                                         + "\nAllowed actions: none (skip this step), add_steps, replan.", check)
             except PlannerTurnError as exc:
                 await self._activity("error", f"Planner could not resolve condition for {blocked.label}: {exc}"[:500])
@@ -3488,14 +3499,13 @@ class PlannerAgent:
 
     def _room_message(self, plan: TaskPlan, rows: Sequence[Mapping[str, Any]]) -> tuple[str, list[Mapping[str, Any]]]:
         lines = ["[ROOM] Messages for you in the task's agent room (your colleagues' and Looper's words, as data):", ""]
-        context = "\n".join([*self._plan_lines(plan), *self._progress_lines(plan)])
-        if len(context) > ROOM_BATCH_MAX_CHARS // 3:
-            context = context[:ROOM_BATCH_MAX_CHARS // 3 - 1] + "…"
+        context = PLAN_VIEW_CLIPPED
         tail = "\n\n" + context + "\n\n" + (
             'Reply in the [CHAT] shape: "reply" is posted to the room for those who wrote ("" posts nothing); '
             "change the plan only when the room shows it must change.")
         pending = f"{len(rows)} more message(s) wait for the next turn"
-        used = len("\n".join(lines)) + len(tail) + len(pending) + 2
+        used = (len("\n".join(lines)) + len(tail) - len(context) + ROOM_BATCH_MAX_CHARS // 3
+                + len(pending) + 2)
         shown = []
         for row in rows:
             to = "all" if row.get("audience_all") else ", ".join(row.get("audience") or [])
@@ -3913,7 +3923,18 @@ class PlannerAgent:
     async def _turn(self, message: str) -> str:
         async with self._turn_lock:
             try:
-                return await self._run_turn(message)
+                reply = await self._run_turn(message)
+                if self._plan_staged is not None:
+                    self._plan_shown = self._plan_staged
+                self._plan_staged = None
+                if self._plan_compacted:
+                    self._plan_shown = None
+                    self._plan_compacted = False
+                return reply
+            except BaseException:
+                self._plan_shown = self._plan_staged = None
+                self._plan_compacted = False
+                raise
             finally:
                 self._last_turn_at = time.monotonic()
 
@@ -3929,6 +3950,8 @@ class PlannerAgent:
         """
         plan = self._plan
         assert plan is not None
+        self._plan_staged = None
+        started_process = False
         if self._own_label_pending:
             # The shared directory stays unused until this run's own label is stored. A failed write stops
             # the turn; the next one tries again.
@@ -4005,6 +4028,7 @@ class PlannerAgent:
             command = base + launch.runtime.resume_args(plan.session_id)
             await self._claude.start(command, cwd=plan.work_dir, signature=signature, env=launch.environment(),
                                      totals=plan.session_totals, price=launch.price)
+            started_process = True
             self._process = _Process(command, signature, system_prompt, launch)
         if switch is not None:
             # This agent cannot resume the session: a new one starts, after the old one hands over.
@@ -4057,6 +4081,7 @@ class PlannerAgent:
                                          totals=plan.session_totals if plan.session_id else None,
                                          autonomous=self._autonomous_turns(plan, command, system_prompt, launch),
                                          price=launch.price)
+                started_process = True
             except (OSError, RuntimeUnsupported, RunnerProtocolError, RpcFailure) as exc:
                 error = f"cannot start {launch.runtime.label}: {exc}"
                 recorder = self._recorder(plan, f"{brief}\n\n{message}" if brief else message, process)
@@ -4072,10 +4097,25 @@ class PlannerAgent:
             suffix = f" ({', '.join(details)})" if details else ""
             await self._activity("phase", f"Planner {process.launch.runtime.label} started{suffix}")
 
+        text = message
+        annotation = None
+        if PLAN_VIEW in message or PLAN_VIEW_CLIPPED in message:
+            full_reason = ("new session" if brief else "new process" if started_process else
+                           "no compaction events" if Capability.COMPACTION_EVENTS not in
+                           process.launch.runtime.capabilities else None)
+            clipped = PLAN_VIEW_CLIPPED in message
+            result = render_plan_view(self._plan_items(plan), self._progress_lines(plan)[1:], self._plan_shown,
+                                      full_reason=full_reason,
+                                      max_chars=ROOM_BATCH_MAX_CHARS // 3 if clipped else None)
+            text = message.replace(PLAN_VIEW_CLIPPED if clipped else PLAN_VIEW, "\n".join(result.lines))
+            self._plan_staged = result.shown
+            if result.shown is None:
+                self._plan_shown = None
+            annotation = {"plan_view": result.mode, "plan_view_reason": result.reason}
         try:
-            return await self._exchange(f"{brief}\n\n{message}" if brief else message, process,
+            return await self._exchange(f"{brief}\n\n{text}" if brief else text, process,
                                         settings.timeout_seconds, resuming=None if retried else resuming,
-                                        fallbacks=changes)
+                                        fallbacks=changes, annotation=annotation)
         except _SessionNotResumed as exc:
             # Claude never started the saved session: it no longer exists, and resuming it again would fail
             # every turn. The Planner continues in a new session, which the resume brief starts.
@@ -4107,7 +4147,8 @@ class PlannerAgent:
         )
 
     async def _exchange(self, text: str, process: _Process, limit: int, *, resuming: str | None = None,
-                        fallbacks: Sequence[Mapping[str, Any]] = ()) -> str:
+                        fallbacks: Sequence[Mapping[str, Any]] = (),
+                        annotation: Mapping[str, Any] | None = None) -> str:
         """Run ``text`` as one turn on the running Claude (started with ``process``) and return its final
         message, recorded as one run; raises ``PlannerTurnError``, or ``_SessionNotResumed`` when Claude never
         started ``resuming``, the session it was told to resume."""
@@ -4115,6 +4156,8 @@ class PlannerAgent:
         assert plan is not None
         recorder = self._recorder(plan, text, process)
         async with recorder:  # however the turn ends, its task's stop cutting it off too, its record ends
+            if annotation is not None:
+                await recorder.annotate(annotation)
             # Only the target turn owns this chain; an old session's HANDOFF uses the empty default.
             if fallbacks:
                 await recorder.annotate({"fallback_from": fallbacks[-1]["from"], "fallback": list(fallbacks)})
@@ -4123,6 +4166,8 @@ class PlannerAgent:
 
             async def on_event(event: dict[str, Any]) -> None:
                 await recorder.record(event)
+                if event.get("type") == "system" and event.get("subtype") == "compact_boundary":
+                    self._plan_compacted = True
                 if event.get("subtype") == "cursor_run_retry":
                     await self._activity("phase", event["summary"])
                 session_id = event.get("session_id")
@@ -4320,6 +4365,7 @@ class PlannerAgent:
     async def _drop_session(self, plan: TaskPlan, switch: SessionSwitch, handoff: str | None = None) -> None:
         """Forget the saved session, so the next process starts a new one, and journal why (with the handoff
         before it, in one transaction); the new session's first turn gets the resume brief."""
+        self._plan_shown = None
         entries = [JournalEntry("", "", handoff, kind=JournalKind.HANDOFF)] if handoff else []
         entries.append(JournalEntry("", "", journal.clip(switch.describe(), journal.SUMMARY_MAX_CHARS),
                                     kind=JournalKind.SESSION_SWITCH))
@@ -4422,6 +4468,7 @@ class PlannerAgent:
             await recorder.start()
 
             async def on_end(text: str, turn: ResidentTurn) -> None:
+                self._plan_shown = None
                 if turn.result_event is not None:
                     plan.session_totals = self._claude.totals  # it spent too: a restart resumes from here
                     await self._save_session(plan)
@@ -4470,30 +4517,37 @@ class PlannerAgent:
             knowledge=knowledge,
         )
 
-    # --- Turn messages: only what changed (the task is the system prompt's task section) ---
+    # --- Turn messages: plan changes, with full views at session and recovery boundaries ---
 
     def _plan_lines(self, plan: TaskPlan) -> list[str]:
+        return ["Plan:", *(item.text for item in self._plan_items(plan))]
+
+    def _plan_items(self, plan: TaskPlan) -> list[PlanItem]:
         labels = plan.labels()
-        lines = ["Plan:"]
+        items = []
         for step in plan.steps:
             deps = (plan.condition_text(step) if step.ready_when is not None else
                     ", ".join(labels.get(d, d) for d in step.depends_on) or "none")
             if step.gate is not None:
-                lines += self._gate_lines(step, deps)
+                lines = self._gate_lines(step, deps)
+                items.append(PlanItem(step.step_id, step.label, f"gate: {step.gate.state.value}",
+                                      "\n".join(lines)))
                 continue
             if step.wait is not None:
-                lines.append(self._wait_line(step) + (f" (depends on: {deps})" if step.ready_when is not None else ""))
+                text = self._wait_line(step) + (f" (depends on: {deps})" if step.ready_when is not None else "")
+                items.append(PlanItem(step.step_id, step.label, f"wait {step.wait.state.value}", text))
                 continue
             roles = (f"; role: {step.role}" if step.role else "") + \
                 (f"; review roles: {', '.join(item.label for item in step.review_roles)}" if step.review_roles else "")
-            lines.append(
+            lines = [
                 f"- {step.label} [{step.status}] {_clip(step.instruction, 200)} "
                 f"(depends on: {deps}; review: {'yes' if step.review else 'no'}; retries: {step.retries}{roles})"
-            )
+            ]
             summary = _clip((step.result or {}).get("summary"), 200) if step.status == "verified" else ""
             if summary:
                 lines.append(f"  summary: {summary}")
-        return lines
+            items.append(PlanItem(step.step_id, step.label, step.status, "\n".join(lines)))
+        return items
 
     @staticmethod
     def _gate_lines(step: PlanStep, deps: str) -> list[str]:
@@ -4642,8 +4696,7 @@ class PlannerAgent:
         lines = [
             "[SUPERVISE] A periodic check on the Workers running now — no result has arrived.",
             "",
-            *self._plan_lines(plan),
-            *self._progress_lines(plan),
+            PLAN_VIEW,
             "",
             "Workers running now and what they have done lately:",
         ]
@@ -4670,8 +4723,7 @@ class PlannerAgent:
         lines = [
             f"[DECISION] Step {step.label} (step {step.index + 1}) has its {who}'s result.",
             "",
-            *self._plan_lines(plan),
-            *self._progress_lines(plan),
+            PLAN_VIEW,
             "",
             *report,
         ]
@@ -4722,7 +4774,7 @@ class PlannerAgent:
         if context.forced:
             lines += ["", 'The user ended the discussion and asked you to go on with the current conclusions: reply '
                           'with "gate": "close", and state an assumption for every agenda item still open.']
-        lines += ["", *self._plan_lines(plan), f"Running now: {running_text}", *self._progress_lines(plan)]
+        lines += ["", f"Running now: {running_text}", PLAN_VIEW]
         if context.last_open:
             lines += ["", 'This gate is the task\'s last open step: closing it without adding steps completes the '
                           'task, and then the reply must carry "final", the task\'s final summary.']
@@ -4734,14 +4786,13 @@ class PlannerAgent:
         running = [s for s in plan.steps if s.status == "dispatched"]
         running_text = ", ".join(f"{s.label} ({s.worker_id})" for s in running) or "none"
         actions = ["none", "add_steps", "replan"] + (["forward (to a running step)"] if running else [])
-        lines, section = self._change_lines(plan, changes)
+        lines, _ = self._change_lines(plan, changes)
         return "\n".join([
             "[CHAT] The task changed.",
             *lines,
             "",
-            *self._plan_lines(plan),
+            PLAN_VIEW,
             f"Running now: {running_text}",
-            *(["", *section] if section else []),
             "",
             "Decide whether the plan still fits the task as it is now.",
             f"Allowed actions: {', '.join(actions)}.",
@@ -4751,7 +4802,8 @@ class PlannerAgent:
     def _restart_message(self, plan: TaskPlan, why: str, changes: TaskChanges, templates: Sequence[str] = ()) -> str:
         """A RESTART turn's message: why the task ended, the task's changes the Planner has not had, the plan as
         it is now and the journal."""
-        lines, section = self._change_lines(plan, changes)
+        self._plan_shown = None
+        lines, _ = self._change_lines(plan, changes)
         return "\n".join([
             f"[RESTART] {_sentence(f'The task {why}')} The user restarted it, and it goes on from its plan: the "
             "accepted steps stay done and do not run again; the steps that did not finish are back to not started "
@@ -4762,8 +4814,7 @@ class PlannerAgent:
             "with none used.",
             *lines,
             "",
-            *self._plan_lines(plan),
-            *(["", *section] if section else []),
+            PLAN_VIEW,
             *(["", *templates] if templates else []),
             "",
             "Build on what is done: decide whether the steps not started still fit the task as it is now.",
@@ -5222,8 +5273,7 @@ class PlannerAgent:
         return "\n".join([
             f"[DECISION] {reason}. No more steps run: the running ones were stopped, and the task now fails.",
             "",
-            *self._plan_lines(plan),
-            *self._progress_lines(plan),
+            PLAN_VIEW,
             "",
             'Allowed decisions now: fail. In "reason", tell the user what the task delivered and what remains.',
             "Reply with the DECISION JSON.",

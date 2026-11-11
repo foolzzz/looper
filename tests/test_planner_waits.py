@@ -1238,8 +1238,8 @@ def test_the_wait_message_reports_a_checked_timeout(planner_claude: Any, agent_d
         "Last output (capped):",
         "Last error: disk full\nstill full",
         "The user was told in their Lark chat.",
-        f"- w1 [wait timed_out: {DESCRIBE}, deadline {_stamp(deadline)}]",
         "Running now: none",
+        f"- w1 [wait timed_out: {DESCRIBE}, deadline {_stamp(deadline)}]",
         "Progress and findings",
         "Steps waiting for it: s2.",
         'Reply in the CHAT shape plus "wait":',
@@ -1648,7 +1648,8 @@ def test_run_deadline_is_named_when_the_wait_has_no_check(
                         "(max_wait_seconds 1800) and its time passed.")
     assert lines[1] == _run_line(3600)
     assert lines[2] == ""
-    assert lines[3] == "Plan:"
+    assert lines[3] == "Running now: none"
+    assert lines[4] == "Plan:"
     assert "Check:" not in lines[1]
 
 
