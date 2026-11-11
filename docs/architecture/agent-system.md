@@ -1947,20 +1947,26 @@ Manager tools.
   chains are acyclic, allow at most three hops and preserve every supported
   role; edits also validate incoming chains. Referenced targets cannot be deleted.
   Planner follows the chain only for a profile configuration error. Worker and
-  Reviewer also fall back after a launch failure, or a nonzero exit (or a
-  model refusal reporting zero turns) before any model event. Codex, coco and
-  Cursor Agent through TTADK also fall back when they end without a result,
-  even with exit code 0; TTADK's exit code is unreliable. Timeouts do not
-  trigger this detection. It is enabled for native Claude Code and Grok, and
-  for Codex, coco and Cursor Agent with either the native or TTADK launcher,
-  with recorded samples and stand-in streams covering their event boundaries.
+  Reviewer also fall back after a launch failure, or a nonzero exit before
+  any model event: native Claude Code and Grok, and Codex, coco and Cursor
+  Agent with either the native or TTADK launcher. An error result reporting
+  zero turns also qualifies, even with exit code 0. Codex error results omit
+  the turn count; with either launcher, these qualify when no model event
+  has occurred. Codex, coco and Cursor Agent through TTADK also fall back
+  when they end without a result, even with exit code 0; TTADK's exit code
+  is unreliable. A native exit 0 without a result fails early with the
+  redacted stderr head but does not itself trigger fallback. Nonzero exits
+  without a usable result also retain the redacted stderr head; TTADK keeps
+  both the head and tail. Codex error results retain their redacted, bounded
+  error text. Timeouts do not trigger this detection. Recorded samples and
+  stand-in streams cover the enabled runtimes' event boundaries.
   Launcher banners, session/turn starts and
   model names echoed at initialization are not model events. Responses, tool
   calls, partial model output and nonzero token usage prevent fallback.
   OMP, Pi, DSH and API keep `first_event_known` disabled until their first
   model events are verified. The exit reason is
-  `exited before any model event: <first line of the error>`, clipped to 299
-  characters including the prefix. Each switch stays within
+  `exited before any model event: <first line of the error>`, redacted before
+  clipping to 299 characters including the prefix. Each switch stays within
   the same step attempt, without consuming a retry, and records activity,
   `profile_fallback` journal entries and the ordered `{from, to, reason}` chain in
   `metadata.fallback` on the target run, including failed launches. `metadata.fallback_from`

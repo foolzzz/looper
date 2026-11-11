@@ -69,6 +69,7 @@ from ..operator_notes import notes_note
 from ..project_execution import ProjectExecution
 from ..verification_writes import VerificationWrites
 from ..library import items_label, load_installed
+from ..log_redaction import redact
 from ..runtimes import ADAPTERS, RunChannel, RuntimeAdapter, RuntimeUnsupported, waits_without_turns
 from ..runtimes.channel import DeliveryResult, RunHandle, RunStartError
 from ..runtimes.cursor_agent import cursor_failure, retry_event, retry_stderr, RETRY_SUMMARY
@@ -2653,23 +2654,27 @@ class WorkerPool:
         )
         detail = (runtime.failure_detail(result_event, launch=launch, command=command, pid=handle.pid)
                   if not result_ok else None)
+        errors = (result_event or {}).get("errors") or []
+        if runtime.type == "codex" and result_event is not None and result_event.get("is_error"):
+            detail = redact("\n".join(str(error) for error in errors))[:500] or detail
         # A launcher can report a model refusal as a zero-turn error even when it exits 0.
+        # Codex's failed results omit num_turns; model events below remain the work boundary.
         launch_refused = (result_event is not None and result_event.get("is_error") is True
-                          and type(result_event.get("num_turns")) is int and result_event["num_turns"] == 0)
+                          and ((type(result_event.get("num_turns")) is int and result_event["num_turns"] == 0)
+                               or (runtime.type == "codex" and "num_turns" not in result_event)))
         launch_ended_without_result = not launch.exit_code_reliable and result_event is None
         if ((return_code != 0 or launch_refused or launch_ended_without_result)
                 and runtime.first_event_known and ctx.model_events == 0
                 and not result_ok and runtime.budget_error(result_event) is None):
             stderr = stderr if stderr is not None else await handle.error_output()
-            errors = (result_event or {}).get("errors") or []
-            message = (detail or (str(errors[0]) if errors else "") or stderr or "").strip()
+            message = redact(detail or (str(errors[0]) if errors else "") or stderr or "").strip()
             message = message or f"{runtime.label} exited with code {return_code}"
             ctx.fallback_reason = f"exited before any model event: {message.splitlines()[0]}"[:299]
         # A run stopped at its spend cap exits non-zero too; its result says why.
         if ((return_code != 0 or not launch.exit_code_reliable or result_event is None or first_stderr is not None)
                 and not result_ok
                 and runtime.budget_error(result_event) is None and not detail):
-            stderr = stderr if stderr is not None else await handle.error_output()
+            stderr = redact(stderr if stderr is not None else await handle.error_output())
             error = (f"{runtime.label} through TTADK ended without a result" if not launch.exit_code_reliable
                      else f"{runtime.label} ended without a result" if return_code == 0 and result_event is None
                      else f"{runtime.label} exited with code {return_code}")

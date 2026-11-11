@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from fake_claude import fake_claude
+from looper.agents import log_redaction
 from looper.agents.agent_settings import AgentSettings
 from looper.agents.message import MessageEnvelope, MessageType, worker_address
 from looper.agents.profile_registry import (
@@ -25,6 +26,7 @@ INIT = {"type": "system", "subtype": "init", "model": "unavailable-model", "sess
 ASSISTANT = {"type": "assistant", "message": {"role": "assistant", "content": [
     {"type": "text", "text": "Inspecting the project"}]}}
 ERROR = "Unknown model\nUse an available model"
+SECRET = "synthetic-registered-launch-secret"
 SUCCESS = {"type": "result", "subtype": "success", "result": json.dumps({
     "status": "completed", "summary": "Recovered", "changed_files": {}})}
 
@@ -93,7 +95,7 @@ def run_primary(agent_db, tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "fallback_settings", AsyncMock(return_value=backup))
 
     def run(runtime, launcher=Launcher.NATIVE, *, events=(), exit_code=1, wait=False, steer=False,
-            error=ERROR, startup=True):
+            error=ERROR, startup=True, fallback=True):
         transcript = "Launcher ready\n" + "\n".join(json.dumps(e) for e in [
             *(_launch_lines(runtime) if startup else []), *events])
         body = f'''
@@ -122,7 +124,7 @@ for line in sys.stdin:
         raise SystemExit({exit_code})
 '''
         executable = fake_claude(tmp_path / 'primary', body)
-        primary = _settings(runtime, executable, launcher=launcher, fallback="backup")
+        primary = _settings(runtime, executable, launcher=launcher, fallback="backup" if fallback else None)
         if steer:
             profile = primary.profile
             primary = replace(primary, profile=replace(profile, runtime=replace(
@@ -151,12 +153,18 @@ def test_nonzero_exit_before_model_event_uses_recorded_fallback(run_primary, age
     assert "Unknown model" in agent_db.finish_record.await_args_list[0].kwargs["error"]
 
 
-@pytest.mark.parametrize("runtime", ["cursor-agent", "codex", "coco"])
-def test_ttadk_zero_exit_without_result_uses_bounded_recorded_fallback(
-    run_primary, agent_db, monkeypatch, tmp_path, runtime,
+@pytest.mark.parametrize(("runtime", "launcher", "exit_code"), [
+    *[(runtime, Launcher.TTADK, 0) for runtime in ("cursor-agent", "codex", "coco")],
+    *[(runtime, launcher, 1) for runtime, launcher in LAUNCHES],
+])
+def test_launch_refusal_uses_bounded_redacted_recorded_fallback(
+    run_primary, agent_db, monkeypatch, tmp_path, runtime, launcher, exit_code,
 ):
-    refusal = "Cannot use this model: unavailable-model. Available models: " + "available-model, " * 140
-    result, records = run_primary(runtime, Launcher.TTADK, exit_code=0, startup=False, error=refusal)
+    monkeypatch.setattr(log_redaction, "_secrets", (SECRET,))
+    # The first secret crosses the reason's clipping boundary; the second crosses stderr's.
+    refusal = "Cannot use this model: " + "x" * 235 + SECRET + "y" * 200 + SECRET + ". Available models: "
+    refusal += "available-model, " * 140
+    result, records = run_primary(runtime, launcher, exit_code=exit_code, startup=False, error=refusal)
     assert result["status"] == "completed"
     assert [r["metadata"]["profile"]["id"] for r in records] == ["primary", "backup"]
     change, = result["fallback"]
@@ -166,7 +174,8 @@ def test_ttadk_zero_exit_without_result_uses_bounded_recorded_fallback(
     assert len(reason) < 300
     assert records[1]["metadata"]["fallback"] == [change]
     assert records[1]["metadata"]["fallback_from"] == "primary"
-    assert refusal[:100] in agent_db.finish_record.await_args_list[0].kwargs["error"]
+    error = agent_db.finish_record.await_args_list[0].kwargs["error"]
+    assert refusal[:100] in error
     activity = [c.kwargs["summary"] for c in agent_db.insert_activity.await_args_list
                 if "Agent Profile fallback:" in c.kwargs["summary"]]
     assert len(activity) == 1 and activity[0].endswith(f"({reason})")
@@ -181,7 +190,49 @@ def test_ttadk_zero_exit_without_result_uses_bounded_recorded_fallback(
     asyncio.run(asyncio.wait_for(agent._handle_work_result(envelope), 5))
     entries = [row for row in agent_db.store.journal["task-1"] if row["kind"] == "profile_fallback"]
     assert [json.loads(row["summary"])["reason"] for row in entries] == [reason]
+    for text in [error, reason, json.dumps(records), *activity, *(row["summary"] for row in entries)]:
+        assert log_redaction.MASK in text and SECRET not in text
+        assert SECRET[:8] not in text
     assert step.retries == 0
+
+
+@pytest.mark.parametrize("launcher", list(Launcher))
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_stderr_error_is_redacted_before_clipping(run_primary, agent_db, monkeypatch, launcher, exit_code):
+    monkeypatch.setattr(log_redaction, "_secrets", (SECRET,))
+    refusal = "Unknown model: " + "x" * 476 + SECRET + " trailing diagnostic"
+    result, records = run_primary("codex", launcher, exit_code=exit_code, error=refusal, fallback=False)
+    assert result["status"] == "failed" and len(records) == 1
+    assert agent_db.finish_record.await_args.kwargs["error"] == result["error"]
+    for text in [result["error"], result["stderr"]]:
+        assert "Unknown model" in text and log_redaction.MASK in text
+        assert SECRET[:8] not in text
+
+
+@pytest.mark.parametrize("launcher", list(Launcher))
+@pytest.mark.parametrize("evidence", ["none", "item", "usage", "no-fallback-profile"])
+def test_codex_zero_exit_error_result_preserves_refusal_and_model_evidence(
+    run_primary, agent_db, monkeypatch, launcher, evidence,
+):
+    monkeypatch.setattr(log_redaction, "_secrets", (SECRET,))
+    # Replay the recorded Codex JSONL shape; the adapter emits errors without num_turns.
+    failed = json.loads((Path(__file__).parent / "fixtures/codex_exec/failed.jsonl").read_text().splitlines()[-1])
+    refusal = f"Model is unavailable: {SECRET}. " + "Choose another model. " * 100
+    failed["error"]["message"] = refusal
+    events = ([{"type": "item.started", "item": {"id": "answer", "type": "agent_message", "text": "Inspecting"}}]
+              if evidence == "item" else [{"type": "turn.completed", "usage": {"input_tokens": 1}}]
+              if evidence == "usage" else [])
+    result, records = run_primary("codex", launcher, events=[*events, failed], exit_code=0, error="",
+                                  fallback=evidence != "no-fallback-profile")
+    falls_back = evidence == "none"
+    assert (result["status"] == "completed") is falls_back
+    assert ("fallback" in result) is falls_back
+    assert len(records) == (2 if falls_back else 1)
+    error = agent_db.finish_record.await_args_list[0].kwargs["error"]
+    texts = [error, result["fallback"][0]["reason"]] if falls_back else [error, result["error"]]
+    for text in texts:
+        assert "Model is unavailable" in text and log_redaction.MASK in text and SECRET not in text
+        assert len(text) <= 500
 
 
 @pytest.mark.parametrize(("runtime", "launcher"), LAUNCHES)
