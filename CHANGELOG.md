@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.142] - 2026-11-11
+
+### Changed
+
+- **Profile fallbacks also cover a run that exits before any model event.** ([#1246](https://github.com/foolzzz/looper/pull/1246))
+  - A Worker or Reviewer run that exits non-zero, or ends with a zero-turn model refusal, before any model event moves to the next profile of its fallback chain, with the reason `exited before any model event: <first line of the error>`, in the same step attempt and without a retry. A run that produced any model event never falls back. A timeout no longer triggers this detection.
+  - Enabled for Claude Code, Codex, coco, Cursor Agent (native and TTADK) and Grok; OMP, Pi, DSH and API keep it disabled. A launcher initialization naming a model no longer counts as a model event; the Codex and Cursor Agent streams gain `codex_item`, `codex_usage` and `cursor_event` events as evidence.
+  - Model-visible: no prompt changes; a different profile may run after a failed start.
+
 ## [2.14.141] - 2026-11-11
 
 ### Changed
