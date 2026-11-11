@@ -457,8 +457,7 @@ class _Reminders:
 
 
 def answers_only_reminders(result_event: dict[str, Any], reminders: set[str]) -> bool:
-    """Whether ``result_event`` ends a turn Claude ran only for room reminders: the user messages it answers
-    (``user_message_uuids``) are all reminders. Such a turn's result never replaces the run's outcome."""
+    """Whether the user messages a turn answers (``user_message_uuids``) are all room reminders."""
     answered = result_event.get("user_message_uuids") or []
     return bool(answered) and bool(reminders) and all(u in reminders for u in answered)
 
@@ -2441,10 +2440,11 @@ class WorkerPool:
                 elif event_type == "result":
                     # Background work (an agent team's teammates) can end in turns of Claude's own after this
                     # one, each with a result of its own, also once stdin is closed: the run's last result is
-                    # its outcome, unless its turn only answered room reminders (``answers_only_reminders``).
+                    # its outcome, unless its turn only acknowledged room reminders without a status report.
                     reminders = self._reminders.get(worker_id)
                     reminder_only = result_event is not None and reminders is not None \
-                        and answers_only_reminders(event, reminders.uuids)
+                        and answers_only_reminders(event, reminders.uuids) \
+                        and extract_report(str(event.get("result") or ""), "status") is None
                     if reminder_only:
                         last_result = finished = event
                         logger.info("worker %s: a turn that only answered room reminders keeps the outcome "

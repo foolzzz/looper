@@ -342,6 +342,66 @@ def test_a_reminder_only_turn_rearms_the_original_wait(tmp_path, monkeypatch, ag
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
+@pytest.mark.parametrize("init", [False, True])
+def test_a_room_reminder_turn_can_complete_the_work(tmp_path, monkeypatch, agent_db, init):
+    async def scenario():
+        run = _Run()
+        async with _pool(tmp_path, monkeypatch, run) as (pool, results):
+            pool._reminders["w1"] = state = worker._Reminders()
+            run.turn(_waiting(check_after_seconds=1800))
+            await run.results_seen.get()
+            assert await pool.remind("w1", "the build is ready")
+            run.turn({**_completed(), "user_message_uuids": list(state.uuids)}, init=init)
+            await run.results_seen.get()
+            assert run.ended_after == [2]
+            await pool._tasks["w1"]
+            assert results[0].payload["status"] == "completed"
+            assert not pool.accepts_input("w1")
+            assert run.inputs == ["the build is ready"]
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
+@pytest.mark.parametrize("seconds", [30, True])
+def test_a_room_reminder_turn_processes_a_new_waiting_report(tmp_path, monkeypatch, agent_db, seconds):
+    async def scenario():
+        sleeps = asyncio.Queue()
+
+        async def sleep(delay):
+            sleeps.put_nowait(delay)
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(worker, "_waiting_sleep", sleep)
+        run = _Run()
+        async with _pool(tmp_path, monkeypatch, run) as (pool, results):
+            pool._reminders["w1"] = state = worker._Reminders()
+            run.turn(_waiting(check_after_seconds=1800))
+            await sleeps.get()
+            await run.results_seen.get()
+            assert await pool.remind("w1", "the build is ready; check the tests")
+            run.turn({**_waiting(waiting_for="the tests", check_after_seconds=seconds),
+                      "user_message_uuids": list(state.uuids)})
+            await run.results_seen.get()
+            assert not run.ended_after
+            if seconds is True:
+                assert len(run.inputs) == 2
+                assert "waiting report was not taken" in run.inputs[-1]
+                run.turn(_completed())
+            else:
+                assert 0 < await sleeps.get() <= seconds
+                assert state.waiting
+                assert len(run.inputs) == 1
+                run.events_in.put_nowait(None)
+            await pool._tasks["w1"]
+            if seconds is True:
+                assert results[0].payload["status"] == "completed"
+            else:
+                assert results[0].payload["status"] == "failed"
+                assert "while waiting for: the tests" in results[0].payload["error"]
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
 def test_a_valid_waiting_report_resets_the_repair_allowance(tmp_path, monkeypatch, agent_db):
     async def scenario():
         run = _Run()
