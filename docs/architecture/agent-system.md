@@ -1259,9 +1259,9 @@ Manager tools.
   command layouts moved out of the tiers unchanged, the
   process mechanics stay in `claude_cli.py`, and the catalog and knowledge
   are materialized in Claude Code's plugin format by
-  `library.load_installed` and `knowledge.load_knowledge`. `CodexRuntime`,
-  `OmpRuntime`, `GrokRuntime`, `CursorAgentRuntime` and `PiRuntime` (`codex`,
-  `omp`, `grok`, `cursor-agent`, `pi`, below) translate
+  `library.load_installed` and `knowledge.load_knowledge`. `CocoRuntime`, `CodexRuntime`,
+  `OmpRuntime`, `GrokRuntime`, `CursorAgentRuntime` and `PiRuntime` (`coco`,
+  `codex`, `omp`, `grok`, `cursor-agent`, `pi`, below) translate
   them at launch; Codex, Cursor Agent, OMP and, by default, Pi keep the Manager's and a Planner's session
   with one process per turn (`runtimes/per_turn.py`), Grok with one process
   over ACP (`runtimes/grok_acp.py`, `RuntimeAdapter.resident_transport`).
@@ -1677,6 +1677,25 @@ Manager tools.
   `userInfo` contents are never retained or shown. The suggested models
   are `auto`, `gpt-5.3-codex`, `gpt-5.6-sol-high`, `composer-2.5` and
   `gemini-3.7-flash-high`, without built-in prices.
+- **Coco (TRAE CLI)** (`looper/agents/runtimes/coco.py`, the `coco` CLI)
+  runs Workers and Reviewers through the Codex adapter's `exec --json` path.
+  It is a Codex-family CLI with its own home layout: Looper sets `TRAE_HOME`
+  to a private run directory containing `traecli.toml`, `AGENTS.md` and a
+  `cli/auth.json` symbolic link to the operator's coco login. Looper never
+  opens or copies that login file. The operator's `HOME` is kept, while
+  their coco configuration, hooks, skills, plugins and memories are not loaded.
+  The agent's shell gets a separate `TRAE_HOME` without the login link.
+  Workers' commits keep coco's `Co-authored-by: TRAE CLI` trailer, recorded
+  as `commit_attribution: trae` in the run metadata.
+
+  Only the built-in `coco-login` provider is supported. Before launch,
+  Looper checks `coco login status` and the cached `coco models --json`
+  catalog, refusing missing logins and unknown models; a run without a login
+  otherwise hangs. Sign in with `coco login` on the server's machine.
+  Coco reports tokens only, no actual model or prices, so `model_reported`
+  stays empty and usage is unpriced. TRAE's servers make the model requests;
+  the recording proxy marks these runs `not_covered`. Manager, Planner,
+  consult and steering support are not enabled yet.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
   runs Manager, Planner, Worker and Reviewer. With the default `[runtimes] pi = "runner"`,

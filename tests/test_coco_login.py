@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -123,3 +124,49 @@ def test_model_catalog_cache_is_per_executable(tmp_path, monkeypatch):
         assert coco_login.available_models(first) is None
     finally:
         coco_login.forget_models()
+
+
+def test_cached_models_expires_without_running_a_process(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRAE_HOME", str(tmp_path / "operator-home"))
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(coco_login, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    executable = fake_claude(tmp_path / "coco", "print('[{\"name\": \"GPT-5.5\"}]')\n")
+    coco_login.forget_models()
+    try:
+        assert coco_login.cached_models(executable) is None
+        models = coco_login.available_models(executable)
+        assert models == {"gpt-5.5": "GPT-5.5"}
+        ran = tmp_path / "models-ran"
+        fake_claude(tmp_path / "coco", f"from pathlib import Path\nPath({str(ran)!r}).touch()\n")
+        clock.now = coco_login._MODELS_TTL_SEC
+        assert coco_login.cached_models(executable) == models
+        assert coco_login.cached_models("another-coco") is None
+        clock.now += 0.01
+        assert coco_login.cached_models(executable) is None
+        assert not ran.exists()
+    finally:
+        coco_login.forget_models()
+
+
+def test_login_probe_cache_is_per_executable_and_expires(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRAE_HOME", str(tmp_path / "operator-home"))
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(coco_login, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    first = fake_claude(tmp_path / "first-coco", "print('Logged in using Trae')\n")
+    second = fake_claude(tmp_path / "second-coco", "print('Not logged in')\nraise SystemExit(1)\n")
+    coco_login.forget_probe()
+    try:
+        assert coco_login.cached_probe(first).state is coco_login.LoginState.LOGGED_IN
+        assert coco_login.cached_probe(second).state is coco_login.LoginState.NOT_LOGGED_IN
+        fake_claude(tmp_path / "first-coco", "print('Not logged in')\nraise SystemExit(1)\n")
+        clock.now = coco_login._PROBE_TTL_SEC
+        assert coco_login.cached_probe(first).state is coco_login.LoginState.LOGGED_IN
+        clock.now += 0.01
+        assert coco_login.cached_probe(first).state is coco_login.LoginState.NOT_LOGGED_IN
+        fake_claude(tmp_path / "first-coco", "print('Logged in using Trae')\n")
+        fake_claude(tmp_path / "second-coco", "print('Logged in using Trae')\n")
+        coco_login.forget_probe()
+        assert coco_login.cached_probe(first).state is coco_login.LoginState.LOGGED_IN
+        assert coco_login.cached_probe(second).state is coco_login.LoginState.LOGGED_IN
+    finally:
+        coco_login.forget_probe()

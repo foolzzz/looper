@@ -266,7 +266,7 @@ def dsh_policy(monkeypatch: pytest.MonkeyPatch):
         label = "DSH policy test"
         auth_kinds = frozenset({AuthKind.API_KEY})
 
-        def check_pairing(self, provider, model, effort=None):
+        def check_pairing(self, provider, model, effort=None, *, executable=None):
             dsh.validate_provider(provider, model, effort)
 
         def bind_provider(self, provider, model, effort):

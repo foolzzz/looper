@@ -475,7 +475,8 @@ class RuntimeAdapter(ABC):
         """The model name this runtime sends to the provider's API for ``model``; verbatim by default."""
         return model
 
-    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
+    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
+                      executable: str | None = None) -> None:
         """Additional configuration rules, without requiring or reading a provider key; none by default."""
         return None
 
@@ -617,7 +618,7 @@ class RuntimeAdapter(ABC):
     # The models the Agent Profile form suggests with the runtime's own login (any model is taken).
     login_models: ClassVar[tuple[str, ...]] = ()
 
-    async def login_problem(self, provider: ProviderSpec) -> str | None:
+    async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None) -> str | None:
         """Why a run with ``provider`` (the runtime's own login) cannot start now; None when it can, or when the
         adapter cannot tell."""
         return None
@@ -653,6 +654,7 @@ def replace_refusal(adapter: RuntimeAdapter) -> str | None:
 def _adapters() -> dict[str, RuntimeAdapter]:
     from .api import ApiRuntime
     from .claude_code import ClaudeCodeRuntime
+    from .coco import CocoRuntime
     from .codex import CodexRuntime
     from .cursor_agent import CursorAgentRuntime
     from .dsh import DshRuntime
@@ -661,7 +663,7 @@ def _adapters() -> dict[str, RuntimeAdapter]:
     from .pi import PiRuntime
 
     return {adapter.type: adapter for adapter in (
-        ClaudeCodeRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(), CursorAgentRuntime(), DshRuntime(), PiRuntime(), ApiRuntime())}
+        ClaudeCodeRuntime(), CocoRuntime(), CodexRuntime(), OmpRuntime(), GrokRuntime(), CursorAgentRuntime(), DshRuntime(), PiRuntime(), ApiRuntime())}
 
 
 # The runtime types, by type id. Code owns this set: a registered runtime of a type missing here cannot run.

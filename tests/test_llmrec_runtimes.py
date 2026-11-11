@@ -131,9 +131,14 @@ def test_loopback_bypass_preserves_inheritance_and_is_idempotent(initial, expect
     ("claude-code", False, Launcher.TTADK, "TTADK manages its own provider"),
     ("grok", True, Launcher.NATIVE, "Grok has no known endpoint override"),
     ("cursor-agent", True, Launcher.NATIVE, "Cursor's servers make the model requests"),
+    ("coco", True, Launcher.NATIVE, "TRAE's servers make the model requests"),
 ])
 @pytest.mark.parametrize("include_oauth", [False, True])
 def test_not_covered_details(runtime_type, oauth, launcher, detail, include_oauth, tmp_path, monkeypatch):
+    if runtime_type == "coco":
+        from looper.agents.runtimes import coco_login
+
+        monkeypatch.setattr(coco_login, "available_models", lambda executable: {"test-model": "test-model"})
     api = ApiProtocol.ANTHROPIC_MESSAGES if runtime_type == "claude-code" else ApiProtocol.OPENAI_RESPONSES
     provider = LegacyProviderSpec("test-login", "Test login", AuthKind.OAUTH if oauth else AuthKind.API_KEY,
                                   frozenset({api}), oauth_runtime_type=runtime_type if oauth else None)

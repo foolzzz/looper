@@ -203,7 +203,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
                 env[BASE_URL] = launch.llmrec.url
         return claude_cli.isolation_args(cwd, env=env, settings_dir=settings_dir)
 
-    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
+    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
+                      executable: str | None = None) -> None:
         if provider.protocols == self.translated_protocols and not provider.base_url.strip():
             raise RuntimeUnsupported("Cannot prepare Claude Code: the model's OpenAI endpoint has no base URL")
 

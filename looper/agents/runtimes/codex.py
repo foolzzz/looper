@@ -124,6 +124,7 @@ class CodexHome:
     runtime: str
     top_config: tuple[str, ...] = ()
     features: tuple[str, ...] = ()
+    title: str = "Codex"
 
 
 CODEX = CodexHome("CODEX_HOME", "config.toml", "", "codex", HOME_LAYOUT_ID, codex_login, "codex")
@@ -261,7 +262,7 @@ class CodexRuntime(RuntimeAdapter):
     def _command(self, executable: str, prompt_file: Path, launch: Launch) -> list[str]:
         local = _local_dir(prompt_file)
         login = self.home.login.login_file() if launch.profile.provider.auth is AuthKind.OAUTH else None
-        agents = agents_md(prompt_file, launch)
+        agents = agents_md(prompt_file, launch, home=self.home)
         instructions = None
         if launch.system_prompt_mode is SystemPromptMode.REPLACE:
             instructions = write_instructions(local, agents, home=self.home)
@@ -278,7 +279,7 @@ class CodexRuntime(RuntimeAdapter):
         return Path(command[1].removeprefix(f"{self.home.env}="))
 
     def prompt_blocks(self, launch: Launch, looper_prompt: str, *, cwd: str | Path | None = None) -> list[PromptBlock]:
-        looper = PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch),
+        looper = PromptBlock("Looper instructions", "looper", _prompt_text(looper_prompt, launch, home=self.home),
                              "base instructions file" if launch.system_prompt_mode is SystemPromptMode.REPLACE
                              else "AGENTS.md")
         runtime = PromptBlock("Runtime instructions", "runtime", None, "skills/permissions notes (not shown)")
@@ -388,7 +389,7 @@ class CodexRuntime(RuntimeAdapter):
 
         return claude_cli.budget_error(result_event) if (result_event or {}).get(claude_cli.SOFT_CAP) else None
 
-    async def login_problem(self, provider: ProviderSpec) -> str | None:
+    async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None) -> str | None:
         """Why a run with Codex's own login cannot start now (``codex_login.launch_problem``)."""
         return await self.home.login.launch_problem() if provider.auth is AuthKind.OAUTH else None
 
@@ -634,12 +635,12 @@ def materialize(library: AgentLibrary) -> RuntimeCatalog:
     return RuntimeCatalog(tuple(skills), tuple(dirs), tuple(skipped))
 
 
-def runtime_notes(catalog: RuntimeCatalog) -> str:
+def runtime_notes(catalog: RuntimeCatalog, *, name: str = "Codex") -> str:
     """What only a Codex agent needs to know, written before Looper's own prompt in its ``AGENTS.md``."""
     lines = [
-        "# Runtime notes (Codex)",
+        f"# Runtime notes ({name})",
         "",
-        "Looper runs you through Codex. The instructions after these notes are Looper's, not a repository's "
+        f"Looper runs you through {name}. The instructions after these notes are Looper's, not a repository's "
         "AGENTS.md.",
         "",
         "- Looper reads only your last message of each turn. When the instructions ask for a reply or a report in "
@@ -657,13 +658,13 @@ def runtime_notes(catalog: RuntimeCatalog) -> str:
     return "\n".join(lines)
 
 
-def agents_md(prompt_file: Path, launch: Launch) -> str:
+def agents_md(prompt_file: Path, launch: Launch, *, home: CodexHome = CODEX) -> str:
     """A run's ``AGENTS.md``: custom text first when set, with adapter notes before the harness."""
-    return _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch)
+    return _prompt_text(Path(prompt_file).read_text(encoding="utf-8"), launch, home=home)
 
 
-def _prompt_text(looper_prompt: str, launch: Launch) -> str:
-    return runtime_prompt_text(launch, looper_prompt, runtime_notes(materialize(launch.library)))
+def _prompt_text(looper_prompt: str, launch: Launch, *, home: CodexHome = CODEX) -> str:
+    return runtime_prompt_text(launch, looper_prompt, runtime_notes(materialize(launch.library), name=home.title))
 
 
 def _home_dir(local: Path, *, home: CodexHome = CODEX) -> Path:
@@ -836,7 +837,8 @@ def _codex_usage(usage: Mapping[str, Any]) -> dict[str, int]:
         value = usage.get(key)
         return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
-    cached, written = count("cached_input_tokens"), count("cache_write_input_tokens")
+    cached = count("cached_input_tokens")
+    written = count("cache_write_input_tokens") or count("cache_creation_input_tokens")
     return {"inputTokens": max(count("input_tokens") - cached - written, 0), "outputTokens": count("output_tokens"),
             "cacheReadInputTokens": cached, "cacheCreationInputTokens": written}
 
