@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.134] - 2026-11-10
+
+### Changed
+
+- **Coco model-catalog checks no longer break task, profile and settings reads; a stale catalog refreshes when a coco Profile is saved.** ([#1232](https://github.com/foolzzz/looper/pull/1232))
+  - Reading a Profile, task or settings no longer runs coco's model-catalog check, so a task view no longer fails when its model has left the catalog. Saving a coco Profile (and changing a model or provider that a coco Profile uses) refreshes an expired catalog off the event loop and refuses an unknown model; if the catalog cannot be read, the save is accepted. A launch still refuses an unknown model. `ttadk-coco` warms the catalog with the native coco executable, and `looper doctor` reports SKIP, not OK, for a coco login that no Profile uses.
+  - Not model-visible: no prompt or tool text changes.
+
 ## [2.14.133] - 2026-11-10
 
 ### Added
