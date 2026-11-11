@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.124] - 2026-11-10
+
+### Fixed
+
+- **Profiles that workflows reference are protected and stay usable.** ([#1205](https://github.com/foolzzz/looper/pull/1205), issue #1179)
+  - Profile usage gains `workflows`, the presets that select a Profile (custom roles included); deleting such a Profile is refused, and saving a workflow whose Profile was removed meanwhile fails with a conflict.
+  - Editing a workflow role in a task keeps the Profile its workflow granted, even outside the project's allowed list; new role versions resolve it the same way. Tasks without a workflow are unchanged.
+
 ## [2.14.123] - 2026-11-10
 
 ### Fixed
