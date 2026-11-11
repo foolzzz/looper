@@ -4556,6 +4556,8 @@ before.
   newer message, or 10 minutes later at the next event. A `[DECISION]` on a
   step, and each running step in a `[SUPERVISE]`, carry what the step's seats
   did in the room (sent, received, interface posts, unanswered questions).
+  A `[SUPERVISE]` also shows each running Worker's newest six activity rows,
+  oldest first, with their kind and clipped summary.
   The reply contract and the tools' guide name `[ROOM]` and the room only
   where it is on (`reply_contract(..., room=True)`).
 - **Consults** (`looper/agents/consult.py`, `room_consults`). A `question`
