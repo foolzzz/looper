@@ -150,9 +150,9 @@ def _pi_launch(**kwargs: Any) -> Any:
     return Launch(AgentSettings(profile=profile), **kwargs)
 
 
-@pytest.mark.parametrize("cost", [0.01, None, 1.0])
+@pytest.mark.parametrize(("cost", "compacted"), [(0.01, False), (None, False), (1.0, False), (None, True)])
 def test_claude_consult_budget_checks_own_recorded_cost(
-    agent_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cost: float | None,
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cost: float | None, compacted: bool,
 ) -> None:
     from looper.agents import consult
     from looper.agents.agent_settings import AgentSettings, AgentType, Launch
@@ -175,10 +175,22 @@ def test_claude_consult_budget_checks_own_recorded_cost(
     monkeypatch.setattr(consult, "load_agent_settings", AsyncMock(return_value=launch.settings))
     monkeypatch.setattr(consult, "_run_cost", AsyncMock(return_value=cost))
     monkeypatch.setattr(service, "_note", AsyncMock())
-    monkeypatch.setattr(service, "_execute", AsyncMock(return_value=({
-        "type": "result", "subtype": "success", "total_cost_usd": 37 if cost == 0.01 else 0.1,
-        "result": '{"answers":[{"reply_to":17,"body":"answer"}]}',
-    }, True, False)))
+    if compacted:
+        rows = [json.loads(line) for line in
+                (Path(__file__).parent / "fixtures/claude_stream/manual_compact.jsonl").read_text().splitlines()]
+        # One process auto-compacts, then answers; its first result includes the summary's hidden spend.
+        events = [row for row in rows[4:] if row["type"] != "result"]
+        events.append({**rows[-1], "result": '{"answers":[{"reply_to":17,"body":"answer"}]}'})
+        script = "import sys; sys.stdin.readline(); " + "; ".join(
+            f"print({json.dumps(event)!r}, flush=True)" for event in events)
+        monkeypatch.setattr(type(launch.runtime), "consult_command", lambda *args, **kwargs: [sys.executable, "-c", script])
+        monkeypatch.setattr(consult, "_run_cost", AsyncMock(
+            side_effect=lambda *args: agent_db.finish_record.await_args.kwargs["cost_usd"]))
+    else:
+        monkeypatch.setattr(service, "_execute", AsyncMock(return_value=({
+            "type": "result", "subtype": "success", "total_cost_usd": 37 if cost == 0.01 else 0.1,
+            "result": '{"answers":[{"reply_to":17,"body":"answer"}]}',
+        }, True, False)))
 
     async def run() -> None:
         call = service._consult(1, "task", "worker@s1", MemberKind.WORK, AgentType.WORKER,
@@ -188,6 +200,10 @@ def test_claude_consult_budget_checks_own_recorded_cost(
                 await call
             assert failed.value.reason is FallbackReason.BUDGET
             room.finish_consult.assert_not_awaited()
+            if compacted:
+                saved = agent_db.finish_record.await_args.kwargs
+                assert saved["compactions"] and saved["input_tokens"] == 10
+                assert saved["cost_usd"] is None
         else:
             await call
             assert room.finish_consult.await_args.kwargs["columns"]["cost_usd"] == cost

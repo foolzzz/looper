@@ -251,7 +251,7 @@ def budget_error(result_event: dict[str, Any] | None) -> str | None:
 # since the request that crosses it is already made. A run stopped this way ends with ``soft_cap_result``, which
 # ``budget_error`` reads like Claude Code's own. The stream carries the main loop's requests; a subagent's
 # requests and Claude Code's side requests appear only in the result's totals, so they count toward the run's
-# recorded cost but not toward stopping it.
+# recorded cost (or leave it unknown for an inherited session) but not toward stopping it.
 
 
 @dataclass(frozen=True)
@@ -1427,6 +1427,7 @@ class ClaudeRunRecorder:
         self._context_tokens: int | None = None  # the prompt of the run's latest main-loop request
         self._compactions: list[dict[str, Any]] = []
         self._streamed = Usage()  # the tokens of the run's model requests so far, from its usage events
+        self._result_only_usage = False  # side requests whose full usage is absent from the request stream
         self._started = _clock()
         self._last_heartbeat = float("-inf")
         # What the run spent so far at its provider's prices, from its usage events, against its per-run cap;
@@ -1527,6 +1528,14 @@ class ClaudeRunRecorder:
         """What ``event`` tells the run (its usage, so its cap, its model and session), at once; ``persist`` writes
         it to the record, which may wait on the database."""
         self._model_reported = self._runtime().reported_model(event) or self._model_reported
+        if event.get("type") == "system" and (
+            event.get("subtype") == "compact_boundary"
+            or (event.get("subtype") == "status" and event.get("status") == "compacting")
+            or (event.get("subtype") == "task_started" and event.get("task_type") == "local_agent")
+        ):
+            self._result_only_usage = True
+        if event.get("usage_complete") is False:
+            self._result_only_usage = True
         if event.get("type") == "usage":  # internal: counted, not part of the transcript
             from .runtimes.pricing import event_usage
 
@@ -1633,7 +1642,11 @@ class ClaudeRunRecorder:
     @property
     def _usage_so_far(self) -> Usage:
         """What the run's usage events added up to: its tokens, and their cost when Looper prices the run."""
-        return self._spend.usage if self._spend is not None else self._streamed
+        usage = self._spend.usage if self._spend is not None else self._streamed
+        if self._inherited_session and self._result_only_usage:
+            # The stream is only a lower bound; the result includes inherited spend, so neither is a bill.
+            return replace(usage, cost_usd=None)
+        return usage
 
     async def finish(
         self,
@@ -1646,7 +1659,8 @@ class ClaudeRunRecorder:
         status: RecordStatus | None = None,
     ) -> None:
         """Close with the run's own ``usage``, or its result totals for a fresh process.
-        A whole process inheriting a Claude session uses only its streamed request usage.
+        A whole process inheriting a Claude session uses only its streamed request usage, leaving cost unknown
+        when side requests make that stream incomplete.
         ``outcome`` is how a Worker's report or a Reviewer's verdict read (``worker.RunOutcome``); ``status``,
         when given, replaces the one its result gives (``ended_by``, for a run that was stopped). The tool calls
         the runtime refused (``RuntimeAdapter.permission_denials``) are kept as ``permission_denials``.
