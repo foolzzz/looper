@@ -2625,8 +2625,6 @@ class WorkerPool:
             await recorder.finish(output_text=None, result_event=result_event, error=error,
                                   outcome=RunOutcome.RUN_FAILED.value, status=ended_by(exc))
             if timed_out:
-                if runtime.first_event_known and ctx.model_events == 0:
-                    ctx.fallback_reason = "no_model_events"
                 raise asyncio.TimeoutError(error) from exc
             raise
         finally:
@@ -2653,10 +2651,18 @@ class WorkerPool:
             and not result_event.get("is_error")
             and result_event.get("subtype") == "success"
         )
-        if return_code != 0 and runtime.first_event_known and ctx.model_events == 0 and not result_ok:
-            ctx.fallback_reason = "no_model_events"
         detail = (runtime.failure_detail(result_event, launch=launch, command=command, pid=handle.pid)
                   if not result_ok else None)
+        # A launcher can report a model refusal as a zero-turn error even when it exits 0.
+        launch_refused = (result_event is not None and result_event.get("is_error") is True
+                          and type(result_event.get("num_turns")) is int and result_event["num_turns"] == 0)
+        if ((return_code != 0 or launch_refused) and runtime.first_event_known and ctx.model_events == 0
+                and not result_ok and runtime.budget_error(result_event) is None):
+            stderr = stderr if stderr is not None else await handle.error_output()
+            errors = (result_event or {}).get("errors") or []
+            message = (detail or (str(errors[0]) if errors else "") or stderr or "").strip()
+            message = message or f"{runtime.label} exited with code {return_code}"
+            ctx.fallback_reason = f"exited before any model event: {message.splitlines()[0]}"
         # A run stopped at its spend cap exits non-zero too; its result says why.
         if ((return_code != 0 or not launch.exit_code_reliable or first_stderr is not None) and not result_ok
                 and runtime.budget_error(result_event) is None and not detail):

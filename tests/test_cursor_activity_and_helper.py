@@ -29,13 +29,16 @@ def test_text_is_committed_before_each_tool_event_and_only_once(phase):
     if phase == "completed":
         stream.translate({**call, "subtype": "started"})
     text = {"type": "assistant", "message": {"content": [{"type": "text", "text": "working"}]}}
-    assert stream.translate(text) == []
+    evidence = [{"type": "system", "subtype": "cursor_event", "session_id": None, "event": text}]
+    assert stream.translate(text) == evidence
+    assert CURSOR.is_model_event(evidence[0])
     events = stream.translate(call)
     assert events[0] == text
+    assert _blocks(events, "text") == text["message"]["content"]
     assert _blocks(events[1:], "tool_use" if phase == "started" else "tool_result")
     assert not _blocks(stream.translate({"type": "result"}), "text")
     # Equal text in a later, successful attempt is a distinct transcript message.
-    assert stream.translate(text) == []
+    assert stream.translate(text) == evidence
     assert _blocks(stream.translate({"type": "result"}), "text") == text["message"]["content"]
 
 

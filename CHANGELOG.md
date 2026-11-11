@@ -18,6 +18,25 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.142] - 2026-11-11
+
+### Changed
+
+- **Profile fallbacks also cover a run that exits before any model event.** ([#1246](https://github.com/foolzzz/looper/pull/1246))
+  - A Worker or Reviewer run that exits non-zero, or ends with a zero-turn model refusal, before any model event moves to the next profile of its fallback chain, with the reason `exited before any model event: <first line of the error>`, in the same step attempt and without a retry. A run that produced any model event never falls back. A timeout no longer triggers this detection.
+  - Enabled for Claude Code, Codex, coco, Cursor Agent (native and TTADK) and Grok; OMP, Pi, DSH and API keep it disabled. A launcher initialization naming a model no longer counts as a model event; the Codex and Cursor Agent streams gain `codex_item`, `codex_usage` and `cursor_event` events as evidence.
+  - Model-visible: no prompt changes; a different profile may run after a failed start.
+
+## [2.14.141] - 2026-11-11
+
+### Changed
+
+- **Adjudication: the Planner is told it may downgrade a finding and accept.** ([#1248](https://github.com/foolzzz/looper/pull/1248))
+  - With adjudication on, a decision turn after a review that failed only on downgradable blocking findings offers the adjudicated accept: downgrade the named findings to suggestions with a reason each, then accept. Accept without adjudication stays refused.
+  - The reply contract states the adjudication rules once, and adds that a failed review needs its adjudications in the same reply and that `final` is included when the decision completes the task.
+  - The `panel_adjudicate` prompt eval now blocks a correct delivery on an out-of-scope changelog rule and requires the adjudicated accept with a journaled reason, without a retry.
+  - Model-visible: the Planner's decision message and reply contract change as above.
+
 ## [2.14.140] - 2026-11-11
 
 ### Changed

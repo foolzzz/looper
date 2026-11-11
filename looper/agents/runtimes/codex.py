@@ -131,6 +131,7 @@ CODEX = CodexHome("CODEX_HOME", "config.toml", "", "codex", HOME_LAYOUT_ID, code
 
 
 class CodexRuntime(RuntimeAdapter):
+    first_event_known = True
     home: ClassVar[CodexHome] = CODEX
     can_replace_system_prompt = True
     type = "codex"
@@ -152,6 +153,17 @@ class CodexRuntime(RuntimeAdapter):
     read_only = ReadOnly.SANDBOX
     # Set by the binding and the run's home: a provider's own variables cannot set them.
     provider_env_owned: ClassVar[frozenset[str]] = frozenset({KEY_ENV, CODEX.env})
+
+    def is_model_event(self, event: Mapping[str, Any]) -> bool:
+        if event.get("type") == "system" and event.get("subtype") == "codex_usage":
+            usage = event.get("usage") or {}
+            return any(type(usage.get(key)) is int and usage[key] > 0 for key in (
+                "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteInputTokens", "reasoningOutputTokens"))
+        if event.get("type") == "system" and event.get("subtype") == "codex_item":
+            # Unknown and partial items may already represent work; startup warnings do not.
+            item = event.get("item") or {}
+            return bool(item.get("type")) and item["type"] != "error"
+        return super().is_model_event(event)
 
     def auth_kinds_for(self, launcher: Launcher) -> frozenset[AuthKind]:
         return frozenset({AuthKind.OAUTH}) if launcher is Launcher.TTADK else self.auth_kinds
@@ -888,7 +900,11 @@ class CodexStream:
             return []
         if kind in ("item.started", "item.updated", "item.completed"):
             item = raw.get("item")
-            return self._item(item, completed=kind == "item.completed") if isinstance(item, Mapping) else []
+            if not isinstance(item, Mapping):
+                return []
+            events = self._item(item, completed=kind == "item.completed")
+            # Keep evidence even when a partial message is not ready to render.
+            return events or [{"type": "system", "subtype": "codex_item", **self._base(), "item": dict(item)}]
         if kind == "turn.completed":
             usage = raw.get("usage") if isinstance(raw.get("usage"), Mapping) else {}
             result = {"type": "result", "subtype": "success", "is_error": False, "result": self._last_text,

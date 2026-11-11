@@ -212,6 +212,7 @@ def runtime_notes(servers: list[str]) -> str:
 
 
 class CursorAgentRuntime(RuntimeAdapter):
+    first_event_known = True
     type = "cursor-agent"
     label = "Cursor Agent"
     default_executable = "cursor-agent"
@@ -229,6 +230,14 @@ class CursorAgentRuntime(RuntimeAdapter):
     runtime_cost_capped = False
     can_replace_system_prompt = False
     loads_operator_config = True
+
+    def is_model_event(self, event: Mapping[str, Any]) -> bool:
+        if event.get("type") == "system" and event.get("subtype") == "cursor_event":
+            raw = event.get("event") or {}
+            if raw.get("type") == "thinking" and raw.get("subtype") == "delta":
+                return bool(raw.get("text"))
+            return super().is_model_event(raw)
+        return super().is_model_event(event)
 
     def reported_model(self, event: Mapping[str, Any]) -> str | None:
         model = (event.get("routed_model") if event.get("type") == "result" else
@@ -526,10 +535,11 @@ class CursorStream:
                 text = text[match.end():]
             self._final.append(text)
             self._pending.append(dict(raw))
-            return []
+            # The rendered message waits for tool_call/result, but work has already begun.
+            return [{"type": "system", "subtype": "cursor_event", "session_id": self.session_id, "event": dict(raw)}]
         if kind == "thinking" and phase == "delta":
             self._thinking.append(str(raw.get("text") or ""))
-            return []
+            return [{"type": "system", "subtype": "cursor_event", "session_id": self.session_id, "event": dict(raw)}]
         if kind == "thinking" and phase == "completed":
             text = "".join(self._thinking)
             self._thinking.clear()

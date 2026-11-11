@@ -428,20 +428,21 @@ def test_profile_error_uses_fallback_without_an_extra_dispatch(tmp_path, monkeyp
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
-@pytest.mark.parametrize("trigger", ["exit", "timeout", "start"])
+@pytest.mark.parametrize("trigger", ["exit", "init_model", "start"])
 def test_failed_run_before_first_model_event_repeats_the_same_attempt(tmp_path, monkeypatch, agent_db, trigger):
     class FailedRun(ScriptedRun):
         async def wait(self):
             self.wait_calls += 1
             return 2
 
-    first = FailedRun([], hold=trigger == "timeout",
+    events = [{"type": "system", "subtype": "init", "model": "example-model"}] \
+        if trigger == "init_model" else []
+    first = FailedRun(events,
                       launch_error=RunStartError("unavailable") if trigger == "start" else None)
     second = ScriptedRun(_events())
 
     async def scenario():
-        async with _pool(tmp_path, monkeypatch, first, second,
-                         timeout=1 if trigger == "timeout" else 0) as (pool, calls, results):
+        async with _pool(tmp_path, monkeypatch, first, second) as (pool, calls, results):
             monkeypatch.setattr(ADAPTERS["claude-code"], "first_event_known", True, raising=False)
             good = builtin_launch().settings
             bad = replace(good, profile=replace(good.profile, id="dev", fallback_profile_id=good.profile.id))
@@ -455,25 +456,26 @@ def test_failed_run_before_first_model_event_repeats_the_same_attempt(tmp_path, 
             assert {c.kwargs["metadata"]["step_id"] for c in records} == {"s1"}
             assert first.prompt == second.prompt if trigger != "start" else second.prompt
             assert agent_db.add_metadata.await_args.args[1]["fallback_from"] == "dev"
-            if trigger != "exit":
+            if trigger == "start":
                 assert first.end_calls == 1
 
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
-@pytest.mark.parametrize("boundary", ["unknown", "model_event", "zero_exit", "no_fallback"])
+@pytest.mark.parametrize("boundary", ["unknown", "model_event", "zero_exit", "no_fallback", "timeout"])
 def test_runs_outside_the_fallback_boundary_are_not_repeated(tmp_path, monkeypatch, agent_db, boundary):
     class FailedRun(ScriptedRun):
         async def wait(self):
             self.wait_calls += 1
             return 0 if boundary == "zero_exit" else 2
 
-    events = [{"type": "system", "subtype": "init", "model": "example-model"}] \
+    events = [{"type": "assistant", "message": {"content": [{"type": "text", "text": "working"}]}}] \
         if boundary == "model_event" else []
-    first, second = FailedRun(events), ScriptedRun(_events())
+    first, second = FailedRun(events, hold=boundary == "timeout"), ScriptedRun(_events())
 
     async def scenario():
-        async with _pool(tmp_path, monkeypatch, first, second) as (pool, calls, results):
+        async with _pool(tmp_path, monkeypatch, first, second,
+                         timeout=1 if boundary == "timeout" else 0) as (pool, calls, results):
             monkeypatch.setattr(ADAPTERS["claude-code"], "first_event_known", boundary != "unknown", raising=False)
             good = builtin_launch().settings
             bad = replace(good, profile=replace(good.profile, id="dev",
@@ -484,6 +486,12 @@ def test_runs_outside_the_fallback_boundary_are_not_repeated(tmp_path, monkeypat
             await _finish(pool, tmp_path)
             assert len(calls) == 1 and second.launch_calls == 0
             assert results[0].payload["status"] == "failed" and "fallback" not in results[0].payload
+            assert agent_db.start_record.await_count == 1
+            if boundary == "timeout":
+                assert "timeout_seconds" in results[0].payload["error"]
+                assert first.end_calls == 1
+                assert agent_db.finish_record.await_count == 1
+                assert agent_db.finish_record.await_args.kwargs["status"] == "failed"
 
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
@@ -513,7 +521,7 @@ def test_two_fallback_switches_are_recorded_in_order(tmp_path, monkeypatch, agen
 def test_fallback_history_survives_final_timeout(tmp_path, monkeypatch, agent_db, last_failure):
     async def scenario():
         first = ScriptedRun([], launch_error=RunStartError("unavailable"), dropped_input=["keep this"])
-        events = [{"type": "system", "subtype": "init", "model": "example-model"}] \
+        events = [{"type": "assistant", "message": {"content": [{"type": "text", "text": "working"}]}}] \
             if last_failure == "after_model_event" else []
         second = ScriptedRun(events, hold=True, dropped_input=["and this"])
         async with _pool(tmp_path, monkeypatch, first, second, timeout=1) as (pool, _, results):

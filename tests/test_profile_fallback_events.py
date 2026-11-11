@@ -1,6 +1,8 @@
 """Fallback detection uses model events; legacy prompt bytes stay unchanged."""
 
+import asyncio
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
@@ -13,7 +15,7 @@ from looper.agents.tiers.worker import DEFAULT_SYSTEM_PROMPT as WORKER_PROMPT, R
 
 
 @pytest.mark.parametrize(("event", "expected"), [
-    ({"type": "system", "subtype": "init", "model": "example-model"}, True),
+    ({"type": "system", "subtype": "init", "model": "example-model"}, False),
     ({"type": "system", "subtype": "init", "session_id": "session-1"}, False),
     ({"type": "assistant", "message": {"content": [{"type": "text", "text": "Ready"}]}}, True),
     ({"type": "assistant", "message": {"model": "example-model"}}, True),
@@ -31,7 +33,33 @@ def test_only_model_events_prevent_pre_response_fallback(event: dict, expected: 
 
 
 def test_unverified_runtime_first_event_detection_stays_disabled() -> None:
-    assert all(not adapter.first_event_known for adapter in ADAPTERS.values())
+    assert {name for name, adapter in ADAPTERS.items() if adapter.first_event_known} == {
+        "claude-code", "codex", "coco", "cursor-agent", "grok"}
+
+
+@pytest.mark.parametrize(("runtime", "sample", "first_type"), [
+    ("claude-code", "claude_stream/multi_request_turns.jsonl", "assistant"),
+    ("codex", "codex_exec/tools.jsonl", "assistant"),
+    ("coco", "coco_exec/sample.jsonl", "assistant"),
+    ("cursor-agent", "cursor-stream-sample.jsonl", "system"),
+    ("grok", "grok_stream/tools.jsonl", "assistant"),
+])
+def test_recorded_stream_distinguishes_initialization_from_first_model_event(runtime, sample, first_type):
+    adapter = ADAPTERS[runtime]
+
+    async def parse():
+        stream = asyncio.StreamReader()
+        stream.feed_data((Path(__file__).parent / "fixtures" / sample).read_bytes())
+        stream.feed_eof()
+        return [event async for event in adapter.parse(stream, model="requested-model")]
+
+    events = asyncio.run(parse())
+    assert events[0]["type"] == "system" and events[0]["subtype"] == "init"
+    assert not adapter.is_model_event(events[0])
+    first = next(event for event in events if adapter.is_model_event(event))
+    assert first["type"] == first_type
+    if runtime == "cursor-agent":
+        assert first["event"]["type"] == "thinking"  # evidence precedes the buffered assistant
 
 
 @pytest.mark.parametrize(("runtime", "event", "expected"), [
