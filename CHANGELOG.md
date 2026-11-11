@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.136] - 2026-11-11
+
+### Changed
+
+- **Task confirmation shows a workflow task's own roles, review panel and verification.** ([#1237](https://github.com/foolzzz/looper/pull/1237))
+  - The confirmation of a task that runs with a workflow (Manager and dashboard) lists the workflow's roles with their profiles and fallbacks, the review panel rule and the read-only verification, instead of the project default Worker and Reviewer lines. Tasks without a workflow keep today's confirmation.
+  - New read-only v1 operation `workflows/preview` and a dashboard preview under the workflow field of the new-task form, which show the same lines before the task is created.
+  - Model-visible: the confirmation text the Manager shows for a workflow task changes, and the v1 workflows operation list gains `preview`.
+
 ## [2.14.135] - 2026-11-11
 
 ### Changed
