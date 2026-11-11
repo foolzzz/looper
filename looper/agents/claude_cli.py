@@ -1428,6 +1428,7 @@ class ClaudeRunRecorder:
         self._compactions: list[dict[str, Any]] = []
         self._streamed = Usage()  # the tokens of the run's model requests so far, from its usage events
         self._result_only_usage = False  # side requests whose full usage is absent from the request stream
+        self._compacting = False  # an unresolved attempt may have made a hidden summary request
         self._started = _clock()
         self._last_heartbeat = float("-inf")
         # What the run spent so far at its provider's prices, from its usage events, against its per-run cap;
@@ -1528,9 +1529,15 @@ class ClaudeRunRecorder:
         """What ``event`` tells the run (its usage, so its cap, its model and session), at once; ``persist`` writes
         it to the record, which may wait on the database."""
         self._model_reported = self._runtime().reported_model(event) or self._model_reported
+        if event.get("type") == "system" and event.get("subtype") == "status":
+            if event.get("status") == "compacting":
+                self._compacting = True
+            elif event.get("compact_result") in ("success", "failed"):
+                # A failed attempt without a boundary made no hidden request; other usage gaps stay sticky.
+                self._compacting = False
         if event.get("type") == "system" and (
             event.get("subtype") == "compact_boundary"
-            or (event.get("subtype") == "status" and event.get("status") == "compacting")
+            or (event.get("subtype") == "status" and event.get("compact_result") == "success")
             or (event.get("subtype") == "task_started" and event.get("task_type") == "local_agent")
         ):
             self._result_only_usage = True
@@ -1643,7 +1650,7 @@ class ClaudeRunRecorder:
     def _usage_so_far(self) -> Usage:
         """What the run's usage events added up to: its tokens, and their cost when Looper prices the run."""
         usage = self._spend.usage if self._spend is not None else self._streamed
-        if self._inherited_session and self._result_only_usage:
+        if self._inherited_session and (self._result_only_usage or self._compacting):
             # The stream is only a lower bound; the result includes inherited spend, so neither is a bill.
             return replace(usage, cost_usd=None)
         return usage

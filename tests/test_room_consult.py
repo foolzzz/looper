@@ -150,9 +150,11 @@ def _pi_launch(**kwargs: Any) -> Any:
     return Launch(AgentSettings(profile=profile), **kwargs)
 
 
-@pytest.mark.parametrize(("cost", "compacted"), [(0.01, False), (None, False), (1.0, False), (None, True)])
+@pytest.mark.parametrize(("cost", "compact_fixture"), [
+    (0.01, None), (None, None), (1.0, None), (None, "manual_compact"), (0.01209575, "auto_compact"),
+])
 def test_claude_consult_budget_checks_own_recorded_cost(
-    agent_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cost: float | None, compacted: bool,
+    agent_db: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cost: float | None, compact_fixture: str | None,
 ) -> None:
     from looper.agents import consult
     from looper.agents.agent_settings import AgentSettings, AgentType, Launch
@@ -175,12 +177,17 @@ def test_claude_consult_budget_checks_own_recorded_cost(
     monkeypatch.setattr(consult, "load_agent_settings", AsyncMock(return_value=launch.settings))
     monkeypatch.setattr(consult, "_run_cost", AsyncMock(return_value=cost))
     monkeypatch.setattr(service, "_note", AsyncMock())
-    if compacted:
+    if compact_fixture:
         rows = [json.loads(line) for line in
-                (Path(__file__).parent / "fixtures/claude_stream/manual_compact.jsonl").read_text().splitlines()]
-        # One process auto-compacts, then answers; its first result includes the summary's hidden spend.
-        events = [row for row in rows[4:] if row["type"] != "result"]
-        events.append({**rows[-1], "result": '{"answers":[{"reply_to":17,"body":"answer"}]}'})
+                (Path(__file__).parent / f"fixtures/claude_stream/{compact_fixture}.jsonl").read_text().splitlines()]
+        if compact_fixture == "auto_compact":
+            # Its first turn tries autocompact, fails with too_few_groups, then answers normally.
+            end = next(i for i, row in enumerate(rows) if row["type"] == "result")
+            events = rows[:end + 1]
+        else:
+            # A successful compact includes summary spend hidden from the visible requests.
+            events = [row for row in rows[4:] if row["type"] != "result"] + [rows[-1]]
+        events[-1] = {**events[-1], "result": '{"answers":[{"reply_to":17,"body":"answer"}]}'}
         script = "import sys; sys.stdin.readline(); " + "; ".join(
             f"print({json.dumps(event)!r}, flush=True)" for event in events)
         monkeypatch.setattr(type(launch.runtime), "consult_command", lambda *args, **kwargs: [sys.executable, "-c", script])
@@ -200,13 +207,15 @@ def test_claude_consult_budget_checks_own_recorded_cost(
                 await call
             assert failed.value.reason is FallbackReason.BUDGET
             room.finish_consult.assert_not_awaited()
-            if compacted:
+            if compact_fixture:
                 saved = agent_db.finish_record.await_args.kwargs
                 assert saved["compactions"] and saved["input_tokens"] == 10
                 assert saved["cost_usd"] is None
         else:
             await call
-            assert room.finish_consult.await_args.kwargs["columns"]["cost_usd"] == cost
+            finished = room.finish_consult.await_args.kwargs
+            assert finished["columns"]["cost_usd"] == cost
+            assert [(question["id"], answer) for question, answer in finished["answers"]] == [(17, "answer")]
 
     asyncio.run(run())
 

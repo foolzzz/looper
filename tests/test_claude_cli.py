@@ -300,6 +300,66 @@ def test_prompt_block_survives_cancellation_during_process_cleanup(tmp_path: Pat
 
 
 class TestClaudeRunRecorder:
+    @pytest.mark.parametrize("close_from", ["finish", "end_left_open"])
+    def test_inherited_failed_autocompact_keeps_request_cost(self, agent_db: Any, close_from: str) -> None:
+        from looper.agents.claude_cli import ClaudeRunRecorder, stream_events
+
+        recorder = ClaudeRunRecorder(
+            agent_id="consult-usage", task_id=None, command=["claude", "--fork-session"], cwd="/tmp",
+            input_text="question", launch=_builtin_launch(consult=True), whole_process=True)
+        rows = (Path(__file__).parent / "fixtures/claude_stream/auto_compact.jsonl").read_bytes().splitlines()
+        end = next(i for i, row in enumerate(rows) if json.loads(row)["type"] == "result")
+        result = json.loads(rows[end])
+
+        async def run() -> None:
+            stream = asyncio.StreamReader()
+            stream.feed_data(b"\n".join(rows[:end + 1]))
+            stream.feed_eof()
+            async with recorder:
+                async for event in stream_events(stream):
+                    await recorder.record(event)
+                if close_from == "finish":
+                    await recorder.finish(output_text=result["result"], result_event=result)
+
+        asyncio.run(run())
+        saved = agent_db.finish_record.await_args.kwargs
+        assert saved["compactions"] == []
+        assert (saved["input_tokens"], saved["output_tokens"], saved["cache_read_tokens"],
+                saved["cache_creation_tokens"]) == (18, 7, 36640, 6703)
+        # Only the visible requests, at Haiku's prices; never the session's total_cost_usd.
+        assert saved["cost_usd"] == pytest.approx((18 + 7 * 5 + 36640 * 0.1 + 6703 * 1.25) / 1_000_000)
+
+    @pytest.mark.parametrize(("prior_event", "cost"), [
+        (None, 0.3),
+        ({"type": "system", "subtype": "compact_boundary"}, None),
+        ({"type": "system", "subtype": "status", "compact_result": "success"}, None),
+        ({"type": "system", "subtype": "task_started", "task_type": "local_agent"}, None),
+        ({"type": "usage", "usage_complete": False}, None),
+    ])
+    def test_failed_compaction_clears_only_pending_compaction(
+        self, agent_db: Any, prior_event: dict[str, Any] | None, cost: float | None,
+    ) -> None:
+        from looper.agents.claude_cli import ClaudeRunRecorder
+        from looper.agents.run_usage import Usage
+        from looper.agents.runtimes.pricing import usage_event
+
+        recorder = ClaudeRunRecorder(
+            agent_id="worker-usage", task_id=None, command=["claude", "--resume", "source"], cwd="/tmp",
+            input_text="question", launch=_priced_launch(), whole_process=True)
+
+        async def run() -> None:
+            async with recorder:
+                await recorder.record(usage_event("m-main", Usage(input_tokens=100_000, output_tokens=10_000)))
+                if prior_event is not None:
+                    await recorder.record(prior_event)
+                for _ in range(2):  # Retrying a failed compact does not introduce a hidden summary request.
+                    await recorder.record({"type": "system", "subtype": "status", "status": "compacting"})
+                    await recorder.record({"type": "system", "subtype": "status", "status": None,
+                                           "compact_result": "failed", "compact_error": "too_few_groups"})
+
+        asyncio.run(run())
+        assert agent_db.finish_record.await_args.kwargs["cost_usd"] == cost
+
     @pytest.mark.parametrize("session", ["consult", "--resume", "--continue", "--fork-session"])
     @pytest.mark.parametrize("close_from", ["finish", "end_left_open"])
     @pytest.mark.parametrize("provider_priced", [False, True])
@@ -337,6 +397,7 @@ class TestClaudeRunRecorder:
 
     @pytest.mark.parametrize(("event", "cost"), [
         ({"type": "system", "subtype": "status", "status": "compacting"}, None),
+        ({"type": "system", "subtype": "status", "compact_result": "success"}, None),
         ({"type": "system", "subtype": "task_started", "task_type": "local_agent"}, None),
         ({"type": "result", "subtype": "success", "usage_complete": False}, None),
         ({"type": "system", "subtype": "task_started", "task_type": "local_bash"}, 0.3),
