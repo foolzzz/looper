@@ -29,7 +29,7 @@ from looper.agents.message import (
 )
 from looper.agents.runtimes.channel import DeliveryResult
 from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT
-from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT
+from looper.agents.system_prompt import REVIEW_CONTRACT, WAITING_CONTRACT, WORK_CONTRACT
 from looper.agents.tiers.planner import PlannerAgent, PlanStep, TaskPlan
 from looper.agents.tiers.worker import (
     DEFAULT_SYSTEM_PROMPT,
@@ -730,15 +730,16 @@ class TestWorkerSystemPrompt:
 
         assert result["status"] == "completed"
         prompt = _system_prompt(seen)
+        contract = f"{WORK_CONTRACT}\n\n{WAITING_CONTRACT}"
         _in_order(prompt, f"{DEFAULT_HARNESS_PROMPT}\n\n{ROLE}\n\n", "## Project: calc\nUse uv.\nPython 3.12.\n\n",
-                  "## Task\n", REQUIREMENT, "calc-module", "add calc.py", "calc.add(1, 2) == 3", WORK_CONTRACT)
-        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\n{ROLE}\n\n") and prompt.endswith(WORK_CONTRACT)
+                  "## Task\n", REQUIREMENT, "calc-module", "add calc.py", "calc.add(1, 2) == 3", contract)
+        assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\n{ROLE}\n\n") and prompt.endswith(contract)
         agent_db.get_task_project.assert_awaited_once_with("task-1")
         # The step is the system prompt's task section; stdin only starts the work.
         for part in ("add calc.py", "calc.add(1, 2) == 3", REQUIREMENT, '"deleted_files"', "End your final message"):
             assert part not in seen["stdin"]
         # A retried step's feedback is part of its task; the dependencies' reports are the user turn.
-        task = _task_section(prompt, WORK_CONTRACT)
+        task = _task_section(prompt, contract)
         assert "attempt 3" in task and "- import calc from the package\n- add sub()" in task
         assert "import calc from the package" not in seen["stdin"]
         assert "added the core module" in seen["stdin"] and "core.py" in seen["stdin"]
@@ -762,8 +763,8 @@ class TestWorkerSystemPrompt:
                                      "updated_at": "2026-10-13T12:00:00+00:00", "knowledge_sha256": None,
                                      "knowledge_documents": 0}
         assert layers["task"] == {"kind": "work", "task_id": "task-1", "step_id": "s1",
-                                  "sha256": _sha(_task_section(prompt, WORK_CONTRACT))}
-        assert layers["contract"] == {"name": "WORK_CONTRACT", "sha256": _sha(WORK_CONTRACT)}
+                                  "sha256": _sha(_task_section(prompt, contract))}
+        assert layers["contract"] == {"name": "WORK_CONTRACT", "sha256": _sha(contract)}
         assert layers["isolation"] == ISOLATION_ID
         summaries = activity(agent_db)
         assert "Project background applied (20 chars)" in summaries
@@ -824,7 +825,7 @@ class TestWorkerSystemPrompt:
         get_config.assert_awaited_with(config_id)  # each reads its own row
         prompt = _system_prompt(seen)
         assert prompt.startswith(f"{DEFAULT_HARNESS_PROMPT}\n\n{default.strip()}\n\n## Project")
-        assert prompt.endswith(REVIEW_CONTRACT if verify else WORK_CONTRACT)
+        assert prompt.endswith(REVIEW_CONTRACT if verify else f"{WORK_CONTRACT}\n\n{WAITING_CONTRACT}")
         assert other.strip() not in prompt  # not the other one's role
         role = agent_db.start_record.await_args.kwargs["metadata"]["prompt_layers"]["role"]
         assert role == {"config_id": config_id, "sha256": _sha(default.strip()), "recommended": True}

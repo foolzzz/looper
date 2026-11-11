@@ -2441,11 +2441,12 @@ class WorkerPool:
                 elif event_type == "result":
                     # Background work (an agent team's teammates) can end in turns of Claude's own after this
                     # one, each with a result of its own, also once stdin is closed: the run's last result is
-                    # its outcome, unless its turn only acknowledged room reminders without a status report.
+                    # its outcome, unless its turn only answered room reminders after input ended or without
+                    # a status report. While input is open, a reminder can wake a waiting Worker to report.
                     reminders = self._reminders.get(worker_id)
                     reminder_only = result_event is not None and reminders is not None \
                         and answers_only_reminders(event, reminders.uuids) \
-                        and extract_report(str(event.get("result") or ""), "status") is None
+                        and (input_ended or extract_report(str(event.get("result") or ""), "status") is None)
                     if reminder_only:
                         last_result = finished = event
                         logger.info("worker %s: a turn that only answered room reminders keeps the outcome "
