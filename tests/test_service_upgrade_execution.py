@@ -125,7 +125,7 @@ def deployment(tmp_path, monkeypatch, system_responses):
         executable="python", cwd=tmp_path, package_root=tmp_path, run=run, clock=lambda: elapsed[0],
         sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
         get_components=lambda port, token: (current if scenario.verify_error else scenario.current).to_dict(),
-        system_operation=operation, get_status=lambda *args: system_responses.status,
+        system_operation=operation, get_status=lambda *args, **kwargs: system_responses.status,
         get_whoami=lambda *args: {"looper_version": scenario.current.version},
         port_in_use=lambda port, address="127.0.0.1": False, pid_alive=lambda pid: scenario.process_lingers)
     manager = SimpleNamespace(host=host, state=lambda: state, unit_path=unit,
@@ -406,8 +406,8 @@ def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs
     deployment.host.system_operation = operation
     deployment.host.pid_alive = alive
     deployment.host.port_in_use = lambda *args: case in ("port_taken", "port_taken_known")
-    deployment.host.get_status = lambda *args: (
-        deployment.responses.status if deployment.state.running and (not shutting_down or "start" in deployment.events) else None)
+    deployment.host.get_status = lambda *args, **kwargs: (
+        deployment.responses.status if deployment.state.running and (not shutting_down or not shutdown_started or "start" in deployment.events) else None)
 
     assert cli.main(["service", "upgrade"]) == 1
     assert "install" not in deployment.events
@@ -476,8 +476,8 @@ def test_upgrade_recovery_decides_after_the_wait_whatever_the_first_port_probe_s
             deployment.state.pid = None
         return False
 
-    def status(*args):
-        if "start" in deployment.events or case in ("still_serving", "health_recovers"):
+    def status(*args, **kwargs):
+        if not failed_poll or "start" in deployment.events or case in ("still_serving", "health_recovers"):
             return deployment.responses.status
         return None
 
@@ -525,7 +525,7 @@ def test_manager_restart_during_drain_waits_for_serving_without_starting(
         return {"phase": "serving"}
 
     deployment.host.system_operation = operation
-    deployment.host.get_status = lambda *args: (
+    deployment.host.get_status = lambda *args, **kwargs: (
         deployment.responses.status if not restart_time or deployment.elapsed[0] >= restart_time[0] + response_delay else None)
     assert cli.main(["service", "upgrade", "--timeout", "5"]) == 1
     assert "start" not in deployment.events
@@ -1104,7 +1104,7 @@ def test_checkout_build_precedes_drain_and_stop(deployment, checkout_install, mo
     if kind != "WEB_ONLY":
         target.components["control_plane"] = "b" * 64
     deployment.scenario.target = target
-    deployment.host.get_status = lambda *args: {**deployment.responses.status, "keepers": {
+    deployment.host.get_status = lambda *args, **kwargs: {**deployment.responses.status, "keepers": {
         "mode": "on" if kind == "CONTROL_PLANE" else "off", "pending": 0}}
     deployment.host.get_index = lambda *args: b"new dashboard"
     monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
@@ -1284,8 +1284,8 @@ def test_failed_start_retries_new_install_and_reports_serving(deployment, recove
     log = deployment.root / "logs/serve.log"
     log.parent.mkdir(parents=True)
     log.write_text("startup output\n")
-    deployment.host.get_status = lambda *args: (
-        deployment.responses.status if recovery_serves and deployment.events.count("start") == 2 else None)
+    deployment.host.get_status = lambda *args, **kwargs: (
+        deployment.responses.status if "stop" not in deployment.events or (recovery_serves and deployment.events.count("start") == 2) else None)
     assert cli.main(["service", "upgrade", "--timeout", "1"]) == 1
     assert deployment.events.count("start") == 2
     assert deployment.events.count("install") == 1
@@ -1375,10 +1375,10 @@ def test_control_plane_reports_kept_runs_and_adoption_outcome(deployment, adopte
 def test_control_plane_waits_until_adoption_finishes(deployment):
     deployment.responses.status["keepers"] = {"mode": "on", "pending": 1, "adopted_at_start": 0}
     read = deployment.host.get_status
-    def status(*args):
+    def status(*args, **kwargs):
         if deployment.elapsed[0] >= 3:
             deployment.responses.status["keepers"].update(pending=0, adopted_at_start=1)
-        return read(*args)
+        return read(*args, **kwargs)
     deployment.host.get_status = status
     deployment.statuses[:] = [{"phase": "drained", "waiting": {"runs": [
         {"worker_id": "kept-worker", "role": "worker", "keepable": True}]}}]

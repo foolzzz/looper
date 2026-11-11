@@ -63,7 +63,7 @@ def upgrade_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     host = service.Host(
         system="Linux", home=tmp_path / "home", uid=501, environ={},
         executable=str(tmp_path / ".venv/bin/python"), cwd=checkout, package_root=checkout, run=run,
-        sleep=forbidden, get_status=lambda *args: {"status": "ok"}, port_in_use=forbidden, get_components=get_components,
+        sleep=forbidden, get_status=lambda *args, **kwargs: {"status": "ok"}, port_in_use=forbidden, get_components=get_components,
         get_whoami=forbidden,
     )
     state = service.State(installed=True, loaded=True, running=True, pid=1234, port=18834,
@@ -318,6 +318,46 @@ def test_cli_upgrade_dry_run_rfc_examples(upgrade_host, monkeypatch, capsys, cha
     assert len(requests) == 1
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_upgrade_refuses_unreadable_status_before_planning(upgrade_host, monkeypatch, dry_run):
+    from looper import upgrade
+
+    host, _ = upgrade_host
+    host.get_status = lambda *args, **kwargs: None
+    operations = []
+    host.system_operation = lambda *args: operations.append(args)
+    monkeypatch.setattr(components, "manifest_from_wheel", lambda *args: _manifest("control_plane"))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("an unreadable status must stop the upgrade before planning or changing the service")
+
+    monkeypatch.setattr(upgrade, "decide", forbidden)
+    monkeypatch.setattr(service, "_execute_plan", forbidden)
+    monkeypatch.setattr(service, "_install_target", forbidden)
+    with pytest.raises(service.ServiceError) as caught:
+        service.upgrade(host, to="candidate.whl", dry_run=dry_run)
+    assert str(caught.value) == (
+        "cannot read the running service's status (keeper mode unknown); "
+        "nothing was drained, run looper service upgrade again")
+    assert operations == []
+
+
+def test_upgrade_status_read_uses_longer_timeout(upgrade_host, monkeypatch):
+    host, _ = upgrade_host
+    timeouts = []
+
+    def open_request(request, *, timeout):
+        timeouts.append(timeout)
+        return io.BytesIO(b'{"status": "ok", "result": {"keepers": {"mode": "on"}}}')
+
+    monkeypatch.setattr(service.urllib.request, "build_opener", lambda *args: SimpleNamespace(open=open_request))
+    host.get_status = service._get_status
+    monkeypatch.setattr(components, "manifest_from_git", lambda *args: _manifest("control_plane"))
+    assert service._get_status(18834, None) == {"keepers": {"mode": "on"}}
+    assert "plan       CONTROL_PLANE" in service.upgrade(host, dry_run=True)
+    assert timeouts == [3, 15]
+
+
 @pytest.mark.parametrize("system,preserves,keeper_on,expected", [
     ("Darwin", True, False, "FULL"),
     ("Darwin", True, True, "CONTROL_PLANE"),
@@ -329,7 +369,7 @@ def test_upgrade_preview_uses_running_keeper_mode_and_unit(
     host, _ = upgrade_host
     host.system = system
     monkeypatch.setattr(service, "_unit_package_root", lambda *args: host.package_root)
-    host.get_status = lambda *args: {"keepers": {"mode": "on"}} if keeper_on else {"status": "ok"}
+    host.get_status = lambda *args, **kwargs: {"keepers": {"mode": "on" if keeper_on else "off"}}
     if system == "Linux":
         original = service.manager(host, "test")
         mgr = service.Systemd(host, "upgrade-test")
@@ -358,7 +398,7 @@ def test_upgrade_preview_uses_running_keeper_mode_and_unit(
 def test_upgrade_preview_refuses_unsupported_live_keeper(upgrade_host, monkeypatch):
     from looper import upgrade
     host, _ = upgrade_host
-    host.get_status = lambda *args: {"keepers": {"mode": "on"}}
+    host.get_status = lambda *args, **kwargs: {"keepers": {"mode": "on"}}
     target = _manifest("control_plane")
     target.adoption["keeper_protocols"] = ["1.0"]
     running = _manifest()
@@ -400,7 +440,7 @@ def test_upgrade_preview_rejects_a_git_work_contract_change(upgrade_host):
     git("commit", "-qm", "initial source")
     running = components.manifest_from_git(host.cwd, "HEAD")
     host.get_components = lambda *args: running.to_dict()
-    host.get_status = lambda *args: {"keepers": {"mode": "on"}}
+    host.get_status = lambda *args, **kwargs: {"keepers": {"mode": "on"}}
     contract = host.cwd / "looper/agents/system_prompt.py"
     contract.write_text(contract.read_text().replace('WORK_CONTRACT = """\\\n',
         'WORK_CONTRACT = """\\\nUpdated work contract.\n', 1))
