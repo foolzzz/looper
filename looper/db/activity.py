@@ -64,6 +64,30 @@ async def list_activity(
     return [dict(r) for r in rows]
 
 
+async def list_worker_activity(
+    task_id: str,
+    worker: str,
+    *,
+    limit: int = 6,
+    pool: asyncpg.Pool | None = None,
+) -> list[dict[str, Any]]:
+    """A worker's newest activity rows in a task, oldest first, summary only (no detail)."""
+    pool = pool or get_pool()
+    limit = max(1, min(limit, 50))
+    rows = await pool.fetch(
+        """
+        SELECT seq, task_id, worker, kind, summary, metadata,
+               input_tokens, output_tokens, created_at
+        FROM activity
+        WHERE task_id = $1 AND worker = $2
+        ORDER BY seq DESC
+        LIMIT $3
+        """,
+        task_id, worker, limit,
+    )
+    return [dict(r) for r in reversed(rows)]
+
+
 async def get_activity_detail(seq: int, *, pool: asyncpg.Pool | None = None) -> dict[str, Any] | None:
     """Get a single activity row including the detail field."""
     pool = pool or get_pool()
