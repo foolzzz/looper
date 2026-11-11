@@ -19,7 +19,7 @@ directories), one at a time over the HTTP API:
 | `interface_first` | a service and its client that must agree on a request format the requirement leaves open: the plan must have a step both parts depend on (the interface), the two parts independent and running at the same time, and a step that depends on both (the integration); the client must work |
 | `reviewed_step` | a step an independent Reviewer must pass |
 | `panel_merge` | a workflow supplies two required review steps with blocking findings at different locations; the Planner's retry feedback must cover both files |
-| `panel_adjudicate` | a workflow enables adjudication and one reviewer incorrectly claims that 2 + 2 is 5; the Planner must give a reasoned adjudication or retry |
+| `panel_adjudicate` | a workflow enables adjudication and one required reviewer blocks a correct single-file delivery on an out-of-scope changelog rule; the decision turn must offer adjudicated accept and the Planner must use it with a journaled reason, without retrying |
 | `retry_after_failure` | a step that fails once (a flaky `build.sh`) and is retried |
 | `workflow_verify_loop` | a failed read-only verification is replaced with a reviewed development repair and a separate dependent verification, without retrying the verification to edit files |
 | `chat_correction` | a correction sent to the task's Planner mid-task |
@@ -174,7 +174,9 @@ findings, through real workflow creation, review dispatch and acceptance conditi
 The fixture gives the scripted reviews a separate runtime identity using the same
 protocol; this tests orchestration, not independence between actual runtimes.
 The merge check reads the Planner's retry feedback for both locations; the
-adjudication check requires a nonempty reason or retry feedback. Run these cases
+adjudication check requires the turn to offer adjudicated accept, the Planner to
+accept with a named downgrade and nonempty reason, and that reason to appear in
+the journal; a retry does not pass. Run these cases
 with sonnet `--reps 2` and opus `--reps 1`, using `--tasks panel_merge,panel_adjudicate`.
 A real run still needs authorized model credentials; a fake pass is not model evidence.
 

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from looper.agents.tiers.planner_protocol import ADJUDICATED_ACCEPT
 from looper.agents.tiers.worker import extract_report
 
 from .metrics import Discipline, result_text, role, timestamp
@@ -1710,16 +1711,25 @@ def _panel_flow(detail, records, _events, *, adjudication=False):
     seats = [step for step in detail["steps"] if step.get("reviews") == work[0]["id"]]
     if {step.get("role_key") for step in seats} != {"review_a", "review_b"}:
         return "the workflow's two review steps did not run"
+    if adjudication:
+        judgments = [json.loads(entry["summary"]) for entry in detail.get("journal", [])
+                     if entry.get("kind") == "review_adjudicated"]
+        for record in records:
+            if role(record) != "planner":
+                continue
+            reply = extract_report(str(record.get("output_text") or ""), "decision") or {}
+            proposals = reply.get("adjudications") or []
+            if reply.get("decision") != "accept" or not proposals:
+                continue
+            if ADJUDICATED_ACCEPT not in str(record.get("input_text") or ""):
+                return "the decision turn did not offer adjudicated accept"
+            if (any(item.get("member") == "review_a" and item.get("finding") == 0
+                    and item.get("level") == "suggestion" for item in proposals)
+                    and all(str(item.get("reason") or "").strip() and item in judgments for item in proposals)):
+                return None
+        return "the out-of-scope blocking finding was not accepted with a journaled reasoned adjudication"
     replies = [extract_report(str(record.get("output_text") or ""), "decision") for record in records
                if role(record) == "planner"]
-    if adjudication:
-        for reply in filter(None, replies):
-            proposals = reply.get("adjudications") or []
-            if reply.get("decision") == "retry" and str(reply.get("feedback") or "").strip():
-                return None
-            if proposals and all(str(item.get("reason") or "").strip() for item in proposals):
-                return None
-        return "the false blocking was accepted without a reasoned adjudication or retry"
     if not any(reply and reply.get("decision") == "retry" and
                all(path in str(reply.get("feedback")) for path in ("left.txt", "right.txt")) for reply in replies):
         return "retry feedback did not cover both blocking locations"
@@ -1754,14 +1764,15 @@ TASKS += (
         id="panel_adjudicate", requirement="Write sum.txt containing 4, the sum of 2 and 2. Deliver the file.",
         workflow=_panel_workflow(adjudication=True), check=_equals("sum.txt", "4"),
         flow_check=lambda detail, records, events: _panel_flow(detail, records, events, adjudication=True),
-        expect={"min_reviews": 2, "max_contract_violations": 0},
+        expect={"min_reviews": 2, "max_retries": 0, "max_contract_violations": 0},
         fake={"real_planner": True,
               "plan": [_step("s1", "Write sum.txt containing 4.", ["sum.txt contains 4"], review=True)],
               "attempts": {"s1": [{"files": {"sum.txt": "4"}}]},
-              "panel_findings": {"review_a": [[{"severity": "blocking", "where": "sum.txt:1",
-                                                  "text": "2 + 2 equals 5, so replace 4 with 5."}], []], "review_b": [[]]},
+              "panel_findings": {"review_a": [[{"severity": "blocking", "where": "CHANGELOG.md",
+                                                  "text": "Every change must add a CHANGELOG.md entry before acceptance."}]],
+                                 "review_b": [[]]},
               "panel_adjudications": [{"member": "review_a", "finding": 0, "level": "suggestion",
-                                        "reason": "2 + 2 equals 4; the file already satisfies the requirement."}]},
+                                        "reason": "A changelog is outside the requested single-file delivery; sum.txt already contains 4."}]},
     ),
 )
 
