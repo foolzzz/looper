@@ -499,26 +499,31 @@ async def _profile_set(call: PlannerCall) -> dict[str, Any]:
         except RegistryError as exc:
             raise OpError(ErrorCode.INVALID, str(exc)) from None
     step_id = step["id"] if step else None
-    task_role = None
-    if step and step.get("role_key"):
-        # A new attempt takes the current definition, as the Planner's dispatch does.
-        defined = await db_roles.get(call.task_id, step["role_key"])
-        if defined is not None and RoleKind(defined["kind"]).agent is role:
-            task_role = (defined["role_key"], defined["version"])
-    layers = index_layers(await db_layers.list_layers(project_id, task_id=call.task_id, step_id=step_id,
-                                                      task_role=task_role), project_id)
+    task_roles: list[tuple[str, int] | None] = [None]
+    if step:
+        keys = [step["role_key"]] if step.get("role_key") else []
+        if role is AgentType.REVIEWER:
+            keys += review_role_keys(step)
+        for key in keys:
+            # New attempts load the latest definition, including each role in a work step's review chain.
+            defined = await db_roles.get(call.task_id, key)
+            if defined is not None and RoleKind(defined["kind"]).agent is role:
+                task_roles.append((defined["role_key"], defined["version"]))
     choice = (Layer.PLANNER_STEP if step else Layer.PLANNER_TASK, role)
-    if profile is None:
-        layers.pop(choice, None)
-    else:
-        layers[choice] = LayerValues.from_row({"profile": profile})
-    runs = resolve(role, layers, project_id)
-    if runs.profile_source in (Layer.TASK_ROLE, Layer.TASK):
-        owner = (f"the user chose {runs.profile.name} for this task's {_label(role)}; their choice stands over yours"
-                 if runs.profile_source is Layer.TASK else f"the task role pins {runs.profile.name}")
-        raise OpError(ErrorCode.FORBIDDEN, f"{owner} ({runs.profile_source.value} layer). Nothing changed. "
-                                           "The operator can change the profile in the dashboard "
-                                           "(task → Roles), or you can ask through a user gate.")
+    for task_role in task_roles:
+        layers = index_layers(await db_layers.list_layers(project_id, task_id=call.task_id, step_id=step_id,
+                                                          task_role=task_role), project_id)
+        if profile is None:
+            layers.pop(choice, None)
+        else:
+            layers[choice] = LayerValues.from_row({"profile": profile})
+        runs = resolve(role, layers, project_id)
+        if runs.profile_source in (Layer.TASK_ROLE, Layer.TASK):
+            owner = (f"the user chose {runs.profile.name} for this task's {_label(role)}; their choice stands over yours"
+                     if runs.profile_source is Layer.TASK else f"the task role pins {runs.profile.name}")
+            raise OpError(ErrorCode.FORBIDDEN, f"{owner} ({runs.profile_source.value} layer). Nothing changed. "
+                                               "The operator can change the profile in the dashboard "
+                                               "(task → Roles), or you can ask through a user gate.")
     before = next((c for c in await db_layers.planner_profiles(call.task_id)
                    if c["role"] == role.value and c["step_id"] == step_id), None)
     if profile is None and before is None:
