@@ -618,7 +618,8 @@ class AgentHTTPServer:
             log_refusal(logger, operation, principal, exc.code.value)
             public = not operation.credential_write or isinstance(exc, PublicOpError)
             return api_v1.error(exc.code, str(exc) if public else "invalid credential request",
-                                details=None if operation.credential_write else exc.details)
+                                details=None if operation.credential_write else exc.details,
+                                field=None if operation.credential_write else exc.field)
 
     async def _v1_online(self, operation: api_v1.Operation, headers: Mapping[str, str], body: bytes,
                          principal: api_v1.Principal, *, json_export: Callable[..., Awaitable[Any]] | None = None

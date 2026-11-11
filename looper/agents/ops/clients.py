@@ -229,6 +229,8 @@ class ClientOps:
             answer = _error(exc.code, str(exc))
             if exc.details is not None:
                 answer["error"]["details"] = exc.details
+            if exc.field is not None:
+                answer["error"]["field"] = exc.field
             return answer
         except Exception as exc:
             logger.exception("an API client's call of %s failed", name)
@@ -262,6 +264,8 @@ class ClientOps:
             answer = _error(exc.code, str(exc))
             if exc.details is not None:
                 answer["error"]["details"] = exc.details
+            if exc.field is not None:
+                answer["error"]["field"] = exc.field
             return answer
         except Exception as exc:
             logger.exception("an API client's confirmed call of %s failed", tool.name)

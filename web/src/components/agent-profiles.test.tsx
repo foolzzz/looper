@@ -111,6 +111,64 @@ describe("Agent Profiles", () => {
 
   const CODEX: AgentProfile = { ...PROFILE, model_id: "model-responses", model: { ...PROFILE.model, model_id: "model-responses", protocol: "openai-responses" }, runtime_id: "rt-codex", runtime_type: "codex", agent_teams: false };
 
+  it("selects Coco's login models and shows a server catalog refusal at the model field", async () => {
+    registry.runtime_types.push({ ...registry.runtime_types[1], type: "coco", label: "Coco (TRAE CLI)",
+      runtime_id: "rt-coco", default_executable: "coco", auth_kinds: ["oauth"], effort_levels: [] });
+    registry.runtimes.push({ ...registry.runtimes[1], type: "coco", type_label: "Coco (TRAE CLI)",
+      runtime_id: "rt-coco", name: "coco", auth_kinds: ["oauth"] });
+    const suggestions = ["GPT-5.5", "GPT-6.1-Sol"];
+    registry.providers.push(provider("prov-coco-login", { vendor_type: "coco-login", auth: "oauth",
+      oauth_runtime_type: "coco", suggested_models: suggestions, login: { state: "logged_in", detail: "logged in" } }));
+    registry.models.push(...suggestions.map((name) => ({ ...model(name, "openai-responses", "prov-coco-login"), name })));
+    const refusal = "coco has no model 'GPT-5.5' on this machine; it has: GPT-6.1-Sol";
+    const done = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => String(url).endsWith("/status")
+      ? Response.json({ status: "ok", result: { checks: [] } })
+      : Response.json({ status: "error", error: { code: "invalid", message: refusal, field: "model" } }, { status: 400 })));
+    await act(async () => root.render(<AgentProfileForm profile={null} registry={registry} onDone={done} />));
+    await choose("Runtime", "rt-coco");
+    expect(modelOptions()).toEqual(expect.arrayContaining(suggestions));
+    await input("Name *", "coco/default");
+    await input("Model *", "GPT-5.5");
+    expect(select("Runtime").value).toBe("rt-coco");
+    expect(select("Provider *").value).toBe("prov-coco-login");
+    expect(select("Provider *").parentElement!.textContent).toContain("login (OAuth) · logged in");
+    expect(select("Provider *").parentElement!.querySelector(".text-warning")).toBeNull();
+    await submit();
+    const field = select("Model *");
+    expect(field.parentElement!.querySelector('[role="alert"]')!.textContent).toBe(refusal);
+    expect(field.getAttribute("aria-describedby")).toBe(field.parentElement!.querySelector('[role="alert"]')!.id);
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(field.value).toBe("GPT-5.5");
+    expect(done).not.toHaveBeenCalled();
+    await input("Model *", "GPT-6.1-Sol");
+    expect(field.parentElement!.querySelector('[role="alert"]')).toBeNull();
+    expect(field.getAttribute("aria-invalid")).toBe("false");
+  });
+
+  it("clears a server model refusal when choosing another compatible runtime", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "error", error: {
+      code: "invalid", message: "This runtime cannot use the model", field: "model",
+    } }, { status: 400 })));
+    await show();
+    await submit();
+    expect(select("Model *").getAttribute("aria-invalid")).toBe("true");
+    expect(select("Runtime").querySelector<HTMLOptionElement>('[value="rt-stand-in"]')!.disabled).toBe(false);
+    await choose("Runtime", "rt-stand-in");
+    expect(select("Model *").getAttribute("aria-invalid")).toBe("false");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("shows a failed Coco login check with its sign-in fix", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "ok", result: { checks: [
+      { id: "coco_login", label: "Coco login", status: "fail", detail: "not logged in", fix: "Run coco login" },
+    ] } })));
+    await act(async () => root.render(<ClaudeCheckBanner />));
+    expect(container.querySelector('[role="alert"]')!.textContent).toContain("Coco login: not logged in");
+    expect(container.textContent).toContain("To fix: Run coco login");
+    expect(container.textContent).not.toContain("then restart");
+  });
+
   it("saves and clears fallback profiles while excluding itself and incompatible roles", async () => {
     registry.profiles.push({ ...PROFILE, profile_id: "target", name: "Target" },
       { ...PROFILE, profile_id: "limited", name: "Limited", roles: [] });
@@ -715,14 +773,21 @@ describe("Agent Profiles", () => {
     expect(select("Model *").value).toBe("");
   });
 
-  it("keeps the draft and displays the server error when saving fails", async () => {
+  it.each([
+    [409, "conflict", "an Agent Profile named Example already exists"],
+    [400, "invalid", "Model is no longer available"],
+  ])("keeps the draft and displays a non-field %s error at the form bottom", async (status, code, message) => {
     const done = vi.fn();
     vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => init?.body
-      ? Response.json({ status: "error", error: { code: "conflict", message: "Model is no longer available" } }, { status: 409 })
+      ? Response.json({ status: "error", error: { code, message } }, { status })
       : Response.json(String(url).endsWith("/status") ? { checks: [] } : REGISTRY)));
     await act(async () => root.render(<AgentProfileForm profile={PROFILE} registry={REGISTRY} onDone={done} />));
     await submit();
-    expect(container.querySelector('[role="alert"]')!.textContent).toContain("Model is no longer available");
+    const alert = container.querySelector('[role="alert"]')!;
+    expect(alert.textContent).toContain(message);
+    expect(select("Model *").parentElement!.contains(alert)).toBe(false);
+    expect(alert.parentElement!.querySelector('button[type="submit"]')).not.toBeNull();
+    expect(select("Model *").getAttribute("aria-invalid")).toBe("false");
     expect(select("Model *").value).toBe("model");
     expect(done).not.toHaveBeenCalled();
   });

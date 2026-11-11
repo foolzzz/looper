@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import threading
@@ -14,7 +15,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from fake_claude import fake_claude
-from looper.agents.agent_settings import AgentSettings, Launch
+from looper.agents.agent_settings import AgentSettings, AgentType, Launch
+from looper.agents.claude_cli import ClaudeRunRecorder
 from looper.agents.library import AgentLibrary
 from looper.agents.mcp import write_config
 from looper.agents.run_usage import Usage
@@ -176,7 +178,8 @@ def test_probe_checks_only_version_in_a_disposable_home(tmp_path):
     ))
     probe = COCO.probe_for(executable, Launcher.NATIVE)
     assert probe.error is None and probe.version == "traecli 0.214.1"
-    assert probe.capabilities == {Capability.RUN, Capability.MCP, Capability.ADD_DIRS}
+    assert probe.capabilities == {Capability.RUN, Capability.MCP, Capability.ADD_DIRS,
+                                  Capability.RESIDENT_SESSION, Capability.RESUME}
     assert not Path(recorded.read_text()).exists()
 
 
@@ -237,15 +240,123 @@ def test_unavailable_model_catalog_does_not_block_pairing(monkeypatch):
     COCO.check_pairing(_launch(model="GPT-9").profile.provider, "GPT-9")
 
 
-@pytest.mark.parametrize("method", ["resident_command", "resume_args", "resident_session", "consult_command", "steer_command"])
+@pytest.mark.parametrize("method", ["consult_command", "steer_command"])
 def test_unsupported_session_operations_refuse_before_creating_a_home(tmp_path, method):
-    if method in {"resume_args", "resident_session"}:
-        args, kwargs = ("session",), {}
-    else:
-        args = ("coco",)
-        kwargs = {"cwd": tmp_path, "prompt_file": tmp_path / "unused", "launch": _launch()}
-        if method == "consult_command":
-            kwargs.update(session_id="session", session_dir=None, fork_dir=tmp_path / "fork")
+    kwargs = {"cwd": tmp_path, "prompt_file": tmp_path / "unused", "launch": _launch()}
+    if method == "consult_command":
+        kwargs.update(session_id="session", session_dir=None, fork_dir=tmp_path / "fork")
     with pytest.raises(RuntimeUnsupported):
-        getattr(COCO, method)(*args, **kwargs)
+        getattr(COCO, method)("coco", **kwargs)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["bin"]
+
+
+@pytest.fixture
+def resident_coco(tmp_path):
+    return fake_claude(tmp_path / "resident-coco", r"""
+import json, os, sys
+from pathlib import Path
+home = Path(os.environ['TRAE_HOME'])
+args = sys.argv[1:]
+assert args[:3] == ['exec', '--json', '--skip-git-repo-check'], args
+assert args[-1] == '-' and '--ephemeral' not in args, args
+log = home / 'argv.jsonl'
+resumed = 'resume' in args
+assert args[-3:] == ['resume', 'T', '-'] if resumed else not log.exists()
+with log.open('a') as out:
+    out.write(json.dumps(args) + '\n')
+message = sys.stdin.read()
+if message == 'fork':
+    link = home / 'cli' / 'auth.json'
+    link.unlink()
+    link.write_text('synthetic fork')
+for event in [
+    {'type': 'thread.started', 'thread_id': 'T'},
+    {'type': 'turn.started'},
+    {'type': 'item.completed', 'item': {'id': 'answer', 'type': 'agent_message', 'text': message}},
+    {'type': 'turn.completed', 'usage': {'input_tokens': 37731 if resumed else 14923,
+                                        'output_tokens': 10 if resumed else 5}},
+]:
+    print(json.dumps(event), flush=True)
+""")
+
+
+def test_resident_turns_resume_in_a_private_home_and_count_only_their_own_tokens(tmp_path, resident_coco):
+    launch = _launch(executable=resident_coco)
+    command = COCO.resident_command(resident_coco, cwd=tmp_path,
+                                   prompt_file=SystemPrompt("Resident instructions").write_file(tmp_path), launch=launch)
+    run_home = Path(command[1].removeprefix("TRAE_HOME="))
+    home = tmp_path / ".local" / "coco" / "sessions" / "manager"
+
+    async def run():
+        session = COCO.resident_session("manager")
+        assert session.runtime_label == "Coco (TRAE CLI)" and not session.can_interrupt
+        events = []
+
+        async def on_event(event):
+            events.append(event)
+
+        await session.start(command, cwd=str(tmp_path), signature="first", env=launch.environment())
+        try:
+            first = await session.run_turn("first", on_event)
+            second = await session.run_turn("second", on_event)
+            # Restore the saved thread and totals, as after a prompt change or service restart.
+            await session.stop()
+            await session.start(command + COCO.resume_args("T"), cwd=str(tmp_path), signature="second",
+                                env=launch.environment(), totals=session.totals)
+            restored = await session.run_turn("restored", on_event)
+            assert restored.session_started and restored.result_event["result"] == "restored"
+            return first, second, events
+        finally:
+            await session.stop()
+
+    first, second, events = asyncio.run(run())
+    assert all(turn.result_event["subtype"] == "success" for turn in (first, second))
+    assert [first.result_event["result"], second.result_event["result"]] == ["first", "second"]
+    assert first.usage == Usage(input_tokens=14923, output_tokens=5, cache_read_tokens=0, cache_creation_tokens=0)
+    assert second.usage == Usage(input_tokens=22808, output_tokens=5, cache_read_tokens=0, cache_creation_tokens=0)
+    assert [event["runtime"] for event in events if event.get("subtype") == "init"] == ["coco"] * 3
+    argv = [json.loads(line) for line in (home / "argv.jsonl").read_text().splitlines()]
+    assert argv == [command[3:] + ["-"], *[command[3:] + ["resume", "T", "-"]] * 2]
+    for name in ("traecli.toml", "AGENTS.md"):
+        assert (home / name).read_text() == (run_home / name).read_text()
+    assert (home / "cli" / "auth.json").is_symlink()
+    assert os.readlink(home / "cli" / "auth.json") == str(coco_login.login_file())
+
+
+def test_planner_coco_launch_approves_its_mcp_server(tmp_path):
+    library = AgentLibrary(mcp_config=str(write_config(tmp_path, [
+        ("looper", {"type": "stdio", "command": "planner-mcp"})])))
+    launch = replace(_launch(library=library), role=AgentType.PLANNER)
+    command = COCO.resident_command("coco", cwd=tmp_path,
+                                   prompt_file=SystemPrompt("Planner").write_file(tmp_path), launch=launch)
+    home = Path(command[1].removeprefix("TRAE_HOME="))
+    assert tomllib.loads((home / "traecli.toml").read_text())["mcp_servers"]["looper"][
+        "default_tools_approval_mode"] == "approve"
+
+
+def test_finishing_each_resident_turn_repairs_and_reports_a_forked_login(tmp_path, monkeypatch, resident_coco):
+    record = AsyncMock(return_value="login link repaired")
+    monkeypatch.setattr(coco_login, "record_problems", record)
+    launch = _launch(executable=resident_coco)
+    command = COCO.resident_command(resident_coco, cwd=tmp_path,
+                                   prompt_file=SystemPrompt("Manager").write_file(tmp_path), launch=launch)
+    home = tmp_path / ".local" / "coco" / "sessions" / "manager"
+
+    async def run():
+        session = COCO.resident_session("manager")
+        await session.start(command, cwd=str(tmp_path), signature="s", env=launch.environment())
+        try:
+            for _ in range(2):
+                recorder = ClaudeRunRecorder(agent_id="manager", task_id=None, command=command,
+                                            cwd=str(tmp_path), input_text="fork", launch=launch)
+                turn = await session.run_turn("fork", recorder.record)
+                assert turn.result_event["subtype"] == "success"
+                assert not (home / "cli" / "auth.json").is_symlink()
+                await recorder.finish(output_text="fork", result_event=turn.result_event, usage=turn.usage)
+                assert (home / "cli" / "auth.json").is_symlink()
+                assert os.readlink(home / "cli" / "auth.json") == str(coco_login.login_file())
+        finally:
+            await session.stop()
+
+    asyncio.run(run())
+    assert record.await_count == 2

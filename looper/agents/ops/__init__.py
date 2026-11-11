@@ -73,10 +73,12 @@ class ErrorDetails(TypedDict, total=False):
 class OpError(Exception):
     """A call Looper refuses or could not run, with the code the answer carries."""
 
-    def __init__(self, code: ErrorCode, message: str, *, details: ErrorDetails | None = None) -> None:
+    def __init__(self, code: ErrorCode, message: str, *, details: ErrorDetails | None = None,
+                 field: str | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.details = details
+        self.field = field
 
 
 class PublicOpError(OpError):

@@ -18,6 +18,31 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.130] - 2026-11-10
+
+### Changed
+
+- **The dashboard shows the `coco` runtime as "Coco (TRAE CLI)", explains its login and places model refusals at the Model input.** ([#1218](https://github.com/foolzzz/looper/pull/1218))
+  - Runtime cards, Agent Profile selections and the `coco login` row are complete; `coco_login` joins the login checks of the startup banner. Codex and Cursor keep their sign-in wording.
+  - Registry and operation errors take an optional `field`, carried in the v1 error envelope (`error.field`, also in the OpenAPI schema). Coco's unknown-model refusals set `field: "model"`, and the profile form shows them at the Model input; other errors stay in the bottom error.
+  - A usable coco login warms the model catalog during first registration, startup with an existing registration, and re-detection or probing, so the first profile save refuses an unknown model. Logged-out, unknown-login and failed-catalog cases keep the deferred launch validation.
+
+## [2.14.129] - 2026-11-11
+
+### Added
+
+- **The `coco` runtime can run the Manager and Planners.** ([#1217](https://github.com/foolzzz/looper/pull/1217))
+  - Coco gains the Manager and Planner roles (a maintainer decision): one `coco exec` process per turn, then `resume <thread> -`, with sessions under `<runtime_root>/.local/coco/sessions/<label>`. Stopping a Manager turn is the per-turn kill, as for Codex. Steer, consult, effort and structured output stay refused.
+  - Unused coco session homes are reclaimed like the other per-turn runtimes'. Nothing changes for other runtimes.
+
+### Changed
+
+- **Web chat tasks of the default Manager report into their chat.** ([#1219](https://github.com/foolzzz/looper/pull/1219))
+  - A task created from the dashboard chat with the default Manager now records that chat session and saves its phase notices, gate notices and completion (with the delivery summary) into it, as tasks from other Managers and channels already did. Tasks created without a chat session (CLI/API) are unchanged.
+
+- **Worker reports and reviewer verdicts with stray backslash escapes are accepted.** ([#1221](https://github.com/foolzzz/looper/pull/1221))
+  - A report or verdict whose JSON fails only on invalid backslash escapes is accepted after doubling those backslashes and is recorded as `report_repaired`. A JSON block that still does not parse fails with a message naming the parse error and its line and column. Nothing else is repaired.
+
 ## [2.14.128] - 2026-11-10
 
 ### Added

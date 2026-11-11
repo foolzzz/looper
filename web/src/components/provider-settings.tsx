@@ -320,7 +320,7 @@ function LoginLine({ provider, label }: { provider: Provider; label: string }) {
               the server&apos;s machine (<code className="font-mono">{help.signIn}</code> if it is not logged in), then use it
               again.</>
           ) : (
-            <>Run <code className="font-mono">{help.signIn}</code>{help.how ? ` ${help.how}` : ""} on the server&apos;s
+            <>{provider.oauth_runtime_type === "coco" && help.check ? <>Check <code className="font-mono">{help.check}</code>; run </> : "Run "}<code className="font-mono">{help.signIn}</code>{help.how ? ` ${help.how}` : ""} on the server&apos;s
               machine.</>
           )}
         </span>

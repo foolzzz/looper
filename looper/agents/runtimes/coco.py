@@ -1,4 +1,4 @@
-"""Native Coco Workers and Reviewers, using the Codex stream and an isolated Coco home."""
+"""Native Coco agents, using the Codex stream and an isolated Coco home."""
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from ... import child_env
 from . import ApiProtocol, AuthKind, Capability, Launcher, Probe, ProviderBinding, ReadOnly, RuntimeUnsupported
 from . import coco_login
-from .codex import CodexHome, CodexRuntime
+from .codex import CodexHome, CodexRuntime, ResidentCodex
 
 if TYPE_CHECKING:
     from ..agent_settings import Launch
@@ -30,7 +30,8 @@ class CocoRuntime(CodexRuntime):
     launchers = frozenset({Launcher.NATIVE})
     ttadk_tool = None
     ttadk_runtime_name = None
-    capabilities = frozenset({Capability.RUN, Capability.MCP, Capability.ADD_DIRS})
+    capabilities = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capability.RESUME,
+                              Capability.MCP, Capability.ADD_DIRS})
     protocols = frozenset({ApiProtocol.OPENAI_RESPONSES})
     auth_kinds = frozenset({AuthKind.OAUTH})
     login_models = coco_login.SUGGESTED_MODELS
@@ -80,7 +81,7 @@ class CocoRuntime(CodexRuntime):
             raise RuntimeUnsupported("coco takes no effort level in Looper yet")
         models = coco_login.cached_models(executable or self.default_executable)
         if problem := _catalog_problem(model, models):
-            raise RuntimeUnsupported(problem)
+            raise RuntimeUnsupported(problem, field="model")
 
     async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None) -> str | None:
         if problem := await coco_login.launch_problem(executable or self.default_executable):
@@ -99,15 +100,8 @@ class CocoRuntime(CodexRuntime):
                                          "or the provider's variables")
         return super().environment(launch)
 
-    def resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                         max_turns: int = 0) -> list[str]:
-        raise RuntimeUnsupported("the coco runtime cannot run the Manager or a Planner yet")
-
-    def resume_args(self, session_id: str) -> list[str]:
-        raise RuntimeUnsupported("the coco runtime cannot run the Manager or a Planner yet")
-
     def resident_session(self, label: str) -> ResidentSession:
-        raise RuntimeUnsupported("the coco runtime cannot run the Manager or a Planner yet")
+        return ResidentCodex(label=label, home=COCO, runtime_label=self.label)
 
     def steer_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                       max_turns: int = 0, session_dir: Path | None = None) -> list[str]:

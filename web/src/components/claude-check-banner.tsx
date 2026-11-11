@@ -3,7 +3,7 @@ import { type SelfCheck } from "@/lib/api";
 import { useStartupChecks } from "@/lib/use-startup-checks";
 
 /** The checks of the runtimes' own logins Agent Profiles may use. */
-const LOGIN_CHECKS = ["codex_login", "grok_login", "cursor_login", "ttadk"];
+const LOGIN_CHECKS = ["codex_login", "coco_login", "grok_login", "cursor_login", "ttadk"];
 
 const shown = (c: SelfCheck) => (c.id.startsWith("claude_") || LOGIN_CHECKS.includes(c.id)) && c.status === "fail";
 

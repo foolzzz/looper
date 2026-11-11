@@ -129,10 +129,10 @@ def test_the_manager_answering_a_clients_chat_gives_the_task_its_client_and_thre
         assert (row["client_id"], row["origin_thread"], row["manager_id"]) == (client.client_id, "cli-x", "manager")
         action = await pool.fetchrow("SELECT client_id, channel FROM manager_actions WHERE status = 'ok'")
         assert (action["client_id"], action["channel"]) == (client.client_id, "web")
-        # The dashboard's own chat for the default Manager is unchanged.
+        # The dashboard's own chat keeps its thread without acquiring a client's identity.
         without = await _manager_create(_Chat(tmp_path), client_id=None)
         row = await tasks.get_task(without["result"]["task_id"], pool=pool)
-        assert (row["client_id"], row["origin_thread"]) == (None, None)
+        assert (row["client_id"], row["origin_thread"]) == (None, "cli-x")
 
     run_db(test, monkeypatch)
 

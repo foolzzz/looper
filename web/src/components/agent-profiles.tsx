@@ -34,6 +34,7 @@ import { LOGIN_HELP, PLANNED_RUNTIMES, RUNTIME_TYPES, loginUsable, roleLabel } f
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { useSettingsTarget } from "@/lib/settings-target";
 import { useAction } from "@/lib/use-action";
+import { V1Error } from "@/lib/v1";
 import { profileLabel, useRegistry } from "@/lib/use-registry";
 import { useStartupChecks } from "@/lib/use-startup-checks";
 
@@ -244,7 +245,12 @@ export function AgentProfileForm({
                    agent_teams: teams && draft.agent_teams };
     let answer: { profile: AgentProfile; warnings: string[] } | null = null;
     const done = await action.run(async () => {
-      answer = await (profile ? updateAgentProfile(profile.profile_id, body) : createAgentProfile(body));
+      try {
+        answer = await (profile ? updateAgentProfile(profile.profile_id, body) : createAgentProfile(body));
+      } catch (error) {
+        if (error instanceof V1Error && error.field === "model") setModelError(error.message);
+        else throw error;
+      }
     });
     const result = answer as { profile: AgentProfile; warnings: string[] } | null;
     if (!done || !result) return;
