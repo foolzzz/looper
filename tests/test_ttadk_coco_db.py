@@ -19,25 +19,36 @@ pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not
 def coco_on_path(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    for name in ("coco", "traex"):
-        fake_claude(bin_dir / name, '''import sys
+    log = tmp_path / "commands.jsonl"
+    for name in ("coco", "traex", "custom-coco"):
+        fake_claude(bin_dir / name, "import json, sys\n"
+            f"with open({str(log)!r}, 'a') as out: out.write(json.dumps(sys.argv) + '\\n')\n" + '''
 if sys.argv[1:] == ['--version']: print('traecli 0.214.1')
 elif sys.argv[1:] == ['models', '--json']: print('[{"name":"GPT-5.5"}]')
+elif sys.argv[1:] == ['login', 'status']: print('Logged in using Trae')
 else: raise AssertionError(sys.argv)
 ''')
-    fake_claude(bin_dir / "ttadk", "import sys\nassert sys.argv[1:] == ['--version']\nprint('1.0.37')\n")
+    fake_claude(bin_dir / "ttadk", f"import json, sys\n"
+                f"with open({str(log)!r}, 'a') as out: out.write(json.dumps(sys.argv) + '\\n')\n"
+                "assert sys.argv[1:] == ['--version']\nprint('1.0.37')\n")
     monkeypatch.setenv("PATH", str(bin_dir))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(registry, "_login_modules", lambda: {})
     coco_login.forget_models()
+    coco_login.forget_probe()
     ttadk.forget_probe()
     yield
     coco_login.forget_models()
+    coco_login.forget_probe()
     ttadk.forget_probe()
 
 
-def test_detection_registers_both_coco_launchers(coco_on_path, monkeypatch):
+@pytest.mark.parametrize("command", ["traex", "custom-coco"])
+def test_detection_registers_both_coco_launchers(coco_on_path, monkeypatch, tmp_path, command):
+    monkeypatch.setattr(ttadk, "tool_command", lambda tool: {
+        "trae-cli": command, "codex": "codex", "cursor-cli": "agent"}[tool])
+
     async def test(pool):
         found = await registry.register_found_runtimes()
         assert {"coco", "ttadk-coco"} <= set(found)
@@ -46,7 +57,14 @@ def test_detection_registers_both_coco_launchers(coco_on_path, monkeypatch):
         assert native["launcher"] == "native" and native["version"] == "traecli 0.214.1"
         assert (wrapped["name"], wrapped["type"], wrapped["launcher"]) == ("ttadk-coco", "coco", "ttadk")
         assert wrapped["version"] == "ttadk 1.0.37 / traecli 0.214.1" and wrapped["probe_error"] is None
+        assert coco_login.cached_models(command) == {"gpt-5.5": "GPT-5.5"}
+        coco_login.forget_models()
+        coco_login.forget_probe()
         assert await registry.register_found_runtimes() == []
+        assert coco_login.cached_models(command) == {"gpt-5.5": "GPT-5.5"}
+        calls = [json.loads(line) for line in (tmp_path / "commands.jsonl").read_text().splitlines()]
+        assert any(Path(call[0]).name == command and call[1:] == ["models", "--json"] for call in calls)
+        assert not any(Path(call[0]).name == "ttadk" and "login" in call[1:] for call in calls)
 
     run_db(test, monkeypatch, timeout=30)
 

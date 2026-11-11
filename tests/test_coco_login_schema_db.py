@@ -82,7 +82,9 @@ def test_provider_view_reports_and_clears_a_forked_coco_login(monkeypatch, tmp_p
             cleared = await profile_registry.clear_login_problem('prov-coco-login')
             assert cleared['provider']['login']['state'] == 'not_logged_in'
             assert await coco_login.recorded_problem() is None
-            assert (await self_check.coco_login_check()).detail == 'not used'
+            check = await self_check.coco_login_check()
+            assert check.status == self_check.SKIP
+            assert check.detail == 'not checked: no Agent Profile uses the coco login'
             # Doctor reads its own connection, rather than relying on the server's global pool.
             connect = asyncpg.connect
             schema = await conn.fetchval('SELECT current_schema()')

@@ -87,24 +87,19 @@ class CocoRuntime(CodexRuntime):
         super().check_pairing(provider, model, effort, executable=executable, launcher=launcher)
         if effort:
             raise RuntimeUnsupported("coco takes no effort level in Looper yet")
-        command = _ttadk_command()[0] if launcher is Launcher.TTADK else executable or self.default_executable
-        models = coco_login.cached_models(command)
-        if problem := _catalog_problem(model, models):
-            raise RuntimeUnsupported(problem, field="model")
 
     async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None,
                             launcher: Launcher = Launcher.NATIVE) -> str | None:
-        command = executable or self.default_executable
+        command = native_executable(executable, launcher)
         if launcher is Launcher.TTADK:
             problem = await ttadk.sign_in_problem(executable or "ttadk", "trae-cli")
             if problem and problem.blocks_launch:
                 return problem.message(self.type)
-            command = _ttadk_command()[0]
         if problem := await coco_login.launch_problem(command):
             return problem
         # Resolved profiles expose only the selected model in their binding catalog.
         if len(provider.catalog) == 1:
-            return await asyncio.to_thread(_model_problem, provider.catalog[0].name,
+            return await asyncio.to_thread(model_problem, provider.catalog[0].name,
                                            command)
         return None
 
@@ -147,7 +142,12 @@ def _ttadk_command() -> tuple[str, str | None]:
     return "traex", "TTADK's configured trae-cli command is not a single word; probed PATH's traex instead"
 
 
-def _model_problem(model: str, executable: str) -> str | None:
+def native_executable(executable: str | None, launcher: Launcher) -> str:
+    """The Coco CLI whose login and model catalog the run will use."""
+    return _ttadk_command()[0] if launcher is Launcher.TTADK else executable or "coco"
+
+
+def model_problem(model: str, executable: str) -> str | None:
     return _catalog_problem(model, coco_login.available_models(executable))
 
 
