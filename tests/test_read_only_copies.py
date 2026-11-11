@@ -328,7 +328,7 @@ def test_a_pi_home_stays_after_env_has_execed_the_agent(tmp_path: Path, content:
     assert asyncio.run(reclaim_unused(tmp_path)) == [home, sessions]
 
 
-@pytest.mark.parametrize("runtime", ["omp", "pi", "cursor-agent"])
+@pytest.mark.parametrize("runtime", ["omp", "pi", "cursor-agent", "coco"])
 def test_a_session_directory_stays_while_its_agent_saved_a_session_of_that_runtime(
     tmp_path: Path, content: _Content, runtime: str,
 ) -> None:

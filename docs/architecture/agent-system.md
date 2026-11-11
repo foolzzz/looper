@@ -1085,7 +1085,7 @@ it does not hunt down the processes the turn started:
   `proc_tree.end` finds (`kill`).
 - A process that detached from the agent's tree (`setsid`, a double fork,
   its ancestors gone) is never chased.
-- On a runtime without an interrupt (Codex, Cursor Agent, OMP, Pi, DSH, Grok's per-turn
+- On a runtime without an interrupt (Codex, Coco, Cursor Agent, OMP, Pi, DSH, Grok's per-turn
   fallback) the stop is refused: `POST /api/chat/stop` answers `409`
   `cannot_interrupt`, `/stop` says so, the dashboard's Stop button is
   disabled with that reason and Esc does nothing. A stop never kills such a
@@ -1099,7 +1099,7 @@ stopped:
 |---|---|---|---|
 | Claude Code (`ResidentClaude`) | writes a `control_request` `interrupt` to Claude's stdin and waits up to `INTERRUPT_GRACE_SEC` (5 s) for the turn's `result` (`control`); without one, or when stdin is closed, kills Claude (`kill`, the turn returns a synthetic `user_stop_result`) | `control`: the process stays; `kill`: the next turn starts it again with `--resume` | `control`: the result's; `kill`: what the events had reported |
 | Grok over ACP (`AcpGrok`) | `session/cancel`, waits for `stopReason: cancelled` up to `CANCEL_GRACE_SEC` (`cancel`); past it the process is ended (`kill`) | `cancel`: process and session stay | the response's `_meta.usage` |
-| Codex, Cursor Agent, OMP, Pi, DSH and Grok's per-turn fallback (`PerTurnSession`) | not offered: the user's stop is refused (`cannot_interrupt`) and the turn runs on. Its `cancel` (a turn handed one already requested, or a caller other than `stop_turn`) starts no process, or ends the turn's tree through `proc_tree.end` (`kill`) | the session id is kept; the next turn resumes it | OMP, Pi and DSH report usage per message; Codex and Cursor Agent only when a turn ends (`usage_complete` false) |
+| Codex, Coco, Cursor Agent, OMP, Pi, DSH and Grok's per-turn fallback (`PerTurnSession`) | not offered: the user's stop is refused (`cannot_interrupt`) and the turn runs on. Its `cancel` (a turn handed one already requested, or a caller other than `stop_turn`) starts no process, or ends the turn's tree through `proc_tree.end` (`kill`) | the session id is kept; the next turn resumes it | OMP, Pi and DSH report usage per message; Codex, Coco and Cursor Agent only when a turn ends (`usage_complete` false) |
 
 The per-turn runtimes have no interrupt the Manager can send: it runs them as
 one process per turn, not over Codex's app-server or OMP/Pi's rpc, whose
@@ -1277,7 +1277,7 @@ Manager tools.
   `resume`, `steer`, `read_tools`, `compaction_events` and `mcp` when the
   probe accepts version 1.3.0 or newer and every required help flag, and none
   otherwise. Pi's `mcp` is the Looper platform bridge only; Cursor Agent has
-  `run`, `resident_session`, `resume`, `mcp` and `add_dirs`). Codex and OMP list `steer` when
+  `run`, `resident_session`, `resume`, `mcp` and `add_dirs`, as does Coco). Codex and OMP list `steer` when
   their probe finds the steering protocol (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md));
   Claude Code and Grok do not. Pi's `steer` is in that probed set.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
@@ -1678,7 +1678,7 @@ Manager tools.
   are `auto`, `gpt-5.3-codex`, `gpt-5.6-sol-high`, `composer-2.5` and
   `gemini-3.7-flash-high`, without built-in prices.
 - **Coco (TRAE CLI)** (`looper/agents/runtimes/coco.py`, the `coco` CLI)
-  runs Workers and Reviewers through the Codex adapter's `exec --json` path.
+  runs Manager, Planner, Worker and Reviewer through the Codex adapter's `exec --json` path.
   It is a Codex-family CLI with its own home layout: Looper sets `TRAE_HOME`
   to a private run directory containing `traecli.toml`, `AGENTS.md` and a
   `cli/auth.json` symbolic link to the operator's coco login. Looper never
@@ -1688,14 +1688,27 @@ Manager tools.
   Workers' commits keep coco's `Co-authored-by: TRAE CLI` trailer, recorded
   as `commit_attribution: trae` in the run metadata.
 
+  Manager and Planner sessions use `ResidentCodex` with one `coco exec`
+  process per turn, then `resume <thread> -` for subsequent turns. Their
+  homes live in `<runtime_root>/.local/coco/sessions/<label>` and receive
+  the run home's configuration, instructions and login link before each turn.
+  The Planner's MCP servers set `default_tools_approval_mode = "approve"`.
+  Session token totals are differenced to record each turn's own usage.
+  After every login turn, the run recorder inspects `.local/coco` for forked
+  login links. Unused session homes are reclaimed unless a saved session or
+  running process still names them. Like Codex, Coco has no soft interrupt:
+  the Manager refuses the user's stop (`can_interrupt=False`); cancellation
+  by another caller ends the current turn's process tree and keeps the thread
+  id for the next turn.
+
   Only the built-in `coco-login` provider is supported. Before launch,
   Looper checks `coco login status` and the cached `coco models --json`
   catalog, refusing missing logins and unknown models; a run without a login
   otherwise hangs. Sign in with `coco login` on the server's machine.
   Coco reports tokens only, no actual model or prices, so `model_reported`
   stays empty and usage is unpriced. TRAE's servers make the model requests;
-  the recording proxy marks these runs `not_covered`. Manager, Planner,
-  consult and steering support are not enabled yet.
+  the recording proxy marks these runs `not_covered`. Consult and steering
+  support are not enabled yet.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
   runs Manager, Planner, Worker and Reviewer. With the default `[runtimes] pi = "runner"`,
