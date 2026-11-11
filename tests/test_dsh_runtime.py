@@ -20,7 +20,7 @@ from looper.agents.profile_registry import (
     CatalogModel, LegacyProviderSpec as ProviderSpec, RegistryError, RuntimeSpec, check_pairing,
 )
 from tests.runtime_model_helpers import resolved_profile
-from looper.agents.runtimes import ApiProtocol, AuthKind, RuntimeUnsupported
+from looper.agents.runtimes import ApiProtocol, AuthKind, Launcher, RuntimeUnsupported
 from tests.test_dsh_installed import installation as installed_dsh
 
 
@@ -266,7 +266,7 @@ def dsh_policy(monkeypatch: pytest.MonkeyPatch):
         label = "DSH policy test"
         auth_kinds = frozenset({AuthKind.API_KEY})
 
-        def check_pairing(self, provider, model, effort=None, *, executable=None):
+        def check_pairing(self, provider, model, effort=None, *, executable=None, launcher=Launcher.NATIVE):
             dsh.validate_provider(provider, model, effort)
 
         def bind_provider(self, provider, model, effort):

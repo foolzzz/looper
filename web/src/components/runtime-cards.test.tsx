@@ -231,7 +231,7 @@ describe("Agent Runtimes", () => {
     api();
     await show();
     const titles = [...container.querySelectorAll("h3")].map((node) => node.textContent);
-    expect(titles).toEqual(["Model API (SDK)", "ttadk-codex", "ttadk-cursor-agent", "Claude Code SDK", "OpenAI Agents SDK"]);
+    expect(titles).toEqual(["Model API (SDK)", "ttadk-coco", "ttadk-codex", "ttadk-cursor-agent", "Claude Code SDK", "OpenAI Agents SDK"]);
     expect(RUNTIME_TYPES.api).toEqual({ kind: "SDK", title: "Model API (SDK)" });
   });
 
