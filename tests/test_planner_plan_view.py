@@ -154,6 +154,49 @@ def test_runtime_without_compaction_events_always_sends_full(
     ]
 
 
+def test_grok_resident_session_always_sends_full(agent_db, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fake_claude import fake_claude
+    from fake_grok_acp import FAKE_ACP
+    from looper.agents.agent_settings import AgentSettings
+    from looper.agents.profile_registry import (
+        Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
+    )
+    from looper.agents.runtimes import ApiProtocol, AuthKind, VendorType, adapter
+
+    grok = adapter("grok")
+    executable = fake_claude(tmp_path / "grok", FAKE_ACP)
+    provider = ProviderSpec("grok-login", "Grok", VendorType.GROK_LOGIN, AuthKind.OAUTH, "grok")
+    model = ModelSpec("grok-model", provider.id, "grok-4.7", ApiProtocol.OPENAI_RESPONSES)
+    profile = ResolvedAgentProfile(
+        "grok-planner", "Grok Planner", RuntimeSpec("grok-runtime", "Grok", "grok", executable, grok.capabilities),
+        model.id, resolved_model=ResolvedModel(model, provider, Endpoint(provider.id, model.protocol, "")))
+    agent = _agent(tmp_path, SimpleNamespace(bin=executable))
+    agent._plan.session_id = None
+    monkeypatch.setattr(agent, "_load_agent_settings", AsyncMock(return_value=AgentSettings(profile=profile)))
+
+    async def exercise():
+        try:
+            texts = []
+            for turn in range(3):
+                agent._plan.steps[0].status = "pending" if turn == 0 else "verified"
+                texts.append(await agent._turn(_decision(agent)))  # The ACP stand-in echoes the prompt.
+                assert agent._claude.transport == "acp"
+            return texts
+        finally:
+            await agent._claude.stop()
+
+    texts = _run(exercise)
+    assert all("\nPlan:\n" in text and "Plan (changes since" not in text for text in texts)
+    assert all("- part-1 [pending]" in text for text in texts)  # Unchanged steps remain available.
+    assert "- part-0 [verified]" in texts[1]
+    assert [annotation["plan_view_reason"] for annotation in _annotations(agent_db)] == [
+        "new session", "no compaction events", "no compaction events",
+    ]
+
+
 @pytest.mark.parametrize("new_session", [False, True], ids=["new-process", "resume-brief"])
 def test_process_and_session_restart_send_full(agent_db, planner_claude, tmp_path, new_session):
     claude = planner_claude("ack")
