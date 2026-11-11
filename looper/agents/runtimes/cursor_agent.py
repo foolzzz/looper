@@ -410,7 +410,7 @@ class CursorAgentRuntime(RuntimeAdapter):
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
         return None
 
-    async def login_problem(self, provider: ProviderSpec) -> str | None:
+    async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None) -> str | None:
         return await cursor_login.launch_problem()
 
     async def after_run(self, launch: Launch, command: list[str]) -> list[str]:

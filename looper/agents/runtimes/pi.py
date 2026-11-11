@@ -203,7 +203,8 @@ class PiRuntime(RuntimeAdapter):
     def isolation_args(self, cwd: str | Path) -> list[str]:
         return list(_ISOLATION_FLAGS)
 
-    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
+    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
+                      executable: str | None = None) -> None:
         if effort and effort not in self.effort_levels:
             raise RuntimeUnsupported(f"pi thinking must be one of {', '.join(self.effort_levels)}, or empty")
 

@@ -194,7 +194,8 @@ def pricer(provider: LegacyProviderSpec | ProviderSpec | ResolvedModel, *,
         account = provider
     aliases = dict(CLAUDE_CODE_ALIASES) if (account.auth is AuthKind.OAUTH
                                            and account.oauth_runtime_type == _CLAUDE_CODE) else {}
-    builtin = dict(BUILTIN_PRICES)
+    # Coco's hosted models have no published prices; matching a model name does not establish its price.
+    builtin = {} if account.auth is AuthKind.OAUTH and account.oauth_runtime_type == "coco" else dict(BUILTIN_PRICES)
     exact: dict[str, ModelPrice] = {}
     normalized: dict[str, ModelPrice] = {}
     for entry in entries:

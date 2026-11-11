@@ -388,7 +388,7 @@ class CodexRuntime(RuntimeAdapter):
 
         return claude_cli.budget_error(result_event) if (result_event or {}).get(claude_cli.SOFT_CAP) else None
 
-    async def login_problem(self, provider: ProviderSpec) -> str | None:
+    async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None) -> str | None:
         """Why a run with Codex's own login cannot start now (``codex_login.launch_problem``)."""
         return await self.home.login.launch_problem() if provider.auth is AuthKind.OAUTH else None
 
@@ -836,7 +836,8 @@ def _codex_usage(usage: Mapping[str, Any]) -> dict[str, int]:
         value = usage.get(key)
         return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
-    cached, written = count("cached_input_tokens"), count("cache_write_input_tokens")
+    cached = count("cached_input_tokens")
+    written = count("cache_write_input_tokens") or count("cache_creation_input_tokens")
     return {"inputTokens": max(count("input_tokens") - cached - written, 0), "outputTokens": count("output_tokens"),
             "cacheReadInputTokens": cached, "cacheCreationInputTokens": written}
 

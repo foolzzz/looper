@@ -73,7 +73,7 @@ def _model_fields(record):
     reported = (metadata["routed_model"] if runtime == "cursor-agent" and metadata.get("routed_model") else
                 metadata["model_reported"] if "model_reported" in metadata else
                 metadata.get("model_display") if runtime == "cursor-agent" else
-                None if runtime in ("codex", "grok", "pi", "omp", "dsh", "api") else record.get("model"))
+                None if runtime in ("coco", "codex", "grok", "pi", "omp", "dsh", "api") else record.get("model"))
     return {**record, "model_requested": (metadata.get("model_choice") or {}).get("model") or profile.get("model"),
             "model_reported": reported}
 

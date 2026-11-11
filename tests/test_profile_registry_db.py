@@ -286,7 +286,7 @@ def test_dsh_policy_checks_stored_effort_when_a_provider_changes(
 def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.agents.profile_registry import AgentProfile
     from looper.agents.runtimes import CLAUDE_CODE
-    from looper.agents.runtimes import cursor_login
+    from looper.agents.runtimes import coco_login, cursor_login
     from looper.db import profile_registry as db
     from looper.db.connection import ensure_schema
 
@@ -310,7 +310,7 @@ def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch
                 coco["api_key"], coco["endpoints"], coco["model_count"], coco["suggested_models"]) == (
             "prov-coco-login", "coco login", True, "oauth", "coco", None,
             [{"provider_id": "prov-coco-login", "protocol": "openai-responses", "base_url": "",
-              "use_runtime_default": False}], 0, [])
+              "use_runtime_default": False}], 0, list(coco_login.SUGGESTED_MODELS))
         assert coco["login"]["state"] == "not_logged_in"
         assert await db.list_models(provider_id="prov-coco-login") == []
         assert (codex["provider_id"], codex["name"], codex["builtin"], codex["auth"], codex["oauth_runtime_type"],
@@ -663,6 +663,59 @@ def test_codex_on_path_becomes_a_builtin_runtime_once(monkeypatch: pytest.Monkey
         assert await register_found_runtimes() == []  # once
 
     run_db(_test, monkeypatch)
+
+
+def test_coco_on_path_pairs_only_with_its_own_login_and_runs_workers_and_reviewers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from looper.agents.profile_registry import register_found_runtimes
+    from looper.agents.runtimes import coco_login
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_claude(bin_dir / "coco", (
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n    print('traecli 0.214.1')\n    sys.exit(0)\n"
+        "if sys.argv[1:] == ['models', '--json']:\n"
+        "    print('[{\"name\":\"GPT-5.5\",\"config_name\":\"gpt-5.5\"}]')\n    sys.exit(0)\n"
+        "sys.exit(9)\n"
+    ))
+    _version_codex(bin_dir / "codex")
+    monkeypatch.setenv("TRAE_HOME", str(tmp_path / "operator-coco"))
+    coco_login.forget_models()
+
+    async def _test(_pool: Any) -> None:
+        monkeypatch.setenv("PATH", str(bin_dir))
+        assert await register_found_runtimes() == ["coco", "codex", "api"]
+        registry = await _registry()
+        runtime = _by_name(registry["runtimes"], "coco")
+        assert (runtime["runtime_id"], runtime["builtin"], runtime["version"], runtime["type_label"],
+                runtime["protocols"], runtime["roles"]) == (
+            "rt-coco", True, "traecli 0.214.1", "Coco (TRAE CLI)", ["openai-responses"], ["worker", "reviewer"])
+        assert await register_found_runtimes() == []
+
+        async def profile(provider_id: str, runtime_id: str = "rt-coco") -> tuple[int, Any]:
+            return await _call("POST", "/api/agent-profiles", {
+                "name": f"{runtime_id}-{provider_id}", "runtime_id": runtime_id,
+                "model_id": await _model_id(provider_id, "GPT-5.5", "openai-responses")})
+
+        status, payload = await profile("prov-coco-login")
+        assert status == 201, payload
+        assert payload["profile"]["roles"] == ["worker", "reviewer"]
+        key = await _provider({
+            "name": "responses-key", "vendor_type": "custom", "api_key": SECRET,
+            "endpoints": [{"protocol": "openai-responses", "base_url": "https://example.invalid/v1"}],
+        })
+        for provider_id in ("prov-codex-login", key):
+            status, payload = await profile(provider_id)
+            assert status == 400, payload
+        status, payload = await profile("prov-coco-login", "rt-codex")
+        assert status == 400 and "only use its own runtime" in payload["error"]
+
+    try:
+        run_db(_test, monkeypatch, timeout=30)
+    finally:
+        coco_login.forget_models()
 
 
 def _version_omp(path: Path) -> str:

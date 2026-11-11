@@ -346,7 +346,8 @@ class DshRuntime(RuntimeAdapter):
     def api_model(self, model: str) -> str:
         return MODEL_MAP.get(model, model)
 
-    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
+    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
+                      executable: str | None = None) -> None:
         validate_provider(provider, model, effort)
 
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:

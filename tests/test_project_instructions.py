@@ -76,16 +76,16 @@ def _runtime_prompt(runtime: str, cwd: Path, root: Path) -> str:
 
 @pytest.mark.parametrize("files, expected", [
     ({"CLAUDE.md": "c"},
-     {"claude-code": ["CLAUDE.md"], "codex": ["CLAUDE.md"], "omp": ["CLAUDE.md"], "grok": ["CLAUDE.md"],
+     {"claude-code": ["CLAUDE.md"], "coco": ["CLAUDE.md"], "codex": ["CLAUDE.md"], "omp": ["CLAUDE.md"], "grok": ["CLAUDE.md"],
       "cursor-agent": ["CLAUDE.md"]}),
     ({"AGENTS.md": "a"},
-     {"claude-code": ["AGENTS.md"], "codex": ["AGENTS.md"], "omp": ["AGENTS.md"], "grok": ["AGENTS.md"],
+     {"claude-code": ["AGENTS.md"], "coco": ["AGENTS.md"], "codex": ["AGENTS.md"], "omp": ["AGENTS.md"], "grok": ["AGENTS.md"],
       "cursor-agent": ["AGENTS.md"]}),
     # Grok and Cursor read every name they know in a directory, in their own order.
     ({"CLAUDE.md": "c", "AGENTS.md": "a"},
-     {"claude-code": ["CLAUDE.md"], "codex": ["AGENTS.md"], "omp": ["AGENTS.md"], "grok": ["CLAUDE.md", "AGENTS.md"],
+     {"claude-code": ["CLAUDE.md"], "coco": ["AGENTS.md"], "codex": ["AGENTS.md"], "omp": ["AGENTS.md"], "grok": ["CLAUDE.md", "AGENTS.md"],
       "cursor-agent": ["AGENTS.md", "CLAUDE.md"]}),
-    ({}, {"claude-code": [], "codex": [], "omp": [], "grok": [], "cursor-agent": []}),
+    ({}, {"claude-code": [], "coco": [], "codex": [], "omp": [], "grok": [], "cursor-agent": []}),
 ], ids=["only CLAUDE.md", "only AGENTS.md", "both", "neither"])
 def test_each_runtime_is_given_one_file_of_the_repository_read_by_itself(
     tmp_path: Path, files: dict[str, str], expected: dict[str, list[str]],
@@ -107,6 +107,7 @@ def test_below_the_root_claude_code_reads_the_projects_claude_md_and_the_others_
     (repo / "pkg").mkdir()
     (repo / "pkg" / "AGENTS.md").write_text("pkg\n")
     assert _given(repo / "pkg") == {"claude-code": _native("../CLAUDE.md"),
+                                    "coco": _native("../CLAUDE.md", "AGENTS.md"),
                                     "codex": _native("../CLAUDE.md", "AGENTS.md"),
                                     "omp": _native("../CLAUDE.md", "AGENTS.md"),
                                     "grok": _native("../CLAUDE.md", "AGENTS.md"),

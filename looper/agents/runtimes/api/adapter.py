@@ -96,7 +96,8 @@ class ApiRuntime(RuntimeAdapter):
     def isolation_args(self, cwd: str | Path) -> list[str]:
         return []
 
-    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None) -> None:
+    def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
+                      executable: str | None = None) -> None:
         if not provider.base_url:
             raise RuntimeUnsupported("the api runtime needs the endpoint's base_url")
 

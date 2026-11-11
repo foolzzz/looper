@@ -16,6 +16,16 @@ from tests.test_review_panel_planner import configure
 from looper.agents.workflow_reporting import process_record_text
 
 
+def test_coco_delivery_keeps_the_requested_model_separate_from_the_missing_report():
+    from looper.agents.tiers.planner import TaskPlan
+    from looper.agents.workflow_reporting import process_record
+
+    record = process_record(TaskPlan("plan", "goal", "task", "."), [], [{"role": "worker", "model": "GPT-5.5", "metadata": {
+        "profile": {"name": "Coco", "runtime": {"type": "coco"}, "model": "GPT-5.5"}}}])
+    text = process_record_text(record)
+    assert "请求模型 GPT-5.5; 报告模型 未记录" in text
+
+
 @pytest.mark.parametrize("notices", [True, False])
 def test_plan_and_review_phase_reach_telegram_transport(planner_claude, agent_db, monkeypatch, notices):
     configure(agent_db, monkeypatch, phase_notices=notices)

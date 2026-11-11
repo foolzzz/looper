@@ -1,0 +1,16 @@
+{"type": "thread.started", "thread_id": "01a1c78c-467c-78f3-a2d3-b8dc851f3814"}
+{"type": "turn.started"}
+{"type": "item.started", "item": {"id": "item_0", "type": "command_execution", "command": "echo HOME=$HOME", "aggregated_output": "", "exit_code": null, "status": "in_progress"}}
+{"type": "item.completed", "item": {"id": "item_0", "type": "command_execution", "command": "echo HOME=$HOME", "aggregated_output": "HOME=/home/user\n", "exit_code": 0, "status": "completed"}}
+{"type": "item.started", "item": {"id": "item_1", "type": "mcp_tool_call", "server": "probe", "tool": "probe_echo", "arguments": {"text": "x"}, "result": null, "error": null, "status": "in_progress"}}
+{"type": "item.completed", "item": {"id": "item_1", "type": "mcp_tool_call", "server": "probe", "tool": "probe_echo", "arguments": {"text": "x"}, "result": {"content": [{"type": "text", "text": "probe-echo:x"}], "structured_content": null}, "error": null, "status": "completed"}}
+{"type": "item.completed", "item": {"id": "item_2", "type": "agent_message", "text": "HOME=/home/user probe-echo:x LOOPER-OK."}}
+{"type": "turn.completed", "usage": {"input_tokens": 65419, "cache_creation_input_tokens": 0, "cached_input_tokens": 40960, "output_tokens": 222, "reasoning_output_tokens": 38}}
+{"type": "thread.started", "thread_id": "01a1c799-0000-7000-8000-000000000002"}
+{"type": "item.completed", "item": {"id": "item_0", "type": "error", "message": "TRAE CLI is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.\n  user: `features.unknown_key` is ignored."}}
+{"type": "turn.started"}
+{"type": "item.started", "item": {"id": "item_1", "type": "command_execution", "command": "git commit --allow-empty -q -m \"looper probe commit\"", "aggregated_output": "", "exit_code": null, "status": "in_progress"}}
+{"type": "item.completed", "item": {"id": "item_1", "type": "command_execution", "command": "git commit --allow-empty -q -m \"looper probe commit\"", "aggregated_output": "", "exit_code": 0, "status": "backgrounded"}}
+{"type": "item.completed", "item": {"id": "item_3", "type": "command_execution", "command": "git commit --allow-empty -q -m \"looper probe commit\"", "aggregated_output": "", "exit_code": 0, "status": "completed"}}
+{"type": "item.completed", "item": {"id": "item_4", "type": "agent_message", "text": "done"}}
+{"type": "turn.completed", "usage": {"input_tokens": 24402, "cache_creation_input_tokens": 0, "cached_input_tokens": 22528, "output_tokens": 223, "reasoning_output_tokens": 11}}

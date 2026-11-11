@@ -97,7 +97,7 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
         reported = (metadata['routed_model'] if runtime_type == 'cursor-agent' and metadata.get('routed_model') else
                     metadata['model_reported'] if 'model_reported' in metadata else
                     metadata.get('model_display') if runtime_type == 'cursor-agent' else
-                    None if runtime_type in ('codex', 'grok', 'pi', 'omp', 'dsh') else run.get('model'))
+                    None if runtime_type in ('coco', 'codex', 'grok', 'pi', 'omp', 'dsh') else run.get('model'))
         details = (f'{role}: Profile {_line(profile.get("name") or profile.get("id"))}; 运行时 '
                    f'{_line(runtime_type or runtime.get("id"))}; 请求模型 '
                    f'{_line((metadata.get("model_choice") or {}).get("model") or profile.get("model"))}; '

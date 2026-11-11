@@ -357,7 +357,7 @@ class ResolvedModel:
                 raise RegistryError(_ttadk_pairing_problem(runtime, self.provider.name, adapter))
             raise RegistryError("runtime does not support the provider's auth kind")
         try:
-            adapter.check_pairing(self.binding_provider(), self.model.name, effort)
+            adapter.check_pairing(self.binding_provider(), self.model.name, effort, executable=runtime.executable)
         except RuntimeUnsupported as exc:
             raise RegistryError(str(exc)) from None
 
@@ -717,7 +717,7 @@ def check_pairing(runtime: RuntimeSpec, provider: LegacyProviderSpec, model: str
         raise RegistryError(f"provider {provider.name!r} lists the models {', '.join(provider.models)}; "
                             f"{model!r} is not one of them")
     try:
-        adapter.check_pairing(provider, model, effort)
+        adapter.check_pairing(provider, model, effort, executable=runtime.executable)
     except RuntimeUnsupported as exc:
         raise RegistryError(str(exc)) from None
 
