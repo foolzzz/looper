@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.140] - 2026-11-11
+
+### Changed
+
+- **Gate notices carry the question; records stay readable.** ([#1247](https://github.com/foolzzz/looper/pull/1247))
+  - A user gate now posts its number, question (clipped to 500 characters) and the `/gate <number> <answer>` reply form into the web chat, and the Planner no longer reports a progress notice for an opened gate. Telegram and Lark keep posting the gate through the gate courier.
+  - TTADK failure text keeps its first 400 characters and its tail within 1000 characters. The Process record summary lists reviews newest first and points to the task page for the full record. Journal entries keep non-ASCII text readable. SUPERVISE activity lines drop the work directory prefix and keep both ends of long lines.
+  - The startup self-check reports a still-running TTADK check as pending, and refreshing no longer overwrites a finished pending check. Cursor's effort refusal says it takes no effort level.
+  - Model-visible: the Planner's journal text and SUPERVISE activity lines change as above.
+
 ## [2.14.139] - 2026-11-11
 
 ### Changed
