@@ -515,6 +515,7 @@ def test_verification_virtualenv_runs_private_checkout_code(tmp_path, monkeypatc
 
     assert run(developer, ["pytest", "-q", "-s", "-p", "no:cacheprovider", "test_probe.py"]).returncode == 0
     if editable.startswith("strict-"):
+        assert Path(importlib.util.cache_from_source(str(linked_package / "__init__.py"))).is_file()
         assert list((linked_package / "__pycache__").glob("*.pyc"))
     source = tmp_path / "task"
     _git(developer, "worktree", "add", "--detach", str(source))

@@ -221,7 +221,7 @@ class _Run:
 
 
 async def _git(cwd: str | Path, *args: str, identity: bool = False, check: bool = True,
-               env: Mapping[str, str] | None = None) -> _Run:
+               env: Mapping[str, str] | None = None, input: bytes | None = None) -> _Run:
     """Run one git command in ``cwd``: no hooks, no prompts, with the time limit; ``identity`` commits as Looper.
 
     Raises ``GitError`` when git is missing, times out or (with ``check``) fails.
@@ -232,13 +232,14 @@ async def _git(cwd: str | Path, *args: str, identity: bool = False, check: bool 
         command_env.update(_IDENTITY)
     try:
         process = await asyncio.create_subprocess_exec(
-            *_GIT, *args, cwd=str(cwd), env=command_env, stdin=asyncio.subprocess.DEVNULL,
+            *_GIT, *args, cwd=str(cwd), env=command_env,
+            stdin=asyncio.subprocess.PIPE if input is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError as exc:
         raise GitError(f"cannot run git in {prompt_name(cwd)}: {exc}") from None
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), GIT_TIMEOUT_SEC)
+        stdout, stderr = await asyncio.wait_for(process.communicate(input), GIT_TIMEOUT_SEC)
     except asyncio.TimeoutError:
         process.kill()
         await process.wait()
@@ -595,12 +596,29 @@ async def snapshot_review(repo: Repo, *, task_id: str, step_key: str) -> str:
         # contains tracked files. Select tracked and non-ignored files first.
         paths = await _git(repo.toplevel, "ls-files", "-z", "--cached", "--others", "--exclude-standard",
                            "--", repo.subdir or ".", env=env)
-        if paths.stdout:
+        # The real index also tracks new files explicitly added under ignored paths.
+        staged = await _git(repo.toplevel, "ls-files", "-z", "--stage", "--", repo.subdir or ".")
+        selected = set(paths.stdout.split(b"\0")) - {b""}
+        missing = []
+        for entry in staged.stdout.split(b"\0"):
+            if not entry:
+                continue
+            _, path = entry.split(b"\t", 1)
+            if path in selected or os.path.lexists(Path(repo.toplevel) / os.fsdecode(path)):
+                selected.add(path)
+            else:
+                # New staged files removed from disk cannot be added by pathspec.
+                # Retain their staged blobs and modes after capturing the worktree.
+                missing.append(entry)
+        if selected:
             pathspec = Path(directory) / "paths"
-            pathspec.write_bytes(paths.stdout)
+            pathspec.write_bytes(b"\0".join(sorted(selected)) + b"\0")
             # Force only this selected set so tracked files under ignored parents update too.
             await _git(repo.toplevel, "--literal-pathspecs", "add", "-A", "-f", "--pathspec-file-nul",
                        f"--pathspec-from-file={pathspec}", env=env)
+        if missing:
+            await _git(repo.toplevel, "update-index", "-z", "--index-info", env=env,
+                       input=b"\0".join(missing) + b"\0")
         tree = (await _git(repo.toplevel, "write-tree", env=env)).text
     if tree == (await _git(repo.toplevel, "rev-parse", f"{repo.head}^{{tree}}")).text:
         return repo.head

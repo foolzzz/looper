@@ -170,6 +170,43 @@ def test_shared_snapshot_preserves_the_workers_index_and_only_captures_the_task_
     assert git(task, "ls-tree", "-r", "--name-only", frozen).splitlines() == [".gitignore", "project/output.txt"]
 
 
+@pytest.mark.parametrize("subdir", ["", "cache/project"])
+@pytest.mark.parametrize("removed", [False, True])
+def test_shared_snapshot_includes_force_added_output_without_changing_the_index(workspace, subdir, removed):
+    task = Path(workspace.task_dir)
+    project = task / subdir
+    project.mkdir(parents=True, exist_ok=True)
+    output = project / "cache" / "output.txt"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("staged\n")
+    git(task, "add", "-f", "--", output.relative_to(task).as_posix())
+    if removed:
+        git(task, "update-index", "--chmod=+x", "--", output.relative_to(task).as_posix())
+        output.unlink()
+    else:
+        output.write_text("delivered\n")
+    (output.parent / "secret.txt").write_text("ignored local state\n")
+    (task / "cache" / "outside.txt").write_text("outside the task\n")
+    git(task, "add", "-f", "cache/outside.txt")
+    head = git(task, "rev-parse", "HEAD")
+    index = git(task, "ls-files", "--stage")
+    pending = git(task, "status", "--porcelain")
+    repo = asyncio.run(ws.inspect(str(project)))
+    assert isinstance(repo, ws.Repo)
+    frozen = asyncio.run(ws.snapshot_review(repo, task_id="task-1", step_key="s1"))
+    assert git(task, "rev-parse", "HEAD") == head
+    assert git(task, "ls-files", "--stage") == index
+    assert git(task, "status", "--porcelain") == pending
+    assert git(task, "show", f"{frozen}:{output.relative_to(task).as_posix()}") == (
+        "staged" if removed else "delivered")
+    if removed:
+        assert git(task, "ls-tree", frozen, "--", output.relative_to(task).as_posix()).startswith("100755 blob ")
+    expected = [".gitignore", output.relative_to(task).as_posix()]
+    if not subdir:
+        expected.append("cache/outside.txt")
+    assert git(task, "ls-tree", "-r", "--name-only", frozen).splitlines() == sorted(expected)
+
+
 @pytest.mark.parametrize("tracked", [False, True])
 def test_shared_snapshot_in_ignored_directory_excludes_local_state(workspace, tracked):
     task = Path(workspace.task_dir)
