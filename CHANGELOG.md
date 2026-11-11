@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.141] - 2026-11-11
+
+### Changed
+
+- **Adjudication: the Planner is told it may downgrade a finding and accept.** ([#1248](https://github.com/foolzzz/looper/pull/1248))
+  - With adjudication on, a decision turn after a review that failed only on downgradable blocking findings offers the adjudicated accept: downgrade the named findings to suggestions with a reason each, then accept. Accept without adjudication stays refused.
+  - The reply contract states the adjudication rules once, and adds that a failed review needs its adjudications in the same reply and that `final` is included when the decision completes the task.
+  - The `panel_adjudicate` prompt eval now blocks a correct delivery on an out-of-scope changelog rule and requires the adjudicated accept with a journaled reason, without a retry.
+  - Model-visible: the Planner's decision message and reply contract change as above.
+
 ## [2.14.140] - 2026-11-11
 
 ### Changed
