@@ -46,6 +46,52 @@ def held_reviews(envelope):
     return None if envelope.message_type == MessageType.VERIFY_REQUEST else WORK_OK
 
 
+@pytest.mark.parametrize("action", ["nudge", "kill"])
+def test_supervision_accepts_the_running_work_and_review_steps_it_lists(
+    planner_claude, agent_db, monkeypatch, action,
+):
+    from looper.agents.tiers import planner as planner_module
+    from tests.test_planner_agent import reply
+
+    accepted = []
+    parse_supervise = planner_module.parse_supervise
+
+    def parse(text, running):
+        accepted.append(running)
+        return parse_supervise(text, running)
+
+    monkeypatch.setattr(planner_module, "parse_supervise", parse)
+    configure(agent_db, monkeypatch, review_panel={"members": ["review_a"], "accept_when": "review_a"})
+    fields = {"text": "Report your progress"} if action == "nudge" else {"reason": "Review is stalled"}
+    supervision = reply({"reviews": [{"step": "s1/review_a", "action": action, **fields}]})
+    claude = planner_claude(plan(step("s1", review=True), step("s2")), decide("review"), supervision,
+                           decide("fail", reason="Review did not finish"))
+
+    def outcome(envelope):
+        return WORK_OK if envelope.message_type == MessageType.WORK_ITEM and envelope.payload["step_key"] == "s1" else None
+
+    async def scenario(h):
+        await h.start()
+        await h.until(lambda: len(h.reviews) == 1 and len(h.work_items) == 2)
+        await h.planner._supervise()
+        message = claude.turns()[2]["text"]
+        reports = message.split("Workers running now and what they have done lately:\n", 1)[1].split("\n\n", 1)[0]
+        listed = frozenset(line.split()[1] for line in reports.splitlines() if line.startswith("Step "))
+        assert listed == {"s2", "s1/review_a"}
+        assert accepted == [listed]
+        if action == "nudge":
+            assert len(claude.turns()) == 3  # no contract-repair turn
+            assert h.forwarded[0].target == h.reviews[0].target
+            assert not h.killed
+        else:
+            assert len(claude.turns()) == 4
+            assert "Step s1 (step 1) has its Reviewer's result" in claude.turns()[3]["text"]
+            assert h.planner._plan.steps[0].result["verify_passed"] is False
+            assert h.final().payload["status"] == "failed"
+
+    drive(claude, outcome, scenario)
+
+
 def test_required_reviews_release_accept_before_advisory_but_delivery_waits(
     planner_claude, agent_db, monkeypatch,
 ):
@@ -365,7 +411,7 @@ def test_panel_contract_is_opt_in_and_exposes_adjudication_only_when_enabled():
     assert "adjudications" in reply_contract(review_panel=True, adjudication=True)
     panel = reply_contract(workflow_roles=True, review_panel=True)
     assert 'fixed workflow work role' in panel and 'review_roles", fixed workflow' not in panel
-    assert hashlib.sha256(reply_contract().encode()).hexdigest() == 'b70ffeae8558158dbf5c765d6b8ffe9fe8ef425d7aede3a1e9ce6f5af5adb588'
+    assert hashlib.sha256(reply_contract().encode()).hexdigest() == '2f72cd02be65030f0d1635b2c276dc6debac28eac9d378040c3aa3d5ef6ddc42'
 
 
 def test_invalid_work_decision_cannot_bypass_panel(planner_claude, agent_db, monkeypatch):

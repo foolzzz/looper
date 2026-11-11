@@ -1476,6 +1476,7 @@ result. The message lists the decisions allowed now.
   "open_issues": "..."}}: what the task delivered, how to use it, the evidence
   that it works (commands run and what they showed), and what is left open
   ("none" when nothing).
+  Write final in the user's language; headings may stay as the protocol defines them.
 {gate_changes}
 [CHAT]: the task changed: the user added a supplement to it (every message
 the user sends you is one) or edited its requirement. Answer, and decide

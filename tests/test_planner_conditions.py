@@ -392,7 +392,7 @@ def test_default_planner_system_prompt_matches_the_released_bytes() -> None:
         TaskPlan("p", "g", "Build the project", ""), PlannerSettings("Plan carefully.", 60, 0, 0),
         EMPTY_KNOWLEDGE, Harness("Work carefully.", Layer.BUILTIN),
     )
-    assert prompt.sha256 == "9bc15086404f4efa8254e7b02da2bca0f7a334c9ebd2e83c17b1cfa3a0f90693"
+    assert prompt.sha256 == "9bda3e3a4ac7dd6455a3c527df7be9e10c8c0e8e71a5a40ff34000806c73e858"
 
 
 def test_replan_preserves_a_started_condition_and_replaces_a_pending_condition(planner_claude: Any, agent_db: Any) -> None:
