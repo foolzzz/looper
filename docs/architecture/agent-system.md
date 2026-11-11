@@ -3881,11 +3881,16 @@ acceptance and end into that conversation (`origin_thread`), for the default Man
 A task reports to the Manager that created it (`tasks.manager_id`; the
 dashboard's and a schedule's tasks belong to the default Manager). Its
 progress and end go to that Manager, which tells the chat the task came from.
-A task asked for in the web chat records the chat thread (`tasks.origin_thread`);
-its acceptance and its end are written into that thread and reach an open
-dashboard through the thread's session subscription. When a Manager is
-disabled, its queued and in-flight reports are handed to the default Manager
-instead of being dropped.
+A task asked for in a web chat with a known session records that session as
+`tasks.origin_thread`, including the default Manager's dashboard chat without
+an API client. Its acceptance, phase and user-gate status notices, and its end
+(including the workflow delivery summary) are saved as messages in that chat
+and reach an open dashboard through the thread's session subscription, even
+after the asking turn's reply stream has closed. A task created without a known
+chat session (for example through the CLI or a direct API call) records no
+`origin_thread` and keeps its existing channel behavior; it posts no web chat
+message. When a Manager is disabled, its queued and in-flight reports are handed
+to the default Manager instead of being dropped.
 
 ### Task templates
 

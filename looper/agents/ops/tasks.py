@@ -23,7 +23,7 @@ from ...db import steps as db_steps, tasks as db_tasks
 from ...db import managers as db_managers, user_gates as db_user_gates
 from .. import projects as project_ops
 from .. import task_templates, task_workspaces
-from ..managers_api import DEFAULT_MANAGER_ID, TaskPolicy
+from ..managers_api import TaskPolicy
 from ..task_templates import TaskTemplate, TemplateError
 from ..gate_service import origin_chat, post_message as post_gate_message
 from ..message import MessageEnvelope, MessageType, is_lark, planner_address
@@ -397,7 +397,7 @@ async def _create(call: Call) -> dict[str, Any]:
         if is_lark(turn.channel) and isinstance(context.get("message_id"), str) and context["message_id"]:
             route["reply_to"] = context["message_id"]
         row["origin_reply_route"] = route
-    if origin == "channel-web" and envelope is not None and (call.manager_id != DEFAULT_MANAGER_ID or turn.client_id):
+    if origin == "channel-web" and envelope is not None:
         thread = (envelope.payload.get("channel_context") or {}).get("session_id")
         row["origin_thread"] = thread if isinstance(thread, str) and thread else None
     if template is not None:
