@@ -649,6 +649,11 @@ class RuntimeAdapter(ABC):
         return {}
 
 
+def waits_without_turns(runtime: RuntimeAdapter) -> bool:
+    """Whether a run can stay idle between turns and wake on input or background work."""
+    return runtime.run_input and Capability.AUTONOMOUS_TURNS in runtime.capabilities
+
+
 def replace_refusal(adapter: RuntimeAdapter) -> str | None:
     """The shared API and dashboard reason a runtime cannot replace its default prompt."""
     if not adapter.can_replace_system_prompt:

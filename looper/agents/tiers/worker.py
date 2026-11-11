@@ -46,7 +46,7 @@ import subprocess
 import time
 import uuid
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum, StrEnum
@@ -69,7 +69,7 @@ from ..operator_notes import notes_note
 from ..project_execution import ProjectExecution
 from ..verification_writes import VerificationWrites
 from ..library import items_label, load_installed
-from ..runtimes import ADAPTERS, RunChannel, RuntimeAdapter, RuntimeUnsupported
+from ..runtimes import ADAPTERS, RunChannel, RuntimeAdapter, RuntimeUnsupported, waits_without_turns
 from ..runtimes.channel import DeliveryResult, RunHandle, RunStartError
 from ..runtimes.cursor_agent import cursor_failure, retry_event, retry_stderr, RETRY_SUMMARY
 from ..runtimes.api.tools import RoomTurnTools
@@ -85,7 +85,7 @@ from ..message import (
 from . import journal
 from ..drain import DrainState
 from ..system_prompt import (
-    WORK_CONTRACT,
+    work_contract,
     build_role_prompt,
     build_system_prompt,
     is_recommended,
@@ -313,6 +313,37 @@ def _git_head(work_dir: str | Path) -> str | None:
         return None
 
 
+WAITING_CHECK_SECONDS = (30, 1800)
+WAITING_FOR_MAX_CHARS = 300
+
+
+@dataclass(frozen=True)
+class WaitingReport:
+    waiting_for: str
+    check_after_seconds: int
+
+
+def waiting_report(result_event: Mapping[str, Any]) -> WaitingReport | str | None:
+    """Read a successful waiting report, its validation error, or None for another result."""
+    if result_event.get("is_error") or result_event.get("subtype") != "success":
+        return None
+    report = extract_report(str(result_event.get("result") or ""), "status")
+    if report is None or report.get("status") != "waiting":
+        return None
+    seconds = report.get("check_after_seconds")
+    if not isinstance(seconds, int) or isinstance(seconds, bool) \
+            or not WAITING_CHECK_SECONDS[0] <= seconds <= WAITING_CHECK_SECONDS[1]:
+        return "check_after_seconds must be an integer from 30 to 1800"
+    subject = report.get("waiting_for")
+    if not isinstance(subject, str) or not subject.strip() or len(subject) > WAITING_FOR_MAX_CHARS:
+        return "waiting_for must be a short text (at most 300 characters)"
+    return WaitingReport(subject, seconds)
+
+
+async def _waiting_sleep(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
 def judge_result(
     result_event: dict[str, Any] | None,
     *,
@@ -371,6 +402,8 @@ def judge_result(
     changed = report.get("changed_files", {})
     deleted = report.get("deleted_files", [])
     summary = str(report.get("summary") or "")
+    if status == "waiting":
+        return _work_failed(f"the Worker ended while waiting for: {str(report.get('waiting_for') or '')[:200]}")
     if status not in ("completed", "failed"):
         return _work_failed(f"Worker reported an unknown status {status!r}")
     if not isinstance(changed, dict) or not isinstance(deleted, list):
@@ -415,10 +448,11 @@ ADOPT_WINDOW_SECONDS = 300
 class _Reminders:
     """A running Claude's room reminders (``WorkerPool.remind``)."""
 
-    pending: str | None = None  # the one waiting for a tool call to run
+    pending: str | None = None  # the one waiting for a tool call or an idle wait
     uuids: set[str] = field(default_factory=set)  # the ones written, by the uuid Claude names in a result
     last_at: float = float("-inf")
     tools_running: int = 0  # its tool calls that have no result yet
+    waiting: bool = False
     sent: int = 0
 
 
@@ -1470,7 +1504,8 @@ class WorkerPool:
         """Tell a running Claude that the room has something for it: one line, written while one of its tool calls
         runs (Claude then folds it into the turn it is in, at the next tool result; written while it writes its final
         reply, it would start a turn of its own after the report), at most every ``REMINDER_INTERVAL_SEC``. A
-        reminder that cannot go now waits for the next tool call; the newest replaces it. Whether it went now."""
+        reminder that cannot go now waits for the next tool call or waiting report; the newest replaces it.
+        While a Worker waits between turns, reminders can start its next turn. Whether it went now."""
         state = self._reminders.get(worker_id)
         if state is None:
             return False
@@ -1480,7 +1515,7 @@ class WorkerPool:
     async def _flush_reminder(self, worker_id: str) -> bool:
         state = self._reminders.get(worker_id)
         channel = self._inputs.get(worker_id)
-        if state is None or state.pending is None or channel is None or not state.tools_running:
+        if state is None or state.pending is None or channel is None or (not state.tools_running and not state.waiting):
             return False
         if time.monotonic() - state.last_at < REMINDER_INTERVAL_SEC:
             return False
@@ -1921,7 +1956,7 @@ class WorkerPool:
                 step_id=payload.get("task_id") or None,
                 task=self._task_section(payload, work_dir, is_verify=is_verify),
                 contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
-                contract=review_contract(payload.get("severity") is True) if is_verify else WORK_CONTRACT,
+                contract=review_contract(payload.get("severity") is True) if is_verify else work_contract(runtime),
                 knowledge=knowledge,
                 room=room_text,
                 vault=vault_text,
@@ -1938,7 +1973,7 @@ class WorkerPool:
                 step_id=payload.get("task_id") or None,
                 task=self._task_section(payload, work_dir, is_verify=is_verify),
                 contract_name="REVIEW_CONTRACT" if is_verify else "WORK_CONTRACT",
-                contract=review_contract(payload.get("severity") is True) if is_verify else WORK_CONTRACT,
+                contract=review_contract(payload.get("severity") is True) if is_verify else work_contract(runtime),
                 knowledge=knowledge,
                 room=room_text,
                 vault=vault_text,
@@ -2247,6 +2282,13 @@ class WorkerPool:
 
         channel = handle.channel
         input_ended = False
+        can_wait = not is_verify and waits_without_turns(runtime) and channel is not None
+        waiting: WaitingReport | None = None
+        # Keep the interrupted wait until its turn reports, including a repair turn.
+        waiting_turn: WaitingReport | None = None
+        waiting_deadline = 0.0
+        repairs = 0
+        check_task: asyncio.Task | None = None
 
         def _end_input() -> None:
             # Without this Claude would wait on stdin for another user turn.
@@ -2255,6 +2297,46 @@ class WorkerPool:
             if not input_ended:
                 channel.end_input()
                 input_ended = True
+
+        async def _waiting_activity(summary: str, metadata: dict[str, Any]) -> None:
+            if parent_task_id:
+                try:
+                    await db_activity.insert_activity(task_id=parent_task_id, worker=worker_id, kind="phase",
+                                                      summary=summary, metadata=metadata)
+                except Exception:
+                    logger.debug("failed to insert waiting activity", exc_info=True)
+
+        async def _send_control(text: str) -> None:
+            try:
+                if await channel.send(text) is not DeliveryResult.REJECTED:
+                    return
+                logger.warning("worker %s rejected waiting input", worker_id)
+            except Exception:
+                logger.warning("worker %s waiting input failed", worker_id, exc_info=True)
+            _end_input()
+
+        async def _send_check() -> None:
+            if waiting is not None and not input_ended:
+                await _send_control(
+                    f"[Looper] {waiting.check_after_seconds} s have passed since you began waiting for: "
+                    f"{waiting.waiting_for}. Check on it, then go on, wait again with a waiting report, "
+                    "or end with your report.")
+
+        def _cancel_check() -> None:
+            if check_task is not None:
+                check_task.cancel()
+
+        def _arm_check() -> None:
+            nonlocal check_task
+            _cancel_check()
+            report = waiting
+
+            async def check() -> None:
+                await _waiting_sleep(max(0, waiting_deadline - time.monotonic()))
+                if waiting is report:
+                    await _send_check()
+
+            check_task = asyncio.create_task(check())
 
         result_event: dict[str, Any] | None = None
         finished: dict[str, Any] | None = None  # the last result Claude wrote (result_event, unless capped)
@@ -2266,6 +2348,7 @@ class WorkerPool:
 
         async def _read_stream() -> None:
             nonlocal result_event, finished, last_result, replay_events
+            nonlocal waiting, waiting_turn, waiting_deadline, repairs
             async for event in channel.events():
                 ctx.model_events += int(runtime.is_model_event(event))
                 replaying = isinstance(handle, KeptRun) and handle.replaying
@@ -2288,6 +2371,14 @@ class WorkerPool:
                     return
 
                 event_type = event.get("type", "")
+                if waiting is not None and (event_type == "assistant" or
+                        (event_type == "system" and event.get("subtype") == "init")):
+                    _cancel_check()
+                    waiting_turn, waiting = waiting, None
+                    if (reminders := self._reminders.get(worker_id)) is not None:
+                        reminders.waiting = False
+                    if not replaying:
+                        await _waiting_activity("Worker resumed while waiting", {"state": "resumed"})
 
                 if event_type == "system" and parent_task_id and not replaying:
                     runner = event.get("runner") or {}
@@ -2352,17 +2443,55 @@ class WorkerPool:
                     # one, each with a result of its own, also once stdin is closed: the run's last result is
                     # its outcome, unless its turn only answered room reminders (``answers_only_reminders``).
                     reminders = self._reminders.get(worker_id)
-                    if result_event is not None and reminders is not None \
-                            and answers_only_reminders(event, reminders.uuids):
+                    reminder_only = result_event is not None and reminders is not None \
+                        and answers_only_reminders(event, reminders.uuids)
+                    if reminder_only:
                         last_result = finished = event
                         logger.info("worker %s: a turn that only answered room reminders keeps the outcome "
                                     "before it", worker_id)
                     else:
                         result_event = finished = event
                         last_result = None
-                    _end_input()
+                    if input_ended:
+                        continue
+                    if reminder_only and (waiting is not None or waiting_turn is not None):
+                        waiting, waiting_turn = waiting or waiting_turn, None
+                        reminders.waiting = True
+                        if not replaying:
+                            _arm_check()
+                        continue
+                    found = waiting_report(event) if can_wait else None
+                    if isinstance(found, WaitingReport):
+                        waiting, waiting_turn, repairs = found, None, 0
+                        waiting_deadline = time.monotonic() + found.check_after_seconds
+                        if reminders is not None:
+                            reminders.waiting = True
+                            if not replaying:
+                                await self._flush_reminder(worker_id)
+                        if not replaying:
+                            _arm_check()
+                            await _waiting_activity(
+                                f"Worker waits for: {found.waiting_for} "
+                                f"(checks again in {found.check_after_seconds / 60:g} min)",
+                                {"state": "waiting", "check_after_seconds": found.check_after_seconds})
+                    else:
+                        missing = can_wait and (waiting is not None or waiting_turn is not None) \
+                            and not event.get("is_error") and event.get("subtype") == "success" \
+                            and extract_report(str(event.get("result") or ""), "status") is None
+                        if repairs == 0 and (isinstance(found, str) or missing):
+                            repairs = 1
+                            if not replaying:
+                                await _send_control(
+                                    f"[Looper] Your waiting report was not taken: {found}. End your message "
+                                    "with a valid waiting report or with your report." if isinstance(found, str) else
+                                    "[Looper] Your message ended without a JSON report while you were waiting. "
+                                    "End it with a waiting report to keep waiting, or with your report.")
+                        else:
+                            _cancel_check()
+                            _end_input()
 
         async def _read_output() -> None:
+            nonlocal result_event
             if start is ConsumeStart.NEW:
                 await _read_stream()
                 return
@@ -2373,6 +2502,15 @@ class WorkerPool:
                 if boundary.done():
                     logger.info("adopt run=%s replay_events=%d replay_ms=%d", worker_id, replay_events,
                                 int((time.monotonic() - replay_started) * 1000))
+                    if waiting is not None:
+                        _cancel_check()
+                        if (capped := recorder.cap_stop) is not None:
+                            result_event = capped.result_event
+                            await recorder.record(result_event)
+                            _end_input()
+                            await _end_run()
+                            return
+                        await _send_check()
                 await reading
             finally:
                 reading.cancel()
@@ -2480,6 +2618,8 @@ class WorkerPool:
                 else str(exc) if isinstance(exc, KeeperLost)
                 else f"worker stopped reading Claude: {type(exc).__name__}"
             )
+            if waiting is not None:
+                error += f"; the Worker ended while waiting for: {waiting.waiting_for[:200]}"
             await recorder.finish(output_text=None, result_event=result_event, error=error,
                                   outcome=RunOutcome.RUN_FAILED.value, status=ended_by(exc))
             if timed_out:
@@ -2488,6 +2628,9 @@ class WorkerPool:
                 raise asyncio.TimeoutError(error) from exc
             raise
         finally:
+            _cancel_check()
+            if check_task is not None:
+                await asyncio.gather(check_task, return_exceptions=True)
             self._inputs.pop(worker_id, None)
             if not waited or ctx.verification is not None:
                 # Successful CLIs can leave children behind. End the whole run

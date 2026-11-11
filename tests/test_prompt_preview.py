@@ -66,7 +66,7 @@ def _dependencies(monkeypatch, runtime="claude-code", mode="append", role="worke
     *(("claude-code", "replace", role) for role in ("planner", "worker", "reviewer", "manager")),
 ])
 def test_preview_uses_profile_harness_contract_and_runtime_blocks(monkeypatch, runtime, mode, role):
-    from looper.agents.system_prompt import sha256_text
+    from looper.agents.system_prompt import WAITING_CONTRACT, sha256_text
     module, profile, loader = _dependencies(monkeypatch, runtime, mode, role)
     result = asyncio.run(module.preview(profile.id, role))
     assert loader.await_args.args == (None,)
@@ -83,6 +83,8 @@ def test_preview_uses_profile_harness_contract_and_runtime_blocks(monkeypatch, r
         "manager": "TOOLS_CONTRACT"}[role]
     assert "the Task section is filled in at launch" in result["notes"]
     blocks = result["blocks"]
+    assert any(WAITING_CONTRACT in (b["text"] or "") for b in blocks) == (
+        role == "worker" and runtime == "claude-code")
     assert any(
         b["owner"] == "looper" and b["text"].startswith("My profile identity\n\n")
         and "Shared harness" in b["text"] for b in blocks

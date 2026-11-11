@@ -10,7 +10,7 @@ from .agent_settings import (
 )
 from .knowledge import AgentKnowledge, SourceKind, StoredSet, _entry, clipped_index
 from .profile_registry import AgentProfile, ResolvedAgentProfile, RegistryError, RegistryNotFound
-from .system_prompt import WORK_CONTRACT, REVIEW_CONTRACT, build_system_prompt, is_recommended
+from .system_prompt import work_contract, REVIEW_CONTRACT, build_system_prompt, is_recommended
 
 
 async def _role_prompt(role: AgentType) -> tuple[str, bool]:
@@ -75,6 +75,7 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
         notes.append("Injected project instruction files require the task's working directory at launch.")
     else:
         notes.append("Injected project instruction files use the project directory; a task may use another directory.")
+    launch = Launch(settings, knowledge=knowledge, role=agent)
     if agent is AgentType.MANAGER:
         from .tiers.manager import TOOLS_CONTRACT, root_adjusted
 
@@ -89,13 +90,12 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
     elif agent is AgentType.REVIEWER:
         contract_name, contract = "REVIEW_CONTRACT", REVIEW_CONTRACT
     else:
-        contract_name, contract = "WORK_CONTRACT", WORK_CONTRACT
+        contract_name, contract = "WORK_CONTRACT", work_contract(launch.runtime)
     system_prompt = build_system_prompt(
         harness=settings.harness, custom_prompt=profile.custom_prompt,
         role_id=role, role=role_text, recommended=recommended,
         contract_name=contract_name, contract=contract, project=project, knowledge=knowledge,
     )
-    launch = Launch(settings, knowledge=knowledge, role=agent)
     _, mode_source = system_prompt_mode_choice(agent, layers)
     return {
         "profile": {"id": profile.id, "name": profile.name}, "role": role,
