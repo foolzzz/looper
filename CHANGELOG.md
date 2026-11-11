@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.146] - 2026-11-11
+
+### Changed
+
+- **Run errors: key-shaped values are redacted everywhere, a Codex reviewer's refusal reaches its run error, coco falls back like Codex.** ([#1259](https://github.com/foolzzz/looper/pull/1259))
+  - Stderr that goes into run errors and fallback reasons passes through registered-secret redaction and key-pattern masking (`sk-`, `api_key=`, `Bearer`, `Authorization`) on every launcher, and ANSI escape codes are stripped (new `strip_ansi`, applied by `safe_error`).
+  - A reviewer run whose result is an error now records the outcome summary as its run error; a review that says "not passed" is still a successful run.
+  - The Codex refusal rules are chosen by adapter family (`CodexRuntime`) instead of the type string, so a coco model refusal falls back to the next profile.
+
 ## [2.14.145] - 2026-11-11
 
 ### Changed
