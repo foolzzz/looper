@@ -120,7 +120,7 @@ def _run(argv: Sequence[str], *, timeout: float = _COMMAND_TIMEOUT_SECONDS,
         raise ServiceError(f"`{' '.join(argv)}` did not finish in {timeout:.0f} s") from exc
 
 
-def _get_status(port: int, token: str | None, address: str = "127.0.0.1") -> dict | None:
+def _get_status(port: int, token: str | None, address: str = "127.0.0.1", *, timeout: float = 3) -> dict | None:
     """``POST /api/v1/system/status``, bypassing any proxy; None when nothing answers with JSON."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     authority = f"[{address}]" if ":" in address else address
@@ -128,7 +128,7 @@ def _get_status(port: int, token: str | None, address: str = "127.0.0.1") -> dic
                                     data=b"{}", headers={"Content-Type": "application/json",
                                                            **({"Authorization": f"Bearer {token}"} if token else {})})
     try:
-        with opener.open(request, timeout=3) as response:
+        with opener.open(request, timeout=timeout) as response:
             payload = json.loads(response.read())
     except urllib.error.HTTPError as exc:
         return {"status": "unauthorized"} if exc.code == 401 else None
@@ -226,7 +226,7 @@ class Host:
     package_root: Path = Path(__file__).resolve().parents[2]
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
-    get_status: Callable[[int, str | None, str], dict | None] = _get_status
+    get_status: Callable[..., dict | None] = _get_status
     port_in_use: Callable[[int, str], bool] = _port_in_use
     get_components: Callable[[int, str | None], dict | None] = _get_components
     system_operation: Callable[[int, str, str, dict], dict] = _system_operation
@@ -1607,7 +1607,10 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         if not token:
             raise ServiceError("the service operator token is missing")
         running = components.Manifest.from_dict(host.get_components(port, token))
-        status = host.get_status(port, token) or {}
+        status = host.get_status(port, token, timeout=15)
+        if status is None:
+            raise ServiceError("cannot read the running service's status (keeper mode unknown); "
+                               "nothing was drained, run looper service upgrade again")
         keeper_on = (status.get("keepers") or {}).get("mode") == "on"
         preserves = not isinstance(mgr, Systemd) or mgr.kill_mode_ok()
         keepers = scan_keepers(root)
