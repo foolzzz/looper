@@ -18,6 +18,19 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.126] - 2026-11-10
+
+### Added
+
+- **A `coco login` provider.** ([#1208](https://github.com/foolzzz/looper/pull/1208))
+  - The built-in provider `coco login` (`prov-coco-login`, added by an additive migration) links the operator's coco login on the server's machine into run homes without reading or copying it; probes use `coco login status` and `coco models --json` in a temporary home. No runtime uses it yet.
+  - `looper doctor` and system status gain a `coco_login` check (OK "not used" without a coco Agent Profile); a forked link is repaired, recorded and cleared like Codex's and Grok's.
+
+### Fixed
+
+- **Stored `on: completed` dependencies wait for acceptance in worktree projects.** ([#1204](https://github.com/foolzzz/looper/pull/1204), issue #1174)
+  - With worktree step workspaces, readiness treats a saved `on: completed` leaf as `on: verified` when dispatching and in the task and pipeline views; steps with panel reviews are exempt. Projects with the switch off are unchanged.
+
 ## [2.14.125] - 2026-11-10
 
 ### Fixed
