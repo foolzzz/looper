@@ -668,10 +668,21 @@ answer to an edit on the task page goes.
   plus `--max-turns N` when the config sets `max_turns` above 0. A Worker
   reads the `worker` row and a Reviewer the `reviewer` row, for every run. The
   first user turn goes on stdin; stdin stays open so the Planner can add user
-  turns mid-run, and closes when the first result arrives. Background work the
-  run started that is still going then (an agent team's teammates,
-  [below](#runtimes-llm-providers-and-agent-profiles)) brings turns of Claude's
-  own, each with a result, before Claude exits: the Worker reads the output to
+  turns mid-run. A Worker runtime with run input and autonomous turns (Claude
+  Code) can end a turn with a typed `waiting` report: `waiting_for` names what
+  it awaits (1–300 characters), and `check_after_seconds` is an integer from
+  30 to 1800. Stdin stays open, with no model requests while idle. The next
+  turn starts when its background command, agent or Monitor reports, a room
+  reminder or Planner/user message arrives, or Looper sends a check when the
+  timer expires. Room reminders can be sent while waiting without a running
+  tool call. On restart, an adopted waiting run gets an immediate check.
+  Looper prefixes check and repair messages with `[Looper]`; an invalid
+  waiting report or a missing report after waking gets one repair turn, and
+  a second invalid turn closes input. A final report closes input, as does
+  the first result for other runtimes and Reviewers. Waiting never extends
+  the run timeout or budget; a run ending while waiting fails with its wait
+  reason. Background work still going after input closes can bring turns of
+  Claude's own, each with a result: the Worker reads the output to
   its end, and the run's last result is its outcome, its report and its cost
   ("Worker finished" goes to the task's activity once, from it)
 - The step is the system prompt; only other agents' output is the user turn:
@@ -4556,6 +4567,8 @@ before.
   newer message, or 10 minutes later at the next event. A `[DECISION]` on a
   step, and each running step in a `[SUPERVISE]`, carry what the step's seats
   did in the room (sent, received, interface posts, unanswered questions).
+  A `[SUPERVISE]` also shows each running Worker's newest six activity rows,
+  oldest first, with their kind and clipped summary.
   The reply contract and the tools' guide name `[ROOM]` and the room only
   where it is on (`reply_contract(..., room=True)`).
 - **Consults** (`looper/agents/consult.py`, `room_consults`). A `question`

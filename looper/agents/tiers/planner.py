@@ -4626,14 +4626,14 @@ class PlannerAgent:
         """What step ``step``'s Worker has done lately, for a SUPERVISE turn."""
         lines = [f"Step {step.label} ({step.worker_id}): {_clip(step.instruction, 200)}"]
         try:
-            rows = await db_activity.list_activity(self._task_id, since_seq=0, limit=400)
+            rows = (await db_activity.list_worker_activity(self._task_id, step.worker_id, limit=6)
+                    if step.worker_id else [])
         except Exception:
             lines.append("  - (recent activity is unavailable)")
             return lines
-        recent = [r for r in rows if r.get("worker") == step.worker_id][-6:]
-        if not recent:
+        if not rows:
             lines.append("  - (no activity yet)")
-        for row in recent:
+        for row in rows:
             lines.append(f"  - [{row.get('kind')}] {_clip(row.get('summary'), 160)}")
         lines += [f"  - {line}" for line in await self._room_lines(step)]
         return lines

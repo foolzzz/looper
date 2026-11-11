@@ -4578,6 +4578,11 @@ export async function fetchWorkflows(): Promise<Workflow[]> {
   if ("status" in result) throw new Error(result.impact);
   return result.workflows;
 }
+export async function previewWorkflow(key: string, project_id: string | null, profiles: Partial<Record<TaskRole, string>>): Promise<string[]> {
+  const result = await callV1<{ lines: string[] }>("/api/v1/workflows/preview", { key, project_id, profiles });
+  if ("status" in result) throw new Error(result.impact);
+  return result.lines;
+}
 export async function putWorkflow(definition: unknown): Promise<void> {
   const result = await callV1("/api/v1/workflows/put", definition);
   if (result && typeof result === "object" && "impact" in result) throw new Error(String(result.impact));

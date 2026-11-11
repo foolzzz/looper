@@ -65,6 +65,7 @@ from .reported_files import prompt_name
 from .agent_settings import WORKING_STYLE, Boundaries, Harness, Layer
 from .claude_cli import ISOLATION_ID
 from .knowledge import AgentKnowledge
+from .runtimes import RuntimeAdapter, waits_without_turns
 from .task_roles import TaskRole
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,28 @@ after it:
 Give paths relative to the working directory. The report is checked against
 the files on disk: a changed file that does not exist, or a deleted file that
 still does, fails the step."""
+
+WAITING_CONTRACT = """\
+## Waiting for something that takes a while
+When you have to wait for something that takes minutes (a command or a
+Monitor you started in the background, a job elsewhere), do not keep
+calling looper_room_inbox with wait_seconds to pass the time: every call
+costs a model request. End your message with a waiting report instead,
+and nothing after it:
+{"status": "waiting", "waiting_for": "...", "check_after_seconds": 600}
+- waiting_for: what you wait for, in a sentence (at most 300 characters).
+- check_after_seconds: 30 to 1800; when to look again if nothing reports.
+Your run stays open and costs nothing while it waits. Your next turn
+starts when a background command or Monitor of yours reports, when a
+message reaches you (the room, the Planner, the user), or when
+check_after_seconds pass, whichever comes first. Then continue, wait
+again, or end with your report. Do not wait while there is work you can
+do meanwhile."""
+
+
+def work_contract(runtime: RuntimeAdapter) -> str:
+    return WORK_CONTRACT + "\n\n" + WAITING_CONTRACT if waits_without_turns(runtime) else WORK_CONTRACT
+
 
 # A Reviewer's verdict contract: the shape the verify path of ``worker.judge_result`` reads.
 REVIEW_CONTRACT = """\

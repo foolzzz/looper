@@ -32,7 +32,7 @@ import pytest
 from evals.prompt_regression.runner import fresh_database, running_server
 from looper.agents.agent_settings import HARNESS_BOUNDARIES, WORKING_STYLE
 from looper.agents.ops.planner import ROLES_GUIDE
-from looper.agents.system_prompt import BOUNDARIES_LEAD, REVIEW_CONTRACT, WORK_CONTRACT
+from looper.agents.system_prompt import BOUNDARIES_LEAD, REVIEW_CONTRACT, WAITING_CONTRACT, WORK_CONTRACT
 from tests.db_support import DSN
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -314,7 +314,8 @@ def test_every_role_run_ends_with_the_boundaries_and_a_built_in_run_is_as_before
     prompts = {(r["kind"], r["step"], r["who"]): r["prompt"] for r in _log(ran["state"], "runs.jsonl", "roles")}
     tester = [r["prompt"] for r in _log(ran["state"], "runs.jsonl", "roles") if r["who"] == "tester"]
     assert TESTER in tester[0] and TESTER_V2 in tester[1]  # the retry ran the version current when it started
-    for prompt, contract in ((tester[1], WORK_CONTRACT), (prompts[("review", "a", "security")], REVIEW_CONTRACT)):
+    for prompt, contract in ((tester[1], f"{WORK_CONTRACT}\n\n{WAITING_CONTRACT}"),
+                             (prompts[("review", "a", "security")], REVIEW_CONTRACT)):
         assert prompt.count("## Boundaries") == 1
         assert prompt.index("## Task") < prompt.index(boundaries) < prompt.index(contract)
         assert prompt.endswith(contract)

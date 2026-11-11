@@ -2,12 +2,12 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { WorkflowsSection } from "@/components/workflows";
-import { deleteWorkflow, fetchWorkflows, putWorkflow, type Workflow } from "@/lib/api";
+import { WorkflowField, WorkflowsSection } from "@/components/workflows";
+import { deleteWorkflow, fetchWorkflows, previewWorkflow, putWorkflow, type Workflow } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
-  fetchWorkflows: vi.fn(), putWorkflow: vi.fn(), deleteWorkflow: vi.fn(),
+  fetchWorkflows: vi.fn(), previewWorkflow: vi.fn(), putWorkflow: vi.fn(), deleteWorkflow: vi.fn(),
 }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let container: HTMLDivElement, root: Root;
@@ -42,4 +42,23 @@ it("requires a second click to delete and preserves the server confirmation", as
   await click("Delete workflow");
   expect(deleteWorkflow).toHaveBeenLastCalledWith("dev", pending);
   expect(fetchWorkflows).toHaveBeenCalledTimes(2);
+});
+it("discards a stale task preview and shows a preview failure without default role claims", async () => {
+  let complete!: (lines: string[]) => void;
+  vi.mocked(previewWorkflow).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }))
+    .mockRejectedValueOnce(new Error("Profile unavailable"));
+  const rows = [{ key: "dev", name: "Development", profiles: { worker: "fixed" } },
+    { key: "check", name: "Check", profiles: {} }] as Workflow[];
+  const render = (value: string) => root.render(<WorkflowField rows={rows} value={value} onChange={() => {}}
+    preview={{ projectId: "demo", profiles: { worker: "other", planner: "chosen", reviewer: "" } }} />);
+  await act(async () => render("dev"));
+  expect(previewWorkflow).toHaveBeenLastCalledWith("dev", "demo", { planner: "chosen" });
+  await act(async () => render("check"));
+  expect(previewWorkflow).toHaveBeenLastCalledWith("check", "demo", { worker: "other", planner: "chosen" });
+  await act(async () => complete(["Stale configuration"]));
+  expect(container.textContent).not.toContain("Stale configuration");
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe("Profile unavailable");
+  expect(container.textContent).not.toContain("default worker");
+  await act(async () => render("none"));
+  expect(container.querySelector('[role="alert"]')).toBeNull();
 });

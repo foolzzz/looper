@@ -1588,22 +1588,35 @@ async def configuration_block(
     lines.append(f"- 目录：{work_dir}")
     if workspace is not None:
         lines += _workspace_lines(task_id, workspace)
-    limits: list[int] = []
-    try:
-        layers = index_layers(await db_layers.list_layers(project_id, task_id=task_id), project_id)
-    except Exception as exc:
-        logger.warning("could not read the agent settings of project %s", project_id, exc_info=True)
-        lines.append(f"- Agent 设置：暂时读不到（{type(exc).__name__}），可以在项目的 Settings 页查看")
-    else:
-        lines += [_role_line(role, resolve(role, layers, project_id)) for role in TASK_ROLES]
-        limits = [resolve_task_concurrency(role, layers).value for role in TASK_LIMIT_ROLES]
+    if workflow:
+        # Keep the workflow card short without dropping workspace warnings or any role.
+        directory = next(i for i, line in enumerate(lines) if line.startswith("- 目录："))
+        lines = [lines[0], "- " + "；".join(line.removeprefix("- ") for line in lines[1:directory]),
+                 *lines[directory:]]
+        if workspace is not None:
+            lines[2:4] = [lines[2] + "；" + lines[3].removeprefix("- ")]
     # Runtime reads the task's own cap ahead of the project's cap, then overlays its workflow.
     execution_row = dict(project)
     if workflow and workflow.get("budget_usd") is not None:
         execution_row["task_budget_usd"] = workflow["budget_usd"]
     execution = ProjectExecution.from_row(execution_row).overlaid(workflow)
-    lines.append("- 评审：每一步都要 Reviewer 评审通过" if execution.review_policy is ReviewPolicy.ALL
-                 else "- 评审：由 Planner 决定哪些步骤要 Reviewer 评审")
+    limits: list[int] = []
+    try:
+        layers = index_layers(await db_layers.list_layers(project_id, task_id=task_id), project_id)
+        settings = {role: resolve(role, layers, project_id) for role in TASK_ROLES}
+        if workflow:
+            from .workflows import configuration_lines
+            lines += await configuration_lines(workflow, settings, review_all=execution.review_all)
+        else:
+            lines += [_role_line(role, settings[role]) for role in TASK_ROLES]
+        limits = [resolve_task_concurrency(role, layers).value for role in TASK_LIMIT_ROLES]
+    except Exception as exc:
+        logger.warning("could not read the agent settings of project %s", project_id, exc_info=True)
+        lines.append(f"- Agent 设置：暂时读不到（{type(exc).__name__}），可以在项目的 Settings 页查看")
+    if not workflow:
+        lines.append("- 评审：每一步都要 Reviewer 评审通过" if execution.review_policy is ReviewPolicy.ALL
+                     else "- 评审：由 Planner 决定哪些步骤要 Reviewer 评审")
+    controls_start = len(lines)
     if execution.task_budget_usd is None:
         lines.append("- 每个任务的花费上限：不限")
     else:
@@ -1620,4 +1633,8 @@ async def configuration_block(
     }[execution.distill_lessons])
     if limits:
         lines.append(f"- 并发：这个任务同时最多运行 {limits[0]} 个 Worker、{limits[1]} 个 Reviewer")
+    if workflow:
+        lines[controls_start - 1:] = [lines[controls_start - 1] + "；" + "；".join(
+            line.removeprefix("- ") for line in lines[controls_start:])]
+        return "\n".join([*lines, "", START_QUESTION])
     return "\n".join([*lines, "", START_QUESTION])

@@ -3,11 +3,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TasksPage } from "@/pages/tasks";
-import { fetchTasks, fetchWorkflows, fetchProjectsList, type Workflow, type Project, type TaskInfo, type TasksPage as TaskPage } from "@/lib/api";
+import { fetchTasks, fetchWorkflows, previewWorkflow, fetchProjectsList, type Workflow, type Project, type TaskInfo, type TasksPage as TaskPage } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
-  fetchWorkflows: vi.fn(async () => []), fetchTasks: vi.fn(), fetchProjectsList: vi.fn(), fetchManagers: vi.fn(async () => []),
+  fetchWorkflows: vi.fn(async () => []), previewWorkflow: vi.fn(), fetchTasks: vi.fn(), fetchProjectsList: vi.fn(), fetchManagers: vi.fn(async () => []),
 }));
 vi.mock("@/components/agent-profiles", () => ({ AgentProfileSelect: ({ id, value, disabled }: { id: string; value: string; disabled?: boolean }) => <select id={id} value={value} disabled={disabled} onChange={() => {}}><option value={value}>{value}</option></select> }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -37,6 +37,9 @@ describe("task list polling and pagination", () => {
 
   beforeEach(() => {
     vi.mocked(fetchWorkflows).mockResolvedValue([]);
+    vi.mocked(previewWorkflow).mockResolvedValue(["- dev：Development（codex/model）；回落至 Backup（claude-code/sonnet）",
+      "- 评审面板：必需席位：review_a、review_b；建议席位：suggest；验收：全部通过",
+      "- verify_staging：Verification（codex/model）；验证：只读，最多 2 轮"]);
     vi.useFakeTimers();
     requests = [];
     vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
@@ -83,8 +86,10 @@ describe("task list polling and pagination", () => {
     const select = container.querySelector<HTMLSelectElement>("#workflow-choice");
     expect(select?.value ?? null).toBe(expected);
     if (expected === "dev") {
-      expect(container.textContent).toContain("all (review_a passes, review_b passes)");
-      expect(container.textContent).toContain("verify_staging (2 rounds)");
+      expect(previewWorkflow).toHaveBeenCalledWith("dev", "demo", {});
+      expect(container.textContent).toContain("Development（codex/model）；回落至 Backup（claude-code/sonnet）");
+      expect(container.textContent).toContain("必需席位：review_a、review_b；建议席位：suggest；验收：全部通过");
+      expect(container.textContent).toContain("验证：只读，最多 2 轮");
       const fixed = container.querySelector<HTMLSelectElement>("#new-task-profile-worker")!;
       expect(fixed.disabled).toBe(true);
       expect(fixed.value).toBe("fixed");

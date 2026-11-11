@@ -16,15 +16,25 @@ from looper.agents.ops.service import ManagerOps, Platform
 from looper.agents.ops.tasks import START_QUESTION
 from looper.agents.projects import HTTP_409, RequestError
 from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
-from looper.db import manager_actions, projects, tasks
+from looper.db import manager_actions, projects, tasks, workflows
 
 
 @pytest.mark.usefixtures("current_turn")
 @pytest.mark.parametrize("start", ["same-task", "none", "failed", "another-task"])
+@pytest.mark.parametrize("workflow", ["none", "named", "project-default"])
 def test_created_task_start_question_in_manager_reply(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_db: Any, start: str,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_db: Any, start: str, workflow: str,
 ) -> None:
     project = {"id": "project-calc", "name": "calc", "work_dir": str(tmp_path)}
+    workflow_args = {}
+    if workflow != "none":
+        preset = {"key": "reviewed", "name": "Reviewed", "description": "", "definition": {}}
+        monkeypatch.setattr(workflows, "list_workflows", AsyncMock(return_value=[preset]))
+        monkeypatch.setattr(workflows, "get", AsyncMock(return_value=preset))
+        if workflow == "named":
+            workflow_args = {"workflow": "reviewed"}
+        else:
+            project["default_workflow"] = "reviewed"
     monkeypatch.setattr(projects, "find_project_by_name", AsyncMock(return_value=project))
     monkeypatch.setattr(projects, "get_project", AsyncMock(return_value=project))
     monkeypatch.setattr(manager_actions, "record", AsyncMock(return_value=1))
@@ -45,12 +55,12 @@ def test_created_task_start_question_in_manager_reply(
 
         async def model_turn(token: Any, prepared: Any) -> str:
             created = await ops.call("looper_task_create", {
-                "title": "计算器", "requirement": "build a calculator", "project": "calc"})
+                "title": "计算器", "requirement": "build a calculator", "project": "calc", **workflow_args})
             assert created["status"] == "ok", created
             if start != "none":
                 if start == "another-task":
                     created = await ops.call("looper_task_create", {
-                        "title": "另一个任务", "requirement": "another task", "project": "calc"})
+                        "title": "另一个任务", "requirement": "another task", "project": "calc", **workflow_args})
                     assert created["status"] == "ok", created
                 started = await ops.call("looper_task_control", {
                     "task_id": created["result"]["task_id"], "action": "start"})
@@ -81,7 +91,9 @@ def test_created_task_start_question_in_manager_reply(
 
     reply = asyncio.run(asyncio.wait_for(run(), timeout=10))
     assert "- 任务：计算器（task-" in reply
-    assert "- 项目：calc（已有）" in reply
+    assert ("- 项目：calc（已有）" if workflow == "none" else "；项目：calc（已有）") in reply
+    if workflow != "none":
+        assert "；工作流：Reviewed（reviewed）" in reply
     assert f"- 目录：{tmp_path}" in reply and "- Planner：" in reply
     assert reply.count(START_QUESTION) == (0 if start == "same-task" else 1)
     assert ("Ready — not started" in reply) is (start != "same-task")

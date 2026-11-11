@@ -18,6 +18,32 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.137] - 2026-11-11
+
+### Changed
+
+- **Workers wait without spending, with the waiting report.** ([#1236](https://github.com/foolzzz/looper/pull/1236))
+  - On a runtime that takes run input and runs turns of its own after background work (Claude Code), a Worker turn that ends with a valid waiting report (`waiting_for`, `check_after_seconds` 30 to 1800) no longer ends the run. Stdin stays open with no model requests while idle; the next turn starts on a background report, a room, Planner or user message, or a `[Looper]` check when the timer expires. The run ends on a final report, a second invalid turn, the run timeout, a budget cap or a kill.
+  - Looper writes `[Looper]` check and repair messages into such runs, and room reminders are written while a Worker waits. A run that ends while waiting is judged failed: "the Worker ended while waiting for: …". `room_wait_max_seconds`, the inbox tool and the other runtimes do not change.
+  - Model-visible: the Claude Code work contract gains a waiting section, and the Worker receives the check, repair and reminder messages.
+
+## [2.14.136] - 2026-11-11
+
+### Changed
+
+- **Task confirmation shows a workflow task's own roles, review panel and verification.** ([#1237](https://github.com/foolzzz/looper/pull/1237))
+  - The confirmation of a task that runs with a workflow (Manager and dashboard) lists the workflow's roles with their profiles and fallbacks, the review panel rule and the read-only verification, instead of the project default Worker and Reviewer lines. Tasks without a workflow keep today's confirmation.
+  - New read-only v1 operation `workflows/preview` and a dashboard preview under the workflow field of the new-task form, which show the same lines before the task is created.
+  - Model-visible: the confirmation text the Manager shows for a workflow task changes, and the v1 workflows operation list gains `preview`.
+
+## [2.14.135] - 2026-11-11
+
+### Changed
+
+- **SUPERVISE reads each running Worker's newest activity.** ([#1234](https://github.com/foolzzz/looper/pull/1234))
+  - A SUPERVISE turn's report on a running Worker used to filter the task's oldest 400 activity rows, so on a task with more than 400 rows a later Worker showed "(no activity yet)". It now reads that Worker's six newest rows (`list_worker_activity`), oldest first, summary only.
+  - Model-visible: the SUPERVISE message content changes, and the Planner's nudge and kill decisions may change with it. Nothing else in the message, its cadence or its reply contract changes.
+
 ## [2.14.134] - 2026-11-10
 
 ### Changed
