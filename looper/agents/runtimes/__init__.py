@@ -333,6 +333,10 @@ class ResidentSession(Protocol):
 class RuntimeUnsupported(ValueError):
     """The runtime cannot do what was asked of it (yet)."""
 
+    def __init__(self, message: str, *, field: str | None = None) -> None:
+        super().__init__(message)
+        self.field = field
+
 
 @dataclass(frozen=True)
 class PromptBlock:

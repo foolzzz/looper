@@ -50,7 +50,9 @@ async def answered(request: Awaitable[T]) -> T:
         raise OpError(ErrorCode.NOT_FOUND, str(exc)) from None
     except (profile_registry.RegistryConflict, catalog.CatalogConflict) as exc:
         raise OpError(ErrorCode.CONFLICT, str(exc)) from None
-    except (profile_registry.RegistryError, catalog.CatalogError, SettingsError) as exc:
+    except profile_registry.RegistryError as exc:
+        raise OpError(ErrorCode.INVALID, str(exc), field=exc.field) from None
+    except (catalog.CatalogError, SettingsError) as exc:
         raise OpError(ErrorCode.INVALID, str(exc)) from None
 
 

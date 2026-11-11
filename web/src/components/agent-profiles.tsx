@@ -34,6 +34,7 @@ import { LOGIN_HELP, PLANNED_RUNTIMES, RUNTIME_TYPES, loginUsable, roleLabel } f
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
 import { useSettingsTarget } from "@/lib/settings-target";
 import { useAction } from "@/lib/use-action";
+import { V1Error } from "@/lib/v1";
 import { profileLabel, useRegistry } from "@/lib/use-registry";
 import { useStartupChecks } from "@/lib/use-startup-checks";
 
@@ -167,7 +168,6 @@ export function AgentProfileForm({
   const action = useAction();
   const [runtimeNote, setRuntimeNote] = useState("");
   const [modelError, setModelError] = useState("");
-  const modelProblem = modelError || action.error;
   const [warnings, setWarnings] = useState<string[]>([]);
   const [saved, setSaved] = useState<AgentProfile | null>(null);
   const set = (change: Partial<typeof draft>) => {
@@ -245,7 +245,12 @@ export function AgentProfileForm({
                    agent_teams: teams && draft.agent_teams };
     let answer: { profile: AgentProfile; warnings: string[] } | null = null;
     const done = await action.run(async () => {
-      answer = await (profile ? updateAgentProfile(profile.profile_id, body) : createAgentProfile(body));
+      try {
+        answer = await (profile ? updateAgentProfile(profile.profile_id, body) : createAgentProfile(body));
+      } catch (error) {
+        if (error instanceof V1Error && error.field === "model") setModelError(error.message);
+        else throw error;
+      }
     });
     const result = answer as { profile: AgentProfile; warnings: string[] } | null;
     if (!done || !result) return;
@@ -265,13 +270,13 @@ export function AgentProfileForm({
         </div>
         <div className="space-y-1">
           <label htmlFor={`${id}-model`} className={LABEL}>Model *</label>
-          <Input id={`${id}-model`} list={`${id}-model-names`} value={draft.modelName} onChange={(e) => chooseName(e.target.value)} placeholder="Type or choose a model" className="font-mono" aria-invalid={!!modelError} aria-describedby={modelProblem ? `${id}-model-error` : undefined} />
+          <Input id={`${id}-model`} list={`${id}-model-names`} value={draft.modelName} onChange={(e) => chooseName(e.target.value)} placeholder="Type or choose a model" className="font-mono" aria-invalid={!!modelError} aria-describedby={modelError ? `${id}-model-error` : undefined} />
           <datalist id={`${id}-model-names`}>
             {names.map((name) => <option key={name} value={name} />)}
           </datalist>
           {!usable.length && <p className="text-[11px] text-muted-foreground">No compatible models. Add a model in <a href={settingsHref("providers")} className="underline underline-offset-2">LLM Providers</a>.</p>}
           {draft.modelName && !usable.some((m) => m.name === draft.modelName) && <p className="text-[11px] text-muted-foreground">No enabled provider offers {draft.modelName}. Add it under <a href={settingsHref("providers")} className="underline underline-offset-2">LLM Providers</a>: Models, or Fetch models.</p>}
-          {modelProblem && <p id={`${id}-model-error`} role="alert" className="text-xs text-destructive">{modelProblem}</p>}
+          {modelError && <p id={`${id}-model-error`} role="alert" className="text-xs text-destructive">{modelError}</p>}
         </div>
         <div className="space-y-1">
           <label htmlFor={`${id}-protocol`} className={LABEL}>Protocol *</label>
@@ -393,7 +398,7 @@ export function AgentProfileForm({
       )}
       {!warnings.length && (
         <FormFooter
-          error=""
+          error={action.error}
           busy={action.busy}
           submit={profile ? "Save" : `Add ${AGENT_PROFILE.name}`}
           onCancel={() => onDone()}

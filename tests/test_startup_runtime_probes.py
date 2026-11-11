@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import subprocess
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,8 +14,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from fake_claude import fake_claude
 from looper.agents import profile_registry as registry, runtimes
-from looper.agents.runtimes import Capability, Launcher, Probe
+from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, Launcher, Probe, RuntimeUnsupported, coco_login
 from looper.db import profile_registry as db
 
 
@@ -197,3 +200,77 @@ def test_runtime_discovery_preserves_existing_rows(monkeypatch, unavailable):
 
     assert asyncio.run(registry.register_found_runtimes()) == []
     assert store.rows == before
+
+
+@pytest.mark.parametrize("entry,state", [
+    ("startup", "logged_in"), ("registered-startup", "logged_in"), ("redetect", "logged_in"),
+    ("startup", "not_logged_in"), ("startup", "unknown"), ("startup", "failed-catalog"),
+])
+def test_coco_registration_warms_the_model_catalog_off_the_event_loop(tmp_path, monkeypatch, entry, state):
+    adapter = runtimes.adapter("coco")
+    store = _RuntimeStore()
+    _install(monkeypatch, [adapter], store)
+    target = tmp_path / "operator-auth.json"
+    target.write_text("stand-in login")
+    monkeypatch.setattr(coco_login, "login_file", lambda: target)
+    monkeypatch.setattr(coco_login, "recorded_problem", AsyncMock(return_value=None))
+    calls = tmp_path / "calls"
+    executable = fake_claude(tmp_path / "coco", (
+        "import sys\nfrom pathlib import Path\n"
+        f"with Path({str(calls)!r}).open('a') as stream: stream.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "if sys.argv[1:] == ['--version']: print('coco 0.214.1')\n"
+        "elif sys.argv[1:] == ['login', 'status']:\n"
+        f"    print({'Not logged in' if state == 'not_logged_in' else 'Unexpected' if state == 'unknown' else 'Logged in using Trae'!r})\n"
+        f"    raise SystemExit({1 if state == 'not_logged_in' else 2 if state == 'unknown' else 0})\n"
+        "elif sys.argv[1:] == ['models', '--json']:\n"
+        "    print('[{\"name\": \"GPT-5.5\"}]')\n"
+        f"    raise SystemExit({1 if state == 'failed-catalog' else 0})\n"
+        "else: raise AssertionError(sys.argv)\n"
+    ))
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(shutil, "which", lambda name: executable if name == "coco" else None)
+    run_process = subprocess.run
+
+    def off_loop(*args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return run_process(*args, **kwargs)
+        pytest.fail("runtime and catalog probes must never start processes on the event loop")
+
+    monkeypatch.setattr(subprocess, "run", off_loop)
+    provider = registry.LegacyProviderSpec("prov-coco", "coco-login", AuthKind.OAUTH,
+        frozenset({ApiProtocol.OPENAI_RESPONSES}), "coco", catalog=(registry.CatalogModel("GPT-9"),))
+    coco_login.forget_probe()
+    coco_login.forget_models()
+
+    async def run():
+        if entry in {"registered-startup", "redetect"}:
+            await store.insert("rt-coco", {"name": "coco", "type": "coco", "executable": executable,
+                "launcher": "native", "version": "previous", "capabilities": [], "probe_error": None})
+        if entry == "redetect":
+            await registry.probe_runtime("rt-coco")
+        else:
+            assert await registry.register_found_runtimes() == (["coco"] if entry == "startup" else [])
+        key = executable if entry in {"registered-startup", "redetect"} else "coco"
+        before = calls.read_text()
+        if state == "logged_in":
+            assert coco_login.cached_models(key) == {"gpt-5.5": "GPT-5.5"}
+            with pytest.raises(RuntimeUnsupported, match="GPT-9.*GPT-5.5"):
+                adapter.check_pairing(provider, "GPT-9", executable=key)
+            supported = registry.LegacyProviderSpec("prov-coco", "coco-login", AuthKind.OAUTH,
+                frozenset({ApiProtocol.OPENAI_RESPONSES}), "coco", catalog=(registry.CatalogModel("GPT-5.5"),))
+            adapter.check_pairing(supported, "GPT-5.5", executable=key)
+        else:
+            assert coco_login.cached_models(key) is None
+            adapter.check_pairing(provider, "GPT-9", executable=key)
+        assert calls.read_text() == before
+        commands = before.splitlines()
+        assert "login status" in commands
+        assert ("models --json" in commands) == (state not in {"not_logged_in", "unknown"})
+
+    try:
+        asyncio.run(run())
+    finally:
+        coco_login.forget_probe()
+        coco_login.forget_models()

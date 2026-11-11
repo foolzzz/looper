@@ -80,7 +80,7 @@ class CocoRuntime(CodexRuntime):
             raise RuntimeUnsupported("coco takes no effort level in Looper yet")
         models = coco_login.cached_models(executable or self.default_executable)
         if problem := _catalog_problem(model, models):
-            raise RuntimeUnsupported(problem)
+            raise RuntimeUnsupported(problem, field="model")
 
     async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None) -> str | None:
         if problem := await coco_login.launch_problem(executable or self.default_executable):

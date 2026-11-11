@@ -718,6 +718,65 @@ def test_coco_on_path_pairs_only_with_its_own_login_and_runs_workers_and_reviewe
         coco_login.forget_models()
 
 
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_coco_profile_save_marks_only_model_refusals(monkeypatch, tmp_path, action):
+    import asyncio
+
+    from looper.agents import profile_registry as service
+    from looper.agents.runtimes import coco_login
+    from tests.db_support import v1_api
+
+    executable = fake_claude(tmp_path / "coco", (
+        "import sys\n"
+        "if sys.argv[1:] == ['models', '--json']:\n"
+        "    print('[{\"name\":\"GPT-5.5\"}]')\n"
+        "elif sys.argv[1:] == ['login', 'status']:\n"
+        "    print('Logged in using Trae')\n"
+        "else:\n    sys.exit(9)\n"
+    ))
+    monkeypatch.setenv("TRAE_HOME", str(tmp_path / "operator-coco"))
+    monkeypatch.setattr(service, "_login_modules", lambda: {"coco": coco_login})
+    coco_login.forget_models()
+    coco_login.forget_probe()
+
+    async def test(pool):
+        await _runtime("coco", executable=executable)
+        models = {}
+        for name in ("GPT-5.5", "GPT-9"):
+            models[name] = (await service.create_model({"provider_id": "prov-coco-login", "name": name,
+                "protocol": "openai-responses"}))["model"]["model_id"]
+        await asyncio.to_thread(coco_login.available_models, executable)
+        async with v1_api(tmp_path, pool) as call:
+            fields = {"name": "Coco worker", "runtime_id": "rt-coco", "model_id": models["GPT-5.5"]}
+            status, answer = await call("profiles.create", fields)
+            assert status == 200, answer
+            profile_id = answer["result"]["profile"]["profile_id"]
+
+            async def save(changes):
+                body = {**fields, **changes, "name": "Another worker"}
+                if action == "update":
+                    body = {"profile_id": profile_id, "fields": changes}
+                return await call(f"profiles.{action}", body)
+
+            status, answer = await save({"model_id": models["GPT-9"]})
+            assert status == 400, answer
+            assert answer["error"]["field"] == "model"
+            assert "coco has no model 'GPT-9'" in answer["error"]["message"]
+            status, answer = await save({"effort": "high"})
+            assert status == 400, answer
+            assert "field" not in answer["error"]
+            status, answer = await call("profiles.create", fields)
+            assert status == 409, answer
+            assert "already exists" in answer["error"]["message"]
+            assert "field" not in answer["error"]
+
+    try:
+        run_db(test, monkeypatch, timeout=30)
+    finally:
+        coco_login.forget_models()
+        coco_login.forget_probe()
+
+
 def _version_omp(path: Path) -> str:
     """A stand-in omp that prints its version for ``--version`` and fails on anything else."""
     return fake_claude(path, (

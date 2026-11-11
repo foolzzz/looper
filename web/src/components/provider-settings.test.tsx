@@ -485,13 +485,17 @@ it("uses the normalized registry contract throughout", () => {
   expectTypeOf<AgentProfile["model"]>().toHaveProperty("model_id");
 });
 
-it("shows the Cursor sign-in command without offering login-link recovery", async () => {
-  data.providers = [account({ vendor_type: "cursor-login", auth: "oauth", oauth_runtime_type: "cursor-agent",
+it.each([
+  ["cursor-login", "cursor-agent", "cursor-agent login"],
+  ["codex-login", "codex", "codex login"],
+] as const)("keeps the sign-in guidance for %s", async (vendor, runtime, signIn) => {
+  data.providers = [account({ vendor_type: vendor, auth: "oauth", oauth_runtime_type: runtime,
     api_key: null, endpoints: [endpoint("openai-responses", "")],
     login: { state: "not_logged_in", detail: "not signed in" } })];
   await render(false);
   expect(container.textContent).toContain("Login not usable: not signed in");
-  expect(container.textContent).toContain("cursor-agent login");
+  expect(container.textContent).toContain(signIn);
+  expect(container.textContent).not.toContain("Check ");
   expect([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Use the login again"))).toBe(false);
 });
 
