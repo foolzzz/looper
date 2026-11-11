@@ -9,6 +9,20 @@ from looper.agents import profile_registry
 from looper.agents.workflows import Workflow, WorkflowError, check_profiles
 
 
+@pytest.mark.parametrize("raw, expected", [
+    ("a", "a 通过"),
+    ({"all_of": ["a", "b"]}, "全部通过（a 通过、b 通过）"),
+    ({"any_of": ["a", "b"]}, "至少一个通过（a 通过、b 通过）"),
+    ({"k_of": 2, "of": ["a", {"any_of": ["b", "c"]}, "d"]},
+     "至少 2 项通过（a 通过、至少一个通过（b 通过、c 通过）、d 通过）"),
+])
+def test_confirmation_acceptance_rule_keeps_thresholds_and_nested_groups(raw, expected):
+    from looper.agents.tiers.conditions import parse
+    from looper.agents.workflows import _pass_rule
+
+    assert _pass_rule(parse(raw, "accept_when")) == expected
+
+
 def definition(**extra):
     return {"key": "reviewed", "name": "Reviewed change", "roles": [
         {"key": "dev", "kind": "work", "role_prompt": "Implement the change."},

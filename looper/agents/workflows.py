@@ -6,7 +6,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
-from .agent_settings import SettingsError, budget_usd
+from .agent_settings import AgentSettings, AgentType, SettingsError, budget_usd
 from .task_roles import RoleError, RoleKind, check_definition, role_key
 from .task_templates import KEY_PATTERN
 from .tiers import conditions
@@ -195,3 +195,69 @@ async def check_profiles(workflow: Workflow, *, pool: Any = None) -> None:
             review = selected.get("reviewer") or selected.get(member)
             if work and review and work.runtime.id == review.runtime.id:
                 raise WorkflowError(f"review member {member!r} must use a different runtime from the work role")
+
+
+def _pass_rule(condition: conditions.Condition) -> str:
+    if isinstance(condition, conditions.Leaf):
+        return f"{condition.step} 通过"
+    children = "、".join(_pass_rule(child) for child in condition.of)
+    rule = ("全部通过" if condition.k == len(condition.of) else "至少一个通过" if condition.k == 1
+            else f"至少 {condition.k} 项通过")
+    return f"{rule}（{children}）"
+
+
+async def configuration_lines(workflow: Mapping[str, Any], settings: Mapping[AgentType, AgentSettings], *,
+                              review_all: bool) -> list[str]:
+    """The same effective workflow roles and acceptance rule for task confirmation and form preview."""
+    from ..db import profile_registry as db_profiles
+    from .profile_registry import BUILTIN_PROFILE, ResolvedAgentProfile, builtin_resolved_profile
+
+    cache: dict[str, ResolvedAgentProfile | None] = {}
+
+    async def profile(profile_id: str) -> ResolvedAgentProfile | None:
+        if profile_id not in cache:
+            row = await db_profiles.get_profile(profile_id)
+            cache[profile_id] = (ResolvedAgentProfile.from_row(row) if row else
+                                 builtin_resolved_profile() if profile_id == BUILTIN_PROFILE.id else None)
+        return cache[profile_id]
+
+    async def describe(profile_id: str) -> str:
+        chain, seen = [], set()
+        # Execution permits at most three fallback hops and never revisits a profile.
+        while profile_id and profile_id not in seen and len(chain) < 4:
+            seen.add(profile_id)
+            selected = await profile(profile_id)
+            if selected is None:
+                chain.append(f"Profile {profile_id}（不可用）")
+                break
+            effort = f"，effort {selected.effort}" if selected.effort else ""
+            chain.append(f"{selected.name}（{selected.runtime.type}/{selected.model}{effort}）")
+            profile_id = selected.fallback_profile_id
+        return "，回落至 ".join(chain)
+
+    async def role_line(key: str, agent: AgentType, pinned: str | None = None) -> str:
+        selected = pinned or (workflow.get("profiles") or {}).get(agent.value) or settings[agent].profile.id
+        verification = workflow.get("verification") or {}
+        purpose = (f"；验证：只读，最多 {verification['max_rounds']} 轮" if key == verification.get("role") else "")
+        return f"- {key}：{await describe(selected)}{purpose}"
+
+    lines = [await role_line("Planner", AgentType.PLANNER)]
+    for role in workflow.get("roles") or []:
+        agent = AgentType.WORKER if role["kind"] == "work" else AgentType.REVIEWER
+        lines.append(await role_line(role["key"], agent, role.get("profile_id")))
+    if not workflow.get("work_role"):
+        lines.append(await role_line("工作角色", AgentType.WORKER))
+    panel = workflow.get("review_panel")
+    if not panel or "builtin" in panel["members"]:
+        lines.append(await role_line("内置评审席位", AgentType.REVIEWER))
+    if panel:
+        accept = conditions.parse(panel["accept_when"], "review_panel.accept_when")
+        required = conditions.leaves(accept)
+        seats = "、".join(member for member in panel["members"] if member in required)
+        suggestions = "、".join(member for member in panel["members"] if member not in required) or "无"
+        scope = "每个工作步骤" if review_all else "由 Planner 决定步骤"
+        lines.append(f"- 评审面板（{scope}）：必需席位：{seats}；建议席位：{suggestions}；验收：{_pass_rule(accept)}")
+    else:
+        lines.append("- 评审：每一步都要 Reviewer 评审通过" if review_all
+                     else "- 评审：由 Planner 决定哪些步骤要 Reviewer 评审")
+    return lines

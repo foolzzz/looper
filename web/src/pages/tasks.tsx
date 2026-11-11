@@ -1013,7 +1013,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                 value={newWorkspace}
                 onChange={setNewWorkspace}
               />
-              <WorkflowField rows={workflows.rows} value={workflowKey} onChange={setNewWorkflow} />
+              <WorkflowField rows={workflows.rows} value={workflowKey} onChange={setNewWorkflow}
+                preview={{ projectId: isNewProject ? null : newProject || null, profiles: newProfiles }} />
               {workflows.error && <p role="alert" className="text-xs text-destructive">{workflows.error}</p>}
               <TaskProfilesField value={newProfiles} onChange={setNewProfiles} fixed={fixedProfiles} />
               <p className="text-xs text-muted-foreground">

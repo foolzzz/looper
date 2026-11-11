@@ -55,6 +55,7 @@ def test_clients_cannot_read_or_write_workflow_presets(tmp_path, monkeypatch):
     async def test(pool):
         async with v1_api(tmp_path, pool) as call:
             for action, body in (("list", {}), ("get", {"key": "reviewed"}),
+                                 ("preview", {"key": "reviewed"}),
                                  ("put", PRESET), ("delete", {"key": "reviewed"})):
                 status, answer = await call("workflows." + action, body, client=True)
                 assert status == 403 and answer["error"]["code"] == "forbidden", answer
