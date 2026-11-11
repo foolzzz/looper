@@ -70,7 +70,7 @@ def test_normalized_nested_reads_counts_order_and_missing(monkeypatch):
         await _seed(pool)
         providers = await db.list_providers()
         assert [p['id'] for p in providers] == [
-            'prov-claude-subscription', 'prov-codex-login', 'prov-cursor-login', 'prov-grok-login',
+            'prov-claude-subscription', 'prov-coco-login', 'prov-codex-login', 'prov-cursor-login', 'prov-grok-login',
             'prov-test', 'prov-empty']
         provider = await db.get_provider('prov-test')
         assert provider == next(p for p in providers if p['id'] == 'prov-test')
