@@ -20,6 +20,9 @@ MASK = "***"
 # A Telegram bot token, <bot id>:<secret>, in a Bot API URL path.
 _BOT_TOKEN_IN_PATH = re.compile(r"(?<=bot)\d+:[A-Za-z0-9_-]+")
 
+# CSI colour/control sequences, OSC titles/links, and single-character escapes.
+_ANSI_ESCAPE = re.compile(r"\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-_])")
+
 # A value this short is no usable token, and masking it would mangle every line.
 _MIN_SECRET_LEN = 8
 
@@ -39,6 +42,11 @@ def redact(text: str) -> str:
     for secret in _secrets:
         text = text.replace(secret, MASK)
     return _BOT_TOKEN_IN_PATH.sub(MASK, text)
+
+
+def strip_ansi(text: str) -> str:
+    """Remove terminal escape sequences before retaining CLI diagnostics."""
+    return _ANSI_ESCAPE.sub("", text)
 
 
 class RedactingFormatter(logging.Formatter):

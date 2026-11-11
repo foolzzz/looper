@@ -514,7 +514,7 @@ else:
             assert result["passed"] is True if verify else result["status"] == "completed"
             assert result["summary"] == "pong HOME=/home/user" and finish["error"] is None
     else:
-        assert result["status"] == "failed" and result["stderr"] == "boom\n"
+        assert result["status"] == "failed" and result["stderr"] == "boom"
         assert "exited with code 1" in result["error"]
 
 
