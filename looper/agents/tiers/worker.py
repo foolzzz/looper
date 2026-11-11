@@ -193,22 +193,55 @@ def _display_command(command: list[str]) -> str:
     return " ".join(shown)
 
 
-def extract_report(text: str, key: str) -> dict[str, Any] | None:
+@dataclass
+class _ReportDiagnostics:
+    repaired: bool = False
+    error: json.JSONDecodeError | None = None
+
+
+def extract_report(text: str, key: str, *, diagnostics: _ReportDiagnostics | None = None) -> dict[str, Any] | None:
     """Return the last top-level JSON object in ``text`` that has ``key``.
 
     Handles nested objects and markdown fences, which a flat regex cannot.
+    Only invalid backslash escapes are repaired; valid escape pairs are consumed
+    together so their second backslash is never mistaken for a stray one.
     """
     decoder = json.JSONDecoder()
     found: dict[str, Any] | None = None
     i = text.find("{")
     while i != -1:
+        repaired = False
         try:
             obj, end = decoder.raw_decode(text, i)
-        except json.JSONDecodeError:
-            i = text.find("{", i + 1)
-            continue
+        except json.JSONDecodeError as error:
+            fence = text.find("```", i)
+            candidate = text[i:fence if fence != -1 else len(text)]
+            if diagnostics is not None and re.search(rf'(?:\{{|,)\s*"{re.escape(key)}"', candidate):
+                diagnostics.error = error
+            if error.msg not in ("Invalid \\escape", "Invalid \\uXXXX escape"):
+                i = text.find("{", i + 1)
+                continue
+            insertions: list[int] = []
+
+            def escape(match: re.Match[str]) -> str:
+                if len(match[0]) != 1:
+                    return match[0]
+                insertions.append(match.start() + len(insertions))
+                return "\\\\"
+
+            escaped = re.sub(r'\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4})?', escape, text[i:])
+            try:
+                obj, end = decoder.raw_decode(escaped)
+            except json.JSONDecodeError:
+                i = text.find("{", i + 1)
+                continue
+            # Resume in the original text, skipping nested objects in this report.
+            end = i + end - sum(at < end for at in insertions)
+            repaired = True
         if isinstance(obj, dict) and key in obj:
             found = obj
+            if diagnostics is not None:
+                diagnostics.repaired = repaired
         i = text.find("{", end)
     return found
 
@@ -225,17 +258,18 @@ class RunOutcome(str, Enum):
     RUN_FAILED = "run_failed"  # the run itself did not succeed (no result, an error, a cap)
 
 
-def run_outcome(result_event: dict[str, Any] | None, judged: dict[str, Any], *, is_verify: bool) -> RunOutcome:
+def run_outcome(result_event: dict[str, Any] | None, judged: dict[str, Any], *, is_verify: bool,
+                diagnostics: _ReportDiagnostics | None = None) -> RunOutcome:
     """How a run whose ``result_event`` ``judge_result`` judged ``judged`` ended, read the same way."""
     if result_event is None or result_event.get("is_error") or result_event.get("subtype") != "success":
         return RunOutcome.RUN_FAILED
     text = str(result_event.get("result") or "")
     if is_verify:
-        verdict = extract_report(text, "passed")
+        verdict = extract_report(text, "passed", diagnostics=diagnostics)
         if verdict is None or not isinstance(verdict.get("passed"), bool):
             return RunOutcome.CONTRACT
         return RunOutcome.PASSED if judged.get("passed") else RunOutcome.NOT_PASSED
-    report = extract_report(text, "status")
+    report = extract_report(text, "status", diagnostics=diagnostics)
     if report is None or report.get("status") not in ("completed", "failed") \
             or not isinstance(report.get("changed_files", {}), dict) or not isinstance(report.get("deleted_files", []),
                                                                                   list):
@@ -307,9 +341,22 @@ def judge_result(
         return failed(budget_error(result_event) or (f"{runtime_label} run did not succeed: {failure_detail}"[:500]
                       if failure_detail else f"{runtime_label} run did not succeed ({subtype})"))
     text = str(result_event.get("result") or "")
+    diagnostics = _ReportDiagnostics()
+    report = extract_report(text, "passed" if is_verify else "status", diagnostics=diagnostics)
+    if report is None:
+        subject = "Reviewer" if is_verify else "Worker"
+        kind = "verdict" if is_verify else "status report"
+        if diagnostics.error is not None:
+            error = diagnostics.error
+            message = (f"{subject} ended with a JSON {kind} that does not parse: {error.msg} "
+                       f"(line {error.lineno} column {error.colno})")
+        else:
+            message = f"{subject} did not end with the JSON {kind}"
+        # Keep the tail of what the Worker said so the failure can be diagnosed.
+        return failed(message) if is_verify else _work_failed(message, final_message=text[-500:])
     if is_verify:
-        verdict = extract_report(text, "passed")
-        if verdict is None or not isinstance(verdict.get("passed"), bool):
+        verdict = report
+        if not isinstance(verdict.get("passed"), bool):
             return failed("Reviewer did not end with the JSON verdict")
         findings = verdict.get("findings", [])
         outcome = {
@@ -320,10 +367,6 @@ def judge_result(
         }
         return _severity_verdict(outcome) if severity else outcome
 
-    report = extract_report(text, "status")
-    if report is None:
-        # Keep the tail of what Claude said so the failure can be diagnosed.
-        return _work_failed("Worker did not end with the JSON status report", final_message=text[-500:])
     status = report.get("status")
     changed = report.get("changed_files", {})
     deleted = report.get("deleted_files", [])
@@ -2519,8 +2562,12 @@ class WorkerPool:
         # A review that says "not passed" is still a successful run; only work
         # failures are the run's error.
         error = outcome.get("error") if not is_verify and outcome.get("status") == "failed" else None
+        diagnostics = _ReportDiagnostics()
         await recorder.finish(output_text=final_text, result_event=recorded, error=error,
-                              outcome=run_outcome(result_event, outcome, is_verify=is_verify).value)
+                              outcome=run_outcome(result_event, outcome, is_verify=is_verify,
+                                                  diagnostics=diagnostics).value)
+        if diagnostics.repaired:
+            await recorder.annotate({"report_repaired": True})
         return outcome
 
     async def _verification_result(self, ctx: RunContext, result: dict[str, Any], *,
