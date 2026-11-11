@@ -18,6 +18,22 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.129] - 2026-11-11
+
+### Added
+
+- **The `coco` runtime can run the Manager and Planners.** ([#1217](https://github.com/foolzzz/looper/pull/1217))
+  - Coco gains the Manager and Planner roles (a maintainer decision): one `coco exec` process per turn, then `resume <thread> -`, with sessions under `<runtime_root>/.local/coco/sessions/<label>`. Stopping a Manager turn is the per-turn kill, as for Codex. Steer, consult, effort and structured output stay refused.
+  - Unused coco session homes are reclaimed like the other per-turn runtimes'. Nothing changes for other runtimes.
+
+### Changed
+
+- **Web chat tasks of the default Manager report into their chat.** ([#1219](https://github.com/foolzzz/looper/pull/1219))
+  - A task created from the dashboard chat with the default Manager now records that chat session and saves its phase notices, gate notices and completion (with the delivery summary) into it, as tasks from other Managers and channels already did. Tasks created without a chat session (CLI/API) are unchanged.
+
+- **Worker reports and reviewer verdicts with stray backslash escapes are accepted.** ([#1221](https://github.com/foolzzz/looper/pull/1221))
+  - A report or verdict whose JSON fails only on invalid backslash escapes is accepted after doubling those backslashes and is recorded as `report_repaired`. A JSON block that still does not parse fails with a message naming the parse error and its line and column. Nothing else is repaired.
+
 ## [2.14.128] - 2026-11-10
 
 ### Added
