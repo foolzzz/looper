@@ -28,7 +28,7 @@ def _priced_launch() -> Any:
     from tests.runtime_model_helpers import resolved_profile
 
     provider = ProviderSpec("prov-x", "x", AuthKind.API_KEY, frozenset({ApiProtocol.ANTHROPIC_MESSAGES}),
-                            base_url="https://example.invalid/anthropic",
+                            base_url="https://example.invalid/anthropic", api_key="test-key",
                             catalog=(CatalogModel("m-main", input_usd_per_mtok=2.0, output_usd_per_mtok=10.0),))
     runtime = RuntimeSpec("rt-claude-code", "claude-code", "claude-code", "", adapter("claude-code").capabilities)
     return Launch(AgentSettings(profile=resolved_profile("agent-x", "claude-code/m-main", runtime, provider, "m-main")))
@@ -300,6 +300,229 @@ def test_prompt_block_survives_cancellation_during_process_cleanup(tmp_path: Pat
 
 
 class TestClaudeRunRecorder:
+    @pytest.mark.parametrize("close_from", ["finish", "end_left_open"])
+    def test_inherited_failed_autocompact_keeps_request_cost(self, agent_db: Any, close_from: str) -> None:
+        from looper.agents.claude_cli import ClaudeRunRecorder, stream_events
+
+        recorder = ClaudeRunRecorder(
+            agent_id="consult-usage", task_id=None, command=["claude", "--fork-session"], cwd="/tmp",
+            input_text="question", launch=_builtin_launch(consult=True), whole_process=True)
+        rows = (Path(__file__).parent / "fixtures/claude_stream/auto_compact.jsonl").read_bytes().splitlines()
+        end = next(i for i, row in enumerate(rows) if json.loads(row)["type"] == "result")
+        result = json.loads(rows[end])
+
+        async def run() -> None:
+            stream = asyncio.StreamReader()
+            stream.feed_data(b"\n".join(rows[:end + 1]))
+            stream.feed_eof()
+            async with recorder:
+                async for event in stream_events(stream):
+                    await recorder.record(event)
+                if close_from == "finish":
+                    await recorder.finish(output_text=result["result"], result_event=result)
+
+        asyncio.run(run())
+        saved = agent_db.finish_record.await_args.kwargs
+        assert saved["compactions"] == []
+        assert (saved["input_tokens"], saved["output_tokens"], saved["cache_read_tokens"],
+                saved["cache_creation_tokens"]) == (18, 7, 36640, 6703)
+        # Only the visible requests, at Haiku's prices; never the session's total_cost_usd.
+        assert saved["cost_usd"] == pytest.approx((18 + 7 * 5 + 36640 * 0.1 + 6703 * 1.25) / 1_000_000)
+
+    @pytest.mark.parametrize(("prior_event", "cost"), [
+        (None, 0.3),
+        ({"type": "system", "subtype": "compact_boundary"}, None),
+        ({"type": "system", "subtype": "status", "compact_result": "success"}, None),
+        ({"type": "system", "subtype": "task_started", "task_type": "local_agent"}, None),
+        ({"type": "usage", "usage_complete": False}, None),
+    ])
+    def test_failed_compaction_clears_only_pending_compaction(
+        self, agent_db: Any, prior_event: dict[str, Any] | None, cost: float | None,
+    ) -> None:
+        from looper.agents.claude_cli import ClaudeRunRecorder
+        from looper.agents.run_usage import Usage
+        from looper.agents.runtimes.pricing import usage_event
+
+        recorder = ClaudeRunRecorder(
+            agent_id="worker-usage", task_id=None, command=["claude", "--resume", "source"], cwd="/tmp",
+            input_text="question", launch=_priced_launch(), whole_process=True)
+
+        async def run() -> None:
+            async with recorder:
+                await recorder.record(usage_event("m-main", Usage(input_tokens=100_000, output_tokens=10_000)))
+                if prior_event is not None:
+                    await recorder.record(prior_event)
+                for _ in range(2):  # Retrying a failed compact does not introduce a hidden summary request.
+                    await recorder.record({"type": "system", "subtype": "status", "status": "compacting"})
+                    await recorder.record({"type": "system", "subtype": "status", "status": None,
+                                           "compact_result": "failed", "compact_error": "too_few_groups"})
+
+        asyncio.run(run())
+        assert agent_db.finish_record.await_args.kwargs["cost_usd"] == cost
+
+    @pytest.mark.parametrize("session", ["consult", "--resume", "--continue", "--fork-session"])
+    @pytest.mark.parametrize("close_from", ["finish", "end_left_open"])
+    @pytest.mark.parametrize("provider_priced", [False, True])
+    def test_inherited_compaction_keeps_cost_unknown(
+        self, agent_db: Any, session: str, close_from: str, provider_priced: bool,
+    ) -> None:
+        from dataclasses import replace
+        from looper.agents.claude_cli import ClaudeRunRecorder, stream_events
+
+        launch = _priced_launch() if provider_priced else _builtin_launch()
+        launch = replace(launch, consult=session == "consult")
+        recorder = ClaudeRunRecorder(
+            agent_id="consult-usage", task_id=None, command=["claude", *([] if launch.consult else [session])],
+            cwd="/tmp", input_text="question", launch=launch, whole_process=True)
+        rows = (Path(__file__).parent / "fixtures/claude_stream/manual_compact.jsonl").read_bytes().splitlines()
+        # The first result belongs to the source session. Replay its compaction and next answer only.
+        start = next(i for i, row in enumerate(rows) if json.loads(row)["type"] == "result") + 1
+        result = json.loads(rows[-1])
+
+        async def run() -> None:
+            stream = asyncio.StreamReader()
+            stream.feed_data(b"\n".join(row for row in rows[start:] if json.loads(row).get("subtype") != "status"))
+            stream.feed_eof()
+            async with recorder:
+                async for event in stream_events(stream):
+                    await recorder.record(event)
+                if close_from == "finish":
+                    await recorder.finish(output_text=result["result"], result_event=result)
+
+        asyncio.run(run())
+        saved = agent_db.finish_record.await_args.kwargs
+        assert saved["compactions"] and saved["input_tokens"] == 10
+        assert saved["output_tokens"] == 6 and saved["cache_creation_tokens"] == 2280
+        assert saved["cost_usd"] is None
+
+    @pytest.mark.parametrize(("event", "cost"), [
+        ({"type": "system", "subtype": "status", "status": "compacting"}, None),
+        ({"type": "system", "subtype": "status", "compact_result": "success"}, None),
+        ({"type": "system", "subtype": "task_started", "task_type": "local_agent"}, None),
+        ({"type": "result", "subtype": "success", "usage_complete": False}, None),
+        ({"type": "system", "subtype": "task_started", "task_type": "local_bash"}, 0.3),
+    ])
+    def test_inherited_result_only_usage_is_not_a_complete_bill(
+        self, agent_db: Any, event: dict[str, Any], cost: float | None,
+    ) -> None:
+        from looper.agents.claude_cli import ClaudeRunRecorder
+        from looper.agents.run_usage import Usage
+        from looper.agents.runtimes.pricing import usage_event
+
+        recorder = ClaudeRunRecorder(
+            agent_id="worker-usage", task_id=None, command=["claude", "--resume", "source"], cwd="/tmp",
+            input_text="question", launch=_priced_launch(), whole_process=True)
+
+        async def run() -> None:
+            async with recorder:
+                await recorder.record(usage_event("m-main", Usage(input_tokens=100_000, output_tokens=10_000)))
+                await recorder.record(event)
+
+        asyncio.run(run())
+        saved = agent_db.finish_record.await_args.kwargs
+        assert saved["input_tokens"] == 100_000 and saved["output_tokens"] == 10_000
+        assert saved["cost_usd"] == cost
+
+    @pytest.mark.parametrize("session", ["consult", "resume", "fresh"])
+    @pytest.mark.parametrize("close_from", ["finish", "end_left_open"])
+    @pytest.mark.parametrize("provider_priced", [False, True])
+    @pytest.mark.parametrize("partial", [False, True])
+    def test_inherited_sessions_record_only_their_own_requests(
+        self, agent_db: Any, tmp_path: Path, session: str, close_from: str, provider_priced: bool, partial: bool,
+    ) -> None:
+        from dataclasses import replace
+        from looper.agents.claude_cli import ClaudeRunRecorder
+
+        launch = _priced_launch() if provider_priced else _builtin_launch()
+        launch = replace(launch, consult=session == "consult", settings=replace(launch.settings, max_budget_usd=2))
+        model = "m-main" if provider_priced else "claude-sonnet-5-5"
+        own = {"input_tokens": 100_000, "output_tokens": 10_000,
+               "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+        events = [{"type": "system", "subtype": "init", "model": model, "session_id": "new-session"}]
+        # Each request has partial usage, an assistant snapshot, then final usage.
+        # Replaying the same message id must not charge it again.
+        for message_id in ("request-1", "request-1", "request-2"):
+            if not partial:
+                events.append({"type": "assistant", "message": {"id": message_id, "model": model, "usage": own}})
+                continue
+            events += [
+                {"type": "stream_event", "event": {"type": "message_start", "message": {
+                    "id": message_id, "model": model, "usage": {**own, "output_tokens": 0}}}},
+                {"type": "assistant", "message": {"id": message_id, "model": model,
+                    "usage": {**own, "output_tokens": 0}, "content": [{"type": "text", "text": "answer"}]}},
+                {"type": "stream_event", "event": {"type": "message_delta", "usage": {"output_tokens": 10_000}}},
+                {"type": "stream_event", "event": {"type": "message_stop"}},
+            ]
+        result = {"type": "result", "subtype": "success", "session_id": "new-session", "total_cost_usd": 37,
+                  "modelUsage": {model: {"inputTokens": 10_000_000, "outputTokens": 1_000_000,
+                                        "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}}}
+        events.append(result)
+        executable = fake_claude(tmp_path / "usage-claude", "import sys\nsys.stdin.readline()\n" +
+                                 "\n".join(f"print({json.dumps(event)!r}, flush=True)" for event in events))
+        command = [executable, *([] if session == "fresh" else ["--resume", "source-session"]),
+                   *(["--fork-session"] if session == "consult" else [])]
+        recorder = ClaudeRunRecorder(agent_id="worker-usage", task_id=None, command=command, cwd=str(tmp_path),
+                                     input_text="question", launch=launch, whole_process=True)
+
+        async def run() -> None:
+            if session == "consult" and close_from == "finish":
+                from looper.agents.consult import ConsultService
+                from looper.agents.system_prompt import SystemPrompt
+
+                service = ConsultService(room=None, worker_pool=None, runtime_root=tmp_path)
+                final, started, timed_out = await service._execute(
+                    "task", {"id": "step"}, "consult-usage", command, str(tmp_path),
+                    "question", SystemPrompt("consult", {}), launch, 5)
+                assert final == result and started and not timed_out
+                return
+            async with recorder:
+                process = await asyncio.create_subprocess_exec(
+                    *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+                try:
+                    await launch.runtime.write_turn(process.stdin, "question")
+                    async for event in launch.runtime.parse_process(process, launch=launch):
+                        await recorder.record(event)
+                    await asyncio.wait_for(process.wait(), 5)
+                    assert recorder.cap_stop is None  # own $0.60 is below the $2 cap
+                    if close_from == "finish":
+                        await recorder.finish(output_text="answer", result_event=result)
+                finally:
+                    if process.returncode is None:
+                        process.kill()
+                    await process.wait()
+
+        asyncio.run(asyncio.wait_for(run(), 10))
+        saved = agent_db.finish_record.await_args.kwargs
+        inherited = session != "fresh"
+        assert (saved["input_tokens"], saved["output_tokens"], saved["cache_read_tokens"],
+                saved["cache_creation_tokens"]) == ((200_000, 20_000, 0, 0) if inherited else
+                                                    (10_000_000, 1_000_000, 0, 0))
+        assert saved["cost_usd"] == pytest.approx(0.6 if inherited else (30 if provider_priced else 37))
+        assert saved["cost_source"] == ("provider_price" if inherited or provider_priced else "runtime")
+
+    @pytest.mark.parametrize("has_request", [False, True])
+    def test_inherited_usage_gaps_are_never_filled_from_session_totals(self, agent_db: Any, has_request: bool) -> None:
+        from looper.agents.claude_cli import ClaudeRunRecorder
+        from looper.agents.run_usage import Usage
+        from looper.agents.runtimes.pricing import usage_event
+
+        recorder = ClaudeRunRecorder(agent_id="consult-usage", task_id=None, command=["claude", "--resume", "source"],
+                                     cwd="/tmp", input_text="question", launch=_builtin_launch(consult=True),
+                                     whole_process=True)
+
+        async def run() -> None:
+            async with recorder:
+                if has_request:
+                    await recorder.record(usage_event("unknown-model", Usage(input_tokens=12, output_tokens=3)))
+                await recorder.finish(output_text="answer", result_event={
+                    "type": "result", "subtype": "success", "total_cost_usd": 37,
+                    "usage": {"input_tokens": 1_000_000, "output_tokens": 100_000}})
+
+        asyncio.run(run())
+        saved = agent_db.finish_record.await_args.kwargs
+        assert saved["cost_usd"] is None
+        assert (saved["input_tokens"], saved["output_tokens"]) == ((12, 3) if has_request else (None, None))
+
     def _recorder(self) -> Any:
         from looper.agents.claude_cli import ClaudeRunRecorder
 

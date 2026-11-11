@@ -260,6 +260,8 @@ def test_consult_request_belongs_to_its_record_and_closes_the_route(monkeypatch,
     from looper import child_env
     from looper.agents.llmrec import ROUTES_DIR, RouteFile
     from looper.agents.room import RoomService
+    from looper.agents.run_usage import Usage
+    from looper.agents.runtimes.pricing import usage_event
     from tests.db_support import until
     from tests.run_handle_support import ScriptedRun
     from tests.test_room_consult_db import _CONSULTED, _host_consults, _question, _ran, _service, _settled
@@ -293,7 +295,9 @@ def test_consult_request_belongs_to_its_record_and_closes_the_route(monkeypatch,
 
                 handle = HttpRun([
                     {"type": "system", "subtype": "init", "session_id": "consult-fork"},
-                    {"type": "result", "subtype": "success", "total_cost_usd": 0.01,
+                    usage_event("claude-haiku-4-5", Usage(input_tokens=0, output_tokens=2000,
+                                                         cache_read_tokens=0, cache_creation_tokens=0)),
+                    {"type": "result", "subtype": "success", "total_cost_usd": 37.01,
                      "result": json.dumps({"answers": [{"reply_to": question["id"], "body": "the field is qty"}]})},
                 ])
                 calls = _host_consults(monkeypatch, handle)

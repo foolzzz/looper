@@ -3454,8 +3454,17 @@ So:
 
 - **Cost and tokens** (`cost_usd`, `input_tokens`, `output_tokens`,
   `cache_read_tokens`, `cache_creation_tokens`) are the change in the reported
-  totals over the run. A Worker or Reviewer run is a whole process, so they
-  are its totals. A resident agent's turn subtracts the totals at the
+  totals over the run. A fresh Worker or Reviewer run is a whole process,
+  so they are its totals. A Claude Code consult forks another run's session:
+  its result includes that session's history, so its record instead sums only
+  this run's streamed requests, deduplicated by message id and priced at the
+  launch's frozen model prices (`cost_source: provider_price`, also with
+  Claude Code login). A standalone Worker or Reviewer started with `--resume`
+  follows the same rule; ordinary Worker/Reviewer launches start fresh, and
+  adopting a kept process continues the same run with its events replayed.
+  Missing request usage or prices stay unknown, never filled from inherited
+  result totals. Consult budget checks use that same recorded cost; an unknown
+  cost cannot pass the cap check. A resident agent's turn subtracts the totals at the
   previous result. `ResidentClaude` keeps those totals. A process that
   resumes a session starts from the totals saved beside its id in
   `agent_sessions`. The saved totals are
