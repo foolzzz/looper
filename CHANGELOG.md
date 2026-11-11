@@ -18,6 +18,21 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.133] - 2026-11-10
+
+### Added
+
+- **A second coco runtime row, `ttadk-coco`, starts coco through TTADK.** ([#1225](https://github.com/foolzzz/looper/pull/1225))
+  - The runtime (`rt-ttadk-coco`, launcher `ttadk`) is registered when `ttadk` and `coco` are found and runs `ttadk code -t trae-cli --skip-check -- exec --json …`. TTADK 1.0.37 retired `-t coco`. The model goes after `--` as Coco's `-m`, because TTADK ignores its own `-m` for `trae-cli`. Only the `coco-login` provider pairs with it. Run metadata records `launcher: {kind: ttadk, version, tool: trae-cli}`, and request recording marks these runs `not_covered`. The native coco runtime is unchanged, and the dashboard lists the new row.
+  - `looper[test]` now lists `playwright`, and the installed-tests workflow no longer installs it separately.
+  - Not model-visible: no prompt or tool text changes.
+
+### Changed
+
+- **Consult runs record only their own usage and cost, not the forked Claude session's cumulative totals.** ([#1222](https://github.com/foolzzz/looper/pull/1222))
+  - A Claude Code consult, and a standalone Worker or Reviewer started with `--resume`, sums its own streamed requests (deduplicated by message id) at the launch's frozen model prices (`cost_source: provider_price`). Missing usage or prices stay unknown instead of being filled from the inherited result totals. The consult spend cap uses that recorded cost, so an unknown cost cannot pass it. Fresh runs are unchanged.
+  - Not model-visible: no prompt or tool text changes.
+
 ## [2.14.132] - 2026-11-10
 
 ### Changed
