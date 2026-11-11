@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.143] - 2026-11-11
+
+### Changed
+
+- **Adjudication: the repair message names the adjudicated accept when it was offered.** ([#1252](https://github.com/foolzzz/looper/pull/1252))
+  - When a refused Planner reply followed a decision turn that offered the adjudicated accept, the repair message lists it first among the allowed decisions and, for a plain accept, names the findings still blocking (`<member> finding <n>`) and asks for downgrades with a reason each.
+  - The allowed-decisions list is separated by `; ` when the adjudicated accept is offered; the adjudication rules appear once, in the reply contract, instead of also in the decision message.
+  - The `panel_adjudicate` prompt eval accepts a repaired accept after a refused one.
+  - Model-visible: the Planner's decision message and the refusal text change as above.
+
 ## [2.14.142] - 2026-11-11
 
 ### Changed
