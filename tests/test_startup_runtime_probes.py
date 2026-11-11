@@ -16,7 +16,7 @@ import pytest
 
 from fake_claude import fake_claude
 from looper.agents import profile_registry as registry, runtimes
-from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, Launcher, Probe, RuntimeUnsupported, coco_login
+from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, Launcher, Probe, VendorType, coco_login
 from looper.db import profile_registry as db
 
 
@@ -239,8 +239,11 @@ def test_coco_registration_warms_the_model_catalog_off_the_event_loop(tmp_path, 
         pytest.fail("runtime and catalog probes must never start processes on the event loop")
 
     monkeypatch.setattr(subprocess, "run", off_loop)
-    provider = registry.LegacyProviderSpec("prov-coco", "coco-login", AuthKind.OAUTH,
-        frozenset({ApiProtocol.OPENAI_RESPONSES}), "coco", catalog=(registry.CatalogModel("GPT-9"),))
+    provider = registry.ProviderSpec("prov-coco", "coco-login", VendorType.COCO_LOGIN, AuthKind.OAUTH, "coco")
+    endpoint = registry.Endpoint(provider.id, ApiProtocol.OPENAI_RESPONSES, "")
+    models = {name: registry.ResolvedModel(
+        registry.ModelSpec(name, provider.id, name, endpoint.protocol), provider, endpoint)
+        for name in ("GPT-9", "GPT-5.5")}
     coco_login.forget_probe()
     coco_login.forget_models()
 
@@ -253,17 +256,20 @@ def test_coco_registration_warms_the_model_catalog_off_the_event_loop(tmp_path, 
         else:
             assert await registry.register_found_runtimes() == (["coco"] if entry == "startup" else [])
         key = executable if entry in {"registered-startup", "redetect"} else "coco"
+        runtime = registry.RuntimeSpec("rt-coco", "coco", "coco", key, adapter.capabilities)
         before = calls.read_text()
+        # Reads remain structural even when a warmed catalog no longer lists the model.
+        models["GPT-9"].check_runtime(runtime)
         if state == "logged_in":
             assert coco_login.cached_models(key) == {"gpt-5.5": "GPT-5.5"}
-            with pytest.raises(RuntimeUnsupported, match="GPT-9.*GPT-5.5"):
-                adapter.check_pairing(provider, "GPT-9", executable=key)
-            supported = registry.LegacyProviderSpec("prov-coco", "coco-login", AuthKind.OAUTH,
-                frozenset({ApiProtocol.OPENAI_RESPONSES}), "coco", catalog=(registry.CatalogModel("GPT-5.5"),))
-            adapter.check_pairing(supported, "GPT-5.5", executable=key)
+            with pytest.raises(registry.RegistryError, match="GPT-9.*GPT-5.5") as refused:
+                await models["GPT-9"].check_available_runtime(runtime)
+            assert refused.value.field == "model"
+            assert await adapter.login_problem(models["GPT-9"].binding_provider(), executable=key) == str(refused.value)
+            await models["GPT-5.5"].check_available_runtime(runtime)
+            assert await adapter.login_problem(models["GPT-5.5"].binding_provider(), executable=key) is None
         else:
             assert coco_login.cached_models(key) is None
-            adapter.check_pairing(provider, "GPT-9", executable=key)
         assert calls.read_text() == before
         commands = before.splitlines()
         assert "login status" in commands
