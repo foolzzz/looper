@@ -1947,9 +1947,16 @@ Manager tools.
   chains are acyclic, allow at most three hops and preserve every supported
   role; edits also validate incoming chains. Referenced targets cannot be deleted.
   Planner follows the chain only for a profile configuration error. Worker and
-  Reviewer also fall back after a launch failure, or a nonzero exit or timeout
-  before any model event when the adapter's `first_event_known` is verified.
-  Unverified adapters leave that detection disabled. Each switch stays within
+  Reviewer also fall back after a launch failure, or a nonzero exit (or a
+  model refusal reporting zero turns) before any model event. Timeouts do not
+  trigger this detection. It is enabled for Claude Code, Codex, coco, Cursor
+  Agent (native and TTADK) and Grok, with recorded samples and stand-in streams
+  covering their event boundaries. Launcher banners, session/turn starts and
+  model names echoed at initialization are not model events. Responses, tool
+  calls, partial model output and nonzero token usage prevent fallback.
+  OMP, Pi, DSH and API keep `first_event_known` disabled until their first
+  model events are verified. The exit reason is
+  `exited before any model event: <first line of the error>`. Each switch stays within
   the same step attempt, without consuming a retry, and records activity,
   `profile_fallback` journal entries and the ordered `{from, to, reason}` chain in
   `metadata.fallback` on the target run, including failed launches. `metadata.fallback_from`

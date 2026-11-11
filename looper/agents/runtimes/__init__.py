@@ -399,7 +399,7 @@ class RuntimeAdapter(ABC):
     # Planner's nudge, an agent room reminder. A runtime that reads only its prompt has False.
     run_input: ClassVar[bool] = False
     keepable: ClassVar[bool] = False  # a keeper may hold its run across a control-plane restart
-    # Enable only after real CLI checks confirm its first model event on success and absence on startup failure.
+    # Enable only when recorded CLI samples and stand-in streams pin down its first model event.
     first_event_known: ClassVar[bool] = False
     # How it keeps a run that must not change files from changing them (``Launch.read_only``).
     read_only: ClassVar[ReadOnly] = ReadOnly.CHECK
@@ -417,17 +417,20 @@ class RuntimeAdapter(ABC):
     can_interrupt: ClassVar[bool] = False
 
     def is_model_event(self, event: Mapping[str, Any]) -> bool:
-        """A model initialization, response or nonzero token usage; progress and empty results are not evidence."""
+        """A response or nonzero token usage; launcher initialization alone is not evidence."""
         if event.get("type") == "result":
             from ..run_usage import reported_totals
 
             usage = reported_totals(dict(event)).to_dict()
             return any(value and value > 0 for name, value in usage.items() if name != "cost_usd")
+        if event.get("type") == "usage":
+            from ..run_usage import Usage
+
+            return any(value > 0 for name, value in Usage.from_dict(event.get("usage")).to_dict().items()
+                       if name != "cost_usd")
         if event.get("is_error") or event.get("error"):
             return False
         kind = event.get("type")
-        if kind == "system" and event.get("subtype") == "init":
-            return isinstance(event.get("model"), str) and bool(event["model"].strip())
         if kind == "assistant":
             message = event.get("message")
             if isinstance(message, Mapping):

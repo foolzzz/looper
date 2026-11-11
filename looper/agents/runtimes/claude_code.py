@@ -135,6 +135,7 @@ def _prompt_input(launch: Launch, *, prompt_file: Path | None = None,
 
 
 class ClaudeCodeRuntime(RuntimeAdapter):
+    first_event_known = True
     can_replace_system_prompt = True
     type = "claude-code"
     label = "Claude Code"
@@ -154,6 +155,19 @@ class ClaudeCodeRuntime(RuntimeAdapter):
                                     *BACKGROUND_MODEL_VARS})
     # A read-only run refuses what would change files and reports each refusal (claude_cli.read_only_args).
     read_only = ReadOnly.PERMISSIONS
+
+    def is_model_event(self, event: Mapping[str, Any]) -> bool:
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            # init normally just echoes the requested model, before the API is called.
+            from ..run_usage import request_tokens
+
+            return bool(self.reported_model(event)) and any(request_tokens(event.get("usage")).to_dict().values())
+        if event.get("type") == "stream_event":
+            raw = event.get("event") or {}
+            if raw.get("type") == "message_start":
+                return super().is_model_event({"type": "assistant", "message": raw.get("message")})
+            return raw.get("type") in {"content_block_start", "content_block_delta"}
+        return super().is_model_event(event)
 
     def reported_model(self, event: Mapping[str, Any]) -> str | None:
         if event.get("type") == "system" and event.get("subtype") == "init":
