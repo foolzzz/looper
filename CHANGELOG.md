@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.135] - 2026-11-11
+
+### Changed
+
+- **SUPERVISE reads each running Worker's newest activity.** ([#1234](https://github.com/foolzzz/looper/pull/1234))
+  - A SUPERVISE turn's report on a running Worker used to filter the task's oldest 400 activity rows, so on a task with more than 400 rows a later Worker showed "(no activity yet)". It now reads that Worker's six newest rows (`list_worker_activity`), oldest first, summary only.
+  - Model-visible: the SUPERVISE message content changes, and the Planner's nudge and kill decisions may change with it. Nothing else in the message, its cadence or its reply contract changes.
+
 ## [2.14.134] - 2026-11-10
 
 ### Changed
