@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.130] - 2026-11-10
+
+### Changed
+
+- **The dashboard shows the `coco` runtime as "Coco (TRAE CLI)", explains its login and places model refusals at the Model input.** ([#1218](https://github.com/foolzzz/looper/pull/1218))
+  - Runtime cards, Agent Profile selections and the `coco login` row are complete; `coco_login` joins the login checks of the startup banner. Codex and Cursor keep their sign-in wording.
+  - Registry and operation errors take an optional `field`, carried in the v1 error envelope (`error.field`, also in the OpenAPI schema). Coco's unknown-model refusals set `field: "model"`, and the profile form shows them at the Model input; other errors stay in the bottom error.
+  - A usable coco login warms the model catalog during first registration, startup with an existing registration, and re-detection or probing, so the first profile save refuses an unknown model. Logged-out, unknown-login and failed-catalog cases keep the deferred launch validation.
+
 ## [2.14.129] - 2026-11-11
 
 ### Added
