@@ -95,7 +95,7 @@ def run_primary(agent_db, tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "fallback_settings", AsyncMock(return_value=backup))
 
     def run(runtime, launcher=Launcher.NATIVE, *, events=(), exit_code=1, wait=False, steer=False,
-            error=ERROR, startup=True, fallback=True):
+            error=ERROR, startup=True, fallback=True, verify=False):
         transcript = "Launcher ready\n" + "\n".join(json.dumps(e) for e in [
             *(_launch_lines(runtime) if startup else []), *events])
         body = f'''
@@ -133,7 +133,8 @@ for line in sys.stdin:
         pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
 
         async def execute():
-            return await asyncio.wait_for(pool._execute(_step_envelope(tmp_path / "work", verify=False)), 10)
+            return await asyncio.wait_for(pool._execute(
+                _step_envelope(tmp_path / "work", verify=verify), is_verify=verify), 10)
 
         return asyncio.run(execute()), records
 
@@ -198,21 +199,53 @@ def test_launch_refusal_uses_bounded_redacted_recorded_fallback(
 
 @pytest.mark.parametrize("launcher", list(Launcher))
 @pytest.mark.parametrize("exit_code", [0, 1])
-def test_stderr_error_is_redacted_before_clipping(run_primary, agent_db, monkeypatch, launcher, exit_code):
+@pytest.mark.parametrize("secret", [SECRET, "sk-ABC123" + "synthetic" * 20])
+def test_stderr_error_is_redacted_before_clipping(run_primary, agent_db, monkeypatch, launcher, exit_code, secret):
     monkeypatch.setattr(log_redaction, "_secrets", (SECRET,))
-    refusal = "Unknown model: " + "x" * 476 + SECRET + " trailing diagnostic"
+    refusal = "Unknown model: " + "x" * 476 + " " + secret + " trailing diagnostic"
     result, records = run_primary("codex", launcher, exit_code=exit_code, error=refusal, fallback=False)
     assert result["status"] == "failed" and len(records) == 1
     assert agent_db.finish_record.await_args.kwargs["error"] == result["error"]
     for text in [result["error"], result["stderr"]]:
-        assert "Unknown model" in text and log_redaction.MASK in text
-        assert SECRET[:8] not in text
+        assert "Unknown model" in text
+        if secret == SECRET:
+            assert log_redaction.MASK in text
+        assert secret[:8] not in text
+
+
+@pytest.mark.parametrize("launcher", list(Launcher))
+@pytest.mark.parametrize("fallback", [False, True])
+def test_cli_stderr_masks_unregistered_keys_and_strips_ansi(run_primary, agent_db, launcher, fallback):
+    keys = ("sk-ABC123syntheticKey", "syntheticApiKey", "syntheticBearerToken")
+    stderr = (f"\x1b]8;;https://example.invalid/model\x1b\\\x1b[31mUnknown model: {keys[0]} "
+              f"api_key={keys[1]} Bearer {keys[2]}\x1b[0m\x1b]8;;\x1b\\")
+    result, records = run_primary("codex", launcher, error=stderr, fallback=fallback)
+    error = agent_db.finish_record.await_args_list[0].kwargs["error"]
+    assert "Unknown model" in error
+    assert len(records) == (2 if fallback else 1)
+    texts = [error]
+    if fallback:
+        reason = result["fallback"][0]["reason"]
+        assert "Unknown model" in reason
+        assert records[1]["metadata"]["fallback"] == result["fallback"]
+        activity = [c.kwargs["summary"] for c in agent_db.insert_activity.await_args_list
+                    if "Agent Profile fallback:" in c.kwargs["summary"]]
+        assert len(activity) == 1 and activity[0].endswith(f"({reason})")
+        texts.extend([reason, json.dumps(records), *activity])
+    else:
+        texts.extend([result["error"], result["stderr"]])
+    for text in texts:
+        assert "[redacted]" in text
+        assert all(key not in text for key in keys)
+        assert "\x1b" not in text and "\\u001b" not in text
+        assert "example.invalid" not in text
 
 
 @pytest.mark.parametrize("launcher", list(Launcher))
 @pytest.mark.parametrize("evidence", ["none", "item", "usage", "no-fallback-profile"])
+@pytest.mark.parametrize("runtime", ["codex", "coco"])
 def test_codex_zero_exit_error_result_preserves_refusal_and_model_evidence(
-    run_primary, agent_db, monkeypatch, launcher, evidence,
+    run_primary, agent_db, monkeypatch, launcher, evidence, runtime,
 ):
     monkeypatch.setattr(log_redaction, "_secrets", (SECRET,))
     # Replay the recorded Codex JSONL shape; the adapter emits errors without num_turns.
@@ -222,7 +255,7 @@ def test_codex_zero_exit_error_result_preserves_refusal_and_model_evidence(
     events = ([{"type": "item.started", "item": {"id": "answer", "type": "agent_message", "text": "Inspecting"}}]
               if evidence == "item" else [{"type": "turn.completed", "usage": {"input_tokens": 1}}]
               if evidence == "usage" else [])
-    result, records = run_primary("codex", launcher, events=[*events, failed], exit_code=0, error="",
+    result, records = run_primary(runtime, launcher, events=[*events, failed], exit_code=0, error="",
                                   fallback=evidence != "no-fallback-profile")
     falls_back = evidence == "none"
     assert (result["status"] == "completed") is falls_back
@@ -233,6 +266,27 @@ def test_codex_zero_exit_error_result_preserves_refusal_and_model_evidence(
     for text in texts:
         assert "Model is unavailable" in text and log_redaction.MASK in text and SECRET not in text
         assert len(text) <= 500
+
+
+def test_codex_reviewer_records_refusal_reason(run_primary, agent_db):
+    refusal = "Model is unavailable: \x1b[31msk-ABC123syntheticKey\x1b[0m; choose another model"
+    result, records = run_primary("codex", events=[{
+        "type": "turn.failed", "error": {"message": refusal}}], exit_code=0, error="",
+        fallback=False, verify=True)
+    assert result["passed"] is False and len(records) == 1
+    error = agent_db.finish_record.await_args.kwargs["error"]
+    assert error == result["summary"]
+    assert "Model is unavailable" in error and "choose another model" in error
+    assert "sk-ABC123" not in error and "\x1b" not in error
+
+
+def test_codex_reviewer_negative_verdict_is_not_a_run_error(run_primary, agent_db):
+    verdict = {"passed": False, "findings": ["Missing validation"], "summary": "Changes needed"}
+    result, _ = run_primary("codex", events=[{
+        "type": "item.completed", "item": {"id": "review", "type": "agent_message", "text": json.dumps(verdict)}},
+        {"type": "turn.completed", "usage": {"input_tokens": 1}}], exit_code=0, error="", verify=True)
+    assert result["passed"] is False and result["summary"] == verdict["summary"]
+    assert agent_db.finish_record.await_args.kwargs["error"] is None
 
 
 @pytest.mark.parametrize(("runtime", "launcher"), LAUNCHES)

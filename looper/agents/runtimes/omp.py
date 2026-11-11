@@ -83,6 +83,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from ... import child_env
+from ..log_redaction import strip_ansi
 from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
@@ -674,6 +675,7 @@ def write_prompt(home: Path, text: str) -> Path:
 
 def safe_error(message: str, *, secrets: tuple[str, ...] = (), limit: int | None = 500) -> str:
     """Redact before clipping: a truncated credential must never become visible."""
+    message = strip_ansi(message)
     for secret in secrets:
         if secret:
             message = message.replace(secret, "[redacted]")
