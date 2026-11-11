@@ -77,7 +77,7 @@ def test_ttadk_on_path_registers_a_separate_builtin_runtime(monkeypatch, tmp_pat
         assert await db.get_runtime("rt-ttadk-codex") is None
         assert await db.get_runtime("rt-ttadk-cursor-agent") is None
         monkeypatch.setenv("PATH", str(bin_dir))
-        assert await registry.register_found_runtimes() == ["codex", "ttadk-codex", "ttadk-cursor-agent"]
+        assert await registry.register_found_runtimes() == ["ttadk-coco", "codex", "ttadk-codex", "ttadk-cursor-agent"]
         row = await db.get_runtime("rt-ttadk-codex")
         assert (row["name"], row["type"], row["launcher"], row["executable"]) == (
             "ttadk-codex", "codex", "ttadk", "")

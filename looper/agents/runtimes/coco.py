@@ -1,7 +1,8 @@
-"""Native Coco agents, using the Codex stream and an isolated Coco home."""
+"""Native and TTADK Coco agents, using the Codex stream and an isolated Coco home."""
 from __future__ import annotations
 
 import asyncio
+import shlex
 import subprocess
 import tempfile
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from ... import child_env
 from . import ApiProtocol, AuthKind, Capability, Launcher, Probe, ProviderBinding, ReadOnly, RuntimeUnsupported
-from . import coco_login
+from . import coco_login, ttadk
 from .codex import CodexHome, CodexRuntime, ResidentCodex
 
 if TYPE_CHECKING:
@@ -27,9 +28,9 @@ class CocoRuntime(CodexRuntime):
     label = "Coco (TRAE CLI)"
     default_executable = "coco"
     home = COCO
-    launchers = frozenset({Launcher.NATIVE})
-    ttadk_tool = None
-    ttadk_runtime_name = None
+    launchers = frozenset({Launcher.NATIVE, Launcher.TTADK})
+    ttadk_tool = "trae-cli"
+    ttadk_runtime_name = "ttadk-coco"
     capabilities = frozenset({Capability.RUN, Capability.RESIDENT_SESSION, Capability.RESUME,
                               Capability.MCP, Capability.ADD_DIRS})
     protocols = frozenset({ApiProtocol.OPENAI_RESPONSES})
@@ -44,7 +45,14 @@ class CocoRuntime(CodexRuntime):
         return self.auth_kinds
 
     def probe_for(self, executable: str, launcher: Launcher) -> Probe:
-        return self.probe(executable)
+        if launcher is Launcher.NATIVE:
+            return self.probe(executable)
+        version, error = ttadk.probe_version(executable)
+        if error:
+            return Probe(None, self.capabilities, error)
+        command, note = _ttadk_command()
+        native = self.probe(command)
+        return Probe(f"ttadk {version} / {native.version or 'unknown'}", native.capabilities, native.error or note)
 
     def probe(self, executable: str) -> Probe:
         # Coco has its own version sequence: never apply Codex's app-server version gate.
@@ -75,21 +83,29 @@ class CocoRuntime(CodexRuntime):
         return ProviderBinding(args=("-m", model), env=provider.env, unset=coco_login.ENV_UNSET)
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
-                      executable: str | None = None) -> None:
-        super().check_pairing(provider, model, effort, executable=executable)
+                      executable: str | None = None, launcher: Launcher = Launcher.NATIVE) -> None:
+        super().check_pairing(provider, model, effort, executable=executable, launcher=launcher)
         if effort:
             raise RuntimeUnsupported("coco takes no effort level in Looper yet")
-        models = coco_login.cached_models(executable or self.default_executable)
+        command = _ttadk_command()[0] if launcher is Launcher.TTADK else executable or self.default_executable
+        models = coco_login.cached_models(command)
         if problem := _catalog_problem(model, models):
             raise RuntimeUnsupported(problem, field="model")
 
-    async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None) -> str | None:
-        if problem := await coco_login.launch_problem(executable or self.default_executable):
+    async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None,
+                            launcher: Launcher = Launcher.NATIVE) -> str | None:
+        command = executable or self.default_executable
+        if launcher is Launcher.TTADK:
+            problem = await ttadk.sign_in_problem(executable or "ttadk", "trae-cli")
+            if problem and problem.blocks_launch:
+                return problem.message(self.type)
+            command = _ttadk_command()[0]
+        if problem := await coco_login.launch_problem(command):
             return problem
         # Resolved profiles expose only the selected model in their binding catalog.
         if len(provider.catalog) == 1:
             return await asyncio.to_thread(_model_problem, provider.catalog[0].name,
-                                           executable or self.default_executable)
+                                           command)
         return None
 
     def environment(self, launch: Launch) -> dict[str, str]:
@@ -99,6 +115,9 @@ class CocoRuntime(CodexRuntime):
                 raise RuntimeUnsupported(f"coco runs in a home of Looper's: remove {name} from the Agent settings' "
                                          "or the provider's variables")
         return super().environment(launch)
+
+    def _program(self, executable: str, launch: Launch) -> list[str]:
+        return ttadk.prefix(executable, "trae-cli") if launch.profile.runtime.launcher is Launcher.TTADK else [executable]
 
     def resident_session(self, label: str) -> ResidentSession:
         return ResidentCodex(label=label, home=COCO, runtime_label=self.label)
@@ -112,7 +131,20 @@ class CocoRuntime(CodexRuntime):
         raise RuntimeUnsupported("coco runs cannot be consulted yet")
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
-        return {**super().launch_record(launch), "commit_attribution": "trae"}
+        record = {**super().launch_record(launch), "commit_attribution": "trae"}
+        if launch.profile.runtime.launcher is Launcher.TTADK:
+            record["launcher"] = {"kind": "ttadk", "version": launch.profile.runtime.version, "tool": "trae-cli"}
+        return record
+
+
+def _ttadk_command() -> tuple[str, str | None]:
+    try:
+        words = shlex.split(ttadk.tool_command("trae-cli"))
+    except ValueError:
+        words = []
+    if len(words) == 1:
+        return words[0], None
+    return "traex", "TTADK's configured trae-cli command is not a single word; probed PATH's traex instead"
 
 
 def _model_problem(model: str, executable: str) -> str | None:

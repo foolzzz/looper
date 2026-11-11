@@ -1701,6 +1701,16 @@ Manager tools.
   by another caller ends the current turn's process tree and keeps the thread
   id for the next turn.
 
+  **Through TTADK.** The separate `ttadk-coco` runtime uses
+  `ttadk code -t trae-cli --skip-check -- exec --json …`. TTADK adds its
+  sign-in check, banner lines and launch event; Coco uses the same isolated
+  `TRAE_HOME` and login. The retired `ttadk code -t coco` command no longer
+  exists. TTADK's `-m` does not select a model for this tool: Looper passes
+  `-m` to Coco after `--`. Version detection uses TTADK's configured
+  single-word `trae-cli` command (`traex` by default), and run metadata
+  records `launcher: {kind: ttadk, version: …, tool: trae-cli}`. All four
+  roles are available. Request recording marks these runs `not_covered`.
+
   Only the built-in `coco-login` provider is supported. Before launch,
   Looper checks `coco login status` and the cached `coco models --json`
   catalog, refusing missing logins and unknown models; a run without a login

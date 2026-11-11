@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 from ...llmrec import LlmrecRoute, no_proxy
 from .. import (
-    ApiProtocol, AuthKind, Capability, CostSource, Probe, PromptBlock, ProviderBinding,
+    ApiProtocol, AuthKind, Capability, CostSource, Launcher, Probe, PromptBlock, ProviderBinding,
     RunCost, RuntimeAdapter, RuntimeUnsupported, runtime_prompt_text,
 )
 
@@ -97,7 +97,7 @@ class ApiRuntime(RuntimeAdapter):
         return []
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
-                      executable: str | None = None) -> None:
+                      executable: str | None = None, launcher: Launcher = Launcher.NATIVE) -> None:
         if not provider.base_url:
             raise RuntimeUnsupported("the api runtime needs the endpoint's base_url")
 

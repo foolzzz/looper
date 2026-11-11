@@ -73,7 +73,7 @@ from urllib.parse import urlsplit
 from ... import child_env
 from .. import claude_cli
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
+    ApiProtocol, AuthKind, Capability, CostSource, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
     RuntimeAdapter, RuntimeUnsupported, instructions,
 )
 from .instructions import InstructionFile
@@ -204,7 +204,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         return claude_cli.isolation_args(cwd, env=env, settings_dir=settings_dir)
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
-                      executable: str | None = None) -> None:
+                      executable: str | None = None, launcher: Launcher = Launcher.NATIVE) -> None:
         if provider.protocols == self.translated_protocols and not provider.base_url.strip():
             raise RuntimeUnsupported("Cannot prepare Claude Code: the model's OpenAI endpoint has no base URL")
 

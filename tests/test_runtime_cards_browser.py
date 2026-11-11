@@ -7,6 +7,7 @@ import pytest
 
 from fake_claude import fake_claude
 from looper.agents import profile_registry as registry, runtimes
+from looper.agents.runtimes import ttadk as ttadk_runtime
 
 
 @pytest.mark.installed
@@ -17,18 +18,22 @@ def test_agent_runtimes_launcher_and_operator_configuration(tmp_path, monkeypatc
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for name, version in [("ttadk", "1.0.37"), ("codex", "codex-cli 0.162.0"),
-                          ("cursor-agent", "2026.10.22-27dcf5f")]:
+                          ("cursor-agent", "2026.10.22-27dcf5f"), ("coco", "traecli 0.214.1"),
+                          ("traex", "traecli 0.214.1")]:
         if name == "ttadk" and not ttadk_detected:
             continue
         fake_claude(bin_dir / name, "import sys\n"
                     "assert sys.argv[1:] == ['--version'], 'Only version probes are allowed'\n"
                     f"print({version!r})\n")
     monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setattr(ttadk_runtime, "tool_command", lambda tool: {
+        "codex": "codex", "cursor-cli": "agent", "trae-cli": "traex"}[tool])
 
     async def snapshot():
         rows = []
         for kind, launcher in [("codex", runtimes.Launcher.NATIVE), ("cursor-agent", runtimes.Launcher.NATIVE),
-                               ("codex", runtimes.Launcher.TTADK)]:
+                               ("codex", runtimes.Launcher.TTADK), ("coco", runtimes.Launcher.NATIVE),
+                               ("coco", runtimes.Launcher.TTADK)]:
             if launcher is runtimes.Launcher.TTADK and not ttadk_detected:
                 continue
             adapter = runtimes.adapter(kind)
@@ -43,7 +48,7 @@ def test_agent_runtimes_launcher_and_operator_configuration(tmp_path, monkeypatc
             # Public screenshot paths describe the stand-ins without exposing the checkout or temporary directory.
             row["path"] = f"/usr/local/bin/{row['default_executable']}"
             rows.append(row)
-        return {"runtime_types": [registry.type_view(runtimes.adapter(kind)) for kind in ("codex", "cursor-agent")],
+        return {"runtime_types": [registry.type_view(runtimes.adapter(kind)) for kind in ("codex", "cursor-agent", "coco")],
                 "runtimes": rows, "profiles": [], "providers": [], "models": [], "vendor_types": [],
                 "prices": {"as_of": "", "sources": [], "models": {}}, "limits": registry._limits()}
 
@@ -73,8 +78,11 @@ def test_agent_runtimes_launcher_and_operator_configuration(tmp_path, monkeypatc
             expect(ttadk.get_by_text("TTADK", exact=True)).to_be_visible()
             if ttadk_detected:
                 expect(ttadk).to_contain_text("ttadk 1.0.37 / codex-cli 0.162.0")
+                coco = page.get_by_role("listitem").filter(has=page.get_by_role("heading", name="ttadk-coco", exact=True))
+                expect(coco).to_contain_text("ttadk 1.0.37 / traecli 0.214.1")
+                expect(coco.get_by_role("button", name="Re-detect ttadk-coco", exact=True)).to_be_enabled()
             else:
-                for name in ("ttadk-codex", "ttadk-cursor-agent"):
+                for name in ("ttadk-codex", "ttadk-cursor-agent", "ttadk-coco"):
                     card = page.get_by_role("listitem").filter(has=page.get_by_role("heading", name=name, exact=True))
                     expect(card).to_contain_text("Not detected")
                     expect(card).to_contain_text("Install TTADK and sign in (ttadk auth login sso), then Re-detect.")

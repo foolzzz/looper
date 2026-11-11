@@ -480,7 +480,7 @@ class RuntimeAdapter(ABC):
         return model
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
-                      executable: str | None = None) -> None:
+                      executable: str | None = None, launcher: Launcher = Launcher.NATIVE) -> None:
         """Additional configuration rules, without requiring or reading a provider key; none by default."""
         return None
 
@@ -622,7 +622,8 @@ class RuntimeAdapter(ABC):
     # The models the Agent Profile form suggests with the runtime's own login (any model is taken).
     login_models: ClassVar[tuple[str, ...]] = ()
 
-    async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None) -> str | None:
+    async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None,
+                            launcher: Launcher = Launcher.NATIVE) -> str | None:
         """Why a run with ``provider`` (the runtime's own login) cannot start now; None when it can, or when the
         adapter cannot tell."""
         return None

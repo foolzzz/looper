@@ -22,7 +22,7 @@ from uuid import uuid4
 from ... import child_env
 from ..run_usage import Usage
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ResidentTransport, RunCost,
+    ApiProtocol, AuthKind, Capability, Launcher, Probe, PromptBlock, ProviderBinding, ResidentTransport, RunCost,
     ReadOnly, RuntimeAdapter, RuntimeUnsupported, instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
@@ -347,7 +347,7 @@ class DshRuntime(RuntimeAdapter):
         return MODEL_MAP.get(model, model)
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
-                      executable: str | None = None) -> None:
+                      executable: str | None = None, launcher: Launcher = Launcher.NATIVE) -> None:
         validate_provider(provider, model, effort)
 
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:

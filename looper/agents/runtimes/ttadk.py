@@ -60,6 +60,8 @@ def prefix(executable: str, tool: str) -> list[str]:
         return [executable, "codex", "--skip-check", "--mode", "mixed", "--"]
     if tool == "cursor-cli":
         return [executable, "code", "-t", "cursor-cli", "--skip-check", "--"]
+    if tool == "trae-cli":
+        return [executable, "code", "-t", "trae-cli", "--skip-check", "--"]
     raise ValueError(f"unsupported TTADK tool: {tool!r}")
 
 
@@ -96,7 +98,7 @@ def probe_version(executable: str) -> tuple[str | None, str | None]:
 
 
 def tool_command(tool: str) -> str:
-    default = {"codex": "codex", "cursor-cli": "agent"}[tool]
+    default = {"codex": "codex", "cursor-cli": "agent", "trae-cli": "traex"}[tool]
     try:
         settings = json.loads((Path.home() / ".ttadk" / "setting.json").read_text(encoding="utf-8"))
         commands = settings.get("ai_tool_commands", {})
