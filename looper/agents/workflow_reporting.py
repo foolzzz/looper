@@ -210,6 +210,7 @@ def process_record(plan: TaskPlan, journal: Iterable[JournalEntry], runs: Iterab
             if step.step_id not in summarized_gates:
                 summary_escalations.append(f'{_notice_piece(step.label, 60)} / {_notice_piece(gate.topic, 60)}: '
                                            f'{gate.state.value}; {_notice_piece("; ".join(conclusion) or "尚无结论", 80)}')
+    reviews.reverse()
     summary = _summary_text({
         "Roles": list(summary_roles) if runs is not None else ['运行记录读取失败；运行时和模型信息不可用'],
         "Reviews": _outcome_lines(summary_reviews), "Verification": _outcome_lines(summary_verification),
@@ -270,7 +271,7 @@ def _summary_text(sections: Mapping[str, list[str]]) -> str:
     names = SECTIONS[:-1]
     pointer = "Full record: task page / looper_tasks get"
     total = sum(map(len, sections.values()))
-    marker = f'（另 {total} 条，完整记录见下）'
+    marker = f'（另 {total} 条，完整记录见任务页面）'
     reserved = len("## Process record\n\n\n\n" + pointer) + sum(len(name) + 5 + len(marker) for name in names)
     budget = (PROCESS_RECORD_SUMMARY_MAX_CHARS - reserved) // len(names)
     lines = ["## Process record", ""]
@@ -278,7 +279,7 @@ def _summary_text(sections: Mapping[str, list[str]]) -> str:
         items = sections.get(name, [])
         kept, omitted = _fit_entries(items, budget, "; ")
         value = "; ".join(kept) or ("未记录" if not omitted else "详见完整记录")
-        lines.append(f'- {name}: {value}' + (f'（另 {omitted} 条，完整记录见下）' if omitted else ''))
+        lines.append(f'- {name}: {value}' + (f'（另 {omitted} 条，完整记录见任务页面）' if omitted else ''))
     return "\n".join([*lines, '', pointer])
 
 

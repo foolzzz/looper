@@ -58,10 +58,12 @@ def test_review_arrivals_and_snapshot_keep_latest_verdict_per_seat_and_round():
     entries[0] = entry(JournalKind.REVIEW_ROUND, round=0, reviews={'alpha': {'passed': False}})
     entries.append(entry(JournalKind.REVIEW_ROUND, round=0, reviews=seats))
     record = process_record(task(), entries, [])
-    assert record['sections']['Reviews'] == [f'- s1 第 1 轮 / {name}: 通过, 0 blocking' for name in seats]
+    assert record['sections']['Reviews'] == [f'- s1 第 1 轮 / {name}: 通过, 0 blocking' for name in reversed(seats)]
     entries.extend([entry(JournalKind.REVIEW_ROUND, round=1, reviews=seats),
                     entry(JournalKind.REVIEW_ROUND, 's2', round=0, reviews=seats)])
     assert len(process_record(task(), entries, [])['sections']['Reviews']) == 9
+    text = process_record_text(process_record(task(), entries, []))
+    assert text.index('s2 第 1 轮') < text.index('s1 第 2 轮') < text.index('s1 第 1 轮')
     from looper.agents.tiers.journal import planner_section
 
     prompt = '\n'.join(planner_section(entries))
@@ -276,6 +278,7 @@ def test_delivery_summary_fits_latest_steps_and_seats_before_older_verdicts():
         kept = line.count('第 1 轮')
         assert 0 < kept < total
         assert f'另 {total - kept} 条' in line
+        assert '完整记录见任务页面' in line and '完整记录见下' not in line
         assert 'step-1-' not in line
     assert len(summary) <= 1200
 

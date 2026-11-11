@@ -76,6 +76,22 @@ def settle(token: Any, delivered: bool) -> None:
                 _snapshots[key] = (time.monotonic(), entries)
 
 
+def web_notice(thread: str, task_id: str, gate: dict[str, Any], *, name: str, manager_id: str, token: str) -> str:
+    """Number an opening notice in this web chat's command snapshot, preserving its earlier numbers."""
+    key = (manager_id, 'channel-web', thread, '')
+    saved = _snapshots.get(key)
+    entries = list(saved[1]) if saved and time.monotonic() - saved[0] <= SNAPSHOT_TTL_SEC else []
+    entry = next((entry for entry in entries if entry.step_id == gate['step_id']), None)
+    if entry is None:
+        entry = Entry(max((entry.number for entry in entries), default=0) + 1,
+                      task_id, gate['step_key'], gate['step_id'], name, manager_id)
+        entries.append(entry)
+    _pending[key] = (token, entries)
+    question = str(gate.get('question') or gate['topic'])
+    question = question if len(question) <= 500 else question[:499] + '…'
+    return f'关卡 {entry.number}【{name}】{gate["step_key"]}：\n{question}\n在此聊天回答：/gate {entry.number} <回答>'
+
+
 def _waited(moment: Any) -> str:
     from datetime import datetime, timezone
 

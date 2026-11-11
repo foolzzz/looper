@@ -673,6 +673,8 @@ def _effort(raw: Any, runtime: RuntimeSpec | None = None) -> str | None:
     levels = (adapter.effort_levels if adapter is not None else
               tuple(level for adapter in runtimes.ADAPTERS.values() for level in adapter.effort_levels or ()))
     if adapter is not None and levels is not None and raw not in (None, "") and raw not in levels:
+        if not levels:
+            raise RegistryError(f"{adapter.label} takes no effort level; leave effort empty")
         raise RegistryError(f"{adapter.label} effort must be one of {', '.join(levels)}, or empty for the runtime's own")
     if levels is not None and isinstance(raw, str) and raw in levels:
         return raw

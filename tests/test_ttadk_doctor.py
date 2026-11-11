@@ -50,7 +50,7 @@ def test_doctor_waits_for_cold_ttadk_sign_in_and_fails_when_signed_out(tmp_path,
     (1, ttadk.TtadkProblem.NOT_FOUND, self_check.FAIL),
     (1, ttadk.TtadkProblem.NOT_SIGNED_IN, self_check.FAIL),
     (1, ttadk.TtadkProblem.CHECK_FAILED, self_check.WARN),
-    (1, ttadk.TtadkProblem.CHECKING, self_check.WARN),
+    (1, ttadk.TtadkProblem.CHECKING, self_check.PENDING),
 ], ids=["no-database", "no-profile", "signed-in", "missing", "signed-out", "check-failed", "checking"])
 def test_ttadk_check_reports_usage_and_noninteractive_sign_in(monkeypatch, profiles, problem, status):
     calls = []
@@ -82,6 +82,17 @@ def test_ttadk_check_reports_usage_and_noninteractive_sign_in(monkeypatch, profi
         assert check.detail == problem.message("codex")
 
 
+def test_pending_ttadk_check_does_not_log_a_failure_or_empty_fix(monkeypatch, caplog):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(ttadk, 'sign_in_problem', AsyncMock(return_value=ttadk.TtadkProblem.CHECKING))
+    check = asyncio.run(self_check.check_ttadk([{'type': 'codex', 'executable': ''}], wait=False))
+    self_check.log_problems([check])
+    assert check.status == self_check.PENDING
+    assert self_check.format_checks([check]).startswith('pending TTADK')
+    assert 'cannot run' not in caplog.text and 'Fix:' not in caplog.text
+
+
 def test_system_status_refreshes_the_ttadk_startup_check(monkeypatch):
     async def current():
         return self_check.Check("ttadk", "TTADK", self_check.OK, "signed in now")
@@ -92,6 +103,65 @@ def test_system_status_refreshes_the_ttadk_startup_check(monkeypatch):
     server = SimpleNamespace(_self_checks=[other, startup], _worker_pool=None)
     result = asyncio.run(AgentHTTPServer._checks_now(server))
     assert result == [other, asyncio.run(current()).to_dict()]
+
+
+def test_system_status_skips_startup_login_placeholders(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from looper.agents.serve import _pending_advisory_checks
+
+    startup = [check.to_dict() for group in _pending_advisory_checks() for check in group]
+    current = AsyncMock(side_effect=AssertionError("startup still owns the check"))
+    for name in self_check.LOGIN_CHECKS:
+        monkeypatch.setitem(self_check.LOGIN_CHECKS, name, current)
+    server = SimpleNamespace(_self_checks=startup, _worker_pool=None)
+    assert asyncio.run(AgentHTTPServer._checks_now(server)) == startup
+    current.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("problem", "status"), [
+    (ttadk.TtadkProblem.NOT_SIGNED_IN, self_check.FAIL),
+    (None, self_check.OK),
+], ids=["signed-out", "signed-in"])
+def test_system_status_refreshes_pending_cold_ttadk_startup_probe(problem, status, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    ttadk.forget_probe()
+    key = ("stand-in-ttadk", "codex")
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def probe(executable, tool):
+        calls.append((executable, tool))
+        entered.set()
+        assert release.wait(5)
+        return problem
+
+    runtimes = [{"launcher": "ttadk", "profile_count": 1, "type": "codex", "executable": key[0]}]
+    monkeypatch.setattr(ttadk, "_sign_in_problem", probe)
+    monkeypatch.setattr(profile_registry, "launcher_profile_count", AsyncMock(return_value=1))
+    monkeypatch.setattr(profile_registry, "list_runtimes", AsyncMock(return_value=runtimes))
+
+    async def check():
+        try:
+            startup = await self_check.ttadk_check()
+            assert startup.status == self_check.PENDING
+            server = SimpleNamespace(_self_checks=[startup.to_dict()], _worker_pool=None)
+            assert await asyncio.to_thread(entered.wait, 1)
+            for _ in range(2):
+                assert await asyncio.wait_for(AgentHTTPServer._checks_now(server), 1) == [startup.to_dict()]
+            release.set()
+            assert await asyncio.wait_for(ttadk.sign_in_problem(*key), 2) is problem
+            result = (await AgentHTTPServer._checks_now(server))[0]
+            assert result["status"] == status
+            if problem is not None:
+                assert result["detail"] == problem.message("codex")
+            assert calls == [key]
+        finally:
+            release.set()
+            await asyncio.to_thread(ttadk.forget_probe)
+
+    asyncio.run(asyncio.wait_for(check(), 8))
 
 
 @pytest.mark.parametrize("previous", ["cold", None, ttadk.TtadkProblem.NOT_SIGNED_IN],
@@ -127,7 +197,7 @@ def test_system_status_does_not_wait_for_ttadk_and_launch_shares_refresh(previou
             start = time.monotonic()
             result = await AgentHTTPServer._checks_now(server)
             assert time.monotonic() - start < 0.2
-            expected = self_check.WARN if previous == "cold" else self_check.FAIL if previous else self_check.OK
+            expected = self_check.PENDING if previous == "cold" else self_check.FAIL if previous else self_check.OK
             assert result[0]["status"] == expected
             assert await asyncio.to_thread(entered.wait, 1)
             assert await AgentHTTPServer._checks_now(server) == result

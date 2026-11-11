@@ -43,6 +43,12 @@ def test_old_runtime_rows_default_to_native():
     assert config_transfer.runtime_entry(row) == {"name": "codex-here", "type": "codex", "executable": ""}
 
 
+def test_cursor_profile_refuses_effort_with_a_clear_runtime_message():
+    runtime = registry.runtime_spec(_row(type='cursor-agent'))
+    with pytest.raises(registry.RegistryError, match='Cursor Agent takes no effort level'):
+        registry.AgentProfile('profile', 'Cursor', runtime, 'model', 'high')
+
+
 @pytest.mark.parametrize("destination,source", [("native", "ttadk"), ("ttadk", "native")])
 def test_import_rejects_same_named_runtime_with_different_launcher(destination, source):
     row = _row(destination)

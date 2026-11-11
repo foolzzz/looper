@@ -27,10 +27,30 @@ def test_running_report_reads_the_workers_latest_rows(tmp_path, monkeypatch):
     lines = asyncio.run(agent._running_report(plan, step))
 
     assert lines[1:3] == ["  - [tool] read source", "  - [tool] ran checks"]
-    assert lines[3] == "  - [tool] " + "x" * 159 + "…"
+    assert len(lines[3]) == len("  - [tool] ") + 160
+    assert '…' in lines[3]
     assert lines[-1] == "  - room update"
     assert not any("(no activity yet)" in line or "old activity" in line for line in lines)
     recent.assert_awaited_once_with("task", worker, limit=6)
+
+
+@pytest.mark.parametrize('outside', [False, True])
+def test_running_report_keeps_filename_after_a_long_absolute_path(tmp_path, monkeypatch, outside):
+    root = tmp_path / ('workspace-' * 25)
+    path = (tmp_path if outside else root) / ('nested-' * 30) / 'important_source.py'
+    monkeypatch.setattr(activity, 'list_worker_activity', AsyncMock(return_value=[
+        {'kind': 'tool', 'summary': f'Read {path}'}]))
+    agent = PlannerAgent(task_id='task', runtime_root=tmp_path)
+    monkeypatch.setattr(agent, '_room_lines', AsyncMock(return_value=[]))
+    step = PlanStep('step', 0, 'Inspect', worker_id='worker')
+    plan = TaskPlan('plan', 'goal', 'Inspect', str(root), steps=[step])
+
+    lines = asyncio.run(agent._running_report(plan, step))
+
+    assert 'important_source.py' in lines[1] and lines[1].startswith('  - [tool] Read ')
+    assert len(lines[1]) <= len('  - [tool] ') + 160
+    if not outside:
+        assert str(root) not in lines[1]
 
 
 @pytest.mark.parametrize("worker,unavailable", [("worker-b", False), (None, False), ("", False), ("worker-b", True)])

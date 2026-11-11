@@ -343,10 +343,14 @@ async def check_ttadk(runtimes: list[dict[str, Any]] | None, *, wait: bool = Tru
         problem = await ttadk.sign_in_problem(runtime["executable"] or "ttadk", tool, wait=wait)
         if problem is not None:
             problems.append(problem.message(runtime["type"]))
-            if problem not in (ttadk.TtadkProblem.CHECK_FAILED, ttadk.TtadkProblem.CHECKING):
+            if problem is ttadk.TtadkProblem.CHECKING:
+                if status == OK:
+                    status = PENDING
+            elif problem is ttadk.TtadkProblem.CHECK_FAILED:
+                if status in (OK, PENDING):
+                    status = WARN
+            else:
                 status = FAIL
-            elif status == OK:
-                status = WARN
     if problems:
         return Check("ttadk", "TTADK", status, "; ".join(problems))
     return Check("ttadk", "TTADK", OK, "signed in for the TTADK runtimes used by Agent Profiles")
