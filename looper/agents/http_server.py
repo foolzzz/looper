@@ -999,7 +999,8 @@ class AgentHTTPServer:
         """The startup self-check, with the runtimes' own logins read now: a run may have found one forked since."""
         now = {check.get("id"): (await self_check.LOGIN_CHECKS[check["id"]]()).to_dict()
                for check in self._self_checks if check.get("id") in self_check.LOGIN_CHECKS
-               and check.get("status") != self_check.PENDING}
+               and not (check.get("status") == self_check.PENDING
+                        and check.get("detail") == "Startup check in progress")}
         checks = [now.get(check.get("id"), check) for check in self._self_checks]
         pool = self._worker_pool
         if pool is None or not (status := pool.keeper_status()):
