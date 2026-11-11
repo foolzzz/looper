@@ -2370,7 +2370,8 @@ class WorkerPool:
                     return
 
                 event_type = event.get("type", "")
-                if waiting is not None and (event_type == "assistant" or
+                # Background agents stream their own messages before the lead resumes.
+                if waiting is not None and not event.get("parent_tool_use_id") and (event_type == "assistant" or
                         (event_type == "system" and event.get("subtype") == "init")):
                     _cancel_check()
                     waiting_turn, waiting = waiting, None

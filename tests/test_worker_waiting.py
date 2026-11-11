@@ -190,6 +190,52 @@ def test_a_new_turn_cancels_the_waiting_check(tmp_path, monkeypatch, agent_db, t
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
+@pytest.mark.parametrize("fixture", ["background_agent", "agent_team_worker"])
+def test_subagent_events_preserve_the_waiting_check_and_reminders(tmp_path, monkeypatch, agent_db, fixture):
+    events = [json.loads(line) for line in (
+        Path(__file__).parent / "fixtures" / "claude_stream" / f"{fixture}.jsonl").read_text().splitlines()]
+    background = [event for event in events if event.get("parent_tool_use_id")]
+    assert any(event["type"] == "assistant" for event in background)
+    assert any(event["type"] == "user" for event in background)
+
+    async def scenario():
+        processed, sleeping, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        class Run(_Run):
+            async def events(self):
+                async for event in super().events():
+                    yield event
+                    if event is background[-1]:
+                        processed.set()
+
+        async def sleep(seconds):
+            sleeping.set()
+            await release.wait()
+
+        monkeypatch.setattr(worker, "_waiting_sleep", sleep)
+        run = Run()
+        async with _pool(tmp_path, monkeypatch, run, timeout=1) as (pool, results):
+            pool._reminders["w1"] = state = worker._Reminders()
+            run.turn(_waiting())
+            await sleeping.wait()
+            for event in background:
+                run.events_in.put_nowait(event)
+            await processed.wait()
+            assert state.waiting and state.tools_running == 0
+            assert not any(call.kwargs.get("metadata") == {"state": "resumed"}
+                           for call in agent_db.insert_activity.await_args_list)
+            assert await pool.remind("w1", "the room has new information")
+            assert await run.writes.get() == "the room has new information"
+            release.set()
+            assert "600 s have passed since you began waiting for: the build" in await run.writes.get()
+            await pool._tasks["w1"]
+            assert results[0].payload["status"] == "failed"
+            assert "timeout_seconds" in results[0].payload["error"]
+            assert "while waiting for: the build" in results[0].payload["error"]
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
 def test_the_check_timer_writes_a_wake_message(tmp_path, monkeypatch, agent_db):
     async def scenario():
         monkeypatch.setattr(worker, "_waiting_sleep", AsyncMock())
