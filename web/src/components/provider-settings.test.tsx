@@ -495,6 +495,17 @@ it("shows the Cursor sign-in command without offering login-link recovery", asyn
   expect([...container.querySelectorAll("button")].some((button) => button.textContent?.includes("Use the login again"))).toBe(false);
 });
 
+it.each(["not_logged_in", "unavailable"] as const)("explains how to check and sign in to an unusable Coco login (%s)", async (state) => {
+  data.providers = [account({ provider_id: "prov-coco-login", name: "Coco login", vendor_type: "coco-login",
+    auth: "oauth", oauth_runtime_type: "coco", api_key: null, login: { state, detail: "login needs attention" } })];
+  await render(false);
+  const row = container.querySelector('[role="status"]')!;
+  expect(row.textContent).toContain("coco login status");
+  expect([...row.querySelectorAll("code")].map((node) => node.textContent)).toContain("coco login");
+  expect([...row.querySelectorAll("button")].some((button) => button.textContent?.includes("Use the login again")))
+    .toBe(state === "unavailable");
+});
+
 it.each(["logged_in", "not_logged_in", "unknown"] as const)("refreshes a cold Cursor login to %s without user action, then stops", async (state) => {
   vi.useFakeTimers();
   data.providers = [account({ vendor_type: "cursor-login", auth: "oauth", oauth_runtime_type: "cursor-agent",

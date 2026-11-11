@@ -112,6 +112,18 @@ describe("Agent Runtimes", () => {
   const apiCard = () => [...container.querySelectorAll("h3")]
     .find((node) => node.textContent === "Model API (SDK)")!.closest("li")!;
 
+  it("shows Coco's version and all four roles without offering an install command", async () => {
+    body.runtime_types[0] = { ...body.runtime_types[0], type: "coco", label: "coco",
+      runtime_id: "rt-coco", default_executable: "coco", roles: ["worker", "reviewer"] };
+    body.runtimes = [runtime({ type: "coco", runtime_id: "rt-coco", name: "coco",
+      default_executable: "coco", path: null, version: "traecli 0.214.1", roles: ["worker", "reviewer"] })];
+    await show();
+    const node = [...container.querySelectorAll("h3")].find((h) => h.textContent === "Coco (TRAE CLI)")!.closest("li")!;
+    expect(fact(node, "Version")).toContain("traecli 0.214.1");
+    expect(fact(node, "Roles")).toBe("Manager: cannot runPlanner: cannot runWorker: can runReviewer: can run");
+    expect(node.textContent).not.toContain("Install");
+  });
+
   it("shows the TTADK launcher row and its full probed version beside native Codex", async () => {
     body.runtime_types[0] = { ...body.runtime_types[0], type: "codex", runtime_id: "rt-codex" };
     body.runtimes = [runtime({ type: "codex", runtime_id: "rt-codex" }), runtime({

@@ -167,6 +167,7 @@ export function AgentProfileForm({
   const action = useAction();
   const [runtimeNote, setRuntimeNote] = useState("");
   const [modelError, setModelError] = useState("");
+  const modelProblem = modelError || action.error;
   const [warnings, setWarnings] = useState<string[]>([]);
   const [saved, setSaved] = useState<AgentProfile | null>(null);
   const set = (change: Partial<typeof draft>) => {
@@ -264,13 +265,13 @@ export function AgentProfileForm({
         </div>
         <div className="space-y-1">
           <label htmlFor={`${id}-model`} className={LABEL}>Model *</label>
-          <Input id={`${id}-model`} list={`${id}-model-names`} value={draft.modelName} onChange={(e) => chooseName(e.target.value)} placeholder="Type or choose a model" className="font-mono" aria-invalid={!!modelError} aria-describedby={modelError ? `${id}-model-error` : undefined} />
+          <Input id={`${id}-model`} list={`${id}-model-names`} value={draft.modelName} onChange={(e) => chooseName(e.target.value)} placeholder="Type or choose a model" className="font-mono" aria-invalid={!!modelError} aria-describedby={modelProblem ? `${id}-model-error` : undefined} />
           <datalist id={`${id}-model-names`}>
             {names.map((name) => <option key={name} value={name} />)}
           </datalist>
           {!usable.length && <p className="text-[11px] text-muted-foreground">No compatible models. Add a model in <a href={settingsHref("providers")} className="underline underline-offset-2">LLM Providers</a>.</p>}
           {draft.modelName && !usable.some((m) => m.name === draft.modelName) && <p className="text-[11px] text-muted-foreground">No enabled provider offers {draft.modelName}. Add it under <a href={settingsHref("providers")} className="underline underline-offset-2">LLM Providers</a>: Models, or Fetch models.</p>}
-          {modelError && <p id={`${id}-model-error`} role="alert" className="text-xs text-destructive">{modelError}</p>}
+          {modelProblem && <p id={`${id}-model-error`} role="alert" className="text-xs text-destructive">{modelProblem}</p>}
         </div>
         <div className="space-y-1">
           <label htmlFor={`${id}-protocol`} className={LABEL}>Protocol *</label>
@@ -392,7 +393,7 @@ export function AgentProfileForm({
       )}
       {!warnings.length && (
         <FormFooter
-          error={action.error}
+          error=""
           busy={action.busy}
           submit={profile ? "Save" : `Add ${AGENT_PROFILE.name}`}
           onCancel={() => onDone()}
