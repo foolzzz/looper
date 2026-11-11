@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.132] - 2026-11-10
+
+### Changed
+
+- **`looper service upgrade` fails when it cannot read the running service's status, instead of treating keeper mode as off and planning a full drain.** ([#1226](https://github.com/foolzzz/looper/pull/1226))
+  - The error is `cannot read the running service's status (keeper mode unknown); nothing was drained, run looper service upgrade again`. It is raised before planning, for a dry run too, and nothing is decided, installed or sent. That one status read has a 15 s timeout (default 3 s elsewhere). A readable status plans as before.
+  - Not model-visible: no prompt or tool text changes.
+
 ## [2.14.131] - 2026-11-10
 
 ### Changed
