@@ -92,6 +92,16 @@ def thread_roots_command(chat_id: str, *, page_token: str = "", profile: str | N
             "--params", json.dumps(params)]
 
 
+def recent_messages_command(chat_id: str, *, start: float, end: float, page_token: str = "",
+                            profile: str | None = None) -> list[str]:
+    # Search uses message creation time, including replies whose roots are outside chat history.
+    return [*_base(profile), "im", "+messages-search", "--as", "bot", "--chat-id", chat_id,
+            "--start", datetime.fromtimestamp(start, timezone.utc).isoformat(),
+            "--end", datetime.fromtimestamp(end, timezone.utc).isoformat(),
+            "--page-size", "50", "--no-reactions", "--format", "json",
+            *(["--page-token", page_token] if page_token else [])]
+
+
 def thread_history_command(thread_id: str, *, page_token: str = "", profile: str | None = None) -> list[str]:
     # Thread containers do not support time filters. Scan newest first and filter locally.
     return [*_base(profile), "im", "+threads-messages-list", "--as", "bot", "--thread", thread_id,

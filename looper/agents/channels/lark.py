@@ -439,7 +439,8 @@ class LarkChannelAdapter(ChannelAdapter):
         return await catchup_chats(self.channel_id, _CATCHUP_MAX_CHATS)
 
     async def _history_pages(self, fetch: Callable[..., Awaitable[dict[str, Any]]],
-                             container_id: str, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+                             container_id: str, *, allow_truncation: bool = False,
+                             **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         token = ""
         for _ in range(_CATCHUP_MAX_PAGES):
             page = await fetch(container_id, page_token=token, **kwargs)
@@ -450,7 +451,8 @@ class LarkChannelAdapter(ChannelAdapter):
             if not next_token or next_token == token:
                 raise ValueError("history pagination did not advance")
             token = next_token
-        raise ValueError("catch-up page limit reached")
+        if not allow_truncation:
+            raise ValueError("catch-up page limit reached")
 
     async def _catchup_messages(self, page: dict[str, Any], chat_id: str, *, start: float, end: float,
                                 stats: dict[str, int]) -> None:
@@ -480,29 +482,45 @@ class LarkChannelAdapter(ChannelAdapter):
         if not hasattr(self._transport, "list_threads"):
             return
         seen: set[str] = set()
-        # Discover roots without the recovery time filter; their replies may be new.
-        async for roots in self._history_pages(self._transport.list_threads, chat_id):  # type: ignore[attr-defined]
-            for thread_id in roots["threads"]:
-                if thread_id in seen:
-                    continue
-                seen.add(thread_id)
-                try:
-                    pages = []
-                    async for page in self._history_pages(
-                        self._transport.list_thread_messages, thread_id,  # type: ignore[attr-defined]
-                    ):
-                        pages.append(page)
-                        if any(_history_created(message) < start for message in page["messages"]):
-                            # Thread pages descend by creation time: the rest predates the window.
-                            break
-                    # Fetch newest first for a bounded scan, admit oldest first as on the chat path.
-                    for page in reversed(pages):
-                        await self._catchup_messages(
-                            {**page, "messages": list(reversed(page["messages"][:50]))}, chat_id,
-                            start=start, end=end, stats=stats)
-                except Exception:
-                    stats["failures"] += 1
-                    logger.warning("%s: catch-up thread failed", self.channel_id, exc_info=True)
+
+        async def threads() -> AsyncIterator[str]:
+            recent = getattr(self._transport, "list_recent_messages", None)
+            if recent is not None:
+                # Find replies by their own creation time, independently of root age/rank.
+                async for page in self._history_pages(recent, chat_id, start=start, end=end):
+                    await self._catchup_messages(page, chat_id, start=start, end=end, stats=stats)
+                    for message in _history_messages(page["messages"][:50]):
+                        if thread_id := message.get("thread_id"):
+                            yield thread_id
+            # Supplement the window search with older roots. Once that search completes,
+            # history beyond this budget is not an unfinished scan of the recovery window.
+            async for roots in self._history_pages(
+                self._transport.list_threads, chat_id, allow_truncation=recent is not None,  # type: ignore[attr-defined]
+            ):
+                for thread_id in roots["threads"]:
+                    yield thread_id
+
+        async for thread_id in threads():
+            if thread_id in seen:
+                continue
+            seen.add(thread_id)
+            try:
+                pages = []
+                async for page in self._history_pages(
+                    self._transport.list_thread_messages, thread_id,  # type: ignore[attr-defined]
+                ):
+                    pages.append(page)
+                    if any(_history_created(message) < start for message in page["messages"]):
+                        # Thread pages descend by creation time: the rest predates the window.
+                        break
+                # Fetch newest first for a bounded scan, admit oldest first as on the chat path.
+                for page in reversed(pages):
+                    await self._catchup_messages(
+                        {**page, "messages": list(reversed(page["messages"][:50]))}, chat_id,
+                        start=start, end=end, stats=stats)
+            except Exception:
+                stats["failures"] += 1
+                logger.warning("%s: catch-up thread failed", self.channel_id, exc_info=True)
 
     async def _catch_up(self, boundary: float | None) -> None:
         stats = dict(chats_scanned=0, messages_found=0, handled=0, duplicates=0, too_old=0, failures=0)

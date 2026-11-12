@@ -99,6 +99,18 @@ class CliTransport:
         return {**page, "threads": list(dict.fromkeys(item["thread_id"] for item in page["items"]
                                                     if item.get("thread_id")))}
 
+    async def list_recent_messages(self, chat_id: str, *, start: float, end: float,
+                                   page_token: str = "") -> dict[str, Any]:
+        chat_type = await self._history_chat_type(chat_id)
+        if chat_type == "p2p":
+            return {"messages": [], "chat_type": chat_type, "has_more": False}
+        result = await lark_cli.run_json(lark_cli.recent_messages_command(
+            chat_id, start=start, end=end, page_token=page_token, profile=self._profile))
+        page = result.get("data", result)
+        if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
+            raise lark_cli.LarkCliError("history search did not return a message page")
+        return {**page, "chat_type": chat_type}
+
     async def list_thread_messages(self, thread_id: str, *, page_token: str = "") -> dict[str, Any]:
         result = await lark_cli.run_json(lark_cli.thread_history_command(
             thread_id, page_token=page_token, profile=self._profile))
