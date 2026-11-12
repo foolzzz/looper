@@ -124,9 +124,9 @@ def deployment(tmp_path, monkeypatch, system_responses):
     host = service.Host(system="Linux", home=tmp_path / "home", uid=1, environ={},
         executable="python", cwd=tmp_path, package_root=tmp_path, run=run, clock=lambda: elapsed[0],
         sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
-        get_components=lambda port, token: (current if scenario.verify_error else scenario.current).to_dict(),
+        get_components=lambda port, token, **kwargs: (current if scenario.verify_error else scenario.current).to_dict(),
         system_operation=operation, get_status=lambda *args, **kwargs: system_responses.status,
-        get_whoami=lambda *args: {"looper_version": scenario.current.version},
+        get_whoami=lambda *args, **kwargs: {"looper_version": scenario.current.version},
         port_in_use=lambda port, address="127.0.0.1": False, pid_alive=lambda pid: scenario.process_lingers)
     manager = SimpleNamespace(host=host, state=lambda: state, unit_path=unit,
         unit_argv=lambda: service.looper_command(host.executable) + ["serve"],
@@ -167,7 +167,7 @@ def test_upgrade_refuses_shell_import_or_repository_overrides_before_contacting_
         deployment, monkeypatch, name, value, dry_run, capsys):
     deployment.host.environ = {name: value}
     deployment.host.run = lambda *args, **kwargs: pytest.fail("must refuse before running git or Python")
-    deployment.host.get_components = lambda *args: pytest.fail("must refuse first")
+    deployment.host.get_components = lambda *args, **kwargs: pytest.fail("must refuse first")
     monkeypatch.setattr(service, "manager", lambda *args: pytest.fail("must refuse before reading the unit"))
     assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 1
     assert deployment.events == []
@@ -204,7 +204,7 @@ def test_upgrade_refuses_code_from_another_package_root(
 @pytest.mark.parametrize("argv", [["/other/bin/looper", "serve"], []])
 def test_upgrade_refuses_another_interpreter_before_contacting_service(deployment, dry_run, argv, capsys):
     service.manager(deployment.host, "test").unit_argv = lambda: argv
-    deployment.host.get_components = lambda *args: pytest.fail("must refuse before contacting the service")
+    deployment.host.get_components = lambda *args, **kwargs: pytest.fail("must refuse before contacting the service")
     assert cli.main(["service", "upgrade", *(["--dry-run"] if dry_run else [])]) == 1
     assert deployment.events == []
     assert "run looper service upgrade with that looper" in capsys.readouterr().err
@@ -738,7 +738,7 @@ def test_invalid_drain_deadline_refused_without_any_mutation(deployment, value):
 def test_web_verifies_served_index_and_asset_fingerprint(deployment):
     target = manifest("web", "1.0.1")
     deployment.scenario.current = target
-    deployment.host.get_index = lambda port, token: b"installed page"
+    deployment.host.get_index = lambda port, token, **kwargs: b"installed page"
     plan = UpgradePlan(UpgradeKind.WEB_ONLY, ("web changed",), ("web",))
     with pytest.raises(service.ServiceError, match="does not match the installed build"):
         service._execute_plan(deployment.host, service.manager(deployment.host, "test"),
@@ -903,7 +903,8 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_in_service_environment(
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
 
     def execute(argv, *, env=None):
-        return subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        # Real offline installs can be slow on busy hosts; this tests their result, not their latency.
+        return subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, timeout=120,
                               env=env if env is not None else
                               {k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
 
@@ -988,10 +989,10 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_in_service_environment(
         return operation(port, token, name, args)
 
     deployment.host.system_operation = drain
-    deployment.host.get_index = lambda *args: (static / "index.html").read_bytes()
-    deployment.host.get_whoami = lambda *args: {
+    deployment.host.get_index = lambda *args, **kwargs: (static / "index.html").read_bytes()
+    deployment.host.get_whoami = lambda *args, **kwargs: {
         "looper_version": "1.0.1" if restarts and installations else "1.0.0"}
-    deployment.host.get_components = lambda *args: components.Manifest(
+    deployment.host.get_components = lambda *args, **kwargs: components.Manifest(
         "1.0.1" if restarts and installations else "1.0.0", "startup",
         (deployment.scenario.target if installations else deployment.scenario.current).components,
         deployment.scenario.current.adoption, {"web": components.web_fingerprints(static)[1]}).to_dict()
@@ -1106,7 +1107,7 @@ def test_checkout_build_precedes_drain_and_stop(deployment, checkout_install, mo
     deployment.scenario.target = target
     deployment.host.get_status = lambda *args, **kwargs: {**deployment.responses.status, "keepers": {
         "mode": "on" if kind == "CONTROL_PLANE" else "off", "pending": 0}}
-    deployment.host.get_index = lambda *args: b"new dashboard"
+    deployment.host.get_index = lambda *args, **kwargs: b"new dashboard"
     monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
     dist = checkout_install.web / "dist"
     dist.mkdir()
@@ -1308,7 +1309,7 @@ def test_failed_start_retries_new_install_and_reports_serving(deployment, recove
 def test_serving_failure_reports_unknown_fingerprint_when_readback_fails(deployment):
     reads = []
 
-    def components_readback(*args):
+    def components_readback(*args, **kwargs):
         reads.append(True)
         if len(reads) == 1:
             return deployment.scenario.current.to_dict()
