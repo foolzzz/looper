@@ -2,17 +2,7 @@
 
 import shlex
 
-
-# Gateway safeguards override inherited backend selectors for every client.
-TRANSLATED_BACKEND_ENV = (
-    ("CLAUDE_CODE_USE_BEDROCK", "0"),
-    ("CLAUDE_CODE_USE_VERTEX", "0"),
-    ("CLAUDE_CODE_USE_FOUNDRY", "0"),
-    ("CLAUDE_CODE_USE_ANTHROPIC_AWS", "0"),
-    ("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "0"),
-    ("CLAUDE_CODE_USE_MANTLE", "0"),
-    ("CLAUDE_CODE_USE_GATEWAY", "0"),
-)
+from .agents.llmrec import TRANSLATED_BACKEND_ENV
 
 
 def gateway_environment(url: str, alias: str, key: str = '<local-key>') -> str:

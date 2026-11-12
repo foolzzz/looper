@@ -71,8 +71,8 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from ... import child_env
-from ...gateway_env import TRANSLATED_BACKEND_ENV
 from .. import claude_cli
+from ..llmrec import TRANSLATED_BACKEND_ENV
 from . import (
     ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
     RoomPush, RuntimeAdapter, RuntimeUnsupported, instructions,

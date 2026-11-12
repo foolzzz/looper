@@ -3,6 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import json
 import logging
+import math
 
 import httpx
 import pytest
@@ -236,20 +237,24 @@ def test_external_prefix_history_groups_resolved_sessions(tmp_path, session_sour
     run_db(check, timeout=15)
 
 
-def test_alias_cache_expires_after_ten_seconds(tmp_path, monkeypatch):
+# Crossing a float exponent boundary can round the elapsed time below ten seconds.
+@pytest.mark.parametrize('start', [100.0, math.nextafter(127.0, math.inf)],
+                         ids=['aligned-clock', 'rounded-deadline'])
+def test_alias_cache_expires_after_ten_seconds(tmp_path, monkeypatch, start):
     from looper.agents.llmrec import gateway
     from types import SimpleNamespace
     async def check(pool):
         async with endpoint(tmp_path, pool) as (client, base, proxy, received, key, sink):
-            clock = gateway.time.monotonic
-            now = clock()
+            now = start
             monkeypatch.setattr(gateway, 'time', SimpleNamespace(monotonic=lambda: now))
             headers = {'x-api-key': key}
             payload = {'model': 'local-chat', 'messages': []}
             assert (await client.post(base + '/v1/messages', headers=headers, json=payload)).status_code == 200
             await pool.execute("UPDATE llm_providers SET enabled=false WHERE id='prov-external'")
             assert (await client.post(base + '/v1/messages', headers=headers, json=payload)).status_code == 200
-            now += 10
+            now = math.nextafter(start + 10, -math.inf)
+            assert (await client.post(base + '/v1/messages', headers=headers, json=payload)).status_code == 200
+            now = start + 10
             assert (await client.post(base + '/v1/messages', headers=headers, json=payload)).status_code == 403
     run_db(check, timeout=15)
 
