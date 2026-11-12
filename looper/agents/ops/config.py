@@ -245,9 +245,10 @@ async def _confirming_project(call: Call) -> str | None:
     if call.scoped and any(row["manager_id"] != call.manager_id for row in change.schedules):
         raise OpError(ErrorCode.CONFLICT, f"project {project['name']!r}'s directory is also where command "
                                           "schedules outside this Manager run: it cannot be changed from here")
+    # Bind empty previews too: a command schedule can be enabled before execution takes the lock.
+    call.confirmation.update(project_id=project["id"], directory_version=change.version)
     if not change.schedules:
         return None
-    call.confirmation.update(project_id=project["id"], directory_version=change.version)
     return directory_change_impact(project, change, call.arguments)
 
 

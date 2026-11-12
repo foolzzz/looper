@@ -337,6 +337,65 @@ def test_a_project_directory_change_that_moves_no_command_schedule_runs_at_once(
     run_db(test, monkeypatch, timeout=30)
 
 
+@pytest.mark.parametrize("entry", ["manager", "project_admin.update", "/api/v1/ops/projects/update"])
+def test_directory_update_refuses_a_command_enabled_after_an_empty_preview(monkeypatch, tmp_path, entry):
+    from looper.agents import projects
+    from tests.db_support import v1_api
+
+    async def test(pool):
+        project = await _project(pool, work_dir="/srv/a")
+        sid = (await _schedule(project, "pull", kind="command", command="git pull", requirement=""))["schedule_id"]
+        previewed = asyncio.Event()
+        directory_change = projects.directory_change
+
+        async def preview(*args, **kwargs):
+            change = await directory_change(*args, **kwargs)
+            previewed.set()
+            return change
+
+        monkeypatch.setattr(projects, "directory_change", preview)
+        async with v1_api(tmp_path, pool) as call:
+            async def update():
+                if entry == "manager":
+                    (answer,) = await _Chat(tmp_path).say("改目录", ("looper_projects", {
+                        "action": "update", "project": "calc", "work_dir": "/srv/b"}))
+                    return answer
+                fields = {"work_dir": "/srv/b"}
+                body = {"project_id": project["id"], "fields": fields} if entry == "project_admin.update" else {
+                    "project": "calc", **fields}
+                status, answer = await call(entry, body, client=True)
+                assert status == 409, answer
+                return answer
+
+            pending = None
+            try:
+                async with pool.acquire() as enabling:
+                    async with enabling.transaction():
+                        blocker = await enabling.fetchval("SELECT pg_backend_pid()")
+                        await enabling.fetchrow("SELECT id FROM projects WHERE id = $1 FOR SHARE", project["id"])
+                        await enabling.execute("UPDATE schedules SET enabled = true WHERE id = $1", sid)
+                        pending = asyncio.create_task(update())
+                        await asyncio.wait_for(previewed.wait(), 5)
+                        # The preview cannot see the uncommitted enable. Commit only once the
+                        # directory write is actually waiting for its project lock.
+                        async with asyncio.timeout(5):
+                            while not await pool.fetchval(
+                                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                                    "WHERE $1::int = ANY(pg_blocking_pids(pid)))", blocker):
+                                await asyncio.sleep(0.01)
+                answer = await pending
+                assert _error(answer) == "conflict", answer
+                assert answer["error"]["message"] == projects.DIRECTORY_CHANGED
+                assert await pool.fetchval("SELECT work_dir FROM projects WHERE id=$1", project["id"]) == "/srv/a"
+                assert await pool.fetchval("SELECT enabled FROM schedules WHERE id=$1", sid) is True
+            finally:
+                if pending is not None and not pending.done():
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_clearing_a_project_directory_says_its_command_schedules_will_fail(monkeypatch, tmp_path):
     async def test(pool):
         project = await _project(pool, work_dir="/srv/a")

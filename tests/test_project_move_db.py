@@ -483,7 +483,14 @@ def test_inventory_bounds_directory_only_trees(monkeypatch, tmp_path):
             assert len(scans) <= 2, "inventory exceeded its directory entry budget"
             return scandir(path)
 
-        monkeypatch.setattr(project_move.os, "scandir", bounded_scan)
+        inventory = project_move._inventory
+
+        def bounded_inventory(path):
+            with monkeypatch.context() as scope:
+                scope.setattr(project_move.os, "scandir", bounded_scan)
+                return inventory(path)
+
+        monkeypatch.setattr(project_move, "_inventory", bounded_inventory)
         preview = await api.preview_project_move(project, {"to": str(new)}, db=pool)
         assert preview.truncated and preview.files == 0 and preview.bytes == 0
         assert "扫描达到上限" in api.project_move_impact(project, preview)
