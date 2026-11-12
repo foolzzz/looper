@@ -76,7 +76,7 @@ from ..run_usage import Usage, reported_totals, run_usage
 from ..reported_files import prompt_name
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
+    ApiProtocol, AuthKind, Capability, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RoomPush, RunCost, RuntimeAdapter,
     RuntimeUnsupported, codex_login, instructions, runtime_prompt_text, ttadk,
 )
 from .instructions import InstructionFile
@@ -131,6 +131,7 @@ CODEX = CodexHome("CODEX_HOME", "config.toml", "", "codex", HOME_LAYOUT_ID, code
 
 
 class CodexRuntime(RuntimeAdapter):
+    room_push = RoomPush.STEER
     first_event_known = True
     home: ClassVar[CodexHome] = CODEX
     can_replace_system_prompt = True

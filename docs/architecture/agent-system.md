@@ -4595,8 +4595,8 @@ before.
   waiting, and `looper_room_read` for earlier or clipped messages. Claude Code
   Workers use `PUSHED_WAITS`: after doing the rest, they wait for a needed
   answer with a waiting report, and deliveries can arrive as their own turn.
-  Its Reviewers use `PUSHED`, never a waiting report. Runtimes without room
-  deliveries, including Cursor, keep `PULL`; pulling Workers wait with
+  Its Reviewers and steering Codex runs use `PUSHED`, never a waiting report.
+  Runtimes without room deliveries, including Cursor, keep `PULL`; pulling Workers wait with
   `wait_seconds` only for an answer they cannot go on without, after doing
   the rest, never as a timer.
   `looper_room_inbox` gives unread messages oldest first (`for_you` on those
@@ -4610,18 +4610,26 @@ before.
   Every tool's answer carries unread counts. The inbox tool description says
   `wait_seconds` is only for an answer the run cannot go on without, never a
   timer; each call costs a request, and per-runtime wait caps still apply.
-  Running Claude Code Workers and Reviewers (`RoomPush.USER_TURN`) instead
-  receive message bodies when a message names them or an interface post
+  Running Claude Code Workers and Reviewers (`RoomPush.USER_TURN`) and Codex
+  runs with the probed steering capability (`RoomPush.STEER`, Codex 0.162.0
+  or newer with `turn/steer` in its schema) instead receive message bodies
+  when a message names them or an interface post
   reaches them. Other posts ride along in an oldest-first prefix: at most
   10 messages and 4,000 characters, bodies clipped at 1,500 for addressed or
   interface posts and 300 for others, with a pointer to `looper_room_read`.
   Deliveries are written only during a tool call or while a Worker waits;
   Claude folds them in at the next tool result, or starts the waiting turn.
   A batch with an addressed message can go every 10 s; other batches every
-  60 s, with a retry when the interval ends. Messages are marked read on the
-  delivery's replay echo or a result naming its uuid in `user_message_uuids`,
-  never merely on writing stdin. While in flight, that run's inbox and unread
-  counts exclude the delivered bodies; an inbox wait still detects matching
+  60 s, with a retry when the interval ends. Claude Code messages are marked
+  read on the delivery's replay echo or a result naming its uuid in `user_message_uuids`,
+  never merely on writing stdin. Codex deliveries use `turn/steer` only while
+  a tool call runs and are marked read when the app-server acknowledges the
+  steer. A rejection or no active turn leaves them unread; an unknown
+  acknowledgement advances the in-flight cursor without marking them read
+  or retrying, and logs the uncertainty. A run killed after acknowledgement
+  but before its next model request can leave an accepted delivery unseen.
+  While in flight, that run's inbox and unread counts exclude the delivered
+  bodies; an inbox wait still detects matching
   messages within that range as described above. A waiting Worker's check
   first flushes pending room messages and skips its check turn if it wrote a
   delivery in that wake. An unconfirmed delivery remains
