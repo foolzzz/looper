@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.148] - 2026-11-11
+
+### Changed
+
+- **Cursor Workers: a dropped connection resumes the same session instead of restarting the run.** ([#1263](https://github.com/foolzzz/looper/pull/1263))
+  - A Worker or Reviewer run that ends with `RetriableError: WritableIterable is closed` relaunches with `--resume <session id>` and a short continuation prompt, up to three times within the run's deadline, when the failed attempt produced model output; otherwise it keeps the single fresh restart. The continuation prompt is model-visible.
+  - `cursor_run_retry` events gain `mode` (`resume` or `restart`) and `attempt` up to 3; failed attempts share the 1,000-character stderr limit. Manager and Planner turns keep their single retry.
+
 ## [2.14.147] - 2026-11-11
 
 ### Changed
