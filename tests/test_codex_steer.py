@@ -386,6 +386,40 @@ def test_send_returns_only_after_server_accepts(app_server: tuple[str, Path], tm
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("mode", ["hold", "steer_error", "steer_crash"])
+def test_send_from_tool_event_reads_the_server_reply(app_server: tuple[str, Path], tmp_path: Path,
+                                                    monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    executable, log = app_server
+    monkeypatch.setenv("FAKE_CODEX_MODE", mode)
+
+    async def run() -> list[dict[str, Any]]:
+        async with _channel(executable, tmp_path) as (channel, _):
+            await channel.start("prompt")
+            events = []
+            async with asyncio.timeout(3):
+                async for event in channel.events():
+                    events.append(event)
+                    if _blocks([event], "tool_use"):
+                        # The Worker flushes queued room input here, while events() is suspended.
+                        if mode == "steer_error":
+                            with pytest.raises(RuntimeError, match="steer refused"):
+                                await channel.send("queued room message")
+                        else:
+                            expected = DeliveryResult.ACCEPTED if mode == "hold" else DeliveryResult.UNKNOWN
+                            assert await channel.send("queued room message") is expected
+                    if event["type"] == "result":
+                        channel.end_input()
+            return events
+
+    events = asyncio.run(run())
+    assert len([r for r in _requests(log) if r.get("method") == "turn/steer"]) == 1
+    if mode == "steer_crash":
+        assert not any(e["type"] == "result" for e in events)
+    else:
+        assert [b["content"] for b in _blocks(events, "tool_result")] == ["done\n"]
+        assert events[-1]["result"] == ("got: queued room message" if mode == "hold" else "steer was refused")
+
+
 def test_send_after_turn_completed_is_refused_without_writing(app_server: tuple[str, Path], tmp_path: Path) -> None:
     executable, log = app_server
 
@@ -403,6 +437,27 @@ def test_send_after_turn_completed_is_refused_without_writing(app_server: tuple[
 
     asyncio.run(run())
     assert not any(r.get("method") == "turn/steer" for r in _requests(log))
+
+
+def test_closing_events_releases_the_stdout_reader(app_server: tuple[str, Path], tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    executable, _ = app_server
+    monkeypatch.setenv("FAKE_CODEX_MODE", "hold")
+
+    async def run() -> None:
+        async with _channel(executable, tmp_path) as (channel, _), asyncio.timeout(3):
+            await channel.start("prompt")
+            tasks = asyncio.all_tasks()
+            events = channel.events()
+            async for event in events:
+                if _blocks([event], "tool_use"):
+                    break
+            await events.aclose()
+            with pytest.raises(RuntimeError, match="the Codex run has ended"):
+                await channel.send("after closing events")
+            assert asyncio.all_tasks() <= tasks
+
+    asyncio.run(run())
 
 
 def test_steer_server_error_is_returned_to_sender(app_server: tuple[str, Path], tmp_path: Path,
