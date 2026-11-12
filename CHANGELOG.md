@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.147] - 2026-11-11
+
+### Changed
+
+- **`looper service upgrade` waits up to 15 seconds for component fingerprints and the verification reads.** ([#1261](https://github.com/foolzzz/looper/pull/1261))
+  - The initial `system.components` read, the post-install `system.components`, `whoami` and web-only `index.html` reads, and the failure-recovery `system.components` read share one 15-second timeout (the helpers keep a 3-second default elsewhere); a failed inspection still refuses before draining.
+  - The offline wheel installation test helper waits 120 seconds instead of 30.
+- **Eval reports gain `room_deliveries`, `room_inbox_calls` and `room_inbox_empty` columns.** ([#1262](https://github.com/foolzzz/looper/pull/1262))
+  - Counts room deliveries recorded in activity, `looper_room_inbox` calls, and those whose result had an empty messages list; no product behavior changes.
+
 ## [2.14.146] - 2026-11-11
 
 ### Changed
