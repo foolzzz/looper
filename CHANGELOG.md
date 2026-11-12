@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.158] - 2026-11-12
+
+### Changed
+
+- **Room deliveries for steering Codex runs.** ([#1285](https://github.com/foolzzz/looper/pull/1285))
+  - Codex runs whose app-server supports `turn/steer` now get room messages steered into the running turn while a tool call runs, and the `PUSHED` room section of the system prompt. They were pull-only before.
+  - Their messages are marked read when the app-server acknowledges the steer. A rejection or no active turn leaves them unread; an unknown acknowledgement is logged, advances the in-flight cursor and is not retried.
+  - Codex runs without the steer capability, and OMP, Pi and hosted runner runs, are unchanged.
+  - Model-visible: the room section of the system prompt, the first-turn "Unread" line and the `looper_room_inbox` description of steering Codex Workers and Reviewers.
+
 ## [2.14.157] - 2026-11-12
 
 ### Changed
