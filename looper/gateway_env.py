@@ -2,6 +2,8 @@
 
 import shlex
 
+from .agents.llmrec import TRANSLATED_BACKEND_ENV
+
 
 def gateway_environment(url: str, alias: str, key: str = '<local-key>') -> str:
     env = {
@@ -11,6 +13,7 @@ def gateway_environment(url: str, alias: str, key: str = '<local-key>') -> str:
         **dict.fromkeys(('ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
                          'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
                          'CLAUDE_CODE_SUBAGENT_MODEL'), alias),
+        **dict(TRANSLATED_BACKEND_ENV),
         'CLAUDE_CODE_ATTRIBUTION_HEADER': '0',
         'ENABLE_TOOL_SEARCH': 'false',
         'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS': '1',

@@ -176,7 +176,8 @@ class AliasResolver:
         except ValueError:
             return None
         cached = self._cache.get(alias)
-        if cached is not None and time.monotonic() - cached[0] < 10:
+        # Subtracting timestamps can round an elapsed ten seconds below the TTL.
+        if cached is not None and time.monotonic() < cached[0] + 10:
             self._cache.move_to_end(alias)
             return cached[1]
         from .dialects import default_dialect
