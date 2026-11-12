@@ -97,8 +97,20 @@ def stopping_upgrade(upgrade_host):
         events.append("start")
         state.running, state.pid, state.loaded = True, 5678, True
 
-    host.clock = lambda: elapsed[0]
-    host.sleep = lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
+    clock_reads = 0
+
+    def clock():
+        nonlocal clock_reads
+        clock_reads += 1
+        assert clock_reads < 1000, "upgrade exceeded its test polling budget"
+        return elapsed[0]
+
+    def sleep(seconds):
+        assert seconds > 0
+        elapsed[0] += seconds
+        assert elapsed[0] <= 120, "upgrade exceeded its test deadline"
+
+    host.clock, host.sleep = clock, sleep
     host.pid_alive = lambda pid: state.pid == pid
     host.port_in_use = lambda *args: state.running
     host.get_status = lambda *args, **kwargs: {"status": "ok", "pid": state.pid} if state.running else None
@@ -134,6 +146,7 @@ def test_upgrade_renews_drain_during_a_blocking_stop(stopping_upgrade, monkeypat
         assert entered.wait(1)
         assert timeout <= 5
         case.elapsed[0] += timeout
+        assert case.elapsed[0] <= 40, "stop did not complete after releasing the test worker"
         if case.elapsed[0] >= 35:
             release.set()
             return wait(futures, timeout=1)

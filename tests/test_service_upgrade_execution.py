@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import io
 import asyncio
+import ensurepip
 import multiprocessing
 import os
 import plistlib
@@ -77,6 +78,22 @@ def deployment(tmp_path, monkeypatch, system_responses):
     target = manifest("control_plane", "1.0.1")
     state = service.State(installed=True, loaded=True, running=True, pid=123456789)
     elapsed = [0.0]
+    sleeps = []
+    clock_reads = 0
+
+    def clock():
+        nonlocal clock_reads
+        clock_reads += 1
+        assert clock_reads < 20000, "upgrade stopped advancing its polling loop"
+        return elapsed[0]
+
+    def sleep(seconds):
+        assert seconds > 0
+        sleeps.append(seconds)
+        assert len(sleeps) < 4000, "upgrade exceeded its test polling budget"
+        elapsed[0] += seconds
+        assert elapsed[0] <= 1800, "upgrade exceeded its test deadline"
+
     statuses = [{"phase": "draining", "waiting": {"runs": []}}, {"phase": "drained"}]
     scenario = SimpleNamespace(target=target, current=current, install_error=False, stop_error=False, stop_then_error=False,
                                verify_error=False, process_lingers=False)
@@ -123,8 +140,7 @@ def deployment(tmp_path, monkeypatch, system_responses):
         return subprocess.CompletedProcess(argv, 0, "1" * 40 if "rev-parse" in argv else "", "")
 
     host = service.Host(system="Linux", home=tmp_path / "home", uid=1, environ={},
-        executable="python", cwd=tmp_path, package_root=tmp_path, run=run, clock=lambda: elapsed[0],
-        sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+        executable="python", cwd=tmp_path, package_root=tmp_path, run=run, clock=clock, sleep=sleep,
         get_components=lambda port, token, **kwargs: (current if scenario.verify_error else scenario.current).to_dict(),
         system_operation=operation, get_status=lambda *args, **kwargs: system_responses.status,
         get_whoami=lambda *args, **kwargs: {"looper_version": scenario.current.version},
@@ -135,11 +151,12 @@ def deployment(tmp_path, monkeypatch, system_responses):
     monkeypatch.setattr(service, "manager", lambda *args: manager)
     monkeypatch.setattr(service.Host, "current", classmethod(lambda cls: host))
     monkeypatch.setattr(components, "manifest_from_git", lambda *args: scenario.target)
+    monkeypatch.setattr(components, "loaded_manifest", lambda: current)
     monkeypatch.setattr(service, "_install_target", install)
     monkeypatch.setattr(service, "_unit_package_root", lambda host, mgr: host.package_root.resolve())
     monkeypatch.setattr(service, "__file__", str(tmp_path / "looper/agents/service.py"))
     return SimpleNamespace(host=host, events=events, statuses=statuses, state=state, scenario=scenario,
-                           root=root, elapsed=elapsed, responses=system_responses)
+                           root=root, elapsed=elapsed, sleeps=sleeps, responses=system_responses)
 
 
 def report(deployment):
@@ -652,8 +669,13 @@ def test_no_force_cancels_deadline_without_stopping_or_installing(deployment, ca
     assert "--no-force" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("finishes_at", [15, 30, None])
-def test_control_plane_preflight_waits_without_draining(deployment, capsys, finishes_at):
+@pytest.mark.parametrize("finishes_at,wait_seconds,poll_seconds,polls_expected", [
+    (15, 30, 15, [0, 15]), (30, 30, 15, [0, 15, 30]), (None, 30, 15, [0, 15, 30]),
+    (None, 7, 15, [0, 7]), (0.5, 1, 0.25, [0, 0.25, 0.5]),
+])
+def test_control_plane_preflight_waits_without_draining(
+        deployment, monkeypatch, capsys, finishes_at, wait_seconds, poll_seconds, polls_expected):
+    monkeypatch.setattr(service, "_PREFLIGHT_POLL_SECONDS", poll_seconds)
     deployment.responses.status["keepers"] = {"mode": "on", "pending": 0}
     operation = deployment.host.system_operation
     polls = []
@@ -672,10 +694,11 @@ def test_control_plane_preflight_waits_without_draining(deployment, capsys, fini
         return operation(port, token, name, args)
 
     deployment.host.system_operation = preflight
-    result = cli.main(["service", "upgrade", "--no-force", "--preflight-wait", "30"])
+    result = cli.main(["service", "upgrade", "--no-force", "--preflight-wait", str(wait_seconds)])
     data = report(deployment)
-    assert polls == ([0, 15] if finishes_at == 15 else [0, 15, 30])
-    assert data["preflight_wait_seconds"] == (finishes_at or 30)
+    assert polls == polls_expected
+    assert deployment.sleeps[:len(polls) - 1] == [b - a for a, b in zip(polls, polls[1:])]
+    assert data["preflight_wait_seconds"] == (finishes_at or wait_seconds)
     if finishes_at is None:
         assert result == 1 and deployment.events == []
         assert data["drain_seconds"] == 0 and data["serving"] is True
@@ -706,7 +729,9 @@ def test_preflight_leaves_other_upgrade_flows_unchanged(deployment, monkeypatch,
     assert report(deployment)["preflight_wait_seconds"] == 0
 
 
-def test_cancelled_drain_reports_last_blockers_and_periodic_progress(deployment, capsys):
+@pytest.mark.parametrize("summary_seconds", [60, 1])
+def test_cancelled_drain_reports_last_blockers_and_periodic_progress(deployment, monkeypatch, capsys, summary_seconds):
+    monkeypatch.setattr(service, "_DRAIN_SUMMARY_SECONDS", summary_seconds)
     deployment.responses.status["keepers"] = {"mode": "on", "pending": 0}
     waiting = {"runs": [{"worker_id": "plain-worker", "runtime_id": "codex", "keepable": False,
                          "since": "2026-01-01T00:00:00+00:00"},
@@ -715,7 +740,7 @@ def test_cancelled_drain_reports_last_blockers_and_periodic_progress(deployment,
                "gates": 2, "waits": 3, "consults": 1, "starting": 1}
     deployment.statuses[:] = [{"phase": "draining", "waiting": {"manager_turns": ["old-turn"]}},
                              {"phase": "draining", "waiting": waiting}]
-    assert cli.main(["service", "upgrade", "--no-force", "--drain-timeout", "120"]) == 1
+    assert cli.main(["service", "upgrade", "--no-force", "--drain-timeout", str(2 * summary_seconds)]) == 1
     data = report(deployment)
     blockers = data["blockers"]
     assert len(blockers["non_keepable_runs"]) == 1
@@ -728,7 +753,9 @@ def test_cancelled_drain_reports_last_blockers_and_periodic_progress(deployment,
         assert text in data["error"]
     output = capsys.readouterr()
     progress = [line for line in output.err.splitlines() if line.startswith("drain waiting")]
-    assert len(progress) == 2  # 60 s, 120 s
+    assert len(progress) == 2
+    assert [line.split(":", 1)[0] for line in progress] == [
+        f"drain waiting ({seconds}s)" for seconds in (summary_seconds, 2 * summary_seconds)]
     assert all("plain-worker" in line and "gates=2" in line for line in progress)
     assert "drain_cancel" in deployment.events and "stop" not in deployment.events
 
@@ -1041,15 +1068,16 @@ def test_cli_repeated_wheel_upgrade_preserves_dashboard_without_dependency_reins
 def test_wheel_upgrade_installs_cli_code_and_metadata_in_service_environment(
         deployment, tmp_path, monkeypatch, pip_available, change):
     environment = tmp_path / "venv"
-    venv.EnvBuilder(with_pip=True).create(environment)
+    venv.EnvBuilder().create(environment)
     python = str(environment / "bin/python")
     monkeypatch.setenv("PIP_NO_INDEX", "1")
+    monkeypatch.setenv("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+    monkeypatch.setenv("PIP_NO_COMPILE", "1")
     monkeypatch.setenv("PIP_CONFIG_FILE", os.devnull)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
 
     def execute(argv, *, env=None):
-        # Real offline installs can be slow on busy hosts; this tests their result, not their latency.
-        return subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        return subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, timeout=30,
                               env=env if env is not None else
                               {k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
 
@@ -1074,9 +1102,12 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_in_service_environment(
             for name, content in files.items():
                 archive.writestr(name, content)
         wheels.append(wheel)
+    site = Path(execute([python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"]).stdout.strip())
+    # Run the real bundled pip from its wheel, without reinstalling pip/setuptools in every case.
+    pip_wheel = next((Path(ensurepip.__file__).parent / "_bundled").glob("pip-*.whl"))
+    (site / "pip.pth").write_text(str(pip_wheel) + "\n")
     installed = execute([python, "-m", "pip", "install", "--no-deps", str(wheels[0])])
     assert installed.returncode == 0, installed.stderr
-    site = Path(execute([python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"]).stdout.strip())
     static = site / "looper/web/dashboard"
     original = {p.relative_to(static).as_posix(): p.read_bytes() for p in static.rglob("*") if p.is_file()}
     monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(static))

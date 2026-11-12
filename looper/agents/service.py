@@ -100,6 +100,8 @@ _GIT_REPOSITORY_OVERRIDES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _STOP_WAIT_SECONDS = 30.0  # launchd sends SIGKILL 20 s after SIGTERM by default
 _POLL_SECONDS = 0.5
+_PREFLIGHT_POLL_SECONDS = 15.0
+_DRAIN_SUMMARY_SECONDS = 60.0
 _BOOTSTRAP_ATTEMPTS = 10
 _COMMAND_TIMEOUT_SECONDS = 30.0
 _UPGRADE_READ_TIMEOUT_SECONDS = 15
@@ -1369,10 +1371,10 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                         report["blockers"] = blockers
                         raise ServiceError(f"{len(blockers['non_keepable_runs'])} non-keepable runs are in flight "
                                            f"({_drain_summary(blockers)}); nothing was drained; deploy again later")
-                    host.sleep(min(15, remaining))
+                    host.sleep(min(_PREFLIGHT_POLL_SECONDS, remaining))
             started = host.clock()
             turns_started = None
-            next_summary = started + 60
+            next_summary = started + _DRAIN_SUMMARY_SECONDS
             # Mark the attempt first: a lost response may still have begun draining.
             draining = True
             status = host.system_operation(port, token, "drain", {
@@ -1399,7 +1401,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                     blockers = _drain_blockers(status, include_keepable=not control_plane)
                     print(f"drain waiting ({report['drain_seconds']:.0f}s): {_drain_summary(blockers)}",
                           file=sys.stderr, flush=True)
-                    next_summary = now + 60
+                    next_summary = now + _DRAIN_SUMMARY_SECONDS
                 if passed and phase != "drained":
                     if no_force:
                         report["blockers"] = _drain_blockers(status, include_keepable=not control_plane)

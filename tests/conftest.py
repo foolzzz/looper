@@ -91,6 +91,12 @@ def staged_dashboard_dir() -> Path:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    # Keep retention cleanup away from other checkouts' potentially large test trees.
+    # Respect explicit pytest temporary-directory settings, including nested sessions.
+    if config.option.basetemp is None and "PYTEST_DEBUG_TEMPROOT" not in os.environ:
+        temporary_root = REPO_ROOT / ".local" / "pytest"
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        os.environ["PYTEST_DEBUG_TEMPROOT"] = str(temporary_root)
     if (shard := os.environ.get("LOOPER_TEST_SHARD")) is not None:
         match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", shard)
         if match is None or int(match[1]) > int(match[2]):
@@ -473,7 +479,10 @@ async def _created_project(
 @pytest.fixture(autouse=True)
 def _gate_command_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Gate lists belong to one server lifetime, not to earlier tests in this worker."""
-    from looper.agents import gate_commands
+    # An unimported module has no state to reset; do not load the agent stack for CLI-only tests.
+    gate_commands = sys.modules.get("looper.agents.gate_commands")
+    if gate_commands is None:
+        return
 
     monkeypatch.setattr(gate_commands, "_snapshots", {})
     monkeypatch.setattr(gate_commands, "_pending", {})

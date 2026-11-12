@@ -14,6 +14,15 @@ from tests.test_api_v1_auth import CLIENT_TOKEN, TOKEN, _bearer, _send, _serving
 from tests.test_api_v1_auth import clients as clients  # noqa: F401
 
 
+@pytest.fixture(autouse=True)
+def installation_manifest(monkeypatch):
+    from looper import components
+
+    # Drain HTTP tests exercise admission, not installation fingerprinting.
+    manifest = components.Manifest("1.0.0", "startup", {}, {})
+    monkeypatch.setattr(components, "loaded_manifest", lambda: manifest)
+
+
 @pytest.mark.parametrize("scope,seconds", [(DrainScope.TURNS, 180), (DrainScope.RUNS, 1200)])
 @pytest.mark.parametrize("keepable", [False, True])
 def test_deadline_reports_without_aborting_and_restart_starts_serving(scope, seconds, keepable):
@@ -82,12 +91,9 @@ def test_cancel_wakes_the_held_worker_slot(tmp_path, monkeypatch):
 @pytest.mark.usefixtures("clients")
 @pytest.mark.parametrize("blocked", [False, True])
 def test_lost_drain_polls_resume_held_turns_and_runs_without_releasing_at_deadline(tmp_path, monkeypatch, blocked):
-    from looper import components
     from looper.agents.tiers import worker
     from looper.agents.v1_domains import drain as domain
 
-    # HTTP startup hashes the installation once; keep that preparation outside the drain timeout.
-    components.loaded_manifest()
     monkeypatch.setattr(worker, "load_task_limit", AsyncMock(return_value=2))
     monkeypatch.setattr(domain, "DRAIN_POLL_TIMEOUT_SECONDS", 0.2, raising=False)
 
