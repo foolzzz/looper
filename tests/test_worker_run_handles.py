@@ -15,8 +15,9 @@ from looper.agents import proc_tree
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
 from looper.agents.ops.room import RoomOps
+from looper.agents.room import RoomInput
 from looper.agents.run_usage import Usage
-from looper.agents.runtimes import ADAPTERS, CostSource
+from looper.agents.runtimes import ADAPTERS, CostSource, RoomPush
 from looper.agents.runtimes.api.loop import ToolCall
 from looper.agents.runtimes.channel import RunStartError
 from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
@@ -183,12 +184,14 @@ def test_hosted_start_failure_fails_like_a_missing_executable(tmp_path: Path, mo
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
+@pytest.mark.parametrize("push", [RoomPush.NONE, RoomPush.USER_TURN])
 def test_hosted_run_gets_room_tools_in_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                             agent_db: Any) -> None:
+                                             agent_db: Any, push: RoomPush) -> None:
     run = ScriptedRun(_events(), hold=True)
 
     async def scenario() -> None:
         async with _pool(tmp_path, monkeypatch, run) as (pool, calls, results):
+            monkeypatch.setattr(ADAPTERS["claude-code"], "room_push", push)
             room = Mock(presence_changed=AsyncMock(), first_turn=AsyncMock(return_value="room"),
                         roster=AsyncMock(return_value={"members": []}))
             ops = RoomOps(room, url="http://127.0.0.1:1")
@@ -206,6 +209,11 @@ def test_hosted_run_gets_room_tools_in_process(tmp_path: Path, monkeypatch: pyte
             assert [(spec.name, spec.description, spec.schema) for spec in await tools.specs()] == [
                 (tool["name"], tool["description"], tool["inputSchema"]) for tool in listing]
             assert ops.authorized("Bearer " + token) and issue.call_count == 1
+            mode = RoomInput.PULL if push is RoomPush.NONE else RoomInput.PUSHED_WAITS
+            assert issue.call_args.kwargs["mode"] is mode
+            room.first_turn.assert_awaited_once_with("t1", issue.call_args.args[1], mode=mode)
+            inbox = next(tool for tool in listing if tool["name"] == "looper_room_inbox")
+            assert ("waiting report" in inbox["description"]) is (mode is RoomInput.PUSHED_WAITS)
             invalid = await tools.call(ToolCall("bad-call", "looper_room_roster", "[]"))
             assert invalid.is_error and not invalid.ran
             live = await tools.call(ToolCall("live-call", "looper_room_roster", "{}"))

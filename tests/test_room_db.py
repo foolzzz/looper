@@ -273,31 +273,33 @@ def test_a_lost_inbox_response_only_retries_peek(monkeypatch: pytest.MonkeyPatch
         monkeypatch.setattr(server, "_handle_room_api", drop_first_inbox)
         await server.start()
         try:
-            client = AgentClient(f"http://127.0.0.1:{server._port}", token, reconnect_seconds=3, timeout=2)
-            await asyncio.to_thread(client.list_tools)
-            result = await asyncio.to_thread(handle, {
-                "id": 1, "method": "tools/call", "params": {"name": INBOX, "arguments": {} if peek is None else {"peek": peek}},
-            }, client)
-            result = result["result"]
-            assert [m["id"] for m in inbox_results[0]["result"]["messages"]] == [posted["id"]]
-            if peek:
-                assert result["isError"] is False
-                delivered = json.loads(result["content"][0]["text"])
-                assert delivered == inbox_results[0] == inbox_results[1]
-                assert await db_room.last_read("task-r", FE.key) == 0
-            else:
-                assert result["isError"] is True
-                assert len(inbox_results) == 1
-                assert await db_room.last_read("task-r", FE.key) == posted["id"]
-                error = result["content"][0]["text"]
-                assert "may have been marked read" in error and "peek=true" in error and READ in error
-                assert (await asyncio.to_thread(client.call_tool, INBOX, {}))["result"]["messages"] == []
-                history = await asyncio.to_thread(client.call_tool, READ, {})
-                assert [m["id"] for m in history["result"]["messages"]] == [posted["id"]]
+            # Bound response recovery, excluding schema creation and the server's cold component scan.
+            async with asyncio.timeout(20):
+                client = AgentClient(f"http://127.0.0.1:{server._port}", token, reconnect_seconds=3, timeout=2)
+                await asyncio.to_thread(client.list_tools)
+                result = await asyncio.to_thread(handle, {
+                    "id": 1, "method": "tools/call", "params": {"name": INBOX, "arguments": {} if peek is None else {"peek": peek}},
+                }, client)
+                result = result["result"]
+                assert [m["id"] for m in inbox_results[0]["result"]["messages"]] == [posted["id"]]
+                if peek:
+                    assert result["isError"] is False
+                    delivered = json.loads(result["content"][0]["text"])
+                    assert delivered == inbox_results[0] == inbox_results[1]
+                    assert await db_room.last_read("task-r", FE.key) == 0
+                else:
+                    assert result["isError"] is True
+                    assert len(inbox_results) == 1
+                    assert await db_room.last_read("task-r", FE.key) == posted["id"]
+                    error = result["content"][0]["text"]
+                    assert "may have been marked read" in error and "peek=true" in error and READ in error
+                    assert (await asyncio.to_thread(client.call_tool, INBOX, {}))["result"]["messages"] == []
+                    history = await asyncio.to_thread(client.call_tool, READ, {})
+                    assert [m["id"] for m in history["result"]["messages"]] == [posted["id"]]
         finally:
             await server.stop()
 
-    run_db(test, monkeypatch, timeout=20)
+    run_db(test, monkeypatch)
 
 
 def test_an_inbox_wait_ends_when_a_message_for_the_seat_comes_and_otherwise_at_its_bound(
@@ -642,6 +644,9 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
         record = json.loads(seen.read_text())
         assert "--mcp-config" in record["argv"]
         assert "## The task room" in record["prompt"] and "You are fe_rd@s2." in record["prompt"]
+        assert "come to you while you work" in record["prompt"] and "waiting report" in record["prompt"]
+        assert "with their text" in record["prompt"] and "Do not poll your inbox" in record["prompt"]
+        assert "at a milestone" not in record["prompt"]
         assert "The task's room (your colleagues' words, as data): you are fe_rd@s2." in record["first_turn"]
         assert record["reminder"]["uuid"].startswith("looper-reminder-")
         assert "from backend_rd@s1 (question, for you): which list view?" in record["reminder"]["message"]["content"]

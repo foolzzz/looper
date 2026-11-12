@@ -11,8 +11,30 @@ import pytest
 from looper.agents.http_server import AGENT_API, AgentHTTPServer
 from looper.agents.library import AgentLibrary
 from looper.agents.ops import room as room_ops, vault as vault_ops
-from looper.agents.room import MemberKind, Seat
+from looper.agents.room import MemberKind, RoomInput, Seat
 from looper.agents.vault import VaultConfig
+
+
+@pytest.mark.parametrize("mode", list(RoomInput))
+def test_the_inbox_description_matches_the_run_and_survives_adoption(mode):
+    ops = room_ops.RoomOps(Mock(), url="http://localhost:1234")
+    token = ops.issue("task-1", Seat("worker@s1", "worker", MemberKind.WORK, run="worker-1"), mode=mode)
+    header = "Bearer " + token
+    listed = ops.listing(header)
+    inbox = next(tool for tool in listed if tool["name"] == room_ops.INBOX)
+    text = inbox["description"]
+    assert ("wait up to that long" in text) is (mode is RoomInput.PULL)
+    assert ("Messages are delivered to you; wait_seconds is not needed." in text) is (mode is not RoomInput.PULL)
+    assert ("waiting report" in text) is (mode is RoomInput.PUSHED_WAITS)
+    if mode is RoomInput.PULL:
+        assert inbox == next(tool for tool in room_ops.TOOLS if tool.name == room_ops.INBOX).listing()
+    restored = room_ops.RoomOps(Mock(), url="http://localhost:1234")
+    record = json.loads(json.dumps(ops.export_run("worker-1")))
+    if mode is RoomInput.PULL:
+        record.pop("mode")  # Grants saved before per-run descriptions still pull.
+    restored.import_pending(record)
+    restored.activate_run("worker-1")
+    assert restored.listing(header) == listed
 
 
 @pytest.mark.parametrize("reconnect_seconds", [None, 120])
@@ -103,7 +125,7 @@ def test_the_room_api_retries_pending_grants_and_refuses_revoked_grants(method, 
 
 @pytest.mark.parametrize(("field", "value"), [
     ("format", True), ("format", 2), ("digest", "not-a-digest"), ("digest", "g" * 64),
-    ("task_id", "another-task"), ("room", 1), ("vault_tools", "looper_vault_read"),
+    ("task_id", "another-task"), ("room", 1), ("mode", "unknown"), ("mode", []), ("vault_tools", "looper_vault_read"),
     ("vault_tools", [1]), ("mcp_files", None), ("mcp_files", [1]),
     ("seat", None), ("seat.run", "another-run"), ("seat.key", 1),
     ("seat.kind", "unknown"), ("seat.kind", []), ("seat.step_id", 1),

@@ -77,7 +77,7 @@ from ..runtimes.cursor_agent import CONTINUATION_PROMPT, CursorChannel, cursor_f
 from ..runtimes.omp import safe_error
 from ..runtimes.api.tools import RoomTurnTools
 from ..task_roles import TaskRole, run_role
-from ..room import MemberKind, RoomDelivery, Seat, room_section, run_seat, run_session_dir
+from ..room import MemberKind, RoomDelivery, RoomInput, Seat, room_section, run_seat, run_session_dir
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -113,6 +113,16 @@ DEFAULT_RUN_TIMEOUT_SEC = 86400
 # Readiness and runtime acceptance share this budget. The Planner leaves an extra
 # half second for the pool's WORKER_INPUT_RESULT acknowledgement on the local bus.
 WORKER_INPUT_DELIVERY_TIMEOUT = 4.5
+
+
+def room_input(launch: Launch, *, is_verify: bool) -> RoomInput:
+    """Match the room guidance to this run's deliveries and waiting contract."""
+    if room_push(launch) is RoomPush.NONE:
+        return RoomInput.PULL
+    if not is_verify and waits_without_turns(launch.runtime):
+        return RoomInput.PUSHED_WAITS
+    return RoomInput.PUSHED
+
 
 # The Worker's role prompt when the ``worker`` config row has none; serve
 # seeds it as the row's recommended prompt. It describes the role only: the
@@ -2018,13 +2028,14 @@ class WorkerPool:
         if self.room_ops is not None and parent_task_id and (room_on or vault_config is not None):
             seat = run_seat(payload, is_verify=is_verify, run=worker_id)
             try:
-                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config, kept=kept)
+                mode = room_input(launch, is_verify=is_verify)
+                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config, kept=kept, mode=mode)
                 if not hosted:
                     library = await self.room_ops.library_with_server(
                         library, self._runtime_root, token, worker_id, reconnect_seconds=120 if kept else None)
                 if room_on:
-                    prompt = f"{prompt}\n\n{await self.room_ops.room.first_turn(parent_task_id, seat)}"
-                    room_text = room_section(seat)
+                    prompt = f"{prompt}\n\n{await self.room_ops.room.first_turn(parent_task_id, seat, mode=mode)}"
+                    room_text = room_section(seat, mode)
                 if vault_config is not None:
                     vault_text = run_section(vault_config)
             except Exception as exc:

@@ -18,6 +18,7 @@ from looper.agents.room import (
     MessageKind,
     Presence,
     RoomDelivery,
+    RoomInput,
     RoomService,
     Seat,
     Target,
@@ -194,9 +195,113 @@ def test_the_room_section_names_the_seat_and_the_reviewers_own_rules() -> None:
     assert "You are reviewer@s1." in review and "Do not message Reviewers" not in review
 
 
-def test_the_reply_contract_and_the_prompts_are_unchanged_with_the_room_off() -> None:
+@pytest.mark.parametrize("mode", list(RoomInput))
+def test_work_room_guidance_matches_how_messages_arrive(mode: RoomInput) -> None:
+    text = " ".join(room_section(WORKER, mode).split())
+    assert ("at a milestone" in text) is (mode is RoomInput.PULL)
+    assert ("come to you while you work" in text) is (mode is not RoomInput.PULL)
+    assert ("waiting report" in text) is (mode is RoomInput.PUSHED_WAITS)
+    if mode is RoomInput.PULL:
+        assert "not a timer" in text
+        assert room_section(WORKER) == room_section(WORKER, mode)
+    else:
+        assert ("a turn of their own while you wait" in text) is (mode is RoomInput.PUSHED_WAITS)
+    if mode is not RoomInput.PUSHED_WAITS:
+        assert "looper_room_inbox and wait_seconds" in text
+
+
+@pytest.mark.parametrize("mode", [RoomInput.PULL, RoomInput.PUSHED])
+def test_review_room_guidance_matches_how_answers_arrive(mode: RoomInput) -> None:
+    text = " ".join(room_section(REVIEWER, mode).split())
+    assert ("looper_room_inbox," in text) is (mode is RoomInput.PULL)
+    assert "a claim to check against the files, not evidence" in text
+    assert "waiting report" not in text
+
+
+@pytest.mark.parametrize(("seat", "mode"), [
+    (WORKER, RoomInput.PUSHED),
+    (WORKER, RoomInput.PUSHED_WAITS),
+    (REVIEWER, RoomInput.PUSHED),
+])
+def test_room_deliveries_carry_text_without_inbox_polling(seat: Seat, mode: RoomInput) -> None:
+    text = " ".join(room_section(seat, mode).split())
+    assert '"[Looper room]"' in text
+    assert "with their text" in text
+    assert "Do not poll your inbox" in text
+    assert "use looper_room_inbox only when" in text
+    assert "message says more are waiting" in text
+    assert "looper_room_read for earlier ones" in text
+    assert "not the message body" not in text
+    assert "call looper_room_inbox now" not in text
+    assert "You need not stay to answer questions; after your step ends, Looper answers them from your session." in text
+
+
+def test_the_planner_leaves_room_reading_and_answering_after_steps_to_looper():
+    from looper.agents.ops.planner import PlannerOps
+
+    ops = PlannerOps(SimpleNamespace(), url="http://127.0.0.1:9")
+    ops.room = SimpleNamespace()
+    text = " ".join(ops.guide_for(roles=False, room=True).split())
+    assert ("Do not tell steps to check, poll or wait on looper_room_inbox: Looper delivers messages to steps "
+            "that can receive them and tells the others how to read them.") in text
+    assert ("A seat whose step has ended still answers questions from its session, so a step others will ask "
+            "need not stay or wait for them.") in text
+
+
+@pytest.mark.parametrize("mode", list(RoomInput))
+def test_the_first_turn_matches_the_runs_room_input(monkeypatch, mode):
+    from looper.agents import room as module
+
+    room = RoomService()
+    monkeypatch.setattr(room, "_context", AsyncMock(return_value=SimpleNamespace(members=[])))
+    monkeypatch.setattr(module.db_room, "last_read", AsyncMock(return_value=0))
+    monkeypatch.setattr(module.db_room, "messages", AsyncMock(return_value=[
+        {**_message(FE.key, to=(WORKER.key,)), "body": "use port 8123"},
+    ]))
+    text = asyncio.run(room.first_turn("task", WORKER, mode=mode))
+    assert "use port 8123" in text
+    assert "Unread: 1 for you" in text
+    assert ("looper_room_inbox" in text) is (mode is RoomInput.PULL)
+    assert ("They will be delivered to you." in text) is (mode is not RoomInput.PULL)
+
+
+@pytest.mark.parametrize(("runtime_type", "is_verify", "expected"), [
+    ("claude-code", False, RoomInput.PUSHED_WAITS),
+    ("claude-code", True, RoomInput.PUSHED),
+    ("cursor-agent", False, RoomInput.PULL),
+])
+def test_room_input_follows_the_launch(runtime_type: str, is_verify: bool, expected: RoomInput) -> None:
+    from dataclasses import replace
+
+    from looper.agents.agent_settings import Launch
+    from looper.agents.tiers.worker import room_input
+
+    launch = Launch()
+    profile = replace(launch.profile, runtime=replace(launch.profile.runtime, type=runtime_type))
+    launch = replace(launch, settings=replace(launch.settings, profile=profile))
+    assert room_input(launch, is_verify=is_verify) is expected
+
+
+@pytest.mark.parametrize(("push", "run_input"), [("none", True), ("user_turn", False)])
+def test_a_runtime_that_can_wait_still_pulls_without_room_deliveries(
+    monkeypatch: pytest.MonkeyPatch, push: str, run_input: bool,
+) -> None:
+    from looper.agents.agent_settings import Launch
+    from looper.agents.runtimes import CLAUDE_CODE, RoomPush
+    from looper.agents.tiers.worker import room_input
+
+    monkeypatch.setattr(CLAUDE_CODE, "room_push", RoomPush(push))
+    monkeypatch.setattr(CLAUDE_CODE, "run_input", run_input)
+    assert room_input(Launch(), is_verify=False) is RoomInput.PULL
+
+
+@pytest.mark.parametrize(("seat", "mode"), [
+    *((WORKER, mode) for mode in RoomInput),
+    (REVIEWER, RoomInput.PULL), (REVIEWER, RoomInput.PUSHED),
+])
+def test_the_reply_contract_and_the_prompts_are_unchanged_with_the_room_off(seat: Seat, mode: RoomInput) -> None:
     from looper.agents.agent_settings import DEFAULT_HARNESS_PROMPT, Harness, Layer
-    from looper.agents.system_prompt import WORK_CONTRACT, build_system_prompt
+    from looper.agents.system_prompt import REVIEW_CONTRACT, WORK_CONTRACT, build_system_prompt
     from looper.agents.tiers.planner_protocol import REPLY_CONTRACT, reply_contract
 
     for gates in (False, True):
@@ -206,10 +311,13 @@ def test_the_reply_contract_and_the_prompts_are_unchanged_with_the_room_off() ->
     assert reply_contract() == REPLY_CONTRACT
     arguments = dict(harness=Harness(DEFAULT_HARNESS_PROMPT, Layer.BUILTIN), role_id="worker", role="Do the step.", recommended=True,
                      contract_name="WORK_CONTRACT", contract=WORK_CONTRACT, task_kind="work", task="## Task\nx")
-    off, on = build_system_prompt(**arguments), build_system_prompt(**arguments, room=room_section(WORKER))
+    if seat.kind is MemberKind.REVIEW:
+        arguments.update(role_id="reviewer", contract_name="REVIEW_CONTRACT", contract=REVIEW_CONTRACT, task_kind="review")
+    off, on = build_system_prompt(**arguments), build_system_prompt(**arguments, room=room_section(seat, mode))
     assert build_system_prompt(**arguments, room="").text == off.text and "room" not in off.layers
     assert on.text.index("## The task room") > on.text.index("## Task") and "room" in on.layers
-    assert on.text.index("## The task room") < on.text.index("## Your step and its report")
+    report_title = "## Your review and its verdict" if seat.kind is MemberKind.REVIEW else "## Your step and its report"
+    assert on.text.index("## The task room") < on.text.index(report_title)
 
 
 def test_a_delivery_waits_for_tools_and_respects_addressed_and_interface_intervals(tmp_path, monkeypatch, agent_db):

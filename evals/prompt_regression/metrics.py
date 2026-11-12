@@ -196,11 +196,12 @@ def room_metrics(detail: Mapping[str, Any], activity: Iterable[Mapping[str, Any]
     and the interface posts (``room_interface``); Looper's escalations to the Planner (``room_escalations``); the
     reminders Claude Code runs got (``room_reminders``); room deliveries (``room_deliveries``); the posts the room
     refused (``room_refused``); and the runs' calls of the room's tools (``room_tool_calls``, reads included),
-    including inbox calls (``room_inbox_calls``) and those returning no messages (``room_inbox_empty``)."""
+    including inbox calls (``room_inbox_calls``), waits woken by delivery (``room_inbox_woken_by_delivery``)
+    and those returning no messages or deliveries (``room_inbox_empty``)."""
     room = detail.get("room") or {}
     by_kind = (room.get("counts") or {}).get("by_kind") or {}
     rows = list(activity)
-    calls = inbox_calls = inbox_empty = 0
+    calls = inbox_calls = inbox_empty = inbox_woken_by_delivery = 0
     for record_events in events.values():
         inbox_ids: set[str] = set()
         for row in record_events:
@@ -239,7 +240,10 @@ def room_metrics(detail: Mapping[str, Any], activity: Iterable[Mapping[str, Any]
                         continue
                     payload = answer.get("result", answer) if isinstance(answer, Mapping) else None
                     messages = payload.get("messages") if isinstance(payload, Mapping) else None
-                    inbox_empty += int(isinstance(messages, list) and not messages)
+                    delivered = payload.get("delivered_message_ids") if isinstance(payload, Mapping) else None
+                    woken_by_delivery = isinstance(delivered, list) and bool(delivered)
+                    inbox_woken_by_delivery += int(woken_by_delivery)
+                    inbox_empty += int(isinstance(messages, list) and not messages and not woken_by_delivery)
     return {
         "room_messages": sum(n for kind, n in by_kind.items() if kind not in ("notice", "escalation")),
         "room_questions": int(by_kind.get("question", 0)),
@@ -250,6 +254,7 @@ def room_metrics(detail: Mapping[str, Any], activity: Iterable[Mapping[str, Any]
         "room_deliveries": sum(1 for r in rows if str(r.get("summary") or "").startswith("Room messages delivered")),
         "room_inbox_calls": inbox_calls,
         "room_inbox_empty": inbox_empty,
+        "room_inbox_woken_by_delivery": inbox_woken_by_delivery,
         "room_refused": sum(1 for r in rows if str(r.get("summary") or "").startswith("Room: ")
                             and "refused" in str(r.get("summary") or "")),
         "room_tool_calls": calls,
