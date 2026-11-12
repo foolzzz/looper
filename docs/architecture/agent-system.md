@@ -2909,8 +2909,12 @@ often the largest share of a run's cost; a profile a schedule chose cannot be de
 (`{worker, reviewer}`, each 1–64 or null for the default: how many of each
 run's task's Workers and Reviewers run at once, `schedule_task_limits`); and, from S2, an optional
 `gate_command` with `gate_timeout_seconds` (1–600, default 60), an optional `daily_budget_usd`, `notify` (`failures`,
-`alerts`, `always`, `never`) and a `notify_target` (a channel and chat; none: the
-dashboard only). A new schedule is disabled.
+`alerts`, `always`, `never`) and a `notify_target` (a channel and chat: an allowlisted
+sender's direct chat or a chat explicitly bound to a Manager on a built-in channel;
+none: the dashboard only). Bound chats use the binding's bot; removing the binding
+keeps the saved target, marks it unavailable and logs failed delivery without rerouting.
+A tasks-scope Manager may select only its own bound chats; the dashboard/operator API
+may select any offered target. A new schedule is disabled.
 
 A schedule has an immutable `manager_id`, chosen when created and defaulting
 to `manager` when omitted. The dashboard/operator API can choose its owner;

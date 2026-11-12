@@ -12,7 +12,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import asyncpg
 
@@ -108,6 +108,21 @@ async def list_bindings(channel_id: str | None = None, manager_id: str | None = 
         "WHERE ($1::text IS NULL OR channel_id = $1) AND ($2::text IS NULL OR manager_id = $2) "
         "ORDER BY channel_id, chat_id", channel_id, manager_id)
     return [ChatBinding(**dict(row)) for row in rows]
+
+
+async def notification_targets() -> list[dict[str, Any]]:
+    """Explicit bindings of built-in bots, with observed chat and Manager names."""
+    from .channel_configs import BUILTIN_CHANNEL_IDS
+
+    rows = await get_pool().fetch(
+        "SELECT b.channel_id, b.chat_id, b.manager_id, m.name AS manager_name, s.name AS chat_name, "
+        "c.channel_type, c.enabled FROM manager_chat_bindings b "
+        "JOIN channel_configs c ON c.channel_id = b.channel_id "
+        "JOIN managers m ON m.id = b.manager_id "
+        "LEFT JOIN channel_seen_chats s ON s.channel_id = b.channel_id AND s.chat_id = b.chat_id "
+        "WHERE b.channel_id = ANY($1::text[]) AND m.deleted_at IS NULL ORDER BY b.channel_id, b.chat_id",
+        list(BUILTIN_CHANNEL_IDS))
+    return [dict(row) for row in rows]
 
 
 async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,

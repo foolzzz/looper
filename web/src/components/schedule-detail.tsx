@@ -254,6 +254,9 @@ export function ScheduleDetail({ scheduleId, onDeleted }: { scheduleId: string; 
               (schedule.notify_target
                 ? ` → ${channelLabel(schedule.notify_target.channel)} · ${schedule.notify_target.chat}`
                 : " → the dashboard only")}
+            {schedule.notify_target && schedule.notify_target_available === false && (
+              <span className="text-warning"> (unavailable)</span>
+            )}
             {notifyOption && <p className="text-xs text-muted-foreground">{notifyOption.hint}</p>}
           </Field>
           {schedule.kind !== "command" && <>

@@ -13,8 +13,8 @@ The minimum interval is a system setting (``scheduler_settings``).
 
 S2 adds a gate command (run before each run), a daily spend cap, and whom to
 tell (``notify`` and a ``notify_target``: a chat that a channel's sender
-allowlist in Settings → Channels already allows; none means the dashboard
-only). Each schedule's view carries what its runs cost today and its active
+allowlist in Settings → Channels already allows, or an explicitly bound chat;
+none means the dashboard only). Each schedule's view carries what its runs cost today and its active
 alerts; ``schedule_overview`` is the dashboard's summary.
 
 A schedule's ``profile_overrides`` and ``task_limits`` (how many of a run's
@@ -40,6 +40,7 @@ import asyncpg
 from ..paths import home_runtime_root
 from ..db import channel_configs as db_channel_configs, connection as db_connection, llm_records as db_llm_records
 from ..db import projects as db_projects, schedules as db_schedules
+from ..db import chat_bindings as db_chat_bindings
 from . import cron
 from .agent_settings import CONCURRENCY_MAX, TASK_LIMIT_ROLES, budget_usd
 from .channels.allowlist import SENDER_ID_FORMATS, sender_ids
@@ -304,11 +305,15 @@ async def _schedule_answer(schedule_id: str, *, runtime_root: Path | None = None
     latest = (await db_schedules.latest_runs([schedule_id])).get(schedule_id)
     last_run = (await _run_views([latest], runtime_root=runtime_root))[0] if latest else None
     spent = await db_schedules.spent_since(db_connection.get_pool(), schedule_id, local_midnight())
-    return {"schedule": schedule_view(row, last_run, spent_today=spent, default_timeout=await default_run_timeout())}
+    view = schedule_view(row, last_run, spent_today=spent, default_timeout=await default_run_timeout())
+    target = view["notify_target"]
+    view["notify_target_available"] = target is None or any(
+        (t["channel"], t["chat"]) == (target["channel"], target["chat"]) for t in await notify_targets())
+    return {"schedule": view}
 
 
-async def notify_targets() -> list[dict[str, Any]]:
-    """The chats a schedule may tell: the senders each channel's allowlist (Settings → Channels) already lets in."""
+async def notify_targets(*, manager_id: str | None = None) -> list[dict[str, Any]]:
+    """Built-in bots' allowlisted direct chats and explicitly Manager-bound chats."""
     targets = []
     for row in await db_channel_configs.list_configs():
         channel = row["channel_type"]
@@ -321,6 +326,20 @@ async def notify_targets() -> list[dict[str, Any]]:
         label = "Telegram" if channel == "telegram" else "Lark"
         targets += [{"channel": channel, "chat": chat, "label": f"{label} · {chat}",
                      "channel_enabled": bool(row.get("enabled"))} for chat in chats]
+    offered = {(target["channel"], target["chat"]) for target in targets}
+    bindings = await db_chat_bindings.notification_targets()
+    for binding in bindings:
+        channel, chat = binding["channel_type"], binding["chat_id"]
+        if (channel not in SENDER_ID_FORMATS or binding["channel_id"] != builtin_channel_id(channel)
+                or (channel, chat) in offered):
+            continue
+        label = "Telegram" if channel == "telegram" else "Lark"
+        targets.append({"channel": channel, "chat": chat,
+                        "label": f"{label} · {binding['chat_name'] or chat} (bound to {binding['manager_name']})",
+                        "channel_enabled": bool(binding["enabled"])})
+    if manager_id is not None:
+        owned = {(b["channel_type"], b["chat_id"]) for b in bindings if b["manager_id"] == manager_id}
+        targets = [target for target in targets if (target["channel"], target["chat"]) in owned]
     return targets
 
 
@@ -506,7 +525,7 @@ async def _notify_target(raw: Any) -> dict[str, str | None]:
     allowed = {(target["channel"], target["chat"]) for target in await notify_targets()}
     if (raw["channel"], raw["chat"]) not in allowed:
         raise RequestError(HTTP_400, f"{raw['channel']} chat {raw['chat']!r} is not one the channel allows: add the "
-                                     "sender in Settings → Channels first")
+                                     "sender or bind the chat to a Manager in Settings → Channels first")
     return {"notify_channel": raw["channel"], "notify_chat": raw["chat"]}
 
 
