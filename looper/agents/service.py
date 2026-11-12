@@ -143,10 +143,10 @@ def _get_status(port: int, token: str | None, address: str = "127.0.0.1", *, tim
             and isinstance(payload.get("result"), dict) else None)
 
 
-def _get_components(port: int, token: str | None, *, timeout: float = 3) -> dict | None:
+def _get_components(port: int, token: str | None, *, address: str = "127.0.0.1", timeout: float = 3) -> dict | None:
     """Read the startup snapshot through the operator-authenticated v1 API."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1/system/components",
+    request = urllib.request.Request(f"{_base_url(address, port)}/api/v1/system/components",
                                     headers={"Authorization": f"Bearer {token}"} if token else {}, method="POST")
     try:
         with opener.open(request, timeout=timeout) as response:
@@ -175,12 +175,14 @@ def _base_url(address: str, port: int) -> str:
     return f"http://{authority}:{port}"
 
 
-def _system_operation(port: int, token: str, name: str, arguments: dict, *, timeout: float = 3) -> dict:
-    return _request_json(port, token, f"/api/v1/system/{name}", arguments, timeout=timeout)
+def _system_operation(port: int, token: str, name: str, arguments: dict, *,
+                      address: str = "127.0.0.1", timeout: float = 3) -> dict:
+    return _request_json(port, token, f"/api/v1/system/{name}", arguments, address=address, timeout=timeout)
 
 
-def _request_json(port: int, token: str, path: str, arguments: dict | None = None, *, timeout: float = 3) -> dict:
-    request = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+def _request_json(port: int, token: str, path: str, arguments: dict | None = None, *,
+                  address: str = "127.0.0.1", timeout: float = 3) -> dict:
+    request = urllib.request.Request(f"{_base_url(address, port)}{path}",
         data=json.dumps(arguments).encode() if arguments is not None else None,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     try:
@@ -194,14 +196,14 @@ def _request_json(port: int, token: str, path: str, arguments: dict | None = Non
     raise ServiceError(f"invalid response from {path}")
 
 
-def _get_whoami(port: int, token: str, *, timeout: float = 3) -> dict:
-    return _request_json(port, token, "/api/v1/whoami", timeout=timeout)
+def _get_whoami(port: int, token: str, *, address: str = "127.0.0.1", timeout: float = 3) -> dict:
+    return _request_json(port, token, "/api/v1/whoami", address=address, timeout=timeout)
 
 
-def _get_index(port: int, token: str, *, timeout: float = 3) -> bytes:
+def _get_index(port: int, token: str, *, address: str = "127.0.0.1", timeout: float = 3) -> bytes:
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        request = urllib.request.Request(f"http://127.0.0.1:{port}/index.html",
+        request = urllib.request.Request(f"{_base_url(address, port)}/index.html",
                                          headers={"Cookie": f"{operator_auth.cookie_name(port)}={token}"})
         with opener.open(request, timeout=timeout) as response:
             return response.read()
@@ -688,7 +690,9 @@ def install_probe_units(host: Host, label: str, service_text: str, timer_text: s
 
 def _stop_probe_units(host: Host, mgr: Systemd, timer: Path) -> None:
     mgr._systemctl("disable", "--now", timer.name, check=False)
+    mgr._systemctl("stop", timer.name, check=False)
     mgr._systemctl("stop", mgr.unit, check=False)
+    mgr._systemctl("daemon-reload")
     deadline = host.clock() + _STOP_WAIT_SECONDS
     for unit in (timer.name, mgr.unit):
         while True:
@@ -711,10 +715,6 @@ def remove_probe_units(host: Host, label: str) -> None:
     else:
         mgr = Systemd(host, f"{label}-probe")
         timer = mgr.unit_path.with_suffix(".timer")
-        if not timer.is_file() and not mgr.unit_path.is_file():
-            mgr._systemctl("disable", "--now", timer.name, check=False)
-            mgr._systemctl("stop", mgr.unit, check=False)
-            return
         _stop_probe_units(host, mgr, timer)
         mgr.unit_path.unlink(missing_ok=True)
         timer.unlink(missing_ok=True)
@@ -756,7 +756,9 @@ def _install_probe(host: Host, ops: OpsConfig, label: str, runtime_root: Path, p
                     if new_path not in previous:
                         new_path.unlink(missing_ok=True)
                 for old_path, data in previous.items():
-                    write_private(old_path, data)
+                    # Atomic replacement may have failed without changing the old file.
+                    if not old_path.is_file() or old_path.read_bytes() != data:
+                        write_private(old_path, data)
                 if host.system == "Darwin":
                     Launchd(host, f"{label}.probe").start()
                 else:
@@ -974,12 +976,14 @@ def uninstall(host: Host, *, label: str = DEFAULT_LABEL) -> str:
     probe_error = None
     try:
         remove_probe_units(host, label)
-    except ServiceError as exc:
+    except (ServiceError, OSError) as exc:
         probe_error = exc
-    state = mgr.state()
+    try:
+        state = mgr.state()
+    finally:
+        mgr.remove()
     if not state.installed and not state.loaded and probe_error is None:
         return f"{label} is not installed"
-    mgr.remove()
     if probe_error is not None:
         raise ServiceError(f"uninstalled {label}; probe cleanup failed: {probe_error}; run uninstall again")
     kept = f"; the log stays at {state.log_path}" if state.log_path else ""
@@ -1267,11 +1271,11 @@ def _deploy_report(report: dict, log_path: Path | None) -> str:
     return line
 
 
-def _upgrade_drain_status(host: Host, port: int, token: str) -> dict:
+def _upgrade_drain_status(host: Host, port: int, token: str, address: str = "127.0.0.1") -> dict:
     # Retry reads only; callers still check the phase in case the controller lease expired.
     for attempt in range(3):
         try:
-            return host.system_operation(port, token, "drain_status", {}, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
+            return host.system_operation(port, token, "drain_status", {}, address=address, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
         except (ServiceError, OSError) as exc:
             cause = exc.__cause__ if isinstance(exc, ServiceError) else exc
             if isinstance(cause, urllib.error.URLError):
@@ -1351,7 +1355,7 @@ def _deployment_signals():
 def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path: Path | None,
                   plan, running, target, installer, timeout: float, drain_timeout: float,
                   no_force: bool, turns_timeout: float = 180, preflight_wait: float = 0,
-                  prepare: Callable[[], None] | None = None) -> str:
+                  prepare: Callable[[], None] | None = None, address: str = "127.0.0.1") -> str:
     from ..components import Manifest
     from ..upgrade import UpgradeKind
 
@@ -1367,15 +1371,15 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
 
     def renew() -> None:
         try:
-            _upgrade_drain_status(host, port, token)
+            _upgrade_drain_status(host, port, token, address)
         except (ServiceError, OSError):
             pass  # The old process may already have closed its listener.
 
     def port_conflict() -> ServiceError:
-        answer = host.get_status(port, token, "127.0.0.1") or {}
+        answer = host.get_status(port, token, address) or {}
         if "pid" not in answer:
             try:
-                answer = host.system_operation(port, token, "health", {})
+                answer = host.system_operation(port, token, "health", {}, address=address)
             except (ServiceError, OSError):
                 pass
         owner = f" (pid {answer['pid']})" if answer.get("pid") is not None else ""
@@ -1405,7 +1409,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             if control_plane and no_force and preflight_wait > 0:
                 preflight_started = host.clock()
                 while True:
-                    status = _upgrade_drain_status(host, port, token)
+                    status = _upgrade_drain_status(host, port, token, address)
                     report["preflight_wait_seconds"] = round(host.clock() - preflight_started, 3)
                     if status.get("phase") != "serving":
                         raise ServiceError("the service is already draining; deployment stopped")
@@ -1425,7 +1429,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             draining = True
             status = host.system_operation(port, token, "drain", {
                 "scope": "turns" if plan.kind == UpgradeKind.CONTROL_PLANE else "runs",
-                "timeout_seconds": drain_timeout})
+                "timeout_seconds": drain_timeout}, address=address)
             while True:
                 phase = status.get("phase")
                 if phase not in ("draining", "drained"):
@@ -1465,7 +1469,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 if phase == "drained" or passed:
                     break
                 host.sleep(_POLL_SECONDS)
-                status = _upgrade_drain_status(host, port, token)
+                status = _upgrade_drain_status(host, port, token, address)
             gap_started = host.clock()
             stop_attempted = True
             _stop_for_install(mgr, before, renew)
@@ -1474,7 +1478,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 expected = installer()
                 report["installed_package_version"] = target.version
             start_attempted = True
-            serving = _start_and_wait(mgr, port, log_path, timeout, root)
+            serving = _start_and_wait(mgr, port, log_path, timeout, root, address)
             restart_started = True
             if isinstance(serving.status.get("startup_steps"), dict):
                 report["startup_steps"] = serving.status["startup_steps"]
@@ -1482,7 +1486,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             if control_plane:
                 adoption_deadline = host.clock() + 330
                 while True:
-                    keepers = ((host.get_status(port, token) or {}).get("keepers") or {})
+                    keepers = ((host.get_status(port, token, address) or {}).get("keepers") or {})
                     if keepers.get("pending") == 0 or host.clock() >= adoption_deadline:
                         break
                     host.sleep(min(_POLL_SECONDS, adoption_deadline - host.clock()))
@@ -1497,17 +1501,17 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             expected = installer()
             report["installed_package_version"] = target.version
 
-        actual = Manifest.from_dict(host.get_components(port, token, timeout=_UPGRADE_READ_TIMEOUT_SECONDS))
+        actual = Manifest.from_dict(host.get_components(port, token, address=address, timeout=_UPGRADE_READ_TIMEOUT_SECONDS))
         if target is not None:
             if actual.components != target.components or actual.adoption != target.adoption:
                 raise ServiceError("running system.components does not match the target")
             if plan.kind == UpgradeKind.WEB_ONLY:
-                index = host.get_index(port, token, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
+                index = host.get_index(port, token, address=address, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
                 if not index or (expected and (index != expected[0] or actual.verification.get("web") != expected[1])):
                     raise ServiceError("the served dashboard does not match the installed build")
                 if expected is None and actual.verification.get("web") != target.verification.get("web"):
                     raise ServiceError("the served dashboard does not match the target wheel")
-        whoami = host.get_whoami(port, token, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
+        whoami = host.get_whoami(port, token, address=address, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
         report.update(status="ok", serving=True, running_code_fingerprint=actual.components["control_plane"],
                       running_version=whoami["looper_version"], web_fingerprint=actual.components["web"])
     except BaseException as exc:
@@ -1535,7 +1539,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                     deadline = host.clock() + _STOP_WAIT_SECONDS
                     while host.pid_alive(before):
                         try:
-                            serving_pid = host.system_operation(port, token, "health", {}).get("pid")
+                            serving_pid = host.system_operation(port, token, "health", {}, address=address).get("pid")
                         except (ServiceError, OSError):
                             serving_pid = None
                         if serving_pid == before:
@@ -1547,7 +1551,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                         host.sleep(_POLL_SECONDS)
                     # Decide at the end of the wait, whatever the first probe found.
                     if not host.pid_alive(before) and not mgr.state().running:
-                        if host.port_in_use(port):
+                        if host.port_in_use(port, address):
                             raise port_conflict()
                         stopped = True
                 # Retry an exited or failed start from a stopped unit before cancelling.
@@ -1561,20 +1565,20 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                         # An exited launchd job can remain loaded forever;
                         # bootstrap needs a completed bootout even without a PID.
                         _stop_with_renewal(mgr, renew)
-                    if host.port_in_use(port):
+                    if host.port_in_use(port, address):
                         raise port_conflict()
-                    _start_and_wait(mgr, port, log_path, timeout, root)
+                    _start_and_wait(mgr, port, log_path, timeout, root, address)
             except Exception as cancel_error:
                 report["recovery_error"] = str(cancel_error)
                 if isinstance(cancel_error, ServiceStarting):
                     starting = cancel_error
             if starting is None:
                 try:
-                    host.system_operation(port, token, "drain_cancel", {})
+                    host.system_operation(port, token, "drain_cancel", {}, address=address)
                 except (ServiceError, OSError) as cancel_error:
                     report["recovery_error"] = "; ".join(filter(None, (report.get("recovery_error"), str(cancel_error))))
         try:
-            answer = host.get_status(port, token, "127.0.0.1", timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
+            answer = host.get_status(port, token, address, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
             if answer is None and draining and not stop_attempted and before is not None:
                 state = mgr.state()
                 if state.running and ((state.pid is not None and state.pid != before) or not host.pid_alive(before)):
@@ -1582,7 +1586,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                     deadline = host.clock() + timeout
                     while answer is None and host.clock() < deadline:
                         host.sleep(min(1.0, deadline - host.clock()))
-                        answer = host.get_status(port, token, "127.0.0.1", timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
+                        answer = host.get_status(port, token, address, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
                     if answer is None and mgr.state().running and host.clock() >= deadline:
                         starting = ServiceStarting(
                             f"the service is still starting after {timeout:.0f} s; do not restart it",
@@ -1593,7 +1597,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
         report["running_code_fingerprint"] = None
         if report["serving"]:
             try:
-                actual = Manifest.from_dict(host.get_components(port, token, timeout=_UPGRADE_READ_TIMEOUT_SECONDS))
+                actual = Manifest.from_dict(host.get_components(port, token, address=address, timeout=_UPGRADE_READ_TIMEOUT_SECONDS))
                 report["running_code_fingerprint"] = actual.components["control_plane"]
             except Exception as fingerprint_error:
                 report["running_code_fingerprint_error"] = str(fingerprint_error)
@@ -1626,14 +1630,16 @@ def _planned_restart(host: Host, *, label: str, timeout: float, drain_timeout: f
     port, log_path, root = mgr.unit_settings()
     if port is None or root is None or not mgr.state().running:
         raise ServiceError("cannot locate a running installed service to drain")
+    ops = mgr.ops()
+    address = _connect_address(ops.host if ops else "127.0.0.1")
     token = operator_auth.read_token(root)
     try:
-        running = Manifest.from_dict(host.get_components(port, token))
+        running = Manifest.from_dict(host.get_components(port, token, address=address))
     except (ValueError, KeyError) as exc:
         raise ServiceError(str(exc)) from exc
     plan = UpgradePlan(UpgradeKind.FULL, ("Planned restart requested; no package installation.",), ())
     return _execute_plan(host, mgr, port=port, root=root, log_path=log_path, plan=plan,
-        running=running, target=None, installer=None, timeout=timeout, drain_timeout=drain_timeout, no_force=no_force)
+        address=address, running=running, target=None, installer=None, timeout=timeout, drain_timeout=drain_timeout, no_force=no_force)
 
 
 def _unit_package_root(host: Host, mgr: _Manager) -> Path:
@@ -1695,6 +1701,8 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         port, log_path, root = mgr.unit_settings()
         if port is None or root is None:
             raise ServiceError("cannot locate the service port and runtime root; install the service first")
+        ops = mgr.ops()
+        address = _connect_address(ops.host if ops else "127.0.0.1")
         expected = looper_command(host.executable)
         try:
             argv = list(mgr.unit_argv())
@@ -1732,8 +1740,8 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         token = operator_auth.read_token(root)
         if not token:
             raise ServiceError("the service operator token is missing")
-        running = components.Manifest.from_dict(host.get_components(port, token, timeout=_UPGRADE_READ_TIMEOUT_SECONDS))
-        status = host.get_status(port, token, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
+        running = components.Manifest.from_dict(host.get_components(port, token, address=address, timeout=_UPGRADE_READ_TIMEOUT_SECONDS))
+        status = host.get_status(port, token, address, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
         if status is None:
             raise ServiceError("cannot read the running service's status (keeper mode unknown); "
                                "nothing was drained, run looper service upgrade again")
@@ -1769,7 +1777,7 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
 
             build_web = "web" in plan.changed_components
             return _execute_plan(host, mgr, port=port, root=root, log_path=log_path, plan=plan,
-                running=running, target=target, prepare=prepare if build_web and not wheel else None,
+                address=address, running=running, target=target, prepare=prepare if build_web and not wheel else None,
                 installer=lambda: _install_target(host, source, wheel=wheel, build_web=build_web,
                     dependencies=dependencies, sync_environment=sync_environment, wheel_environment=wheel_environment,
                     prepared_web=prepared_web),

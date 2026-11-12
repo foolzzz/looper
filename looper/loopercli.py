@@ -198,9 +198,10 @@ class Api:
         # The URL is a Looper on this machine; a proxy from the environment must not carry it.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
-    def call(self, method: str, path: str, body: Mapping[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+    def call(self, method: str, path: str, body: Mapping[str, Any] | None = None,
+             *, timeout: float = TIMEOUT_SECONDS) -> tuple[int, dict[str, Any]]:
         """The HTTP status and the JSON object of the answer, for any status."""
-        response = self._open(method, path, body, "application/json")
+        response = self._open(method, path, body, "application/json", timeout=timeout)
         try:
             status, payload = response.status, self._json(response)
         finally:
@@ -221,14 +222,15 @@ class Api:
             response.close()
         return iter([("answer", payload)])
 
-    def _open(self, method: str, path: str, body: Mapping[str, Any] | None, accept: str) -> Any:
+    def _open(self, method: str, path: str, body: Mapping[str, Any] | None, accept: str,
+              *, timeout: float = TIMEOUT_SECONDS) -> Any:
         headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json", "Accept": accept}
         if self._session:
             headers["X-Looper-Session"] = self._session
         data = None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(self.url + path, data=data, headers=headers, method=method)
         try:
-            response = self._opener.open(request, timeout=TIMEOUT_SECONDS)
+            response = self._opener.open(request, timeout=timeout)
         except urllib.error.HTTPError as exc:  # a non-2xx answer; it reads like a response
             response = exc
         except (OSError, http.client.HTTPException) as exc:
@@ -1312,10 +1314,37 @@ def _run_generated(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def _run_task_alias(args: argparse.Namespace, ctx: Context) -> int:
-    """``stop``, ``delete`` and ``status TASK``: the generated operation with the task's id."""
+    """``delete`` and ``status TASK``: the generated operation with the task's id."""
     operation: Generated = args._generated
     status, answer = ctx.api().call(operation.method, operation.path, {"task_id": args.task})
     return finish(status, answer, ctx.as_json, ctx.session)
+
+
+def _run_stop(args: argparse.Namespace, ctx: Context) -> int:
+    get: Generated | None = args._get_operation
+    if get is None:
+        raise UsageError("this Looper version has no tasks.get operation; upgrade the service")
+    operation: Generated = args._generated
+    api = ctx.api()
+    status, answer = api.call(operation.method, operation.path, {"task_id": args.task})
+    if answer.get("status") != "ok":
+        return finish(status, answer, ctx.as_json, ctx.session)
+    # Stop acknowledges a queued request. Wait for the task's stored state before a chained start can run.
+    deadline = time.monotonic() + 30
+    while (remaining := deadline - time.monotonic()) > 0:
+        poll_status, poll = api.call(get.method, get.path, {"task_id": args.task}, timeout=remaining)
+        if poll.get("status") != "ok":
+            return finish(poll_status, poll, ctx.as_json, ctx.session)
+        task = poll.get("result")
+        if isinstance(task, dict) and task.get("status") in ("init", "stopped", "failed", "completed", "cancelled"):
+            if ctx.as_json:
+                return finish(status, answer, True, ctx.session)
+            print(f"{args.task}: {task['status']}")
+            return EXIT_OK
+        time.sleep(min(0.5, max(deadline - time.monotonic(), 0)))
+    finish(0, {"status": "error", "error": {"code": "wait_timeout",
+           "message": f"{args.task}: stop requested; still stopping after 30 s"}}, ctx.as_json, ctx.session)
+    return EXIT_WAIT_TIMEOUT
 
 
 def _run_start(args: argparse.Namespace, ctx: Context) -> int:
@@ -1468,7 +1497,7 @@ def _add_aliases(commands: Any, found: Mapping[tuple[str, str], Generated], take
             ("start", ("task-control", "start"),
              "Start a ready task; continue stopped, failed or cancelled tasks from their saved plan; "
              "running tasks succeed unchanged; completed tasks are refused", _run_start),
-            ("stop", ("task-control", "stop"), "Stop a running task", _run_task_alias),
+            ("stop", ("task-control", "stop"), "Stop a running task and wait up to 30 seconds (timeout: exit 6)", _run_stop),
             ("delete", ("tasks", "delete"),
              "Delete a ready, stopped, failed, cancelled or completed task and its workspaces; "
              "running tasks are refused; its result branch stays", _run_task_alias),
@@ -1477,9 +1506,10 @@ def _add_aliases(commands: Any, found: Mapping[tuple[str, str], Generated], take
             sub.add_argument("task", metavar="TASK", help="the task's id")
             if name == "delete":
                 _operator_arguments(sub)
+            if name in ("start", "stop"):
+                sub.set_defaults(_get_operation=found.get(("tasks", "get")))
             if name == "start":
-                sub.set_defaults(_get_operation=found.get(("tasks", "get")),
-                                 _restart_operation=found.get(("task-control", "restart")))
+                sub.set_defaults(_restart_operation=found.get(("task-control", "restart")))
             sub.set_defaults(_run=run, _generated=found[key])
     if (sub := alias("status", ("tasks", "get"), "One task's state, or the overview without a TASK")) is not None:
         sub.add_argument("task", metavar="TASK", nargs="?", help="the task's id (without it: the overview)")

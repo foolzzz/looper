@@ -72,6 +72,7 @@ def upgrade_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         host=host,
         unit_argv=lambda: service.looper_command(host.executable) + ["serve"],
         unit_path=unit, state=lambda: state, unit_settings=lambda **kwargs: (18834, state.log_path, root),
+        ops=lambda: None,
         start=forbidden, stop=forbidden, remove=forbidden,
     )
     monkeypatch.setattr(service, "manager", lambda host, label: manager)

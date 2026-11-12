@@ -5625,7 +5625,8 @@ the token only to that URL and never follows a redirect.
   remain available.
 - `loopercli start TASK` starts a ready task, or continues a stopped, failed or cancelled task from its saved
   plan, keeping accepted steps. An already running task succeeds unchanged; a completed task is refused.
-- `loopercli stop TASK` stops a running task.
+- `loopercli stop TASK` requests a stop and waits up to 30 seconds for the task to become inactive.
+  If it is still stopping, the command exits 6 so a chained `start` does not run prematurely.
 - `loopercli delete TASK` refuses a running task. A ready, stopped, failed, cancelled or completed task is
   deleted with its workspaces; its result branch stays.
   Client tokens receive the usual confirmation id and `loopercli confirm ID` hint; operator tokens execute directly.
