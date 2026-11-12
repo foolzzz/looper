@@ -903,7 +903,8 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_in_service_environment(
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
 
     def execute(argv, *, env=None):
-        return subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        # Real offline installs can be slow on busy hosts; this tests their result, not their latency.
+        return subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, timeout=120,
                               env=env if env is not None else
                               {k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
 
