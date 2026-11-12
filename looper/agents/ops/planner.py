@@ -816,8 +816,9 @@ TOOLS: tuple[Tool, ...] = (
         description="Choose an allowed Agent Profile from looper_task_profiles for this task's Workers or "
                     "Reviewers: for the rest of the task, or with step for each attempt of that step. profile_id "
                     "null clears your choice. Applies to new runs; next_run gives the resolved profile. Refused "
-                    "when task or task_role pins it: ask through a user gate or have the operator change the "
-                    "profile in the dashboard (task → Roles).",
+                    "when the user's task choice or a step's task role pins it. For a role you defined, with role "
+                    "tools on, define a new version with looper_task_role_set and profile_id; otherwise ask "
+                    "through a user gate or have the operator change the profile in the dashboard (task → Roles).",
         schema={"type": "object", "required": ["role"], "additionalProperties": False, "properties": {
             "role": _ROLE,
             "profile_id": {"type": "string", "minLength": 1,
