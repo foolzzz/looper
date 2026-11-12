@@ -110,11 +110,11 @@ async def list_bindings(channel_id: str | None = None, manager_id: str | None = 
     return [ChatBinding(**dict(row)) for row in rows]
 
 
-async def notification_targets() -> list[dict[str, Any]]:
+async def notification_targets(*, pool: _Reader | None = None) -> list[dict[str, Any]]:
     """Explicit bindings of built-in bots, with observed chat and Manager names."""
     from .channel_configs import BUILTIN_CHANNEL_IDS
 
-    rows = await get_pool().fetch(
+    rows = await (pool or get_pool()).fetch(
         "SELECT b.channel_id, b.chat_id, b.manager_id, m.name AS manager_name, s.name AS chat_name, "
         "c.channel_type, c.enabled FROM manager_chat_bindings b "
         "JOIN channel_configs c ON c.channel_id = b.channel_id "

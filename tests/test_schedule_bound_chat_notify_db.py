@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from looper.agents import schedules
+from looper.agents import config_transfer as transfer, schedules
 from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.lark import LarkChannelAdapter
 from looper.agents.channels.registry import ChannelRegistry
@@ -28,6 +28,61 @@ async def bind(env, channel="lark", chat="oc_x", name=None):
         await chat_bindings.put_binding(f"channel-{channel}", chat, "manager-report", conn=conn)
     if name:
         await chat_bindings.record_seen(f"channel-{channel}", chat, name, suppressed=False, pool=env.pool)
+
+
+@pytest.mark.parametrize("channel,chat,state", [
+    ("lark", "oc_x", "bound"), ("lark_bot", "oc_x", "bound"), ("telegram", "-123", "bound"),
+    ("lark", "ou_abcdefgh12", "sender"), ("lark", "oc_x", "unbound"),
+    ("lark", "oc_x", "other_bot"), ("lark", "oc_x", "deleted_manager"),
+])
+def test_export_reimport_preserves_available_notify_target(monkeypatch, tmp_path, channel, chat, state):
+    async def test(env: ScheduleEnv):
+        await bind(env, channel, "oc_x" if state == "sender" else chat)
+        if state == "sender":
+            await env.pool.execute("UPDATE channel_configs SET config = $2::jsonb WHERE channel_id = $1",
+                                   f"channel-{channel}", json.dumps({"allowed_open_ids": [chat]}))
+        target = {"channel": channel, "chat": chat}
+        sid = (await env.enabled(notify="always", notify_target=target))["schedule_id"]
+        before = await env.pool.fetchrow("SELECT * FROM schedules WHERE id = $1", sid)
+        assert before["enabled"] and before["next_fire_at"] is not None
+        async with env.pool.acquire() as conn, conn.transaction(isolation="repeatable_read", readonly=True):
+            document = json.loads("".join([chunk async for chunk in transfer.export_chunks(
+                conn, include_projects=True, include_secrets=False)]))
+        assert document["projects"][0]["schedules"][0]["notify_target"] == target
+        assert not {"manager_chat_bindings", "channel_seen_chats", "channel_unbound_chats"} & document.keys()
+        if state in ("unbound", "other_bot"):
+            async with env.pool.acquire() as conn, conn.transaction():
+                await chat_bindings.delete_binding(f"channel-{channel}", chat, conn=conn)
+                if state == "other_bot":
+                    await conn.execute("INSERT INTO channel_configs (channel_id, channel_type, display_name) "
+                                       "VALUES ('channel-lark-2', 'lark', 'Another bot')")
+                    await chat_bindings.put_binding("channel-lark-2", chat, "manager-report", conn=conn)
+        elif state == "deleted_manager":
+            await env.pool.execute("UPDATE managers SET enabled = false, deleted_at = now() "
+                                   "WHERE id = 'manager-report'")
+            document["managers"] = []  # Do not try to restore the deleted Manager from the file.
+        available = state in ("bound", "sender")
+        assert any((t["channel"], t["chat"]) == (channel, chat)
+                   for t in await schedules.notify_targets()) is available
+        for apply in (False, True):
+            async with env.pool.acquire() as conn:
+                plan = await transfer.run_import(conn, document, apply=apply)
+            change = next(c for c in plan.changes if c.section == "project.schedules")
+            if available:
+                assert change.action is transfer.Action.UNCHANGED, plan
+                assert not any("tells the dashboard only" in note for note in plan.notes)
+            else:
+                assert change.action is transfer.Action.CHANGED
+                assert set(change.fields) == {"notify_channel", "notify_chat"}
+                note = next(note for note in plan.notes if "tells the dashboard only" in note)
+                assert "bind the chat" in note and "add the sender" not in note
+            stored = await env.pool.fetchrow("SELECT * FROM schedules WHERE id = $1", sid)
+            if available or not apply:
+                assert stored == before
+            else:
+                assert (stored["notify_channel"], stored["notify_chat"], stored["enabled"],
+                        stored["next_fire_at"]) == (None, None, False, None)
+    run_scheduled(test, monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize("channel,chat,name", [
