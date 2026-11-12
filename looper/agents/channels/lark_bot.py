@@ -10,6 +10,7 @@ from .allowlist import SenderAllowlist
 from .chat_routing import ChatResolver
 from .lark import LarkChannelAdapter, RejectedListener
 from .lark_bot_settings import stored_config
+from .lark_content import ResourceRef
 
 
 class BotTransport:
@@ -40,6 +41,9 @@ class BotTransport:
 
     async def react(self, message_id: str) -> None:
         await self._api.react(message_id)
+
+    async def download(self, message_id: str, ref: ResourceRef, part: Path, *, max_bytes: int) -> None:
+        await self._api.download(message_id, ref.key, ref.kind.value, part, max_bytes=max_bytes)
 
     def events(self) -> AsyncIterator[dict[str, Any]]:
         from .lark_stream import stream_events

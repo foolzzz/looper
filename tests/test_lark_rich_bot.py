@@ -19,6 +19,8 @@ from looper.agents.message import MessageType, channel_address
 def test_post_from_bot_stream_reaches_manager_with_resource_placeholders(tmp_path: Path, group: bool) -> None:
     async def main() -> None:
         async with FakeLarkPlatform() as fake:
+            fake.resources = {("om_rich", "img_v3_a1"): (b"\x89PNG\r\n\x1a\n", "image/png"),
+                              ("om_rich", "file_v3_b2"): (b"%PDF-1.7", "application/pdf")}
             sender = "ou_sender"
             fake.users = [{"open_id": sender, "name": "Ada Lovelace"}]
             bot = fake.bot["open_id"]
@@ -47,8 +49,18 @@ def test_post_from_bot_stream_reaches_manager_with_resource_placeholders(tmp_pat
                 assert message.source == channel_address("lark_bot")
                 assert message.payload["text"] == (
                     "Weekly\n**Hello** [Spec](https://example.com/spec)\n[image 1]\n\n"
-                    '```go\n    fmt.Println(1)\n```\n[file 2: a "q".pdf]\n\n'
-                    '(Looper cannot receive images or files yet: [image 1], [file 2: a "q".pdf] not received.)')
+                    '```go\n    fmt.Println(1)\n```\n[file 2: a "q".pdf]')
+                attachments = message.payload["attachments"]
+                assert [(item["state"], item["mime"]) for item in attachments] == [
+                    ("saved", "image/png"), ("saved", "application/pdf")]
+                for item in attachments:
+                    path = Path(item["path"])
+                    assert path.parent == tmp_path / "chat-attachments" / "channel-lark_bot" / "om_rich"
+                    assert path.is_file() and path.stat().st_mode & 0o777 == 0o600
+                    assert path.parent.stat().st_mode & 0o777 == 0o700
+                requests = [request for request in fake.requests if "/resources/" in request["path"]]
+                assert [request["query"] for request in requests] == [{"type": ["image"]}, {"type": ["file"]}]
+                assert all(request["authenticated"] for request in requests)
                 context = message.payload["channel_context"]
                 assert context["message_id"] == "om_rich"
                 assert context["chat_type"] == ("group" if group else "p2p")

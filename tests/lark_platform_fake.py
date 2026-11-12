@@ -27,6 +27,8 @@ class FakeLarkPlatform:
         self.token_requests = 0
         self.sent: list[dict[str, Any]] = []
         self.requests: list[dict[str, Any]] = []
+        self.resources: dict[tuple[str, str], tuple[bytes, str]] = {}
+        self.chunked_resources: set[tuple[str, str]] = set()
         self.bot: dict[str, str] = {"app_name": "Test Bot", "open_id": "ou_bot000001"}
         self.users: list[dict[str, Any]] = []
         self.departments: list[dict[str, Any] | str] = []
@@ -110,11 +112,27 @@ class FakeLarkPlatform:
                                       "/open-apis/auth/v3/tenant_access_token/internal", "/callback/ws/endpoint"
                                   } else None,
                                   "headers": {key: value for key, value in headers.items()
-                                              if key != "authorization"}})
+                                              if key != "authorization"},
+                                  "authenticated": self._token is not None and
+                                      headers.get("authorization") == f"Bearer {self._token}"})
             status, answer = self._answer(method, parsed.path, query, body, headers)
-            payload = json.dumps(answer).encode()
-            writer.write(f"HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\n"
-                         f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode() + payload)
+            if isinstance(answer, tuple):
+                payload, content_type = answer
+            else:
+                payload, content_type = json.dumps(answer).encode(), "application/json"
+            segments = parsed.path.split("/")
+            chunked = len(segments) == 8 and (unquote(segments[5]), unquote(segments[7])) in self.chunked_resources
+            size_header = "Transfer-Encoding: chunked" if chunked else f"Content-Length: {len(payload)}"
+            writer.write(f"HTTP/1.1 {status} Response\r\nContent-Type: {content_type}\r\n"
+                         f"{size_header}\r\nConnection: close\r\n\r\n".encode())
+            if chunked:
+                for offset in range(0, len(payload), 8192):
+                    chunk = payload[offset:offset + 8192]
+                    writer.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+                    await writer.drain()
+                writer.write(b"0\r\n\r\n")
+            else:
+                writer.write(payload)
             await writer.drain()
         except (asyncio.IncompleteReadError, ConnectionError):
             pass
@@ -124,7 +142,7 @@ class FakeLarkPlatform:
                 await writer.wait_closed()
 
     def _answer(self, method: str, path: str, query: dict[str, list[str]], body: Any,
-                headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
+                headers: dict[str, str]) -> tuple[int, dict[str, Any] | tuple[bytes, str]]:
         for index, (prefix, code, msg, status) in enumerate(self._failures):
             if path.startswith(prefix):
                 self._failures.pop(index)
@@ -149,6 +167,10 @@ class FakeLarkPlatform:
             return 400, {"code": 99991663, "msg": "Invalid access token for authorization"}
         if path == "/open-apis/bot/v3/info":
             return 200, {"code": 0, "bot": self.bot}
+        segments = path.split("/")
+        if method == "GET" and len(segments) == 8 and segments[6] == "resources":
+            resource = self.resources.get((unquote(segments[5]), unquote(segments[7])))
+            return (200, resource) if resource is not None else (400, {"code": 234003, "msg": "File not in msg."})
         if path.startswith("/open-apis/im/v1/messages"):
             return self._message(method, path, query, body)
         if path == "/open-apis/contact/v3/users/batch":

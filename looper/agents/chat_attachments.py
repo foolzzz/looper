@@ -26,6 +26,10 @@ WEB_TOTAL_MAX_BYTES = 6_000_000
 RETENTION = timedelta(days=7)
 
 
+class TooLarge(Exception):
+    """A transport stopped a resource download at the attachment size limit."""
+
+
 class AttachmentKind(str, Enum):
     IMAGE = "image"
     FILE = "file"
@@ -140,7 +144,7 @@ def accept(part: Path, *, index: int, kind: AttachmentKind, name: str, source: s
         return item
     file_class, mime = classified
     name = item.name
-    if not Path(name).suffix:
+    if mime != mimetypes.guess_type(name)[0]:
         name += mimetypes.guess_extension(mime) or ".txt"
     target = part.with_name(f"{index}-{name}")
     part.rename(target)
@@ -240,5 +244,17 @@ def prune(runtime_root: Path, now: datetime) -> int:
     return removed
 
 
-def redact(text: str, runtime_root: Path) -> str:
-    return re.sub(re.escape(str(root(runtime_root))) + r'''[^\s)\]`"']*''', "[attachment]", text)
+def redact(text: str, runtime_root: Path, *, paths: Sequence[str] = ()) -> str:
+    prefix = str(root(runtime_root).resolve()) + "/"
+    known = {path for path in paths if isinstance(path, str) and path.startswith(prefix)}
+    # Posts can refer to files from earlier turns. Inspect only directories named in the text.
+    for found in re.finditer(re.escape(prefix) + r"[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/", text):
+        directory = Path(found[0])
+        try:
+            if directory.resolve().is_relative_to(root(runtime_root).resolve()):
+                known.update(str(path) for path in directory.iterdir() if path.is_file())
+        except OSError:
+            pass
+    for path in sorted(known, key=len, reverse=True):
+        text = text.replace(path, "[attachment]")
+    return re.sub(re.escape(prefix) + r'''[^\s)\]`"']*''', "[attachment]", text)

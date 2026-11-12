@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.156] - 2026-11-12
+
+### Changed
+
+- **Lark images and files become attachments.** ([#1281](https://github.com/foolzzz/looper/pull/1281))
+  - `image` and `file` messages and the images and files in posts are downloaded as the bot (one at a time, 30 s each, 60 s and 10 per message, 20 MB each, checked by content) after admission, routing and the reaction, and reach the Manager as `[image N]` / `[file N: name]` plus attachments. The app needs the scope `im:message:readonly`.
+  - Anything not received gets one reply to the sender (「有 N 个附件没有收下：…」) and the Manager's section marks those items "the user was told". The unsupported-type reply now ends 「请发文字、富文本、图片或文件。」
+  - Stored attachment paths are replaced by `[attachment]` in Lark, Telegram and dashboard chat text; a sniffed type that disagrees with the file extension gets its extension appended.
+  - Model-visible: the "cannot receive images or files yet" line is replaced by placeholders and attachments in the Manager's input.
+
 ## [2.14.155] - 2026-11-12
 
 ### Changed

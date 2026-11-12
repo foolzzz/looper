@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import time
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 
+from ..chat_attachments import TooLarge
 from .lark_cli import LarkCliError, MESSAGE_GONE_CODES, sent_message_id
 
 __all__ = ["BASE_URLS", "FEISHU_BASE_URL", "LARK_BASE_URL", "MESSAGE_GONE_CODES", "BotInfo", "LarkApi",
@@ -170,6 +173,58 @@ class LarkApi:
     async def react(self, message_id: str, emoji: str = "Get") -> None:
         await self.call("POST", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reactions",
                         body={"reaction_type": {"emoji_type": emoji}})
+
+    async def download(self, message_id: str, file_key: str, kind: str, part: Path, *, max_bytes: int) -> None:
+        """Stream one message-bound resource, refreshing its bot token at most once."""
+        path = f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/resources/{quote(file_key, safe='')}"
+        created = False
+        try:
+            for attempt in range(2):
+                token = await self.tenant_token()
+                async with self._http.stream("GET", self._base_url + path, params={"type": kind},
+                        headers={"Authorization": f"Bearer {token}"}, timeout=30.0) as response:
+                    length = response.headers.get("content-length")
+                    if response.status_code == 200 and length is not None and length.isdecimal() and int(length) > max_bytes:
+                        raise TooLarge
+                    chunks = response.aiter_bytes(chunk_size=65536)
+                    first = b""
+                    answer: dict[str, Any] = {}
+                    if response.status_code != 200 or "application/json" in response.headers.get("content-type", ""):
+                        first = await anext(chunks, b"")
+                        try:
+                            parsed = json.loads(first)
+                            answer = parsed if isinstance(parsed, dict) else {}
+                        except ValueError:
+                            pass
+                    code = answer.get("code")
+                    invalid = response.status_code == 401 or (type(code) is int and code in TOKEN_INVALID_CODES)
+                    if invalid:
+                        if self._token == token:
+                            self._token = None
+                        if attempt == 0:
+                            continue
+                    if invalid or response.status_code != 200:
+                        if code == 99991672:
+                            answer["msg"] = "missing scope im:message:readonly: " + str(answer.get("msg") or "access denied")
+                        raise self._error(answer, response.status_code, token=token)
+                    with os.fdopen(os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as stream:
+                        created = True
+                        size = len(first)
+                        if size > max_bytes:
+                            raise TooLarge
+                        stream.write(first)
+                        async for chunk in chunks:
+                            size += len(chunk)
+                            if size > max_bytes:
+                                raise TooLarge
+                            stream.write(chunk)
+                    return
+        except BaseException as exc:
+            if created:
+                part.unlink(missing_ok=True)
+            if isinstance(exc, httpx.HTTPError):
+                raise LarkApiError(f"could not reach the Lark platform: {type(exc).__name__}") from None
+            raise
 
     async def bot_info(self) -> BotInfo:
         bot = (await self.call("GET", "/open-apis/bot/v3/info")).get("bot")

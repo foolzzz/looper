@@ -283,3 +283,12 @@ def test_attachment_dialog_requires_both_contents_in_real_mode(fake: bool, reply
 
     look = dialogs.Look(None, None, reply, "disposable", 0, frozenset(), fake)
     assert (dialogs._attachments_read(look) is None) is passes
+
+
+@pytest.mark.parametrize("name,content,stored", [
+    ("x.png", b"hello", "x.png.txt"), ("x.txt", b"\x89PNG\r\n\x1a\n", "x.txt.png"),
+    ("x.jpg", b"\x89PNG\r\n\x1a\n", "x.jpg.png"), ("x.txt", b"hello", "x.txt"),
+])
+def test_stored_extension_follows_content(tmp_path, name, content, stored):
+    item, = files.store_upload(tmp_path, "web", "message", [(name, content)])
+    assert Path(item.path).name == "1-" + stored

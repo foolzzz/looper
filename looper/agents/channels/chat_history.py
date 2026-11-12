@@ -11,10 +11,12 @@ discussion keeps it) or a Telegram group's. The web channel stores its own.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from ...db import chat as db_chat
 from ..message import MessageEnvelope
+from .. import chat_attachments
 from .base import DeliveryFailure, DeliveryReceipt
 
 logger = logging.getLogger(__name__)
@@ -29,7 +31,8 @@ def chat_record(session_id: str, message_id: str) -> dict[str, str]:
     return {"session_id": session_id, "message_id": message_id}
 
 
-async def record_reply(channel: str, envelope: MessageEnvelope, receipt: DeliveryReceipt) -> None:
+async def record_reply(channel: str, envelope: MessageEnvelope, receipt: DeliveryReceipt, *,
+                       runtime_root: Path | None = None) -> None:
     """Store the answer ``envelope`` as ``receipt`` says the channel delivered it, when the Manager named its
     record. A storage failure is logged, never raised: the channel goes on."""
     from .. import gate_commands
@@ -37,6 +40,8 @@ async def record_reply(channel: str, envelope: MessageEnvelope, receipt: Deliver
     gate_commands.settle(envelope.metadata.get(gate_commands.SNAPSHOT_TOKEN), receipt.success)
     record: Any = envelope.metadata.get(CHAT_RECORD)
     text = str(envelope.payload.get("text") or "")
+    if runtime_root is not None:
+        text = chat_attachments.redact(text, runtime_root, paths=envelope.metadata.get("attachment_paths", ()))
     if not isinstance(record, dict) or not record.get("session_id") or not record.get("message_id") or not text:
         return
     if envelope.source.agent_type != "manager":

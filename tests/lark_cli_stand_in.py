@@ -23,7 +23,7 @@ BOT_OPEN_ID = "ou_bot0000001"  # every profile's bot, as its info says
 BOT_MENTION = {"id": BOT_OPEN_ID, "key": "@_user_1", "name": "HelperBot"}
 
 _STAND_IN = """\
-import json, sys
+import base64, json, os, sys, time
 world = json.load(open({world!r}))
 args = sys.argv[1:]
 with open({log!r}, "a") as log:
@@ -90,6 +90,25 @@ if args[:5] == ["im", "+messages-edit", "--as", "bot", "--message-id"] and len(a
     if args[5].endswith("gone"):
         refuse("the message was recalled or the bot did not send it")
     answer({{"ok": True, "identity": "bot", "data": {{"message_id": args[5]}}}})
+if args[:4] == ["im", "+messages-resources-download", "--as", "bot"]:
+    rest = dict(zip(args[4::2], args[5::2]))
+    key, output = rest["--file-key"], rest["--output"]
+    if "/" in output or chr(92) in output or ".." in output:
+        refuse("unsafe output path")
+    if key.endswith("noscope"):
+        print(json.dumps({{"ok": False, "error": {{"type": "authorization", "code": 99991672,
+            "message": "access denied", "missing_scopes": ["im:message:readonly"]}}}}), file=sys.stderr)
+        sys.exit(1)
+    if key.endswith("slow"):
+        time.sleep(3)
+    resource = world["resources"].get(rest["--message-id"] + "/" + key)
+    if resource is None:
+        refuse("File not in msg.", api_code=234003)
+    content = base64.b64decode(resource["base64"])
+    path = os.path.join(os.getcwd(), output)
+    with open(path, "wb") as saved:
+        saved.write(content)
+    answer({{"ok": True, "identity": "bot", "data": {{"saved_path": path, "size_bytes": len(content)}}}})
 if args[:6] == ["im", "reactions", "create", "--as", "bot", "--message-id"] and args[7:8] == ["--data"]:
     if not json.loads(args[8]).get("reaction_type", {{}}).get("emoji_type"):
         refuse("reaction_type.emoji_type is required")
@@ -117,6 +136,7 @@ refuse('unknown command "%s" for "lark-cli"' % args[0])
 """
 
 WORLD: dict[str, Any] = {
+    "resources": {},
     "active": "cli_main",
     "profiles": {
         "cli_main": {"app_id": "cli_main", "signed_in": True, "bot": "HelperBot"},
