@@ -18,6 +18,24 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.163] - 2026-11-12
+
+### Fixed
+
+- **LLM gateway follow-ups.** ([#1294](https://github.com/foolzzz/looper/pull/1294); review follow-ups #1155, #1161, #1163)
+  - A gateway route id is derived from the whole binding (alias, provider, upstream URL, upstream model and dialect), so two bindings of one alias no longer share a route id.
+  - An upstream URL with a query string keeps it: `/chat/completions` is appended to the path, not to the query.
+  - Prefix-history grouping resolves the session id from the client header, then from the request's `metadata.user_id` session suffix, so external clients that send the session only in the metadata are grouped per session.
+  - The client environment printed for the gateway (`gateway_environment`) now sets the backend selectors (`CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`, `_ANTHROPIC_AWS`, `_ANTHROPIC_GOOGLE_CLOUD`, `_MANTLE`, `_GATEWAY`) to `0`, as the Claude Code runtime already did.
+  - The alias cache's ten-second TTL check no longer rounds an elapsed ten seconds below the limit.
+  - No model-visible change: the upstream request body is built as before; only the grouping key and route id change.
+- **Service command follow-ups.** ([#1295](https://github.com/foolzzz/looper/pull/1295); review follow-ups #1168, #999)
+  - The service upgrade and planned restart use the unit's configured host (IPv6 included) for every probe and system operation, not a fixed `127.0.0.1`.
+  - Probe-unit removal always stops and reloads the units (also when no unit file exists), and `uninstall` removes the service even when the state read fails or probe cleanup raises an `OSError`.
+  - Probe-unit rollback rewrites an old file only when its content differs.
+  - `loopercli stop TASK` waits up to 30 seconds until the task is inactive and prints its state; if it is still stopping it exits 6, so a chained `start` does not run early.
+  - No model-visible change.
+
 ## [2.14.162] - 2026-11-12
 
 ### Fixed
