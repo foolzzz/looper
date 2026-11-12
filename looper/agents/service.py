@@ -101,6 +101,7 @@ _STOP_WAIT_SECONDS = 30.0  # launchd sends SIGKILL 20 s after SIGTERM by default
 _POLL_SECONDS = 0.5
 _BOOTSTRAP_ATTEMPTS = 10
 _COMMAND_TIMEOUT_SECONDS = 30.0
+_UPGRADE_READ_TIMEOUT_SECONDS = 15
 _KILL_MODE_WARNING = ("the unit predates KillMode=process: restarting it ends running command schedules; "
                       "run `looper service install` again")
 
@@ -138,13 +139,13 @@ def _get_status(port: int, token: str | None, address: str = "127.0.0.1", *, tim
             and isinstance(payload.get("result"), dict) else None)
 
 
-def _get_components(port: int, token: str | None) -> dict | None:
+def _get_components(port: int, token: str | None, *, timeout: float = 3) -> dict | None:
     """Read the startup snapshot through the operator-authenticated v1 API."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     request = urllib.request.Request(f"http://127.0.0.1:{port}/api/v1/system/components",
                                     headers={"Authorization": f"Bearer {token}"} if token else {}, method="POST")
     try:
-        with opener.open(request, timeout=3) as response:
+        with opener.open(request, timeout=timeout) as response:
             payload = json.loads(response.read())
     except urllib.error.HTTPError as exc:
         raise ServiceError(f"components endpoint returned HTTP {exc.code}; check the running version and operator token") from exc
@@ -174,13 +175,13 @@ def _system_operation(port: int, token: str, name: str, arguments: dict) -> dict
     return _request_json(port, token, f"/api/v1/system/{name}", arguments)
 
 
-def _request_json(port: int, token: str, path: str, arguments: dict | None = None) -> dict:
+def _request_json(port: int, token: str, path: str, arguments: dict | None = None, *, timeout: float = 3) -> dict:
     request = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
         data=json.dumps(arguments).encode() if arguments is not None else None,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(request, timeout=3) as response:
+        with opener.open(request, timeout=timeout) as response:
             payload = json.loads(response.read())
         if isinstance(payload, dict) and payload.get("status") == "ok" and isinstance(payload.get("result"), dict):
             return payload["result"]
@@ -189,16 +190,16 @@ def _request_json(port: int, token: str, path: str, arguments: dict | None = Non
     raise ServiceError(f"invalid response from {path}")
 
 
-def _get_whoami(port: int, token: str) -> dict:
-    return _request_json(port, token, "/api/v1/whoami")
+def _get_whoami(port: int, token: str, *, timeout: float = 3) -> dict:
+    return _request_json(port, token, "/api/v1/whoami", timeout=timeout)
 
 
-def _get_index(port: int, token: str) -> bytes:
+def _get_index(port: int, token: str, *, timeout: float = 3) -> bytes:
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         request = urllib.request.Request(f"http://127.0.0.1:{port}/index.html",
                                          headers={"Cookie": f"{operator_auth.cookie_name(port)}={token}"})
-        with opener.open(request, timeout=3) as response:
+        with opener.open(request, timeout=timeout) as response:
             return response.read()
     except (OSError, http.client.HTTPException) as exc:
         raise ServiceError("the installed dashboard index.html is not served") from exc
@@ -228,10 +229,10 @@ class Host:
     clock: Callable[[], float] = time.monotonic
     get_status: Callable[..., dict | None] = _get_status
     port_in_use: Callable[[int, str], bool] = _port_in_use
-    get_components: Callable[[int, str | None], dict | None] = _get_components
+    get_components: Callable[..., dict | None] = _get_components
     system_operation: Callable[[int, str, str, dict], dict] = _system_operation
-    get_whoami: Callable[[int, str], dict] = _get_whoami
-    get_index: Callable[[int, str], bytes] = _get_index
+    get_whoami: Callable[..., dict] = _get_whoami
+    get_index: Callable[..., bytes] = _get_index
     pid_alive: Callable[[int], bool] = _pid_alive
 
     @classmethod
@@ -1382,17 +1383,17 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             expected = installer()
             report["installed_package_version"] = target.version
 
-        actual = Manifest.from_dict(host.get_components(port, token))
+        actual = Manifest.from_dict(host.get_components(port, token, timeout=_UPGRADE_READ_TIMEOUT_SECONDS))
         if target is not None:
             if actual.components != target.components or actual.adoption != target.adoption:
                 raise ServiceError("running system.components does not match the target")
             if plan.kind == UpgradeKind.WEB_ONLY:
-                index = host.get_index(port, token)
+                index = host.get_index(port, token, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
                 if not index or (expected and (index != expected[0] or actual.verification.get("web") != expected[1])):
                     raise ServiceError("the served dashboard does not match the installed build")
                 if expected is None and actual.verification.get("web") != target.verification.get("web"):
                     raise ServiceError("the served dashboard does not match the target wheel")
-        whoami = host.get_whoami(port, token)
+        whoami = host.get_whoami(port, token, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
         report.update(status="ok", serving=True, running_code_fingerprint=actual.components["control_plane"],
                       running_version=whoami["looper_version"], web_fingerprint=actual.components["web"])
     except BaseException as exc:
@@ -1471,7 +1472,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
         report["running_code_fingerprint"] = None
         if report["serving"]:
             try:
-                actual = Manifest.from_dict(host.get_components(port, token))
+                actual = Manifest.from_dict(host.get_components(port, token, timeout=_UPGRADE_READ_TIMEOUT_SECONDS))
                 report["running_code_fingerprint"] = actual.components["control_plane"]
             except Exception as fingerprint_error:
                 report["running_code_fingerprint_error"] = str(fingerprint_error)
@@ -1606,8 +1607,8 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
         token = operator_auth.read_token(root)
         if not token:
             raise ServiceError("the service operator token is missing")
-        running = components.Manifest.from_dict(host.get_components(port, token))
-        status = host.get_status(port, token, timeout=15)
+        running = components.Manifest.from_dict(host.get_components(port, token, timeout=_UPGRADE_READ_TIMEOUT_SECONDS))
+        status = host.get_status(port, token, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
         if status is None:
             raise ServiceError("cannot read the running service's status (keeper mode unknown); "
                                "nothing was drained, run looper service upgrade again")

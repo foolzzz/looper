@@ -44,7 +44,7 @@ def upgrade_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     def forbidden(*args, **kwargs):
         pytest.fail("an upgrade preview must not install, restart, sleep or run the service manager")
 
-    def get_components(port, credential):
+    def get_components(port, credential, **kwargs):
         requests.append((port, credential))
         assert (port, credential) == (18834, token)
         return _manifest().to_dict()
@@ -102,7 +102,7 @@ def stopping_upgrade(upgrade_host):
     host.pid_alive = lambda pid: state.pid == pid
     host.port_in_use = lambda *args: state.running
     host.get_status = lambda *args: {"status": "ok", "pid": state.pid} if state.running else None
-    host.get_whoami = lambda *args: {"looper_version": "1.0.0"}
+    host.get_whoami = lambda *args, **kwargs: {"looper_version": "1.0.0"}
     host.system_operation = lambda port, token, name, args: events.append(name) or {"phase": "drained"}
     mgr.stop, mgr.start = stop, start
 
@@ -358,6 +358,74 @@ def test_upgrade_status_read_uses_longer_timeout(upgrade_host, monkeypatch):
     assert timeouts == [3, 15]
 
 
+def test_upgrade_components_read_uses_longer_timeout(upgrade_host, monkeypatch):
+    host, _ = upgrade_host
+    timeouts = []
+    manifest = _manifest().to_dict()
+
+    def open_request(request, *, timeout):
+        timeouts.append(timeout)
+        return io.BytesIO(json.dumps({"status": "ok", "result": manifest}).encode())
+
+    monkeypatch.setattr(service.urllib.request, "build_opener", lambda *args: SimpleNamespace(open=open_request))
+    host.get_components = service._get_components
+    monkeypatch.setattr(components, "manifest_from_git", lambda *args: _manifest("control_plane"))
+    assert service._get_components(18834, None) == manifest
+    assert "plan       FULL" in service.upgrade(host, dry_run=True)
+    assert timeouts == [3, 15]
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_upgrade_components_failure_stops_before_draining(upgrade_host, monkeypatch, dry_run):
+    host, _ = upgrade_host
+    operations = []
+
+    def open_request(request, *, timeout):
+        raise TimeoutError("components request timed out")
+
+    monkeypatch.setattr(service.urllib.request, "build_opener", lambda *args: SimpleNamespace(open=open_request))
+    host.get_components = service._get_components
+    host.system_operation = lambda *args: operations.append(args)
+    monkeypatch.setattr(components, "manifest_from_wheel", lambda *args: _manifest("control_plane"))
+    monkeypatch.setattr(service, "_execute_plan", lambda *args, **kwargs: pytest.fail("must refuse before execution"))
+    with pytest.raises(service.ServiceError) as caught:
+        service.upgrade(host, to="candidate.whl", dry_run=dry_run)
+    assert str(caught.value) == "cannot read running component fingerprints"
+    assert operations == []
+
+
+def test_upgrade_verification_reads_use_longer_timeout(stopping_upgrade, monkeypatch):
+    from looper.upgrade import UpgradeKind, UpgradePlan
+
+    case = stopping_upgrade
+    manifest = _manifest()
+    responses = {
+        "/api/v1/system/components": manifest.to_dict(),
+        "/api/v1/whoami": {"looper_version": manifest.version},
+    }
+    reads = []
+
+    def open_request(request, *, timeout):
+        reads.append((request.selector, timeout))
+        payload = (b"dashboard" if request.selector == "/index.html" else
+                   json.dumps({"status": "ok", "result": responses[request.selector]}).encode())
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr(service.urllib.request, "build_opener", lambda *args: SimpleNamespace(open=open_request))
+    case.host.get_components = service._get_components
+    case.host.get_whoami = service._get_whoami
+    case.host.get_index = service._get_index
+    assert service._get_whoami(18834, "test-token") == responses["/api/v1/whoami"]
+    assert service._get_index(18834, "test-token") == b"dashboard"
+    result = service._execute_plan(case.host, case.mgr, port=18834, root=case.state.runtime_root,
+        log_path=case.state.log_path, plan=UpgradePlan(UpgradeKind.WEB_ONLY, (), ()),
+        running=manifest, target=manifest, installer=lambda: (b"dashboard", None),
+        timeout=1, drain_timeout=1, no_force=False)
+    assert json.loads(result.splitlines()[-1])["status"] == "ok"
+    assert reads == [("/api/v1/whoami", 3), ("/index.html", 3),
+                     ("/api/v1/system/components", 15), ("/index.html", 15), ("/api/v1/whoami", 15)]
+
+
 @pytest.mark.parametrize("system,preserves,keeper_on,expected", [
     ("Darwin", True, False, "FULL"),
     ("Darwin", True, True, "CONTROL_PLANE"),
@@ -403,7 +471,7 @@ def test_upgrade_preview_refuses_unsupported_live_keeper(upgrade_host, monkeypat
     target.adoption["keeper_protocols"] = ["1.0"]
     running = _manifest()
     running.adoption["keeper_protocols"] = ["1.0"]
-    host.get_components = lambda *args: running.to_dict()
+    host.get_components = lambda *args, **kwargs: running.to_dict()
     monkeypatch.setattr(components, "manifest_from_git", lambda *args: target)
     monkeypatch.setattr(upgrade, "scan_keepers", lambda root: (upgrade.Keeper(protocols=("2.0",)),))
     output = service.upgrade(host, dry_run=True)
@@ -439,7 +507,7 @@ def test_upgrade_preview_rejects_a_git_work_contract_change(upgrade_host):
     git("add", "looper", "pyproject.toml")
     git("commit", "-qm", "initial source")
     running = components.manifest_from_git(host.cwd, "HEAD")
-    host.get_components = lambda *args: running.to_dict()
+    host.get_components = lambda *args, **kwargs: running.to_dict()
     host.get_status = lambda *args, **kwargs: {"keepers": {"mode": "on"}}
     contract = host.cwd / "looper/agents/system_prompt.py"
     contract.write_text(contract.read_text().replace('WORK_CONTRACT = """\\\n',
@@ -574,7 +642,7 @@ def test_cli_upgrade_rejects_executable_wheel_declarations_without_side_effects(
 @pytest.mark.parametrize("answer", [None, {"status": "unauthorized"}, {"unexpected": "response"}])
 def test_upgrade_fails_closed_when_the_running_manifest_is_unavailable(upgrade_host, monkeypatch, answer):
     host, _ = upgrade_host
-    host.get_components = lambda port, token: answer
+    host.get_components = lambda port, token, **kwargs: answer
     monkeypatch.setattr(components, "manifest_from_git", lambda *args: _manifest("control_plane"))
     with pytest.raises(service.ServiceError):
         service.upgrade(host, dry_run=True)
@@ -607,7 +675,7 @@ def test_upgrade_rejects_malformed_adoption_data(upgrade_host, monkeypatch, fiel
     host, _ = upgrade_host
     answer = _manifest().to_dict()
     answer["adoption"][field] = value
-    host.get_components = lambda port, token: answer
+    host.get_components = lambda port, token, **kwargs: answer
     monkeypatch.setattr(components, "manifest_from_git", lambda *args: _manifest())
     with pytest.raises(service.ServiceError, match="adoption"):
         service.upgrade(host, dry_run=True)
