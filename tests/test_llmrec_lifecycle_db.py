@@ -259,8 +259,8 @@ def test_disabled_gateway_port_does_not_pin_recorder(tmp_path, short_checks, mon
     asyncio.run(asyncio.wait_for(run(), 25))
 
 
-@pytest.mark.parametrize('replacement_fails', [False, True])
-def test_failed_writer_replaced_on_original_port_and_records_again(tmp_path, short_checks, monkeypatch, replacement_fails):
+@pytest.mark.parametrize('reconcile', ['tick', 'start'])
+def test_failed_writer_recovers_on_original_endpoint_and_records_again(tmp_path, short_checks, monkeypatch, reconcile):
     from looper.agents import self_check
 
     async def run(pool):
@@ -272,11 +272,15 @@ def test_failed_writer_replaced_on_original_port_and_records_again(tmp_path, sho
         script = ResponseScript(events=[{'type': 'message_start', 'message': {
             'id': 'msg_test', 'type': 'message', 'role': 'assistant', 'content': [],
             'usage': {'input_tokens': 1, 'output_tokens': 0}}}, {'type': 'message_stop'}])
+        gate = asyncio.Event()
+        held = ResponseScript(events=[*script.events[:-1],
+            {'type': 'response.completed', 'response': {'output': []}}, *script.events[-1:]], gate=gate)
+        request = None
         try:
             await started(control)
             first = control._state()
             await pool.execute("ALTER TABLE llm_requests ADD CONSTRAINT reject_capture CHECK (model <> 'reject-writer')")
-            async with FakeModelAPI([script, script, script]) as upstream:
+            async with FakeModelAPI([script, script, held, script]) as upstream:
                 route = RouteFile(id='d' * 22, upstream=upstream.base_url, agent_id='worker-recovery',
                     protocol='anthropic-messages', created_at='2026-01-01T00:00:00+00:00')
                 route.write(tmp_path / ROUTES_DIR / f'{route.id}.json')
@@ -298,41 +302,63 @@ def test_failed_writer_replaced_on_original_port_and_records_again(tmp_path, sho
 
                     async def failed():
                         response = await client.get(f'{endpoint}/llmrec/health')
-                        return response.status_code == 503
+                        assert response.status_code == 200
+                        assert response.json()['writer_healthy'] is True
+                        return response.json()['write_errors'] > 0
 
                     await wait_for(failed)
                     status = (await control.status())['proxy']
-                    assert status['state'] == 'unavailable'
+                    assert status['state'] == 'running'
                     assert status['write_errors'] == 1 and status['recorded'] == 1
                     check = await self_check.llmrec_check()
-                    assert check.status == self_check.FAIL and 'write_errors=1' in check.detail
+                    assert check.status == self_check.WARN and 'write_errors=1' in check.detail
+                    request = asyncio.create_task(send('during-failure'))
+                    await asyncio.wait_for(held.gate_reached.wait(), 2)
+                    # Neither reconciliation path may replace a retrying writer's endpoint
+                    # or cut a response that is still streaming through it.
+                    with monkeypatch.context() as patch:
+                        spawn = AsyncMock(side_effect=OSError('boot failed'))
+                        patch.setattr(asyncio, 'create_subprocess_exec', spawn)
+                        if reconcile == 'tick':
+                            await control.tick()
+                        else:
+                            assert await control._start()
+                        spawn.assert_not_awaited()
+                    assert control._state() == first
+                    assert await control._running(first)
+                    assert not request.done()
+                    assert await pool.fetchval('SELECT count(*) FROM llm_requests') == 1
                     await pool.execute('ALTER TABLE llm_requests DROP CONSTRAINT reject_capture')
-                    if replacement_fails:
-                        with monkeypatch.context() as patch:
-                            patch.setattr(asyncio, 'create_subprocess_exec', AsyncMock(side_effect=OSError('boot failed')))
-                            with pytest.raises(OSError, match='boot failed'):
-                                await control.tick()
-                        status = (await control.status())['proxy']
-                        assert status['state'] == 'unavailable' and status['write_errors'] == 1
-                        assert status['port'] == first['port']
-                    await control.tick()
-                    await wait_for(control._health)
-                    second = control._state()
-                    assert second['pid'] != first['pid'] and second['instance'] != first['instance']
-                    assert second['port'] == first['port']
-                    assert not await control._running(first)
+                    gate.set()
+                    await request
+
+                    async def drained():
+                        return await pool.fetchval('SELECT count(*) FROM llm_requests') == 3
+
+                    await wait_for(drained)
                     await send('after-recovery')
 
                     async def recovered():
                         return await pool.fetchval("SELECT count(*) FROM llm_requests WHERE model='after-recovery'") == 1
 
                     await wait_for(recovered)
-                    assert (await control.status())['proxy']['recorded'] == 1
-                    assert len(upstream.requests) == 3
+                    rows = await pool.fetch('SELECT proxy_instance,proxy_seq,model,outcome FROM llm_requests ORDER BY proxy_seq')
+                    assert [tuple(row) for row in rows] == [
+                        (first['instance'], seq, model, 'completed') for seq, model in enumerate(
+                            ['before-failure', 'reject-writer', 'during-failure', 'after-recovery'], 1)]
+                    status = (await control.status())['proxy']
+                    assert status['state'] == 'running' and status['recorded'] == 4
+                    assert status['dropped'] == 0 and status['gaps'] == 0
+                    assert control._state() == first
+                    assert len(upstream.requests) == 4
         finally:
+            gate.set()
+            if request is not None and not request.done():
+                request.cancel()
+                await asyncio.gather(request, return_exceptions=True)
             await cleanup(control)
 
-    run_db(run, timeout=35)
+    run_db(run, monkeypatch, timeout=35)
 
 
 def test_state_removal_ends_proxy(tmp_path, short_checks):
