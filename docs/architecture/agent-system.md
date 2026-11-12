@@ -5162,6 +5162,16 @@ After restart, the CLI waits up to 330 seconds for pending adoptions and reports
 a run was ended at startup, or an adoption failed after startup, it
 adds a P1 alert and prints a warning. A serving upgrade still exits successfully.
 
+`--start-timeout SECONDS` sets the wait for the restarted service to answer
+(default 300; `--timeout` remains an alias). A live process is allowed the
+whole interval, including while imports are quiet or the serve log and startup
+steps keep advancing. An exited process fails immediately. At the deadline,
+a process still alive is reported as `status: "starting"`, `starting: true`
+and `serving: false`, with `last_startup_step` (null before any step was logged).
+The CLI exits nonzero because readiness is unverified, but leaves that process
+running and says it is still starting and not to restart it. Startup step
+entries are logged before each step, so the report can name an unfinished step.
+
 With keeper mode on, `system.status.checks` exposes keeper warnings through the
 dashboard's existing checks list: P1 for incomplete or failed adoption or runs
 ended at startup (with reason counts), and P2
@@ -5177,7 +5187,7 @@ upgrade waits up to 30 s for the old process to exit unless it still answers
 as itself, and decides when that wait ends, whether or not the port was still
 open when the poll failed. If the service manager has
 already restarted the unit, the upgrade starts nothing and waits up to
-`--timeout` for it to answer before reporting whether it is serving.
+`--start-timeout` for it to answer before reporting whether it is serving.
 
 `looper/components.toml` declares component globs, runner packaging aliases
 and explicit ignores. A normal-suite test rejects unclassified tracked files.
