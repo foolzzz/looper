@@ -5144,33 +5144,12 @@ dashboard by atomic directory swap. Upgrade reports and logs separate this build
 time as `prepare_seconds` from the service's `gap_seconds`. Wheel installs keep
 their existing behavior.
 
-A `CONTROL_PLANE` upgrade with `--no-force --preflight-wait SECONDS` first
-polls `system.drain_status` every 15 seconds while non-keepable runs remain.
-Outside a drain this endpoint only reads the serving service's blockers; it
-does not pause admission. If runs remain when the wait expires, deployment
-fails with their run IDs, runtime IDs/types and ages, without starting a drain.
-`--preflight-wait` defaults to 0 (disabled); full upgrades and upgrades without
-`--no-force` skip this wait. New work can still arrive between the final
-preflight poll and the drain, so the existing drain deadlines remain in force.
-`preflight_wait_seconds` records this wait separately from `drain_seconds`.
-Older services may omit runtime details; unknown ages are reported as null.
-
 A `CONTROL_PLANE` upgrade begins a turns drain with `--drain-timeout` as the
 server deadline and the cap on the whole drain. The CLI measures
 `--turns-timeout` from the first drain status with no non-keepable runs waiting,
 when only turns block. A non-keepable run reappearing resets this clock;
 it starts again once only turns block. `--no-force` cancels deployment when
 either the total drain timeout or the turns timeout passes.
-On cancellation, the error text and report's `blockers` object include the
-last status's `non_keepable_runs` (with `worker_id`, runtime details, `since`
-and computed `age_seconds`), `manager_turns`, `planner_turns`, and the `gates`,
-`waits`, `consults` and `starting` counts. A preflight refusal includes the same
-object; full drains also include `keepable_runs`, which block a full restart.
-While draining, the CLI writes a one-line blocker summary to stderr
-every 60 seconds. Upgrade `drain_status` reads use a 15-second
-timeout and retry transient timeouts twice before failing; other errors fail
-immediately. A lost controller lease still cancels deployment. Post-failure
-status probes also use the 15-second upgrade read timeout.
 The report's `turns_wait_seconds` is the time since that turns clock started,
 or 0 while it is unset.
 The report counts keepable runs in the final drain status as `kept_before`;
@@ -5182,6 +5161,16 @@ After restart, the CLI waits up to 330 seconds for pending adoptions and reports
 `failed_after_start` reason counts. If fewer runs were adopted than kept,
 a run was ended at startup, or an adoption failed after startup, it
 adds a P1 alert and prints a warning. A serving upgrade still exits successfully.
+
+`--start-timeout SECONDS` sets the wait for the restarted service to answer
+(default 300; `--timeout` remains an alias). A live process is allowed the
+whole interval, including while imports are quiet or the serve log and startup
+steps keep advancing. An exited process fails immediately. At the deadline,
+a process still alive is reported as `status: "starting"`, `starting: true`
+and `serving: false`, with `last_startup_step` (null before any step was logged).
+The CLI exits nonzero because readiness is unverified, but leaves that process
+running and says it is still starting and not to restart it. Startup step
+entries are logged before each step, so the report can name an unfinished step.
 
 With keeper mode on, `system.status.checks` exposes keeper warnings through the
 dashboard's existing checks list: P1 for incomplete or failed adoption or runs
@@ -5198,7 +5187,7 @@ upgrade waits up to 30 s for the old process to exit unless it still answers
 as itself, and decides when that wait ends, whether or not the port was still
 open when the poll failed. If the service manager has
 already restarted the unit, the upgrade starts nothing and waits up to
-`--timeout` for it to answer before reporting whether it is serving.
+`--start-timeout` for it to answer before reporting whether it is serving.
 
 `looper/components.toml` declares component globs, runner packaging aliases
 and explicit ignores. A normal-suite test rejects unclassified tracked files.

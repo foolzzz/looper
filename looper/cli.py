@@ -137,8 +137,8 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
         "upgrade", allow_abbrev=False, help="Plan, drain, install and restart the changed components.")
     upgrade.add_argument("--dry-run", action="store_true", help="Print the upgrade plan only.")
     upgrade.add_argument("--to", metavar="REF_OR_WHEEL", help="Target Git ref (default origin/main) or wheel path.")
-    upgrade.add_argument("--timeout", type=float, default=120.0,
-                         help="Seconds to wait for the restarted service to answer (default 120).")
+    upgrade.add_argument("--start-timeout", "--timeout", dest="timeout", type=float, default=300.0,
+                         metavar="SECONDS", help="Seconds to wait for the restarted service to answer (default 300).")
     upgrade.add_argument("--turns-timeout", type=float, default=180.0,
                          help="Seconds to wait once only turns block a control-plane upgrade; "
                               "resets if a non-keepable run reappears (default 180, capped by --drain-timeout).")

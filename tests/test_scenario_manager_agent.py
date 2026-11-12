@@ -96,12 +96,12 @@ async def test_default_prompt_is_unchanged(tmp_path: Path) -> None:
 
 @pytest.mark.usefixtures("agent_db")
 @pytest.mark.parametrize(("tools", "scope", "tool_text", "scope_texts"), [
-    (ManagerTools.TASKS, TaskScope.PROJECTS, "task tools only",
+    (ManagerTools.TASKS, TaskScope.PROJECTS, "task tools and agent schedules",
      ['only the tasks of the projects listed under "Projects"', "whoever created them",
       "create tasks only in those projects"]),
-    (ManagerTools.TASKS, TaskScope.OWN, "task tools only", ["only the tasks you created"]),
+    (ManagerTools.TASKS, TaskScope.OWN, "task tools and agent schedules", ["only the tasks you created"]),
     (ManagerTools.ALL, TaskScope.OWN, "every platform tool", ["only the tasks you created"]),
-    (ManagerTools.TASKS, TaskScope.ALL, "task tools only", ["every task", "list only the tasks you created"]),
+    (ManagerTools.TASKS, TaskScope.ALL, "task tools and agent schedules", ["every task", "list only the tasks you created"]),
     (ManagerTools.ALL, TaskScope.ALL, "every platform tool", ["every task", "list only the tasks you created"]),
 ])
 @sync
@@ -116,6 +116,9 @@ async def test_scenario_prompt(tmp_path: Path, tools: ManagerTools, scope: TaskS
     assert DEFAULT_SYSTEM_PROMPT not in text
     contract = " ".join(scope_contract(definition).split())
     assert tool_text in contract
+    if tools is ManagerTools.TASKS:
+        assert "must not be used to run shell commands or file operations on the server" in contract
+        assert "Bound-chat notification targets must be chats bound to this Manager" in contract
     for fragment in scope_texts:
         assert fragment in contract
     assert all(len(line) < 80 for line in scope_contract(definition).splitlines())
