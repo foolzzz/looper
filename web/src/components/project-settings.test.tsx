@@ -3,11 +3,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectSettingsForm } from "@/components/project-settings";
-import { PROJECTS_CHANGED_EVENT, fetchWorkflows, type Workflow, type Project } from "@/lib/api";
+import { PROJECTS_CHANGED_EVENT, fetchWorkflows, previewProjectDelete, type Workflow, type Project } from "@/lib/api";
 import { resetSessionGuard } from "@/lib/session";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(), fetchWorkflows: vi.fn(async () => []),
+  previewProjectDelete: vi.fn(async () => ({ impact: "Delete Example? This cannot be undone." })),
 }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -21,6 +22,7 @@ describe("project deletion", () => {
   let root: Root;
   beforeEach(() => {
     resetSessionGuard();
+    vi.mocked(previewProjectDelete).mockReset().mockResolvedValue({ impact: "Delete Example? This cannot be undone." });
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ status: "needs_confirmation",
       confirmation_id: "delete-project", expires_in_seconds: 60, impact: "Delete Example?" }, { status: 202 })));
     container = document.createElement("div");
@@ -53,7 +55,7 @@ describe("project deletion", () => {
     }));
   });
 
-  it("requires local confirmation before an authenticated operator can delete, and cancels without a request", async () => {
+  it("requires local confirmation before an authenticated operator can delete, and cancels without deleting", async () => {
     const fetcher = vi.fn().mockResolvedValue(Response.json({ status: "ok", result: { deleted: "project-example" } }));
     vi.stubGlobal("fetch", fetcher);
     const onDeleted = vi.fn();
@@ -80,6 +82,46 @@ describe("project deletion", () => {
       expect(onDeleted).toHaveBeenCalledOnce();
       expect(changed).toHaveBeenCalledOnce();
     } finally { window.removeEventListener(PROJECTS_CHANGED_EVENT, changed); }
+  });
+
+  it("shows scoped Managers before the operator can confirm deletion", async () => {
+    const impact = "它在管家「Release」的项目范围里：删除后会从它的范围里去掉。";
+    let complete!: (preview: { impact: string }) => void;
+    vi.mocked(previewProjectDelete).mockRejectedValueOnce(new Error("Impact unavailable"))
+      .mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    const onDeleted = vi.fn();
+    await act(async () => root.render(<ProjectSettingsForm project={project()} onDeleted={onDeleted} />));
+    await act(async () => button("Delete project").click());
+    expect(section().querySelector("[role=alert]")?.textContent).toBe("Impact unavailable");
+    expect(container.querySelector("form [role=alert]")).toBeNull();
+    expect(button("Delete")).toBeUndefined();
+    await act(async () => button("Delete project").click());
+    expect(button("Checking impact…").disabled).toBe(true);
+    expect(section().querySelector("[role=alert]")).toBeNull();
+    expect(button("Delete")).toBeUndefined();
+    expect(fetcher).not.toHaveBeenCalled();
+    await act(async () => complete({ impact }));
+    expect(section().textContent).toContain("Release");
+    expect(button("Delete").disabled).toBe(false);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(onDeleted).not.toHaveBeenCalled();
+    await act(async () => button("Cancel").click());
+    expect(button("Delete")).toBeUndefined();
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("focuses Cancel when the delete preview resolves", async () => {
+    let complete!: (preview: { impact: string }) => void;
+    vi.mocked(previewProjectDelete).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    await act(async () => root.render(<ProjectSettingsForm project={project()} onDeleted={() => {}} />));
+    button("Delete project").focus();
+    expect(document.activeElement).toBe(button("Delete project"));
+    await act(async () => button("Delete project").click());
+    expect(button("Cancel")).toBeUndefined();
+    await act(async () => complete({ impact: "Delete Example? This cannot be undone." }));
+    expect(document.activeElement).toBe(button("Cancel"));
   });
 
   it("shows the API deletion impact before confirming in the same session", async () => {
@@ -163,7 +205,8 @@ describe("project deletion", () => {
     await act(async () => button("Delete project").click());
     await act(async () => button("Delete").click());
     await act(async () => button("Delete").click());
-    expect(container.querySelector("[role=alert]")?.textContent).toBe(message);
+    expect(section().querySelector("[role=alert]")?.textContent).toBe(message);
+    expect(container.querySelector("form [role=alert]")).toBeNull();
     expect(button("Delete project").disabled).toBe(false);
     expect(onDeleted).not.toHaveBeenCalled();
     await act(async () => button("Delete project").click());

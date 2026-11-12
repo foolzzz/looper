@@ -47,6 +47,18 @@ describe("run system prompt mode", () => {
     expect(html).toContain("hash unknown");
     expect(html).not.toContain("replaced default");
   });
+  it("warns when the recorded TTADK sign-in check was inconclusive", () => {
+    const html = render(undefined, { ttadk_check: "timed out or failed; the run started anyway" });
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    const warning = [...host.querySelectorAll("p")].find((item) => item.textContent?.includes("TTADK sign-in check"))!;
+    expect(warning.textContent).toBe("TTADK sign-in check before this run started: timed out or failed; the run started anyway");
+    expect(warning.querySelector("svg")).not.toBeNull();
+    expect(html).not.toContain("could not finish");
+    expect(html).not.toContain("check_failed");
+    expect(render()).not.toContain("TTADK sign-in check");
+  });
+
   it("uses normalized sources and canonical Profiles without interpreting historical labels", () => {
     expect(sourceName({ code: null, label: "Manager override" })).toBe("Manager override");
     expect(sourceName({ code: "planner_step", label: null })).toBe("Planner's choice for this step");
@@ -164,7 +176,7 @@ describe("recorded model requests", () => {
     const text = host.textContent!;
     expect(text.indexOf("recorded-model")).toBeLessThan(text.indexOf("After the turn ended"));
     expect(text.indexOf("After the turn ended")).toBeLessThan(text.indexOf("after-turn-model"));
-    expect(listCalls().map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
+    expect(listCalls().slice(0, 2).map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
       { record_id: 7, limit: 500 }, { record_id: 7, between_turns: true, limit: 500 }]);
   });
 
@@ -319,6 +331,24 @@ describe("recorded model requests", () => {
     await click("Model requests · 2");
     await click("recorded-model");
     expect(host.querySelector('[aria-label="Model request 1"]')?.textContent).toContain(explanation);
+  });
+
+  it("reloads a completed run's requests when reopened to include later between-turn requests", async () => {
+    let arrived = false;
+    const ordinaryFetch = fetcher.getMockImplementation()!;
+    fetcher.mockImplementation((input, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      return String(input).endsWith("llm_requests/list") && body.between_turns && !arrived
+        ? Promise.resolve(ok({ requests: [] })) : ordinaryFetch(input, init);
+    });
+    await show();
+    await click("Model requests · 1");
+    expect(host.textContent).not.toContain("After the turn ended");
+    await click("Model requests · 1");
+    arrived = true;
+    await click("Model requests · 1");
+    expect(host.textContent).toContain("After the turn ended");
+    expect(host.textContent).toContain("after-turn-model");
   });
 
   it("stops polling when the run finishes", async () => {

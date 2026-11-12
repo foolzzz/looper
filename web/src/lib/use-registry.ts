@@ -23,8 +23,9 @@ async function reload(): Promise<void> {
   } catch (err) {
     if (seq === latest) publish({ registry: snapshot.registry, error: err instanceof Error ? err.message : String(err) });
   } finally {
-    // A cold login probe finishes in the server's background, without a mutation event.
-    if (seq === latest && listeners.size && snapshot.registry?.providers.some((provider) => provider.login?.state === "checking")) {
+    // Login probes finish in the server's background, without a mutation event.
+    if (seq === latest && listeners.size && snapshot.registry?.providers.some((provider) =>
+      provider.login?.state === "checking" || provider.login?.refreshing)) {
       loginRefresh = setTimeout(() => { void reload(); }, 1000);
     }
   }

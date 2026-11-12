@@ -121,7 +121,7 @@ def launch_note(executable: str, tool: str) -> str | None:
     """Retain an inconclusive preflight in the launch record without probing again."""
     cached = _probed.get((executable, tool))
     if cached is not None and cached[1] is TtadkProblem.CHECK_FAILED:
-        return f"could not finish ({cached[1].value})"
+        return "timed out or failed; the run started anyway"
     return None
 
 

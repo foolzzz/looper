@@ -133,15 +133,19 @@ async def launch_problem() -> str | None:
             "run `cursor-agent status` on this machine")
 
 
-async def login_view() -> dict[str, str]:
+async def login_view() -> dict[str, str | bool]:
     """Return the last answer immediately and refresh it in one background probe when needed."""
     probed = _probed
-    if (probed is None or time.monotonic() - probed[0] > _PROBE_TTL_SEC) and _probe_lock.acquire(blocking=False):
+    stale = probed is None or time.monotonic() - probed[0] > _PROBE_TTL_SEC
+    refreshing = stale or _probe_lock.locked()
+    if stale and _probe_lock.acquire(blocking=False):
         try:
             threading.Thread(target=_background_probe, name="cursor-login-status", daemon=True).start()
         except BaseException:
             _probe_lock.release()
             raise
-    if probed is None:
-        return {"state": "checking", "detail": "checking the Cursor login"}
-    return {"state": probed[1].state.value, "detail": probed[1].detail}
+    view: dict[str, str | bool] = ({"state": "checking", "detail": "checking the Cursor login"} if probed is None
+                                  else {"state": probed[1].state.value, "detail": probed[1].detail})
+    if refreshing:
+        view["refreshing"] = True
+    return view
