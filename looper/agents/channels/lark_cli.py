@@ -82,6 +82,23 @@ def history_command(chat_id: str, *, start: float, end: float, page_token: str =
             *(["--page-token", page_token] if page_token else [])]
 
 
+def thread_roots_command(chat_id: str, *, page_token: str = "", profile: str | None = None) -> list[str]:
+    # No start_time: a reply in the recovery window may belong to a much older root.
+    params = {"container_id_type": "chat", "container_id": chat_id,
+              "sort_type": "ByCreateTimeDesc", "page_size": 50}
+    if page_token:
+        params["page_token"] = page_token
+    return [*_base(profile), "api", "GET", "/open-apis/im/v1/messages", "--as", "bot",
+            "--params", json.dumps(params)]
+
+
+def thread_history_command(thread_id: str, *, page_token: str = "", profile: str | None = None) -> list[str]:
+    # Thread containers do not support time filters. Scan newest first and filter locally.
+    return [*_base(profile), "im", "+threads-messages-list", "--as", "bot", "--thread", thread_id,
+            "--order", "desc", "--page-size", "50", "--no-reactions", "--format", "json",
+            *(["--page-token", page_token] if page_token else [])]
+
+
 def send_command(*, chat_id: str | None = None, user_id: str | None = None, text: str | None = None,
                  markdown: str | None = None, profile: str | None = None,
                  idempotency_key: str | None = None) -> list[str]:

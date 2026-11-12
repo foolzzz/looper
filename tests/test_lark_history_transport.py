@@ -45,6 +45,10 @@ def test_history_uses_bot_profile_bounded_page_and_flat_event(monkeypatch, mode)
         assert datetime.fromisoformat(argv[argv.index("--start") + 1]).timestamp() == 1700000000
         assert datetime.fromisoformat(argv[argv.index("--end") + 1]).timestamp() == 1700000060
         assert "--page-all" not in argv and "--no-reactions" in argv
+        if mode == "p2p":
+            before = len(calls)
+            assert await transport.list_threads("oc_example") == {"threads": [], "has_more": False}
+            assert len(calls) == before
         await transport.aclose()
 
     asyncio.run(asyncio.wait_for(run(), 3))

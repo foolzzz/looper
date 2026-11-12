@@ -152,6 +152,154 @@ def test_gap_group_mention_reaches_bound_manager_once_after_start(tmp_path: Path
     asyncio.run(asyncio.wait_for(run(), 5))
 
 
+@pytest.mark.parametrize("mode", ["group", "topic"])
+def test_restart_recovers_nested_and_old_thread_mentions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
+) -> None:
+    import json
+
+    from looper.agents.channels import lark_cli
+    from looper.agents.channels.lark_transport import CliTransport
+
+    async def run() -> None:
+        now = time.time()
+        seed_boundary(tmp_path, now - 60)
+        nested = history_message("om_nested", at=now - 40, parent_id="om_recent", root_id="om_recent")
+        old_reply = history_message("om_old_reply", at=now - 30, parent_id="om_old", root_id="om_old")
+        calls = []
+
+        async def run_json(argv):
+            calls.append(argv)
+            if "/open-apis/im/v1/chats/oc_synthetic_group" in argv:
+                return {"data": {"chat_mode": mode}}
+            if "+chat-messages-list" in argv:
+                return {"messages": [history_message("om_recent", at=now - 50, mentioned=False,
+                                                    thread_replies=[nested])], "has_more": False}
+            if "/open-apis/im/v1/messages" in argv:
+                params = json.loads(argv[argv.index("--params") + 1])
+                assert params["container_id_type"] == "chat" and params["container_id"] == "oc_synthetic_group"
+                assert "start_time" not in params
+                if not params.get("page_token"):
+                    return {"data": {"items": [{"thread_id": "omt_recent"}],
+                                     "has_more": True, "page_token": "roots-next"}}
+                assert params["page_token"] == "roots-next"
+                return {"data": {"items": [{"thread_id": "omt_old", "create_time": str(int((now - 86400) * 1000))}],
+                                 "has_more": False}}
+            assert "+threads-messages-list" in argv
+            assert argv[argv.index("--order") + 1] == "desc"
+            assert argv[argv.index("--page-size") + 1] == "50"
+            assert "--page-all" not in argv and "--start" not in argv and "--end" not in argv
+            assert "--no-reactions" in argv
+            thread = argv[argv.index("--thread") + 1]
+            if thread == "omt_recent":
+                return {"messages": [nested], "has_more": False}
+            assert thread == "omt_old"
+            if "--page-token" not in argv:
+                return {"messages": [
+                    history_message("om_future", at=now + 60),
+                    history_message("om_latest_reply", at=now - 5, parent_id="om_old", root_id="om_old"),
+                    history_message("om_unmentioned", at=now - 10, mentioned=False),
+                    history_message("om_denied", at=now - 20, sender={"id": "ou_denied", "sender_type": "user"}),
+                ], "has_more": True, "page_token": "replies-next"}
+            assert argv[argv.index("--page-token") + 1] == "replies-next"
+            return {"messages": [old_reply, history_message("om_expired", at=now - 86400)],
+                    "has_more": True, "page_token": "older-than-window"}
+
+        monkeypatch.setattr(lark_cli, "run_json", run_json)
+        transport = HistoryTransport()
+        cli = CliTransport("synthetic-profile")
+        transport.list_messages = cli.list_messages
+        transport.list_threads = cli.list_threads
+        transport.list_thread_messages = cli.list_thread_messages
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            messages = bus.journal.undelivered()
+            assert [m.payload["channel_context"]["message_id"] for m in messages] == [
+                "om_nested", "om_old_reply", "om_latest_reply"]
+            assert all(m.target.agent_id == "manager-helper" and m.payload["text"] == "hello" for m in messages)
+            assert messages[1].payload["channel_context"]["reply_to"] == "om_old"
+            assert messages[1].payload["channel_context"]["root_id"] == "om_old"
+            assert instance._inbox.processed("om_old_reply")
+            assert not instance._inbox.processed("om_future")
+            assert len([c for c in calls if "+threads-messages-list" in c]) == 3
+            assert all(c[:3] == ["lark-cli", "--profile", "synthetic-profile"] and "bot" in c for c in calls)
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("failure", ["root_error", "root_limit", "reply_error", "reply_limit", "reply_cursor"])
+def test_incomplete_thread_scan_preserves_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    from looper.agents.channels.lark_cli import LarkCliError
+    from looper.agents.channels.lark_inbox import LarkInbox
+
+    monkeypatch.setattr("looper.agents.channels.lark._CATCHUP_MAX_PAGES", 1)
+    monkeypatch.setattr("looper.agents.channels.lark._HEARTBEAT_SECONDS", 0.01)
+
+    async def run() -> None:
+        boundary = time.time() - 60
+        seed_boundary(tmp_path, boundary)
+        entered, release, saved = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        transport = HistoryTransport()
+        transport.pages["oc_synthetic_group"] = [{"messages": [], "chat_type": "group", "has_more": False}]
+
+        async def list_threads(chat_id, *, page_token=""):
+            if failure.startswith("root"):
+                entered.set()
+                await release.wait()
+                if failure == "root_error":
+                    raise LarkCliError("synthetic root read failure")
+                return {"threads": [], "has_more": True, "page_token": "next"}
+            return {"threads": ["omt_old"], "has_more": False}
+
+        async def list_thread_messages(thread_id, *, page_token=""):
+            entered.set()
+            await release.wait()
+            if failure == "reply_error":
+                raise LarkCliError("synthetic reply read failure")
+            return {"messages": [], "chat_type": "group", "has_more": True,
+                    "page_token": "" if failure == "reply_cursor" else "next"}
+
+        transport.list_threads = list_threads
+        transport.list_thread_messages = list_thread_messages
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            checkpoint = instance._inbox.checkpoint
+
+            def save(at):
+                checkpoint(at)
+                saved.set()
+
+            monkeypatch.setattr(instance._inbox, "checkpoint", save)
+            await asyncio.wait_for(entered.wait(), 3)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(saved.wait(), 0.05)
+            release.set()
+            await catchup_done(instance, transport)
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(saved.wait(), 0.05)
+            assert instance._inbox.boundary == boundary
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+        inbox = LarkInbox(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
+        try:
+            assert inbox.boundary == boundary, "clean stop must also preserve incomplete thread recovery"
+        finally:
+            inbox.close()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
 @pytest.mark.parametrize("live_first", [True, False])
 def test_live_event_racing_history_is_published_once(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, live_first: bool,

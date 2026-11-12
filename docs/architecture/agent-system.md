@@ -5901,8 +5901,13 @@ implementation supplies it and is retested.
   10 seconds through the consumer's ready time. It scans explicit channel
   bindings first, then unbound chats observed by `observe_chat` in the last
   24 hours when the default Manager accepts unbound chats. At most 100 chats,
-  5 pages per chat and 50 messages per page are scanned. Recovered messages use
-  the live admission, group bot-mention, routing, attachment and disabled-chat
+  5 pages per chat and 50 messages per page are scanned. Embedded thread replies
+  use the same admission path. For groups and topics, a separate root scan without
+  a time filter discovers older threads (up to 5 pages of 50 roots). Each thread
+  is read newest first, up to 5 pages of 50 replies, stopping once replies predate
+  the recovery window; replies are admitted oldest first within that thread.
+  Recovered messages use the live admission, group bot-mention, routing,
+  attachment and disabled-chat
   checks. Known p2p chats participate only when bot identity can resolve their
   chat mode and list their history; permission failures are warnings and do not
   prevent other chats or live input. A new, never-observed unbound chat cannot
@@ -5914,9 +5919,11 @@ implementation supplies it and is retested.
   Live and recovered messages share a lock and durable receipts, so overlapping
   history and live delivery are processed once. Receipts store ids, never message
   content. Startup preserves the previous boundary until recovery finishes;
-  while the consumer is ready and no message is being handled, a heartbeat
+  only after all chat and thread scans complete, while the consumer is ready
+  and no message is being handled, a heartbeat
   saves the current time every 5 seconds. A clean stop saves its stop time;
-  an interrupted handler or disconnected consumer retains the earlier boundary.
+  an interrupted handler, disconnected consumer, failed scan or exhausted page
+  budget retains the earlier boundary.
   After a crash, that last heartbeat is the recovery boundary. A missing
   boundary initializes the state without replaying history; one older than
   15 minutes skips the whole window. Individual recovered messages older than

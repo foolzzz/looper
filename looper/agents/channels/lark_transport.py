@@ -67,8 +67,7 @@ class CliTransport:
         self.consumer_started = asyncio.Event()
         self._history_chat_types: dict[str, str] = {}
 
-    async def list_messages(self, chat_id: str, *, start: float, end: float,
-                            page_token: str = "") -> dict[str, Any]:
+    async def _history_chat_type(self, chat_id: str) -> str:
         # History omits chat mode. Never infer p2p from a missing mention: that would admit group chatter.
         if chat_id not in self._history_chat_types:
             info = await lark_cli.run_json([
@@ -77,12 +76,36 @@ class CliTransport:
             if mode not in {"group", "p2p", "topic"}:
                 raise lark_cli.LarkCliError("history chat mode is unavailable to the bot")
             self._history_chat_types[chat_id] = "p2p" if mode == "p2p" else "group"
+        return self._history_chat_types[chat_id]
+
+    async def list_messages(self, chat_id: str, *, start: float, end: float,
+                            page_token: str = "") -> dict[str, Any]:
+        chat_type = await self._history_chat_type(chat_id)
         result = await lark_cli.run_json(lark_cli.history_command(
             chat_id, start=start, end=end, page_token=page_token, profile=self._profile))
         page = result.get("data", result)
         if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
             raise lark_cli.LarkCliError("history did not return a message page")
-        return {**page, "chat_type": self._history_chat_types[chat_id]}
+        return {**page, "chat_type": chat_type}
+
+    async def list_threads(self, chat_id: str, *, page_token: str = "") -> dict[str, Any]:
+        if await self._history_chat_type(chat_id) == "p2p":
+            return {"threads": [], "has_more": False}
+        result = await lark_cli.run_json(lark_cli.thread_roots_command(
+            chat_id, page_token=page_token, profile=self._profile))
+        page = result.get("data", result)
+        if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+            raise lark_cli.LarkCliError("history did not return a thread root page")
+        return {**page, "threads": list(dict.fromkeys(item["thread_id"] for item in page["items"]
+                                                    if item.get("thread_id")))}
+
+    async def list_thread_messages(self, thread_id: str, *, page_token: str = "") -> dict[str, Any]:
+        result = await lark_cli.run_json(lark_cli.thread_history_command(
+            thread_id, page_token=page_token, profile=self._profile))
+        page = result.get("data", result)
+        if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
+            raise lark_cli.LarkCliError("history did not return a thread message page")
+        return {**page, "chat_type": "group"}
 
     async def send(self, *, chat_id: str | None = None, user_id: str | None = None,
                    text: str | None = None, markdown: str | None = None,
