@@ -2,9 +2,13 @@
 
 <h1>Looper</h1>
 
-**Three-tier multi-agent orchestration system with a real-time web dashboard.**
+**A self-hosted, planner-driven multi-agent system for orchestrating coding agents.**
 
-Deploy autonomous coding agents that plan, decompose, and execute complex tasks — with full observability.
+A Manager takes your requests, a Planner per task plans and accepts the work,
+and Workers and Reviewers carry it out on the agent runtimes you register.
+A web dashboard shows all of it live.
+
+English · [中文](README.zh-CN.md)
 
 </div>
 
@@ -12,71 +16,135 @@ Deploy autonomous coding agents that plan, decompose, and execute complex tasks 
 
 ## What is Looper
 
-Looper is a self-hosted multi-agent system that turns a single task description
-into a coordinated plan–execute–verify loop. A **Manager** agent talks to users,
-a **TaskRouter** manages task lifecycle, a **Planner** decomposes work
-into steps, and a **WorkerPool** runs Claude CLI subprocesses to do the actual
-coding.
+Looper runs on your own machine and turns a request into planned, reviewed
+work done by coding agents. It keeps its state in PostgreSQL, so tasks,
+sessions and schedules carry on after a restart.
 
-Everything is observable through a built-in web dashboard with real-time
-streaming, task lifecycle controls, and agent configuration.
+- A **Manager** talks to you in the dashboard chat, Lark, Telegram or the CLI
+  and API. It creates projects, tasks and schedules, and reports a task's
+  progress and result in the chat the task came from.
+- Each started task gets its own **Planner**. It breaks the request into
+  steps, dispatches them, and accepts, retries or replans after each result.
+- **Workers** carry out the steps and **Reviewers** check them. Every role
+  runs on an Agent Profile: a runtime, an LLM provider and a model. The
+  runtimes are Claude Code, Codex, Cursor Agent, Grok, Coco (TRAE CLI), OMP,
+  Pi and DSH; the Manager can also run on the in-process Model API runtime.
+- The **dashboard** shows tasks, plans, running agents, transcripts and spend
+  as they happen, and holds the configuration.
 
 ```
-User ─→ Chat / Lark / Telegram
-          │
-       Manager          (understands intent, routes tasks)
-          │
-       TaskRouter       (task lifecycle)
-          │
-       Planner          (decomposes into steps, verifies results)
-          │
-       WorkerPool       (Claude CLI subprocesses, stream-json)
+You ─→ dashboard chat · Lark · Telegram · loopercli / API
+         │
+      Manager        talks to you; creates projects, tasks and schedules
+         │
+      Planner        one per task: plans the steps, dispatches them,
+         │           accepts, retries or replans after each result
+    ┌────┴────┐
+ Workers   Reviewers do and check the steps, and message each other in the
+                     task's room; each runs on its Agent Profile's runtime:
+                     Claude Code, Codex, Cursor Agent, Grok, Coco, OMP, Pi, DSH
 ```
 
 ### Key Features
 
-- **Task lifecycle**: `init → pending → assigned → running → completed/failed/stopped/cancelled`
-- **Direct task creation**: Create tasks from the dashboard, configure before starting
-- **Pause & resume**: Stop running tasks, restart from stopped/failed state
-- **Real-time activity streaming**: SSE-based live event feed from worker processes
-- **Multiple agent runtimes and LLM providers**: An agent is a runtime (such as
-  Claude Code or Codex), an LLM provider (the runtime's own login, or an API
-  key for an Anthropic- or OpenAI-compatible endpoint, with presets for common
-  vendors), a model and a thinking effort; every run records its tokens and,
-  when its model has a price, its cost
-- **Layered settings**: Set the harness prompt, agent, environment and per-run
-  spend cap for the whole system, a role, a project or a role in a
+**Tasks and workflows**
+
+- **Tasks and projects**: Create a task in the dashboard or from chat, review
+  it, then start it; stop it, resume it from its saved plan or start it over.
+  A project holds a default directory, a background and knowledge documents;
+  each task keeps a journal of steps, decisions and your instructions that its
+  Planner reads every turn, across restarts and new sessions
+- **Workflow presets**: Reusable presets fix a task's roles and Agent
+  Profiles, review panels with required and suggestion seats, adjudication of
+  review findings, read-only verification rounds and dependency conditions,
+  and end the result with a process record. A Planner can also stop at a
+  user gate for a decision only you can make
+- **Agent room**: A task's Planner, Workers and Reviewers message each other
+  in the task's room. On runtimes that support it, a message is delivered
+  into the running agent; the others read their inbox
+- **Schedules**: Agent schedules start a full task on a cron rule, with a
+  gate command, overlap and catch-up rules, spend caps and alerts to Telegram
+  or Lark. Command schedules run a shell command with no agent or model
+  spend, and their runs outlive a server restart
+
+**Agents**
+
+- **Runtimes, providers and profiles**: An Agent Profile pairs a runtime
+  with an LLM provider (the runtime's own login, or an API key for an
+  Anthropic- or OpenAI-compatible endpoint, with presets for common vendors),
+  a model and a thinking effort. Every run records its tokens and, when its
+  model has a price, its cost
+- **Profile fallback chains**: A profile can name a fallback, up to three
+  hops. A Worker or Reviewer whose run fails to launch or exits before any
+  model output moves to the next profile within the same attempt
+- **Layered settings**: Set the harness prompt, agent, environment and
+  per-run spend cap for the whole system, a role, a project or a role in a
   project, and let a task choose its own agents; the dashboard shows which
   layer each value comes from
 - **Capability catalog**: Plugins, skills and MCP servers, imported from this
   machine, uploaded, taken from git or written in Looper, then installed
   globally or in one project for the roles you choose
-- **Projects and task memory**: A project holds a default directory, a
-  background and knowledge documents that agents read on demand; each task
-  keeps a journal of accepted and failed steps, decisions, your instructions
-  and learnings, which its Planner reads every turn, across restarts and new
-  sessions
-- **Configuration export and import**: Move the agent configuration to another
-  machine as one file, from the CLI or the Settings page
-- **Multi-channel input**: Web chat, Lark bot, Telegram bot
-- **Pipeline visualization**: React Flow DAG showing task decomposition and worker assignment
+- **Local gateway and request recording**: Claude Code can run an
+  OpenAI-compatible Chat Completions model through Looper's local gateway.
+  Request recording keeps the model requests of Claude Code and Model API
+  runs (Claude subscription runs only when you opt in), which a run's history
+  shows and exports
+
+**Channels and operations**
+
+- **Channels and CLI**: The dashboard chat, plus Telegram and Lark bots that
+  pass on only the senders they list; scenario Managers can have bots of
+  their own. Images and files sent in the dashboard chat or Lark reach the
+  Manager as attachments. `loopercli` runs every v1 operation from a shell,
+  chat and task waits included, and ships a skill that teaches coding agents
+  to use it
+- **Service and upgrades**: `looper service` runs Looper under launchd or
+  systemd. `looper service upgrade` drains and restarts only what changed;
+  with keeper mode on, a control-plane upgrade keeps running Workers and
+  Reviewers through the restart. Each schema change is preceded by a
+  verified database backup, and the agent configuration moves to another
+  machine as one file
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.11+
-- PostgreSQL (container `agentbox-postgres` on port 54329, or any PG instance)
-- Node.js 22+ (for building the dashboard)
-- Claude CLI (`claude`) on PATH and signed in
-- Optional, for the Lark channel: `lark-cli` on PATH and signed in
+- PostgreSQL (any instance; the Docker example below starts one)
+- At least one agent runtime installed and signed in. Claude Code runs every
+  role until you select another Agent Profile in Settings → Roles; Codex,
+  Cursor Agent, Grok, Coco, OMP, Pi and DSH are found on the server's `PATH`
+  (see [Agent Configuration](#agent-configuration))
+- Recommended: git 2.40+, so parallel steps can work in separate worktrees
+- Optional, for the Lark channel: `lark-cli` on `PATH` and signed in
+- From source only: [uv](https://docs.astral.sh/uv/) and Node.js 22+ (for
+  building the dashboard)
 
-### 1. Database Setup
+### 1. Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/foolzzz/looper/main/install.sh | bash
+```
+
+`install.sh` installs the wheel of the latest GitHub release, dashboard
+included, with uv, pipx or pip. Run it again to upgrade.
+
+To run from a checkout instead:
+
+```bash
+git clone https://github.com/foolzzz/looper.git && cd looper
+uv sync
+cd web && npm install && npx vite build && cd ..
+```
+
+and run the `looper` commands below as `uv run looper ...`.
+
+### 2. Database
 
 ```bash
 # Start PostgreSQL (if using Docker)
-docker run -d --name agentbox-postgres \
-  -e POSTGRES_DB=loopx \
+docker run -d --name looper-postgres \
+  -e POSTGRES_DB=looper \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
   -p 54329:5432 \
@@ -86,38 +154,34 @@ docker run -d --name agentbox-postgres \
 mkdir -m 700 -p ~/.looper/ops
 cat > ~/.looper/ops/server.toml <<'EOF'
 [database]
-url = "postgresql://postgres:postgres@localhost:54329/loopx"
+url = "postgresql://postgres:postgres@localhost:54329/looper"
 EOF
 chmod 600 ~/.looper/ops/server.toml
 ```
 
-An install that still sets the old variables (`LOOPER_DATABASE_URL`, or
-`LOOPX_DATABASE_URL`, in the shell or `.env`) can run `uv run looper config
-init-ops` once after `uv sync` instead. It writes that file from the values
-in effect, mode 0600, and refuses to overwrite a file that exists.
+Then run `looper doctor`. It checks PostgreSQL, Claude Code and the other
+runtimes' logins, the enabled channels, `pg_dump` and git, and prints the fix
+for anything missing. It reports Claude Code as failed when it is not on
+`PATH`, even if your roles use another runtime.
 
-### 2. Install & Build
-
-```bash
-# Install Python dependencies
-uv sync
-
-# Build the web dashboard
-cd web && npm install && npx vite build && cd ..
-```
-
-Then run `uv run looper doctor`. It checks PostgreSQL, the Claude CLI and its
-login, and the enabled channels, and prints the fix for anything missing.
+> **Upgrading an old install only.** An install that still sets the
+> database URL as a variable (`LOOPER_DATABASE_URL`, or the older
+> `LOOPX_DATABASE_URL`, in the shell or `.env`) can run
+> `looper config init-ops` once instead of writing the file by hand. It
+> writes the file from the values in effect, mode 0600, and refuses to
+> overwrite a file that exists. An existing database keeps its name.
 
 ### 3. Run
 
 ```bash
-uv run looper serve
+looper serve
 # Dashboard at http://127.0.0.1:8767
 ```
 
-The schema is applied automatically on first startup. Telegram and Lark need
-no flags; turn them on from the Settings page (see [Channels](#channels)).
+The schema is applied automatically on first startup. Open the dashboard,
+create a project and a task, or ask the Manager in Chat. Telegram and Lark
+need no flags; turn them on from the Settings page (see
+[Channels](#channels)).
 
 Moving to a new machine needs the running service. `loopercli config export
 looper-config.json` writes `looper-config/v4` (secrets become placeholders;
@@ -134,10 +198,11 @@ produce v4. A disposable v2.13.165 installation can do the import.
 ### 4. Run as a service
 
 ```bash
-uv run looper service install     # --port, --runtime-root, --config, --label, --env NAME
-uv run looper service status      # installed, running, PID, last exit, log, POST /api/v1/system/status
-uv run looper service restart     # e.g. after pulling new code
-uv run looper service uninstall
+looper service install     # --port, --runtime-root, --config, --label, --env NAME
+looper service status      # installed, running, PID, last exit, log, POST /api/v1/system/status
+looper service restart     # e.g. after pulling new code
+looper service upgrade     # --dry-run, --to <git ref | wheel>: drain, install, restart what changed
+looper service uninstall
 ```
 
 `install` runs `looper serve` in the background: a launchd LaunchAgent on macOS,
@@ -175,7 +240,7 @@ and dump inside the container (`{dbname}` and `{user}` are filled in):
 
 ```toml
 [backup]
-command = ["docker", "exec", "agentbox-postgres", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
+command = ["docker", "exec", "looper-postgres", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
 ```
 
 The dump must also be listed back to prove it is readable. That is done by the
@@ -187,7 +252,7 @@ The dump must also be listed back to prove it is readable. That is done by the
 like `pg_restore --list`:
 
 ```toml
-verify_command = ["docker", "exec", "-i", "agentbox-postgres", "pg_restore", "--list"]
+verify_command = ["docker", "exec", "-i", "looper-postgres", "pg_restore", "--list"]
 ```
 
 `looper doctor` and the startup log say which verifier is used.
@@ -207,7 +272,7 @@ pg_restore --no-owner --dbname '<isolated-database-url>' <file>
 Point the guarded older release at that restored database. Do not restore over
 the upgraded database and do not downgrade it. A schema-only dump or a config
 export cannot restore history. In Docker, `pg_restore` targets that separate
-database, not the live `loopx` database. Set `[backup]` in the ops file and
+database, not the live one. Set `[backup]` in the ops file and
 restart: `service install` does not copy these as variables.
 
 ### Upgrading across v2.13.165
@@ -273,10 +338,10 @@ database URL; `looper config init-ops` writes
 
 | Tier | Module | Role |
 |---|---|---|
-| **Manager** | `looper/agents/tiers/manager.py` | User-facing steward, intent classification, chat |
+| **Manager** | `looper/agents/tiers/manager.py` | User-facing steward: chat, and projects, tasks and schedules through its platform tools; a default Manager plus scenario Managers |
 | **TaskRouter** | `looper/agents/tiers/task.py` | Task lifecycle: a started task gets its Planner at once, with no limit on how many run |
 | **Planner** | `looper/agents/tiers/planner.py` | Step decomposition, dispatch, verification |
-| **WorkerPool** | `looper/agents/tiers/worker.py` | Claude CLI subprocess pool with stream-json output |
+| **WorkerPool** | `looper/agents/tiers/worker.py` | Runs Workers and Reviewers on their Agent Profiles' runtimes, within each task's limits, and streams their events to the task's activity |
 | **Scheduler** | `looper/agents/scheduler.py` | Fires each project's schedules: a full task per firing, started at once; missed fires run once, an overlapping firing is skipped or queued, a run past its timeout is stopped; a gate command decides whether a run is worth a task, a failed run's input goes to the next, a daily budget, and messages with two alerts to Telegram or Lark |
 
 All inter-agent communication flows through a typed async **MessageBus** with
@@ -309,14 +374,15 @@ release wheel serves the copy packaged with it.
 | Page | Features |
 |---|---|
 | **Dashboard** | What is happening now: task counts by group (each opening the filtered Tasks page), the agents running now, each active project's running tasks, Workers and Reviewers, the schedules (next fires, failing ones, today's skips), today's spend, and a warning when a component is unhealthy |
-| **Chat** | Talk to the global Manager, or to a running task's Planner (a message reaches it as a supplement to the task); with the Manager selected, its conversations by channel (dashboard chat, Lark, Telegram), the Lark and Telegram ones read-only; SSE streaming |
+| **Chat** | Talk to a Manager, or to a running task's Planner (a message reaches it as a supplement to the task); with the Manager selected, its conversations by channel (dashboard chat, Lark, Telegram), the Lark and Telegram ones read-only; SSE streaming |
 | **Tasks** | Task list, project, status and schedule filters, a Scheduled badge on the tasks a schedule created, create/start/stop/delete controls |
 | **Project** | One project's overview, knowledge documents, its own skills and installs, the Agent Profiles and other agent settings its roles override, its schedules (rule, next fire times, enable, Run now, run history) and its settings |
-| **Task Detail** | Config editor (init status), overview, pipeline DAG, agents (each role's Agent Profile and limits, the Planner's roles, what each step ran on), sessions, conversation; each Agent Timeline row has a **History** button |
+| **Task Detail** | Config editor (init status), overview, pipeline DAG, the task's agent room, agents (each role's Agent Profile and limits, the Planner's roles, what each step ran on), sessions, conversation; each Agent Timeline row has a **History** button |
+| **User Gates** | Every task's gates, open by default, filtered by state, project and whether they wait for you; answer one in place |
 | **Runs** | Each role's sessions and run history (a Manager `/new` shows as a new session), each run opening its history; no configuration, a link to the role in Settings → Roles |
 | **Schedules** | Every project's schedules, filtered by project and status, each with its switch, Run now and Delete; a schedule's page shows its settings, alerts, today's spend and its run history. New schedules and edits are on the project's Schedules tab |
 | **Agent history** | One agent's launch command, full transcript (text, thinking, tool calls and results) and activity; follows a running agent and flags one with no output for 2 minutes |
-| **Settings** | A folding group at the bottom of the sidebar, one page each: **LLM Providers**; **Agent Runtimes** (read-only: each runtime type, found on the server's PATH or not, with Re-detect, and the planned ones); **Agent Profiles** (runtime, provider and model, the roles each can run and where it is used); **Roles** (one collapsible row for the shared defaults, then one per role with its overrides, prompt and limits); **Skills & MCP**; **Channels**; **Import / Export** |
+| **Settings** | A folding group at the bottom of the sidebar, one page each: **LLM Providers**; **Agent Runtimes** (read-only: each runtime type, found on the server's PATH or not, with Re-detect, and the planned ones); **Agent Profiles** (runtime, provider and model, the roles each can run and where it is used); **Roles** (one collapsible row for the shared defaults, then one per role with its overrides, prompt and limits); **Workflows**; **Managers**; **API clients**; **Skills & MCP**; **Channels**; **Chat**; **Scheduler**; **Knowledge vault**; **Request recording**; **Local gateway**; **Import / Export** |
 
 ### HTTP API
 
@@ -371,6 +437,8 @@ never shows the value.
 | `backup.command` | No | An argv array whose stdout is the dump; `{dbname}` and `{user}` are filled in from the database URL |
 | `backup.verify_command` | No | An argv array that reads the dump on stdin and lists it like `pg_restore --list`; derived from `backup.command` when that is `docker exec ... <container> pg_dump ...`, else the local `pg_restore` |
 | `operator_notes.root` | No | Absolute path of the directory where the operator's Claude Code keeps project notes |
+| `projects.root` | No | Absolute parent directory for new projects created without a directory: each gets its own directory under it. File only, unset by default |
+| `agent_host.keeper` | No | `"off"` (default) or `"on"`. On, each Worker and Reviewer run is held by a keeper process that outlives a planned restart, so `looper service upgrade` can upgrade the control plane without ending running agents (launchd, or a systemd unit installed with `KillMode=process`). Needs one `looper serve` per database. File only; restart to apply |
 | `runtimes.pi` | No | `"runner"` (default) or `"cli"`. Pi profiles run on the SDK runner (Node 22.19+, pi 1.3.x). `"cli"` opts out onto the Pi CLI. File only, read once at startup; restart to apply. A runner that cannot start names the cause and this opt-out |
 | `runtimes.dsh` | No | `"runner"` (default) or `"cli"`. DSH profiles run on the SDK runner (Node 22.19+, dsh 0.2.1-rc.2). `"cli"` opts out onto the DSH CLI. File only, read once at startup; restart to apply. A runner that cannot start names the cause and this opt-out |
 
@@ -448,8 +516,8 @@ apart from the settings and never returned by the API or exported.
 - Each Manager can have its own Telegram or Lark bots: Settings → Channels →
   Add a bot; enter its token or app secret there (an added bot never reads the
   environment). A bot's Manager is fixed when it is added; restart to apply.
-- Every agent runs Claude Code without permission prompts, so the Manager
-  can run any command on this machine. Each channel therefore passes on only
+- Every agent has every tool and runs without permission prompts, so the
+  Manager can run any command on this machine. Each channel therefore passes on only
   the senders it lists: anyone else's message is dropped and logged (sender
   id only) with no reply. A channel with an empty or malformed list does not
   start, and the Settings page says why. `LOOPX_TELEGRAM_ALLOWED_USERS` no
@@ -481,11 +549,12 @@ Every role (Manager, Planner, Workers, Reviewers) runs an **agent**: a
 runtime, an LLM provider and a model, kept as an **Agent Profile** in
 Settings → Agent Profiles and selected in Settings → Roles.
 
-- A **runtime** is an agent CLI of a type Looper has an adapter for (Claude
-  Code, Codex or OMP). Runtimes are built in: Looper finds each one on the
-  server's PATH and probes its version and capabilities; Settings → Agent
-  Runtimes shows them and can Re-detect one. A different binary comes from
-  the server's PATH.
+- A **runtime** is an agent CLI of a type Looper has an adapter for: Claude
+  Code, Codex, Cursor Agent, Grok, Coco (TRAE CLI), OMP, Pi or DSH. Runtimes
+  are built in: Looper finds each one on the server's PATH and probes its
+  version and capabilities; Settings → Agent Runtimes shows them and can
+  Re-detect one. A different binary comes from the server's PATH. The Model
+  API runtime runs in-process, with no executable, and runs only the Manager.
 - Pi and DSH profiles run on their SDK runners by default (Node 22.19+, pi
   1.3.x, dsh 0.2.1-rc.2). Claude Code uses the Claude Code CLI. To use the CLI
   for one of those two, set `[runtimes] pi = "cli"` or
@@ -549,17 +618,18 @@ init ──→ pending ──→ assigned ──→ running ──→ completed
                                     ↓
                                  pending → ...
 
-cancelled ← running  (permanent termination)
+cancelled ← running  (cancel; (start) runs it again too)
 ```
 
 - **init**: Created from UI, user reviews and edits config before starting
-- **Work directory**: every task runs in a directory you choose (`work_dir`, an
-  absolute path or one starting with `~/`); there is no default. It is required
-  when creating a task, a task without one cannot start, and it is created if
-  missing. When the Manager creates a task from chat, it takes the directory from
-  the conversation and asks you if you have not said one.
+- **Work directory**: every task runs in its `work_dir` (an absolute path or
+  one starting with `~/`), else its project's default directory. A task with
+  neither cannot be created or started, and the directory is created if
+  missing. When the Manager creates a task from chat, it takes the directory
+  from the conversation and asks you if neither is known.
 - **stopped**: Paused, state preserved, can resume
-- **cancelled**: Permanently terminated, cannot resume
+- **cancelled**: Ended on request; starting it again goes on from its saved
+  plan, and starting it over plans it anew
 
 ## Development
 

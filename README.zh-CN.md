@@ -2,9 +2,9 @@
 
 <h1>Looper</h1>
 
-**三层多 Agent 编排系统，自带实时 Web 控制台。**
+**自托管、由 Planner 驱动的多 agent 系统，用来编排编程 agent。**
 
-部署能自主规划、拆解并执行复杂任务的编程 agent，全程可观测。
+Manager 接收你的请求，每个任务一个 Planner 负责规划和验收，Worker 和 Reviewer 在你注册的 agent 运行时上完成工作。Web 控制台实时展示这一切。
 
 [English](README.md) · 中文
 
@@ -14,58 +14,83 @@
 
 ## Looper 是什么
 
-Looper 是一个自托管的多 Agent 系统，把一段任务描述变成协同运转的"规划—执行—验证"循环：
-**Manager** 负责与用户对话，**TaskRouter** 管理任务生命周期，**Planner** 把工作拆成步骤，
-**WorkerPool** 运行 Claude CLI 子进程完成实际的编码。
+Looper 运行在你自己的机器上，把一个请求变成由编程 agent 完成、经过规划和评审的工作。它的状态都存在 PostgreSQL 里，所以任务、会话和定时任务在重启后会接着进行。
 
-所有过程都能在内置的 Web 控制台里看到：实时流式输出、任务生命周期控制和 agent 配置。
+- **Manager** 在控制台对话、飞书、Telegram 或 CLI 和 API 里和你对话。它创建项目、任务和定时任务，并在任务来自的那个对话里汇报进度和结果。
+- 每个开始的任务都有自己的 **Planner**。它把请求拆成步骤并派发，每有一个结果就决定验收、重试或调整计划。
+- **Worker** 执行步骤，**Reviewer** 检查结果。每个角色都运行在一个 Agent Profile 上：运行时、LLM 提供方和模型。运行时有 Claude Code、Codex、Cursor Agent、Grok、Coco（TRAE CLI）、OMP、Pi 和 DSH；Manager 还可以跑在进程内的 Model API 运行时上。
+- **控制台**实时显示任务、计划、正在运行的 agent、完整记录和花费，也是配置的地方。
 
 ```
-用户 ─→ 网页对话 / 飞书 / Telegram
-          │
-       Manager          （理解意图，分派任务）
-          │
-       TaskRouter       （任务生命周期）
-          │
-       Planner          （拆解步骤，核验结果）
-          │
-       WorkerPool       （Claude CLI 子进程，stream-json）
+你 ─→ 控制台对话 · 飞书 · Telegram · loopercli / API
+         │
+      Manager        与你对话；创建项目、任务和定时任务
+         │
+      Planner        每个任务一个：规划步骤并派发，
+         │           每个结果之后验收、重试或调整计划
+    ┌────┴────┐
+ Workers   Reviewers 执行和检查步骤，在任务的 room 里互发消息；
+                     各自运行在 Agent Profile 的运行时上：
+                     Claude Code、Codex、Cursor Agent、Grok、Coco、OMP、Pi、DSH
 ```
 
 ### 主要功能
 
-- **任务生命周期**：`init → pending → assigned → running → completed/failed/stopped/cancelled`
-- **直接创建任务**：在控制台里创建任务，开始前先配置
-- **暂停与恢复**：停止运行中的任务，从 stopped 或 failed 状态重新开始
-- **实时活动流**：基于 SSE，实时显示 worker 进程的事件
-- **多种 agent 运行时和 LLM 提供方**：一个 agent 由运行时（如 Claude Code、Codex）、LLM 提供方（运行时自己的登录，
-  或 Anthropic、OpenAI 兼容接口的 API key，常见厂商有预设）、模型和思考强度组成；每次运行都记录 token，模型有价格时也记录花费
-- **分层设置**：harness prompt、agent、环境变量和单次运行的花费上限可以按全系统、角色、项目或项目内的角色设置，
-  任务还能自选 agent；控制台标出每个值来自哪一层
-- **能力目录**：插件、skill 和 MCP 服务器，可以从本机导入、上传、从 git 获取或在 Looper 里编写，再全局安装或装到某个项目，
-  并指定给哪些角色
-- **项目与任务记忆**：项目有默认目录、背景和 agent 按需读取的知识文档；每个任务都有一份日志，记录通过和失败的步骤、决策、
-  你的指示和经验，Planner 每一轮都会读，重启和换新会话后依然保留
-- **配置导出与导入**：从命令行或 Settings 页把 agent 配置作为一个文件迁到另一台机器
-- **多渠道输入**：网页对话、飞书机器人、Telegram 机器人
-- **流水线可视化**：用 React Flow 画出任务拆解和 worker 分配的 DAG
+**任务与工作流**
+
+- **任务与项目**：在控制台或对话里创建任务，确认后再开始；可以停止、按保存的计划继续，或从头开始。项目有默认目录、背景和知识文档；每个任务都有一份记录步骤、决策和你的指示的日志，Planner 每一轮都会读，重启和换新会话后依然保留
+- **工作流预设**：可复用的预设固定任务的角色和 Agent Profile、带必需席位和建议席位的评审面板、评审意见的裁决、只读的验证轮次和依赖条件，并在结果末尾附上过程记录。Planner 还可以停在用户关卡上，等你做只有你能做的决定
+- **Agent room**：任务的 Planner、Worker 和 Reviewer 在任务的 room 里互发消息。运行时支持时，消息直接送进正在运行的 agent；其余的从收件箱读取
+- **定时任务**：agent 定时任务按 cron 规则启动一个完整任务，带前置检查命令、重叠和补跑规则、花费上限，以及发到 Telegram 或飞书的告警。命令型定时任务直接执行一条 shell 命令，不起 agent、不花模型额度，它的运行在服务重启后继续
+
+**Agent**
+
+- **运行时、提供方与 Profile**：一个 Agent Profile 由运行时、LLM 提供方（运行时自己的登录，或 Anthropic、OpenAI 兼容接口的 API key，常见厂商有预设）、模型和思考强度组成。每次运行都记录 token，模型有价格时也记录花费
+- **Profile 回退链**：一个 Profile 可以指定回退 Profile，最多三跳。Worker 或 Reviewer 启动失败或在任何模型输出之前退出时，在同一次尝试里换到下一个 Profile
+- **分层设置**：harness prompt、agent、环境变量和单次运行的花费上限可以按全系统、角色、项目或项目内的角色设置，任务还能自选 agent；控制台标出每个值来自哪一层
+- **能力目录**：插件、skill 和 MCP 服务器，可以从本机导入、上传、从 git 获取或在 Looper 里编写，再全局安装或装到某个项目，并指定给哪些角色
+- **本地网关与请求录制**：Claude Code 可以通过 Looper 的本地网关使用 OpenAI 兼容的 Chat Completions 模型。请求录制保存 Claude Code 和 Model API 运行的模型请求（Claude 订阅登录的运行要另行开启），在运行的历史里查看和导出
+
+**渠道与运维**
+
+- **渠道与 CLI**：控制台对话，加上只转发名单内发送者的 Telegram 和飞书机器人；场景 Manager 可以有自己的机器人。在控制台对话或飞书里发的图片和文件会作为附件交给 Manager。`loopercli` 在 shell 里执行每个 v1 操作，包括对话和等待任务，并附带一个教编程 agent 使用它的 skill
+- **服务与升级**：`looper service` 用 launchd 或 systemd 托管 Looper。`looper service upgrade` 只排空并重启有改动的部分；开启 keeper 模式后，控制面升级不会打断正在运行的 Worker 和 Reviewer。每次 schema 变化前都先做一份校验过的数据库备份，agent 配置可以作为一个文件迁到另一台机器
 
 ## 快速开始
 
 ### 前置条件
 
 - Python 3.11+
-- PostgreSQL（端口 54329 上的 `agentbox-postgres` 容器，或任意 PostgreSQL 实例）
-- Node.js 22+（用于构建控制台）
-- `PATH` 上有 Claude CLI（`claude`），并已登录
+- PostgreSQL（任意实例；下面的 Docker 示例会启动一个）
+- 至少一个已安装并登录的 agent 运行时。在 Settings → Roles 里另选 Agent Profile 之前，所有角色都由 Claude Code 运行；Codex、Cursor Agent、Grok、Coco、OMP、Pi 和 DSH 从服务的 `PATH` 上查找（见 [Agent 配置](#agent-配置)）
+- 建议：git 2.40+，这样并行的步骤可以在各自的 worktree 里工作
 - 可选，用于飞书渠道：`PATH` 上有 `lark-cli`，并已登录
+- 仅从源码运行时：[uv](https://docs.astral.sh/uv/) 和 Node.js 22+（用于构建控制台）
 
-### 1. 准备数据库
+### 1. 安装
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/foolzzz/looper/main/install.sh | bash
+```
+
+`install.sh` 用 uv、pipx 或 pip 安装最新 GitHub release 的 wheel，控制台已包含在内。再运行一次就是升级。
+
+改为从 checkout 运行：
+
+```bash
+git clone https://github.com/foolzzz/looper.git && cd looper
+uv sync
+cd web && npm install && npx vite build && cd ..
+```
+
+下面的 `looper` 命令都改成 `uv run looper ...`。
+
+### 2. 准备数据库
 
 ```bash
 # 启动 PostgreSQL（使用 Docker 时）
-docker run -d --name agentbox-postgres \
-  -e POSTGRES_DB=loopx \
+docker run -d --name looper-postgres \
+  -e POSTGRES_DB=looper \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
   -p 54329:5432 \
@@ -75,44 +100,34 @@ docker run -d --name agentbox-postgres \
 mkdir -m 700 -p ~/.looper/ops
 cat > ~/.looper/ops/server.toml <<'EOF'
 [database]
-url = "postgresql://postgres:postgres@localhost:54329/loopx"
+url = "postgresql://postgres:postgres@localhost:54329/looper"
 EOF
 chmod 600 ~/.looper/ops/server.toml
 ```
 
-仍在用旧变量的安装（shell 或 `.env` 里的 `LOOPER_DATABASE_URL`，或 `LOOPX_DATABASE_URL`）可以在 `uv sync` 之后改跑一次
-`uv run looper config init-ops`。它按当前生效的值写成同一个文件，权限 0600，已有文件则拒绝覆盖。
+然后运行 `looper doctor`：它检查 PostgreSQL、Claude Code 和其他运行时的登录、已开启的渠道、`pg_dump` 和 git，缺什么就给出修复方法。`PATH` 上没有 Claude Code 时它会报失败，即使你的角色用的是别的运行时。
 
-### 2. 安装与构建
-
-```bash
-# 安装 Python 依赖
-uv sync
-
-# 构建 Web 控制台
-cd web && npm install && npx vite build && cd ..
-```
-
-然后运行 `uv run looper doctor`：它检查 PostgreSQL、Claude CLI 及其登录和已开启的渠道，缺什么就给出修复方法。
+> **仅限升级旧安装。** 仍用变量设置数据库 URL 的安装（shell 或 `.env` 里的 `LOOPER_DATABASE_URL`，或更早的 `LOOPX_DATABASE_URL`）可以改跑一次 `looper config init-ops`，不用手写文件。它按当前生效的值写成同一个文件，权限 0600，已有文件则拒绝覆盖。已有数据库保持原名。
 
 ### 3. 运行
 
 ```bash
-uv run looper serve
+looper serve
 # 控制台地址：http://127.0.0.1:8767
 ```
 
-首次启动时会自动建表。飞书和 Telegram 不需要命令行参数，在 Settings 页面开启即可（见[渠道](#渠道)）。
+首次启动时会自动建表。打开控制台，建一个项目和任务，或在 Chat 里找 Manager。飞书和 Telegram 不需要命令行参数，在 Settings 页面开启即可（见[渠道](#渠道)）。
 
 换到新机器需要正在运行的服务。`loopercli config export looper-config.json` 写出 `looper-config/v4`（密钥留作占位符，`--include-projects` 连同项目）。`loopercli --json config import looper-config.json` 先预览，`loopercli config import --apply <import_id>` 才写入。两者都要操作者令牌（`--operator-token-file`，默认从标准输入读）。Settings 页的「Move to another machine」也能导出和导入。`looper config` 只写运维文件（`init-ops`）。不是 `looper-config/v4` 的文件在写入前被拒绝。旧文件要在 v2.13.165 上导入，升级那次安装和数据库，再用本版本导出 v4。v2.13.165 仍可能导出 v3，在那里再导出不会得到 v4。一次性的 v2.13.165 安装可以做这次导入。
 
 ### 4. 作为服务常驻
 
 ```bash
-uv run looper service install     # 可选 --port、--runtime-root、--config、--label、--env NAME
-uv run looper service status      # 是否安装、是否运行、PID、上次退出、日志、POST /api/v1/system/status
-uv run looper service restart     # 例如拉取新代码之后
-uv run looper service uninstall
+looper service install     # 可选 --port、--runtime-root、--config、--label、--env NAME
+looper service status      # 是否安装、是否运行、PID、上次退出、日志、POST /api/v1/system/status
+looper service restart     # 例如拉取新代码之后
+looper service upgrade     # 可选 --dry-run、--to <git ref | wheel>：排空、安装并重启有改动的部分
+looper service uninstall
 ```
 
 `install` 让 `looper serve` 在后台常驻：macOS 上是 launchd LaunchAgent，Linux 上是 systemd 用户服务。登录后自动启动，
@@ -136,7 +151,7 @@ PostgreSQL 跑在 Docker 里时，把 `[backup] command` 设成 argv 数组，�
 
 ```toml
 [backup]
-command = ["docker", "exec", "agentbox-postgres", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
+command = ["docker", "exec", "looper-postgres", "pg_dump", "--format=custom", "-U", "{user}", "{dbname}"]
 ```
 
 备份还要再列一遍来证明可读：由 `pg_dump` 旁边（否则 PATH 上）的 `pg_restore` 完成。`command` 是
@@ -145,7 +160,7 @@ command = ["docker", "exec", "agentbox-postgres", "pg_dump", "--format=custom", 
 一个从标准输入读备份、像 `pg_restore --list` 一样列出内容的 argv：
 
 ```toml
-verify_command = ["docker", "exec", "-i", "agentbox-postgres", "pg_restore", "--list"]
+verify_command = ["docker", "exec", "-i", "looper-postgres", "pg_restore", "--list"]
 ```
 
 `looper doctor` 和启动日志会说明用的是哪个校验器。
@@ -156,7 +171,7 @@ verify_command = ["docker", "exec", "-i", "agentbox-postgres", "pg_restore", "--
 pg_restore --no-owner --dbname '<isolated-database-url>' <文件>
 ```
 
-让受保护的旧版本指向这个恢复出来的数据库。不要覆盖已升级的库，也不要降级它。只有 schema 的 dump，或一份配置导出，恢复不了历史。Docker 里的 `pg_restore` 指向这个单独的数据库，而不是正在使用的 `loopx`。`[backup]` 写在运维文件里，改完重启即可；`service install` 不会把它们当成变量复制进去。
+让受保护的旧版本指向这个恢复出来的数据库。不要覆盖已升级的库，也不要降级它。只有 schema 的 dump，或一份配置导出，恢复不了历史。Docker 里的 `pg_restore` 指向这个单独的数据库，而不是正在使用的那个。`[backup]` 写在运维文件里，改完重启即可；`service install` 不会把它们当成变量复制进去。
 
 ### 跨越 v2.13.165 的升级
 
@@ -186,10 +201,10 @@ v2.13.165 含有全部历史迁移，并保持为固定桥。比它更早的安�
 
 | 层级 | 模块 | 职责 |
 |---|---|---|
-| **Manager** | `looper/agents/tiers/manager.py` | 面向用户的管家：识别意图、对话 |
+| **Manager** | `looper/agents/tiers/manager.py` | 面向用户的管家：对话，并通过平台工具管理项目、任务和定时任务；一个默认 Manager 加上场景 Manager |
 | **TaskRouter** | `looper/agents/tiers/task.py` | 任务生命周期：任务一开始就有自己的 Planner，同时运行的任务数不设上限 |
 | **Planner** | `looper/agents/tiers/planner.py` | 拆解步骤、派发、核验 |
-| **WorkerPool** | `looper/agents/tiers/worker.py` | Claude CLI 子进程池，输出 stream-json |
+| **WorkerPool** | `looper/agents/tiers/worker.py` | 在各自 Agent Profile 的运行时上运行 Worker 和 Reviewer，受每个任务的并发上限约束，并把事件流写进任务的活动流 |
 | **Scheduler** | `looper/agents/scheduler.py` | 触发各项目的定时任务：每次触发建一个完整任务并直接开始；漏掉的触发只补一次，重叠时跳过或排队，超时的运行被停止；前置检查决定这次值不值得建任务，失败那一轮的输入交给下一轮，每日花费上限，以及发到 Telegram 或飞书的通知和两条告警 |
 
 各 agent 之间的通信都经过一个带类型的异步 **MessageBus**，按 `MessageEnvelope` 路由。
@@ -217,14 +232,15 @@ PostgreSQL 是启动的硬性依赖。空库只运行一次 `looper/db/schema.sq
 | 页面 | 功能 |
 |---|---|
 | **Dashboard** | 此刻在发生什么：按分组的任务数（点开即按该组筛选的 Tasks 页）、正在运行的 agent、各活跃项目正在运行的任务、Worker 和 Reviewer、定时任务（接下来的触发、正在失败的、今天跳过的）、今日花费，组件不健康时给出警告 |
-| **Chat** | 与全局 Manager 对话，或与运行中任务的 Planner 对话（消息作为该任务的补充说明交给 Planner）；选中 Manager 时按渠道（网页对话、飞书、Telegram）列出它的对话，飞书和 Telegram 的只读；SSE 流式输出 |
+| **Chat** | 与某个 Manager 对话，或与运行中任务的 Planner 对话（消息作为该任务的补充说明交给 Planner）；选中 Manager 时按渠道（网页对话、飞书、Telegram）列出它的对话，飞书和 Telegram 的只读；SSE 流式输出 |
 | **Tasks** | 任务列表、项目、状态和定时任务筛选，定时任务建出的任务带 Scheduled 标记，以及创建、开始、停止、删除操作 |
 | **Project** | 单个项目的概览、知识文档、项目自己的 skill 和安装、各角色在本项目覆盖的 Agent Profile 和其他 agent 设置、定时任务（时间规则、接下来的触发时刻、启用、立即运行、运行历史），以及项目设置 |
-| **Task Detail** | 配置编辑（init 状态）、概览、流水线 DAG、Agents（各角色的 Agent Profile 和并发上限、Planner 定义的角色、每一步实际用的 Profile）、会话、对话；Agent Timeline 每行都有 **History** 按钮 |
+| **Task Detail** | 配置编辑（init 状态）、概览、流水线 DAG、任务的 agent room、Agents（各角色的 Agent Profile 和并发上限、Planner 定义的角色、每一步实际用的 Profile）、会话、对话；Agent Timeline 每行都有 **History** 按钮 |
+| **User Gates** | 所有任务的关卡，默认只看没关的，可按状态、项目和是否在等你筛选；等你的关卡就地回复 |
 | **Runs** | 每个角色的会话和运行记录（Manager 的 `/new` 显示为新会话），每次运行都能打开其历史；不含配置，并链接到 Settings → Roles 里的该角色 |
 | **Schedules** | 所有项目的定时任务，可按项目和状态筛选，每行有启用开关、立即运行和删除；单个定时任务的页面显示设置、告警、今日花费和运行历史。新建和修改在项目的 Schedules 标签页 |
 | **Agent history** | 单个 agent 的启动命令、完整记录（文本、思考、工具调用及结果）和活动；跟随运行中的 agent，2 分钟没有输出会标出 |
-| **Settings** | 侧栏底部可折叠的分组，每项一页：**LLM Providers**；**Agent Runtimes**（只读：每种运行时类型，在服务的 PATH 上找到与否，可 Re-detect，以及规划中的类型）；**Agent Profiles**（运行时、提供方和模型，各自能跑的角色和被谁使用）；**Roles**（可折叠的列表：先是共享默认值 Shared defaults，再是每个角色一行，含它的覆盖项、prompt 和限制）；**Skills & MCP**；**Channels**；**Import / Export** |
+| **Settings** | 侧栏底部可折叠的分组，每项一页：**LLM Providers**；**Agent Runtimes**（只读：每种运行时类型，在服务的 PATH 上找到与否，可 Re-detect，以及规划中的类型）；**Agent Profiles**（运行时、提供方和模型，各自能跑的角色和被谁使用）；**Roles**（可折叠的列表：先是共享默认值 Shared defaults，再是每个角色一行，含它的覆盖项、prompt 和限制）；**Workflows**；**Managers**；**API clients**；**Skills & MCP**；**Channels**；**Chat**；**Scheduler**；**Knowledge vault**；**Request recording**；**Local gateway**；**Import / Export** |
 
 ### HTTP API
 
@@ -267,6 +283,8 @@ PostgreSQL 是启动的硬性依赖。空库只运行一次 `looper/db/schema.sq
 | `backup.command` | 否 | 一个 argv 数组，它的标准输出就是备份；`{dbname}` 和 `{user}` 从数据库 URL 填入 |
 | `backup.verify_command` | 否 | 一个 argv 数组，从标准输入读备份，像 `pg_restore --list` 一样列出内容；`backup.command` 是 `docker exec ... <容器> pg_dump ...` 时自动推导，否则用本机 `pg_restore` |
 | `operator_notes.root` | 否 | 操作者的 Claude Code 存放项目笔记的目录，必须是绝对路径 |
+| `projects.root` | 否 | 新建项目没给目录时的上级目录，必须是绝对路径：每个项目在它下面得到自己的目录。只写在文件里，默认不设置 |
+| `agent_host.keeper` | 否 | `"off"`（默认）或 `"on"`。开启后，每个 Worker 和 Reviewer 运行由一个 keeper 进程持有，计划内重启时它不退出，所以 `looper service upgrade` 升级控制面时不会结束正在运行的 agent（launchd，或用 `KillMode=process` 安装的 systemd 单元）。每个数据库只能有一个 `looper serve`。只写在文件里，改完重启 |
 | `runtimes.pi` | 否 | `"runner"`（默认）或 `"cli"`。Pi 的 Profile 走 SDK runner（Node 22.19+，pi 1.3.x）。`"cli"` 改走 Pi CLI。只写在文件里，启动读取一次，改完重启。runner 起不来时，错误写明原因和这条退路 |
 | `runtimes.dsh` | 否 | `"runner"`（默认）或 `"cli"`。DSH 的 Profile 走 SDK runner（Node 22.19+，dsh 0.2.1-rc.2）。`"cli"` 改走 DSH CLI。只写在文件里，启动读取一次，改完重启。runner 起不来时，错误写明原因和这条退路 |
 
@@ -302,7 +320,7 @@ agent 还需要别的变量时，从它的设置里取（Settings，或项目层
 | 飞书（lark-cli） | `profile`：lark-cli 的 profile，决定用哪个应用和机器人（为空用 lark-cli 当前的）。`allowed_open_ids`：发送者在该应用下的飞书 `open_id`（`ou_...`）；Settings → Channels 可按姓名或邮箱查找，并列出被拒的发送者以便允许。处理私聊，群聊里只处理 @ 机器人的消息。 | `PATH` 上有 `lark-cli` 并已登录；消息由它收发，启动时核对机器人身份。 |
 
 - 每个管家都可以有自己的 Telegram 或飞书机器人：Settings → Channels →「添加机器人」，token 或 app secret 在那里录入（添加的机器人从不读环境变量）。机器人所属的管家在添加时定下，改动后重启生效。
-- 每个 agent 运行 Claude Code 时都不弹权限确认，所以 Manager 能在这台机器上执行任何命令。因此每个渠道只转发名单上的发送者：其他人的消息会被丢弃并记一行日志（只记发送者 ID），不回复。名单为空或格式不对的渠道不会启动，Settings 页会写明原因。`LOOPX_TELEGRAM_ALLOWED_USERS` 已不再生效。
+- 每个 agent 都有全部工具，且不弹权限确认，所以 Manager 能在这台机器上执行任何命令。因此每个渠道只转发名单上的发送者：其他人的消息会被丢弃并记一行日志（只记发送者 ID），不回复。名单为空或格式不对的渠道不会启动，Settings 页会写明原因。`LOOPX_TELEGRAM_ALLOWED_USERS` 已不再生效。
 - 飞书凭据由 `lark-cli` 保管；渠道的 `profile`（或 lark-cli 当前的 profile）决定以哪个应用的身份收发（`lark-cli whoami`）。open_id 因应用而异，所以白名单记下它是为哪个应用建的，换到别的应用后不启动，直到重建名单。
 - Manager 处理名单上发送者的消息时，机器人先给这条消息加一个表情（Telegram 私聊里是 👀，飞书里是「Get」），再用一条原地编辑的状态消息显示进展；回答和任务进度各自单独发消息。
 - 在飞书群里，机器人只回答名单上的发送者 @ 它的消息，回复那条消息，并把任务进度和结束通知发到群里、@ 发起人。其他群消息一律忽略。
@@ -315,7 +333,7 @@ agent 还需要别的变量时，从它的设置里取（Settings，或项目层
 每个角色（Manager、Planner、Worker、Reviewer）运行一个 **agent**：由运行时、LLM 提供方和模型组成，
 保存为 Settings → Agent Profiles 里的一个 **Agent Profile**，在 Settings → Roles 里选用。
 
-- **运行时**是 Looper 有适配器的某类 agent CLI（Claude Code、Codex 或 OMP）。运行时是内置的：Looper 在服务的 PATH 上找到它们并探测版本和能力，Settings → Agent Runtimes 列出它们并可 Re-detect；要换一个可执行文件，就改服务的 PATH。
+- **运行时**是 Looper 有适配器的某类 agent CLI：Claude Code、Codex、Cursor Agent、Grok、Coco（TRAE CLI）、OMP、Pi 或 DSH。运行时是内置的：Looper 在服务的 PATH 上找到它们并探测版本和能力，Settings → Agent Runtimes 列出它们并可 Re-detect；要换一个可执行文件，就改服务的 PATH。Model API 运行时在进程内运行，没有可执行文件，只运行 Manager。
 - Pi 和 DSH 的 Profile 默认走各自的 SDK runner（Node 22.19+，pi 1.3.x，dsh 0.2.1-rc.2）。Claude Code 使用 Claude Code CLI。要让其中一家改走 CLI，在运维文件里写 `[runtimes] pi = "cli"` 或 `[runtimes] dsh = "cli"`，然后重启。这项在启动时读取一次。runner 起不来时，错误写明原因和这条退路；CLI 只在写成这个显式值时使用。
 - **提供方**是 agent 请求发往的地方：它支持的协议、模型及价格，以及认证方式：运行时自己的登录，或 API key（API 从不返回它）。
 - 内置 agent `claude-code/opus`（Claude Code、它自己的登录、`opus`）运行所有没有另选 agent 的角色。
@@ -355,13 +373,13 @@ init ──→ pending ──→ assigned ──→ running ──→ completed
                                     ↓
                                  pending → ...
 
-cancelled ← running  (永久终止)
+cancelled ← running  (取消；(start) 也能让它再次运行)
 ```
 
 - **init**：从界面创建，开始前可以查看和修改配置
-- **工作目录**：每个任务都在你指定的目录里运行（`work_dir`，绝对路径或以 `~/` 开头的路径），没有默认值。创建任务时必须提供，没有工作目录的任务不能开始，目录不存在时会自动创建。Manager 从对话中创建任务时，会从对话里取目录，你没说的话会问你。
+- **工作目录**：每个任务在自己的 `work_dir`（绝对路径或以 `~/` 开头的路径）里运行，没有时用所属项目的默认目录。两者都没有的任务不能创建也不能开始，目录不存在时会自动创建。Manager 从对话中创建任务时，会从对话里取目录，两者都不知道时会问你。
 - **stopped**：已暂停，状态保留，可以恢复
-- **cancelled**：已永久终止，不能恢复
+- **cancelled**：应要求结束；再次开始会按保存的计划继续，从头开始则重新规划
 
 ## 开发
 
