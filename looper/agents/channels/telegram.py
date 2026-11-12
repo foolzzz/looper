@@ -480,11 +480,10 @@ class TelegramChannelAdapter(ChannelAdapter):
                 message = update.effective_message
                 date = getattr(message, "date", None)
                 age = (datetime.now(timezone.utc) - date).total_seconds() if date is not None else 0
-                stopped_at = self._inbox.previous_polling_stopped_at
-                resumed_at = self._inbox.polling_resumed_at
-                during_downtime = (date is not None and stopped_at is not None and resumed_at is not None
-                                   and stopped_at <= date.timestamp() < resumed_at)
-                if age > self._backlog_max_age_seconds and not during_downtime:
+                age_at_stop = self._inbox.age_at_stop(update.update_id)
+                if age_at_stop is not None:
+                    age = age_at_stop
+                if age > self._backlog_max_age_seconds:
                     logger.warning("%s: stale Telegram update_id=%s age_seconds=%.0f backlog_max_age_seconds=%s ignored",
                                    self.channel_id, update.update_id, age, self._backlog_max_age_seconds)
                 else:
