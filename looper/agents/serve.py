@@ -91,6 +91,7 @@ class _StartupSteps:
     @contextlib.contextmanager
     def measure(self, name: str) -> Iterator[None]:
         started = time.monotonic()
+        logger.info("startup step: %s", name)
         try:
             yield
         finally:
