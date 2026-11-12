@@ -558,7 +558,8 @@ def test_fake_room_consumer_needs_the_delivered_interface(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(fake_claude, "_mcp", lambda _args: rpc)
     monkeypatch.setattr(fake_claude.time, "sleep", lambda _seconds: None)
-    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda: "start"), [])
+    turns = iter(["start"])
+    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda timeout=None: next(turns, None)), [])
     problem = task.check(tmp_path)
     if delivery == "interface":
         assert problem is None
@@ -591,7 +592,8 @@ def test_fake_room_consumer_writes_only_the_delivered_answer(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(fake_claude, "_mcp", lambda _args: rpc)
     monkeypatch.setattr(fake_claude.time, "sleep", lambda _seconds: None)
-    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda: "start"), [])
+    turns = iter(["start"])
+    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda timeout=None: next(turns, None)), [])
     assert (tmp_path / "code.txt").read_text() == (code if delivery != "empty" else "") + "\n"
     assert (task.check(tmp_path) is None) is (delivery != "empty" and code == task.fake["consult_answer"])
 

@@ -40,6 +40,15 @@ from tests.runtime_model_helpers import builtin_launch, resolved_profile, with_m
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 ROOT = Path(__file__).resolve().parents[1]
 
+
+@pytest.fixture(scope="module", autouse=True)
+def kept_manifest():
+    from looper import components
+
+    # Hash the checkout before deadlines that measure keeper startup and adoption.
+    return components.loaded_manifest()
+
+
 # The initial input is echoed just as --replay-user-messages does. A tool call
 # remains in flight across detach; every later stdin line is echoed as well.
 BODY = """\
