@@ -300,9 +300,10 @@ class LarkChannelAdapter(ChannelAdapter):
         await self._transport.react(message_id)
 
     async def notify(self, chat: str, text: str) -> DeliveryReceipt:
-        """Send ``text`` as the bot to Lark user ``chat`` (an open_id)."""
+        """Send ``text`` as the bot to a Lark user (open_id) or bound chat (chat_id)."""
         try:
-            await self._transport.send(user_id=chat, text=text)
+            destination = {"chat_id": chat} if chat.startswith("oc_") else {"user_id": chat}
+            await self._transport.send(**destination, text=text)
         except LarkCliError as exc:
             logger.warning("%s notification to %s failed: %s", self.channel_id, chat, exc)
             return DeliveryReceipt(channel=self.channel_type, success=False, error=str(exc))

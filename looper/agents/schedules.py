@@ -308,8 +308,11 @@ async def _schedule_answer(schedule_id: str, *, runtime_root: Path | None = None
 
 
 async def notify_targets() -> list[dict[str, Any]]:
-    """The chats a schedule may tell: the senders each channel's allowlist (Settings → Channels) already lets in."""
+    """The senders each built-in bot allows and its explicitly bound chats."""
+    from ..db import chat_bindings
+
     targets = []
+    bindings = await chat_bindings.list_bindings()
     for row in await db_channel_configs.list_configs():
         channel = row["channel_type"]
         if channel not in SENDER_ID_FORMATS or row["channel_id"] != builtin_channel_id(channel):
@@ -321,6 +324,9 @@ async def notify_targets() -> list[dict[str, Any]]:
         label = "Telegram" if channel == "telegram" else "Lark"
         targets += [{"channel": channel, "chat": chat, "label": f"{label} · {chat}",
                      "channel_enabled": bool(row.get("enabled"))} for chat in chats]
+        targets += [{"channel": channel, "chat": binding["chat_id"], "label": f"{label} · {binding['chat_id']}",
+                     "channel_enabled": bool(row.get("enabled"))} for binding in bindings
+                    if binding["channel_id"] == row["channel_id"] and binding["chat_id"] not in chats]
     return targets
 
 

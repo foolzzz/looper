@@ -135,9 +135,13 @@ TURNED_OFF_REPLY = "This Manager was turned off; your message was not handled."
 SCOPE_HEADING = "## This Manager's scope"
 SCOPE_TOOLS = {
     ManagerTools.TASKS: """\
-You have the task tools only; the projects you can only list and read. Agent
-Profiles, providers, settings, skills and schedules are not yours: when asked,
-tell the user to use the general Manager or the dashboard.""",
+You have the task tools and agent schedules in your scope; the projects you
+can only list and read. For schedules, your project scope allows only your
+projects, and your own scope allows only schedules you created. You can list
+and read command schedules in that scope, but cannot create, change, enable,
+disable, run or delete them. Command schedules, Agent Profiles, providers,
+settings and skills are not yours to manage: when asked, tell the user to use
+the general Manager or the dashboard.""",
     ManagerTools.ALL: "You have every platform tool.",
 }
 SCOPE_TASKS = {

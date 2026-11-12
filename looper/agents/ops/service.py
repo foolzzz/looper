@@ -131,9 +131,10 @@ MANAGER_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *CONCURRENCY_TOOLS, *CONFIG_TOOL
                                    CONFIRM)
 
 
-# What a Manager with ``tools = tasks`` has: the task tools, projects (read only) and the confirmation, in
+# What a Manager with ``tools = tasks`` has: task tools, projects (read only), agent schedules and confirmation, in
 # MANAGER_TOOLS order.
-TASKS_SCOPE_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *(t for t in CONFIG_TOOLS if t.name == "looper_projects"), CONFIRM)
+TASKS_SCOPE_TOOLS: tuple[Tool, ...] = (*TASK_TOOLS, *(t for t in CONFIG_TOOLS if t.name == "looper_projects"),
+                                    *SCHEDULE_TOOLS, CONFIRM)
 READ_ONLY_TASKS = frozenset({"looper_projects"})
 _MANAGER_TOOL_NAMES = {tool.name: tool for tool in MANAGER_TOOLS}
 
@@ -152,6 +153,7 @@ class OpsScope:
     tasks: db_tasks.TaskFilter
     listed: db_tasks.TaskFilter
     task_policy: TaskPolicy
+    tool_scope: ManagerTools = ManagerTools.ALL
     template_keys: tuple[str, ...] = ()
 
     @property
@@ -175,6 +177,7 @@ def scope_for(definition: ManagerDefinition, template_keys: Sequence[str] = (),
         tools=_tool_map(tools),
         read_only=frozenset() if all_tools else READ_ONLY_TASKS,
         tasks=definition.tool_tasks(), listed=definition.listed_tasks(), task_policy=definition.task_policy,
+        tool_scope=definition.tools,
         template_keys=tuple(template_keys),
     )
 

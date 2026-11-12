@@ -359,7 +359,7 @@ def test_a_post_without_a_message_id_is_not_successful(tmp_path: Path) -> None:
     asyncio.run(main())
 
 
-@pytest.mark.parametrize("operation", ["answer", "group_answer", "notify"])
+@pytest.mark.parametrize("operation", ["answer", "group_answer", "notify", "group_notify"])
 def test_transport_send_failures_are_returned_as_receipts(tmp_path: Path, operation: str) -> None:
     async def main() -> None:
         transport = StubTransport()
@@ -368,11 +368,27 @@ def test_transport_send_failures_are_returned_as_receipts(tmp_path: Path, operat
         adapter._correlation_chat["c1"] = "oc_dm"
         if operation == "group_answer":
             adapter._group_message["c1"] = "om_in"
-        receipt = (await adapter.notify(OPEN_ID, "notice") if operation == "notify" else
+        receipt = (await adapter.notify("oc_team" if operation == "group_notify" else OPEN_ID, "notice")
+                   if operation in ("notify", "group_notify") else
                    await adapter.deliver(_envelope("c1", text="answer")))
         assert not receipt.success and receipt.channel == "lark_bot"
         assert "the platform refused" in (receipt.error or "")
         await adapter.stop()
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("target,field", [(OPEN_ID, "user_id"), ("oc_team", "chat_id")])
+def test_schedule_notification_uses_the_native_destination(tmp_path, target, field):
+    async def main():
+        transport = StubTransport()
+        adapter = _adapter(tmp_path, transport)
+        try:
+            receipt = await adapter.notify(target, "Project progress report")
+            assert receipt.success
+            assert transport.calls == [("send", {field: target, "text": "Project progress report"})]
+        finally:
+            await adapter.stop()
 
     asyncio.run(main())
 
