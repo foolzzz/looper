@@ -4571,9 +4571,11 @@ before.
   `prompt_layers.room`). The section follows the run's delivery capability
   (`RoomInput`): runs without room deliveries use `PULL`, reading their inbox
   at milestones, before their report and before using another step's
-  interface. Runs with deliveries use `PUSHED`: messages and answers arrive
-  after a tool result, so they use the inbox only when a delivery says more
-  are waiting, and `looper_room_read` for earlier messages. Workers that can
+  interface. Runs with deliveries use `PUSHED`: unread-count notices arrive
+  after a tool result. Workers and Reviewers call `looper_room_inbox`
+  immediately on a `[Looper room]` notice to read the bodies and mark them
+  read, continuing while the inbox returns `more`; they use
+  `looper_room_read` for earlier messages. Workers that can
   stay idle between turns use `PUSHED_WAITS`, waiting for a needed answer
   with a waiting report; deliveries can then arrive as their own turn.
   Reviewers never use `PUSHED_WAITS`. Claude Code Workers use `PUSHED_WAITS`

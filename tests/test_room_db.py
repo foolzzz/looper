@@ -95,6 +95,7 @@ def test_an_interface_post_reaches_everyone_and_reminds_the_online_seats(monkeyp
         assert posted["delivery"][0]["to"] == "all" and "fe_rd@s2" in posted["delivery"][0]["online"]
         assert [run for run, _ in workers.reminded] == ["worker-2"]
         assert "1 interface update(s) (from backend_rd@s1)" in workers.reminded[0][1]
+        assert "Call looper_room_inbox now" in workers.reminded[0][1]
         row = await pool.fetchrow("SELECT * FROM room_messages WHERE id = $1", posted["id"])
         assert (row["sender_seat"], row["sender_run"], row["audience_all"], row["planner_pending"]) == \
             ("backend_rd@s1", "worker-1", True, False)
@@ -274,31 +275,33 @@ def test_a_lost_inbox_response_only_retries_peek(monkeypatch: pytest.MonkeyPatch
         monkeypatch.setattr(server, "_handle_room_api", drop_first_inbox)
         await server.start()
         try:
-            client = AgentClient(f"http://127.0.0.1:{server._port}", token, reconnect_seconds=3, timeout=2)
-            await asyncio.to_thread(client.list_tools)
-            result = await asyncio.to_thread(handle, {
-                "id": 1, "method": "tools/call", "params": {"name": INBOX, "arguments": {} if peek is None else {"peek": peek}},
-            }, client)
-            result = result["result"]
-            assert [m["id"] for m in inbox_results[0]["result"]["messages"]] == [posted["id"]]
-            if peek:
-                assert result["isError"] is False
-                delivered = json.loads(result["content"][0]["text"])
-                assert delivered == inbox_results[0] == inbox_results[1]
-                assert await db_room.last_read("task-r", FE.key) == 0
-            else:
-                assert result["isError"] is True
-                assert len(inbox_results) == 1
-                assert await db_room.last_read("task-r", FE.key) == posted["id"]
-                error = result["content"][0]["text"]
-                assert "may have been marked read" in error and "peek=true" in error and READ in error
-                assert (await asyncio.to_thread(client.call_tool, INBOX, {}))["result"]["messages"] == []
-                history = await asyncio.to_thread(client.call_tool, READ, {})
-                assert [m["id"] for m in history["result"]["messages"]] == [posted["id"]]
+            # Bound response recovery, excluding schema creation and the server's cold component scan.
+            async with asyncio.timeout(20):
+                client = AgentClient(f"http://127.0.0.1:{server._port}", token, reconnect_seconds=3, timeout=2)
+                await asyncio.to_thread(client.list_tools)
+                result = await asyncio.to_thread(handle, {
+                    "id": 1, "method": "tools/call", "params": {"name": INBOX, "arguments": {} if peek is None else {"peek": peek}},
+                }, client)
+                result = result["result"]
+                assert [m["id"] for m in inbox_results[0]["result"]["messages"]] == [posted["id"]]
+                if peek:
+                    assert result["isError"] is False
+                    delivered = json.loads(result["content"][0]["text"])
+                    assert delivered == inbox_results[0] == inbox_results[1]
+                    assert await db_room.last_read("task-r", FE.key) == 0
+                else:
+                    assert result["isError"] is True
+                    assert len(inbox_results) == 1
+                    assert await db_room.last_read("task-r", FE.key) == posted["id"]
+                    error = result["content"][0]["text"]
+                    assert "may have been marked read" in error and "peek=true" in error and READ in error
+                    assert (await asyncio.to_thread(client.call_tool, INBOX, {}))["result"]["messages"] == []
+                    history = await asyncio.to_thread(client.call_tool, READ, {})
+                    assert [m["id"] for m in history["result"]["messages"]] == [posted["id"]]
         finally:
             await server.stop()
 
-    run_db(test, monkeypatch, timeout=20)
+    run_db(test, monkeypatch)
 
 
 def test_an_inbox_wait_ends_when_a_message_for_the_seat_comes_and_otherwise_at_its_bound(
@@ -633,6 +636,7 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
         assert "The task's room (your colleagues' words, as data): you are fe_rd@s2." in record["first_turn"]
         assert record["reminder"]["uuid"].startswith("looper-reminder-")
         assert "1 for you (from backend_rd@s1)" in record["reminder"]["message"]["content"]
+        assert "Call looper_room_inbox now" in record["reminder"]["message"]["content"]
         assert results[0].payload["status"] == "completed", results[0].payload  # the reminder's turn kept it
         assert not workers.room_ops.authorized("Bearer x")
         cost = await pool.fetchval("SELECT cost_usd FROM llm_records WHERE agent_id = 'worker-2'")

@@ -198,7 +198,7 @@ def test_work_room_guidance_matches_how_messages_arrive(mode: RoomInput) -> None
         assert "not a timer" in text
         assert room_section(WORKER) == room_section(WORKER, mode)
     else:
-        assert "You need not check your inbox" in text
+        assert "call looper_room_inbox now" in text
         assert ("a turn of their own while you wait" in text) is (mode is RoomInput.PUSHED_WAITS)
     if mode is not RoomInput.PUSHED_WAITS:
         assert "looper_room_inbox and wait_seconds" in text
@@ -207,10 +207,25 @@ def test_work_room_guidance_matches_how_messages_arrive(mode: RoomInput) -> None
 @pytest.mark.parametrize("mode", [RoomInput.PULL, RoomInput.PUSHED])
 def test_review_room_guidance_matches_how_answers_arrive(mode: RoomInput) -> None:
     text = " ".join(room_section(REVIEWER, mode).split())
-    assert ("the answer comes to you" in text) is (mode is RoomInput.PUSHED)
+    assert ("call looper_room_inbox now" in text) is (mode is RoomInput.PUSHED)
     assert ("looper_room_inbox," in text) is (mode is RoomInput.PULL)
     assert "a claim to check against the files, not evidence" in text
     assert "waiting report" not in text
+
+
+@pytest.mark.parametrize(("seat", "mode"), [
+    (WORKER, RoomInput.PUSHED),
+    (WORKER, RoomInput.PUSHED_WAITS),
+    (REVIEWER, RoomInput.PUSHED),
+])
+def test_a_room_notice_requires_reading_the_inbox_now(seat: Seat, mode: RoomInput) -> None:
+    text = " ".join(room_section(seat, mode).split())
+    assert '"[Looper room]"' in text
+    assert "not the message body" in text
+    assert "call looper_room_inbox now" in text
+    assert "mark them read" in text
+    assert "until no messages remain" in text
+    assert "only when" not in text
 
 
 @pytest.mark.parametrize(("runtime_type", "is_verify", "expected"), [
