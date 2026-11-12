@@ -1091,7 +1091,7 @@ Every way Looper ends an agent goes through `looper/agents/proc_tree.py`:
   `asyncio.wait_for` drops a cancellation that arrives as what it waits for
   completes, and the loop then waits for its next message for good. The
   bus's request-reply does not use it. The whole shutdown has
-  `SHUTDOWN_DEADLINE_SEC` (15 s, under launchd's 20 s before SIGKILL): past
+  `SHUTDOWN_DEADLINE_SEC` (15 s, under the installed service's 30 s before SIGKILL): past
   it the server logs `the shutdown did not finish within 15 s` and exits with
   code 1, and a second SIGINT or SIGTERM during the shutdown exits at once the
   same way. The next start ends what such an exit leaves: the agents'
@@ -1151,8 +1151,8 @@ re-parented. Each stop logs one line:
 The agents no longer share the server's process group. When the main process
 exits, launchd SIGKILLs only what remains in the job's process group; the plist
 sets no `AbandonProcessGroup`. Keepers use `start_new_session=True`, in a
-session and process group of their own, so they survive that cleanup and the
-plist needs no change. Command schedule runners survive restarts the same
+session and process group of their own, so they survive that cleanup without
+a process-group override in the plist. Command schedule runners survive restarts the same
 way.
 
 The systemd units already use `KillMode=process`, so stop and restart signal
@@ -1161,6 +1161,18 @@ only serve. Leftover keepers remain in the unit's cgroup, and systemd may log
 that effective setting is warned about by service install and upgrade checks;
 the checks read `systemctl --user show <unit> -p KillMode`, including drop-ins. Such a
 unit requires a `FULL` upgrade rather than preserving running agents.
+
+Installed services set `ExitTimeOut=30` on launchd and `TimeoutStopSec=30`
+on systemd, above serve's 15 s shutdown deadline. Run `looper service install`
+again to apply this stop budget to an existing service. Detaching kept runs
+has an 8 s total budget, including closing connections and cancelling run
+tasks; its outcome summary reports runs that could not detach in time.
+
+At startup, rejected keeper metadata is logged with the run, file and failing
+field. Before ending the run, the small JSON files are copied privately to
+`<runtime root>/.local/kept-run-quarantine/`; only the newest 20 copies are
+kept, with at most 64 KiB per file. Run logs are not copied. A failed copy is
+logged and leaves the source directory in place without blocking startup.
 
 Each agent process is started through `proc_tree.spawn`, which records it in
 `<runtime root>/.local/agent-processes/<pid>.json` until the process is

@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from looper.agents import keeper, proc_tree
+from looper.agents import keeper, kept_dirs, proc_tree
 from looper.agents.keeper.__main__ import main
 from looper.agents.keeper.process import Keeper
 from tests.test_keeper_protocol import short_directory
@@ -455,11 +455,47 @@ proc_tree.spawn, proc_tree.end = delayed_spawn, counted_end
     assert (run.directory / keeper.LOG).read_text().count("end called\n") == 1
 
 
-def test_an_unreadable_owner_start_time_fails_before_spawning(launch: Callable[..., Run]) -> None:
-    run = launch(keeper_setup="from looper.agents import proc_tree; proc_tree._start_time = lambda pid: None")
-    state = run.wait(expected=3)
-    assert state["end_reason"] == "start_failed" and state["child_pid"] is None
-    assert "start time" in state["error"]
+@pytest.mark.parametrize("missing", ["keeper", "child", "child_reread", "exited_child"])
+def test_missing_start_times_do_not_leave_an_unidentifiable_running_child(
+    launch: Callable[..., Run], missing: str,
+) -> None:
+    run = launch("pass" if missing == "exited_child" else SLEEP, keeper_setup=f"""\
+import os
+from looper.agents import proc_tree
+original_start_time = proc_tree._start_time
+start_calls = {{}}
+def unavailable_start_time(pid):
+    start_calls[pid] = start_calls.get(pid, 0) + 1
+    if (({missing!r} == 'keeper' and pid == os.getpid() and start_calls[pid] == 1)
+            or ({missing!r} in ('child', 'exited_child') and pid != os.getpid())
+            or ({missing!r} == 'child_reread' and pid != os.getpid() and start_calls[pid] > 1)):
+        return None
+    return original_start_time(pid)
+proc_tree._start_time = unavailable_start_time
+if {missing!r} == 'exited_child':
+    # Force the already-exited branch independently of child scheduling.
+    original_spawn = proc_tree.spawn
+    async def reaped_spawn(*args, **kwargs):
+        child = await original_spawn(*args, **kwargs)
+        await child.wait()
+        return child
+    proc_tree.spawn = reaped_spawn
+""")
+    if missing == "child_reread":
+        run.running()
+        assert kept_dirs.KeeperRecord.read(run.directory / keeper.STATE) is not None
+        run.stop()
+        assert run.wait()["end_reason"] == "ended"
+    elif missing == "exited_child":
+        state = run.wait()
+        assert state["end_reason"] == "exited" and state["exit_code"] == 0
+        assert kept_dirs.KeeperRecord.read(run.directory / keeper.STATE) is not None
+    else:
+        state = run.wait(expected=3)
+        assert state["end_reason"] == "start_failed" and state["state"] == "exited"
+        assert "start time" in state["error"]
+        assert state["child_pid"] is None
+        assert not list((run.runtime_root / proc_tree.RECORDS_DIR).glob("*.json"))
 
 
 def test_a_log_write_error_ends_the_child_tree_and_records_the_error(launch: Callable[..., Run]) -> None:

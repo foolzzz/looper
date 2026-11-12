@@ -99,7 +99,7 @@ _GIT_REPOSITORY_OVERRIDES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_
                              "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
 
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-_STOP_WAIT_SECONDS = 30.0  # launchd sends SIGKILL 20 s after SIGTERM by default
+_STOP_WAIT_SECONDS = 30.0  # Also the explicit service-manager stop budget, above serve's 15 s deadline.
 _POLL_SECONDS = 0.5
 _PREFLIGHT_POLL_SECONDS = 15.0
 _DRAIN_SUMMARY_SECONDS = 60.0
@@ -358,6 +358,7 @@ def render_plist(spec: ServiceSpec) -> bytes:
         "WorkingDirectory": str(spec.working_dir),
         "EnvironmentVariables": dict(spec.env),
         "RunAtLoad": True,
+        "ExitTimeOut": int(_STOP_WAIT_SECONDS),
         # Started again after a failure (a non-zero exit or a signal), as
         # systemd's Restart=on-failure; a clean exit after SIGTERM stays down.
         "KeepAlive": {"SuccessfulExit": False},
@@ -387,6 +388,7 @@ def render_systemd_unit(spec: ServiceSpec) -> str:
         "Restart=on-failure",
         "RestartSec=5",
         "KillMode=process",
+        f"TimeoutStopSec={int(_STOP_WAIT_SECONDS)}",
         f"StandardOutput=append:{log}",
         f"StandardError=append:{log}",
         "",

@@ -113,6 +113,7 @@ DEFAULT_RUN_TIMEOUT_SEC = 86400
 # Readiness and runtime acceptance share this budget. The Planner leaves an extra
 # half second for the pool's WORKER_INPUT_RESULT acknowledgement on the local bus.
 WORKER_INPUT_DELIVERY_TIMEOUT = 4.5
+KEPT_DETACH_BUDGET_SEC = 8.0  # leave time for other shutdown work within the server's deadline
 
 
 def room_input(launch: Launch, *, is_verify: bool) -> RoomInput:
@@ -1190,42 +1191,62 @@ class WorkerPool:
                 wp.handle.fence()
 
     async def detach_kept(self, *, epoch: int, timeout: float = 3.0) -> dict[DetachKind, list[str]]:
+        deadline = asyncio.get_running_loop().time() + KEPT_DETACH_BUDGET_SEC
+
+        def remaining():
+            return max(0, deadline - asyncio.get_running_loop().time())
+
+        def consume_exception(task):
+            if not task.cancelled():
+                task.exception()
+
         # A completed run can still be announcing its offline seat after its recorder has closed.
         runs = [(wid, wp.handle, self._tasks[wid], self._recorders.get(wid)) for wid, wp in self._active.items()
                 if isinstance(wp.handle, KeptRun) and wp.handle.state is KeptRunState.ATTACHED
                 and wid in self._tasks]
 
-        async def detach(wid, handle, recorder):
-            if recorder is None:
-                return DetachOutcome(DetachKind.FINISHING)
-            outcome = await handle.detach(epoch=epoch, timeout=timeout)
-            if outcome.kind is DetachKind.DETACHED:
-                if recorder is not None:
-                    recorder.detach()
-                self._inputs.pop(wid, None)
-                self._drop_reminders(wid)
-            return outcome
-
-        outcomes = await asyncio.gather(*(detach(wid, handle, recorder) for wid, handle, _, recorder in runs),
-                                        return_exceptions=True)
+        detaching = [asyncio.create_task(handle.detach(epoch=epoch, timeout=timeout)) if recorder is not None
+                     else None for _, handle, _, recorder in runs]
+        active = [task for task in detaching if task is not None]
+        if active:
+            _, pending = await asyncio.wait(active, timeout=remaining())
+            for task in pending:
+                task.cancel()
+                task.add_done_callback(consume_exception)
         grouped: dict[DetachKind, list[str]] = {}
-        finishing = []
-        for (wid, handle, task, recorder), outcome in zip(runs, outcomes):
-            if isinstance(outcome, BaseException):
-                logger.warning("could not detach run=%s: %s", wid, outcome)
-                continue
+        cleanup = []
+        for (wid, handle, task, recorder), detaching_task in zip(runs, detaching):
+            if detaching_task is None:
+                outcome = DetachOutcome(DetachKind.FINISHING)
+            elif not detaching_task.done():
+                logger.warning("detach budget expired run=%s state=%s", wid, handle.state)
+                # The durable marker precedes transport cleanup; preserve a successful detach.
+                outcome = DetachOutcome(DetachKind.DETACHED if handle.state is KeptRunState.DETACHED
+                                        else DetachKind.BUSY)
+            else:
+                try:
+                    outcome = detaching_task.result()
+                except BaseException as exc:
+                    logger.warning("could not detach run=%s: %s", wid, exc)
+                    continue
             grouped.setdefault(outcome.kind, []).append(wid)
             if outcome.kind is DetachKind.DETACHED:
+                recorder.detach()
+                self._inputs.pop(wid, None)
+                self._drop_reminders(wid)
                 if ready := self._input_ready.pop(wid, None):
                     ready.set()
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-                logger.info("detach run=%s offset=%d", wid, outcome.consumed)
+                task.add_done_callback(consume_exception)
+                cleanup.append(task)
+                logger.info("detach run=%s offset=%s", wid, outcome.consumed)
             elif outcome.kind is DetachKind.FINISHING:
-                finishing.append(task)
-        if finishing:
-            await asyncio.wait(finishing, timeout=timeout)
+                cleanup.append(task)
+        cleanup = [task for task in cleanup if not task.done()]
+        if cleanup:
+            _, pending = await asyncio.wait(cleanup, timeout=min(timeout, remaining()))
+            if pending:
+                logger.warning("detach cleanup still pending runs=%d", len(pending))
         logger.info("detach outcomes=%s", {kind.value: runs for kind, runs in grouped.items()})
         return grouped
 
