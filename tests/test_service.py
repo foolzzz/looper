@@ -501,18 +501,95 @@ def test_uninstall_removes_server_if_probe_does_not_stop(tmp_path, checkout, mon
     assert not service.manager(host, LABEL).unit_path.exists() and not fake.serving
 
 
-def test_missing_probe_units_do_not_reload_systemd(tmp_path, checkout):
+@pytest.mark.parametrize("stuck", [False, True])
+def test_uninstall_confirms_missing_probe_units_stopped(tmp_path, checkout, monkeypatch, capsys, stuck):
     fake = FakeSystemd()
     host = _host(tmp_path, checkout, fake, system="Linux")
-
     fake.probe_active = fake.probe_service_active = True
+    polls = []
+
     def run(argv):
-        fake(argv)
-        return subprocess.CompletedProcess(argv, 1, "", "unit file missing")
+        if argv[2:4] == ["disable", "--now"]:
+            fake.calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 1, "", "unit file missing")
+        if argv[2:4] == ["stop", f"{LABEL}-probe.timer"]:
+            fake.calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[2:4] == ["show", f"{LABEL}-probe.timer"]:
+            polls.append(host.clock())
+            fake.probe_active = stuck or len(polls) < 3
+            result = fake(argv)
+            return subprocess.CompletedProcess(argv, 1, result.stdout.replace("loaded", "not-found"), "")
+        return fake(argv)
+
     host.run = run
-    assert "not installed" in service.uninstall(host, label=LABEL)
-    assert fake.commands() == [f"disable --now {LABEL}-probe.timer", f"stop {LABEL}-probe.service"]
-    assert not fake.probe_active and not fake.probe_service_active
+    assert _looper(monkeypatch, host, "uninstall", "--label", LABEL) == int(stuck)
+    output = capsys.readouterr()
+    assert f"stop {LABEL}-probe.timer" in fake.commands()
+    assert f"stop {LABEL}-probe.service" in fake.commands()
+    assert "daemon-reload" in fake.commands()
+    assert polls and polls[-1] >= (service._STOP_WAIT_SECONDS if stuck else 1)
+    assert fake.probe_active == stuck and not fake.probe_service_active
+    assert ("run uninstall again" in output.err) if stuck else ("not installed" in output.out)
+
+
+@pytest.mark.parametrize(("system", "state_fails"), [("Darwin", False), ("Linux", False), ("Linux", True)])
+def test_uninstall_removes_server_after_probe_oserror(tmp_path, checkout, monkeypatch, capsys, system, state_fails):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    assert _install(monkeypatch, host, root) == 0
+    unlink = Path.unlink
+
+    def denied(path, *args, **kwargs):
+        if path in _probe_paths(host):
+            raise PermissionError("probe unit is read-only")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", denied)
+    if state_fails:
+        def run(argv):
+            if argv[2:4] == ["show", f"{LABEL}.service"]:
+                raise OSError("cannot read service state")
+            return fake(argv)
+
+        host.run = run
+    assert _looper(monkeypatch, host, "uninstall", "--label", LABEL) == 1
+    error = capsys.readouterr().err
+    if state_fails:
+        assert "cannot read service state" in error
+    else:
+        assert "probe cleanup failed:" in error and "run uninstall again" in error
+    assert not service.manager(host, LABEL).unit_path.exists() and not fake.serving
+    assert any(path.exists() for path in _probe_paths(host))
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_restart_recovers_probe_when_unit_directory_is_read_only(tmp_path, checkout, monkeypatch, capsys, system):
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    root = tmp_path / "runtime"
+    _configure_probe(root)
+    assert _install(monkeypatch, host, root) == 0
+    # Changing the configured port forces a probe refresh without changing its files.
+    config = root / ops_config.FILE
+    config.write_text(config.read_text().replace('[server]\n', '[server]\nport = 9887\n'))
+    unit = service.manager(host, LABEL).unit_path
+    unit.write_bytes(unit.read_bytes().replace(b"9876", b"9887"))
+    previous = {path: path.read_bytes() for path in _probe_paths(host)}
+
+    def denied(*args):
+        raise PermissionError("unit directory is read-only")
+
+    monkeypatch.setattr(service, "write_private", denied)
+    capsys.readouterr()
+    assert _looper(monkeypatch, host, "restart", "--label", LABEL) == 0
+    output = capsys.readouterr().out
+    assert "kept the previous probe" in output
+    assert {path: path.read_bytes() for path in previous} == previous
+    assert fake.serving
+    assert fake.probe.loaded if system == "Darwin" else fake.probe_active
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
@@ -764,7 +841,7 @@ def test_uninstall_removes_server_after_probe_reload_failure(tmp_path, checkout,
     assert not any(p.exists() for p in _probe_paths(host))
     fake.calls.clear()
     assert _looper(monkeypatch, host, "uninstall", "--label", LABEL) == 0
-    assert fake.commands() == [f"disable --now {LABEL}-probe.timer", f"stop {LABEL}-probe.service"]
+    assert not fake.probe_active and not fake.probe_service_active
 
 
 @pytest.mark.parametrize(("system", "missing"), [("Darwin", None), ("Linux", None),
@@ -1031,9 +1108,8 @@ def test_systemd_unit_runs_this_looper_privately_with_the_captured_environment(
                    for line in lines if line.startswith("Environment=")]
     assert dict(item.split("=", 1) for item in environment) == {
         **CAPTURED, "LOOPER_ODD": 'a "quoted" 100% $HOME\\path\nline2'}
-    assert fake.commands()[:5] == ["daemon-reload", f"stop {LABEL}.service",
-                                   f"disable --now {LABEL}-probe.timer", f"stop {LABEL}-probe.service",
-                                   f"enable --now {LABEL}.service"]
+    assert fake.commands()[:2] == ["daemon-reload", f"stop {LABEL}.service"]
+    assert f"enable --now {LABEL}.service" in fake.commands()
     output = capsys.readouterr()
     assert "not copied" in output.out and "LARK_APP_ID" in output.out
     assert "cli_test" not in output.out + output.err and "s3cret" not in output.out + output.err

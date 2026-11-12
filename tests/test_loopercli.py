@@ -1395,10 +1395,65 @@ def test_schedule_log_closed_pipe_exits_silently(client: Path, looper: FakeLoope
 def test_start_and_stop_post_the_task_id_to_task_control(cli: Run, looper: FakeLooper) -> None:
     looper.answers.append((200, {"status": "ok", "result": {"status": "init", "group": "ready"}}))
     assert cli("start", "t1")[0] == 0
+    looper.answers.extend([(200, {"status": "ok", "result": {"task_id": "t1", "action": "stop"}}),
+                          (200, {"status": "ok", "result": {"status": "stopped", "group": "attention"}})])
     assert cli("stop", "t1")[0] == 0
     assert [call[1:4:2] for call in looper.calls()] == [
         ("/api/v1/ops/tasks/get", {"task_id": "t1"}),
-        ("/api/v1/ops/task_control/start", {"task_id": "t1"}), ("/api/v1/ops/task_control/stop", {"task_id": "t1"})]
+        ("/api/v1/ops/task_control/start", {"task_id": "t1"}), ("/api/v1/ops/task_control/stop", {"task_id": "t1"}),
+        ("/api/v1/ops/tasks/get", {"task_id": "t1"})]
+
+
+@pytest.mark.parametrize("outcome", ["stopped", "timeout", "read_error", "stop_error", "confirmation"])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_stop_waits_before_start_can_resume(
+        cli: Run, looper: FakeLooper, monkeypatch: pytest.MonkeyPatch, outcome: str, as_json: bool) -> None:
+    elapsed = 0.0
+
+    def sleep(seconds: float) -> None:
+        nonlocal elapsed
+        elapsed += seconds
+
+    monkeypatch.setattr(loopercli.time, "monotonic", lambda: elapsed)
+    monkeypatch.setattr(loopercli.time, "sleep", sleep)
+    stopped = (200, {"status": "ok", "result": {"task_id": "t1", "status": "stopped", "group": "attention"}})
+    active = (200, {"status": "ok", "result": {"task_id": "t1", "status": "executing", "group": "in_progress"}})
+    error = (409, {"status": "error", "error": {"code": "conflict", "message": "state changed"}})
+    control = (200, {"status": "ok", "result": {"task_id": "t1", "action": "stop"}})
+    if outcome == "stop_error":
+        control = error
+    elif outcome == "confirmation":
+        control = (200, {"status": "needs_confirmation", "confirmation_id": "stop-confirm", "expires_in_seconds": 60})
+    looper.answers.append(control)
+    if outcome == "stopped":
+        looper.answers.extend([active, stopped, stopped,
+                               (200, {"status": "ok", "result": {"task_id": "t1", "action": "restart"}})])
+    elif outcome == "timeout":
+        looper.answers.extend([active] * 100)
+    elif outcome == "read_error":
+        looper.answers.extend([active, error])
+
+    code, out, err = cli("stop", "t1", *(["--json"] if as_json else []))
+    paths = [call[1] for call in looper.calls()]
+    assert paths[0] == "/api/v1/ops/task_control/stop"
+    if outcome == "stopped":
+        assert code == 0 and err == ""
+        assert len(paths) == 3 and elapsed == 0.5
+        assert json.loads(out)["status"] == "ok" if as_json else "stopped" in out
+        code, out, err = cli("start", "t1")
+        assert code == 0 and err == "" and "already running" not in out
+        assert looper.calls()[-1][1] == "/api/v1/ops/task_control/restart"
+    elif outcome == "timeout":
+        assert code == loopercli.EXIT_WAIT_TIMEOUT and elapsed == 30
+        assert "stop requested; still stopping" in out + err
+        if as_json:
+            assert json.loads(out)["status"] == "error"
+    elif outcome == "confirmation":
+        assert code == loopercli.EXIT_CONFIRM and len(paths) == 1
+        assert "stop-confirm" in out
+    else:
+        assert code == loopercli.EXIT_ERROR and "state changed" in out + err
+        assert len(paths) == (3 if outcome == "read_error" else 1)
 
 
 @pytest.mark.parametrize(("status", "group", "action", "message", "code"), [

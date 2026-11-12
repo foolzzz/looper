@@ -14,6 +14,7 @@ import tarfile
 import urllib.error
 import venv
 import zipfile
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -146,6 +147,7 @@ def deployment(tmp_path, monkeypatch, system_responses):
         get_whoami=lambda *args, **kwargs: {"looper_version": scenario.current.version},
         port_in_use=lambda port, address="127.0.0.1": False, pid_alive=lambda pid: scenario.process_lingers)
     manager = SimpleNamespace(host=host, state=lambda: state, unit_path=unit,
+        ops=lambda: None,
         unit_argv=lambda: service.looper_command(host.executable) + ["serve"],
         unit_settings=lambda **kwargs: (18841, root / "logs/serve.log", root), start=start, stop=stop)
     monkeypatch.setattr(service, "manager", lambda *args: manager)
@@ -161,6 +163,74 @@ def deployment(tmp_path, monkeypatch, system_responses):
 
 def report(deployment):
     return json.loads((deployment.root / "logs/serve.log").read_text().splitlines()[-1])
+
+
+@pytest.mark.parametrize("mode", ["restart", "upgrade", "recovery", "conflict", "web"])
+def test_service_deployment_uses_configured_ipv6_host(deployment, monkeypatch, capsys, mode):
+    case = deployment
+    mgr = service.manager(case.host, "test")
+    mgr.ops = lambda: SimpleNamespace(host="::")
+    operation = case.host.system_operation
+    requests, connections = [], []
+
+    def open_request(request, *, timeout):
+        assert request.host == "[::1]:18841"
+        path = request.selector
+        requests.append(path)
+        if path == "/api/v1/system/components":
+            result = case.scenario.current.to_dict()
+        elif path == "/api/v1/system/status":
+            result = case.responses.status
+        elif path == "/api/v1/whoami":
+            result = {"looper_version": case.scenario.current.version}
+        elif path == "/index.html":
+            return io.BytesIO(b"dashboard")
+        else:
+            result = operation(18841, "token", path.rsplit("/", 1)[-1], json.loads(request.data))
+        return io.BytesIO(json.dumps({"status": "ok", "result": result}).encode())
+
+    def port_in_use(port, address="127.0.0.1"):
+        connections.append(address)
+        assert address == "::1"
+        return mode == "conflict"
+
+    monkeypatch.setattr(service.urllib.request, "build_opener", lambda *args: SimpleNamespace(open=open_request))
+    case.host.get_status = service._get_status
+    case.host.get_components = service._get_components
+    case.host.system_operation = service._system_operation
+    case.host.get_whoami = service._get_whoami
+    case.host.get_index = service._get_index
+    case.host.port_in_use = port_in_use
+    case.scenario.install_error = mode in ("recovery", "conflict")
+    if mode == "web":
+        case.scenario.target = manifest("web", "1.0.1")
+
+        def install(*args, **kwargs):
+            case.scenario.current = case.scenario.target
+            return b"dashboard", "f" * 64
+
+        monkeypatch.setattr(service, "_install_target", install)
+        monkeypatch.setattr(service, "_prepare_checkout_dashboard", lambda *args: nullcontext())
+    command = ["restart", "--drain"] if mode == "restart" else ["upgrade"]
+    assert cli.main(["service", *command, "--timeout", "2"]) == int(mode in ("recovery", "conflict"))
+    data = report(case)
+    assert requests and "/api/v1/system/components" in requests
+    if mode in ("recovery", "conflict"):
+        assert data["serving"] and "/api/v1/system/status" in requests
+        assert "/api/v1/system/drain_cancel" in requests
+        assert data["status"] == "failed"
+        if mode == "conflict":
+            assert "another process" in data["recovery_error"]
+            assert "/api/v1/system/health" in requests
+        else:
+            assert "recovery_error" not in data
+    else:
+        assert data["status"] == "ok" and "/api/v1/whoami" in requests
+    if mode == "web":
+        assert "/index.html" in requests and "stop" not in case.events
+    else:
+        assert "/api/v1/system/drain" in requests and "/api/v1/system/drain_status" in requests
+        assert connections
 
 
 @pytest.mark.parametrize("kind", [UpgradeKind.CONTROL_PLANE, UpgradeKind.FULL])
