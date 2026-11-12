@@ -455,7 +455,7 @@ async def carry_on_tasks(task_router: TaskRouter, left: LeftRunning) -> None:
         await task_router.start_tasks(left.starting)
 
 
-# How long a shutdown may take before the server exits without finishing it: under the 20 s launchd gives a service
+# How long a shutdown may take before the server exits without finishing it: under the configured 30 s service budget
 # between SIGTERM and SIGKILL. The next start ends what it leaves (the agents' processes, their runs' records).
 SHUTDOWN_DEADLINE_SEC = 15.0
 

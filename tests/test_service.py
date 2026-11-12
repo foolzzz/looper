@@ -992,6 +992,7 @@ def test_launchd_unit_runs_this_looper_privately_with_the_captured_environment(
         "WorkingDirectory": str(checkout),
         "EnvironmentVariables": {**CAPTURED, "MY_BOT_TOKEN": "custom"},
         "RunAtLoad": True,
+        "ExitTimeOut": 30,
         "KeepAlive": {"SuccessfulExit": False},
         "StandardOutPath": log,
         "StandardErrorPath": log,
@@ -1037,6 +1038,22 @@ def test_systemd_unit_runs_this_looper_privately_with_the_captured_environment(
     output = capsys.readouterr()
     assert "not copied" in output.out and "LARK_APP_ID" in output.out
     assert "cli_test" not in output.out + output.err and "s3cret" not in output.out + output.err
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_install_gives_shutdown_time_to_detach_runs(tmp_path, checkout, monkeypatch, system):
+    from looper.agents.serve import SHUTDOWN_DEADLINE_SEC
+
+    fake = FakeLaunchd() if system == "Darwin" else FakeSystemd()
+    host = _host(tmp_path, checkout, fake, system=system)
+    assert _install(monkeypatch, host, tmp_path / "runtime") == 0
+    if system == "Darwin":
+        budget = plistlib.loads(service.Launchd(host, LABEL).unit_path.read_bytes())["ExitTimeOut"]
+    else:
+        unit = service.Systemd(host, LABEL).unit_path.read_text()
+        budget = float(next(line.split("=", 1)[1] for line in unit.splitlines()
+                            if line.startswith("TimeoutStopSec=")))
+    assert SHUTDOWN_DEADLINE_SEC < budget <= service._STOP_WAIT_SECONDS
 
 
 def test_reinstall_updates_the_unit_after_launchd_has_let_go_of_the_old_job(
