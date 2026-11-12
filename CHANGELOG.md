@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.165] - 2026-11-12
+
+### Fixed
+
+- **Telegram messages sent just before a stop.** ([#1300](https://github.com/foolzzz/looper/pull/1300); review follow-up #989)
+  - An update sent shortly before the channel stopped is no longer dropped as stale after a restart: its age is fixed at the stop and kept until it is handled, also across a second stop.
+  - The channel's own inbox file gains an `age_at_stop` column on first open; no main database or schema change.
+  - No model-visible change.
+
 ## [2.14.164] - 2026-11-12
 
 ### Fixed
