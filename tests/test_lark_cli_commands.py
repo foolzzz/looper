@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from lark_cli_stand_in import BOT_OPEN_ID, OPEN_ID, OTHER
+from lark_cli_stand_in import BOT_MENTION, BOT_OPEN_ID, OPEN_ID, OTHER
 from looper.agents.bus import MessageBus
 from looper.agents.channels import lark_cli, lark_settings
 from looper.agents.channels.allowlist import SenderAllowlist
@@ -132,6 +132,62 @@ def test_direct_messages_and_group_mentions_of_the_bot_reach_the_manager(tmp_pat
 def _group_envelope(kind: MessageType, payload: dict[str, Any]) -> MessageEnvelope:
     return MessageEnvelope.create(source=channel_address("lark"), target=channel_address("lark"), message_type=kind,
                                   payload=payload, correlation_id="c1")
+
+
+def test_rich_posts_and_unsupported_types_through_the_cli_event_stream(
+    tmp_path: Path, lark_cli_stand_in: Path,
+) -> None:
+    post = ('Weekly\n**Hello** [Spec](https://example.com/spec)\n![Image](img_v3_a1)\n\n'
+            '```go\n    fmt.Println(1)\n```\n<file key="file_v3_b2" name="a \\"q\\".pdf"/>')
+    event = {"type": "im.message.receive_v1", "chat_id": "oc_dm", "chat_type": "p2p",
+             "sender_id": OPEN_ID, "sender_type": "user"}
+    events = [
+        {**event, "message_id": "om_post", "message_type": "post", "content": post},
+        {**event, "message_id": "om_group_post", "chat_id": "oc_group", "chat_type": "group",
+         "message_type": "post", "content": "@@HelperBot 看看", "mentions": [BOT_MENTION]},
+        {**event, "message_id": "om_sticker", "message_type": "sticker", "content": "[Sticker]"},
+        {**event, "message_id": "om_image", "message_type": "image", "content": "[Image: img_v3_a1]"},
+        {**event, "message_id": "om_refused", "sender_id": OTHER,
+         "message_type": "sticker", "content": "[Sticker]"},
+        {**event, "message_id": "om_bot", "sender_type": "bot", "message_type": "post", "content": post},
+        {**event, "message_id": "om_unaddressed", "chat_type": "group", "message_type": "post", "content": post},
+        {"schema": "2.0", "event": {"message": {"message_type": "interactive"}}},
+    ]
+    world_file = tmp_path / "world.json"
+    world = json.loads(world_file.read_text())
+    world["events"] = events
+    world_file.write_text(json.dumps(world))
+    rejected: list[tuple[str, str | None]] = []
+
+    async def on_rejected(sender_id: str, chat_id: str | None) -> None:
+        rejected.append((sender_id, chat_id))
+
+    async def main() -> list[MessageEnvelope]:
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = _adapter(tmp_path, on_rejected=on_rejected)
+        adapter._bus, adapter._running = bus, True
+        try:
+            await asyncio.wait_for(adapter._run_event_consumer(), 10)
+            await asyncio.wait_for(asyncio.gather(*adapter._reactions._pending), 10)
+            return bus.journal.undelivered()
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    direct, group = asyncio.run(main())
+    assert direct.payload["text"] == (
+        'Weekly\n**Hello** [Spec](https://example.com/spec)\n[image 1]\n\n'
+        '```go\n    fmt.Println(1)\n```\n[file 2: a "q".pdf]\n\n'
+        '(Looper cannot receive images or files yet: [image 1], [file 2: a "q".pdf] not received.)')
+    assert group.payload["text"] == "看看"
+    assert group.payload["channel_context"]["sender_name"] == "Ada Lovelace"
+    assert rejected == [(OTHER, None)]
+    assert sorted(_calls(lark_cli_stand_in)) == sorted([
+        consume_command()[1:], reaction_command("om_post")[1:], reaction_command("om_group_post")[1:],
+        ["contact", "+search-user", "--as", "user", "--user-ids", OPEN_ID],
+        *[send_command(chat_id="oc_dm", text=f"暂不支持这类飞书消息（{kind}），请发文字或富文本。")[1:]
+          for kind in ("sticker", "image")],
+    ])
 
 
 def test_in_a_group_the_status_and_the_answer_reply_to_the_message_and_progress_goes_to_the_chat(

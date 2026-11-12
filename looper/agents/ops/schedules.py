@@ -33,7 +33,7 @@ from ...db import chat_bindings as db_chat_bindings, connection as db_connection
 from ...db import tasks as db_tasks
 from .. import cron, schedules
 from ..managers_api import ManagerTools
-from ..message import builtin_channel_id, is_lark, parse_channel_id
+from ..message import is_lark, parse_channel_id
 from ..project_execution import format_usd
 from ..schedule_templates import MissingDirectory, effective_schedule, merge_selection
 from ..tiers.journal import clip
@@ -183,26 +183,12 @@ async def _authorize(call: Call) -> None:
             raise OpError(ErrorCode.FORBIDDEN, "this Manager manages agent schedules only; use the general "
                                                "Manager or the dashboard for command or gated schedules")
     if action in ("create", "update", "enable", "run"):
-        target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row else None
+        target = ({"channel": row["notify_channel"], "chat": row["notify_chat"]}
+                  if row and row["notify_channel"] and row["notify_chat"] else None)
         # Only create/update write fields; enable/run use the stored notification destination.
         if action in ("create", "update"):
             target = (arguments.get("fields") or {}).get("notify_target", target)
-        await _check_notify_target(call, target)
-
-
-async def _check_notify_target(call: Call, target: Any) -> None:
-    """Bound chats are destinations only for their own task-scoped Manager."""
-    if call.scope.tool_scope is not ManagerTools.TASKS or not isinstance(target, Mapping):
-        return
-    if not isinstance(target.get("channel"), str) or not isinstance(target.get("chat"), str):
-        return  # ordinary field validation reports malformed targets
-    await answered(schedules._notify_target(target))
-    channel_id = builtin_channel_id(target["channel"])
-    for binding in await db_chat_bindings.list_bindings():
-        if (binding["channel_id"] == channel_id and binding["chat_id"] == target["chat"]
-                and binding["manager_id"] != call.manager_id):
-            raise OpError(ErrorCode.FORBIDDEN, "this chat is bound to another Manager; use a chat bound to this "
-                                               "Manager, the general Manager or the dashboard")
+        await _check_notify_target(call, {"notify_target": target})
 
 
 async def _schedule(arguments: Mapping[str, Any], call: Call | None = None) -> dict[str, Any]:
@@ -325,9 +311,10 @@ async def _create(call: Call) -> dict[str, Any]:
             bindings = await db_chat_bindings.list_bindings(turn.channel_id, call.manager_id)
             if any(binding["chat_id"] == turn.chat for binding in bindings):
                 asked["chat"] = turn.chat
-        if any((t["channel"], t["chat"]) == (asked["channel"], asked["chat"]) for t in await schedules.notify_targets()):
+        if any((t["channel"], t["chat"]) == (asked["channel"], asked["chat"])
+               for t in await schedules.notify_targets(manager_id=_notify_manager_id(call))):
             data["notify_target"] = asked
-    await _check_notify_target(call, data.get("notify_target"))
+    await _check_notify_target(call, data)
     view = (await answered(schedules.create_schedule(project["id"], data, created_via="manager")))["schedule"]
     turn.created.add(view["schedule_id"])
     turn.blocks.append("\n".join([
@@ -348,6 +335,7 @@ def _refuse_other_owner_template(call: Call, row: Mapping[str, Any], data: Mappi
 
 async def _update(call: Call, row: Mapping[str, Any], expected: Mapping[str, str]) -> dict[str, Any]:
     data = _fields(call.arguments, "update")
+    await _check_notify_target(call, data)
     _refuse_other_owner_template(call, row, data)
     before = (await answered(schedules.get_schedule(row["id"])))["schedule"]
     view = (await answered(schedules.update_schedule(row["id"], data, **expected)))["schedule"]
@@ -358,6 +346,26 @@ async def _update(call: Call, row: Mapping[str, Any], expected: Mapping[str, str
                                        f"它现在{'已启用' if view['enabled'] else '是停用的'}。"]))
     return {"schedule": _listed(await _in_scope(call, view)), "changed": [_ARGUMENT.get(key, key) for key in changed],
             "shown_to_user": "Looper adds what changed, before and after, after your reply; do not repeat it."}
+
+
+def _notify_manager_id(call: Call) -> str | None:
+    # Project-scoped task Managers also need a notification boundary independent of task ownership.
+    return call.manager_id if call.scoped or "looper_projects" in call.scope.read_only else None
+
+
+async def _check_notify_target(call: Call, data: Mapping[str, Any]) -> None:
+    manager_id = _notify_manager_id(call)
+    if manager_id is None:
+        return
+    target = data.get("notify_target")
+    if target is None:
+        return
+    if not isinstance(target, dict):
+        await answered(schedules._notify_target(target))
+        return
+    if not any((t["channel"], t["chat"]) == (target.get("channel"), target.get("chat"))
+               for t in await schedules.notify_targets(manager_id=manager_id)):
+        raise OpError(ErrorCode.FORBIDDEN, "this Manager may notify only chats explicitly bound to itself")
 
 
 def _raises_a_cap(row: Mapping[str, Any], data: Mapping[str, Any], project_cap: float | None) -> bool:
@@ -399,6 +407,7 @@ async def _confirming(call: Call) -> str | None:
         return None
     row = await _schedule(call.arguments, call)
     data = _fields(call.arguments, "update")
+    await _check_notify_target(call, data)
     _refuse_other_owner_template(call, row, data)
     # Refused as the update would refuse it, before anything is asked.
     fields, profiles, task_limits = await answered(schedules._fields(data, update=True))

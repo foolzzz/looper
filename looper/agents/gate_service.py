@@ -92,7 +92,7 @@ def gate_chat(task: Mapping[str, Any], dashboard: GateChat | None) -> GateChat |
                 channel = NotifyChannel(channel)
             except ValueError:
                 return None
-            kind = TargetKind.USER if channel.is_lark else TargetKind.CHAT
+            kind = TargetKind.USER if channel.is_lark and not chat.startswith("oc_") else TargetKind.CHAT
             return GateChat(channel, NotifyTarget(kind, chat))
         return dashboard
     channel = notify_channel(task.get("origin_channel_id"))
@@ -103,7 +103,7 @@ def gate_chat(task: Mapping[str, Any], dashboard: GateChat | None) -> GateChat |
 
 
 def _dashboard_chat(raw: Any) -> GateChat | None:
-    """The stored setting as a chat: a Lark user's open_id gets a direct message, a Telegram chat id its chat."""
+    """The stored setting as a chat: a Lark open_id gets a direct message; native chat ids get their chat."""
     try:
         value = json.loads(raw) if isinstance(raw, str) else None
         channel = NotifyChannel(value.get("channel"))
@@ -112,7 +112,7 @@ def _dashboard_chat(raw: Any) -> GateChat | None:
         return None
     if not (isinstance(chat, str) and chat):
         return None
-    kind = TargetKind.USER if channel.is_lark else TargetKind.CHAT
+    kind = TargetKind.USER if channel.is_lark and not chat.startswith("oc_") else TargetKind.CHAT
     return GateChat(channel, NotifyTarget(kind, chat))
 
 

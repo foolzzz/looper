@@ -2916,8 +2916,12 @@ often the largest share of a run's cost; a profile a schedule chose cannot be de
 (`{worker, reviewer}`, each 1–64 or null for the default: how many of each
 run's task's Workers and Reviewers run at once, `schedule_task_limits`); and, from S2, an optional
 `gate_command` with `gate_timeout_seconds` (1–600, default 60), an optional `daily_budget_usd`, `notify` (`failures`,
-`alerts`, `always`, `never`) and a `notify_target` (a channel and chat; none: the
-dashboard only). A new schedule is disabled.
+`alerts`, `always`, `never`) and a `notify_target` (a channel and chat: an allowlisted
+sender's direct chat or a chat explicitly bound to a Manager on a built-in channel;
+none: the dashboard only). Bound chats use the binding's bot; removing the binding
+keeps the saved target, marks it unavailable and logs failed delivery without rerouting.
+A tasks-scope Manager may select only its own bound chats; the dashboard/operator API
+may select any offered target. A new schedule is disabled.
 
 A schedule has an immutable `manager_id`, chosen when created and defaulting
 to `manager` when omitted. The dashboard/operator API can choose its owner;
@@ -3135,12 +3139,9 @@ evaluation is required before the original schedule requirement is complete.
   raises none), recovered the same way. The text is code-written (the schedule, the run's status, a
   summary snippet, its cost and the link to the task, absolute (`links`)). It goes through
   the channel registry to the running Telegram or Lark channel
-  (`ChannelAdapter.notify`: Telegram's bot to the configured chat; Lark's
-  bot to an `ou_` user open id or an `oc_` chat id; other prefixes are refused),
-  to a sender the built-in channel's allowlist allows or a chat explicitly
-  bound to that bot. A `tasks` Manager may target only its own bound chats;
-  the operator API and `all` Managers may select any offered target. Every
-  message is recorded in
+  (`ChannelAdapter.notify`: Telegram's bot to the user's private chat, Lark's
+  `lark-cli im +messages-send --as bot --user-id`), to a chat the channel's
+  sender allowlist allows. Every message is recorded in
   `schedule_notifications`: `sent`, `failed` with the reason (such as a channel
   that is not running), or `dashboard` (no chat, or an alert under `never`).
 - **Deleting.** A project with schedules is not deleted (409) until they are.
@@ -3901,21 +3902,8 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
   key: the trail outlives a deleted Manager).
 - **What a Manager may use and see.** Two independent settings of a row in
   `managers`. `tools` (`all` / `tasks`) says which tools it has: `all` is the
-  whole catalog, `tasks` the task tools, `looper_schedules`, `looper_confirm`
-  and the read-only `looper_projects` list / get. With `tools = tasks`,
-  schedules follow `task_scope`: `projects` admits only schedules in
-  `scope_project_ids`, whoever created them; `own` admits only schedules
-  whose immutable `manager_id` is this Manager's. Creation assigns that id
-  and, for `projects`, requires one of those projects. Within that boundary,
-  agent schedules without a gate can be managed; command schedules and agent
-  schedules with a gate can only be listed or read. Creating or updating with
-  `command`, `env`, `env_file`, `gate_command` or `gate_timeout_seconds`, or
-  changing, enabling, disabling, running, resetting or deleting a command or
-  gated schedule, is `forbidden`. Its scope contract also prohibits using
-  schedules for server shell commands or file operations. Agent Profiles,
-  providers,
-  settings and skills remain the general Manager's or dashboard's business.
-  `task_scope` says which tasks it sees and may
+  whole catalog, `tasks` the task tools, `looper_confirm` and the read-only
+  `looper_projects` list / get. `task_scope` says which tasks it sees and may
   act on: `all` every task, `own` only the tasks it created, and `projects`
   only tasks in `scope_project_ids`, whoever created them (including API
   clients and schedules). A `projects` scope works only with `tools = tasks`:
@@ -3931,9 +3919,8 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
   projects for `projects`. Deleting a project removes it from every Manager's
   scope and bumps `revision`; the confirmation names the affected Managers.
   A scope emptied by deletion stays `projects` with `[]`: readable, with no
-  visible tasks or schedules and no task or schedule creation until the operator
-  chooses projects in Settings → Managers. Renaming it remains allowed. Every
-  change to what
+  visible tasks and no task creation until the operator chooses projects in
+  Settings → Managers. Renaming it remains allowed. Every change to what
   a Manager may do (`tools`, `task_scope`, `scope_project_ids`, `task_policy`, `enabled`, a
   template saved or removed) bumps `managers.revision`; `ManagerOps` compares
   it at each call and, when it differs, rebuilds its scope from the database
@@ -3958,7 +3945,7 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
 | `looper_catalog` | `list` the items (kind, qualified name, description, `manager_install_count`) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`) | list reads; write |
 | `looper_costs` | One task's cost (`task_id`: `GET /api/tasks/:id`'s `cost`), or what the runs started in a range cost (`period` `today`, `this_week` or `this_month` from the server's local midnight, or `since` and `until`, a day or an ISO date-time, a day as `until` counting whole; all time by default), money and subscription equivalent apart as the overview's today: by project (their tasks' runs; the total also counts the Manager's), or with `project` its total and its 10 costliest tasks (`llm_records.spend_since`, `task_spend`) | read |
 | `looper_settings` | `view` the shared defaults and each role's layer, what applies to each role with its source and its timeout, or with `project` its layer, its roles' layers and its allowed profiles; `set` `values` on one layer (neither `role` nor `project`: the shared defaults; `role`; `project`; both: the role in the project): `profile` by id or name, `harness_prompt`, `env` (the layer's whole `{NAME: value}`), `run_budget_usd`, `max_concurrency` (the `worker` or `reviewer` role: the default for every task), `timeout_seconds` (a role alone, as Settings → Roles saves it), null clearing one, written by `agent_settings.update_system`, `update_role` or `update_project` and letting what waits check again after a limit; `allowed_profiles`: `add` profiles to a project's list or `remove` some (one not on it is refused), then the whole list is set by `projects.set_allowed_profiles`, which checks each. The answer gives each value before and after and what now applies | view reads; write; the shared defaults, a role's default concurrency limit and a higher or removed spend cap (any run of the layer's roles, resolved through the layers) are high, shown before → after |
-| `looper_schedules` | Available with `tools = tasks` for agent schedules within its project or ownership boundary; command schedules there are read-only (`list` / `get`), with other actions refused as `forbidden`. An `all` Manager keeps the full behavior below. `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, kind, enabled, user gates, next fire, last run (kind and exit code included), failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the `fields` that `POST /api/v1/schedule_admin/create` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, pre-run gate, user gates, caps, notify, profiles, task limits for agent schedules; kind, command in a verbatim code fence, timeout, env keys only, env file, success deadline and alert thresholds for command schedules) and 「要启用吗？回复「启用」就启用」 to the reply, and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made through a built-in Telegram or Lark bot without a `notify_target`, it defaults to the requesting sender when the channel's allowlist permits it; a `tasks` Manager answering in a group explicitly bound to it defaults to that group instead. Explicitly bound chats are eligible notification targets. An `all` Manager keeps the sender default, and added bots do not set this default; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (commands in verbatim code fences, and the next 3 fires for a new rule or zone); every command schedule update also says it uses no agent or model spend; `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: a command schedule shows its exact command in a code fence, directory, timeout and env keys only (plus env file when set); enabling also shows its success deadline and alert thresholds, and both confirmations say it runs without an agent or model spend. An agent schedule keeps its task and spending confirmation. The call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one (the user confirms first for a running command schedule, including after a refused delete); `delete` one (`schedules.delete_schedule`; a command schedule with a running run is refused (`conflict`) before anything is asked, saying it can be deleted once the command finishes, that disabling stops new fires, and that a queued run still starts after the running one even when the schedule is disabled); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (for an agent schedule a running task goes on and ends normally, a queued or gating run starts no task, and its tasks stay; for a command schedule a queued run does not execute and it has no tasks) and that its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, a disable of a running command schedule, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
+| `looper_schedules` | `list` every project's schedules as the Schedules page does (`schedules.list_all_schedules`; by `project`, by `enabled`): id, name, project, rule, zone, the rule in words, kind, enabled, user gates, next fire, last run (kind and exit code included), failures in a row; `get` one (`GET /api/schedules/:id`, the requirement cut to 1,000 characters) with its 5 latest runs, the routine skips left out and counted, as its page shows them; `create` one in an existing `project` from `fields` (the `fields` that `POST /api/v1/schedule_admin/create` takes, `profiles` being its `profile_overrides`, and `task_limits`), always disabled (`created_via` `manager`): Looper adds its configuration (project, directory, the rule in words and its next 3 fires in its zone, overlap, pre-run gate, user gates, caps, notify, profiles, task limits for agent schedules; kind, command in a verbatim code fence, timeout, env keys only, env file, success deadline and alert thresholds for command schedules) and 「要启用吗？回复「启用」就启用」 to the reply, and the turn that created it may neither `enable` nor `run` it (`conflict`: the user has not seen it); made from a Telegram or Lark chat without a `notify_target`, it tells whoever asked when their channel's allowlist lets them; `update` the `fields` given (`schedules.update_schedule`; null clears one, `profiles` and `task_limits` are replaced whole), and Looper adds each change before → after (commands in verbatim code fences, and the next 3 fires for a new rule or zone); every command schedule update also says it uses no agent or model spend; `enable` one (as its switch does; the answer says when it was so already) or `run` it now (`schedules.run_now`: the dashboard's Run now, through the overlap check, its next fire time left; the answer is the run), each asking first: a command schedule shows its exact command in a code fence, directory, timeout and env keys only (plus env file when set); enabling also shows its success deadline and alert thresholds, and both confirmations say it runs without an agent or model spend. An agent schedule keeps its task and spending confirmation. The call answers `needs_confirmation` and does nothing until the user's next message confirms (a schedule already enabled is not asked), and the turn that created a schedule may do neither (`conflict`); `disable` one (the user confirms first for a running command schedule, including after a refused delete); `delete` one (`schedules.delete_schedule`; a command schedule with a running run is refused (`conflict`) before anything is asked, saying it can be deleted once the command finishes, that disabling stops new fires, and that a queued run still starts after the running one even when the schedule is disabled); `reset_planner_session` clears its stored Planner session and holder after the user confirms in their next message. The reset confirmation says whether a session is stored, that the next run starts fresh, and that a run in flight keeps its own session until it ends and cannot write back. A schedule is named by its id, or by its name ignoring case, within `project` when given; a name more than one project has is refused (`invalid`) naming each with its project and id, an unknown one (`not_found`) naming the schedules there are. The delete confirmation shows its name, project, rule and zone, whether it is enabled, the runs in progress (for an agent schedule a running task goes on and ends normally, a queued or gating run starts no task, and its tasks stay; for a command schedule a queued run does not execute and it has no tasks) and that its run history and messages are deleted | list and get read; write; enable, run now, delete, reset_planner_session, a disable of a running command schedule, and an update that raises or removes the run or daily spend cap (checked as the update would be before anything is asked, shown before → after), are high |
 | `looper_config_export` | Write the portable configuration file (`include_projects`: `--include-projects`), never with secrets (no argument takes them; a secrets argument is `forbidden`), to `<runtime root>/exports/looper-config-<UTC time>-<id>.json`, never to a path from chat; the answer gives its path, format, size, the counts per section, the secret values left as placeholders, the path documents to re-point and how to import it (`loopercli config import`, or Settings → Import / Export) | read |
 | `looper_confirm` | Run the call waiting for confirmation in this chat | — |
 
@@ -5733,8 +5720,9 @@ implementation supplies it and is retested.
   retried and never becomes a chat message; the first failure of a run of the
   channel is logged, naming the missing scope when lark-cli reports one. A
   rejected sender, a Lark group message that does not @-mention the bot, a
-  Telegram group message and a message that is not handed on (not text,
-  empty) get no reaction.
+  Telegram group message and an empty message get no reaction. An admitted
+  unsupported Lark type gets a reply instead, with no reaction or Manager turn
+  (unless its chat is silent or its Manager is turned off).
 - **Telegram**: the token is the one saved in Settings → Channels
   (`channel_secrets`; the API only says whether one is set), else the env var
   named by `bot_token_env` (default `LOOPER_TELEGRAM_BOT_TOKEN`). The Bot API
@@ -5786,10 +5774,21 @@ implementation supplies it and is retested.
   own open_id (from the bot's info at startup; never a match on names).
   Every other group message is ignored entirely: no reaction, nothing stored,
   no Manager turn, no record of who wrote. The bot's mention is taken out of
-  the text (`@name` as lark-cli shows it, else its `@_user_N` placeholder),
+  the text (`@name` as lark-cli shows it, else its `@_user_N` placeholder;
+  rich posts also handle `@@name` and `<at>` tags),
   and the Manager is told the sender's name (`contact +search-user`, the
-  name the allowlist resolves, else the open_id after 5 s). Other message
-  types and bots' messages are ignored too. It sends with `lark-cli im
+  name the allowlist resolves, else the open_id after 5 s). Text and rich-text
+  posts reach the Manager. Posts keep lark-cli's rendered titles, paragraphs,
+  links and fenced code, with other mentions shown as `@name`. Inline images
+  and attached files become numbered `[image N]` / `[file N: name]` placeholders,
+  followed by a line saying Looper cannot receive images or files yet.
+  Other types receive 「暂不支持这类飞书消息（<type>），请发文字或富文本。」
+  as text, in reply to the message in a group or sent to the direct chat,
+  after admission and routing; silent chats receive nothing, and a turned-off
+  Manager gets only the usual turned-off reply. Bots' messages, interactive
+  cards and empty messages are ignored. The bot-token channel renders posts
+  and resource markers into the same notation before the shared adapter reads
+  them. It sends with `lark-cli im
   +messages-send --as bot`: a reply as Markdown (`--markdown`, a rich-text
   post) to the chat its message came from, a schedule's message as text to a
   user (`--user-id`); a failed send carries lark-cli's reason. In a group the

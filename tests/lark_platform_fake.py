@@ -256,15 +256,17 @@ class FakeLarkPlatform:
                                   ("message_id", message_id), ("trace_id", "trace_test"),
                                   ("sum", str(split)), ("seq", str(seq))], payload=payload[start:end]))
 
-    async def push_message(self, *, text: str, sender: str = "ou_sender", chat_type: str = "p2p",
+    async def push_message(self, *, text: str = "", sender: str = "ou_sender", chat_type: str = "p2p",
                            chat_id: str = "oc_chat", message_id: str | None = None,
                            mentions: Iterable[dict[str, Any]] = (), parent_id: str | None = None,
-                           root_id: str | None = None, event_id: str | None = None, split: int = 1) -> None:
+                           root_id: str | None = None, event_id: str | None = None, split: int = 1,
+                           message_type: str = "text", content: str | None = None) -> None:
         """Deliver a schema-2.0 message, optionally split across protocol frames."""
         message_id = message_id or f"om_fake_{self._event_count + 1}"
         event_id = event_id or f"ev_fake_{self._event_count + 1}"
         message = {"message_id": message_id, "chat_id": chat_id, "chat_type": chat_type,
-                   "message_type": "text", "content": json.dumps({"text": text}), "mentions": list(mentions)}
+                   "message_type": message_type, "content": content if content is not None else json.dumps({"text": text}),
+                   "mentions": list(mentions)}
         if parent_id:
             message["parent_id"] = parent_id
         if root_id:

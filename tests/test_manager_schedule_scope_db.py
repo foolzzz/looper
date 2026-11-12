@@ -263,7 +263,8 @@ def test_command_confirmation_is_refused_after_tools_are_narrowed(monkeypatch, t
 @pytest.mark.parametrize("channel,sender", [("lark", "ou_0123456789abcdef"), ("telegram", "12345")])
 @pytest.mark.parametrize("group", [False, True])
 @pytest.mark.parametrize("tools", ["tasks", "all"])
-def test_scoped_chat_schedule_keeps_default_notification(monkeypatch, tmp_path, channel, sender, group, tools):
+def test_scoped_chat_schedule_default_notification_respects_binding(
+        monkeypatch, tmp_path, channel, sender, group, tools):
     async def test(pool):
         from looper.agents.serve import seed_channel_configs
         from looper.db import chat_bindings
@@ -277,7 +278,9 @@ def test_scoped_chat_schedule_keeps_default_notification(monkeypatch, tmp_path, 
                            json.dumps(config), f"channel-{channel}")
         native_chat = (("oc_project" if channel == "lark" else "-98765") if group
                        else "oc_direct" if channel == "lark" else sender)
-        expected_chat = native_chat if tools == "tasks" and group else sender
+        default_chat = native_chat if tools == "tasks" and group else sender
+        # Scoped Managers may notify only their own bindings, even for allowlisted senders.
+        expected_target = {"channel": channel, "chat": default_chat} if default_chat == native_chat else None
         # Bind the chat to this Manager, as the channel router does before the turn reaches it.
         async with pool.acquire() as conn, conn.transaction():
             await chat_bindings.put_binding(f"channel-{channel}", native_chat, REVIEW, conn=conn)
@@ -291,7 +294,11 @@ def test_scoped_chat_schedule_keeps_default_notification(monkeypatch, tmp_path, 
             chat.ops.end_turn(turn)
         sid = _ok(created)["schedule"]["schedule_id"]
         view = (await schedules.get_schedule(sid))["schedule"]
-        assert view["notify_target"] == {"channel": channel, "chat": expected_chat}
+        assert view["notify_target"] == expected_target
+        if expected_target is None:
+            (refused,) = await chat.say("Notify the sender", (TOOL, {"action": "update", "schedule": sid,
+                "fields": {"notify_target": {"channel": channel, "chat": sender}}}))
+            assert _error(refused) == "forbidden"
         assert view["manager_id"] == REVIEW
         from looper.agents.schedule_notify import Notifier
 
@@ -304,8 +311,12 @@ def test_scoped_chat_schedule_keeps_default_notification(monkeypatch, tmp_path, 
         notifier = Notifier(sender=send, clock=lambda: datetime.now(timezone.utc))
         run_id = await _run_of(pool, sid, "completed", summary="Project progress report")
         await notifier.run_ended(run_id)
-        assert sent == [(f"channel-{channel}", expected_chat)]
         (notice,) = await db_schedules.list_notifications(sid, limit=5)
-        assert (notice["chat"], notice["status"]) == (expected_chat, "sent")
+        if expected_target is None:
+            assert sent == []
+            assert (notice["channel"], notice["chat"], notice["status"]) == (None, None, "dashboard")
+        else:
+            assert sent == [(f"channel-{channel}", default_chat)]
+            assert (notice["chat"], notice["status"]) == (default_chat, "sent")
 
     run_db(test, monkeypatch, timeout=30)

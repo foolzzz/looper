@@ -40,6 +40,7 @@ import asyncpg
 from ..paths import home_runtime_root
 from ..db import channel_configs as db_channel_configs, connection as db_connection, llm_records as db_llm_records
 from ..db import projects as db_projects, schedules as db_schedules
+from ..db import chat_bindings as db_chat_bindings
 from . import cron
 from .agent_settings import CONCURRENCY_MAX, TASK_LIMIT_ROLES, budget_usd
 from .channels.allowlist import SENDER_ID_FORMATS, sender_ids
@@ -301,18 +302,12 @@ def local_midnight(now: datetime | None = None) -> datetime:
 
 async def _schedule_answer(schedule_id: str, *, runtime_root: Path | None = None) -> dict[str, Any]:
     row = await _existing(schedule_id)
-    latest = (await db_schedules.latest_runs([schedule_id])).get(schedule_id)
-    last_run = (await _run_views([latest], runtime_root=runtime_root))[0] if latest else None
-    spent = await db_schedules.spent_since(db_connection.get_pool(), schedule_id, local_midnight())
-    return {"schedule": schedule_view(row, last_run, spent_today=spent, default_timeout=await default_run_timeout())}
+    return {"schedule": (await _schedule_views([row], runtime_root=runtime_root))[0]}
 
 
-async def notify_targets() -> list[dict[str, Any]]:
-    """The senders each built-in bot allows and its explicitly bound chats."""
-    from ..db import chat_bindings
-
+async def notify_targets(*, manager_id: str | None = None) -> list[dict[str, Any]]:
+    """Built-in bots' allowlisted direct chats and explicitly Manager-bound chats."""
     targets = []
-    bindings = await chat_bindings.list_bindings()
     for row in await db_channel_configs.list_configs():
         channel = row["channel_type"]
         if channel not in SENDER_ID_FORMATS or row["channel_id"] != builtin_channel_id(channel):
@@ -324,9 +319,20 @@ async def notify_targets() -> list[dict[str, Any]]:
         label = "Telegram" if channel == "telegram" else "Lark"
         targets += [{"channel": channel, "chat": chat, "label": f"{label} · {chat}",
                      "channel_enabled": bool(row.get("enabled"))} for chat in chats]
-        targets += [{"channel": channel, "chat": binding["chat_id"], "label": f"{label} · {binding['chat_id']}",
-                     "channel_enabled": bool(row.get("enabled"))} for binding in bindings
-                    if binding["channel_id"] == row["channel_id"] and binding["chat_id"] not in chats]
+    offered = {(target["channel"], target["chat"]) for target in targets}
+    bindings = await db_chat_bindings.notification_targets()
+    for binding in bindings:
+        channel, chat = binding["channel_type"], binding["chat_id"]
+        if (channel not in SENDER_ID_FORMATS or binding["channel_id"] != builtin_channel_id(channel)
+                or (channel, chat) in offered):
+            continue
+        label = "Telegram" if channel == "telegram" else "Lark"
+        targets.append({"channel": channel, "chat": chat,
+                        "label": f"{label} · {binding['chat_name'] or chat} (bound to {binding['manager_name']})",
+                        "channel_enabled": bool(binding["enabled"])})
+    if manager_id is not None:
+        owned = {(b["channel_type"], b["chat_id"]) for b in bindings if b["manager_id"] == manager_id}
+        targets = [target for target in targets if (target["channel"], target["chat"]) in owned]
     return targets
 
 
@@ -512,7 +518,7 @@ async def _notify_target(raw: Any) -> dict[str, str | None]:
     allowed = {(target["channel"], target["chat"]) for target in await notify_targets()}
     if (raw["channel"], raw["chat"]) not in allowed:
         raise RequestError(HTTP_400, f"{raw['channel']} chat {raw['chat']!r} is not one the channel allows: add the "
-                                     "sender in Settings → Channels first")
+                                     "sender or bind the chat to a Manager in Settings → Channels first")
     return {"notify_channel": raw["channel"], "notify_chat": raw["chat"]}
 
 
@@ -637,7 +643,10 @@ async def _schedule_views(rows: list[dict[str, Any]], *, runtime_root: Path | No
     views = dict(zip(latest, await _run_views(list(latest.values()), runtime_root=runtime_root)))
     spent = await db_schedules.spent_since_each(db_connection.get_pool(), ids, local_midnight())
     default = await default_run_timeout()
-    return [schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]], default_timeout=default)
+    targets = {(target["channel"], target["chat"]) for target in await notify_targets()}
+    return [{**schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]], default_timeout=default),
+             "notify_target_available": not row.get("notify_channel") or
+                 (row["notify_channel"], row["notify_chat"]) in targets}
             for row in rows]
 
 

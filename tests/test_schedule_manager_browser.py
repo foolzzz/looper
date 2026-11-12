@@ -31,7 +31,7 @@ def dashboard(dashboard_url):  # noqa: F811
                   "min_interval_seconds": 300, "min_interval_gated_seconds": 60, "max_parallel_runs_limit": 10,
                   "concurrency_max": 100, "gate_command_max_chars": 2000, "gate_timeout_max_seconds": 300,
                   "gate_timeout_default_seconds": 30, "run_timeout_max_seconds": 86400,
-                  "roles": ["planner", "worker", "reviewer"], "notify_targets": []}
+                  "roles": ["planner", "worker", "reviewer"], "notify_targets": state.setdefault("notify_targets", [])}
 
         def respond(route):
             path = route.request.url.split("/api/v1/")[-1]
@@ -59,7 +59,7 @@ def dashboard(dashboard_url):  # noqa: F811
                     "description": "Every hour (UTC)", "enabled": False, "next_fire_at": None, "last_run": None,
                     "work_dir": "", "max_parallel_runs": 3, "run_budget_usd": None, "daily_budget_usd": None,
                     "profile_overrides": {}, "task_limits": {"worker": None, "reviewer": None},
-                    "gate_command": None, "gate_timeout_seconds": None, "notify_target": None,
+                    "gate_command": None, "gate_timeout_seconds": None, "notify_target": body["fields"].get("notify_target"),
                     "spent_today_usd": 0, "consecutive_failures": 0,
                     "planner_session": {"active": False}, "alerts": {"failures_since": None, "stale_since": None}}
                 state["schedules"].append(schedule)
@@ -124,6 +124,31 @@ def new_schedule(page, base):
     page.get_by_label("Name *", exact=True).fill("Hourly review")
     page.get_by_label("Rule (cron) *", exact=True).fill("0 * * * *")
     page.get_by_label("Requirement *", exact=True).fill("Review synthetic reports.")
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
+def test_bound_target_stays_visible_as_unavailable_after_binding_removal(dashboard, tmp_path, width):
+    page, base, state = dashboard
+    page.set_viewport_size({"width": width, "height": 900})
+    state["notify_targets"].append({"channel": "lark", "chat": "oc_x",
+        "label": "Lark · Project reports (bound to Reports)", "channel_enabled": True})
+    new_schedule(page, base)
+    page.get_by_label("Send to", exact=True).select_option(label="Lark · Project reports (bound to Reports)")
+    page.get_by_role("button", name="Create", exact=True).click()
+    page.wait_for_function("document.body.innerText.includes('Hourly review')")
+    assert state["schedules"][0]["notify_target"] == {"channel": "lark", "chat": "oc_x"}
+    state["notify_targets"].clear()
+    state["schedules"][0]["notify_target_available"] = False
+    page.reload()
+    target = page.get_by_label("Send to", exact=True)
+    assert target.locator("option:checked").inner_text() == "lark · oc_x (unavailable)"
+    assert "Manager binding was removed" in page.inner_text("body")
+    target.scroll_into_view_if_needed()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.screenshot(path=str(tmp_path / "unavailable-target.png"), full_page=True)
+    page.goto(f"{base}/#schedules/sched-example")
+    page.get_by_role("heading", level=1, name="Hourly review").wait_for()
+    assert "oc_x (unavailable)" in page.inner_text("body")
 
 
 @pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
