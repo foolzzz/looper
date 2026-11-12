@@ -274,6 +274,31 @@ def test_size_cap_evicts_only_the_oldest_byte_budget(monkeypatch):
     run_db(check, monkeypatch, timeout=60)
 
 
+def test_size_cap_backfills_rows_from_an_older_writer(monkeypatch):
+    async def check(pool):
+        await system_settings.put_settings({"llmrec.max_total_mb": "256"}, pool=pool)
+        # Scale the cap down so a small fixture can exercise the real eviction path.
+        monkeypatch.setattr(housekeeping, "MIB", 128)
+        fill = llm_requests.fill_missing_stored_bytes
+        monkeypatch.setattr(llm_requests, "fill_missing_stored_bytes", lambda conn: fill(conn, batch=1))
+        old, _ = _capture(1, system="s" * 32000)
+        survivor, expected = _capture(2, route="b" * 22)
+        await llm_requests.write_batch([old, survivor], pool=pool)
+        await pool.execute("UPDATE llm_requests SET stored_bytes = 0")
+        await pool.execute("UPDATE llm_request_parts SET stored_bytes = 0")
+        async with pool.acquire() as conn:
+            assert await llm_requests.logical_bytes(conn) == 0
+        report = housekeeping.Report()
+        await housekeeping._prune_llm_requests(report, datetime.now(timezone.utc))
+        assert report.llm_requests == report.llm_routes == 1
+        assert await pool.fetchval("SELECT proxy_seq FROM llm_requests") == 2
+        assert await pool.fetchval("SELECT min(stored_bytes) FROM llm_requests") > 0
+        assert await pool.fetchval("SELECT min(stored_bytes) FROM llm_request_parts") > 0
+        identifier = await pool.fetchval("SELECT id FROM llm_requests")
+        assert (await llm_requests.get_request(identifier, pool=pool))["request_body"] == expected
+    run_db(check, monkeypatch, timeout=15)
+
+
 def test_byte_budget_counts_parts_only_when_the_route_is_emptied():
     async def check(pool):
         old, _ = _capture(1, system="s" * 32000)

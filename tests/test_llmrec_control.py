@@ -491,3 +491,111 @@ def test_translation_routes_context_suffixed_main_and_background_models(tmp_path
         request = to_chat({'model': name, 'messages': [{'role': 'user', 'content': 'hello'}]},
                           DIALECTS[ChatDialect.GENERIC], route.models, session_id=None)
         assert json.loads(request.body)['model'] == name
+
+
+def test_proxy_recovers_writer_without_replacing_endpoint(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from looper.agents.llmrec import __main__ as process, ROUTES_DIR
+    from tests.fake_model_api import FakeModelAPI, ResponseScript
+
+    async def body():
+        started, failed, recovered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        failed_on_shutdown = asyncio.Event()
+        pool = SimpleNamespace(close=AsyncMock())
+        monkeypatch.setattr(process, 'init_pool', AsyncMock(return_value=pool))
+        stop_handlers = {}
+        monkeypatch.setattr(asyncio.get_running_loop(), 'add_signal_handler',
+                            lambda sig, callback: stop_handlers.setdefault(sig, callback))
+        base_proxy = process.proxy.Proxy
+        proxies, written = [], []
+
+        class ObservedProxy(base_proxy):
+            async def start(self):
+                port = await super().start()
+                proxies.append(self)
+                started.set()
+                return port
+
+        async def write_batch(captures, *, pool):
+            if not failed.is_set():
+                failed.set()
+                raise RuntimeError('sensitive database error')
+            if captures[0].seq == 3 and not failed_on_shutdown.is_set():
+                failed_on_shutdown.set()
+                raise RuntimeError('sensitive database error')
+            written.extend(capture.seq for capture in captures)
+            recovered.set()
+
+        monkeypatch.setattr(process.proxy, 'Proxy', ObservedProxy)
+        monkeypatch.setattr(process.llm_requests, 'write_batch', write_batch)
+        script = [{'type': 'message_start', 'message': {'content': []}}, {'type': 'message_stop'}]
+        async with FakeModelAPI([ResponseScript(events=script) for _ in range(3)]) as upstream:
+            route = RouteFile(id='a' * 22, upstream=upstream.base_url, agent_id='worker-test',
+                              created_at='2026-01-01T00:00:00+00:00')
+            route.write(tmp_path / ROUTES_DIR / f'{route.id}.json')
+            task = asyncio.create_task(process._serve(SimpleNamespace(
+                runtime_root=tmp_path, port=0, check_interval=60), 'disposable'))
+            try:
+                await started.wait()
+                server = proxies[0]
+                async with httpx.AsyncClient(trust_env=False, timeout=2) as client:
+                    base = f'http://127.0.0.1:{server.port}'
+                    before = await client.get(base + '/llmrec/health')
+                    assert before.status_code == 200
+                    url = base + f'/r/{route.id}/messages'
+                    headers = {'authorization': 'Bearer test-key'}
+                    assert (await client.post(url, headers=headers, json={'model': 'test'})).status_code == 200
+                    await failed.wait()
+                    health = await client.get(base + '/llmrec/health')
+                    assert health.status_code == 200
+                    assert (await client.post(url, headers=headers, json={'model': 'test'})).status_code == 200
+                    await recovered.wait()
+                    while server.sink.pending:
+                        await asyncio.sleep(.01)
+                    after = (await client.get(base + '/llmrec/health')).json()
+                    assert (after['pid'], after['instance']) == (before.json()['pid'], before.json()['instance'])
+                    assert written == [1, 2] and after['recorded'] == 2
+                    assert (await client.post(url, headers=headers, json={'model': 'test'})).status_code == 200
+                    await failed_on_shutdown.wait()
+                    # Stop during another retry backoff: shutdown must still drain.
+                    assert server.sink.pending == 1
+                    stop_handlers[signal.SIGTERM]()
+                await task
+                assert written == [1, 2, 3]
+                assert server.sink.pending == 0 and server.sink.recorded == 3
+                assert server.sink.write_errors == 2
+            finally:
+                stop_handlers[signal.SIGTERM]()
+                await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 3)
+
+    asyncio.run(asyncio.wait_for(body(), 8))
+
+
+@pytest.mark.parametrize('transition', ['promote', 'cancel', 'end'])
+def test_resident_route_keeps_live_record_until_release(tmp_path, monkeypatch, launch, transition):
+    from looper.agents.llmrec import ROUTES_DIR
+
+    owner = control.ProxyControl(tmp_path, '', enabled=True)
+    monkeypatch.setattr(owner, '_health', AsyncMock(return_value=True))
+    monkeypatch.setattr(owner, '_state', lambda: {'port': 1234})
+    attached = asyncio.run(owner.attach(launch, agent_id='manager-test', task_id=None, reuse=True))
+    path = tmp_path / ROUTES_DIR / f'{attached.llmrec.id}.json'
+    owner.bind(attached.llmrec.id, 11)
+    owner.bind(attached.llmrec.id, 12)
+    assert RouteFile.read(path).record_id == 11
+    owner.bind(attached.llmrec.id, 11)  # Rebinding the live turn must keep the pending turn.
+    assert RouteFile.read(path).record_id == 11
+    if transition == 'cancel':
+        owner.release(12, end_route=False)
+        assert RouteFile.read(path).record_id == 11
+    owner.release(11, end_route=transition == 'end')
+    route = RouteFile.read(path)
+    assert route.record_id == (12 if transition == 'promote' else None)
+    assert route.last_record_id == 11
+    assert bool(route.ended_at) == (transition == 'end')
+    if transition == 'promote':
+        owner.release(11, end_route=False)  # A stale release cannot clear the next turn.
+        assert RouteFile.read(path).record_id == 12
+        owner.release(12, end_route=False)
+        route = RouteFile.read(path)
+        assert route.record_id is None and route.last_record_id == 12

@@ -81,7 +81,7 @@ async def _serve(args, dsn):
                 stopped.set()
 
     connection_task = asyncio.create_task(connect())
-    writer_task = asyncio.create_task(sink.run())
+    writer_task = asyncio.create_task(sink.run(recover=True))
     watch_task = asyncio.create_task(watch())
     try:
         await stopped.wait()

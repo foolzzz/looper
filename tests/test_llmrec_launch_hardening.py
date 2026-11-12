@@ -13,17 +13,18 @@ from looper.agents.llmrec import LlmrecRoute, STATE_FILE, boot_argv
 from looper.agents.profile_registry import builtin_resolved_profile
 
 
-@pytest.mark.parametrize('lower,upper,expected', [
-    (None, 'internal.example,.corp.example', 'internal.example,.corp.example,127.0.0.1,localhost,::1'),
-    ('', 'internal.example', '127.0.0.1,localhost,::1'),
-    ('lower.example', 'upper.example', 'lower.example,127.0.0.1,localhost,::1'),
-    (None, None, '127.0.0.1,localhost,::1'),
-    ('', '*', '127.0.0.1,localhost,::1'),
-    (None, '*', '*'),
-    ('*', 'upper.example', '*'),
-    ('localhost,127.0.0.1,localhost,::1', '', 'localhost,127.0.0.1,::1'),
+@pytest.mark.parametrize('lower,upper,expected_lower,expected_upper', [
+    (None, 'internal.example,.corp.example', None, 'internal.example,.corp.example,127.0.0.1,localhost,::1'),
+    ('', 'internal.example', '127.0.0.1,localhost,::1', 'internal.example,127.0.0.1,localhost,::1'),
+    ('lower.example', 'upper.example', 'lower.example,127.0.0.1,localhost,::1', 'upper.example,127.0.0.1,localhost,::1'),
+    (None, None, '127.0.0.1,localhost,::1', '127.0.0.1,localhost,::1'),
+    ('', '*', '127.0.0.1,localhost,::1', '*'),
+    (None, '*', None, '*'),
+    (' lower.example ,lower.example,127.0.0.1', None, 'lower.example,127.0.0.1,localhost,::1', None),
+    ('*', 'upper.example', '*', 'upper.example,127.0.0.1,localhost,::1'),
+    ('localhost,127.0.0.1,localhost,::1', '', 'localhost,127.0.0.1,::1', '127.0.0.1,localhost,::1'),
 ])
-def test_recording_preserves_effective_proxy_bypass(monkeypatch, lower, upper, expected):
+def test_recording_preserves_effective_proxy_bypass(monkeypatch, lower, upper, expected_lower, expected_upper):
     for name, value in [('no_proxy', lower), ('NO_PROXY', upper)]:
         if value is None:
             monkeypatch.delenv(name, raising=False)
@@ -35,8 +36,10 @@ def test_recording_preserves_effective_proxy_bypass(monkeypatch, lower, upper, e
     recorded = replace(launch, llmrec=LlmrecRoute('a' * 22, 'http://127.0.0.1:1/r/' + 'a' * 22,
                                                'https://api.anthropic.com'))
     env = recorded.environment()
-    assert env['no_proxy'] == env['NO_PROXY'] == expected
+    assert env.get('no_proxy') == expected_lower
+    assert env.get('NO_PROXY') == expected_upper
     assert launch.environment() == original
+    assert recorded.environment() == env
 
 
 def test_busy_pinned_port_exits_without_replacing_state(tmp_path):
