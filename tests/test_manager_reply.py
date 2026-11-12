@@ -737,6 +737,62 @@ class TestManagerTurnSections:
         assert "  - task-aaaaaaaaaaaa (project tetris, goal old): an older one" in lines
         assert lines[-1] == "确认"
 
+    @pytest.mark.parametrize("views_images", [True, False])
+    def test_attachments_follow_the_message_and_describe_runtime_limits(self, tmp_path, views_images):
+        from looper.agents.chat_attachments import Attachment, AttachmentKind, AttachmentState
+        from looper.agents.runtimes import ImageInput
+
+        image = tmp_path / "screenshot.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n")
+        attachments = (
+            Attachment(index=1, kind=AttachmentKind.IMAGE, state=AttachmentState.SAVED,
+                       name="screenshot.png", source="web", path=str(image), mime="image/png", size=251187),
+            Attachment(index=2, kind=AttachmentKind.IMAGE, state=AttachmentState.TOO_LARGE,
+                       name="photo", source="web", told=True),
+        )
+        agent = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        image_input = ImageInput.READ_TOOL if views_images else ImageInput.NONE
+        turn = asyncio.run(agent._build_user_message("read these", channel="Channel: the Looper dashboard chat",
+                                                     attachments=attachments, image_input=image_input))
+        ending = ("Open one with your file-reading tool when the message needs it." if views_images else
+                  "Open a file with your file-reading tool when the message needs it; your runtime cannot view "
+                  "images, so if the user asks what an image shows, say you cannot see it.")
+        assert turn == "\n".join([
+            "Projects:", "  (none yet)", "", "Channel: the Looper dashboard chat", "", "read these", "",
+            "Attachments sent with this message (kept on this machine for 7 days; never put their paths in a reply):",
+            f'  1. image "screenshot.png" (image/png, 245.3 KB): {image}',
+            '  2. image "photo": not received (larger than 20 MB); the user was told', ending,
+        ])
+
+    def test_no_attachments_keeps_the_existing_turn_text(self, tmp_path):
+        agent = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        assert asyncio.run(agent._build_user_message("hello", channel="Channel: the Looper dashboard chat")) == (
+            "Projects:\n  (none yet)\n\nChannel: the Looper dashboard chat\n\nhello")
+
+    def test_handle_reads_saved_attachments_into_the_runtime_turn_without_changing_recorded_text(self, tmp_path, agent_db):
+        from looper.agents.chat_attachments import store_upload
+
+        async def run():
+            saved = store_upload(tmp_path, "web", "message", [("note.txt", b"the code word")])
+            bus = MessageBus(runtime_root=tmp_path)
+            manager = ManagerAgent(config=ManagerConfig(
+                claude_bin=_fake_claude(tmp_path, _scripted("received")), work_dir=tmp_path), runtime_root=tmp_path)
+            manager._bus = bus
+            try:
+                await manager._handle(MessageEnvelope.create(
+                    source=WEB, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+                    payload={"text": "read this", "attachments": [item.to_payload() for item in saved]},
+                    correlation_id="attachment-turn"))
+            finally:
+                await manager.stop()
+                await bus.shutdown()
+            (turn,) = [json.loads(line) for line in (tmp_path / "turns.jsonl").read_text().splitlines()]
+            assert f'  1. file "note.txt" (text/plain, 13 B): {saved[0].path}' in turn
+            assert turn.endswith("Open one with your file-reading tool when the message needs it.")
+            assert agent_db.start_record.await_args.kwargs["input_text"] == "read this"
+
+        asyncio.run(run())
+
     @pytest.mark.parametrize("scope", ["all", "own", "projects"])
     @pytest.mark.parametrize("failed_section", [0, 1, 2])
     def test_scope_read_failure_keeps_each_turn_sections_own_result(

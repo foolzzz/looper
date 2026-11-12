@@ -61,10 +61,12 @@ so capability differences can be compared with the same case ids.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
 import shutil
+import struct
 import sys
 import tempfile
 import time
@@ -72,6 +74,7 @@ import traceback
 import urllib.error
 import urllib.request
 import uuid
+import zlib
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -162,6 +165,7 @@ class Say:
     text_from: Callable[[Look], str] | None = None
     code_only: bool = False  # Looper answers the step without calling the model (for example, /profile).
     profile_after: Literal["switch", "settings"] | None = None  # A code-only session profile selection.
+    attachments: tuple[tuple[str, bytes], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -639,6 +643,42 @@ def _answered_by_reading(look: Look) -> str | None:
     if not _reads(look):
         return "the Manager read nothing through its tools"
     return None if look.reply.strip() else "no reply"
+
+
+ATTACHMENT_CODE = "青松-8213"
+ATTACHMENT_NUMBER = "4937"
+
+
+def _attachment_png() -> bytes:
+    """A large bitmap number, generated without an image dependency or a binary fixture."""
+    glyphs = ("10001/10001/10001/11111/00001/00001/00001",  # 4
+              "01110/10001/10001/01111/00001/00001/01110",  # 9
+              "11110/00001/00001/01110/00001/00001/11110",  # 3
+              "11111/00001/00010/00100/01000/01000/01000")  # 7
+    scale, margin = 12, 12
+    width, height = 23 * scale + 2 * margin, 7 * scale + 2 * margin
+    white = b"\xff" * width
+    rows = [white] * margin
+    for y in range(7):
+        bits = "0".join(glyph.split("/")[y] for glyph in glyphs)
+        row = b"\xff" * margin + b"".join(bytes([0 if bit == "1" else 255]) * scale for bit in bits)
+        rows.extend([row + b"\xff" * margin] * scale)
+    rows.extend([white] * margin)
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"".join(b"\0" + row for row in rows))) + chunk(b"IEND", b""))
+
+
+def _attachments_read(look: Look) -> str | None:
+    if not look.reply.strip():
+        return "no reply"
+    if look.fake:  # the stand-in does not read files or recognize images
+        return None
+    missing = [value for value in (ATTACHMENT_CODE, ATTACHMENT_NUMBER) if value not in look.reply]
+    return f"the reply does not contain {', '.join(missing)}" if missing else None
 
 
 STOPPED_NOTE = "[Looper] The user stopped your previous reply"
@@ -1961,6 +2001,10 @@ DIALOGS: tuple[Dialog, ...] = (
     Dialog("status", (
         Say("现在有哪些任务？简单列一下。", _answered_by_reading, (("looper_tasks", {"action": "list"}),)),
     ), tags=("runtime",)),
+    Dialog("attachment_read", (Say(
+        "附件里的口令是什么？图片里写的是哪个数字？", _attachments_read,
+        attachments=(("notes.txt", f"口令：{ATTACHMENT_CODE}\n".encode()), ("number.png", _attachment_png())),
+    ),)),
     Dialog("config_tools", (
         Say(f"新建一个项目 {SCRATCH}，默认目录 {SCRATCH_DIR}。", _scratch_created,
             (("looper_projects", {"action": "create", "name": SCRATCH, "work_dir": SCRATCH_DIR}),)),
@@ -2388,7 +2432,8 @@ def _newest_run(api: Api, agent: str) -> int:
 
 def _ask(api: Api, session: str, text: str, *, timeout: float,
          check_budget: Callable[[], None] | None = None, stop: bool = False, withdraw: bool = False,
-         database_url: str | None = None, manager: str | None = None) -> str:
+         database_url: str | None = None, manager: str | None = None,
+         attachments: tuple[tuple[str, bytes], ...] = ()) -> str:
     """Send ``text`` to the Manager in chat ``session`` and wait for its reply; ``ReplyTimeout`` without one.
     With ``stop``, the turn is stopped through the web chat once it has made its first tool call; with
     ``withdraw``, right after the message is sent."""
@@ -2399,6 +2444,9 @@ def _ask(api: Api, session: str, text: str, *, timeout: float,
     since = _newest_run(api, agent)
     before = _last_action(database_url, agent) if database_url is not None else 0
     body = {"text": text, "session_id": session, "message_id": message_id}
+    if attachments:
+        body["attachments"] = [{"filename": name, "content_base64": base64.b64encode(data).decode("ascii")}
+                               for name, data in attachments]
     owner = {"manager": agent} if manager else {}  # a thread of a scenario Manager is read naming it
     if manager:
         body["target"] = {"kind": "manager", "id": agent}
@@ -2755,7 +2803,7 @@ def run_dialog(api: Api, dialog: Dialog, *, database_url: str, project_id: str, 
                                                   database_url=database_url, **budget_args)
             else:
                 reply = _ask(api, session, text, timeout=timeout, stop=say.stop, withdraw=say.withdraw,
-                             database_url=database_url, manager=dialog.manager, **budget_args)
+                             database_url=database_url, manager=dialog.manager, attachments=say.attachments, **budget_args)
             if expects_api:
                 expected_turns.append((number, text, before_run))
             if not (say.code_only or say.withdraw):

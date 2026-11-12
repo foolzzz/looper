@@ -1211,7 +1211,8 @@ def test_gh_stub_answers_views_and_fixture_diffs_and_refuses_other_commands(tmp_
     stub = runner.install_gh(tmp_path / "bin", diffs=task.gh_pr_diffs if fixture else None)
 
     def gh(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run([str(stub), *args], capture_output=True, text=True, timeout=5, check=False)
+        # This checks command behavior, allowing for interpreter startup in parallel runs.
+        return subprocess.run([str(stub), *args], capture_output=True, text=True, timeout=30, check=False)
 
     view = gh("pr", "view", "12", "--repo", "example-org/demo-service", "--json",
               "headRefOid,state,comments,reviews,statusCheckRollup")

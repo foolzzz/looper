@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.153] - 2026-11-12
+
+### Changed
+
+- **`looper service upgrade` can wait for non-keepable runs before it drains, and a failed upgrade reports its blockers.** ([#1273](https://github.com/foolzzz/looper/pull/1273))
+  - New `--preflight-wait SECONDS` (default 0, off). With a control-plane upgrade and `--no-force`, the upgrade polls every 15 s while the service keeps serving, and refuses before draining if non-keepable runs remain when the wait ends.
+  - Cancellation errors and the report carry `blockers` (non-keepable runs with ages, Manager and Planner turns, gates, waits, consults, starting); the report has `preflight_wait_seconds`. Draining prints a blocker summary to stderr every 60 s.
+  - Drain-status polls and the status probe after a failure use the longer upgrade read timeout; a timed-out drain-status read is retried twice.
+  - Each run in the drain status has nullable `runtime_id` and `runtime_type`.
+  - Not model-visible.
+
 ## [2.14.152] - 2026-11-12
 
 ### Changed
