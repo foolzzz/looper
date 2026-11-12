@@ -101,9 +101,9 @@ def stopping_upgrade(upgrade_host):
     host.sleep = lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)
     host.pid_alive = lambda pid: state.pid == pid
     host.port_in_use = lambda *args: state.running
-    host.get_status = lambda *args: {"status": "ok", "pid": state.pid} if state.running else None
+    host.get_status = lambda *args, **kwargs: {"status": "ok", "pid": state.pid} if state.running else None
     host.get_whoami = lambda *args, **kwargs: {"looper_version": "1.0.0"}
-    host.system_operation = lambda port, token, name, args: events.append(name) or {"phase": "drained"}
+    host.system_operation = lambda port, token, name, args, **kwargs: events.append(name) or {"phase": "drained"}
     mgr.stop, mgr.start = stop, start
 
     def execute():
@@ -139,7 +139,7 @@ def test_upgrade_renews_drain_during_a_blocking_stop(stopping_upgrade, monkeypat
             return wait(futures, timeout=1)
         return wait(futures, timeout=0)
 
-    def operation_with_lease(port, token, name, args):
+    def operation_with_lease(port, token, name, args, **kwargs):
         if name == "drain_status":
             renewals.append(case.elapsed[0])
         return operation(port, token, name, args)
@@ -195,10 +195,10 @@ def test_upgrade_recovery_unloads_an_exited_launchd_label_before_starting(stoppi
     case.host.run = run
     case.mgr.stop, case.mgr.start, case.mgr.state = launchd.stop, launchd.start, launchd.state
     case.host.port_in_use = lambda *args: other_pid is not None or case.state.running
-    case.host.get_status = lambda *args: ({"status": "ok"}
+    case.host.get_status = lambda *args, **kwargs: ({"status": "ok"}
                                          if other_pid or case.state.running else None)
     operation = case.host.system_operation
-    case.host.system_operation = lambda port, token, name, args: (
+    case.host.system_operation = lambda port, token, name, args, **kwargs: (
         {"pid": other_pid} if name == "health" else operation(port, token, name, args))
     with pytest.raises(service.ServiceError) as caught:
         case.execute()

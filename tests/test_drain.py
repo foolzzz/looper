@@ -82,15 +82,34 @@ def test_cancel_wakes_the_held_worker_slot(tmp_path, monkeypatch):
 @pytest.mark.usefixtures("clients")
 @pytest.mark.parametrize("blocked", [False, True])
 def test_lost_drain_polls_resume_held_turns_and_runs_without_releasing_at_deadline(tmp_path, monkeypatch, blocked):
+    from looper import components
     from looper.agents.tiers import worker
     from looper.agents.v1_domains import drain as domain
 
+    # HTTP startup hashes the installation once; keep that preparation outside the drain timeout.
+    components.loaded_manifest()
     monkeypatch.setattr(worker, "load_task_limit", AsyncMock(return_value=2))
     monkeypatch.setattr(domain, "DRAIN_POLL_TIMEOUT_SECONDS", 0.2, raising=False)
 
     async def run():
         async with _serving(tmp_path, listen=True) as server:
             drain = server._drain
+            now = datetime.now(timezone.utc)
+            monkeypatch.setattr(drain, "_clock", lambda: now)
+            loop = asyncio.get_running_loop()
+            call_later = loop.call_later
+            leases = []
+
+            def schedule(delay, callback, *args, context=None):
+                if callback == drain._poll_lost:
+                    # Drive lease expiry explicitly: HTTP handling can outlast 200 ms under load.
+                    assert delay == 0.2
+                    timer = asyncio.TimerHandle(loop.time() + delay, callback, args, loop, context=context)
+                    leases.append((timer, callback))
+                    return timer
+                return call_later(delay, callback, *args, context=context)
+
+            monkeypatch.setattr(loop, "call_later", schedule)
             pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path, drain=drain)
             drain.add_source(lambda: {"gates": int(blocked)})
             code, _, initial = await _send(server, "POST /api/v1/system/drain", _bearer(TOKEN),
@@ -106,15 +125,19 @@ def test_lost_drain_polls_resume_held_turns_and_runs_without_releasing_at_deadli
 
             pending = asyncio.create_task(held_run())
             try:
-                await asyncio.sleep(0.12)
+                await asyncio.sleep(0)
+                now += timedelta(seconds=0.12)
                 code, _, status = await _send(server, "POST /api/v1/system/drain_status", _bearer(TOKEN), "{}")
                 assert code == 200 and status["result"]["deadline_passed"]
                 assert status["result"]["phase"] == phase
+                assert len(leases) == 2 and leases[0][0].cancelled()
                 # Polling renews the lease beyond its original expiry, even after the stop deadline.
-                await asyncio.sleep(0.12)
+                now += timedelta(seconds=0.12)
                 assert drain.snapshot()["phase"] == phase
                 assert not turn.done() and not pending.done()
                 # No more polls: the timer must wake both wait paths without another HTTP request.
+                now += timedelta(seconds=0.08)
+                leases[-1][1]()
                 await asyncio.wait_for(asyncio.gather(turn, pending), 1)
                 assert pending.result() == "admitted"
                 assert drain.snapshot()["phase"] == "serving"
@@ -159,6 +182,26 @@ def test_operator_drain_api_and_generated_cli_contract(tmp_path):
         assert {("system", "drain", "POST"), ("system", "drain-status", "POST"),
                 ("system", "drain-cancel", "POST")} <= commands
 
+    asyncio.run(run())
+
+
+@pytest.mark.usefixtures("clients")
+def test_serving_drain_status_reads_runtime_without_holding_admission(tmp_path):
+    async def run():
+        async with _serving(tmp_path, listen=True) as server:
+            pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path, drain=server._drain)
+            worker = WorkerProcess("plain-worker", "step", "plan", runtime_id="codex-local", runtime_type="codex")
+            pool._active[worker.worker_id] = worker
+            pool._slots[worker.worker_id] = (worker.role, "task")
+            for _ in range(2):
+                code, _, answer = await _send(server, "POST /api/v1/system/drain_status", _bearer(TOKEN), "{}")
+                assert code == 200 and answer["result"]["phase"] == "serving"
+                (row,) = answer["result"]["waiting"]["runs"]
+                assert row["runtime_id"] == "codex-local" and row["runtime_type"] == "codex"
+                assert row["keepable"] is False
+                assert answer["result"]["deadline"] is None
+                assert server._drain._poll_timer is None
+                await asyncio.wait_for(server._drain.wait_serving(), 1)
     asyncio.run(run())
 
 
@@ -219,6 +262,10 @@ def test_held_chat_reply_survives_restart(agent_db, tmp_path, monkeypatch, chann
     from looper.db import chat
     from tests.db_support import until
     from tests.test_manager_stop import _Session
+
+    if channel == "telegram":
+        # start() imports Telegram before outbound delivery; this fixture bypasses start().
+        import telegram  # noqa: F401
 
     saved = AsyncMock()
     monkeypatch.setattr(chat, "save_channel_message", saved)
