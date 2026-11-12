@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -43,6 +44,9 @@ if TYPE_CHECKING:
     from ..profile_registry import LegacyProviderSpec as ProviderSpec
     from . import ResidentSession
     from .cancel import TurnCancel
+
+
+logger = logging.getLogger(__name__)
 
 
 HOME_LAYOUT_ID = "cursor-operator-home/v1"
@@ -643,20 +647,24 @@ class ResidentCursor(PerTurnSession):
         self, text: str, on_event: Callable[[dict[str, Any]], Awaitable[None]], *, tag: Any = None,
         stop: Callable[[], CapStop | None] | None = None, cancel: TurnCancel,
     ) -> ResidentTurn:
-        first = await super()._run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
-        if cancel.requested or first.stopped is not None or first.exit_code not in (0, 1) \
-                or cursor_failure(first.result_event, first.stderr) is None:
-            return first
-        # The CLI exited; keep this session's helper and chat for --resume.
-        self._tree, self._end_task = None, None
-        if cancel.requested:
-            return self._stopped_turn(session_started=first.session_started, usage=first.usage,
-                                      complete=first.usage_complete, sent=first.prompt_sent)
-        await on_event(retry_event(first.stderr))
-        self._ended = False
-        second = await super()._run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
-        return replace(second, stderr_detail=retry_stderr(first.stderr, second.stderr)
-                       if second.result_event is None else "")
+        cwd = self._cwd
+        try:
+            first = await super()._run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
+            if cancel.requested or first.stopped is not None or first.exit_code not in (0, 1) \
+                    or cursor_failure(first.result_event, first.stderr) is None:
+                return first
+            # The CLI exited; keep this session's helper and chat for --resume.
+            self._tree, self._end_task = None, None
+            if cancel.requested:
+                return self._stopped_turn(session_started=first.session_started, usage=first.usage,
+                                          complete=first.usage_complete, sent=first.prompt_sent)
+            await on_event(retry_event(first.stderr))
+            self._ended = False
+            second = await super()._run_turn(text, on_event, tag=tag, stop=stop, cancel=cancel)
+            return replace(second, stderr_detail=retry_stderr(first.stderr, second.stderr)
+                           if second.result_event is None else "")
+        finally:
+            self._cwd = cwd
 
     def _split(self, command: list[str]) -> tuple[list[str], str | None, str]:
         message = "a resident Cursor Agent command starts with env CURSOR_CONFIG_DIR=<dir> CURSOR_DATA_DIR=<dir> <program>"
@@ -686,6 +694,16 @@ class ResidentCursor(PerTurnSession):
     def _turn_argv(self) -> list[str]:
         source, home = self._run_dir(), self._home()
         saved = self._saved_session()
+        if self._session and saved is not None and saved.get("session_id") == self._session:
+            cwd = saved.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                if Path(cwd).is_dir():
+                    self._cwd = cwd
+                else:
+                    logger.warning("%s: saved Cursor working directory %s is missing; starting a new chat",
+                                   self._label, cwd)
+                    self._session = None
+                    self._totals = Usage()
         if not self._session:
             sync_dir(source=source, home=home)
         elif source.is_dir() and saved is not None and saved.get("instructions_sha256") == hashlib.sha256(
@@ -725,8 +743,8 @@ class ResidentCursor(PerTurnSession):
             return
         # A replacement that was interrupted after init may finish its first turn on resume.
         home = self._home()
-        chats = home / CONFIG_DIR / "chats"
-        for group in chats.iterdir() if chats.is_dir() else []:
-            for path in group.iterdir() if group.is_dir() and not group.is_symlink() else []:
-                if path.is_dir() and not path.is_symlink() and path.name != self._session:
-                    shutil.rmtree(path, ignore_errors=True)
+        # Cursor keys its chat partition by the process's physical working directory.
+        group = home / CONFIG_DIR / "chats" / hashlib.md5(os.path.realpath(self._cwd).encode("utf-8")).hexdigest()
+        for path in group.iterdir() if group.is_dir() and not group.is_symlink() else []:
+            if path.is_dir() and not path.is_symlink() and path.name != self._session:
+                shutil.rmtree(path, ignore_errors=True)

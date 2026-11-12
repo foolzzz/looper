@@ -544,28 +544,98 @@ def test_runtime_metadata_prompt_inputs_and_unavailable_consults(tmp_path: Path)
 
 
 _RESIDENT_CURSOR = """
-import json, os, sys
+import hashlib, json, os, sys
 from pathlib import Path
 args = sys.argv[1:]
 config = Path(os.environ['CURSOR_CONFIG_DIR'])
+workspace = hashlib.md5(os.getcwd().encode()).hexdigest()
 owner = config.parent
 text = sys.stdin.read()
 with (owner / 'turns.jsonl').open('a') as log:
     log.write(json.dumps({'argv': args, 'config': str(config), 'data': os.environ['CURSOR_DATA_DIR'],
-                          'home': os.environ.get('HOME'), 'tmpdir': os.environ['TMPDIR'], 'text': text}) + '\\n')
+                          'home': os.environ.get('HOME'), 'cwd': os.getcwd(), 'tmpdir': os.environ['TMPDIR'], 'text': text}) + '\\n')
 assert Path(os.environ['TMPDIR']).is_dir()
 if '--resume' in args:
     session = args[args.index('--resume') + 1]
-    if not (config / 'chats' / 'workspace' / session).is_dir():
+    if not (config / 'chats' / workspace / session).is_dir():
         sys.exit(1)
 else:
     session = 'chat-' + str(len((owner / 'turns.jsonl').read_text().splitlines()))
-(config / 'chats' / 'workspace' / session).mkdir(parents=True, exist_ok=True)
+(config / 'chats' / workspace / session).mkdir(parents=True, exist_ok=True)
 print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': session}))
 print(json.dumps({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'pong'}]}}))
 print(json.dumps({'type': 'result', 'subtype': 'success', 'session_id': session,
                   'usage': {'inputTokens': 60, 'outputTokens': 5, 'cacheReadTokens': 40, 'cacheWriteTokens': 0}}))
 """
+
+
+def _chat_partition(owner: Path, cwd: Path) -> Path:
+    return owner / "config/chats" / hashlib.md5(str(cwd.resolve()).encode()).hexdigest()
+
+
+@pytest.mark.parametrize("mode", ["resume", "handoff", "missing-cwd", "vanished-after-resume"])
+def test_cursor_restart_uses_saved_cwd_and_keeps_other_partitions(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, mode: str,
+) -> None:
+    executable = fake_claude(tmp_path / "cursor-agent", _RESIDENT_CURSOR)
+    root = tmp_path / "runtime"
+    old_cwd, new_cwd = tmp_path / "first", tmp_path / "second"
+    old_cwd.mkdir()
+    new_cwd.mkdir()
+    launch = _launch(executable=executable)
+    owner = root / ".local/cursor-agent/sessions/manager"
+    old_chats, new_chats = _chat_partition(owner, old_cwd), _chat_partition(owner, new_cwd)
+
+    async def run() -> None:
+        async def on_event(event: dict[str, Any]) -> None:
+            pass
+
+        command = CURSOR.resident_command(executable, cwd=old_cwd, prompt_file=_prompt(root), launch=launch)
+        session = CURSOR.resident_session("manager")
+        await session.start(command, cwd=str(old_cwd), signature="a", env=launch.environment())
+        try:
+            first = await session.run_turn("hello", on_event)
+            assert first.result_event["session_id"] == "chat-1"
+        finally:
+            await session.stop()
+        (old_chats / "obsolete").mkdir()
+        (new_chats / "chat-1").mkdir(parents=True)
+        (new_chats / "unrelated").mkdir()
+        if mode == "missing-cwd":
+            old_cwd.rmdir()
+        command = CURSOR.resident_command(executable, cwd=new_cwd, prompt_file=_prompt(
+            root, "NEW PROMPT" if mode == "handoff" else "LOOPER PROMPT"), launch=launch)
+        session = CURSOR.resident_session("manager")
+        await session.start(command + CURSOR.resume_args("chat-1"), cwd=str(new_cwd), signature="b",
+                            env=launch.environment())
+        try:
+            turn = await session.run_turn("[HANDOFF] summarize" if mode == "handoff" else "continue", on_event)
+            assert turn.result_event is not None
+            assert turn.result_event["session_id"] == ("chat-2" if mode == "missing-cwd" else "chat-1")
+            if mode == "vanished-after-resume":
+                old_cwd.rmdir()
+                turn = await session.run_turn("continue again", on_event)
+                assert turn.result_event["session_id"] == "chat-3"
+        finally:
+            await session.stop()
+
+    asyncio.run(asyncio.wait_for(run(), 10))
+    turns = [json.loads(line) for line in (owner / "turns.jsonl").read_text().splitlines()]
+    fresh = mode in ("missing-cwd", "vanished-after-resume")
+    expected_cwd = new_cwd if fresh else old_cwd
+    assert Path(turns[-1]["cwd"]) == expected_cwd.resolve()
+    assert (old_chats / "chat-1").is_dir()
+    assert (old_chats / "obsolete").exists() is (mode == "missing-cwd")
+    if fresh:
+        assert "--resume" not in turns[-1]["argv"]
+        assert str(old_cwd) in caplog.text
+        assert "<looper_instructions>" in turns[-1]["text"]
+    else:
+        assert (new_chats / "chat-1").is_dir() and (new_chats / "unrelated").is_dir()
+        assert turns[-1]["argv"][-2:] == ["--resume", "chat-1"]
+        assert turns[-1]["text"] == ("[HANDOFF] summarize" if mode == "handoff" else "continue")
+    saved = json.loads((owner / "session.json").read_text())
+    assert Path(saved["cwd"]) == expected_cwd
 
 
 def test_cursor_resident_command_accepts_a_launcher_path_and_rejects_wrong_prefixes() -> None:
@@ -641,7 +711,7 @@ def test_cursor_resident_turns_resume_in_owner_directories_after_restart(tmp_pat
     assert turns[1]["text"] == "again" and turns[2]["text"] == "next"
     assert json.loads((owner / PLUGIN_DIR / ".cursor-plugin/plugin.json").read_text())["name"] == "looper"
     assert not (owner / PLUGIN_DIR / "rules").exists()
-    assert [path.name for path in (owner / "config/chats/workspace").iterdir()] == ["chat-1"]
+    assert [path.name for path in _chat_partition(owner, tmp_path).iterdir()] == ["chat-1"]
     assert all(stat.S_IMODE((owner / name).stat().st_mode) == 0o700 for name in (".", "config", "data"))
 
 
@@ -660,7 +730,7 @@ def test_cursor_manager_changed_instructions_handoff_before_replacement_and_clea
     snapshot = """
 with (owner / 'snapshots.jsonl').open('a') as log:
     log.write(json.dumps({'instructions': (owner / 'looper-instructions.md').read_text(),
-                          'chats': sorted(p.name for p in (config / 'chats/workspace').iterdir())}) + '\\n')
+                          'chats': sorted(p.name for p in (config / 'chats' / workspace).iterdir())}) + '\\n')
 """
     body = _RESIDENT_CURSOR.replace("print(json.dumps({'type': 'system'", snapshot + "print(json.dumps({'type': 'system'", 1)
     if incomplete_replacement:
@@ -696,7 +766,7 @@ with (owner / 'snapshots.jsonl').open('a') as log:
                 agent._composed_prompt = lambda _: SystemPrompt("prompt B")
             await send("again")
             assert agent._session_id == "chat-3"
-            old = owner / "config/chats/workspace/chat-1"
+            old = _chat_partition(owner, tmp_path) / "chat-1"
             assert old.exists() is incomplete_replacement
             if incomplete_replacement:
                 await send("finish")
@@ -718,7 +788,7 @@ with (owner / 'snapshots.jsonl').open('a') as log:
     assert snapshots[2]["chats"] == ["chat-1", "chat-3"]
     if incomplete_replacement:
         assert turns[3]["argv"][-2:] == ["--resume", "chat-3"]
-    assert [p.name for p in (owner / "config/chats/workspace").iterdir()] == ["chat-3"]
+    assert [p.name for p in _chat_partition(owner, tmp_path).iterdir()] == ["chat-3"]
 
 
 def test_cursor_missing_chat_marks_session_stale_and_owner_starts_over(tmp_path: Path) -> None:
@@ -798,7 +868,7 @@ def test_cursor_planner_changed_instructions_use_handoff_and_resume(
     assert "--resume" not in turns[2]["argv"]
     assert "prompt B\n</looper_instructions>\n\n[RESUME]" in turns[2]["text"]
     assert "remember the pending parser check" in turns[2]["text"]
-    assert [p.name for p in (owner / "config/chats/workspace").iterdir()] == ["chat-3"]
+    assert [p.name for p in _chat_partition(owner, tmp_path).iterdir()] == ["chat-3"]
 
 
 def test_cursor_init_without_result_persists_chat_before_callback_and_resumes_after_restart(tmp_path: Path) -> None:
