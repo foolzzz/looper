@@ -16,6 +16,16 @@ PROXY_ENV = frozenset(('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
                        'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'))
 TLS_ENV = frozenset(('SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS',
                      'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE'))
+# Gateway safeguards override inherited backend selectors for every client.
+TRANSLATED_BACKEND_ENV = (
+    ("CLAUDE_CODE_USE_BEDROCK", "0"),
+    ("CLAUDE_CODE_USE_VERTEX", "0"),
+    ("CLAUDE_CODE_USE_FOUNDRY", "0"),
+    ("CLAUDE_CODE_USE_ANTHROPIC_AWS", "0"),
+    ("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "0"),
+    ("CLAUDE_CODE_USE_MANTLE", "0"),
+    ("CLAUDE_CODE_USE_GATEWAY", "0"),
+)
 STATE_DIR = Path('.local') / 'llmrec'
 ROUTES_DIR = STATE_DIR / 'routes'
 STATE_FILE = STATE_DIR / 'proxy.json'

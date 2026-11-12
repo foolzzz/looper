@@ -82,6 +82,21 @@ def run(check):
     asyncio.run(asyncio.wait_for(check(), 10))
 
 
+@pytest.mark.parametrize('stream', [False, True])
+def test_upstream_query_follows_chat_completions_path(tmp_path, stream):
+    async def check():
+        async with gateway(tmp_path, stream=stream) as (client, base, proxy, sink, received):
+            route_path = tmp_path / ROUTES_DIR / ('g' * 22 + '.json')
+            route = RouteFile.read(route_path)
+            replace(route, upstream=route.upstream + '/?api-version=2025-01-01').write(route_path)
+            response = await client.post(base + '/v1/messages', json={
+                'model': 'client', 'messages': [], 'stream': stream})
+            assert response.status_code == 200
+            assert received[0][0].startswith(
+                b'POST /v1/chat/completions?api-version=2025-01-01 HTTP/1.1\r\n')
+    run(check)
+
+
 @pytest.mark.skipif(not DSN, reason='requires disposable LOOPER_TEST_DATABASE_URL')
 @pytest.mark.parametrize('stream', [False, True])
 @pytest.mark.parametrize('reported', [False, True])
