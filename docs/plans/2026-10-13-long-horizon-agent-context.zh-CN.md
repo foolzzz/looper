@@ -556,6 +556,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-12 | 热升级后续修复（本分支未合入）：复用子进程已记录的启动身份，拒绝的 keeper 元数据记录字段并保留有界副本；服务单元显式设置 30 秒停止预算，保留运行分离共用 8 秒预算，失锁重启测试覆盖连接池扩容。沿用共享后端，控制台和消息渠道无需改动；已有服务需重新执行 `looper service install` 应用停止预算。 |
 | 2026-11-10 | Coco 真实路径验证（traecli 0.214.1、TTADK 1.0.37，一次性数据库、端口和 runtime root）：四个角色与 `ttadk-coco` Worker 跑通，Planner 用 MCP 工具改 Worker 的 Profile，Manager 三轮续接并调用工具；未登录和未知模型在启动前被拒，只读沙箱拦住写入，`--output-schema`（含续接）和只复制会话目录后的续接成立；记录为 `runtime: coco`、token 未定价、`not_covered`、`commit_attribution: trae`，Worker 提交带 TRAE 尾注，操作者的 coco 配置与登录文件未变。真实模式评测 `single_step`、`dependent_steps`、`reviewed_step` 全角色 coco（GPT-5.5）3/3、契约违约 0（Planner 回合为替换模式）；发现保存 Profile 只读 10 分钟的模型目录缓存（过期后不校验模型）、目录里没有该模型的 Profile 让任务详情报错两处缺陷，见 5.4。 |
 | 2026-11-10 | 新增 `ttadk-coco` 运行时：使用 `trae-cli` 启动器，复用 Coco 隔离目录并检查 TTADK 与 Coco 登录，控制台展示独立运行时卡片；CLI、Telegram/Lark 沿用共享注册与 Profile 入口。Playwright 纳入 `test` 依赖，nightly 从同一依赖声明安装；临时 PostgreSQL 与替身 CLI 下定向 pytest 98 项通过（含两种浏览器检出状态），xdist 数据库收尾有事件循环关闭提示，临时数据库已清理，真实 CLI 与模型验证留给集成。 |
 | 2026-11-10 | 原生 Coco Worker/Reviewer 运行时：复用 Codex 事件和隔离目录布局，仅接 coco 登录，启动前检查登录与模型，保留提交尾注；运行记录不冒充实际模型，token 未定价且代理不录制。控制台、Telegram/Lark 与 CLI 沿用共享注册和 Profile 入口；替身测试覆盖命令、目录、事件、启动门禁和步骤结果，真实 CLI 与模型验证由后续集成完成。 |
