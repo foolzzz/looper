@@ -14,8 +14,8 @@ class ContentKind(str, Enum):
     UNSUPPORTED = "unsupported"
 
 
-RICH_TYPES = frozenset({"post"})
-UNSUPPORTED_REPLY = "暂不支持这类飞书消息（{kind}），请发文字或富文本。"
+RICH_TYPES = frozenset({"post", "image", "file"})
+UNSUPPORTED_REPLY = "暂不支持这类飞书消息（{kind}），请发文字、富文本、图片或文件。"
 
 
 class ResourceKind(str, Enum):

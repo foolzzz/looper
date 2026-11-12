@@ -5,6 +5,7 @@ stderr and a non-zero exit), so nothing reaches a real chat, user or account."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.lark import LarkChannelAdapter
 from looper.agents.channels.lark_cli import (
     LarkCliError, bot_info_command, consume_command, reaction_command, reply_command, search_command, send_command,
-    whoami_command,
+    whoami_command, resource_command,
 )
 from looper.agents.message import MessageEnvelope, MessageType, channel_address
 
@@ -147,6 +148,8 @@ def test_rich_posts_and_unsupported_types_through_the_cli_event_stream(
          "message_type": "post", "content": "@@HelperBot 看看", "mentions": [BOT_MENTION]},
         {**event, "message_id": "om_sticker", "message_type": "sticker", "content": "[Sticker]"},
         {**event, "message_id": "om_image", "message_type": "image", "content": "[Image: img_v3_a1]"},
+        {**event, "message_id": "om_file", "message_type": "file",
+         "content": '<file key="file_v3_b2" name="notes.txt"/>'},
         {**event, "message_id": "om_refused", "sender_id": OTHER,
          "message_type": "sticker", "content": "[Sticker]"},
         {**event, "message_id": "om_bot", "sender_type": "bot", "message_type": "post", "content": post},
@@ -156,6 +159,12 @@ def test_rich_posts_and_unsupported_types_through_the_cli_event_stream(
     world_file = tmp_path / "world.json"
     world = json.loads(world_file.read_text())
     world["events"] = events
+    world["resources"] = {
+        "om_post/img_v3_a1": {"base64": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()},
+        "om_post/file_v3_b2": {"base64": base64.b64encode(b"%PDF-1.7").decode()},
+        "om_image/img_v3_a1": {"base64": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()},
+        "om_file/file_v3_b2": {"base64": base64.b64encode(b"hello").decode()},
+    }
     world_file.write_text(json.dumps(world))
     rejected: list[tuple[str, str | None]] = []
 
@@ -174,19 +183,26 @@ def test_rich_posts_and_unsupported_types_through_the_cli_event_stream(
             await adapter.stop()
             await bus.shutdown()
 
-    direct, group = asyncio.run(main())
+    direct, group, image, file = asyncio.run(main())
     assert direct.payload["text"] == (
         'Weekly\n**Hello** [Spec](https://example.com/spec)\n[image 1]\n\n'
-        '```go\n    fmt.Println(1)\n```\n[file 2: a "q".pdf]\n\n'
-        '(Looper cannot receive images or files yet: [image 1], [file 2: a "q".pdf] not received.)')
+        '```go\n    fmt.Println(1)\n```\n[file 2: a "q".pdf]')
+    assert image.payload["attachments"][0]["state"] == "saved"
+    assert file.payload["text"] == "[file 1: notes.txt]"
+    assert file.payload["attachments"][0]["state"] == "saved"
     assert group.payload["text"] == "看看"
     assert group.payload["channel_context"]["sender_name"] == "Ada Lovelace"
     assert rejected == [(OTHER, None)]
     assert sorted(_calls(lark_cli_stand_in)) == sorted([
         consume_command()[1:], reaction_command("om_post")[1:], reaction_command("om_group_post")[1:],
+        reaction_command("om_image")[1:], reaction_command("om_file")[1:],
+        resource_command("om_post", "img_v3_a1", "image", "1.part")[1:],
+        resource_command("om_post", "file_v3_b2", "file", "2.part")[1:],
+        resource_command("om_image", "img_v3_a1", "image", "1.part")[1:],
+        resource_command("om_file", "file_v3_b2", "file", "1.part")[1:],
         ["contact", "+search-user", "--as", "user", "--user-ids", OPEN_ID],
-        *[send_command(chat_id="oc_dm", text=f"暂不支持这类飞书消息（{kind}），请发文字或富文本。")[1:]
-          for kind in ("sticker", "image")],
+        *[send_command(chat_id="oc_dm", text=f"暂不支持这类飞书消息（{kind}），请发文字、富文本、图片或文件。")[1:]
+          for kind in ("sticker",)],
     ])
 
 
@@ -347,3 +363,177 @@ def test_a_cancelled_call_leaves_no_lark_cli_behind(tmp_path: Path) -> None:
 def test_retired_app_settings_are_rejected(key: str) -> None:
     with pytest.raises(ValueError, match="unsupported Lark setting"):
         lark_cli.lark_config({key: "OLD"})
+
+
+@pytest.mark.parametrize("kind,output", [("video", "1.part"), ("image", "a/b"),
+                                        ("file", r"a\b"), ("file", ".."), ("file", ".")])
+def test_resource_command_confines_download(kind: str, output: str) -> None:
+    with pytest.raises(ValueError):
+        resource_command("om_in", "img_test", kind, output)
+
+
+def test_post_downloads_private_attachments_and_recreates_redelivery(
+    tmp_path: Path, lark_cli_stand_in: Path,
+) -> None:
+    import stat
+
+    world_file = tmp_path / "world.json"
+    world = json.loads(world_file.read_text())
+    world["resources"] = {
+        "om_in/img_v3_ok": {"base64": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()},
+        "om_in/file_v3_ok": {"base64": base64.b64encode("你好".encode()).decode()},
+    }
+    world_file.write_text(json.dumps(world))
+
+    async def main() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = _adapter(tmp_path)
+        adapter._bus = bus
+        event = {"type": "im.message.receive_v1", "chat_id": "oc_dm", "chat_type": "p2p",
+                 "sender_id": OPEN_ID, "sender_type": "user", "message_id": "om_in", "message_type": "post",
+                 "content": '![Image](img_v3_ok)\n<file key="file_v3_ok" name="notes.txt"/>'}
+        try:
+            await adapter._handle_lark_event(event)
+            message, = bus.journal.undelivered()
+            assert message.payload["text"] == "[image 1]\n[file 2: notes.txt]"
+            image, file = message.payload["attachments"]
+            directory = tmp_path / "chat-attachments/channel-lark/om_in"
+            for item, name, mime, kind in [(image, "1-image.png", "image/png", "image"),
+                                           (file, "2-notes.txt", "text/plain", "file")]:
+                path = Path(item["path"])
+                assert item["state"] == "saved" and item["mime"] == mime and item["kind"] == kind
+                assert path == directory / name
+                assert stat.S_IMODE(path.stat().st_mode) == 0o600
+            assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+            (directory / "leftover").write_text("stale")
+            await adapter._handle_lark_event(event)
+            assert not (directory / "leftover").exists()
+            assert {path.name for path in directory.iterdir()} == {"1-image.png", "2-notes.txt"}
+            await asyncio.gather(*adapter._reactions._pending)
+            calls = _calls(lark_cli_stand_in)
+            downloads = [call for call in calls if "+messages-resources-download" in call]
+            assert downloads == [resource_command("om_in", key, kind, output)[1:]
+                                 for _ in range(2) for key, kind, output in (
+                                     ("img_v3_ok", "image", "1.part"), ("file_v3_ok", "file", "2.part"))]
+            assert not any("+messages-send" in call or "+messages-reply" in call for call in calls)
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(main(), 10))
+
+
+@pytest.mark.parametrize("case", ["unknown", "noscope", "exe", "large", "over_limit", "timeout"])
+def test_attachment_failures_are_reported_and_still_reach_manager(
+    tmp_path: Path, lark_cli_stand_in: Path, monkeypatch: pytest.MonkeyPatch, case: str,
+) -> None:
+    from looper.agents import chat_attachments as files
+
+    count = 11 if case == "over_limit" else 2 if case == "timeout" else 1
+    key = "file_exe" if case == "exe" else "img_" + ("slow" if case == "timeout" else case)
+    marker = f'<file key="{key}" name="program.exe"/>' if case == "exe" else f"[Image: {key}]"
+    if case == "timeout":
+        monkeypatch.setattr("looper.agents.channels.lark._DOWNLOAD_MESSAGE_SECONDS", 0.2)
+    content = b"MZ\x00" if case == "exe" else b"\x89PNG\r\n\x1a\n"
+    if case == "large":
+        content += b"x" * (files.IMAGE_MAX_BYTES + 1 - len(content))
+    world_file = tmp_path / "world.json"
+    world = json.loads(world_file.read_text())
+    world["resources"] = {"om_in/" + key: {"base64": base64.b64encode(content).decode()}}
+    if case == "unknown":
+        world["resources"] = {}
+    world_file.write_text(json.dumps(world))
+
+    async def main() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = _adapter(tmp_path)
+        adapter._bus = bus
+        try:
+            await adapter._handle_lark_event({"type": "im.message.receive_v1", "chat_id": "oc_dm", "chat_type": "p2p",
+                "sender_id": OPEN_ID, "sender_type": "user", "message_id": "om_in", "message_type": "post",
+                "content": "\n".join([marker] * count)})
+            message, = bus.journal.undelivered()
+            items = message.payload["attachments"]
+            states = {"unknown": "failed", "noscope": "failed", "exe": "not_accepted", "large": "too_large",
+                      "over_limit": "over_limit", "timeout": "failed"}
+            assert len(items) == count and items[-1]["state"] == states[case]
+            assert all(item["told"] for item in items if item["state"] != "saved")
+            if case == "noscope":
+                assert "im:message:readonly" in items[0]["reason"]
+            if case == "timeout":
+                assert [item["reason"] for item in items] == ["timed out"] * 2
+            await asyncio.gather(*adapter._reactions._pending)
+            calls = _calls(lark_cli_stand_in)
+            replies = [call for call in calls if "+messages-send" in call]
+            assert len(replies) == 1
+            assert replies[0][-1].startswith(f"有 {1 if case == 'over_limit' else count} 个附件没有收下：")
+            if case == "unknown":
+                assert replies[0][-1] == "有 1 个附件没有收下：图片 1 下载失败。其余内容已交给 Manager。"
+            if case == "noscope":
+                assert "im:message:readonly" in replies[0][-1]
+            downloads = [call for call in calls if "+messages-resources-download" in call]
+            assert len(downloads) == (10 if case == "over_limit" else 1)
+            directory = tmp_path / "chat-attachments/channel-lark/om_in"
+            assert not list(directory.glob("*.part"))
+            if case != "over_limit":
+                assert not list(directory.iterdir())
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(main(), 15))
+
+
+@pytest.mark.parametrize("route", ["unlisted", "silent", "unaddressed", "off"])
+def test_resources_are_not_downloaded_before_admission(
+    tmp_path: Path, lark_cli_stand_in: Path, monkeypatch: pytest.MonkeyPatch, route: str,
+) -> None:
+    from looper.agents.channels.chat_routing import RouteAction, RouteDecision
+
+    async def observe(*args: Any, **kwargs: Any) -> None:
+        pass
+
+    monkeypatch.setattr("looper.agents.channels.lark.observe_chat", observe)
+
+    async def main() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = _adapter(tmp_path, resolve_chat=lambda *_: RouteDecision(
+            RouteAction.SILENT if route == "silent" else RouteAction.ADMIT, "manager-helper", True),
+            manager_running=lambda _: route != "off")
+        adapter._bus = bus
+        try:
+            await adapter._handle_lark_event({"type": "im.message.receive_v1", "chat_id": "oc_dm",
+                "chat_type": "group" if route == "unaddressed" else "p2p",
+                "sender_id": OTHER if route == "unlisted" else OPEN_ID, "sender_type": "user",
+                "message_id": "om_in", "message_type": "post", "content": "![Image](img_ok)"})
+            assert not bus.journal.undelivered()
+            assert not (tmp_path / "chat-attachments").exists()
+            assert not any("+messages-resources-download" in call for call in _calls(lark_cli_stand_in))
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(main(), 5))
+
+
+@pytest.mark.parametrize("elsewhere", ["unexpected.part", "../outside.part"])
+def test_cli_rejects_unexpected_saved_path_and_only_cleans_inside_message_directory(
+    tmp_path: Path, lark_cli_stand_in: Path, elsewhere: str,
+) -> None:
+    import shutil
+    from looper.agents.channels.lark_content import ResourceKind, ResourceRef
+    from looper.agents.channels.lark_transport import CliTransport
+
+    world_file = tmp_path / "world.json"
+    world = json.loads(world_file.read_text())
+    world["resources"] = {"om_in/img_ok": {"base64": base64.b64encode(b"png").decode()}}
+    world_file.write_text(json.dumps(world))
+    executable = Path(f"{shutil.which('lark-cli')}.py")
+    executable.write_text(executable.read_text().replace('os.getcwd(), output)', f'os.getcwd(), {elsewhere!r})'))
+    directory = tmp_path / "message"
+    directory.mkdir()
+    with pytest.raises(LarkCliError, match="somewhere else"):
+        asyncio.run(CliTransport().download("om_in", ResourceRef(1, ResourceKind.IMAGE, "img_ok"),
+                                            directory / "1.part", max_bytes=1024))
+    assert not list(directory.iterdir())
+    assert (tmp_path / "outside.part").exists() is elsewhere.startswith("..")

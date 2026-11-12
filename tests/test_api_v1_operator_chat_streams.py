@@ -35,7 +35,7 @@ def state(monkeypatch):
 
 def prepare(server, state):
     adapter = WebChannelAdapter()
-    adapter._bus = SimpleNamespace(publish=AsyncMock(side_effect=state.published.append))
+    adapter._bus = SimpleNamespace(publish=AsyncMock(side_effect=state.published.append), runtime_root=server._runtime_root)
     server._web_adapter = adapter
     server._client_ops = ClientOps(SimpleNamespace())
     server._task_router = SimpleNamespace(has_planner=lambda task: task == "running")

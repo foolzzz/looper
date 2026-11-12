@@ -5775,7 +5775,9 @@ implementation supplies it and is retested.
   `domain` (`feishu` or `lark`), and its own app-bound `allowed_open_ids`;
   `channel_secrets.bot_token` holds the app secret and APIs expose only
   `has_bot_token`. It sends through the open platform and receives over its
-  long connection, reconnecting with exponential backoff capped at 300 s and
+  long connection; attachment downloads use the same `im:message:readonly`
+  scope through the resource API, enforcing the size cap while streaming and
+  refreshing an expired token once. It reconnects with exponential backoff capped at 300 s and
   0.5–1.0 jitter; a stream that yields an event or lasts 60 s resets the backoff. Direct
   messages, group @-mentions, replies, statuses, notices, schedules and gates
   follow the Lark rules below. The backend exposes
@@ -5804,16 +5806,32 @@ implementation supplies it and is retested.
   and the Manager is told the sender's name (`contact +search-user`, the
   name the allowlist resolves, else the open_id after 5 s). Text and rich-text
   posts reach the Manager. Posts keep lark-cli's rendered titles, paragraphs,
-  links and fenced code, with other mentions shown as `@name`. Inline images
-  and attached files become numbered `[image N]` / `[file N: name]` placeholders,
-  followed by a line saying Looper cannot receive images or files yet.
-  Other types receive 「暂不支持这类飞书消息（<type>），请发文字或富文本。」
+  links and fenced code, with other mentions shown as `@name`. Images and files
+  in posts, image messages and file messages become numbered `[image N]` /
+  `[file N: name]` placeholders and attachments for the Manager. After sender
+  admission, routing and the reaction, resources download sequentially as the
+  bot (`im +messages-resources-download --as bot`, app scope
+  `im:message:readonly`): at most 10 per message, 30 s per resource and 60 s
+  per message. Images and files are limited to 20 MB each and checked by
+  content (PNG/JPEG/GIF/WEBP, text, PDF and Office documents); a conflicting
+  filename extension has the detected type's extension appended. Files live
+  under `chat-attachments/<channel-id>/<message-id>/` in the runtime root,
+  with private directories/files (0700/0600), for 7 days. Redelivery replaces
+  the message directory. One reply lists any resources not received; a
+  successful reply marks those items as already reported to the user in the
+  Manager's attachment section. Missing download permission names
+  `im:message:readonly` in the log and reply. Silent chats, unlisted senders,
+  unaddressed group messages and turned-off Managers never download resources.
+  Other types receive 「暂不支持这类飞书消息（<type>），请发文字、富文本、图片或文件。」
   as text, in reply to the message in a group or sent to the direct chat,
   after admission and routing; silent chats receive nothing, and a turned-off
   Manager gets only the usual turned-off reply. Bots' messages, interactive
   cards and empty messages are ignored. The bot-token channel renders posts
   and resource markers into the same notation before the shared adapter reads
-  them. It sends with `lark-cli im
+  them. All outgoing Lark, Telegram and dashboard chat text redacts stored
+  attachment paths, including filenames with spaces and Unicode. Dashboard
+  turns with attachments show the final answer without streaming text deltas,
+  so a path split across chunks cannot escape redaction. It sends with `lark-cli im
   +messages-send --as bot`: a reply as Markdown (`--markdown`, a rich-text
   post) to the chat its message came from, a schedule's message as text to a
   user (`--user-id`); a failed send carries lark-cli's reason. In a group the

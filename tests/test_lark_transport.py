@@ -130,7 +130,7 @@ def test_unsupported_group_messages_follow_routing_before_replying(
             assert observed == [route == "silent"]
             assert bus.journal.undelivered() == []
             expected = (TURNED_OFF_REPLY if route == "off" else
-                        "暂不支持这类飞书消息（share_chat），请发文字或富文本。")
+                        "暂不支持这类飞书消息（share_chat），请发文字、富文本、图片或文件。")
             assert transport.calls == ([] if route == "silent" else [
                 ("reply", {"message_id": "om_in", "text": expected})])
         finally:
@@ -151,7 +151,7 @@ def test_an_unsupported_reply_failure_does_not_stop_the_next_event(tmp_path: Pat
             await adapter._handle_lark_event(_event(chat_type="group", chat_id="oc_team",
                                                    message_type="share_chat", mentions=[BOT_MENTION]))
             assert transport.calls == [("reply", {"message_id": "om_in", "text":
-                                                   "暂不支持这类飞书消息（share_chat），请发文字或富文本。"})]
+                                                   "暂不支持这类飞书消息（share_chat），请发文字、富文本、图片或文件。"})]
             transport.error = None
             await adapter._handle_lark_event(_event(message_id="om_next"))
             (message,) = bus.journal.undelivered()
@@ -755,3 +755,72 @@ def test_delivery_record_is_escaped_only_at_lark_markdown_rendering(tmp_path, ta
             await adapter.stop()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("entry", ["answer", "progress", "recovered", "post", "post_reply", "notice", "notify"])
+def test_all_lark_text_delivery_redacts_attachment_paths(tmp_path: Path, entry: str) -> None:
+    from looper.agents import chat_attachments as files
+
+    async def main() -> None:
+        item, = files.store_upload(tmp_path, "channel-lark_bot", "om_1", [("my 笔记.txt", b"hello")])
+        text = f"See `{item.path}` now"
+        transport = StubTransport()
+        adapter = _adapter(tmp_path, transport)
+        try:
+            if entry in {"post", "post_reply"}:
+                receipt = await adapter.post(USER, text, reply_to="om_parent" if entry == "post_reply" else None)
+            elif entry == "notify":
+                receipt = await adapter.notify(OPEN_ID, text)
+            elif entry == "notice":
+                receipt = await adapter._send_notice(USER, text)
+            else:
+                envelope = _envelope("c1", MessageType.AGENT_REPLY if entry == "answer" else MessageType.STATUS_UPDATE,
+                                     text=text)
+                envelope.metadata.update({"attachment_paths": [item.path]})
+                if entry == "recovered":
+                    envelope.metadata.update({"reply_route": {"chat_id": "oc_team", "reply_to": "om_parent"}})
+                else:
+                    adapter._correlation_chat["c1"] = "oc_dm"
+                # Metadata keeps exact names available when retention already removed a file.
+                Path(item.path).unlink()
+                receipt = await adapter.deliver(envelope)
+            assert receipt.success
+            method, payload = transport.calls[0]
+            assert payload.get("text", payload.get("markdown")) == "See `[attachment]` now"
+        finally:
+            await adapter.stop()
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("reply_fails", [False, True])
+def test_group_attachment_failure_notifies_once_and_failed_notice_still_publishes(
+    tmp_path: Path, reply_fails: bool,
+) -> None:
+    async def main() -> None:
+        transport = StubTransport()
+
+        async def download(*args: Any, **kwargs: Any) -> None:
+            raise OSError("cannot save resource")
+
+        transport.download = download
+        if reply_fails:
+            transport.error = LarkCliError("cannot send reply")
+        adapter = _adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        try:
+            await adapter._handle_lark_event(_event(chat_type="group", chat_id="oc_team", mentions=[BOT_MENTION],
+                message_type="post", content="@HelperBot ![Image](img_unknown) ![Image](img_other)"))
+            message, = bus.journal.undelivered()
+            assert len(message.payload["attachments"]) == 2
+            assert all(item["state"] == "failed" and item["told"] is not reply_fails
+                       for item in message.payload["attachments"])
+            replies = [payload for method, payload in transport.calls if method == "reply"]
+            assert len(replies) == 1 and replies[0]["message_id"] == "om_in"
+            assert replies[0]["text"].startswith("有 2 个附件没有收下：")
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())

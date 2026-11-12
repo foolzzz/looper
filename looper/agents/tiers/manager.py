@@ -624,22 +624,25 @@ def _chat_record(envelope: MessageEnvelope, message_id: str) -> dict[str, Any]:
 
 def _reply_route(envelope: MessageEnvelope) -> dict[str, Any]:
     """Keep reply routing in the journaled answer, independent of the channel's in-memory correlation map."""
+    paths = [item["path"] for item in envelope.payload.get("attachments") or []
+             if isinstance(item, dict) and isinstance(item.get("path"), str)]
+    attachments = {"attachment_paths": paths} if paths else {}
     origin = _message_origin(envelope)
     if origin["channel"] == "web":
         context = envelope.payload.get("channel_context")
         if isinstance(context, dict):
             session, client_id = context.get("session_id"), context.get("client_message_id")
             if isinstance(session, str) and session and isinstance(client_id, str) and client_id:
-                return {"reply_route": {"session_id": session, "message_id": f"{client_id}:reply"}}
-        return {}
+                return {**attachments, "reply_route": {"session_id": session, "message_id": f"{client_id}:reply"}}
+        return attachments
     if not origin["chat"] or not (origin["channel"] == "telegram" or is_lark(origin["channel"])):
-        return {}
+        return attachments
     route = {"chat_id": origin["chat"]}
     if is_lark(origin["channel"]) and origin["group"]:
         message_id = envelope.payload["channel_context"].get("message_id")
         if isinstance(message_id, str) and message_id:
             route["reply_to"] = message_id
-    return {"reply_route": route}
+    return {**attachments, "reply_route": route}
 
 
 def _with_blocks(text: str, blocks: list[str]) -> str:
