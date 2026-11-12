@@ -12,14 +12,15 @@ from looper.agents.http_server import AgentHTTPServer
 from looper.db import tasks
 
 
-def test_startup_steps_order_omissions_and_formatting(monkeypatch):
+def test_startup_steps_order_omissions_and_formatting(monkeypatch, caplog):
     ticks = iter([101.3, 101.3, 101.41, 101.41, 101.45, 102.6])
     monkeypatch.setattr(serve, "time", SimpleNamespace(monotonic=lambda: next(ticks)))
     startup = serve._StartupSteps(100.0)
-    with startup.measure("pool"):
-        pass
-    with startup.measure("llmrec"):
-        pass
+    with caplog.at_level("INFO", logger=serve.__name__):
+        with startup.measure("pool"):
+            assert "startup step: pool" in caplog.text
+        with startup.measure("llmrec"):
+            assert "startup step: llmrec" in caplog.text
     assert startup.finish() == "imports=1.3 pool=0.1 llmrec=0.0 total=2.6"
     assert list(startup.steps) == ["imports", "pool", "llmrec", "total"]
     assert startup.steps == pytest.approx({"imports": 1.3, "pool": 0.11, "llmrec": 0.04, "total": 2.6})

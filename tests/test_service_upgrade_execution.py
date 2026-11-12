@@ -4,12 +4,14 @@ from __future__ import annotations
 import json
 import io
 import asyncio
+import ensurepip
 import multiprocessing
 import os
 import plistlib
 import signal
 import subprocess
 import tarfile
+import urllib.error
 import venv
 import zipfile
 from datetime import datetime, timezone
@@ -76,11 +78,27 @@ def deployment(tmp_path, monkeypatch, system_responses):
     target = manifest("control_plane", "1.0.1")
     state = service.State(installed=True, loaded=True, running=True, pid=123456789)
     elapsed = [0.0]
+    sleeps = []
+    clock_reads = 0
+
+    def clock():
+        nonlocal clock_reads
+        clock_reads += 1
+        assert clock_reads < 20000, "upgrade stopped advancing its polling loop"
+        return elapsed[0]
+
+    def sleep(seconds):
+        assert seconds > 0
+        sleeps.append(seconds)
+        assert len(sleeps) < 4000, "upgrade exceeded its test polling budget"
+        elapsed[0] += seconds
+        assert elapsed[0] <= 1800, "upgrade exceeded its test deadline"
+
     statuses = [{"phase": "draining", "waiting": {"runs": []}}, {"phase": "drained"}]
     scenario = SimpleNamespace(target=target, current=current, install_error=False, stop_error=False, stop_then_error=False,
                                verify_error=False, process_lingers=False)
 
-    def operation(port, token, name, args):
+    def operation(port, token, name, args, **kwargs):
         events.append(name)
         if name == "health":
             if not state.running:
@@ -122,8 +140,7 @@ def deployment(tmp_path, monkeypatch, system_responses):
         return subprocess.CompletedProcess(argv, 0, "1" * 40 if "rev-parse" in argv else "", "")
 
     host = service.Host(system="Linux", home=tmp_path / "home", uid=1, environ={},
-        executable="python", cwd=tmp_path, package_root=tmp_path, run=run, clock=lambda: elapsed[0],
-        sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+        executable="python", cwd=tmp_path, package_root=tmp_path, run=run, clock=clock, sleep=sleep,
         get_components=lambda port, token, **kwargs: (current if scenario.verify_error else scenario.current).to_dict(),
         system_operation=operation, get_status=lambda *args, **kwargs: system_responses.status,
         get_whoami=lambda *args, **kwargs: {"looper_version": scenario.current.version},
@@ -134,15 +151,100 @@ def deployment(tmp_path, monkeypatch, system_responses):
     monkeypatch.setattr(service, "manager", lambda *args: manager)
     monkeypatch.setattr(service.Host, "current", classmethod(lambda cls: host))
     monkeypatch.setattr(components, "manifest_from_git", lambda *args: scenario.target)
+    monkeypatch.setattr(components, "loaded_manifest", lambda: current)
     monkeypatch.setattr(service, "_install_target", install)
     monkeypatch.setattr(service, "_unit_package_root", lambda host, mgr: host.package_root.resolve())
     monkeypatch.setattr(service, "__file__", str(tmp_path / "looper/agents/service.py"))
     return SimpleNamespace(host=host, events=events, statuses=statuses, state=state, scenario=scenario,
-                           root=root, elapsed=elapsed, responses=system_responses)
+                           root=root, elapsed=elapsed, sleeps=sleeps, responses=system_responses)
 
 
 def report(deployment):
     return json.loads((deployment.root / "logs/serve.log").read_text().splitlines()[-1])
+
+
+@pytest.mark.parametrize("kind", [UpgradeKind.CONTROL_PLANE, UpgradeKind.FULL])
+def test_slow_start_with_advancing_log_succeeds_with_default_timeout(deployment, monkeypatch, kind):
+    import looper.upgrade
+
+    monkeypatch.setattr(looper.upgrade, "decide", lambda *args, **kwargs: UpgradePlan(kind, (), ("control_plane",)))
+    log = deployment.root / "logs/serve.log"
+    log.parent.mkdir(parents=True)
+    started = []
+
+    def status(*args, **kwargs):
+        if "start" not in deployment.events:
+            return deployment.responses.status
+        if not started:
+            started.append(deployment.elapsed[0])
+        with log.open("a") as output:
+            output.write(f"startup progress {deployment.elapsed[0]}\n")
+        if deployment.elapsed[0] - started[0] >= 200:
+            return {**deployment.responses.status, "keepers": {"pending": 0}}
+        return None
+
+    deployment.host.get_status = status
+    assert cli.main(["service", "upgrade"]) == 0
+    assert deployment.elapsed[0] - started[0] == 200
+    assert deployment.events.count("start") == 1
+    assert deployment.events.count("stop") == 1
+    assert report(deployment)["serving"] is True
+
+
+@pytest.mark.parametrize("flags, deadline", [([], 300), (["--start-timeout", "0.5"], 0.5), (["--timeout", "4"], 4)])
+@pytest.mark.parametrize("progress", [True, False])
+def test_live_start_timeout_reports_starting_without_restarting(deployment, capsys, flags, deadline, progress):
+    log = deployment.root / "logs/serve.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("startup step: old_step\n")
+    started = []
+
+    def status(*args, **kwargs):
+        if "start" not in deployment.events:
+            return deployment.responses.status
+        if not started:
+            started.append(deployment.elapsed[0])
+        if progress:
+            with log.open("a") as output:
+                output.write("INFO looper.agents.serve: startup step: kept_scan\nworking\n")
+        return None
+
+    deployment.host.get_status = status
+    assert cli.main(["service", "upgrade", *flags]) == 1
+    assert deployment.elapsed[0] - started[0] == deadline
+    assert deployment.state.running
+    assert deployment.events.count("start") == 1
+    assert deployment.events.count("stop") == 1
+    assert "drain_cancel" not in deployment.events
+    data = report(deployment)
+    assert data["starting"] is True and data["serving"] is False
+    assert data["status"] == "starting"
+    assert data["last_startup_step"] == ("kept_scan" if progress else None)
+    assert "restart_hint" not in data
+    error = capsys.readouterr().err
+    assert "still starting" in data["error"] and "do not restart" in error
+    assert "starting: yes" in error
+    assert "serving: no" not in error.splitlines()[0]
+
+
+def test_recovery_start_timeout_also_leaves_live_process_starting(deployment, capsys):
+    deployment.scenario.install_error = True
+    deployment.host.get_status = lambda *args, **kwargs: (
+        deployment.responses.status if "start" not in deployment.events else None)
+    assert cli.main(["service", "upgrade", "--start-timeout", "2"]) == 1
+    assert deployment.events.count("start") == 1 and deployment.state.running
+    assert "drain_cancel" not in deployment.events
+    data = report(deployment)
+    assert data["starting"] is True and data["serving"] is False
+    assert "still starting" in data["recovery_error"]
+    assert "restart_hint" not in data
+    assert "do not restart" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_invalid_start_timeout_refused_without_any_mutation(deployment, value):
+    assert cli.main(["service", "upgrade", "--start-timeout", value]) == 1
+    assert deployment.events == []
 
 
 @pytest.mark.parametrize("startup_steps", [None, {"imports": 1.3, "pool": 0.1, "total": 2.6}])
@@ -330,7 +432,7 @@ def test_checkout_upgrade_pins_real_sync_to_preflight_interpreter(deployment, tm
     monkeypatch.setattr(service, "_install_target", _REAL_INSTALLER)
     operation, git = deployment.host.system_operation, deployment.host.run
 
-    def drain(port, token, name, args):
+    def drain(port, token, name, args, **kwargs):
         if name == "drain":
             monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", str(foreign))
             deployment.host.environ["UV_PROJECT_ENVIRONMENT"] = str(foreign)
@@ -376,7 +478,7 @@ def test_service_that_exits_during_drain_is_started_again_only_when_nothing_runs
     shutting_down = case in ("shutting_down", "shutting_down_forever")
     shutdown_started = []
 
-    def operation(port, token, name, args):
+    def operation(port, token, name, args, **kwargs):
         deployment.events.append(name)
         if name == "drain":
             return {"phase": "draining", "waiting": {"runs": []}}
@@ -447,7 +549,7 @@ def test_upgrade_recovery_decides_after_the_wait_whatever_the_first_port_probe_s
         deployment, case, command, capsys):
     failed_poll = []
 
-    def operation(port, token, name, args):
+    def operation(port, token, name, args, **kwargs):
         deployment.events.append(name)
         if name == "drain":
             return {"phase": "draining", "waiting": {"runs": []}}
@@ -513,7 +615,7 @@ def test_manager_restart_during_drain_waits_for_serving_without_starting(
         deployment, pid, response_delay, capsys):
     restart_time = []
 
-    def operation(port, token, name, args):
+    def operation(port, token, name, args, **kwargs):
         deployment.events.append(name)
         if name == "drain":
             return {"phase": "draining", "waiting": {"runs": []}}
@@ -525,8 +627,12 @@ def test_manager_restart_during_drain_waits_for_serving_without_starting(
         return {"phase": "serving"}
 
     deployment.host.system_operation = operation
-    deployment.host.get_status = lambda *args, **kwargs: (
-        deployment.responses.status if not restart_time or deployment.elapsed[0] >= restart_time[0] + response_delay else None)
+    def status(*args, timeout=3):
+        assert timeout == service._UPGRADE_READ_TIMEOUT_SECONDS
+        return (deployment.responses.status
+                if not restart_time or deployment.elapsed[0] >= restart_time[0] + response_delay else None)
+
+    deployment.host.get_status = status
     assert cli.main(["service", "upgrade", "--timeout", "5"]) == 1
     assert "start" not in deployment.events
     assert "stop" not in deployment.events
@@ -537,8 +643,10 @@ def test_manager_restart_during_drain_waits_for_serving_without_starting(
     assert data["serving"] is serving
     assert data["running_code_fingerprint"] == (
         deployment.scenario.current.components["control_plane"] if serving else None)
-    assert ("restart_hint" in data) is not serving
-    assert f"serving: {'yes' if serving else 'no'}" in capsys.readouterr().err
+    assert "restart_hint" not in data
+    if not serving:
+        assert data["starting"] is True
+    assert ("serving: yes" if serving else "starting: yes") in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("late_exit", [True, False])
@@ -590,7 +698,7 @@ def test_stop_wait_renews_drain_best_effort(deployment, renew_error):
     deployment.host.pid_alive = lambda pid: deployment.elapsed[0] < 2 * service._POLL_SECONDS
     operation = deployment.host.system_operation
 
-    def renew(port, token, name, args):
+    def renew(port, token, name, args, **kwargs):
         result = operation(port, token, name, args)
         if name == "drain_status" and renew_error is not None:
             raise renew_error("old service no longer answers")
@@ -647,6 +755,156 @@ def test_no_force_cancels_deadline_without_stopping_or_installing(deployment, ca
     assert "--no-force" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("finishes_at,wait_seconds,poll_seconds,polls_expected", [
+    (15, 30, 15, [0, 15]), (30, 30, 15, [0, 15, 30]), (None, 30, 15, [0, 15, 30]),
+    (None, 7, 15, [0, 7]), (0.5, 1, 0.25, [0, 0.25, 0.5]),
+])
+def test_control_plane_preflight_waits_without_draining(
+        deployment, monkeypatch, capsys, finishes_at, wait_seconds, poll_seconds, polls_expected):
+    monkeypatch.setattr(service, "_PREFLIGHT_POLL_SECONDS", poll_seconds)
+    deployment.responses.status["keepers"] = {"mode": "on", "pending": 0}
+    operation = deployment.host.system_operation
+    polls = []
+    blocked = {"worker_id": "plain-worker", "runtime_id": "codex", "keepable": False,
+               "role": "worker", "since": "2026-01-01T00:00:00+00:00"}
+
+    def preflight(port, token, name, args, **kwargs):
+        if name == "drain_status" and "drain" not in deployment.events:
+            assert kwargs["timeout"] == service._UPGRADE_READ_TIMEOUT_SECONDS
+            polls.append(deployment.elapsed[0])
+            runs = [blocked] if finishes_at is None or deployment.elapsed[0] < finishes_at else []
+            return {"phase": "serving", "waiting": {"runs": runs + [
+                {"worker_id": "kept-worker", "keepable": True}]}}
+        if name == "drain":
+            assert finishes_at is not None and deployment.elapsed[0] >= finishes_at
+        return operation(port, token, name, args)
+
+    deployment.host.system_operation = preflight
+    result = cli.main(["service", "upgrade", "--no-force", "--preflight-wait", str(wait_seconds)])
+    data = report(deployment)
+    assert polls == polls_expected
+    assert deployment.sleeps[:len(polls) - 1] == [b - a for a, b in zip(polls, polls[1:])]
+    assert data["preflight_wait_seconds"] == (finishes_at or wait_seconds)
+    if finishes_at is None:
+        assert result == 1 and deployment.events == []
+        assert data["drain_seconds"] == 0 and data["serving"] is True
+        assert data["blockers"]["non_keepable_runs"][0]["runtime_id"] == "codex"
+        assert data["blockers"]["non_keepable_runs"][0]["age_seconds"] > 0
+        error = capsys.readouterr().err
+        for text in ("1 non-keepable runs are in flight", "plain-worker", "codex", "age_seconds",
+                     "nothing was drained", "deploy again later"):
+            assert text in error
+    else:
+        assert result == 0
+        assert deployment.events[:2] == ["drain", "drain_status"]
+
+
+@pytest.mark.parametrize("kind,no_force,wait", [
+    (UpgradeKind.CONTROL_PLANE, True, "0"),
+    (UpgradeKind.CONTROL_PLANE, False, "30"),
+    (UpgradeKind.FULL, True, "30"),
+])
+def test_preflight_leaves_other_upgrade_flows_unchanged(deployment, monkeypatch, kind, no_force, wait):
+    import looper.upgrade
+    monkeypatch.setattr(looper.upgrade, "decide", lambda *args, **kwargs: UpgradePlan(kind, (), ()))
+    deployment.statuses[0]["waiting"]["runs"] = [
+        {"worker_id": "plain-worker", "runtime_id": "codex", "keepable": False}]
+    flags = ["--no-force"] if no_force else []
+    assert cli.main(["service", "upgrade", "--preflight-wait", wait, *flags]) == 0
+    assert deployment.events == ["drain", "drain_status", "stop", "install", "start"]
+    assert report(deployment)["preflight_wait_seconds"] == 0
+
+
+@pytest.mark.parametrize("summary_seconds", [60, 1])
+def test_cancelled_drain_reports_last_blockers_and_periodic_progress(deployment, monkeypatch, capsys, summary_seconds):
+    monkeypatch.setattr(service, "_DRAIN_SUMMARY_SECONDS", summary_seconds)
+    deployment.responses.status["keepers"] = {"mode": "on", "pending": 0}
+    waiting = {"runs": [{"worker_id": "plain-worker", "runtime_id": "codex", "keepable": False,
+                         "since": "2026-01-01T00:00:00+00:00"},
+                        {"worker_id": "kept-worker", "keepable": True}],
+               "manager_turns": ["manager"], "planner_turns": ["planner-task"],
+               "gates": 2, "waits": 3, "consults": 1, "starting": 1}
+    deployment.statuses[:] = [{"phase": "draining", "waiting": {"manager_turns": ["old-turn"]}},
+                             {"phase": "draining", "waiting": waiting}]
+    assert cli.main(["service", "upgrade", "--no-force", "--drain-timeout", str(2 * summary_seconds)]) == 1
+    data = report(deployment)
+    blockers = data["blockers"]
+    assert len(blockers["non_keepable_runs"]) == 1
+    assert blockers["non_keepable_runs"][0]["worker_id"] == "plain-worker"
+    assert blockers["manager_turns"] == ["manager"]
+    assert blockers["planner_turns"] == ["planner-task"]
+    assert "old-turn" not in data["error"]
+    assert (blockers["gates"], blockers["waits"], blockers["consults"], blockers["starting"]) == (2, 3, 1, 1)
+    for text in ("plain-worker", "codex", "planner-task", "manager", "gates=2", "waits=3"):
+        assert text in data["error"]
+    output = capsys.readouterr()
+    progress = [line for line in output.err.splitlines() if line.startswith("drain waiting")]
+    assert len(progress) == 2
+    assert [line.split(":", 1)[0] for line in progress] == [
+        f"drain waiting ({seconds}s)" for seconds in (summary_seconds, 2 * summary_seconds)]
+    assert all("plain-worker" in line and "gates=2" in line for line in progress)
+    assert "drain_cancel" in deployment.events and "stop" not in deployment.events
+
+
+def test_failed_upgrade_slow_status_probe_still_reports_serving(deployment):
+    deployment.statuses[:] = [{"phase": "draining", "deadline_passed": True}]
+    probes = []
+
+    def slow_status(*args, timeout=3):
+        probes.append(timeout)
+        return deployment.responses.status if timeout >= 4 else None
+
+    deployment.host.get_status = slow_status
+    assert cli.main(["service", "upgrade", "--no-force"]) == 1
+    assert report(deployment)["serving"] is True
+    assert probes == [service._UPGRADE_READ_TIMEOUT_SECONDS] * 2
+
+
+@pytest.mark.parametrize("failures,preflight,error", [
+    (2, False, "wrapped"), (2, True, "wrapped"), (3, False, "wrapped"),
+    (2, False, "url"), (2, False, "raw"), (2, False, "lease_lost"), (1, False, "other"),
+])
+def test_upgrade_drain_status_retries_only_transient_timeouts(deployment, failures, preflight, error):
+    deployment.responses.status["keepers"] = {"mode": "on", "pending": 0}
+    operation = deployment.host.system_operation
+    attempts = []
+
+    def flaky(port, token, name, args, **kwargs):
+        if name == "drain_status":
+            attempts.append(kwargs["timeout"])
+            if len(attempts) <= failures:
+                if error == "other":
+                    raise service.ServiceError("connection refused")
+                if error == "raw":
+                    raise TimeoutError("timed out")
+                try:
+                    if error == "url":
+                        raise urllib.error.URLError(TimeoutError("timed out"))
+                    raise TimeoutError("timed out")
+                except OSError as exc:
+                    raise service.ServiceError("/api/v1/system/drain_status failed: timed out") from exc
+            if error == "lease_lost":
+                return {"phase": "serving"}
+            if preflight and "drain" not in deployment.events:
+                return {"phase": "serving", "waiting": {"runs": []}}
+        return operation(port, token, name, args)
+
+    deployment.host.system_operation = flaky
+    flags = ["--no-force", "--preflight-wait", "30"] if preflight else []
+    failed = failures == 3 or error in ("lease_lost", "other")
+    assert cli.main(["service", "upgrade", *flags]) == int(failed)
+    assert attempts == [service._UPGRADE_READ_TIMEOUT_SECONDS] * (1 if error == "other" else 3 + int(preflight))
+    if failed:
+        assert "drain_cancel" in deployment.events and "install" not in deployment.events
+        assert "stop" not in deployment.events
+
+
+@pytest.mark.parametrize("value", ["-1", "nan", "inf"])
+def test_invalid_preflight_wait_refused_before_mutation(deployment, value):
+    assert cli.main(["service", "upgrade", "--preflight-wait", value]) == 1
+    assert deployment.events == []
+
+
 @pytest.mark.parametrize("failure", ["stop_error", "stop_then_error", "install_error", "process_lingers"])
 def test_failure_before_restart_cancels_drain_and_recovers_serving(deployment, failure):
     setattr(deployment.scenario, failure, True)
@@ -658,7 +916,7 @@ def test_failure_before_restart_cancels_drain_and_recovers_serving(deployment, f
 
 
 def test_lost_drain_response_also_attempts_cancel(deployment):
-    def operation(port, token, name, args):
+    def operation(port, token, name, args, **kwargs):
         deployment.events.append(name)
         if name == "drain":
             raise service.ServiceError("lost response")
@@ -675,7 +933,7 @@ def test_restart_drain_has_no_install_step(deployment):
 
 
 def test_control_plane_retains_turns_drain_branch(deployment, monkeypatch):
-    def operation(port, token, name, args):
+    def operation(port, token, name, args, **kwargs):
         assert name == "drain"
         assert args == {"scope": "turns", "timeout_seconds": 180}
         return {"phase": "drained"}
@@ -896,15 +1154,16 @@ def test_cli_repeated_wheel_upgrade_preserves_dashboard_without_dependency_reins
 def test_wheel_upgrade_installs_cli_code_and_metadata_in_service_environment(
         deployment, tmp_path, monkeypatch, pip_available, change):
     environment = tmp_path / "venv"
-    venv.EnvBuilder(with_pip=True).create(environment)
+    venv.EnvBuilder().create(environment)
     python = str(environment / "bin/python")
     monkeypatch.setenv("PIP_NO_INDEX", "1")
+    monkeypatch.setenv("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+    monkeypatch.setenv("PIP_NO_COMPILE", "1")
     monkeypatch.setenv("PIP_CONFIG_FILE", os.devnull)
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
 
     def execute(argv, *, env=None):
-        # Real offline installs can be slow on busy hosts; this tests their result, not their latency.
-        return subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        return subprocess.run(argv, cwd=tmp_path, capture_output=True, text=True, timeout=30,
                               env=env if env is not None else
                               {k: v for k, v in os.environ.items() if k != "PYTHONPATH"})
 
@@ -929,9 +1188,12 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_in_service_environment(
             for name, content in files.items():
                 archive.writestr(name, content)
         wheels.append(wheel)
+    site = Path(execute([python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"]).stdout.strip())
+    # Run the real bundled pip from its wheel, without reinstalling pip/setuptools in every case.
+    pip_wheel = next((Path(ensurepip.__file__).parent / "_bundled").glob("pip-*.whl"))
+    (site / "pip.pth").write_text(str(pip_wheel) + "\n")
     installed = execute([python, "-m", "pip", "install", "--no-deps", str(wheels[0])])
     assert installed.returncode == 0, installed.stderr
-    site = Path(execute([python, "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"]).stdout.strip())
     static = site / "looper/web/dashboard"
     original = {p.relative_to(static).as_posix(): p.read_bytes() for p in static.rglob("*") if p.is_file()}
     monkeypatch.setenv("PYTEST_LOOPER_STATIC_DIR", str(static))
@@ -980,7 +1242,7 @@ def test_wheel_upgrade_installs_cli_code_and_metadata_in_service_environment(
     deployment.host.environ = shell_environment()
     operation = deployment.host.system_operation
 
-    def drain(port, token, name, args):
+    def drain(port, token, name, args, **kwargs):
         if name == "drain":
             # The installation must use the environment validated before draining.
             deployment.host.environ.update(PIP_TARGET=str(redirected / "after-drain"),
@@ -1285,14 +1547,26 @@ def test_failed_start_retries_new_install_and_reports_serving(deployment, recove
     log = deployment.root / "logs/serve.log"
     log.parent.mkdir(parents=True)
     log.write_text("startup output\n")
-    deployment.host.get_status = lambda *args, **kwargs: (
-        deployment.responses.status if "stop" not in deployment.events or (recovery_serves and deployment.events.count("start") == 2) else None)
+    failed_at = []
+
+    def status(*args, **kwargs):
+        if "stop" not in deployment.events or (recovery_serves and deployment.events.count("start") == 2):
+            return deployment.responses.status
+        deployment.state.running = False
+        deployment.state.pid = None
+        deployment.state.last_exit = "status 1"
+        failed_at.append(deployment.elapsed[0])
+        return None
+
+    deployment.host.get_status = status
     assert cli.main(["service", "upgrade", "--timeout", "1"]) == 1
     assert deployment.events.count("start") == 2
     assert deployment.events.count("install") == 1
     assert deployment.scenario.current is deployment.scenario.target
     data = report(deployment)
     assert data["status"] == "failed"
+    assert "exited before answering" in data["error"]
+    assert deployment.elapsed[0] == failed_at[0]
     assert data["serving"] is recovery_serves
     assert ("recovery_error" in data) is not recovery_serves
     error_line = capsys.readouterr().err.splitlines()[0]
@@ -1332,7 +1606,7 @@ def test_upgrade_uses_scope_specific_drain_deadline(deployment, monkeypatch, kin
     requests = []
     operation = deployment.host.system_operation
 
-    def record_operation(port, token, name, args):
+    def record_operation(port, token, name, args, **kwargs):
         if name == "drain":
             requests.append(args)
         return operation(port, token, name, args)
@@ -1442,7 +1716,7 @@ def test_control_plane_times_only_turns_waiting(
     deployment.responses.status["keepers"] = {"mode": "on", "pending": 0, "adopted_at_start": 1}
     operation = deployment.host.system_operation
 
-    def drain_status(port, token, name, args):
+    def drain_status(port, token, name, args, **kwargs):
         if name not in ("drain", "drain_status"):
             return operation(port, token, name, args)
         deployment.events.append(name)

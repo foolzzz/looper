@@ -339,10 +339,15 @@ class Notifier:
         return await db_schedules.set_alert(db_connection.get_pool(), schedule_id, column, at)
 
     async def _deliver(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None = None) -> None:
+        from .schedules import notify_targets
+
         channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
         status, error = "dashboard", None
         if channel and chat and schedule["notify"] != "never":
-            if self._sender is None:
+            if not any((t["channel"], t["chat"]) == (channel, chat) for t in await notify_targets()):
+                status, error = "failed", ("the notification target is unavailable: "
+                                           "its allowlist entry or chat binding was removed")
+            elif self._sender is None:
                 status, error = "failed", "this server cannot send messages"
             else:
                 try:
