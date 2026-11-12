@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.166] - 2026-11-12
+
+### Fixed
+
+- **Project moves and directory changes.** ([#1301](https://github.com/foolzzz/looper/pull/1301); fixes #1054, part of #1079)
+  - A move repairs bare-repo worktrees (the bare repository first, with `--git-dir=.`) and refuses a submodule whose relative `core.worktree` points outside the project.
+  - A directory-change confirmation is bound to the previewed project version even when no command schedule was listed, and execution rechecks it under the project lock.
+  - No model-visible change beyond the new refusal messages.
+
 ## [2.14.165] - 2026-11-12
 
 ### Fixed
