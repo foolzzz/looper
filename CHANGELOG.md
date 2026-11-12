@@ -18,6 +18,20 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.164] - 2026-11-12
+
+### Fixed
+
+- **Worker waits and Cursor session directories.** ([#1298](https://github.com/foolzzz/looper/pull/1298); review follow-ups #1091, #1110)
+  - A worker's wait for its process to exit and its stderr read after the output ends respect the run timeout; stderr is read with a one-second drain for every run without a successful result.
+  - A resident Cursor session resumes in the working directory saved with it; if that directory is gone, a new chat starts. The cleanup of interrupted replacement chats looks only in the chat partition of the process's working directory.
+  - No model-visible change.
+- **Keeper identities, rejected metadata and upgrade stop budgets.** ([#1296](https://github.com/foolzzz/looper/pull/1296); fixes #1048, part of #1276 and #1224)
+  - The keeper reuses the child's start time recorded by spawn; an unidentifiable live child ends with `START_FAILED` instead of a `RUNNING` state.
+  - Rejected keeper metadata is logged with run, file, field and value, and its small JSON files are copied privately before the keeper is ended (newest 20 copies, 64 KiB per file); a failed copy leaves the directory in place.
+  - Installed launchd plists set `ExitTimeOut` 30 and systemd units `TimeoutStopSec=30`; rerun `looper service install` to apply them to an existing service. `detach_kept` has one eight-second budget.
+  - No model-visible change.
+
 ## [2.14.163] - 2026-11-12
 
 ### Fixed
