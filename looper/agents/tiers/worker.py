@@ -459,6 +459,16 @@ REMINDER_PREFIX = "looper-reminder-"
 ADOPT_WINDOW_SECONDS = 300
 
 
+ROOM_ITEM_TIMEOUT_SEC = 30.0
+
+
+@dataclass
+class _SteeredDelivery:
+    delivery: RoomDelivery
+    observed: bool = False
+    fallback: asyncio.Task | None = None
+
+
 @dataclass
 class _Reminders:
     """A running agent's room deliveries (``WorkerPool.remind``)."""
@@ -467,7 +477,8 @@ class _Reminders:
     notified: int = 0
     next_delivery: Callable[[int], Awaitable[RoomDelivery | None]] | None = None
     confirm: Callable[[int], Awaitable[None]] | None = None
-    confirm_on_accept: bool = False
+    confirm_on_item: bool = False
+    steered: dict[int, _SteeredDelivery] = field(default_factory=dict)
     through: int = 0
     confirmed: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -1536,14 +1547,14 @@ class WorkerPool:
         return {wp.worker_id: (wp.status, wp.since) for wp in self._active.values()
                 if wp.parent_task_id == task_id and wp.status in ("pending", "running")}
 
-    def _room_reminders(self, task_id: str, seat: Seat, *, confirm_on_accept: bool = False) -> _Reminders:
+    def _room_reminders(self, task_id: str, seat: Seat, *, confirm_on_item: bool = False) -> _Reminders:
         if self.room_ops is None:
-            return _Reminders(confirm_on_accept=confirm_on_accept)
+            return _Reminders(confirm_on_item=confirm_on_item)
         room = self.room_ops.room
         # Messages can predate the run, so the first tool call or wait must check without a new post.
         return _Reminders(pending=True, next_delivery=lambda after: room.delivery(task_id, seat, after=after),
                           confirm=lambda through: room.confirm(task_id, seat.key, through),
-                          confirm_on_accept=confirm_on_accept)
+                          confirm_on_item=confirm_on_item)
 
     def room_in_flight(self, worker_id: str) -> int:
         state = self._reminders.get(worker_id)
@@ -1551,8 +1562,54 @@ class WorkerPool:
 
     def _drop_reminders(self, worker_id: str) -> None:
         state = self._reminders.pop(worker_id, None)
-        if state is not None and state.retry is not None:
-            state.retry.cancel()
+        if state is not None:
+            if state.retry is not None:
+                state.retry.cancel()
+            self._cancel_room_fallbacks(state)
+
+    @staticmethod
+    def _cancel_room_fallbacks(state: _Reminders) -> None:
+        for entry in state.steered.values():
+            if entry.fallback is not None:
+                entry.fallback.cancel()
+
+    async def _room_history_item(self, worker_id: str, state: _Reminders, text: str) -> None:
+        if "[Looper room]" not in text:
+            return
+        ids = {int(value) for value in re.findall(r"^- #(\d+) from ", text, re.MULTILINE)}
+        for entry in state.steered.values():
+            if entry.delivery.ids and ids.issuperset(entry.delivery.ids):
+                entry.observed = True
+                if entry.fallback is not None:
+                    entry.fallback.cancel()
+        await self._confirm_room_prefix(worker_id, state)
+
+    async def _confirm_room_prefix(self, worker_id: str, state: _Reminders) -> None:
+        # The room cursor is cumulative: a later receipt must not skip an unseen delivery.
+        while state.steered:
+            through, entry = next(iter(state.steered.items()))
+            if not entry.observed:
+                break
+            state.steered.pop(through)
+            if entry.fallback is not None and entry.fallback is not asyncio.current_task():
+                entry.fallback.cancel()
+            await self._confirm_delivery(worker_id, state, through)
+
+    def _room_item_fallback(self, worker_id: str, state: _Reminders, entry: _SteeredDelivery) -> None:
+        if entry.observed:
+            return
+
+        async def fallback() -> None:
+            await asyncio.sleep(ROOM_ITEM_TIMEOUT_SEC)
+            if self._reminders.get(worker_id) is not state or worker_id not in self._inputs:
+                return
+            logger.warning("worker %s room delivery history item timed out after %g s; "
+                           "falling back to acknowledgement through %d", worker_id, ROOM_ITEM_TIMEOUT_SEC,
+                           entry.delivery.through)
+            entry.observed = True
+            await self._confirm_room_prefix(worker_id, state)
+
+        entry.fallback = asyncio.create_task(fallback())
 
     def _retry_reminder(self, worker_id: str, state: _Reminders, delay: float) -> None:
         if state.retry is not None and not state.retry.done() and state.retry is not asyncio.current_task():
@@ -1607,12 +1664,15 @@ class WorkerPool:
                     return sent
                 reminder = delivery_uuid(delivery.through)
                 state.uuids.add(reminder)  # An echo may arrive while send awaits acceptance.
+                if state.confirm_on_item:
+                    state.steered[delivery.through] = _SteeredDelivery(delivery)
                 try:
                     result = await channel.send(delivery.text, uuid=reminder)
                 except (BrokenPipeError, ConnectionResetError, RuntimeError):
                     result = DeliveryResult.REJECTED
                 if result is DeliveryResult.REJECTED:
                     state.uuids.discard(reminder)
+                    state.steered.pop(delivery.through, None)
                     return sent
                 state.through = max(state.through, delivery.through)
                 state.last_at = now
@@ -1620,8 +1680,8 @@ class WorkerPool:
                 if result is DeliveryResult.UNKNOWN:
                     logger.warning("worker %s room delivery acceptance unknown; not retrying", worker_id)
                     return sent
-                if state.confirm_on_accept:
-                    await self._confirm_delivery(worker_id, state, delivery.through)
+                if state.confirm_on_item and (entry := state.steered.get(delivery.through)) is not None:
+                    self._room_item_fallback(worker_id, state, entry)
                 state.sent += 1
                 sent = True
                 wp = self._active.get(worker_id)
@@ -2410,6 +2470,8 @@ class WorkerPool:
             # Without this Claude would wait on stdin for another user turn.
             nonlocal input_ended
             self._inputs.pop(worker_id, None)
+            if (reminders := self._reminders.get(worker_id)) is not None:
+                self._cancel_room_fallbacks(reminders)
             if not input_ended:
                 channel.end_input()
                 input_ended = True
@@ -2491,6 +2553,9 @@ class WorkerPool:
                     return
 
                 event_type = event.get("type", "")
+                if event_type == "system" and event.get("subtype") == "codex_user_message" \
+                        and (reminders := self._reminders.get(worker_id)) is not None:
+                    await self._room_history_item(worker_id, reminders, event.get("text") or "")
                 # Background agents stream their own messages before the lead resumes.
                 if waiting is not None and not event.get("parent_tool_use_id") and (event_type == "assistant" or
                         (event_type == "system" and event.get("subtype") == "init")):
@@ -2692,7 +2757,7 @@ class WorkerPool:
                         ready.set()
                     if seat is not None and (push := room_push(launch)) is not RoomPush.NONE:
                         self._reminders.setdefault(worker_id, self._room_reminders(
-                            parent_task_id, seat, confirm_on_accept=push is RoomPush.STEER))
+                            parent_task_id, seat, confirm_on_item=push is RoomPush.STEER))
                 except (BrokenPipeError, ConnectionResetError):
                     # The process exited before reading; its output decides the outcome.
                     logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)

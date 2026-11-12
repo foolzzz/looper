@@ -277,11 +277,14 @@ def test_an_ended_seats_answer_follows_the_askers_delivery_mode(monkeypatch, mod
     assert ("comes to your inbox" in state) is (mode is RoomInput.PULL)
     assert ("delivered to your run" in state) is (mode is not RoomInput.PULL)
     assert ("waiting report" in state) is (mode is RoomInput.PUSHED_WAITS)
+    assert ("looper_room_inbox and wait_seconds" in state) is (mode is RoomInput.PUSHED)
 
 
-def test_watch_returns_unread_counts(monkeypatch):
+@pytest.mark.parametrize("mode", list(RoomInput))
+def test_watch_returns_unread_counts_and_the_runs_delivery_guidance(monkeypatch, mode):
     from contextlib import asynccontextmanager
     from looper.agents import room as module
+    from looper.agents.ops import room as room_ops
 
     @asynccontextmanager
     async def transaction(task_id):
@@ -294,8 +297,10 @@ def test_watch_returns_unread_counts(monkeypatch):
     monkeypatch.setattr(module.db_room, "task_transaction", transaction)
     monkeypatch.setattr(module.db_room, "open_watches", AsyncMock(return_value=[]))
     monkeypatch.setattr(module.db_room, "add_watch", AsyncMock(return_value=1))
-    result = asyncio.run(room.watch("task", WORKER, kind="interface"))
+    result = asyncio.run(room_ops.run_tool(room, "task", WORKER, room_ops.WATCH, {"kind": "interface"}, mode=mode))
     assert result["watch"] == 1 and result["unread"] == counts
+    assert ("comes to your inbox" in result["note"]) is (mode is RoomInput.PULL)
+    assert ("delivered to your run" in result["note"]) is (mode is not RoomInput.PULL)
     room._unread.assert_awaited_once_with("task", WORKER)
 
 

@@ -732,6 +732,8 @@ class RoomService:
                                       f"{answer}, so go on meanwhile")
                     if mode is RoomInput.PUSHED_WAITS:
                         entry["state"] += "; if nothing else is left, use a waiting report"
+                    elif mode is RoomInput.PUSHED:
+                        entry["state"] += "; if nothing else is left, wait with looper_room_inbox and wait_seconds"
                 else:
                     await self.give_to_planner(task_id, message, target.name, reason, _FALLBACK_WHY[reason])
                     entry["state"] = f"no run is in it now ({reason.value}): the Planner was given your question"
@@ -1021,7 +1023,8 @@ class RoomService:
     # --- Watches ---
 
     async def watch(self, task_id: str, seat: Seat, *, presence: str | None = None, state: str | None = None,
-                    kind: str | None = None, sender: str | None = None, until: str = "first") -> dict[str, Any]:
+                    kind: str | None = None, sender: str | None = None, until: str = "first",
+                    mode: RoomInput = RoomInput.PULL) -> dict[str, Any]:
         context = await self._context(task_id)
         if (presence is None) == (kind is None):
             raise OpError(ErrorCode.INVALID, "give either presence (a seat or role) or kind (interface or announce)")
@@ -1042,9 +1045,10 @@ class RoomService:
             watch_id = await db_room.add_watch(task_id, seat=seat.key, run=seat.run, presence=presence,
                                                state=(state or "online") if presence is not None else None, kind=kind,
                                                from_seat=sender, until=until, pool=conn)
+        notice = ("comes to your inbox" if mode is RoomInput.PULL else "will be delivered to your run")
         return {"watch": watch_id, **({"now": now} if presence is not None else {}),
                 "unread": await self._unread(task_id, seat),
-                "note": "a notice comes to your inbox when it happens; this run's watches end with it"}
+                "note": f"a notice {notice} when it happens; this run's watches end with it"}
 
     async def _fire(self, task_id: str, context: _Context, watch: Mapping[str, Any], what: str) -> None:
         await self._looper(task_id, MessageKind.NOTICE, Reason.WATCH, f"What you watched for: {what}",
