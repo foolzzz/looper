@@ -21,6 +21,7 @@ that changed while one of its turns ran and no Worker or Reviewer ran.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -193,20 +194,52 @@ def room_metrics(detail: Mapping[str, Any], activity: Iterable[Mapping[str, Any]
     """What the task's agents did in its room: the messages they posted (``room_messages``, Looper's notices and
     escalations apart), of them the questions (``room_questions``), the ones nobody answered (``room_unanswered``)
     and the interface posts (``room_interface``); Looper's escalations to the Planner (``room_escalations``); the
-    reminders Claude Code runs got (``room_reminders``); the posts the room refused (``room_refused``); and the runs'
-    calls of the room's tools (``room_tool_calls``, reads included)."""
+    reminders Claude Code runs got (``room_reminders``); room deliveries (``room_deliveries``); the posts the room
+    refused (``room_refused``); and the runs' calls of the room's tools (``room_tool_calls``, reads included),
+    including inbox calls (``room_inbox_calls``) and those returning no messages (``room_inbox_empty``)."""
     room = detail.get("room") or {}
     by_kind = (room.get("counts") or {}).get("by_kind") or {}
     rows = list(activity)
-    calls = 0
+    calls = inbox_calls = inbox_empty = 0
     for record_events in events.values():
+        inbox_ids: set[str] = set()
         for row in record_events:
-            event = row.get("event", row)
-            if not isinstance(event, Mapping) or event.get("type") != "assistant":
+            if not isinstance(row, Mapping):
                 continue
-            calls += sum(1 for block in (event.get("message") or {}).get("content") or []
-                         if isinstance(block, Mapping) and block.get("type") == "tool_use"
-                         and ROOM_TOOL_PREFIX in str(block.get("name") or ""))
+            event = row.get("event", row)
+            if not isinstance(event, Mapping) or event.get("type") not in ("assistant", "user"):
+                continue
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, Mapping) else None
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, Mapping):
+                    continue
+                if event["type"] == "assistant" and block.get("type") == "tool_use":
+                    name = str(block.get("name") or "")
+                    calls += int(ROOM_TOOL_PREFIX in name)
+                    if name.endswith("looper_room_inbox"):
+                        inbox_calls += 1
+                        if isinstance(call_id := block.get("id"), str):
+                            inbox_ids.add(call_id)
+                elif event["type"] == "user" and block.get("type") == "tool_result":
+                    call_id = block.get("tool_use_id")
+                    if block.get("is_error") or not isinstance(call_id, str) or call_id not in inbox_ids:
+                        continue
+                    text = block.get("content")
+                    if isinstance(text, list):
+                        text = "".join(part["text"] for part in text
+                                       if isinstance(part, Mapping) and isinstance(part.get("text"), str))
+                    if not isinstance(text, str):
+                        continue
+                    try:
+                        answer = json.loads(text)
+                    except ValueError:
+                        continue
+                    payload = answer.get("result", answer) if isinstance(answer, Mapping) else None
+                    messages = payload.get("messages") if isinstance(payload, Mapping) else None
+                    inbox_empty += int(isinstance(messages, list) and not messages)
     return {
         "room_messages": sum(n for kind, n in by_kind.items() if kind not in ("notice", "escalation")),
         "room_questions": int(by_kind.get("question", 0)),
@@ -214,6 +247,9 @@ def room_metrics(detail: Mapping[str, Any], activity: Iterable[Mapping[str, Any]
         "room_interface": int(by_kind.get("interface", 0)),
         "room_escalations": int(by_kind.get("escalation", 0)),
         "room_reminders": sum(1 for r in rows if r.get("summary") == "Room reminder sent"),
+        "room_deliveries": sum(1 for r in rows if str(r.get("summary") or "").startswith("Room messages delivered")),
+        "room_inbox_calls": inbox_calls,
+        "room_inbox_empty": inbox_empty,
         "room_refused": sum(1 for r in rows if str(r.get("summary") or "").startswith("Room: ")
                             and "refused" in str(r.get("summary") or "")),
         "room_tool_calls": calls,
