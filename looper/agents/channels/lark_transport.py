@@ -7,9 +7,11 @@ import json
 import logging
 from collections import deque
 from collections.abc import AsyncIterator, Iterable
+from pathlib import Path
 from typing import Any, Protocol
 
 from . import lark_cli
+from .lark_content import ResourceRef
 
 logger = logging.getLogger(__name__)
 _CONSUMER_STDERR_LINES = 5
@@ -24,6 +26,7 @@ class LarkTransport(Protocol):
                     idempotency_key: str | None = None, return_id: bool = False) -> str | None: ...
     async def edit(self, message_id: str, *, text: str) -> None: ...
     async def react(self, message_id: str) -> None: ...
+    async def download(self, message_id: str, ref: ResourceRef, part: Path, *, max_bytes: int) -> None: ...
     def events(self) -> AsyncIterator[dict[str, Any]]: ...
     async def names(self, open_ids: Iterable[str]) -> dict[str, str]: ...
     def available(self) -> bool: ...
@@ -86,6 +89,19 @@ class CliTransport:
 
     async def react(self, message_id: str) -> None:
         await lark_cli.run(lark_cli.reaction_command(message_id, profile=self._profile))
+
+    async def download(self, message_id: str, ref: ResourceRef, part: Path, *, max_bytes: int) -> None:
+        answer = await lark_cli.run_json(lark_cli.resource_command(
+            message_id, ref.key, ref.kind.value, part.name, profile=self._profile), timeout=30, cwd=part.parent)
+        data = answer.get("data")
+        saved = data.get("saved_path") if isinstance(data, dict) else None
+        if not isinstance(saved, str) or not saved:
+            raise lark_cli.LarkCliError("lark-cli did not say where it saved the resource")
+        path = (part.parent / saved).resolve()
+        if path != part.resolve():
+            if path.is_relative_to(part.parent.resolve()) and path.is_file():
+                path.unlink()
+            raise lark_cli.LarkCliError("lark-cli saved the resource somewhere else")
 
     async def names(self, open_ids: Iterable[str]) -> dict[str, str]:
         return await lark_cli.names(open_ids, self._profile or None)

@@ -13,10 +13,12 @@ import logging
 import uuid
 from collections import OrderedDict
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncGenerator, AsyncIterator
 
 from ..broadcast import Broadcaster
+from .. import chat_attachments
 from ..bus import MessageBus
 from ..message import (
     MANAGER_ADDRESS,
@@ -53,6 +55,7 @@ class WebChannelAdapter(ChannelAdapter):
         # The chat of each message still waiting for its answer, by correlation id: (chat session, message id). The
         # answer is saved to that chat whether or not a page still reads the message's stream (``deliver``).
         self._awaiting: OrderedDict[str, tuple[str, str]] = OrderedDict()
+        self._attachment_paths: OrderedDict[str, list[str]] = OrderedDict()
         # Open chat pages, keyed by chat session: what reaches a chat outside any message's stream.
         self._chats = Broadcaster()
         self._outbound_task: asyncio.Task[Any] | None = None
@@ -83,6 +86,14 @@ class WebChannelAdapter(ChannelAdapter):
         logger.info("web channel adapter stopped")
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
+        paths = envelope.metadata.get("attachment_paths", self._attachment_paths.get(envelope.correlation_id, []))
+        if paths and envelope.message_type is MessageType.STATUS_UPDATE and envelope.payload.get("delta"):
+            # A path split across deltas cannot be safely matched; send only the complete answer for these turns.
+            return DeliveryReceipt(channel="web", success=True)
+        if self._bus:
+            envelope = replace(envelope, payload={
+                key: chat_attachments.redact(value, self._bus.runtime_root, paths=paths)
+                if isinstance(value, str) else value for key, value in envelope.payload.items()})
         chat_session = envelope.payload.get("chat_session_id")
         if envelope.message_type == MessageType.AGENT_REPLY and isinstance(chat_session, str) and chat_session:
             return await self._add_to_chat(chat_session, envelope)
@@ -199,6 +210,12 @@ class WebChannelAdapter(ChannelAdapter):
         as that supplement of the task. ``client`` (``id``, ``name``): the API client it comes from."""
         assert self._bus is not None
         correlation_id = str(uuid.uuid4())
+        paths = [item["path"] for item in attachments or []
+                 if isinstance(item, dict) and isinstance(item.get("path"), str)]
+        if paths:
+            self._attachment_paths[correlation_id] = paths
+            while len(self._attachment_paths) > AWAITING_MAX:
+                self._attachment_paths.popitem(last=False)
 
         sse_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=1000)
         self._sse_queues[correlation_id] = sse_q

@@ -22,6 +22,7 @@ import re
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ... import child_env
@@ -127,6 +128,15 @@ def reaction_command(message_id: str, emoji: str = "Get", *, profile: str | None
     return [*_base(profile), "im", "reactions", "create", "--as", "bot", "--message-id", message_id, "--data", data]
 
 
+def resource_command(message_id: str, file_key: str, kind: str, output: str, *,
+                     profile: str | None = None) -> list[str]:
+    """Download a resource as the bot, confined to a bare output filename."""
+    if kind not in {"image", "file"} or not output or output in {".", ".."} or re.search(r"[/\\\x00]", output):
+        raise ValueError("resource kind must be image or file and output must be a bare filename")
+    return [*_base(profile), "im", "+messages-resources-download", "--as", "bot", "--message-id", message_id,
+            "--file-key", file_key, "--type", kind, "--output", output]
+
+
 def sent_message_id(answer: Mapping[str, Any]) -> str | None:
     """The id of the message ``+messages-send`` or ``+messages-reply`` sent, from its JSON answer."""
     data = answer.get("data") if isinstance(answer.get("data"), Mapping) else answer
@@ -189,11 +199,11 @@ def environment() -> dict[str, str]:
     return {**child_env.inherited(), **{k: v for k, v in os.environ.items() if k.startswith("LARK_")}}
 
 
-async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS) -> bytes:
+async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS, cwd: Path | None = None) -> bytes:
     """Run a lark-cli call; its stdout, or ``LarkCliError`` with lark-cli's reason."""
     try:
         process = await asyncio.create_subprocess_exec(
-            *argv, env=environment(), stdin=asyncio.subprocess.DEVNULL,
+            *argv, env=environment(), cwd=cwd, stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
     except OSError as exc:
@@ -216,8 +226,9 @@ async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS) -> byte
     return stdout
 
 
-async def run_json(argv: list[str]) -> dict[str, Any]:
-    out = await run(argv)
+async def run_json(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS,
+                   cwd: Path | None = None) -> dict[str, Any]:
+    out = await run(argv, timeout=timeout, cwd=cwd)
     try:
         data = json.loads(out)
     except ValueError:

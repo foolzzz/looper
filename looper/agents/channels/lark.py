@@ -12,12 +12,15 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from random import uniform as _reconnect_jitter
 from time import monotonic
 from typing import Any
 
 from ..bus import MessageBus
+from .. import chat_attachments as files
+from ..chat_attachments import Attachment, AttachmentKind, AttachmentState, TooLarge
 from ..message import (
     MessageEnvelope,
     MessageType,
@@ -45,6 +48,24 @@ RejectedListener = Callable[[str, str | None], Awaitable[None]]
 
 # How long finding a group sender's name may hold up their message; then the Manager gets the open_id.
 _NAME_LOOKUP_SECONDS = 5.0
+_DOWNLOAD_MESSAGE_SECONDS = 60.0
+
+
+def _not_received(attachments: list[Attachment]) -> str:
+    items = []
+    for item in attachments:
+        if item.state is AttachmentState.SAVED:
+            continue
+        label = f"图片 {item.index} " if item.kind is AttachmentKind.IMAGE else f"文件 {item.index}（{item.name}）"
+        reason = {
+            AttachmentState.TOO_LARGE: "超过 20 MB",
+            AttachmentState.NOT_ACCEPTED: "不是支持的类型（图片、文本、PDF、Office 文档）",
+            AttachmentState.OVER_LIMIT: "超出一条消息 10 个附件的上限",
+        }.get(item.state, "下载失败")
+        if "im:message:readonly" in (item.reason or ""):
+            reason += "（缺少权限 im:message:readonly）"
+        items.append(label + reason)
+    return f"有 {len(items)} 个附件没有收下：" + "；".join(items) + "。其余内容已交给 Manager。"
 
 
 def _check_lark_cli_available() -> bool:
@@ -146,6 +167,10 @@ class LarkChannelAdapter(ChannelAdapter):
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
         its own, or send the answer to the chat the message came from and close its status line."""
+        envelope = replace(envelope, payload={
+            key: files.redact(value, self._runtime_root, paths=envelope.metadata.get("attachment_paths", ()))
+            if isinstance(value, str) else value for key, value in envelope.payload.items()
+        })
         if envelope.message_type is MessageType.CHAT_NOTICE:
             # A task's end, to who it recorded, in order behind its progress.
             notice = Notice.from_payload(envelope.payload)
@@ -225,6 +250,7 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _send_target(self, target: NotifyTarget, text: str, *,
                            idempotency_key: str | None = None, return_id: bool = False) -> str | None:
         """Send Markdown to a user or to a group mentioning the requester."""
+        text = files.redact(text, self._runtime_root)
         if target.kind is TargetKind.USER:
             return await self._transport.send(user_id=target.id, markdown=text, idempotency_key=idempotency_key,
                                               return_id=return_id)
@@ -302,6 +328,7 @@ class LarkChannelAdapter(ChannelAdapter):
 
     async def notify(self, chat: str, text: str) -> DeliveryReceipt:
         """Send ``text`` as the bot to a Lark user (open_id) or native chat (chat_id)."""
+        text = files.redact(text, self._runtime_root)
         try:
             # Lark prefixes chat IDs with oc_ and user open IDs with ou_.
             if chat.startswith("oc_"):
@@ -321,6 +348,7 @@ class LarkChannelAdapter(ChannelAdapter):
         """Send ``text`` as Markdown: a reply to the message ``reply_to`` (``om_...``) when given, which @-mentions
         nobody; else to ``target`` like an end notice (a user, or a group @-mentioning the requester). Lark sends one
         message per ``idempotency_key`` within an hour, so a post retried after a lost answer is not sent twice."""
+        text = files.redact(text, self._runtime_root)
         try:
             if reply_to:
                 message_id = await self._transport.reply(reply_to, markdown=text, idempotency_key=idempotency_key,
@@ -480,10 +508,19 @@ class LarkChannelAdapter(ChannelAdapter):
                 logger.warning("%s: could not answer an unsupported message in %s", self.channel_id,
                                chat_id, exc_info=True)
             return
-        if inbound.resources:
-            text += ("\n\n(Looper cannot receive images or files yet: "
-                     + ", ".join(lark_content.placeholder(ref) for ref in inbound.resources) + " not received.)")
         self._reactions.add(chat_id, message_id)  # the bot saw it; in the background, the Manager gets it now
+        attachments = await self._collect(message_id, inbound.resources) if inbound.resources else []
+        if any(item.state is not AttachmentState.SAVED for item in attachments):
+            try:
+                reply = _not_received(attachments)
+                if group:
+                    await self._transport.reply(message_id, text=reply)
+                else:
+                    await self._transport.send(chat_id=chat_id, text=reply)
+                attachments = [replace(item, told=True) if item.state is not AttachmentState.SAVED else item
+                               for item in attachments]
+            except LarkCliError:
+                logger.warning("%s: could not report attachments not received", self.channel_id, exc_info=True)
         correlation_id = str(_uuid.uuid4())
         self._correlation_chat[correlation_id] = chat_id
         context = {"chat_id": chat_id, "chat_type": "group" if group else "p2p", "sender_id": sender_open_id or "",
@@ -503,6 +540,7 @@ class LarkChannelAdapter(ChannelAdapter):
             message_type=MessageType.USER_MESSAGE,
             payload={
                 "text": text,
+                **({"attachments": [item.to_payload() for item in attachments]} if attachments else {}),
                 "language": "zh",
                 "channel_context": context,
             },
@@ -510,6 +548,51 @@ class LarkChannelAdapter(ChannelAdapter):
             metadata=metadata,
         )
         await self._bus.publish(envelope)
+
+    async def _collect(self, message_id: str, refs: tuple[lark_content.ResourceRef, ...]) -> list[Attachment]:
+        deadline = monotonic() + _DOWNLOAD_MESSAGE_SECONDS
+        try:
+            directory = files.message_dir(self._runtime_root, self.channel_id, message_id)
+        except (OSError, ValueError):
+            directory = None
+        attachments = []
+        for ref in refs:
+            kind = AttachmentKind(ref.kind.value)
+            item = Attachment(ref.index, kind, AttachmentState.FAILED,
+                              files.safe_name(ref.name, kind.value), self.channel_type)
+            part = directory / f"{ref.index}.part" if directory else None
+            try:
+                remaining = deadline - monotonic()
+                if ref.index > files.PER_MESSAGE_MAX:
+                    item = replace(item, state=AttachmentState.OVER_LIMIT)
+                elif remaining <= 0:
+                    item = replace(item, reason="timed out")
+                elif part is None:
+                    item = replace(item, reason="could not be saved")
+                else:
+                    maximum = files.IMAGE_MAX_BYTES if kind is AttachmentKind.IMAGE else files.FILE_MAX_BYTES
+                    await asyncio.wait_for(self._transport.download(message_id, ref, part, max_bytes=maximum),
+                                           min(30, remaining))
+                    item = files.accept(part, index=ref.index, kind=kind, name=ref.name,
+                                        source=self.channel_type, max_bytes=maximum)
+            except TooLarge:
+                item = replace(item, state=AttachmentState.TOO_LARGE)
+            except TimeoutError:
+                item = replace(item, reason="timed out")
+            except LarkCliError as exc:
+                item = replace(item, reason=str(exc)[:200])
+            except OSError:
+                item = replace(item, reason="could not be saved")
+            finally:
+                if part is not None:
+                    try:
+                        part.unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning("%s: could not remove an attachment partial file", self.channel_id, exc_info=True)
+            logger.info("%s: attachment %s message=%s index=%d kind=%s size=%s reason=%s", self.channel_id,
+                        item.state.value, message_id, item.index, item.kind.value, item.size, item.reason)
+            attachments.append(item)
+        return attachments
 
     # --- Outbound: Bus → Lark ---
 
@@ -520,7 +603,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 if not self._running:
                     break
                 # An answer is stored once it was sent, or as not delivered (the Manager names its record).
-                await record_reply(self.channel_type, envelope, await self.deliver(envelope))
+                await record_reply(self.channel_type, envelope, await self.deliver(envelope),
+                                   runtime_root=self._runtime_root)
         except asyncio.CancelledError:
             pass
 

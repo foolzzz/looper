@@ -61,7 +61,7 @@ def test_text_keeps_literal_resource_markers_and_existing_space_normalization() 
     assert inbound.resources == ()
 
 
-@pytest.mark.parametrize("kind", ["sticker", "image", "file", "", "unknown"])
+@pytest.mark.parametrize("kind", ["sticker", "", "unknown"])
 def test_other_types_are_unsupported(kind: str) -> None:
     inbound = parse(kind, "anything", [])
     assert inbound.kind is ContentKind.UNSUPPORTED

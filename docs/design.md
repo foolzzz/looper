@@ -258,8 +258,8 @@ Web 始终开启。Telegram 和 Lark 默认内置，不需要任何启动参数�
 
 - 需要 `lark-cli` 在 PATH 上且已登录，收发消息都通过它；处理私聊（`p2p`），群聊（`group`）里只处理 @ 机器人的消息（按事件 `mentions` 里有没有机器人自己的 open_id 判断），其余群消息完全忽略：不加表情、不存储、不交给 Manager；群里的状态消息和回答回复触发它的那条消息（`lark-cli im +messages-reply`），在群里发起的任务结束时通知发回该群并 @ 发起人
 - 文本命令原样交给 Manager：`/profile` 作为文本消息就能用（群聊里要 @ 机器人），同 Telegram，由 Looper 自己回答，不经 Claude
-- 已准入的文字和富文本 `post` 交给 Manager；富文本保留 lark-cli 渲染的标题、段落、链接和代码缩进，提及显示为 `@名字`，移除机器人自己的提及。内联图片和附件显示为编号的 `[image N]` / `[file N: name]`，末尾说明 Looper 暂时收不到图片或文件；`lark_bot` 也先渲染为相同格式
-- 其他类型回复「暂不支持这类飞书消息（<type>），请发文字或富文本。」（群里回复原消息，私聊直接发送），不加表情、不交给 Manager；静默路由不回复，Manager 关闭时只回复既有的关闭提示。机器人消息、交互卡片和空消息继续忽略
+- 已准入的文字和富文本 `post` 交给 Manager；富文本保留 lark-cli 渲染的标题、段落、链接和代码缩进，提及显示为 `@名字`，移除机器人自己的提及。内联图片、图片消息和文件消息显示为编号的 `[image N]` / `[file N: name]`，以机器人身份下载后作为附件交给 Manager；`lark_bot` 也先渲染为相同格式。下载需要应用权限 `im:message:readonly`，准入、路由、Manager 开关检查通过并加表情后才开始；每条最多 10 个，每个最多 30 秒、整条最多 60 秒，图片和文件各限 20 MB，按内容只收图片、文本、PDF、Office 文档。文件在 runtime root 的 `chat-attachments/<channel-id>/<message-id>/` 私有目录保留 7 天；未收下的附件统一回复一行，已告知的状态随附件交给 Manager。出站回答、进度和通知中的附件路径替换为 `[attachment]`，文件名含空格和 Unicode 也完整替换
+- 其他类型回复「暂不支持这类飞书消息（<type>），请发文字、富文本、图片或文件。」（群里回复原消息，私聊直接发送），不加表情、不交给 Manager；静默路由不回复，Manager 关闭时只回复既有的关闭提示。机器人消息、交互卡片和空消息继续忽略
 - Settings 配置项 `profile`：lark-cli 的 profile，决定用哪个应用（也就是哪个机器人），为空时用 lark-cli 当前的 profile；每次调用都带 `--profile`。旧的 `app_id_env`、`app_secret_env` 启动时删除，没有 `profile` 的配置补上空的 `profile`，Settings 里才有这一项
 - Settings 配置项 `allowed_open_ids`：发送者白名单，飞书用户在这个应用下的 `open_id`（`ou_` 开头）；open_id 因应用而异，名单记下它是为哪个应用建的，换成别的应用的 profile 后不启动，直到重建名单
 - 启动前用 `lark-cli whoami` 和机器人信息核对能否以机器人身份收发，不行就不启动，Settings → Channels 显示原因；能就显示「Bot: 名字（app_id，profile）」

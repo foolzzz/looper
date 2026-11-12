@@ -24,6 +24,8 @@ import asyncio
 import json
 import logging
 from collections import OrderedDict
+from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -41,7 +43,7 @@ from ..message import (
 )
 from ..task_notice import NotifyTarget
 from .allowlist import SenderAllowlist
-from .. import chat_commands, chat_settings
+from .. import chat_attachments, chat_commands, chat_settings
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat, log_route
@@ -268,6 +270,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         """Send ``text`` as plain text to Telegram chat ``chat`` (a user's private chat has the user's id)."""
         if self._app is None:
             return DeliveryReceipt(channel="telegram", success=False, error="the Telegram bot is not started")
+        text = self._redact(text)
         try:
             for chunk in self._split_message(text, max_len=4000):
                 msg = await self._app.bot.send_message(chat_id=int(chat), text=chunk)
@@ -293,6 +296,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         except ValueError:
             return PostReceipt(False, error=f"not a Telegram message id: {reply_to!r}")
         sent: list[str] = []
+        text = self._redact(text)
         try:
             for chunk in self._split_message(text, max_len=4000):
                 extra = ({"reply_to_message_id": reply, "allow_sending_without_reply": True}
@@ -308,6 +312,10 @@ class TelegramChannelAdapter(ChannelAdapter):
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
         """Show a phase on the message's status line, send task progress or a task's end notice as a message of
         its own, or send the answer to the Telegram user who wrote and close its status line."""
+        paths = envelope.metadata.get("attachment_paths", [])
+        envelope = replace(envelope, payload={
+            key: self._redact(value, paths=paths) if isinstance(value, str) else value
+            for key, value in envelope.payload.items()})
         if envelope.message_type is MessageType.CHAT_NOTICE:
             # A task's end, to the chat it recorded, in order behind its progress; sent like an answer.
             try:
@@ -359,11 +367,11 @@ class TelegramChannelAdapter(ChannelAdapter):
     async def _send_status(self, chat_id: str, text: str) -> str | None:
         if self._app is None:
             return None
-        message = await self._app.bot.send_message(chat_id=int(chat_id), text=text)
+        message = await self._app.bot.send_message(chat_id=int(chat_id), text=self._redact(text))
         return str(message.message_id)
 
     async def _edit_status(self, chat_id: str, message_id: str, text: str) -> None:
-        await self._app.bot.edit_message_text(chat_id=int(chat_id), message_id=int(message_id), text=text)
+        await self._app.bot.edit_message_text(chat_id=int(chat_id), message_id=int(message_id), text=self._redact(text))
 
     async def _react(self, chat_id: str, message_id: str) -> None:
         await self._app.bot.set_message_reaction(chat_id=int(chat_id), message_id=int(message_id), reaction="👀")
@@ -399,6 +407,7 @@ class TelegramChannelAdapter(ChannelAdapter):
         """Send ``text`` as Markdown, or as plain text when Telegram cannot parse it."""
         import telegram
 
+        text = self._redact(text)
         try:
             bot = self._app.bot
             # Split long messages (Telegram limit: 4096 chars)
@@ -428,6 +437,9 @@ class TelegramChannelAdapter(ChannelAdapter):
                 return DeliveryReceipt(
                     channel="telegram", success=False, error=redact(str(inner))
                 )
+
+    def _redact(self, text: str, *, paths: Sequence[str] = ()) -> str:
+        return chat_attachments.redact(text, self._bus.runtime_root, paths=paths) if self._bus else text
 
     def healthcheck(self) -> dict[str, Any]:
         return {
@@ -609,7 +621,8 @@ class TelegramChannelAdapter(ChannelAdapter):
                 if not self._running:
                     break
                 # An answer is stored once it was sent, or as not delivered (the Manager names its record).
-                await record_reply(self.channel_type, envelope, await self.deliver(envelope))
+                await record_reply(self.channel_type, envelope, await self.deliver(envelope),
+                                   runtime_root=self._bus.runtime_root)
         except asyncio.CancelledError:
             pass
 
