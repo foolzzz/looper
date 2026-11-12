@@ -18,6 +18,86 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.155] - 2026-11-12
+
+### Changed
+
+- **Room messages are delivered into running Claude Code runs as bodies, not a reminder.** ([#1266](https://github.com/foolzzz/looper/pull/1266))
+  - A running Claude Code Worker or Reviewer gets up to 10 messages (4,000 characters; 1,500 each for messages for it and interface posts, 300 otherwise) as a user message at a tool call or while waiting, and they are marked read when it echoes them, without a `looper_room_inbox` call. While a delivery is in flight, that run's inbox and unread counts start after it.
+  - Messages for the seat reach the run up to every 10 s (was 60 s); a delivery that had to wait for its interval is retried when it ends. After a keeper adoption, messages that arrived while Looper was down are delivered at the next tool call or check.
+  - Model-visible: the one-line reminder is replaced by a "[Looper room] New in the task's room" message with the bodies; a `looper_room_inbox` wait ended by a delivered message returns `delivered_message_ids` and a note. The activity row reads "Room messages delivered: #ids".
+  - Other runtimes, the Planner's `[ROOM]` turns, consults and the first turn are unchanged.
+
+## [2.14.154] - 2026-11-12
+
+### Changed
+
+- **A dashboard chat message to a Manager can carry attachments.** ([#1278](https://github.com/foolzzz/looper/pull/1278))
+  - `operator_chat.send` `attachments` is now at most 10 `{filename, content_base64}` items, decoded total at most 6,000,000 bytes; anything else, or a Planner target, is refused `invalid`. Breaking for callers that passed arbitrary objects.
+  - Each file is saved and checked by content (PNG, JPEG, GIF, WEBP, PDF, docx/xlsx/pptx, UTF-8 text; up to 20 MB each); a failing file refuses the whole send.
+  - Files live under `chat-attachments/<source>/<message>/` in the runtime root (0700/0600) and hourly housekeeping deletes them after 7 days.
+  - Model-visible: the Manager's turn gets an "Attachments" section after the message (number, kind, name, type, size, path, or why not received). Claude Code is told to open files with its file-reading tool; other runtimes are told they cannot view images.
+  - New `attachment_read` prompt-regression dialog (61 dialogs).
+
+## [2.14.153] - 2026-11-12
+
+### Changed
+
+- **`looper service upgrade` can wait for non-keepable runs before it drains, and a failed upgrade reports its blockers.** ([#1273](https://github.com/foolzzz/looper/pull/1273))
+  - New `--preflight-wait SECONDS` (default 0, off). With a control-plane upgrade and `--no-force`, the upgrade polls every 15 s while the service keeps serving, and refuses before draining if non-keepable runs remain when the wait ends.
+  - Cancellation errors and the report carry `blockers` (non-keepable runs with ages, Manager and Planner turns, gates, waits, consults, starting); the report has `preflight_wait_seconds`. Draining prints a blocker summary to stderr every 60 s.
+  - Drain-status polls and the status probe after a failure use the longer upgrade read timeout; a timed-out drain-status read is retried twice.
+  - Each run in the drain status has nullable `runtime_id` and `runtime_type`.
+  - Not model-visible.
+
+## [2.14.152] - 2026-11-12
+
+### Changed
+
+- **A slow start during `looper service upgrade` is waited for, not reported as a failure.** ([#1274](https://github.com/foolzzz/looper/pull/1274))
+  - `--start-timeout` (alias `--timeout`) defaults to 300 s instead of 120 s. A live process is allowed the whole interval.
+  - A new process that has exited fails at once, also for `looper service install` and `restart`.
+  - At the deadline with the process alive, the report has `status: "starting"`, `starting: true`, `serving: false` and `last_startup_step`; the process is left running and the CLI exits nonzero, saying not to restart it.
+  - The serve log records `startup step: <name>` before each startup step.
+  - Not model-visible.
+
+## [2.14.151] - 2026-11-12
+
+### Changed
+
+- **Managers with `tools = tasks` can create and manage agent schedules in their scope.** ([#1268](https://github.com/foolzzz/looper/pull/1268))
+  - A task-scoped Manager now has the schedule tool. Its project scope limits it to its projects, and its own scope to schedules it created. The check runs before confirmation and again at execution, against the confirmed schedule's id.
+  - It may list and read command schedules and schedules with a gate, but cannot create, change, enable, disable, run or delete them. Creates and updates that set `command`, `env`, `env_file`, `gate_command` or `gate_timeout_seconds`, or the command kind, are refused as forbidden, including attempts to clear gate fields.
+  - Notification targets: a task-scoped Manager may select only chats bound to itself, checked on create, update, enable and manual run; a schedule made from a bound group chat defaults to that chat. The dashboard, the operator API and Managers with every tool are unchanged.
+  - Lark notices go to `oc_` chat ids as chats and `ou_` open ids as users; any other id fails delivery with a clear error instead of being sent as a direct message.
+  - The Manager scope text and the refusal texts are model-visible.
+
+## [2.14.150] - 2026-11-12
+
+### Changed
+
+- **Schedules can notify a group chat bound to a Manager.** ([#1267](https://github.com/foolzzz/looper/pull/1267))
+  - Chats explicitly bound to a Manager on a built-in channel are now valid schedule notify targets, besides allowlisted senders' direct chats. Notices go through the binding's bot; a Lark native chat id (`oc_`) is sent to the chat.
+  - A target whose allowlist entry or binding was removed is kept but unavailable: delivery is recorded as failed and nothing is rerouted. This check now also covers allowlisted direct chats. Schedule views carry `notify_target_available`, and the dashboard marks such targets "(unavailable)".
+  - A Manager with limited scope may select only chats bound to itself. Config import keeps a target the destination allowlists or binds. The schedule view, the refusal texts and the target labels are model-visible.
+
+## [2.14.149] - 2026-11-11
+
+### Changed
+
+- **Lark: rich-text posts reach the Manager as text; other message types are answered.** ([#1270](https://github.com/foolzzz/looper/pull/1270))
+  - A `post` from an admitted sender, in a direct message or as a group @-mention of the bot, now reaches the Manager (it was ignored) as lark-cli's rendering: title, paragraphs, `[text](url)` links and fenced code, mentions as `@name`, the bot's own mention removed. Inline images and attached files appear as `[image N]` / `[file N: name]`, followed by a line saying Looper cannot receive images or files yet. The text is model-visible.
+  - Any other type from an admitted sender (image, file, audio, media, sticker, and so on) now gets one reply, 「暂不支持这类飞书消息（<type>），请发文字或富文本。」, instead of silence: a reply to the message in a group, a message in a direct chat. It starts no Manager turn and adds no reaction; a silent chat gets nothing and a turned-off Manager gets only its usual reply.
+  - The `lark_bot` channel renders non-text content the way lark-cli does instead of passing the message's raw JSON, and drops `interactive` cards. Bots' messages, unlisted senders, group messages without an @-mention and empty messages are unchanged.
+
+## [2.14.148] - 2026-11-11
+
+### Changed
+
+- **Cursor Workers: a dropped connection resumes the same session instead of restarting the run.** ([#1263](https://github.com/foolzzz/looper/pull/1263))
+  - A Worker or Reviewer run that ends with `RetriableError: WritableIterable is closed` relaunches with `--resume <session id>` and a short continuation prompt, up to three times within the run's deadline, when the failed attempt produced model output; otherwise it keeps the single fresh restart. The continuation prompt is model-visible.
+  - `cursor_run_retry` events gain `mode` (`resume` or `restart`) and `attempt` up to 3; failed attempts share the 1,000-character stderr limit. Manager and Planner turns keep their single retry.
+
 ## [2.14.147] - 2026-11-11
 
 ### Changed

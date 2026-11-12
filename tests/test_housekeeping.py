@@ -1,8 +1,11 @@
 """Filesystem retention protects active output and preserves append writers during rotation."""
 
+import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from looper.agents.housekeeping import prune_logs, prune_runner_files, rotate
 
@@ -67,3 +70,30 @@ def test_runner_cleanup_keeps_current_and_recent_source(tmp_path: Path) -> None:
     other = _file(tmp_path / "unrelated.py", 1, age=40)
     assert prune_runner_files(tmp_path, current, NOW) == 1
     assert current.exists() and recent.exists() and other.exists() and not old.exists()
+
+
+def test_hourly_housekeeping_prunes_expired_chat_attachments_and_reports_count(tmp_path, monkeypatch, caplog):
+    from looper.agents import chat_attachments, housekeeping
+
+    @asynccontextmanager
+    async def transaction():
+        yield None
+
+    monkeypatch.setattr(housekeeping.db_connection, "transaction", transaction)
+    monkeypatch.setattr(housekeeping.scheduler_settings, "run_retention_days", AsyncMock(return_value=30))
+    monkeypatch.setattr(housekeeping.db_schedules, "prune_runs", AsyncMock(return_value=0))
+    monkeypatch.setattr(housekeeping.db_schedules, "prune_notifications", AsyncMock(return_value=0))
+    monkeypatch.setattr(housekeeping.db_schedules, "open_log_paths", AsyncMock(return_value=[]))
+    monkeypatch.setattr(housekeeping, "_prune_llm_requests", AsyncMock())
+    old = chat_attachments.message_dir(tmp_path, "web", "expired")
+    fresh = chat_attachments.message_dir(tmp_path, "web", "recent")
+    (old / "note.txt").write_text("old")
+    (fresh / "note.txt").write_text("recent")
+    for path, age in ((old, 8), (fresh, 1)):
+        stamp = (NOW - timedelta(days=age)).timestamp()
+        os.utime(path, (stamp, stamp))
+    with caplog.at_level("INFO", logger=housekeeping.__name__):
+        report = asyncio.run(housekeeping.run_once(tmp_path, NOW, current_runner=None, commands=None))
+    assert report.chat_attachments == 1 and report.failed_steps == {}
+    assert not old.exists() and (fresh / "note.txt").read_text() == "recent"
+    assert "chat_attachments=1" in caplog.text

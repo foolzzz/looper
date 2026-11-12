@@ -198,6 +198,13 @@ class Capability(str, Enum):
     COST_REPORT = "cost_report"  # it reports what a run cost
 
 
+class ImageInput(str, Enum):
+    """How a runtime's model looks at an image file (a chat attachment)."""
+
+    NONE = "none"
+    READ_TOOL = "read_tool"
+
+
 class ReadOnly(str, Enum):
     """How a run that must not change files (``Launch.read_only``, a Planner's) is kept from changing them."""
 
@@ -208,11 +215,10 @@ class ReadOnly(str, Enum):
 
 
 class RoomPush(str, Enum):
-    """How a run can receive room deliveries while it works."""
+    """How a running Worker or Reviewer gets its room messages while it runs."""
 
     NONE = "none"
-    USER_TURN = "user_turn"
-    STEER = "steer"
+    USER_TURN = "user_turn"  # run_input; folded in at a tool result
 
 
 class ResidentTransport(str, Enum):
@@ -379,6 +385,7 @@ class RuntimeAdapter(ABC):
     label: ClassVar[str]  # how the dashboard names the type
     default_executable: ClassVar[str]
     capabilities: ClassVar[frozenset[Capability]]
+    image_input: ClassVar[ImageInput] = ImageInput.NONE
     # The only roles allowed; None leaves ROLE_CAPABILITIES to decide.
     roles: ClassVar[frozenset[str] | None] = None
     # Runs and calls tools inside looper serve, with no executable to find or probe.
@@ -662,9 +669,9 @@ class RuntimeAdapter(ABC):
 
 
 def room_push(launch: Launch) -> RoomPush:
-    """The room delivery transport available to this launch."""
-    mode = launch.runtime.room_push
-    return RoomPush.NONE if mode is RoomPush.STEER and not launch.steers else mode
+    """How ``launch``'s run gets room messages while it runs."""
+    runtime = launch.runtime
+    return RoomPush.USER_TURN if runtime.room_push is RoomPush.USER_TURN and runtime.run_input else RoomPush.NONE
 
 
 def waits_without_turns(runtime: RuntimeAdapter) -> bool:

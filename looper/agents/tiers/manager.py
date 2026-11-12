@@ -41,7 +41,7 @@ from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from ..broadcast import Broadcaster
@@ -70,7 +70,8 @@ from ..claude_cli import (
     exit_note,
     user_stop_result,
 )
-from .. import chat_commands, chat_settings, gate_commands
+from .. import chat_attachments, chat_commands, chat_settings, gate_commands
+from ..chat_attachments import Attachment
 from ..llmrec import LlmrecRoute, control as llmrec
 from ..gate_routing import NOT_A_REPLY, Route, RouteKind, route as route_to_gate
 from ..gate_service import dashboard_target as gate_dashboard_target, gate_chat as gate_chat_of, origin_chat
@@ -78,7 +79,7 @@ from ..library import load_installed
 from ..run_usage import Usage
 from ..reported_files import prompt_name
 from .. import session_switch
-from ..runtimes import CLAUDE_CODE, InProcessTools, ReportsContext
+from ..runtimes import CLAUDE_CODE, ImageInput, InProcessTools, ReportsContext
 from ..runtimes.api.loop import ToolCall, ToolOutcome, ToolSpec
 from ..runtimes.api.tools import ManagerTurnTools
 from ..runtimes.cancel import TurnCancel, TurnCancelled, abandon
@@ -135,9 +136,16 @@ TURNED_OFF_REPLY = "This Manager was turned off; your message was not handled."
 SCOPE_HEADING = "## This Manager's scope"
 SCOPE_TOOLS = {
     ManagerTools.TASKS: """\
-You have the task tools only; the projects you can only list and read. Agent
-Profiles, providers, settings, skills and schedules are not yours: when asked,
-tell the user to use the general Manager or the dashboard.""",
+You have the task tools and agent schedules in your scope; the projects you
+can only list and read. For schedules, your project scope allows only your
+projects, and your own scope allows only schedules you created. You can list
+and read command schedules or agent schedules with a gate in that scope,
+but cannot create, change, enable, disable, run or delete them. Schedules you
+manage must not be used to run shell commands or file operations on the server.
+Bound-chat notification targets must be chats bound to this Manager.
+Command schedules, Agent Profiles, providers,
+settings and skills are not yours to manage: when asked, tell the user to use
+the general Manager or the dashboard.""",
     ManagerTools.ALL: "You have every platform tool.",
 }
 SCOPE_TASKS = {
@@ -1398,7 +1406,9 @@ class ManagerAgent:
                 self._claude.context_tokens, self._claude.context_limit, runtime=self._session_runtime,
                 profile=self._session_profile, provider=self._session_provider)
         turn_text = await token.step("build_user_message", self._build_user_message(
-            ask.message, ask.note, channel=channel_line(envelope), envelope=envelope))
+            ask.message, ask.note, channel=channel_line(envelope), envelope=envelope,
+            attachments=chat_attachments.from_payload(envelope.payload.get("attachments"), self._runtime_root),
+            image_input=launch.runtime.image_input))
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
             launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text)
@@ -2594,7 +2604,8 @@ class ManagerAgent:
         return (await self.ops.current_scope()).listed
 
     async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "",
-                                  envelope: MessageEnvelope | None = None) -> str:
+                                  envelope: MessageEnvelope | None = None, attachments: Sequence[Attachment] = (),
+                                  image_input: ImageInput = ImageInput.NONE) -> str:
         parts = await self._projects_section()
         parts += await self._templates_section()
         parts += await self._workflows_section()
@@ -2612,6 +2623,8 @@ class ManagerAgent:
         if channel:
             parts += [channel, ""]
         parts.append(user_message)
+        if attachments:
+            parts += ["", *chat_attachments.section(attachments, image_input)]
         return "\n".join(parts)
 
     async def _projects_section(self, listed: db_tasks.TaskFilter | None = None) -> list[str]:

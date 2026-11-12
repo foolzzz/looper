@@ -213,7 +213,9 @@ def test_paused_consumer_bounds_queue_and_counts_drops(
     asyncio.run(main())
 
 
-def test_admission_reduces_refused_event_before_queueing(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("message_type", ["text", "post"])
+def test_admission_reduces_refused_event_before_queueing(monkeypatch: pytest.MonkeyPatch,
+                                                        message_type: str) -> None:
     calls = []
     queued = []
     queue_type = asyncio.Queue
@@ -233,14 +235,18 @@ def test_admission_reduces_refused_event_before_queueing(monkeypatch: pytest.Mon
     async def main() -> None:
         async with _memory_stream(monkeypatch, admit=admit) as (fake, events):
             received = asyncio.create_task(anext(events))
-            await fake.push_message(text="private refused text", sender="refused", event_id="evt-1",
-                                    message_id="om_1", parent_id="parent",
-                                    root_id="root", mentions=[{"id": {"open_id": "bot"}, "name": "Bot"}])
+            content = ({"text": "private refused text"} if message_type == "text"
+                       else {"content": [[{"tag": "text", "text": "private refused text"}]]})
+            refused_event = _event(message_type=message_type, content=json.dumps(content))
+            refused_event["event"]["sender"]["sender_id"]["open_id"] = "refused"
+            refused_event["event"]["message"].update({"parent_id": "parent", "root_id": "root",
+                                                     "mentions": [{"id": {"open_id": "bot"}, "name": "Bot"}]})
+            await fake.push_frame(_event_frame(refused_event))
             refused = await asyncio.wait_for(received, 2)
             assert refused == {"type": "im.message.receive_v1", "event_id": "evt-1", "message_id": "om_1",
                                "chat_id": "oc_chat", "chat_type": "p2p", "sender_id": "refused",
                                "sender_type": "user", "mentions": [{"id": "bot", "key": "", "name": "Bot"}],
-                               "message_type": "text", "content": ""}
+                               "message_type": message_type, "content": ""}
             assert queued[0] == refused
             await fake.push_message(text="allowed text", sender="allowed", event_id="evt-2", message_id="om_2",
                                     parent_id="parent", root_id="root")
@@ -295,7 +301,14 @@ def test_repeated_fragment_sequence_adjusts_assembled_bytes(monkeypatch: pytest.
 
 @pytest.mark.parametrize(("message_type", "content", "expected"), [
     ("text", "not JSON", ""), ("text", "[]", ""), ("text", "{}", ""),
-    ("image", '{"image_key":"img_1"}', '{"image_key":"img_1"}'),
+    ("image", '{"image_key":"img_1"}', '[Image: img_1]'),
+    ("sticker", '{}', '[Sticker]'),
+    ("file", '{"file_key":"file_1"}', '<file key="file_1" name="file_1"/>'),
+    ("audio", '{"file_key":"file_1"}', '<audio key="file_1"/>'),
+    ("video", '{"file_key":"file_1","file_name":"clip.mp4"}',
+     '<video key="file_1" name="clip.mp4"/>'),
+    ("share_chat", '{}', '[share_chat]'),
+    ("post", 'not JSON', ''),
 ])
 def test_content_fallback_and_absent_thread_fields(message_type: str, content: str, expected: str) -> None:
     async def main() -> None:
@@ -307,6 +320,51 @@ def test_content_fallback_and_absent_thread_fields(message_type: str, content: s
             assert event["content"] == expected
             assert "reply_to" not in event and "root_id" not in event
     asyncio.run(main())
+
+
+def test_post_renders_mentions_styles_code_and_escaped_attachments() -> None:
+    post = {"title": "Weekly", "content": [[
+        {"tag": "at", "user_id": "@_user_1", "user_name": ""},
+        {"tag": "text", "text": "Hello", "style": ["lineThrough", "underline", "italic", "bold"]},
+        {"tag": "a", "text": "Spec", "href": "https://example.com/spec"},
+        {"tag": "img", "image_key": "img_1"},
+    ], [{"tag": "code_block", "language": "go", "text": "    fmt.Println(1)\n\n    return"}]],
+        "files": [{"file_key": "file_1", "file_name": 'a "q"\n\\.pdf'},
+                  {"file_key": "folder_1", "file_name": "folder", "is_folder": True}]}
+    event = _event(message_type="post", content=json.dumps(post))
+    event["event"]["message"]["mentions"] = [
+        {"id": {"open_id": "ou_bot"}, "key": "@_user_1", "name": "HelperBot"}]
+    flat = lark_stream._flat_event(json.dumps(event).encode())
+    assert flat is not None
+    assert flat["content"] == (
+        'Weekly\n@HelperBot~~<u>***Hello***</u>~~[Spec](https://example.com/spec)![Image](img_1)\n\n'
+        '```go\n    fmt.Println(1)\n\n    return\n```\n'
+        '<file key="file_1" name="a \\"q\\"\\n\\\\.pdf"/>\n'
+        '<folder key="folder_1" name="folder"/>')
+
+
+@pytest.mark.parametrize(("post", "expected"), [
+    ({"en_us": {"title": "English"}, "zh_cn": {"title": "中文"}}, "中文"),
+    ({"z": {"title": "last"}, "a": {"title": "first"}}, "first"),
+    ({"content": [[{"tag": "text", "text": "old"}]],
+      "content_v2": [[{"tag": "md", "text": "**new**"}]]}, "**new**"),
+    ({"content": [[{"tag": "at", "user_id": "all"},
+                    {"tag": "at", "user_id": "ou_person", "user_name": "Name"},
+                    {"tag": "at", "user_id": "missing"}]]},
+     '<at user_id="all"></at>@Name@missing'),
+    ({"content": [[{"tag": "emotion", "emoji_type": "SMILE"},
+                    {"tag": "media", "file_key": "file_2"},
+                    {"tag": "hr"}, {"tag": "unknown", "text": "fallback"}]]},
+     ':SMILE:[Media: file_2]\n---\nfallback'),
+    ({}, "[Rich text message]"),
+])
+def test_post_locales_and_element_fallbacks(post: dict, expected: str) -> None:
+    flat = lark_stream._flat_event(json.dumps(_event(message_type="post", content=json.dumps(post))).encode())
+    assert flat is not None and flat["content"] == expected
+
+
+def test_interactive_message_has_no_flat_event() -> None:
+    assert lark_stream._flat_event(json.dumps(_event(message_type="interactive")).encode()) is None
 
 
 def test_cards_other_events_and_duplicate_events_are_acked_without_yielding() -> None:

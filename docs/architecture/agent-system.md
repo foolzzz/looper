@@ -73,6 +73,14 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   sent: no earlier topic, check or status report unless that message asks for
   one, and a short reply to a greeting or a check-in. A manager row still
   holding the previous recommended prompt gets this one at startup
+- A message can carry files Looper saved itself. Its turn lists each attachment
+  after the user text: kind, name, MIME type, size and local path, or why it was
+  not received. Claude Code opens them with its file-reading tool; other
+  runtimes are told they cannot view images. Paths are never part of the stored
+  user text and the turn tells the model not to put them in replies. Files live
+  under `chat-attachments/<source>/<message>/` in the runtime root (directories
+  0700, files 0600); hourly housekeeping removes message directories older than
+  7 days. A replay after cleanup says the file is no longer available.
 - Maintains chat conversation context per session
 - Runs one resident Claude process through `ResidentClaude`
   (`looper/agents/claude_cli.py`), which each task's Planner uses too, started
@@ -1649,11 +1657,18 @@ Manager tools.
   as `usage` and `modelUsage`; Cursor reports no cost and the login's models
   have no prices, so cost is unknown (`provider_price`). A per-run spend cap
   cannot stop Cursor. When a process exits without a result and stderr names
-  `RetriableError`, Looper retries once in a fresh process, even when TTADK
-  exits zero. Worker and Reviewer runs reuse the same prompt and input directories;
-  Manager and Planner turns resume the recorded chat, if any, with the same turn.
-  The run records the retry and its reason; a second failure retains both stderr
-  tails. Other failures, stops, cancellations, timeouts and missing logins are
+  `RetriableError: WritableIterable is closed`, Looper retries in a fresh process,
+  even when TTADK exits zero. With a reported session id, Worker and Reviewer runs
+  use `--resume <id>` and a short continuation prompt asking for the final JSON
+  report without redoing completed work. They allow up to three continuations
+  within the original deadline, keeping one run record, private directories,
+  launch settings and helper. Without a session id, they retry once with the
+  original prompt. Each retry records `cursor_run_retry`, its `attempt` (1–3),
+  `mode` (`resume` or `restart`) and reason. If all attempts fail, each attempt's
+  stderr tail shares the existing 1,000-character diagnostic limit.
+  Manager and Planner turns keep their existing single retry, resuming the
+  recorded chat, if any, with the same turn. Other failures, stops,
+  cancellations, timeouts and missing logins are
   not retried. Non-JSON stdout lines,
   including TTADK's login greeting before or between events, are discarded
   before events, logs or failure details are recorded.
@@ -2909,8 +2924,12 @@ often the largest share of a run's cost; a profile a schedule chose cannot be de
 (`{worker, reviewer}`, each 1–64 or null for the default: how many of each
 run's task's Workers and Reviewers run at once, `schedule_task_limits`); and, from S2, an optional
 `gate_command` with `gate_timeout_seconds` (1–600, default 60), an optional `daily_budget_usd`, `notify` (`failures`,
-`alerts`, `always`, `never`) and a `notify_target` (a channel and chat; none: the
-dashboard only). A new schedule is disabled.
+`alerts`, `always`, `never`) and a `notify_target` (a channel and chat: an allowlisted
+sender's direct chat or a chat explicitly bound to a Manager on a built-in channel;
+none: the dashboard only). Bound chats use the binding's bot; removing the binding
+keeps the saved target, marks it unavailable and logs failed delivery without rerouting.
+A tasks-scope Manager may select only its own bound chats; the dashboard/operator API
+may select any offered target. A new schedule is disabled.
 
 A schedule has an immutable `manager_id`, chosen when created and defaulting
 to `manager` when omitted. The dashboard/operator API can choose its owner;
@@ -4564,44 +4583,55 @@ before.
   (with `reply_to` a question), `interface`, `announce`; Looper's `notice` and
   `escalation`. Messages are only added; they go with their task and with a
   start-over (`reset_task_for_restart`). Refused posts are a task activity line.
-- **Room input and guidance.** A run's first user turn says its seat, who is
-  online, the messages for it in full and the interface posts it has not read
-  (within 2,000 characters), after the Findings; the system prompt has the
-  room's section after the task (and before a role's boundaries;
-  `prompt_layers.room`). The section follows the run's delivery capability
-  (`RoomInput`): runs without room deliveries use `PULL`, reading their inbox
-  at milestones, before their report and before using another step's
-  interface. Runs with deliveries use `PUSHED`: unread-count notices arrive
-  after a tool result. Workers and Reviewers call `looper_room_inbox`
-  immediately on a `[Looper room]` notice to read the bodies and mark them
-  read, continuing while the inbox returns `more`; they use
-  `looper_room_read` for earlier messages. Workers that can
-  stay idle between turns use `PUSHED_WAITS`, waiting for a needed answer
-  with a waiting report; deliveries can then arrive as their own turn.
-  Reviewers never use `PUSHED_WAITS`. Claude Code Workers use `PUSHED_WAITS`
-  and its Reviewers `PUSHED`; runtimes without deliveries, including Cursor,
-  keep `PULL`. Pulling Workers use `wait_seconds` only for an answer they
-  cannot go on without, after doing the rest, never as a timer.
-  `looper_room_inbox` gives the unread messages oldest
-  first (`for_you` on those that name the seat; at most 20 and 8,000
-  characters) and marks them read per seat (a retry reads on); `peek` reads
-  without marking; `wait_seconds` waits, up to the project's
-  `room_wait_max_seconds`, for a message for the seat or an interface post.
-  Every tool's answer carries the seat's unread counts. The inbox description
-  tells every runtime to wait only for a message it cannot go on without,
-  not as a timer; each call costs a request. Per-runtime wait caps still
-  follow that description.
-- **Reminders.** A run on a runtime that reads user turns while it runs
-  (`RuntimeAdapter.run_input`: Claude Code; not a stored capability) that a
-  message names, or that an interface post or a watch reaches, gets one line,
-  never the message (`WorkerPool.remind`), at most every 60 s. It is written
-  only while one of its tool calls runs (the stream's `tool_use` and
-  `tool_result`): Claude Code 2.1.285 folds a user turn written then into the
-  turn it is in at the next tool result, but runs one written while it writes
-  its final reply as a turn of its own after the report. Reminders carry a
-  uuid (`looper-reminder-…`), and a result whose `user_message_uuids` are all
-  the run's reminders never replaces the run's outcome; the cost is still the
-  last result's (the session's totals).
+- **Delivery.** A run's first user turn says its seat, who is online, the
+  messages for it in full and unread interface posts (within 2,000 characters),
+  after the Findings; the system prompt has the room's section after the task
+  (and before a role's boundaries; `prompt_layers.room`). Its guidance follows
+  the run's delivery capability (`RoomInput`): runs without deliveries use
+  `PULL`, reading their inbox at milestones, before their report and before
+  building on another step's interface. Runs with deliveries use `PUSHED`:
+  messages arrive with their text, so Workers and Reviewers do not poll the
+  inbox; they use `looper_room_inbox` only when a delivery says more are
+  waiting, and `looper_room_read` for earlier or clipped messages. Claude Code
+  Workers use `PUSHED_WAITS`: after doing the rest, they wait for a needed
+  answer with a waiting report, and deliveries can arrive as their own turn.
+  Its Reviewers use `PUSHED`, never a waiting report. Runtimes without room
+  deliveries, including Cursor, keep `PULL`; pulling Workers wait with
+  `wait_seconds` only for an answer they cannot go on without, after doing
+  the rest, never as a timer.
+  `looper_room_inbox` gives unread messages oldest first (`for_you` on those
+  naming the seat; at most 20 and 8,000 characters), marking them read per seat
+  (a retry reads on); `peek` does not mark them. `wait_seconds` waits up to the
+  project's `room_wait_max_seconds` for a message for the seat or an interface
+  post. If a matching message is pushed into the same run during that wait,
+  the inbox returns immediately with `delivered_message_ids` and a note that
+  those messages arrived as separate user messages; it does not repeat their
+  bodies. This also holds if their replay echo has already marked them read.
+  Every tool's answer carries unread counts. The inbox tool description says
+  `wait_seconds` is only for an answer the run cannot go on without, never a
+  timer; each call costs a request, and per-runtime wait caps still apply.
+  Running Claude Code Workers and Reviewers (`RoomPush.USER_TURN`) instead
+  receive message bodies when a message names them or an interface post
+  reaches them. Other posts ride along in an oldest-first prefix: at most
+  10 messages and 4,000 characters, bodies clipped at 1,500 for addressed or
+  interface posts and 300 for others, with a pointer to `looper_room_read`.
+  Deliveries are written only during a tool call or while a Worker waits;
+  Claude folds them in at the next tool result, or starts the waiting turn.
+  A batch with an addressed message can go every 10 s; other batches every
+  60 s, with a retry when the interval ends. Messages are marked read on the
+  delivery's replay echo or a result naming its uuid in `user_message_uuids`,
+  never merely on writing stdin. While in flight, that run's inbox and unread
+  counts exclude the delivered bodies; an inbox wait still detects matching
+  messages within that range as described above. A waiting Worker's check
+  first flushes pending room messages and skips its check turn if it wrote a
+  delivery in that wake. An unconfirmed delivery remains
+  unread for a later run. Adoption rebuilds the cursor from stdin uuids and
+  checks for messages that arrived while Looper was down at the next tool
+  call or check. Delivery uuids retain the `looper-reminder-` prefix; a result
+  answering only those messages preserves the previous outcome, including
+  when a final-reply race makes the delivery a separate turn after the report;
+  cost still comes from the last result (the session's totals).
+  Other runtimes and consults pull; the Planner's `[ROOM]` turns are unchanged.
 - **The Planner.** A message for `planner`, and every escalation, is stored
   `planner_pending` and wakes the Planner (`ROOM_MESSAGE`) after a 30 s batch
   (`ROOM_BATCH_SECONDS`); after the event it is in, the Planner gives all that
@@ -5168,6 +5198,16 @@ After restart, the CLI waits up to 330 seconds for pending adoptions and reports
 a run was ended at startup, or an adoption failed after startup, it
 adds a P1 alert and prints a warning. A serving upgrade still exits successfully.
 
+`--start-timeout SECONDS` sets the wait for the restarted service to answer
+(default 300; `--timeout` remains an alias). A live process is allowed the
+whole interval, including while imports are quiet or the serve log and startup
+steps keep advancing. An exited process fails immediately. At the deadline,
+a process still alive is reported as `status: "starting"`, `starting: true`
+and `serving: false`, with `last_startup_step` (null before any step was logged).
+The CLI exits nonzero because readiness is unverified, but leaves that process
+running and says it is still starting and not to restart it. Startup step
+entries are logged before each step, so the report can name an unfinished step.
+
 With keeper mode on, `system.status.checks` exposes keeper warnings through the
 dashboard's existing checks list: P1 for incomplete or failed adoption or runs
 ended at startup (with reason counts), and P2
@@ -5183,7 +5223,7 @@ upgrade waits up to 30 s for the old process to exit unless it still answers
 as itself, and decides when that wait ends, whether or not the port was still
 open when the poll failed. If the service manager has
 already restarted the unit, the upgrade starts nothing and waits up to
-`--timeout` for it to answer before reporting whether it is serving.
+`--start-timeout` for it to answer before reporting whether it is serving.
 
 `looper/components.toml` declares component globs, runner packaging aliases
 and explicit ignores. A normal-suite test rejects unclassified tracked files.
@@ -5510,6 +5550,13 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   and `looper_gates` (list a task's gates, read their messages, reply, end a gate) exist for clients. A client does not
   get `looper_task_gate_reply`, because a gate reply there is the user's own words in a chat (a client answers with
   `looper_gates`), nor the Manager's confirmation tool, because a client confirms through `/api/v1/confirm`.
+- **Dashboard attachments.** `operator_chat.send` accepts up to 10 inline
+  `attachments: [{filename, content_base64}]`, totaling at most 6,000,000 decoded
+  bytes, only for a Manager. Arbitrary objects and local paths are refused.
+  Every file is content-checked: PNG, JPEG, GIF, WEBP, PDF, docx/xlsx/pptx, or
+  UTF-8 text, at most 20 MB each. One invalid file refuses the whole send and
+  removes its files. The generated CLI uses this same schema. Dashboard file
+  selection and channel downloads are separate features.
 - **Chat.** `chat.send` posts one message (at most 32,000 characters) and answers with server-sent events (a heartbeat
   every 15 s, up to 1,800 s for the Manager's answer). A conversation belongs to the pair `manager_id` (the default
   Manager when omitted) and `client_id`: another client, or the same id on another Manager, finds it unknown. A
@@ -5726,8 +5773,9 @@ implementation supplies it and is retested.
   retried and never becomes a chat message; the first failure of a run of the
   channel is logged, naming the missing scope when lark-cli reports one. A
   rejected sender, a Lark group message that does not @-mention the bot, a
-  Telegram group message and a message that is not handed on (not text,
-  empty) get no reaction.
+  Telegram group message and an empty message get no reaction. An admitted
+  unsupported Lark type gets a reply instead, with no reaction or Manager turn
+  (unless its chat is silent or its Manager is turned off).
 - **Telegram**: the token is the one saved in Settings → Channels
   (`channel_secrets`; the API only says whether one is set), else the env var
   named by `bot_token_env` (default `LOOPER_TELEGRAM_BOT_TOKEN`). The Bot API
@@ -5779,10 +5827,21 @@ implementation supplies it and is retested.
   own open_id (from the bot's info at startup; never a match on names).
   Every other group message is ignored entirely: no reaction, nothing stored,
   no Manager turn, no record of who wrote. The bot's mention is taken out of
-  the text (`@name` as lark-cli shows it, else its `@_user_N` placeholder),
+  the text (`@name` as lark-cli shows it, else its `@_user_N` placeholder;
+  rich posts also handle `@@name` and `<at>` tags),
   and the Manager is told the sender's name (`contact +search-user`, the
-  name the allowlist resolves, else the open_id after 5 s). Other message
-  types and bots' messages are ignored too. It sends with `lark-cli im
+  name the allowlist resolves, else the open_id after 5 s). Text and rich-text
+  posts reach the Manager. Posts keep lark-cli's rendered titles, paragraphs,
+  links and fenced code, with other mentions shown as `@name`. Inline images
+  and attached files become numbered `[image N]` / `[file N: name]` placeholders,
+  followed by a line saying Looper cannot receive images or files yet.
+  Other types receive 「暂不支持这类飞书消息（<type>），请发文字或富文本。」
+  as text, in reply to the message in a group or sent to the direct chat,
+  after admission and routing; silent chats receive nothing, and a turned-off
+  Manager gets only the usual turned-off reply. Bots' messages, interactive
+  cards and empty messages are ignored. The bot-token channel renders posts
+  and resource markers into the same notation before the shared adapter reads
+  them. It sends with `lark-cli im
   +messages-send --as bot`: a reply as Markdown (`--markdown`, a rich-text
   post) to the chat its message came from, a schedule's message as text to a
   user (`--user-id`); a failed send carries lark-cli's reason. In a group the

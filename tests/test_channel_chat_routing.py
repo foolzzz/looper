@@ -176,9 +176,9 @@ def lark_observations(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
 @pytest.mark.parametrize("event", [
     _lark_event(OTHER_ID), _lark_event(OPEN_ID, chat_type="group"),
-    _lark_event(OPEN_ID, sender_type="bot"), _lark_event(OPEN_ID, message_type="image"),
+    _lark_event(OPEN_ID, sender_type="bot"),
     _lark_event(OPEN_ID, " "),
-], ids=["allowlist", "group-without-mention", "bot", "nontext", "empty"])
+], ids=["allowlist", "group-without-mention", "bot", "empty"])
 def test_lark_binding_cannot_bypass_native_eligibility(
     tmp_path: Path, lark_observations: list[Any], event: dict[str, Any],
 ) -> None:

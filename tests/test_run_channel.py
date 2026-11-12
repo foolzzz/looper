@@ -540,13 +540,16 @@ assert sys.stdin.read() == "", "uncertain reminder was retransmitted"
 
     async def run() -> None:
         pool = WorkerPool(config=WorkerConfig(claude_bin=_fake_claude(tmp_path, body)), runtime_root=tmp_path)
-        pool._reminders["w1"] = state = worker._Reminders(pending="room reminder" * 32768)
+        pool._reminders["w1"] = state = worker._Reminders(pending=True, next_delivery=AsyncMock(
+            return_value=worker.RoomDelivery("room delivery" * 32768, 42, (42,), True, 0)), confirm=AsyncMock())
         monkeypatch.setattr(StreamChannel, "send_timeout", .02)
         item = _work_item(tmp_path)
         item.payload["parent_task_id"] = "t1"
         result = await pool._execute(item)
         assert result["status"] == "completed" and result["summary"] == "original report", result
-        assert state.pending is None and len(state.uuids) == 1 and state.sent == 0
+        assert not state.pending and len(state.uuids) == 1 and state.sent == 0
+        assert state.through == 42
+        state.confirm.assert_awaited_once_with(42)
         assert any(call.kwargs.get("summary") == "reader still alive"
                    for call in agent_db.insert_activity.await_args_list)
 

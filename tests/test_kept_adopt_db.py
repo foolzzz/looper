@@ -40,6 +40,15 @@ from tests.runtime_model_helpers import builtin_launch, resolved_profile, with_m
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 ROOT = Path(__file__).resolve().parents[1]
 
+
+@pytest.fixture(scope="module", autouse=True)
+def kept_manifest():
+    from looper import components
+
+    # Hash the checkout before deadlines that measure keeper startup and adoption.
+    return components.loaded_manifest()
+
+
 # The initial input is echoed just as --replay-user-messages does. A tool call
 # remains in flight across detach; every later stdin line is echoed as well.
 BODY = """\
@@ -530,7 +539,13 @@ def test_room_reminders_survive_adoption(tmp_path, monkeypatch):
     async def run(db):
         (tmp_path / 'reminder-turn').touch()
         async with _pools(db, tmp_path, monkeypatch, rooms=True) as case:
-            assert await case.a.remind(case.run_id, 'The room has a message for you')
+            from unittest.mock import AsyncMock
+            from looper.agents.room import RoomDelivery
+
+            monkeypatch.setattr(worker, "delivery_uuid", lambda through: "looper-reminder-0123456789ab-42")
+            case.a._reminders[case.run_id].next_delivery = AsyncMock(
+                return_value=RoomDelivery("The room has a message for you", 42, (42,), True, 0))
+            assert await case.a.remind(case.run_id)
             await _stored(db, 4)
             stdin = [json.loads(line) for line in (case.run_dir / keeper.STDIN).read_text().splitlines()]
             reminders = {message['uuid'] for message in stdin if str(message.get('uuid', '')).startswith(
@@ -543,7 +558,9 @@ def test_room_reminders_survive_adoption(tmp_path, monkeypatch):
 
             adopted = await case.b.adopt(case.run_id, case.expect)
             assert adopted.outcome is AdoptOutcome.ADOPTED
-            assert case.b._reminders[case.run_id].uuids == reminders
+            state = case.b._reminders[case.run_id]
+            assert state.uuids == reminders == {"looper-reminder-0123456789ab-42"}
+            assert state.through == 42 and state.pending
             (tmp_path / 'reminder-result').touch()
             result = (await _finished(case)).payload
 
@@ -647,6 +664,8 @@ def test_a_result_consumed_before_detach_keeps_later_output(tmp_path, monkeypatc
             (tmp_path / 'delay-exit').touch()
             (tmp_path / 'release').touch()
             await _stored(db, 5)
+            # The result can be persisted before the child writes its next marker.
+            await until(lambda: (tmp_path / 'result-written').exists(), 'the child to write its result marker')
             assert (tmp_path / 'result-written').exists()
             assert _live(case.identity['child_pid'])
             detached = await _detach(case)

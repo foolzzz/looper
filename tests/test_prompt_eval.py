@@ -558,7 +558,8 @@ def test_fake_room_consumer_needs_the_delivered_interface(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(fake_claude, "_mcp", lambda _args: rpc)
     monkeypatch.setattr(fake_claude.time, "sleep", lambda _seconds: None)
-    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda: "start"), [])
+    turns = iter(["start"])
+    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda timeout=None: next(turns, None)), [])
     problem = task.check(tmp_path)
     if delivery == "interface":
         assert problem is None
@@ -591,7 +592,8 @@ def test_fake_room_consumer_writes_only_the_delivered_answer(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(fake_claude, "_mcp", lambda _args: rpc)
     monkeypatch.setattr(fake_claude.time, "sleep", lambda _seconds: None)
-    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda: "start"), [])
+    turns = iter(["start"])
+    fake_claude._worker(script, "Your step: s2", SimpleNamespace(readline=lambda timeout=None: next(turns, None)), [])
     assert (tmp_path / "code.txt").read_text() == (code if delivery != "empty" else "") + "\n"
     assert (task.check(tmp_path) is None) is (delivery != "empty" and code == task.fake["consult_answer"])
 
@@ -1209,7 +1211,8 @@ def test_gh_stub_answers_views_and_fixture_diffs_and_refuses_other_commands(tmp_
     stub = runner.install_gh(tmp_path / "bin", diffs=task.gh_pr_diffs if fixture else None)
 
     def gh(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run([str(stub), *args], capture_output=True, text=True, timeout=5, check=False)
+        # This checks command behavior, allowing for interpreter startup in parallel runs.
+        return subprocess.run([str(stub), *args], capture_output=True, text=True, timeout=30, check=False)
 
     view = gh("pr", "view", "12", "--repo", "example-org/demo-service", "--json",
               "headRefOid,state,comments,reviews,statusCheckRollup")

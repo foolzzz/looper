@@ -473,7 +473,10 @@ async def _created_project(
 @pytest.fixture(autouse=True)
 def _gate_command_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Gate lists belong to one server lifetime, not to earlier tests in this worker."""
-    from looper.agents import gate_commands
+    # An unimported module has no state to reset; do not load the agent stack for CLI-only tests.
+    gate_commands = sys.modules.get("looper.agents.gate_commands")
+    if gate_commands is None:
+        return
 
     monkeypatch.setattr(gate_commands, "_snapshots", {})
     monkeypatch.setattr(gate_commands, "_pending", {})

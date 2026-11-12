@@ -73,7 +73,7 @@ from urllib.parse import urlsplit
 from ... import child_env
 from .. import claude_cli
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
+    ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
     RoomPush, RuntimeAdapter, RuntimeUnsupported, instructions,
 )
 from .instructions import InstructionFile
@@ -140,11 +140,12 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     type = "claude-code"
     label = "Claude Code"
     default_executable = "claude"
+    image_input = ImageInput.READ_TOOL
     # Verified against Claude Code 2.1.285 (claude_cli); its replies follow Looper's contracts by prompt, so no
     # structured_output.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})
-    run_input = True  # stdin can stay open between a Worker's waiting turns
     room_push = RoomPush.USER_TURN
+    run_input = True  # stdin can stay open between a Worker's waiting turns
     keepable = True
     can_interrupt = True  # its resident session's control request ``interrupt``
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})

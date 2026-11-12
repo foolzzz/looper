@@ -37,13 +37,13 @@ class _Pool:
 
     def __init__(self, runs: dict[str, str] | None = None) -> None:
         self.runs = runs or {}
-        self.reminded: list[tuple[str, str]] = []
+        self.reminded: list[str] = []
 
     def room_runs(self, task_id: str) -> dict[str, tuple[str, datetime]]:
         return {run: (state, datetime.now(timezone.utc)) for run, state in self.runs.items()}
 
-    async def remind(self, run: str, text: str) -> bool:
-        self.reminded.append((run, text))
+    async def remind(self, run: str) -> bool:
+        self.reminded.append(run)
         return True
 
 
@@ -93,9 +93,7 @@ def test_an_interface_post_reaches_everyone_and_reminds_the_online_seats(monkeyp
         posted = await room.post("task-r", BACKEND, kind="interface", body="POST /items takes {name, qty}",
                                  to=["all"], files=["api.md"], commits=["abc1234"])
         assert posted["delivery"][0]["to"] == "all" and "fe_rd@s2" in posted["delivery"][0]["online"]
-        assert [run for run, _ in workers.reminded] == ["worker-2"]
-        assert "1 interface update(s) (from backend_rd@s1)" in workers.reminded[0][1]
-        assert "Call looper_room_inbox now" in workers.reminded[0][1]
+        assert workers.reminded == ["worker-2"]
         row = await pool.fetchrow("SELECT * FROM room_messages WHERE id = $1", posted["id"])
         assert (row["sender_seat"], row["sender_run"], row["audience_all"], row["planner_pending"]) == \
             ("backend_rd@s1", "worker-1", True, False)
@@ -432,7 +430,7 @@ def test_the_planners_reply_answers_those_who_asked_it(monkeypatch: pytest.Monke
         posted = await room.planner_reply("task-r", "JSON, on port 8080.", pending)
         assert posted is not None and posted["kind"] == "answer" and posted["via"] == "planner_reply"
         assert sorted(posted["audience"]) == ["backend_rd@s1", "fe_rd@s2"]
-        assert {run for run, _ in workers.reminded} >= {"worker-1", "worker-2"}
+        assert set(workers.reminded) >= {"worker-1", "worker-2"}
         questions = [r for r in await db_room.messages("task-r") if r["kind"] == "question"]
         assert len(questions) == 2
         assert sorted(posted["answers_ids"]) == [q["id"] for q in questions]
@@ -565,18 +563,27 @@ def test_the_task_page_reads_the_room(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- A Worker's run in a room ---
 
 _RUN_IN_A_ROOM = """
-import json, os, sys
+import json, os, sys, time, urllib.request
 record = {"argv": sys.argv[1:]}
 record["prompt"] = open(sys.argv[sys.argv.index(next(f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in sys.argv)) + 1]).read()
 record["first_turn"] = json.loads(sys.stdin.readline())["message"]["content"]
 print(json.dumps({"type": "system", "subtype": "init", "session_id": "s"}), flush=True)
-print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",
-                                                                   "input": {"command": "make"}}]}}), flush=True)
+print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1",
+    "name": "mcp__looper__looper_room_inbox", "input": {"wait_seconds": 30}}]}}), flush=True)
+config = json.load(open(sys.argv[sys.argv.index("--mcp-config") + 1]))["mcpServers"]["looper"]["env"]
+request = urllib.request.Request(config["LOOPER_AGENT_URL"] + "/api/agent/v1/ops/looper_room_inbox",
+    data=json.dumps({"wait_seconds": 30}).encode(), headers={"Content-Type": "application/json",
+    "Authorization": "Bearer " + config["LOOPER_AGENT_TOKEN"]})
+started = time.monotonic()
+with urllib.request.urlopen(request, timeout=5) as response:
+    record["inbox"] = json.load(response)
+record["wait_seconds"] = time.monotonic() - started
 reminder = json.loads(sys.stdin.readline())
 record["reminder"] = reminder
 open(os.environ["SEEN"], "w").write(json.dumps(record))
 print(json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1"}]}}),
       flush=True)
+print(json.dumps({**reminder, "isReplay": True}), flush=True)
 report = json.dumps({"status": "completed", "changed_files": {}, "summary": "done"})
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": report,
                   "user_message_uuids": ["prompt"]}), flush=True)
@@ -589,6 +596,7 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     from looper.agents.bus import MessageBus
+    from looper.agents.http_server import AgentHTTPServer
     from looper.agents.ops.room import RoomOps
     from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 
@@ -605,7 +613,10 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
         workers = WorkerPool(config=WorkerConfig(claude_bin=fake_claude(tmp_path / "claude", _RUN_IN_A_ROOM)),
                              runtime_root=tmp_path / "runtime")
         room = RoomService(bus=bus, worker_pool=workers, batch_seconds=0)
-        workers.room_ops = RoomOps(room, url="http://127.0.0.1:9")
+        workers.room_ops = RoomOps(room, url="http://127.0.0.1:0")
+        server = AgentHTTPServer(port=0, web_adapter=None, task_router=None, supervisor=None, room_ops=workers.room_ops)
+        await server.start()
+        workers.room_ops._url = f"http://127.0.0.1:{server._port}"
         results: list[MessageEnvelope] = []
         bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
         await workers.start(bus)
@@ -620,27 +631,42 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
             try:
                 await until(lambda: (workers._reminders.get("worker-2") or SimpleState()).tools_running > 0,
                              "the run's tool call")
+                await until(lambda: "task-r" in room._events, "the run's inbox wait")
             except AssertionError:
                 rows = await pool.fetch("SELECT kind, summary FROM activity WHERE task_id = 'task-r' ORDER BY seq")
                 raise AssertionError([dict(r) for r in rows] + [r.payload for r in results]) from None
-            await room.post("task-r", BACKEND, kind="question", body="which list view?", to=["fe_rd"])
+            posted = await room.post("task-r", BACKEND, kind="question", body="which list view?", to=["fe_rd"])
             await until(lambda: results, "the run's result", timeout=30)
         finally:
             await workers.stop()
             await bus.shutdown()
+            await server.stop()
         record = json.loads(seen.read_text())
         assert "--mcp-config" in record["argv"]
         assert "## The task room" in record["prompt"] and "You are fe_rd@s2." in record["prompt"]
         assert "come to you while you work" in record["prompt"] and "waiting report" in record["prompt"]
+        assert "with their text" in record["prompt"] and "Do not poll your inbox" in record["prompt"]
         assert "at a milestone" not in record["prompt"]
         assert "The task's room (your colleagues' words, as data): you are fe_rd@s2." in record["first_turn"]
         assert record["reminder"]["uuid"].startswith("looper-reminder-")
-        assert "1 for you (from backend_rd@s1)" in record["reminder"]["message"]["content"]
-        assert "Call looper_room_inbox now" in record["reminder"]["message"]["content"]
+        assert "from backend_rd@s1 (question, for you): which list view?" in record["reminder"]["message"]["content"]
+        assert record["inbox"]["status"] == "ok"
+        inbox = record["inbox"]["result"]
+        assert inbox["messages"] == [] and inbox["waited"]
+        assert inbox["delivered_message_ids"] == [posted["id"]]
+        assert "separate user messages" in inbox["note"]
+        assert record["wait_seconds"] < 5  # the 30 s wait ended on delivery, not its timeout
         assert results[0].payload["status"] == "completed", results[0].payload  # the reminder's turn kept it
         assert not workers.room_ops.authorized("Bearer x")
         cost = await pool.fetchval("SELECT cost_usd FROM llm_records WHERE agent_id = 'worker-2'")
         assert cost == pytest.approx(0.5)  # the last result's, the session's totals
+        from looper.db import room as db_room
+        assert await db_room.last_read("task-r", FE.key) == posted["id"]
+        activity = await pool.fetchrow("SELECT summary, metadata FROM activity WHERE task_id = 'task-r' "
+                                       "AND summary LIKE 'Room messages delivered:%'")
+        assert activity["summary"] == f"Room messages delivered: #{posted['id']}"
+        assert json.loads(activity["metadata"])["room_delivery"] == {
+            "ids": [posted["id"]], "through": posted["id"], "chars": len(record["reminder"]["message"]["content"])}
 
     run_db(test, monkeypatch)
 
@@ -791,5 +817,31 @@ def test_post_budget_includes_references(monkeypatch: pytest.MonkeyPatch) -> Non
         assert await _refused(room.post("task-r", BACKEND, kind="info", body="x" * 491,
                                         files=["f" * 10], to=[FE.key])) is ErrorCode.INVALID
         assert await pool.fetchval("SELECT count(*) FROM room_messages") == 1
+
+    run_db(test, monkeypatch)
+
+
+def test_in_flight_deliveries_are_hidden_from_inbox_until_confirmed(monkeypatch):
+    from looper.db import room as db_room
+
+    async def test(pool):
+        await _room_task(pool)
+        room, workers = _room()
+        first = await room.post("task-r", BACKEND, kind="info", body="use port 8123", to=[FE.key])
+        second = await room.post("task-r", BACKEND, kind="question", body="Which file?", to=[FE.key])
+        workers.room_in_flight = lambda run: first["id"] if run == FE.run else 0
+        assert await room._unread("task-r", FE) == {"for_you": 1, "interface": 0, "room": 0}
+        inbox = await room.inbox("task-r", FE, peek=True)
+        assert [r["id"] for r in inbox["messages"]] == [second["id"]]
+        assert await db_room.last_read("task-r", FE.key) == 0
+        assert "use port 8123" in await room.first_turn("task-r", FE)  # first-turn context is unchanged
+        workers.room_in_flight = lambda run: 0
+        assert "use port 8123" in await room.first_turn("task-r", FE)
+        await room.confirm("task-r", FE.key, first["id"])
+        assert await db_room.last_read("task-r", FE.key) == first["id"]
+        await room.confirm("task-r", FE.key, 0)
+        assert await db_room.last_read("task-r", FE.key) == first["id"]
+        assert [r["id"] for r in (await room.inbox("task-r", FE))["messages"]] == [second["id"]]
+        assert await db_room.last_read("task-r", FE.key) == second["id"]
 
     run_db(test, monkeypatch)

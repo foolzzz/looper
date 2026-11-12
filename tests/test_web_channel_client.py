@@ -32,3 +32,12 @@ def test_the_envelope_names_the_client_and_keeps_the_web_source() -> None:
 def test_without_a_client_the_context_has_none() -> None:
     envelope, _ = asyncio.run(_sent())
     assert "client" not in envelope.payload["channel_context"]
+
+
+def test_saved_attachments_reach_the_manager_without_changing_user_text() -> None:
+    attachments = [{"index": 1, "kind": "file", "state": "saved", "name": "note.txt", "source": "web",
+                    "path": "/runtime/chat-attachments/web/upload/1-note.txt", "mime": "text/plain", "size": 3}]
+    envelope, _ = asyncio.run(_sent(attachments=attachments))
+    assert envelope.payload["text"] == "hi"
+    assert envelope.payload["attachments"] == attachments
+    assert envelope.payload["channel_context"]["client_message_id"] == "m1"
