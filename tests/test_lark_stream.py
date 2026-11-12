@@ -246,7 +246,7 @@ def test_admission_reduces_refused_event_before_queueing(monkeypatch: pytest.Mon
             assert refused == {"type": "im.message.receive_v1", "event_id": "evt-1", "message_id": "om_1",
                                "chat_id": "oc_chat", "chat_type": "p2p", "sender_id": "refused",
                                "sender_type": "user", "mentions": [{"id": "bot", "key": "", "name": "Bot"}],
-                               "message_type": message_type, "content": ""}
+                               "message_type": message_type, "content": "", "admitted": False}
             assert queued[0] == refused
             await fake.push_message(text="allowed text", sender="allowed", event_id="evt-2", message_id="om_2",
                                     parent_id="parent", root_id="root")

@@ -22,6 +22,9 @@ def test_overview_keeps_running_waiting_spend_health_and_fleet(tmp_path, monkeyp
     async def counts(**kwargs):
         return [{"project_id": "project-a", "project_name": "Demo", "status": "waiting_user", "count": 1}]
 
+    async def projects(task_ids):
+        return {"task-a": "project-a"}
+
     async def spend(*args, **kwargs):
         return {"provider_priced_usd": 1.25, "equivalent_usd": 2.5, "runs": 3, "running": 1,
                 "unpriced_runs": 1}
@@ -43,6 +46,7 @@ def test_overview_keeps_running_waiting_spend_health_and_fleet(tmp_path, monkeyp
         return [{"task_id": "task-a"}]
 
     monkeypatch.setattr(overview.db_tasks, "status_counts", counts)
+    monkeypatch.setattr(overview.db_tasks, "project_of", projects)
     monkeypatch.setattr(overview.db_llm_records, "spend_since", spend)
     monkeypatch.setattr(overview, "schedule_overview", schedules)
     monkeypatch.setattr(task_ops.db_layers, "task_concurrency", concurrency)
