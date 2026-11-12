@@ -484,7 +484,9 @@ def kept_manifest():
     return components.loaded_manifest()
 
 
-def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch, agent_db, kept_manifest):
+@pytest.mark.parametrize(("room_pending", "resume_during_delivery"), [(False, False), (True, False), (True, True)])
+def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch, agent_db, kept_manifest,
+                                                        room_pending, resume_during_delivery):
     from datetime import datetime, timezone
     from types import SimpleNamespace
     from unittest.mock import Mock
@@ -495,6 +497,9 @@ def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch
         launch = builtin_launch()
         runtime = ClaudeCodeRuntime()
         pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path)
+        delivery = RoomDelivery("A question posted while Looper was down", 42, (42,), True, 0)
+        if room_pending:
+            pool._reminders["w1"] = worker._Reminders(pending=True, next_delivery=AsyncMock(return_value=delivery))
         handle = KeptRun(runtime, ["claude"], launch=launch, cwd=tmp_path,
                          session_dir=None, label="waiting-run", run_dir=tmp_path / "kept",
                          runtime_root=tmp_path, epoch=2, on_stale=lambda reason: None)
@@ -502,15 +507,25 @@ def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch
         handle._process.stdout.replay_until = 1
         handle.end, handle.wait = AsyncMock(), AsyncMock(return_value=0)
         checked = asyncio.Event()
+        resumed = asyncio.Event()
         sleep = AsyncMock(side_effect=AssertionError("an adopted wait must be checked immediately"))
         monkeypatch.setattr(worker, "_waiting_sleep", sleep)
         accounted, persisted = [], []
         recorder = SimpleNamespace(cap_stop=None, account=accounted.append,
                                    record=AsyncMock(side_effect=persisted.append), finish=AsyncMock())
 
+        written = []
+
         async def send(text, **kwargs):
             assert handle.replay_finished.is_set()
             assert not agent_db.insert_activity.await_args_list
+            written.append(text)
+            if text == delivery.text:
+                assert worker.uuid_through(kwargs["uuid"]) == 42
+                if resume_during_delivery:
+                    checked.set()
+                    await resumed.wait()
+                return DeliveryResult.ACCEPTED
             assert text.startswith("[Looper] 600 s have passed since you began waiting for: the build.")
             checked.set()
             return DeliveryResult.ACCEPTED
@@ -522,12 +537,16 @@ def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch
             await checked.wait()
             yield {"type": "assistant", "message": {"content": []}}
             yield _completed()
+            resumed.set()
 
         handle._channel = SimpleNamespace(events=events, send=send, end_input=Mock(), start=AsyncMock())
         ctx = worker.RunContext("w1", "task", None, str(tmp_path), "", False, launch, runtime,
                                 None, 0, datetime.now(timezone.utc), False, ["claude"])
         outcome = await pool._consume(ctx, handle, recorder, start=worker.ConsumeStart.ADOPTED)
         assert outcome["status"] == "completed"
+        if room_pending:
+            assert written[0] == delivery.text and len(written) == (1 if resume_during_delivery else 2)
+            assert pool._reminders["w1"].through == 42
         assert accounted == [_waiting()] and persisted[-1] == _completed()
         assert not any((call.kwargs.get("metadata") or {}).get("state") == "waiting"
                        for call in agent_db.insert_activity.await_args_list)

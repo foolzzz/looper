@@ -655,6 +655,8 @@ def test_a_result_consumed_before_detach_keeps_later_output(tmp_path, monkeypatc
             (tmp_path / 'delay-exit').touch()
             (tmp_path / 'release').touch()
             await _stored(db, 5)
+            # The result can be persisted before the child writes its next marker.
+            await until(lambda: (tmp_path / 'result-written').exists(), 'the child to write its result marker')
             assert (tmp_path / 'result-written').exists()
             assert _live(case.identity['child_pid'])
             detached = await _detach(case)

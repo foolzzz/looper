@@ -305,6 +305,66 @@ def test_delivery_failures_and_concurrent_flushes(tmp_path, outcome):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("paused_at", ["empty_read", "read", "send", "activity"])
+@pytest.mark.parametrize("waiting", [False, True])
+def test_a_post_during_delivery_is_not_lost(tmp_path, monkeypatch, agent_db, paused_at, waiting):
+    from looper.agents.runtimes.channel import DeliveryResult
+    from looper.agents.tiers import worker
+
+    async def run():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path)
+        entered, release, posted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        monkeypatch.setattr(worker, "ADDRESSED_INTERVAL_SEC", 0)
+        written, afters = [], []
+
+        async def pause():
+            entered.set()
+            await release.wait()
+
+        async def next_delivery(after):
+            afters.append(after)
+            if len(afters) == 1:
+                if paused_at in ("empty_read", "read"):
+                    await pause()
+                return None if paused_at == "empty_read" else RoomDelivery("first", 41, (41,), True, 0)
+            return RoomDelivery("second", 42, (42,), True, 0) if after < 42 else None
+
+        async def send(text, **kwargs):
+            written.append(text)
+            if paused_at == "send" and len(written) == 1:
+                await pause()
+            return DeliveryResult.ACCEPTED
+
+        if paused_at == "activity":
+            pool._active["w1"] = SimpleNamespace(parent_task_id="task")
+
+            async def activity(**kwargs):
+                if len(written) == 1:
+                    await pause()
+
+            agent_db.insert_activity.side_effect = activity
+        pool._inputs["w1"] = SimpleNamespace(send=send)
+        pool._reminders["w1"] = state = worker._Reminders(
+            next_delivery=next_delivery, tools_running=int(not waiting), waiting=waiting)
+        first = asyncio.create_task(pool.remind("w1"))
+        await entered.wait()
+
+        async def post():
+            posted.set()
+            return await pool.remind("w1")
+
+        second = asyncio.create_task(post())
+        await posted.wait()
+        release.set()
+        await asyncio.gather(first, second)
+        assert written == (["second"] if paused_at == "empty_read" else ["first", "second"])
+        assert afters[:2] == [0, 0 if paused_at == "empty_read" else 41]
+        assert state.through == 42 and not state.pending
+        pool._drop_reminders("w1")
+
+    asyncio.run(asyncio.wait_for(run(), 3))
+
+
 def test_pending_delivery_retries_when_the_interval_ends(tmp_path, monkeypatch):
     from looper.agents.tiers import worker
     from looper.agents.runtimes.channel import DeliveryResult

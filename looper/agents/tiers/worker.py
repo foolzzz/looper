@@ -454,6 +454,7 @@ class _Reminders:
     """A running Claude's room deliveries (``WorkerPool.remind``)."""
 
     pending: bool = False
+    notified: int = 0
     next_delivery: Callable[[int], Awaitable[RoomDelivery | None]] | None = None
     confirm: Callable[[int], Awaitable[None]] | None = None
     through: int = 0
@@ -1560,6 +1561,7 @@ class WorkerPool:
         state = self._reminders.get(worker_id)
         if state is None:
             return False
+        state.notified += 1
         state.pending = True
         return await self._flush_reminder(worker_id)
 
@@ -1568,48 +1570,55 @@ class WorkerPool:
         channel = self._inputs.get(worker_id)
         if state is None or channel is None or not state.pending or state.next_delivery is None:
             return False
+        sent = False
         async with state.lock:
-            if not state.pending or (not state.tools_running and not state.waiting):
-                return False
-            try:
-                delivery = await state.next_delivery(state.through)
-            except Exception:
-                logger.warning("worker %s failed to read room delivery", worker_id, exc_info=True)
-                return False
-            if delivery is None:
-                state.pending = False
-                return False
-            now = time.monotonic()
-            interval = ADDRESSED_INTERVAL_SEC if delivery.addressed else REMINDER_INTERVAL_SEC
-            if state.last_at + interval > now:
-                self._retry_reminder(worker_id, state, state.last_at + interval - now)
-                return False
-            reminder = delivery_uuid(delivery.through)
-            state.uuids.add(reminder)  # An echo may arrive while send awaits acceptance.
-            try:
-                result = await channel.send(delivery.text, uuid=reminder)
-            except (BrokenPipeError, ConnectionResetError, RuntimeError):
-                result = DeliveryResult.REJECTED
-            if result is DeliveryResult.REJECTED:
-                state.uuids.discard(reminder)
-                return False
-            state.through = max(state.through, delivery.through)
-            state.last_at = now
-            state.pending = delivery.more > 0
-            if result is DeliveryResult.UNKNOWN:
-                logger.warning("worker %s room delivery acceptance unknown; not retrying", worker_id)
-                return False
-            state.sent += 1
-            wp = self._active.get(worker_id)
-            if wp is not None and wp.parent_task_id:
-                await self._activity(wp.parent_task_id, worker_id, "phase",
-                                     ("Room messages delivered: " + ", ".join(f"#{i}" for i in delivery.ids))[:300],
-                                     metadata={"room_delivery": {"ids": list(delivery.ids),
-                                                                  "through": delivery.through,
-                                                                  "chars": len(delivery.text)}})
-            if state.pending:
-                self._retry_reminder(worker_id, state, interval)
-            return True
+            while True:
+                if not state.pending or (not state.tools_running and not state.waiting):
+                    return sent
+                notified = state.notified
+                try:
+                    delivery = await state.next_delivery(state.through)
+                except Exception:
+                    logger.warning("worker %s failed to read room delivery", worker_id, exc_info=True)
+                    return sent
+                if delivery is None:
+                    state.pending = state.notified != notified
+                    continue
+                now = time.monotonic()
+                interval = ADDRESSED_INTERVAL_SEC if delivery.addressed else REMINDER_INTERVAL_SEC
+                if state.last_at + interval > now:
+                    self._retry_reminder(worker_id, state, state.last_at + interval - now)
+                    return sent
+                reminder = delivery_uuid(delivery.through)
+                state.uuids.add(reminder)  # An echo may arrive while send awaits acceptance.
+                try:
+                    result = await channel.send(delivery.text, uuid=reminder)
+                except (BrokenPipeError, ConnectionResetError, RuntimeError):
+                    result = DeliveryResult.REJECTED
+                if result is DeliveryResult.REJECTED:
+                    state.uuids.discard(reminder)
+                    return sent
+                state.through = max(state.through, delivery.through)
+                state.last_at = now
+                state.pending = delivery.more > 0 or state.notified != notified
+                if result is DeliveryResult.UNKNOWN:
+                    logger.warning("worker %s room delivery acceptance unknown; not retrying", worker_id)
+                    return sent
+                state.sent += 1
+                sent = True
+                wp = self._active.get(worker_id)
+                if wp is not None and wp.parent_task_id:
+                    await self._activity(wp.parent_task_id, worker_id, "phase",
+                                         ("Room messages delivered: " + ", ".join(f"#{i}" for i in delivery.ids))[:300],
+                                         metadata={"room_delivery": {"ids": list(delivery.ids),
+                                                                      "through": delivery.through,
+                                                                      "chars": len(delivery.text)}})
+                # A post may arrive during the read, write or activity await. Read it before releasing the lock.
+                if state.notified != notified:
+                    continue
+                if state.pending:
+                    self._retry_reminder(worker_id, state, interval)
+                return sent
 
     async def _confirm_delivery(self, worker_id: str, state: _Reminders, through: int) -> None:
         if through <= state.confirmed or state.confirm is None:
@@ -2399,6 +2408,10 @@ class WorkerPool:
 
         async def _send_check() -> None:
             if waiting is not None and not input_ended:
+                report = waiting
+                await self._flush_reminder(worker_id)
+                if waiting is not report or input_ended:
+                    return
                 await _send_control(
                     f"[Looper] {waiting.check_after_seconds} s have passed since you began waiting for: "
                     f"{waiting.waiting_for}. Check on it, then go on, wait again with a waiting report, "
