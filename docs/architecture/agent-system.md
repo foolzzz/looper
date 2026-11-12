@@ -683,8 +683,8 @@ answer to an edit on the task page goes.
   it awaits (1–300 characters), and `check_after_seconds` is an integer from
   30 to 1800. Stdin stays open, with no model requests while idle. The next
   turn starts when its background command, agent or Monitor reports, a room
-  reminder or Planner/user message arrives, or Looper sends a check when the
-  timer expires. Room reminders can be sent while waiting without a running
+  delivery or Planner/user message arrives, or Looper sends a check when the
+  timer expires. Room deliveries can be sent while waiting without a running
   tool call. On restart, an adopted waiting run gets an immediate check.
   Looper prefixes check and repair messages with `[Looper]`; an invalid
   waiting report or a missing report after waking gets one repair turn, and
@@ -4564,27 +4564,34 @@ before.
   (with `reply_to` a question), `interface`, `announce`; Looper's `notice` and
   `escalation`. Messages are only added; they go with their task and with a
   start-over (`reset_task_for_restart`). Refused posts are a task activity line.
-- **Delivery is pulled.** A run's first user turn says its seat, who is
-  online, the messages for it in full and the interface posts it has not read
-  (within 2,000 characters), after the Findings; the system prompt has the
-  room's section after the task (and before a role's boundaries;
-  `prompt_layers.room`). `looper_room_inbox` gives the unread messages oldest
-  first (`for_you` on those that name the seat; at most 20 and 8,000
-  characters) and marks them read per seat (a retry reads on); `peek` reads
-  without marking; `wait_seconds` waits, up to the project's
-  `room_wait_max_seconds`, for a message for the seat or an interface post.
-  Every tool's answer carries the seat's unread counts.
-- **Reminders.** A run on a runtime that reads user turns while it runs
-  (`RuntimeAdapter.run_input`: Claude Code; not a stored capability) that a
-  message names, or that an interface post or a watch reaches, gets one line,
-  never the message (`WorkerPool.remind`), at most every 60 s. It is written
-  only while one of its tool calls runs (the stream's `tool_use` and
-  `tool_result`): Claude Code 2.1.285 folds a user turn written then into the
-  turn it is in at the next tool result, but runs one written while it writes
-  its final reply as a turn of its own after the report. Reminders carry a
-  uuid (`looper-reminder-…`), and a result whose `user_message_uuids` are all
-  the run's reminders never replaces the run's outcome; the cost is still the
-  last result's (the session's totals).
+- **Delivery.** A run's first user turn says its seat, who is online, the
+  messages for it in full and unread interface posts (within 2,000 characters),
+  after the Findings; the system prompt has the room's section after the task
+  (and before a role's boundaries; `prompt_layers.room`).
+  `looper_room_inbox` gives unread messages oldest first (`for_you` on those
+  naming the seat; at most 20 and 8,000 characters), marking them read per seat
+  (a retry reads on); `peek` does not mark them. `wait_seconds` waits up to the
+  project's `room_wait_max_seconds` for a message for the seat or an interface
+  post. Every tool's answer carries unread counts.
+  Running Claude Code Workers and Reviewers (`RoomPush.USER_TURN`) instead
+  receive message bodies when a message names them or an interface post
+  reaches them. Other posts ride along in an oldest-first prefix: at most
+  10 messages and 4,000 characters, bodies clipped at 1,500 for addressed or
+  interface posts and 300 for others, with a pointer to `looper_room_read`.
+  Deliveries are written only during a tool call or while a Worker waits;
+  Claude folds them in at the next tool result, or starts the waiting turn.
+  A batch with an addressed message can go every 10 s; other batches every
+  60 s, with a retry when the interval ends. Messages are marked read on the
+  delivery's replay echo or a result naming its uuid in `user_message_uuids`,
+  never merely on writing stdin. While in flight, that run's inbox and unread
+  counts start after the delivery's cursor. An unconfirmed delivery remains
+  unread for a later run. Adoption rebuilds the cursor from stdin uuids and
+  checks for messages that arrived while Looper was down at the next tool
+  call or check. Delivery uuids retain the `looper-reminder-` prefix; a result
+  answering only those messages preserves the previous outcome, including
+  when a final-reply race makes the delivery a separate turn after the report;
+  cost still comes from the last result (the session's totals).
+  Other runtimes and consults pull; the Planner's `[ROOM]` turns are unchanged.
 - **The Planner.** A message for `planner`, and every escalation, is stored
   `planner_pending` and wakes the Planner (`ROOM_MESSAGE`) after a 30 s batch
   (`ROOM_BATCH_SECONDS`); after the event it is in, the Planner gives all that

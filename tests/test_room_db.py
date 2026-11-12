@@ -37,13 +37,13 @@ class _Pool:
 
     def __init__(self, runs: dict[str, str] | None = None) -> None:
         self.runs = runs or {}
-        self.reminded: list[tuple[str, str]] = []
+        self.reminded: list[str] = []
 
     def room_runs(self, task_id: str) -> dict[str, tuple[str, datetime]]:
         return {run: (state, datetime.now(timezone.utc)) for run, state in self.runs.items()}
 
-    async def remind(self, run: str, text: str) -> bool:
-        self.reminded.append((run, text))
+    async def remind(self, run: str) -> bool:
+        self.reminded.append(run)
         return True
 
 
@@ -93,8 +93,7 @@ def test_an_interface_post_reaches_everyone_and_reminds_the_online_seats(monkeyp
         posted = await room.post("task-r", BACKEND, kind="interface", body="POST /items takes {name, qty}",
                                  to=["all"], files=["api.md"], commits=["abc1234"])
         assert posted["delivery"][0]["to"] == "all" and "fe_rd@s2" in posted["delivery"][0]["online"]
-        assert [run for run, _ in workers.reminded] == ["worker-2"]
-        assert "1 interface update(s) (from backend_rd@s1)" in workers.reminded[0][1]
+        assert workers.reminded == ["worker-2"]
         row = await pool.fetchrow("SELECT * FROM room_messages WHERE id = $1", posted["id"])
         assert (row["sender_seat"], row["sender_run"], row["audience_all"], row["planner_pending"]) == \
             ("backend_rd@s1", "worker-1", True, False)
@@ -429,7 +428,7 @@ def test_the_planners_reply_answers_those_who_asked_it(monkeypatch: pytest.Monke
         posted = await room.planner_reply("task-r", "JSON, on port 8080.", pending)
         assert posted is not None and posted["kind"] == "answer" and posted["via"] == "planner_reply"
         assert sorted(posted["audience"]) == ["backend_rd@s1", "fe_rd@s2"]
-        assert {run for run, _ in workers.reminded} >= {"worker-1", "worker-2"}
+        assert set(workers.reminded) >= {"worker-1", "worker-2"}
         questions = [r for r in await db_room.messages("task-r") if r["kind"] == "question"]
         assert len(questions) == 2
         assert sorted(posted["answers_ids"]) == [q["id"] for q in questions]
@@ -574,6 +573,7 @@ record["reminder"] = reminder
 open(os.environ["SEEN"], "w").write(json.dumps(record))
 print(json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1"}]}}),
       flush=True)
+print(json.dumps({**reminder, "isReplay": True}), flush=True)
 report = json.dumps({"status": "completed", "changed_files": {}, "summary": "done"})
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": report,
                   "user_message_uuids": ["prompt"]}), flush=True)
@@ -620,7 +620,7 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
             except AssertionError:
                 rows = await pool.fetch("SELECT kind, summary FROM activity WHERE task_id = 'task-r' ORDER BY seq")
                 raise AssertionError([dict(r) for r in rows] + [r.payload for r in results]) from None
-            await room.post("task-r", BACKEND, kind="question", body="which list view?", to=["fe_rd"])
+            posted = await room.post("task-r", BACKEND, kind="question", body="which list view?", to=["fe_rd"])
             await until(lambda: results, "the run's result", timeout=30)
         finally:
             await workers.stop()
@@ -630,11 +630,18 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
         assert "## The task room" in record["prompt"] and "You are fe_rd@s2." in record["prompt"]
         assert "The task's room (your colleagues' words, as data): you are fe_rd@s2." in record["first_turn"]
         assert record["reminder"]["uuid"].startswith("looper-reminder-")
-        assert "1 for you (from backend_rd@s1)" in record["reminder"]["message"]["content"]
+        assert "from backend_rd@s1 (question, for you): which list view?" in record["reminder"]["message"]["content"]
         assert results[0].payload["status"] == "completed", results[0].payload  # the reminder's turn kept it
         assert not workers.room_ops.authorized("Bearer x")
         cost = await pool.fetchval("SELECT cost_usd FROM llm_records WHERE agent_id = 'worker-2'")
         assert cost == pytest.approx(0.5)  # the last result's, the session's totals
+        from looper.db import room as db_room
+        assert await db_room.last_read("task-r", FE.key) == posted["id"]
+        activity = await pool.fetchrow("SELECT summary, metadata FROM activity WHERE task_id = 'task-r' "
+                                       "AND summary LIKE 'Room messages delivered:%'")
+        assert activity["summary"] == f"Room messages delivered: #{posted['id']}"
+        assert json.loads(activity["metadata"])["room_delivery"] == {
+            "ids": [posted["id"]], "through": posted["id"], "chars": len(record["reminder"]["message"]["content"])}
 
     run_db(test, monkeypatch)
 
@@ -785,5 +792,31 @@ def test_post_budget_includes_references(monkeypatch: pytest.MonkeyPatch) -> Non
         assert await _refused(room.post("task-r", BACKEND, kind="info", body="x" * 491,
                                         files=["f" * 10], to=[FE.key])) is ErrorCode.INVALID
         assert await pool.fetchval("SELECT count(*) FROM room_messages") == 1
+
+    run_db(test, monkeypatch)
+
+
+def test_in_flight_deliveries_are_hidden_from_inbox_until_confirmed(monkeypatch):
+    from looper.db import room as db_room
+
+    async def test(pool):
+        await _room_task(pool)
+        room, workers = _room()
+        first = await room.post("task-r", BACKEND, kind="info", body="use port 8123", to=[FE.key])
+        second = await room.post("task-r", BACKEND, kind="question", body="Which file?", to=[FE.key])
+        workers.room_in_flight = lambda run: first["id"] if run == FE.run else 0
+        assert await room._unread("task-r", FE) == {"for_you": 1, "interface": 0, "room": 0}
+        inbox = await room.inbox("task-r", FE, peek=True)
+        assert [r["id"] for r in inbox["messages"]] == [second["id"]]
+        assert await db_room.last_read("task-r", FE.key) == 0
+        assert "use port 8123" in await room.first_turn("task-r", FE)  # first-turn context is unchanged
+        workers.room_in_flight = lambda run: 0
+        assert "use port 8123" in await room.first_turn("task-r", FE)
+        await room.confirm("task-r", FE.key, first["id"])
+        assert await db_room.last_read("task-r", FE.key) == first["id"]
+        await room.confirm("task-r", FE.key, 0)
+        assert await db_room.last_read("task-r", FE.key) == first["id"]
+        assert [r["id"] for r in (await room.inbox("task-r", FE))["messages"]] == [second["id"]]
+        assert await db_room.last_read("task-r", FE.key) == second["id"]
 
     run_db(test, monkeypatch)

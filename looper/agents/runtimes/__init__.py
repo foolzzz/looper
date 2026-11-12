@@ -207,6 +207,13 @@ class ReadOnly(str, Enum):
     CHECK = "check"  # it cannot: the Planner compares the task directory before and after each turn
 
 
+class RoomPush(str, Enum):
+    """How a running Worker or Reviewer gets its room messages while it runs."""
+
+    NONE = "none"
+    USER_TURN = "user_turn"  # run_input; folded in at a tool result
+
+
 class ResidentTransport(str, Enum):
     """How a runtime serves the Manager's and a Planner's session (``RuntimeAdapter.resident_transport``)."""
 
@@ -398,6 +405,7 @@ class RuntimeAdapter(ABC):
     # Whether a run reads more user turns while it runs (``write_turn`` after the prompt): a forwarded message, a
     # Planner's nudge, an agent room reminder. A runtime that reads only its prompt has False.
     run_input: ClassVar[bool] = False
+    room_push: ClassVar[RoomPush] = RoomPush.NONE
     keepable: ClassVar[bool] = False  # a keeper may hold its run across a control-plane restart
     # Enable only when recorded CLI samples and stand-in streams pin down its first model event.
     first_event_known: ClassVar[bool] = False
@@ -650,6 +658,12 @@ class RuntimeAdapter(ABC):
         """What the runtime adds to a run's record, such as the installed items it could not load; nothing
         unless the adapter says otherwise."""
         return {}
+
+
+def room_push(launch: Launch) -> RoomPush:
+    """How ``launch``'s run gets room messages while it runs."""
+    runtime = launch.runtime
+    return RoomPush.USER_TURN if runtime.room_push is RoomPush.USER_TURN and runtime.run_input else RoomPush.NONE
 
 
 def waits_without_turns(runtime: RuntimeAdapter) -> bool:

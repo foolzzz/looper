@@ -530,7 +530,13 @@ def test_room_reminders_survive_adoption(tmp_path, monkeypatch):
     async def run(db):
         (tmp_path / 'reminder-turn').touch()
         async with _pools(db, tmp_path, monkeypatch, rooms=True) as case:
-            assert await case.a.remind(case.run_id, 'The room has a message for you')
+            from unittest.mock import AsyncMock
+            from looper.agents.room import RoomDelivery
+
+            monkeypatch.setattr(worker, "delivery_uuid", lambda through: "looper-reminder-0123456789ab-42")
+            case.a._reminders[case.run_id].next_delivery = AsyncMock(
+                return_value=RoomDelivery("The room has a message for you", 42, (42,), True, 0))
+            assert await case.a.remind(case.run_id)
             await _stored(db, 4)
             stdin = [json.loads(line) for line in (case.run_dir / keeper.STDIN).read_text().splitlines()]
             reminders = {message['uuid'] for message in stdin if str(message.get('uuid', '')).startswith(
@@ -543,7 +549,9 @@ def test_room_reminders_survive_adoption(tmp_path, monkeypatch):
 
             adopted = await case.b.adopt(case.run_id, case.expect)
             assert adopted.outcome is AdoptOutcome.ADOPTED
-            assert case.b._reminders[case.run_id].uuids == reminders
+            state = case.b._reminders[case.run_id]
+            assert state.uuids == reminders == {"looper-reminder-0123456789ab-42"}
+            assert state.through == 42 and state.pending
             (tmp_path / 'reminder-result').touch()
             result = (await _finished(case)).payload
 
