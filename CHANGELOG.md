@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.157] - 2026-11-12
+
+### Changed
+
+- **Room guidance for runs that get deliveries.** ([#1265](https://github.com/foolzzz/looper/pull/1265))
+  - Claude Code Workers and Reviewers are told that messages for them, interface posts and answers arrive with their text in a `[Looper room]` message after a tool result, and to use `looper_room_inbox` only when a delivery says more are waiting (`looper_room_read` for earlier messages). Workers continue independent work and use a waiting report when they need an answer and have nothing else left; Reviewers do not use waiting reports.
+  - Runs without delivery keep the inbox reads at milestones, before the report and before building on an interface. The `looper_room_inbox` description says `wait_seconds` is for a needed answer, never a timer, and tells delivered runs to use it only when a delivery says more are waiting.
+  - The Planner's guide gains a line not to tell steps to poll or wait on the inbox. Eval metrics gain `room_inbox_woken_by_delivery`.
+  - Model-visible: Worker and Reviewer room sections, the first-turn "Unread" line, the inbox tool description and the Planner's room guide.
+
 ## [2.14.156] - 2026-11-12
 
 ### Changed
