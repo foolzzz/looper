@@ -144,15 +144,15 @@ def normalize_room_arguments(raw: Any) -> Any:
     return raw
 
 
-async def run_tool(room: RoomService, task_id: str, seat: Seat, name: str, arguments: Mapping[str, Any]
-                   ) -> dict[str, Any]:
+async def run_tool(room: RoomService, task_id: str, seat: Seat, name: str, arguments: Mapping[str, Any], *,
+                   mode: RoomInput = RoomInput.PULL) -> dict[str, Any]:
     """Run room tool ``name`` with its checked ``arguments`` for ``seat`` in ``task_id``'s room."""
     if name == ROSTER:
         return await room.roster(task_id, seat)
     if name == POST:
         return await room.post(task_id, seat, kind=arguments["kind"], body=arguments["body"],
                                to=arguments.get("to"), reply_to=arguments.get("reply_to"),
-                               files=arguments.get("files") or (), commits=arguments.get("commits") or ())
+                               files=arguments.get("files") or (), commits=arguments.get("commits") or (), mode=mode)
     if name == INBOX:
         return await room.inbox(task_id, seat, wait_seconds=int(arguments.get("wait_seconds") or 0),
                                 peek=bool(arguments.get("peek")))
@@ -163,7 +163,7 @@ async def run_tool(room: RoomService, task_id: str, seat: Seat, name: str, argum
     if name == WATCH:
         return await room.watch(task_id, seat, presence=arguments.get("presence"), state=arguments.get("state"),
                                 kind=arguments.get("kind"), sender=arguments.get("from"),
-                                until=arguments.get("until") or "first")
+                                until=arguments.get("until") or "first", mode=mode)
     raise OpError(ErrorCode.INVALID, f"no room tool {name!r}")
 
 
@@ -307,12 +307,23 @@ class RoomOps:
         if grant.mode is not RoomInput.PULL:
             for tool in listed:
                 if tool["name"] == INBOX:
-                    tool["description"] = ("Your unread room messages, oldest first; reading marks them read. "
-                                           "Every room tool's answer carries your unread counts. "
-                                           "Messages are delivered to you; wait_seconds is not needed. "
-                                           "Use this inbox only when a delivery says more are waiting.")
                     if grant.mode is RoomInput.PUSHED_WAITS:
-                        tool["description"] += " To wait for an answer, use a waiting report."
+                        tool["description"] = ("Your unread room messages, oldest first; reading marks them read. "
+                                               "Every room tool's answer carries your unread counts. "
+                                               "Messages are delivered to you. "
+                                               "Use this inbox only when a delivery says more are waiting. "
+                                               "To wait for an answer, use a waiting report.")
+                        tool["inputSchema"]["properties"] = {
+                            key: value for key, value in tool["inputSchema"]["properties"].items()
+                            if key != "wait_seconds"}
+                    else:
+                        tool["description"] += (" Messages are delivered to you. "
+                                                "A wait returns at once when a delivery arrives; read it in your run.")
+                elif tool["name"] == WATCH:
+                    tool["description"] = ("Have a notice delivered to your run when a seat or role comes online "
+                                           "or goes offline (presence, state), or when an interface or announce "
+                                           "message arrives (kind, optionally from). "
+                                           "until: first (default) or run_end.")
         return listed
 
     def retry_safety(self, header: str | None) -> dict[str, str] | None:
@@ -338,7 +349,10 @@ class RoomOps:
             return await self._vault_call(grant, tool, raw)
         try:
             arguments = check_arguments(tool.schema, normalize_room_arguments(raw))
-            result = await run_tool(self.room, grant.task_id, grant.seat, name, arguments)
+            if name == INBOX and grant.mode is RoomInput.PUSHED_WAITS and "wait_seconds" in arguments:
+                raise OpError(ErrorCode.INVALID, "wait_seconds is unavailable: room messages are delivered to "
+                                               "your run. If nothing else is left, use a waiting report.")
+            result = await run_tool(self.room, grant.task_id, grant.seat, name, arguments, mode=grant.mode)
         except OpError as exc:
             if tool.risk is not Risk.READ:
                 await _note_refusal(grant.task_id, grant.seat, name, exc)

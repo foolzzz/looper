@@ -265,6 +265,45 @@ def test_the_first_turn_matches_the_runs_room_input(monkeypatch, mode):
     assert ("They will be delivered to you." in text) is (mode is not RoomInput.PULL)
 
 
+@pytest.mark.parametrize("mode", list(RoomInput))
+def test_an_ended_seats_answer_follows_the_askers_delivery_mode(monkeypatch, mode):
+    room = RoomService()
+    monkeypatch.setattr(room, "_consult", AsyncMock(return_value=None))
+    context = SimpleNamespace(members=[SimpleNamespace(seat=FE.key, presence=Presence.OFFLINE)])
+    result = asyncio.run(room._deliver("task", context, WORKER,
+                                      _message(WORKER.key, "question", to=(FE.key,)),
+                                      [TO_WORK], False, mode=mode))
+    state = result[0]["state"]
+    assert ("comes to your inbox" in state) is (mode is RoomInput.PULL)
+    assert ("delivered to your run" in state) is (mode is not RoomInput.PULL)
+    assert ("waiting report" in state) is (mode is RoomInput.PUSHED_WAITS)
+    assert ("looper_room_inbox and wait_seconds" in state) is (mode is RoomInput.PUSHED)
+
+
+@pytest.mark.parametrize("mode", list(RoomInput))
+def test_watch_returns_unread_counts_and_the_runs_delivery_guidance(monkeypatch, mode):
+    from contextlib import asynccontextmanager
+    from looper.agents import room as module
+    from looper.agents.ops import room as room_ops
+
+    @asynccontextmanager
+    async def transaction(task_id):
+        yield object()
+
+    room = RoomService()
+    monkeypatch.setattr(room, "_context", AsyncMock(return_value=SimpleNamespace(members=[], roles=lambda: {})))
+    counts = {"for_you": 2, "interface": 1, "room": 3}
+    monkeypatch.setattr(room, "_unread", AsyncMock(return_value=counts))
+    monkeypatch.setattr(module.db_room, "task_transaction", transaction)
+    monkeypatch.setattr(module.db_room, "open_watches", AsyncMock(return_value=[]))
+    monkeypatch.setattr(module.db_room, "add_watch", AsyncMock(return_value=1))
+    result = asyncio.run(room_ops.run_tool(room, "task", WORKER, room_ops.WATCH, {"kind": "interface"}, mode=mode))
+    assert result["watch"] == 1 and result["unread"] == counts
+    assert ("comes to your inbox" in result["note"]) is (mode is RoomInput.PULL)
+    assert ("delivered to your run" in result["note"]) is (mode is not RoomInput.PULL)
+    room._unread.assert_awaited_once_with("task", WORKER)
+
+
 @pytest.mark.parametrize(("runtime_type", "is_verify", "expected"), [
     ("claude-code", False, RoomInput.PUSHED_WAITS),
     ("claude-code", True, RoomInput.PUSHED),

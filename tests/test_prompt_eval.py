@@ -550,6 +550,9 @@ def test_fake_room_consumer_needs_the_delivered_interface(
         messages.insert(0, {"kind": "interface", "body": f'add_item takes {{"{name}": str, "{count}": int}}'})
 
     def rpc(_method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if _method == "tools/list":
+            return {"result": {"tools": [{"name": "looper_room_inbox", "inputSchema": {
+                "properties": {"wait_seconds": {"type": "integer"}}}}]}}
         result = {"messages": messages, "more": False, "unread": {}} if params["name"] == "looper_room_inbox" else {}
         return {"jsonrpc": "2.0", "id": 1, "result": {
             "content": [{"type": "text", "text": json.dumps({"status": "ok", "result": result})}],
@@ -584,6 +587,9 @@ def test_fake_room_consumer_writes_only_the_delivered_answer(
     messages.append({"kind": "interface", "body": "another message"})
 
     def rpc(_method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if _method == "tools/list":
+            return {"result": {"tools": [{"name": "looper_room_inbox", "inputSchema": {
+                "properties": {"wait_seconds": {"type": "integer"}}}}]}}
         result = {"messages": messages} if params["name"] == "looper_room_inbox" else {}
         return {"jsonrpc": "2.0", "id": 1, "result": {
             "content": [{"type": "text", "text": json.dumps({"status": "ok", "result": result})}],
@@ -2374,7 +2380,7 @@ _GATES = {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1
 # its session answers. Nothing is left unanswered; every other task's room stays quiet.
 _ROOM_KEYS = ("room_messages", "room_questions", "room_unanswered", "room_interface", "room_refused",
               "room_tool_calls", "room_consults", "room_consults_answered")
-_ROOM = {"room_interface": (3, 1, 0, 1, 0, 3, 0, 0), "room_consult": (2, 1, 0, 0, 0, 2, 1, 1)}
+_ROOM = {"room_interface": (3, 1, 0, 1, 0, 2, 0, 0), "room_consult": (2, 1, 0, 0, 0, 1, 1, 1)}
 # The Planner turns of each kind that some tasks take.
 _PLANNER_TURNS = {"chat_correction": ("chat", 1), "gate_ambiguous": ("gate", 1), "room_interface": ("room", 1)}
 _VAULT = {"vault_closeout_keeps": (1, 1), "vault_closeout_nothing": (0, 1)}

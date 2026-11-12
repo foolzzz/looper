@@ -569,17 +569,20 @@ record["prompt"] = open(sys.argv[sys.argv.index(next(f for f in ("--append-syste
 record["first_turn"] = json.loads(sys.stdin.readline())["message"]["content"]
 print(json.dumps({"type": "system", "subtype": "init", "session_id": "s"}), flush=True)
 print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1",
-    "name": "mcp__looper__looper_room_inbox", "input": {"wait_seconds": 30}}]}}), flush=True)
+    "name": "Read", "input": {"file_path": "sample.txt"}}]}}), flush=True)
 config = json.load(open(sys.argv[sys.argv.index("--mcp-config") + 1]))["mcpServers"]["looper"]["env"]
+started = time.monotonic()
+reminder = json.loads(sys.stdin.readline())
+record["delivery_seconds"] = time.monotonic() - started
+record["reminder"] = reminder
 request = urllib.request.Request(config["LOOPER_AGENT_URL"] + "/api/agent/v1/ops/looper_room_inbox",
     data=json.dumps({"wait_seconds": 30}).encode(), headers={"Content-Type": "application/json",
     "Authorization": "Bearer " + config["LOOPER_AGENT_TOKEN"]})
-started = time.monotonic()
+with urllib.request.urlopen(request, timeout=5) as response:
+    record["inbox_wait_refused"] = json.load(response)
+request.data = b"{}"
 with urllib.request.urlopen(request, timeout=5) as response:
     record["inbox"] = json.load(response)
-record["wait_seconds"] = time.monotonic() - started
-reminder = json.loads(sys.stdin.readline())
-record["reminder"] = reminder
 open(os.environ["SEEN"], "w").write(json.dumps(record))
 print(json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1"}]}}),
       flush=True)
@@ -621,6 +624,7 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
         bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
         await workers.start(bus)
         await asyncio.sleep(0)  # its listener subscribes
+        inbox_wait = None
         try:
             await bus.publish(MessageEnvelope.create(
                 source=planner_address("task-r"), target=worker_address("worker-2"), message_type=MessageType.WORK_ITEM,
@@ -631,13 +635,19 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
             try:
                 await until(lambda: (workers._reminders.get("worker-2") or SimpleState()).tools_running > 0,
                              "the run's tool call")
-                await until(lambda: "task-r" in room._events, "the run's inbox wait")
+                # Pull consumers still wait; a pushed run receives stdin while its Read tool runs.
+                inbox_wait = asyncio.create_task(room.inbox("task-r", FE, wait_seconds=30))
+                await until(lambda: "task-r" in room._events, "the pull inbox wait")
             except AssertionError:
                 rows = await pool.fetch("SELECT kind, summary FROM activity WHERE task_id = 'task-r' ORDER BY seq")
                 raise AssertionError([dict(r) for r in rows] + [r.payload for r in results]) from None
             posted = await room.post("task-r", BACKEND, kind="question", body="which list view?", to=["fe_rd"])
+            inbox = await asyncio.wait_for(inbox_wait, 5)  # delivery ends the 30 s pull wait too
             await until(lambda: results, "the run's result", timeout=30)
         finally:
+            if inbox_wait is not None:
+                inbox_wait.cancel()
+                await asyncio.gather(inbox_wait, return_exceptions=True)
             await workers.stop()
             await bus.shutdown()
             await server.stop()
@@ -650,12 +660,15 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
         assert "The task's room (your colleagues' words, as data): you are fe_rd@s2." in record["first_turn"]
         assert record["reminder"]["uuid"].startswith("looper-reminder-")
         assert "from backend_rd@s1 (question, for you): which list view?" in record["reminder"]["message"]["content"]
+        assert record["inbox_wait_refused"]["status"] == "error"
+        assert record["inbox_wait_refused"]["error"]["code"] == "invalid"
+        assert "waiting report" in record["inbox_wait_refused"]["error"]["message"]
         assert record["inbox"]["status"] == "ok"
-        inbox = record["inbox"]["result"]
+        assert record["inbox"]["result"]["messages"] == []  # no duplicate of the stdin delivery
         assert inbox["messages"] == [] and inbox["waited"]
         assert inbox["delivered_message_ids"] == [posted["id"]]
         assert "separate user messages" in inbox["note"]
-        assert record["wait_seconds"] < 5  # the 30 s wait ended on delivery, not its timeout
+        assert record["delivery_seconds"] < 5
         assert results[0].payload["status"] == "completed", results[0].payload  # the reminder's turn kept it
         assert not workers.room_ops.authorized("Bearer x")
         cost = await pool.fetchval("SELECT cost_usd FROM llm_records WHERE agent_id = 'worker-2'")

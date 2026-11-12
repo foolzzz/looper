@@ -604,7 +604,8 @@ class RoomService:
         return targets
 
     async def post(self, task_id: str, sender: Seat, *, kind: str, body: str, to: Sequence[str] | None = None,
-                   reply_to: int | None = None, files: Sequence[str] = (), commits: Sequence[str] = ()
+                   reply_to: int | None = None, files: Sequence[str] = (), commits: Sequence[str] = (),
+                   mode: RoomInput = RoomInput.PULL
                    ) -> dict[str, Any]:
         """Post ``sender``'s message to ``task_id``'s room: checked, stored, then delivered (reminders, the
         Planner's wake, escalations, watches). Raises ``OpError`` for a message it refuses."""
@@ -663,7 +664,7 @@ class RoomService:
         if to_planner:
             self._wake_planner(task_id)
         try:
-            delivery = await self._deliver(task_id, context, sender, stored, targets, everyone)
+            delivery = await self._deliver(task_id, context, sender, stored, targets, everyone, mode=mode)
             await self._after_post(task_id, context, sender, stored, reply, targets)
         except Exception:
             # Stored: the readers find it; what delivery adds is help, not the message.
@@ -700,7 +701,8 @@ class RoomService:
                                                   "(room_broadcasts_per_run): name the seats or roles who need it")
 
     async def _deliver(self, task_id: str, context: _Context, sender: Seat, message: Mapping[str, Any],
-                       targets: Sequence[Target], everyone: bool) -> list[dict[str, Any]]:
+                       targets: Sequence[Target], everyone: bool, *, mode: RoomInput = RoomInput.PULL
+                       ) -> list[dict[str, Any]]:
         """Remind the online seats a message is for (an interface post: everyone online), and give a question for
         seats no run is in to the Planner; what happened, per name."""
         interface = message["kind"] == MessageKind.INTERFACE.value
@@ -725,8 +727,13 @@ class RoomService:
             if message["kind"] == MessageKind.QUESTION.value and not live:
                 reason = await self._consult(task_id, seats, message)
                 if reason is None:
+                    answer = ("comes to your inbox" if mode is RoomInput.PULL else "will be delivered to your run")
                     entry["state"] = ("no run is in it now: Looper asks its last session, read only; the answer "
-                                      "comes to your inbox, so go on meanwhile")
+                                      f"{answer}, so go on meanwhile")
+                    if mode is RoomInput.PUSHED_WAITS:
+                        entry["state"] += "; if nothing else is left, use a waiting report"
+                    elif mode is RoomInput.PUSHED:
+                        entry["state"] += "; if nothing else is left, wait with looper_room_inbox and wait_seconds"
                 else:
                     await self.give_to_planner(task_id, message, target.name, reason, _FALLBACK_WHY[reason])
                     entry["state"] = f"no run is in it now ({reason.value}): the Planner was given your question"
@@ -1016,7 +1023,8 @@ class RoomService:
     # --- Watches ---
 
     async def watch(self, task_id: str, seat: Seat, *, presence: str | None = None, state: str | None = None,
-                    kind: str | None = None, sender: str | None = None, until: str = "first") -> dict[str, Any]:
+                    kind: str | None = None, sender: str | None = None, until: str = "first",
+                    mode: RoomInput = RoomInput.PULL) -> dict[str, Any]:
         context = await self._context(task_id)
         if (presence is None) == (kind is None):
             raise OpError(ErrorCode.INVALID, "give either presence (a seat or role) or kind (interface or announce)")
@@ -1037,8 +1045,10 @@ class RoomService:
             watch_id = await db_room.add_watch(task_id, seat=seat.key, run=seat.run, presence=presence,
                                                state=(state or "online") if presence is not None else None, kind=kind,
                                                from_seat=sender, until=until, pool=conn)
+        notice = ("comes to your inbox" if mode is RoomInput.PULL else "will be delivered to your run")
         return {"watch": watch_id, **({"now": now} if presence is not None else {}),
-                "note": "a notice comes to your inbox when it happens; this run's watches end with it"}
+                "unread": await self._unread(task_id, seat),
+                "note": f"a notice {notice} when it happens; this run's watches end with it"}
 
     async def _fire(self, task_id: str, context: _Context, watch: Mapping[str, Any], what: str) -> None:
         await self._looper(task_id, MessageKind.NOTICE, Reason.WATCH, f"What you watched for: {what}",

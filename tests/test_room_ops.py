@@ -23,9 +23,16 @@ def test_the_inbox_description_matches_the_run_and_survives_adoption(mode):
     listed = ops.listing(header)
     inbox = next(tool for tool in listed if tool["name"] == room_ops.INBOX)
     text = inbox["description"]
-    assert ("wait up to that long" in text) is (mode is RoomInput.PULL)
-    assert ("Messages are delivered to you; wait_seconds is not needed." in text) is (mode is not RoomInput.PULL)
+    assert ("wait up to that long" in text) is (mode is not RoomInput.PUSHED_WAITS)
+    assert ("Messages are delivered to you." in text) is (mode is not RoomInput.PULL)
     assert ("waiting report" in text) is (mode is RoomInput.PUSHED_WAITS)
+    properties = inbox["inputSchema"]["properties"]
+    assert ("wait_seconds" in properties) is (mode is not RoomInput.PUSHED_WAITS)
+    if mode is not RoomInput.PUSHED_WAITS:
+        assert properties["wait_seconds"]["maximum"] == 120
+    watch = next(tool for tool in listed if tool["name"] == room_ops.WATCH)
+    assert ("in your inbox" in watch["description"]) is (mode is RoomInput.PULL)
+    assert ("delivered to your run" in watch["description"]) is (mode is not RoomInput.PULL)
     if mode is RoomInput.PULL:
         assert inbox == next(tool for tool in room_ops.TOOLS if tool.name == room_ops.INBOX).listing()
     restored = room_ops.RoomOps(Mock(), url="http://localhost:1234")
@@ -35,6 +42,37 @@ def test_the_inbox_description_matches_the_run_and_survives_adoption(mode):
     restored.import_pending(record)
     restored.activate_run("worker-1")
     assert restored.listing(header) == listed
+
+
+@pytest.mark.parametrize("mode", list(RoomInput))
+@pytest.mark.parametrize("wait_seconds", [0, 120])
+def test_inbox_waiting_is_enforced_for_the_runs_mode(mode, wait_seconds):
+    room = SimpleNamespace(inbox=AsyncMock(return_value={"messages": []}))
+    ops = room_ops.RoomOps(room, url="http://localhost:1234")
+    seat = Seat("worker@s1", "worker", MemberKind.WORK, run="worker-1")
+    header = "Bearer " + ops.issue("task-1", seat, mode=mode)
+    result = asyncio.run(ops.call(header, room_ops.INBOX, {"wait_seconds": wait_seconds}))
+    if mode is not RoomInput.PUSHED_WAITS:
+        assert result["status"] == "ok"
+        room.inbox.assert_awaited_once_with("task-1", seat, wait_seconds=wait_seconds, peek=False)
+        assert asyncio.run(ops.call(header, room_ops.INBOX, {"wait_seconds": 121}))["status"] == "error"
+    else:
+        assert result["status"] == "error" and result["error"]["code"] == "invalid"
+        assert "wait_seconds" in result["error"]["message"]
+        assert "waiting report" in result["error"]["message"]
+        room.inbox.assert_not_awaited()
+        assert asyncio.run(ops.call(header, room_ops.INBOX, {"peek": True}))["status"] == "ok"
+        room.inbox.assert_awaited_once_with("task-1", seat, wait_seconds=0, peek=True)
+
+
+@pytest.mark.parametrize("mode", list(RoomInput))
+def test_post_receives_the_runs_delivery_mode(mode):
+    room = SimpleNamespace(post=AsyncMock(return_value={"id": 1}))
+    ops = room_ops.RoomOps(room, url="http://localhost:1234")
+    seat = Seat("worker@s1", "worker", MemberKind.WORK, run="worker-1")
+    header = "Bearer " + ops.issue("task-1", seat, mode=mode)
+    assert asyncio.run(ops.call(header, room_ops.POST, {"kind": "question", "body": "Which port?"}))["status"] == "ok"
+    assert room.post.await_args.kwargs["mode"] is mode
 
 
 @pytest.mark.parametrize("reconnect_seconds", [None, 120])

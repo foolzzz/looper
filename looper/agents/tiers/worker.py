@@ -1551,7 +1551,8 @@ class WorkerPool:
         if self.room_ops is None:
             return _Reminders(confirm_on_item=confirm_on_item)
         room = self.room_ops.room
-        return _Reminders(next_delivery=lambda after: room.delivery(task_id, seat, after=after),
+        # Messages can predate the run, so the first tool call or wait must check without a new post.
+        return _Reminders(pending=True, next_delivery=lambda after: room.delivery(task_id, seat, after=after),
                           confirm=lambda through: room.confirm(task_id, seat.key, through),
                           confirm_on_item=confirm_on_item)
 

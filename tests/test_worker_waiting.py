@@ -107,7 +107,7 @@ class _Run(ScriptedRun):
 
 @asynccontextmanager
 async def _pool(root: Path, monkeypatch: pytest.MonkeyPatch, run: _Run, *,
-                autonomous: bool = True, timeout: int = 0):
+                autonomous: bool = True, timeout: int = 0, room_ops: Any = None):
     class Runtime(ClaudeCodeRuntime):
         hosts_runs = True
         capabilities = ClaudeCodeRuntime.capabilities if autonomous else (
@@ -124,6 +124,7 @@ async def _pool(root: Path, monkeypatch: pytest.MonkeyPatch, run: _Run, *,
     results: list[MessageEnvelope] = []
     bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
     pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=root)
+    pool.room_ops = room_ops
     await pool.start(bus)
     try:
         item = MessageEnvelope.create(
@@ -284,6 +285,44 @@ def test_a_room_reminder_is_written_while_waiting_without_tools(tmp_path, monkey
             assert await run.writes.get() == "the room has new information"
             run.turn(_completed())
             await pool._tasks["w1"]
+
+    asyncio.run(asyncio.wait_for(scenario(), 5))
+
+
+@pytest.mark.parametrize("trigger", ["tool", "wait"])
+def test_unread_messages_at_start_are_delivered_without_a_new_post(tmp_path, monkeypatch, agent_db, trigger):
+    from types import SimpleNamespace
+    from looper.agents import room as room_module
+    from looper.agents.ops.room import RoomOps
+
+    async def scenario():
+        room = room_module.RoomService()
+        monkeypatch.setattr(room, "_context", AsyncMock(return_value=SimpleNamespace(members=[])))
+        monkeypatch.setattr(room, "enabled", AsyncMock(return_value=True))
+        monkeypatch.setattr(room, "presence_changed", AsyncMock())
+        monkeypatch.setattr(room_module.db_room, "last_read", AsyncMock(return_value=0))
+        monkeypatch.setattr(room_module.db_room, "messages", AsyncMock(return_value=[{
+            "id": 42, "sender_seat": "worker@earlier", "kind": "answer", "audience": ["worker@step"],
+            "audience_all": False, "body": "Use port 8123",
+        }]))
+        run = _Run()
+        ops = RoomOps(room, url="http://127.0.0.1:1")
+        async with _pool(tmp_path, monkeypatch, run, room_ops=ops) as (pool, results):
+            assert "They will be delivered to you." in run.prompt
+            assert "Use port 8123" in run.prompt
+            if trigger == "wait":
+                run.turn(_waiting())
+            else:
+                run.events_in.put_nowait({"type": "assistant", "message": {"content": [
+                    {"type": "tool_use", "id": "read-file", "name": "Read", "input": {"file_path": "app.py"}},
+                ]}})
+            delivered = await run.writes.get()
+            assert "[Looper room]" in delivered and "#42" in delivered and "Use port 8123" in delivered
+            assert pool.room_in_flight("w1") == 42
+            run.turn(_completed())
+            await pool._tasks["w1"]
+            assert results[0].payload["status"] == "completed"
+            assert run.writes.empty()
 
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
