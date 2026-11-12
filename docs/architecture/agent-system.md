@@ -1649,11 +1649,18 @@ Manager tools.
   as `usage` and `modelUsage`; Cursor reports no cost and the login's models
   have no prices, so cost is unknown (`provider_price`). A per-run spend cap
   cannot stop Cursor. When a process exits without a result and stderr names
-  `RetriableError`, Looper retries once in a fresh process, even when TTADK
-  exits zero. Worker and Reviewer runs reuse the same prompt and input directories;
-  Manager and Planner turns resume the recorded chat, if any, with the same turn.
-  The run records the retry and its reason; a second failure retains both stderr
-  tails. Other failures, stops, cancellations, timeouts and missing logins are
+  `RetriableError: WritableIterable is closed`, Looper retries in a fresh process,
+  even when TTADK exits zero. With a reported session id, Worker and Reviewer runs
+  use `--resume <id>` and a short continuation prompt asking for the final JSON
+  report without redoing completed work. They allow up to three continuations
+  within the original deadline, keeping one run record, private directories,
+  launch settings and helper. Without a session id, they retry once with the
+  original prompt. Each retry records `cursor_run_retry`, its `attempt` (1–3),
+  `mode` (`resume` or `restart`) and reason. If all attempts fail, each attempt's
+  stderr tail shares the existing 1,000-character diagnostic limit.
+  Manager and Planner turns keep their existing single retry, resuming the
+  recorded chat, if any, with the same turn. Other failures, stops,
+  cancellations, timeouts and missing logins are
   not retried. Non-JSON stdout lines,
   including TTADK's login greeting before or between events, are discarded
   before events, logs or failure details are recorded.
@@ -5716,8 +5723,9 @@ implementation supplies it and is retested.
   retried and never becomes a chat message; the first failure of a run of the
   channel is logged, naming the missing scope when lark-cli reports one. A
   rejected sender, a Lark group message that does not @-mention the bot, a
-  Telegram group message and a message that is not handed on (not text,
-  empty) get no reaction.
+  Telegram group message and an empty message get no reaction. An admitted
+  unsupported Lark type gets a reply instead, with no reaction or Manager turn
+  (unless its chat is silent or its Manager is turned off).
 - **Telegram**: the token is the one saved in Settings → Channels
   (`channel_secrets`; the API only says whether one is set), else the env var
   named by `bot_token_env` (default `LOOPER_TELEGRAM_BOT_TOKEN`). The Bot API
@@ -5769,10 +5777,21 @@ implementation supplies it and is retested.
   own open_id (from the bot's info at startup; never a match on names).
   Every other group message is ignored entirely: no reaction, nothing stored,
   no Manager turn, no record of who wrote. The bot's mention is taken out of
-  the text (`@name` as lark-cli shows it, else its `@_user_N` placeholder),
+  the text (`@name` as lark-cli shows it, else its `@_user_N` placeholder;
+  rich posts also handle `@@name` and `<at>` tags),
   and the Manager is told the sender's name (`contact +search-user`, the
-  name the allowlist resolves, else the open_id after 5 s). Other message
-  types and bots' messages are ignored too. It sends with `lark-cli im
+  name the allowlist resolves, else the open_id after 5 s). Text and rich-text
+  posts reach the Manager. Posts keep lark-cli's rendered titles, paragraphs,
+  links and fenced code, with other mentions shown as `@name`. Inline images
+  and attached files become numbered `[image N]` / `[file N: name]` placeholders,
+  followed by a line saying Looper cannot receive images or files yet.
+  Other types receive 「暂不支持这类飞书消息（<type>），请发文字或富文本。」
+  as text, in reply to the message in a group or sent to the direct chat,
+  after admission and routing; silent chats receive nothing, and a turned-off
+  Manager gets only the usual turned-off reply. Bots' messages, interactive
+  cards and empty messages are ignored. The bot-token channel renders posts
+  and resource markers into the same notation before the shared adapter reads
+  them. It sends with `lark-cli im
   +messages-send --as bot`: a reply as Markdown (`--markdown`, a rich-text
   post) to the chat its message came from, a schedule's message as text to a
   user (`--user-id`); a failed send carries lark-cli's reason. In a group the

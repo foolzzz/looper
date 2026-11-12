@@ -32,6 +32,7 @@ from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat, log_route
+from . import lark_content
 from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, mention
 from .lark_transport import CliTransport, LarkTransport
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
@@ -391,7 +392,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 await close()
 
     async def _handle_lark_event(self, event: dict[str, Any]) -> None:
-        """Publish a received text message to the Bus. The event is lark-cli's flat one: ``chat_id``,
+        """Publish text and rich posts to the Bus, and answer other admitted message types.
+        The event is lark-cli's flat one: ``chat_id``,
         ``chat_type`` (``p2p`` or ``group``), ``message_id``, ``message_type``, ``sender_id`` (the open_id),
         ``sender_type``, ``mentions`` (each ``id``, an open_id, ``key`` and ``name``), ``content``, a text
         message's text with each mention shown as ``@name``, and for a reply ``reply_to`` and ``root_id``."""
@@ -424,17 +426,19 @@ class LarkChannelAdapter(ChannelAdapter):
                     logger.warning("%s: could not record a rejected sender", self.channel_id, exc_info=True)
             return
 
-        if event.get("sender_type") == "bot" or event.get("message_type", "") != "text":
+        if event.get("sender_type") == "bot":
             return
 
         content = event.get("content")
-        text = content if isinstance(content, str) else ""
-        if not text.strip():
-            return
-
-        text = self._without_mentions(text, bot_mentions)
-        if not text.strip() and not (event.get("reply_to") or event.get("root_id")):
-            return
+        content = content if isinstance(content, str) else ""
+        message_type = event.get("message_type", "")
+        inbound = lark_content.parse(message_type, content, bot_mentions)
+        text = inbound.text
+        if inbound.kind is not lark_content.ContentKind.UNSUPPORTED:
+            if not content.strip():
+                return
+            if not text.strip() and not (event.get("reply_to") or event.get("root_id")):
+                return
 
         message_id = event.get("message_id") or ""
         manager_id, explicit = self._manager_id, False
@@ -456,6 +460,22 @@ class LarkChannelAdapter(ChannelAdapter):
             return
         log_route(logger, self.channel_id, chat_id, decision or RouteDecision(RouteAction.ADMIT, manager_id, explicit),
                   via_chat_senders=sender_open_id not in self._allowlist.ids)
+        if inbound.kind is lark_content.ContentKind.UNSUPPORTED:
+            logger.info("%s: answered an unsupported %s message in %s", self.channel_id,
+                        message_type or "unknown", chat_id)
+            reply = lark_content.UNSUPPORTED_REPLY.format(kind=message_type or "unknown")
+            try:
+                if group:
+                    await self._transport.reply(message_id, text=reply)
+                else:
+                    await self._transport.send(chat_id=chat_id, text=reply)
+            except LarkCliError:
+                logger.warning("%s: could not answer an unsupported message in %s", self.channel_id,
+                               chat_id, exc_info=True)
+            return
+        if inbound.resources:
+            text += ("\n\n(Looper cannot receive images or files yet: "
+                     + ", ".join(lark_content.placeholder(ref) for ref in inbound.resources) + " not received.)")
         self._reactions.add(chat_id, message_id)  # the bot saw it; in the background, the Manager gets it now
         correlation_id = str(_uuid.uuid4())
         self._correlation_chat[correlation_id] = chat_id
@@ -516,17 +536,6 @@ class LarkChannelAdapter(ChannelAdapter):
         if not self._bot_open_id or not isinstance(mentions, list):
             return []
         return [m for m in mentions if isinstance(m, dict) and m.get("id") == self._bot_open_id]
-
-    @staticmethod
-    def _without_mentions(text: str, mentions: list[dict[str, Any]]) -> str:
-        """``text`` without the bot's mentions, each once: as lark-cli shows it (``@name``), else as its placeholder
-        (``@_user_1``)."""
-        for found in mentions:
-            shown = next((form for form in (f"@{found.get('name') or ''}", str(found.get("key") or ""))
-                          if len(form) > 1 and form in text), None)
-            if shown is not None:
-                text = text.replace(shown, "", 1)
-        return re.sub(r" {2,}", " ", text).strip()
 
     async def _sender_name(self, open_id: str) -> str:
         """A group sender's name, as the allowlist resolves it; their open_id when it cannot be found in time."""
