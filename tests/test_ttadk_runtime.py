@@ -202,7 +202,7 @@ def test_ttadk_launch_gate_refuses_only_definite_failures(
         assert [argv[0] for argv in invocations] == ["models", "codex"]
         metadata = agent_db.start_record.await_args.kwargs["metadata"]
         if mode in ("timeout", "unreadable"):
-            assert metadata["ttadk_check"] == "could not finish (check_failed)"
+            assert metadata["ttadk_check"] == "timed out or failed; the run started anyway"
             warnings = [record for record in caplog.records if "could not finish" in record.message]
             assert len(warnings) == 1 and "check_failed" in warnings[0].message
         else:

@@ -236,7 +236,7 @@ os.execvp('agent', ['agent', *sys.argv[6:]])
     metadata = agent_db.start_record.await_args.kwargs["metadata"]
     assert metadata["launcher"]["tool"] == "cursor-cli" and metadata["personal_config"] == list(PERSONAL_CONFIG)
     if check_mode == "timeout":
-        assert metadata["ttadk_check"] == "could not finish (check_failed)"
+        assert metadata["ttadk_check"] == "timed out or failed; the run started anyway"
     else:
         assert "ttadk_check" not in metadata
 

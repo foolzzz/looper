@@ -94,10 +94,12 @@ describe("project deletion", () => {
     const onDeleted = vi.fn();
     await act(async () => root.render(<ProjectSettingsForm project={project()} onDeleted={onDeleted} />));
     await act(async () => button("Delete project").click());
-    expect(container.querySelector("[role=alert]")?.textContent).toBe("Impact unavailable");
+    expect(section().querySelector("[role=alert]")?.textContent).toBe("Impact unavailable");
+    expect(container.querySelector("form [role=alert]")).toBeNull();
     expect(button("Delete")).toBeUndefined();
     await act(async () => button("Delete project").click());
     expect(button("Checking impact…").disabled).toBe(true);
+    expect(section().querySelector("[role=alert]")).toBeNull();
     expect(button("Delete")).toBeUndefined();
     expect(fetcher).not.toHaveBeenCalled();
     await act(async () => complete({ impact }));
@@ -108,6 +110,18 @@ describe("project deletion", () => {
     await act(async () => button("Cancel").click());
     expect(button("Delete")).toBeUndefined();
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("focuses Cancel when the delete preview resolves", async () => {
+    let complete!: (preview: { impact: string }) => void;
+    vi.mocked(previewProjectDelete).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    await act(async () => root.render(<ProjectSettingsForm project={project()} onDeleted={() => {}} />));
+    button("Delete project").focus();
+    expect(document.activeElement).toBe(button("Delete project"));
+    await act(async () => button("Delete project").click());
+    expect(button("Cancel")).toBeUndefined();
+    await act(async () => complete({ impact: "Delete Example? This cannot be undone." }));
+    expect(document.activeElement).toBe(button("Cancel"));
   });
 
   it("shows the API deletion impact before confirming in the same session", async () => {
@@ -191,7 +205,8 @@ describe("project deletion", () => {
     await act(async () => button("Delete project").click());
     await act(async () => button("Delete").click());
     await act(async () => button("Delete").click());
-    expect(container.querySelector("[role=alert]")?.textContent).toBe(message);
+    expect(section().querySelector("[role=alert]")?.textContent).toBe(message);
+    expect(container.querySelector("form [role=alert]")).toBeNull();
     expect(button("Delete project").disabled).toBe(false);
     expect(onDeleted).not.toHaveBeenCalled();
     await act(async () => button("Delete project").click());

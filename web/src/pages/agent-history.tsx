@@ -1114,8 +1114,9 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOp
           <LaunchCommand record={record} />
           <SystemPrompt record={record} />
           <LoadedLibrary record={record} />
-          {record.metadata?.ttadk_check && <p className="text-xs text-warning">
-            TTADK sign-in check could not finish before this run started: {record.metadata.ttadk_check}
+          {record.metadata?.ttadk_check && <p className="flex items-center gap-1 text-xs text-warning">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            TTADK sign-in check before this run started: {record.metadata.ttadk_check}
           </p>}
           <ModelRequests record={record} />
           {record.input_text && (

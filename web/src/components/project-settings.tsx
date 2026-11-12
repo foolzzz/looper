@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { CheckCircle2, Loader2, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -131,8 +131,14 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
+  const [deleteError, setDeleteError] = useState("");
   const [saved, setSaved] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<{ impact: string } | V1PendingConfirmation | null>(null);
+  const cancelDeleteRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (confirmDelete && !busy) cancelDeleteRef.current?.focus();
+  }, [confirmDelete, busy]);
 
   const set = <K extends keyof Draft>(key: K) => (value: Draft[K]) => {
     setDraft((d) => ({ ...d, [key]: value }));
@@ -161,11 +167,11 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
   const previewDelete = async () => {
     setBusy(true);
     setDeleting(true);
-    setError("");
+    setDeleteError("");
     try {
       setConfirmDelete(await previewProjectDelete(project.project_id));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setDeleteError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
       setDeleting(false);
@@ -176,13 +182,13 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
     if (!confirmDelete) return;
     setBusy(true);
     setDeleting(true);
-    setError("");
+    setDeleteError("");
     try {
       const pending = await deleteProject(project.project_id, "confirmation_id" in confirmDelete ? confirmDelete : undefined);
       if (pending) setConfirmDelete(pending);
       else onDeleted();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setDeleteError(err instanceof Error ? err.message : String(err));
       setConfirmDelete(null);
     } finally {
       setBusy(false);
@@ -269,7 +275,7 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
                 {deleting && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}
                 {deleting ? "Stopping and deleting…" : "Delete"}
               </Button>
-              <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmDelete(null)} disabled={busy}>
+              <Button ref={cancelDeleteRef} type="button" variant="ghost" size="sm" onClick={() => setConfirmDelete(null)} disabled={busy}>
                 Cancel
               </Button>
             </>
@@ -287,6 +293,7 @@ export function ProjectSettingsForm({ project, projectsRoot = "", onDeleted }: {
             </Button>
           )}
         </div>
+        {deleteError && <p role="alert" className="mt-2 text-xs text-destructive">{deleteError}</p>}
       </section>
     </div>
   );

@@ -48,9 +48,14 @@ describe("run system prompt mode", () => {
     expect(html).not.toContain("replaced default");
   });
   it("warns when the recorded TTADK sign-in check was inconclusive", () => {
-    const html = render(undefined, { ttadk_check: "could not finish (check_failed)" });
-    expect(html).toContain("TTADK sign-in check could not finish before this run started");
-    expect(html).toContain("could not finish (check_failed)");
+    const html = render(undefined, { ttadk_check: "timed out or failed; the run started anyway" });
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    const warning = [...host.querySelectorAll("p")].find((item) => item.textContent?.includes("TTADK sign-in check"))!;
+    expect(warning.textContent).toBe("TTADK sign-in check before this run started: timed out or failed; the run started anyway");
+    expect(warning.querySelector("svg")).not.toBeNull();
+    expect(html).not.toContain("could not finish");
+    expect(html).not.toContain("check_failed");
     expect(render()).not.toContain("TTADK sign-in check");
   });
 
