@@ -7,9 +7,11 @@ import json
 import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -26,7 +28,9 @@ from tests.test_agent_settings import _row
 from looper.agents.runtimes import ApiProtocol, AuthKind, Capability
 from looper.agents.runtimes.codex import CodexRuntime, CodexStream
 from looper.agents.runtimes.codex_steer import CodexChannel, exec_events, exec_item
-from looper.agents.tiers.worker import WorkerConfig, WorkerPool
+from looper.agents.room import MemberKind, RoomDelivery, RoomInput, RoomService, Seat
+from looper.agents.tiers.worker import ConsumeStart, RunContext, WorkerConfig, WorkerPool
+from tests.run_handle_support import ScriptedRun
 
 CODEX = CodexRuntime()
 TOTALS = {"inputTokens": 100, "cachedInputTokens": 30, "cacheWriteInputTokens": 10,
@@ -133,7 +137,7 @@ for line in sys.stdin:
             sys.exit(1)
         if mode == "server_request":
             emit({"id": 900, "method": "item/tool/requestUserInput", "params": {"question": "continue?"}})
-        elif mode not in ("hold", "early", "steer_error", "ack_gate", "worker", "worker_steer_error", "steer_crash", "stall_steer"):
+        elif not mode.startswith("room_") and mode not in ("hold", "early", "steer_error", "ack_gate", "worker", "worker_steer_error", "steer_crash", "stall_steer"):
             finish("normal answer")
     elif method == "turn/steer":
         if mode == "steer_crash":
@@ -161,6 +165,19 @@ for line in sys.stdin:
         else:
             text = request["params"]["input"][0]["text"]
             response(request, {"turnId": "turn-1"})
+            if mode == "room_end":
+                sys.exit(1)
+            if mode.startswith("room_"):
+                gate = Path(os.environ["FAKE_CODEX_FINISH_GATE"])
+                deadline = time.monotonic() + 3
+                while not gate.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                if mode == "room_item":
+                    for method in ("item/started", "item/completed"):
+                        notify(method, item={"id": "room-user", "type": "userMessage",
+                                             "content": [{"type": "text", "text": text}]})
+                finish(json.dumps({"status": "completed", "summary": "done"}))
+                continue
             notify("item/started", item={"id": "steer-user", "type": "userMessage", "content": [text]})
             finish(json.dumps({"status": "completed", "summary": "got: " + text}) if mode == "worker"
                    else "got: " + text)
@@ -268,7 +285,8 @@ def _blocks(events: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
     ({"type": "webSearch", "query": "a query"}, {"type": "web_search", "query": "a query"}),
     ({"type": "plan", "text": "do this"}, {"type": "todo_list", "items": [{"text": "do this", "completed": False}]}),
     ({"type": "futureItem", "data": {"x": 1}}, {"type": "future_item", "data": {"x": 1}}),
-    ({"type": "userMessage", "content": [{"type": "text", "text": "private steer"}]}, None),
+    ({"type": "userMessage", "content": [{"type": "text", "text": "private steer"}]},
+     {"type": "user_message", "text": "private steer"}),
 ])
 def test_exec_item_conversion(item: dict[str, Any], expected: dict[str, Any] | None) -> None:
     source = {"id": "item-1", **item}
@@ -281,7 +299,8 @@ def test_exec_item_conversion(item: dict[str, Any], expected: dict[str, Any] | N
      [{"type": "item.started", "item": {"id": "x", "type": "web_search", "query": "q"}}]),
     ("item/completed", {"item": {"id": "x", "type": "agentMessage", "text": "ok"}},
      [{"type": "item.completed", "item": {"id": "x", "type": "agent_message", "text": "ok"}}]),
-    ("item/completed", {"item": {"id": "x", "type": "userMessage", "content": []}}, []),
+    ("item/completed", {"item": {"id": "x", "type": "userMessage", "content": []}},
+     [{"type": "item.completed", "item": {"id": "x", "type": "user_message", "text": ""}}]),
     ("turn/completed", {"turn": {"status": "failed", "error": {"message": "failure"}}},
      [{"type": "turn.failed", "error": {"message": "failure"}}]),
     ("turn/completed", {"turn": {"status": "interrupted", "error": None}},
@@ -668,6 +687,104 @@ def test_pending_steer_fails_when_stdout_closes(app_server: tuple[str, Path], tm
             assert not any(e["type"] == "result" for e in await asyncio.wait_for(reading, 3))
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["room_item", "room_end", "room_fallback"])
+def test_room_read_cursor_follows_history_or_bounded_fallback(app_server, tmp_path, monkeypatch, agent_db,
+                                                             caplog, mode):
+    from looper.agents import room as room_module
+    from looper.agents.tiers import worker
+
+    executable, _ = app_server
+    monkeypatch.setenv("FAKE_CODEX_MODE", mode)
+    gate = tmp_path / "finish-gate"
+    monkeypatch.setenv("FAKE_CODEX_FINISH_GATE", str(gate))
+    monkeypatch.setattr(worker, "ROOM_ITEM_TIMEOUT_SEC", 0.1 if mode == "room_fallback" else 10)
+    message = {"id": 42, "sender_seat": "worker@s2", "kind": "question", "audience": ["worker@s1"],
+               "audience_all": False, "body": "use port 8123"}
+    text = "[Looper room] New in the task's room:\n- #42 from worker@s2 (question, for you): use port 8123"
+
+    async def run():
+        last_read = 0
+        confirmed = asyncio.Event()
+        accepted = asyncio.Event()
+
+        async def mark_read(task_id, seat, through):
+            nonlocal last_read
+            last_read = through
+            confirmed.set()
+
+        monkeypatch.setattr(room_module.db_room, "last_read", AsyncMock(side_effect=lambda *a: last_read))
+        monkeypatch.setattr(room_module.db_room, "mark_read", AsyncMock(side_effect=mark_read))
+        monkeypatch.setattr(room_module.db_room, "messages", AsyncMock(
+            side_effect=lambda task_id, after=0: [message] if after < 42 else []))
+        room = RoomService()
+        monkeypatch.setattr(room, "_context", AsyncMock(return_value=SimpleNamespace(members=[])))
+        monkeypatch.setattr(room, "delivery", AsyncMock(return_value=RoomDelivery(text, 42, (42,), True, 0)))
+        launch = _launch(executable)
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        pool.room_ops = SimpleNamespace(room=room)
+        seat = Seat("worker@s1", "worker", MemberKind.WORK, run="w1")
+        async with _channel(executable, tmp_path) as (channel, process):
+            class Run(ScriptedRun):
+                @property
+                def channel(self):
+                    return channel
+
+                async def wait(self):
+                    return await process.wait()
+
+            send = channel.send
+
+            async def accepted_send(*args, **kwargs):
+                result = await send(*args, **kwargs)
+                accepted.set()
+                return result
+
+            monkeypatch.setattr(channel, "send", accepted_send)
+
+            async def record(event):
+                if event.get("subtype") == "init":
+                    await pool.remind("w1")
+
+            recorder = Mock(cap_stop=None, record=AsyncMock(side_effect=record), finish=AsyncMock())
+            ctx = RunContext("w1", "task", "s1", str(tmp_path), "do the step", False, launch, launch.runtime,
+                             seat, 5, datetime.now(timezone.utc), False, [])
+            consuming = asyncio.create_task(pool._consume_once(ctx, Run([]), recorder, start=ConsumeStart.NEW))
+            try:
+                await asyncio.wait_for(accepted.wait(), 3)
+                assert last_read == 0
+                assert pool.room_in_flight("w1") == 42
+                if mode == "room_item":
+                    gate.touch()
+                if mode != "room_end":
+                    await asyncio.wait_for(confirmed.wait(), 3)
+                    assert last_read == 42
+                    gate.touch()
+                result = await asyncio.wait_for(consuming, 3)
+                assert result["status"] == ("failed" if mode == "room_end" else "completed")
+                retry = await room.first_turn("task", seat, mode=RoomInput.PUSHED)
+                assert ("use port 8123" in retry) is (mode == "room_end")
+                if mode == "room_end":
+                    assert last_read == 0
+                    room_module.db_room.mark_read.assert_not_awaited()
+                    assert all(entry.fallback is None or entry.fallback.cancelled()
+                               for entry in pool._reminders["w1"].steered.values())
+                else:
+                    room_module.db_room.mark_read.assert_awaited_once_with("task", seat.key, 42)
+                events = [call.args[0] for call in recorder.record.await_args_list]
+                assert [b["text"] for b in _blocks(events, "text")] == ([] if mode == "room_end" else [
+                    json.dumps({"status": "completed", "summary": "done"})])
+                receipts = [e for e in events if e.get("subtype") == "codex_user_message"]
+                assert bool(receipts) is (mode == "room_item")
+                assert not any(launch.runtime.is_model_event(e) for e in receipts)
+                assert ("room delivery history item timed out" in caplog.text) is (mode == "room_fallback")
+            finally:
+                pool._drop_reminders("w1")
+                consuming.cancel()
+                await asyncio.gather(consuming, return_exceptions=True)
+
+    asyncio.run(asyncio.wait_for(run(), 8))
 
 
 @pytest.mark.parametrize(("mode", "message"), [

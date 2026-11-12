@@ -1,4 +1,4 @@
-"""Room deliveries follow Codex's probed steering and acceptance boundary."""
+"""Room deliveries follow Codex's steering and history receipt boundary."""
 from __future__ import annotations
 
 import asyncio
@@ -35,7 +35,7 @@ def test_only_opted_in_runtimes_deliver_room_messages(runtime, steer, expected):
 
 
 @pytest.mark.parametrize("outcome", ["accepted", "rejected", "unknown", "ended"])
-def test_steering_delivery_confirms_only_on_acceptance(tmp_path, caplog, outcome):
+def test_steering_delivery_waits_for_history_after_acceptance(tmp_path, caplog, outcome):
     async def run():
         pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
         confirm = AsyncMock()
@@ -46,7 +46,7 @@ def test_steering_delivery_confirms_only_on_acceptance(tmp_path, caplog, outcome
             send.side_effect = RuntimeError("no active turn")
         pool._inputs["w1"] = SimpleNamespace(send=send)
         pool._reminders["w1"] = state = _Reminders(next_delivery=select, confirm=confirm,
-                                                  through=40, confirm_on_accept=True)
+                                                  through=40, confirm_on_item=True)
         assert not await pool.remind("w1")
         select.assert_not_awaited()
         send.assert_not_awaited()
@@ -56,18 +56,51 @@ def test_steering_delivery_confirms_only_on_acceptance(tmp_path, caplog, outcome
         send.assert_awaited_once()
         assert send.await_args.args == (delivery.text,)
         assert send.await_args.kwargs["uuid"].endswith("-42")
-        if outcome == "accepted":
-            confirm.assert_awaited_once_with(42)
-            assert state.confirmed == 42
-        else:
-            confirm.assert_not_awaited()
-            assert state.confirmed == 0
+        confirm.assert_not_awaited()
+        assert state.confirmed == 0
         written = outcome in ("accepted", "unknown")
         assert state.through == (42 if written else 40)
         assert state.pending is not written
         assert bool(state.uuids) is written
         if outcome == "unknown":
             assert "room delivery acceptance unknown; not retrying" in caplog.text
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("combined", [False, True])
+def test_history_receipts_match_ids_and_never_skip_unseen_deliveries(tmp_path, monkeypatch, combined):
+    from looper.agents.tiers import worker
+
+    monkeypatch.setattr(worker, "ADDRESSED_INTERVAL_SEC", 0)
+
+    async def run():
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        confirm = AsyncMock()
+        texts = ["[Looper room]\n- #41 from worker@s2 (info): one\n- #42 from worker@s2 (info): two",
+                 "[Looper room]\n- #43 from worker@s2 (info): three"]
+        deliveries = [RoomDelivery(texts[0], 42, (41, 42), True, 0),
+                      RoomDelivery(texts[1], 43, (43,), True, 0)]
+        pool._inputs["w1"] = SimpleNamespace(send=AsyncMock(return_value=DeliveryResult.ACCEPTED))
+        pool._reminders["w1"] = state = _Reminders(next_delivery=AsyncMock(side_effect=deliveries),
+                                                  confirm=confirm, confirm_on_item=True, tools_running=1)
+        try:
+            assert await pool.remind("w1")
+            assert await pool.remind("w1")
+            # A partial delivery, an unrelated user turn and a bare id mention prove nothing.
+            for text in ("[Looper room]\n- #41 from worker@s2 (info): one", "initial prompt", "#42 #43"):
+                await pool._room_history_item("w1", state, text)
+            confirm.assert_not_awaited()
+            if not combined:
+                await pool._room_history_item("w1", state, texts[1])
+                confirm.assert_not_awaited()
+            await pool._room_history_item("w1", state, "other input\n" + "\n".join(texts))
+            assert [call.args[0] for call in confirm.await_args_list] == [42, 43]
+            await pool._room_history_item("w1", state, texts[0])
+            assert confirm.await_count == 2
+            assert not state.steered
+        finally:
+            pool._drop_reminders("w1")
 
     asyncio.run(asyncio.wait_for(run(), 5))
 
@@ -102,11 +135,11 @@ def test_codex_stream_delivers_only_during_tools_and_matches_guidance(tmp_path, 
                 if steer:
                     assert state.tools_running == 1 and not state.waiting
                     assert self.inputs == [delivery.text]
-                    room.confirm.assert_awaited_once_with("task", seat.key, 42)
+                    room.confirm.assert_not_awaited()
                 for event in stream.translate({"type": "item.completed", "item": {**item, "exit_code": 0}}):
                     yield event
                 if steer:
-                    assert state.tools_running == 0 and state.confirm_on_accept
+                    assert state.tools_running == 0 and state.confirm_on_item
                     captured.append(state)
                     assert not await pool.remind("w1")
                     assert self.inputs == [delivery.text]
