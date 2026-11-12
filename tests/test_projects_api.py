@@ -191,10 +191,15 @@ class _Store:
         """No agent settings layer is set: every limit is the built-in one."""
         return []
 
+    async def fetchrow(self, query: str, project_id: str) -> dict[str, Any] | None:
+        """Directory updates re-read the project under a row lock before writing."""
+        assert query == "SELECT * FROM projects WHERE id = $1 FOR UPDATE"
+        return self.projects.get(project_id)
+
     @asynccontextmanager
     async def transaction(self) -> Any:
         self.transactions += 1
-        yield "conn"
+        yield self
 
 
 @pytest.fixture
@@ -359,6 +364,7 @@ class TestProjectEndpoints:
         store.add_project("proj-a", "tetris", "/srv/tetris")
         status, body = _call("POST", "/api/v1/project_admin/update", {"project_id": 'proj-a', "fields": {"name": "Tetris", "work_dir": ""}})
         assert status == 200 and (body["name"], body["work_dir"]) == ("Tetris", "")
+        assert store.transactions == 1
 
     @pytest.mark.parametrize("body", [[], {}, {"name": ""}, {"work_dir": "rel"}, {"description": None}])
     def test_update_rejects_a_bad_request(self, store: _Store, body: Any) -> None:
@@ -473,7 +479,7 @@ class TestTaskCreate:
         assert (project["name"], project["description"], project["work_dir"]) == ("notes", "d", notes_dir)
         task = store.tasks[body["task_id"]]
         assert body["project_id"] == project["id"] == task["project_id"]
-        assert (task["work_dir"], task["config"], task["goal_id"], task["pool"]) == (notes_dir, {"k": 1}, "g", "conn")
+        assert (task["work_dir"], task["config"], task["goal_id"], task["pool"]) == (notes_dir, {"k": 1}, "g", store)
         assert store.transactions == 1
 
     def test_a_new_project_keeps_only_its_own_directory(self, store: _Store) -> None:
