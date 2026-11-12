@@ -73,7 +73,7 @@ from urllib.parse import urlsplit
 from ... import child_env
 from .. import claude_cli
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
+    ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
     RuntimeAdapter, RuntimeUnsupported, instructions,
 )
 from .instructions import InstructionFile
@@ -140,6 +140,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     type = "claude-code"
     label = "Claude Code"
     default_executable = "claude"
+    image_input = ImageInput.READ_TOOL
     # Verified against Claude Code 2.1.285 (claude_cli); its replies follow Looper's contracts by prompt, so no
     # structured_output.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})

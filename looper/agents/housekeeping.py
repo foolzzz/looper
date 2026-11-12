@@ -15,7 +15,7 @@ import shutil
 from typing import Any
 
 from ..db import connection as db_connection, schedules as db_schedules, llm_requests
-from . import scheduler_settings
+from . import chat_attachments, scheduler_settings
 from .command_runs import CommandRuns, Finished, Lost, LOGS_DIR, RUNNER_DIR, RUNS_DIR
 from .llmrec import ROUTES_DIR, RouteFile
 from .llmrec import settings as llmrec_settings
@@ -44,6 +44,7 @@ class Report:
     llm_requests: int = 0
     llm_routes: int = 0
     llm_route_files: int = 0
+    chat_attachments: int = 0
     rotated: list[str] = field(default_factory=list)
     failed_steps: dict[str, str] = field(default_factory=dict)
 
@@ -256,6 +257,9 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
     with _step(report, "llm route files"):
         report.llm_route_files = await asyncio.to_thread(prune_route_files, runtime_root / ROUTES_DIR, now)
 
+    with _step(report, "chat attachments"):
+        report.chat_attachments = await asyncio.to_thread(chat_attachments.prune, runtime_root, now)
+
     with _step(report, "command logs"):
         # A run commits its open row before creating its log. Snapshot files first so runs starting
         # after the open-row query cannot lose a new log to the size cap.
@@ -280,7 +284,7 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             if await asyncio.to_thread(rotate, runtime_root / "logs" / name, at_bytes=ROTATE_AT_BYTES, keep=ROTATE_KEEP):
                 report.rotated.append(name)
     logger.info("housekeeping runs_deleted=%d notifications_deleted=%d logs_deleted=%d log_bytes=%d "
-                "run_dirs=%d runner_files=%d llm_requests=%d llm_routes=%d llm_route_files=%d rotated=%s failed_steps=%s",
+                "run_dirs=%d runner_files=%d llm_requests=%d llm_routes=%d llm_route_files=%d chat_attachments=%d rotated=%s failed_steps=%s",
                 report.runs, report.notifications, report.logs, report.log_bytes, report.run_dirs, report.runner_files,
-                report.llm_requests, report.llm_routes, report.llm_route_files, ",".join(report.rotated), report.failed_steps)
+                report.llm_requests, report.llm_routes, report.llm_route_files, report.chat_attachments, ",".join(report.rotated), report.failed_steps)
     return report
