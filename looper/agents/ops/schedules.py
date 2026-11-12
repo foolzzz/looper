@@ -256,8 +256,10 @@ async def _create(call: Call) -> dict[str, Any]:
         # Made from a Telegram or Lark chat: its messages go to whoever asked, when their channel's allowlist lets them.
         # Schedules notify through the built-in rows only: through an added bot the target stays unset.
         asked = {"channel": turn.channel, "chat": turn.sender}
-        if any((t["channel"], t["chat"]) == (asked["channel"], asked["chat"]) for t in await schedules.notify_targets()):
+        if any((t["channel"], t["chat"]) == (asked["channel"], asked["chat"])
+               for t in await schedules.notify_targets(manager_id=_notify_manager_id(call))):
             data["notify_target"] = asked
+    await _check_notify_target(call, data)
     view = (await answered(schedules.create_schedule(project["id"], data, created_via="manager")))["schedule"]
     turn.created.add(view["schedule_id"])
     turn.blocks.append("\n".join([
@@ -278,6 +280,7 @@ def _refuse_other_owner_template(call: Call, row: Mapping[str, Any], data: Mappi
 
 async def _update(call: Call, row: Mapping[str, Any], expected: Mapping[str, str]) -> dict[str, Any]:
     data = _fields(call.arguments, "update")
+    await _check_notify_target(call, data)
     _refuse_other_owner_template(call, row, data)
     before = (await answered(schedules.get_schedule(row["id"])))["schedule"]
     view = (await answered(schedules.update_schedule(row["id"], data, **expected)))["schedule"]
@@ -288,6 +291,27 @@ async def _update(call: Call, row: Mapping[str, Any], expected: Mapping[str, str
                                        f"它现在{'已启用' if view['enabled'] else '是停用的'}。"]))
     return {"schedule": _listed(await _in_scope(call, view)), "changed": [_ARGUMENT.get(key, key) for key in changed],
             "shown_to_user": "Looper adds what changed, before and after, after your reply; do not repeat it."}
+
+
+def _notify_manager_id(call: Call) -> str | None:
+    # Tasks-only Managers currently cannot write schedules. Keep this boundary when their tools expand,
+    # including project-scoped Managers whose task filter is not tied to a single owner.
+    return call.manager_id if call.scoped or "looper_projects" in call.scope.read_only else None
+
+
+async def _check_notify_target(call: Call, data: Mapping[str, Any]) -> None:
+    manager_id = _notify_manager_id(call)
+    if manager_id is None:
+        return
+    target = data.get("notify_target")
+    if target is None:
+        return
+    if not isinstance(target, dict):
+        await answered(schedules._notify_target(target))
+        return
+    if not any((t["channel"], t["chat"]) == (target.get("channel"), target.get("chat"))
+               for t in await schedules.notify_targets(manager_id=manager_id)):
+        raise OpError(ErrorCode.FORBIDDEN, "this Manager may notify only chats explicitly bound to itself")
 
 
 def _raises_a_cap(row: Mapping[str, Any], data: Mapping[str, Any], project_cap: float | None) -> bool:
@@ -328,6 +352,7 @@ async def _confirming(call: Call) -> str | None:
         return None
     row = await _schedule(call.arguments)
     data = _fields(call.arguments, "update")
+    await _check_notify_target(call, data)
     _refuse_other_owner_template(call, row, data)
     # Refused as the update would refuse it, before anything is asked.
     fields, profiles, task_limits = await answered(schedules._fields(data, update=True))

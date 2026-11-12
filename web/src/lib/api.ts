@@ -1189,6 +1189,7 @@ export interface ScheduleInfo {
   user_gates: ScheduleUserGates;
   /** Null: dashboard only. */
   notify_target: ScheduleNotifyTarget | null;
+  notify_target_available?: boolean;
   /** This schedule's runs since the server's local midnight (running ones at their cost so far). */
   spent_today_usd: number;
   /** When each alert became active; null while it is not. */

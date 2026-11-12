@@ -649,7 +649,7 @@ function GateBudgetNotify({
 }) {
   const targets = limits.notify_targets;
   const chosen = targets.find((target) => targetKey(target) === draft.notifyTarget);
-  // A saved target the allowlist no longer has stays selectable, so the select shows what is saved.
+  // An unavailable saved target stays selectable, so the select shows what is saved.
   const gone = draft.notifyTarget && !chosen ? targetOf(draft.notifyTarget) : null;
   const spent = schedule?.spent_today_usd;
   const cap = schedule?.daily_budget_usd;
@@ -773,9 +773,9 @@ function GateBudgetNotify({
               <p className={LABEL}>Send to</p>
               <p className="text-sm text-foreground">Dashboard only</p>
               <p className="text-xs text-muted-foreground">
-                No channel has a sender to send to.{" "}
+                No channel has an allowed sender or a bound chat to send to.{" "}
                 <a href={settingsHref("channels")} className={linkClass}>
-                  Add a sender in Settings → Channels
+                  Add a sender or bind a chat in Settings → Channels
                 </a>
               </p>
             </>
@@ -796,7 +796,7 @@ function GateBudgetNotify({
                   </option>
                 ))}
                 {gone && (
-                  <option value={draft.notifyTarget}>{`${gone.channel} · ${gone.chat} (not in the allowlist)`}</option>
+                  <option value={draft.notifyTarget}>{`${gone.channel} · ${gone.chat} (unavailable)`}</option>
                 )}
               </select>
               <p id={id("target-hint")} className="text-xs text-muted-foreground">
@@ -804,10 +804,10 @@ function GateBudgetNotify({
                   <span className="text-warning">This channel is turned off in {channelsLink}. </span>
                 ) : gone ? (
                   <span className="text-warning">
-                    This chat is no longer in its channel&apos;s sender allowlist ({channelsLink}).{" "}
+                    This chat is unavailable: its sender allowlist entry or Manager binding was removed ({channelsLink}).{" "}
                   </span>
                 ) : null}
-                Chats a channel&apos;s sender allowlist allows. Dashboard only: nothing is sent to a channel.
+                Allowlisted direct chats and chats bound to a Manager. Dashboard only: nothing is sent to a channel.
               </p>
             </>
           )}
