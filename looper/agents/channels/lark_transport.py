@@ -56,6 +56,7 @@ async def _stop_consumer(process: asyncio.subprocess.Process) -> None:
         process.kill()
     except ProcessLookupError:
         pass
+    await process.wait()
 
 
 class CliTransport:
@@ -63,6 +64,25 @@ class CliTransport:
 
     def __init__(self, profile: str = "") -> None:
         self._profile = profile
+        self.consumer_started = asyncio.Event()
+        self._history_chat_types: dict[str, str] = {}
+
+    async def list_messages(self, chat_id: str, *, start: float, end: float,
+                            page_token: str = "") -> dict[str, Any]:
+        # History omits chat mode. Never infer p2p from a missing mention: that would admit group chatter.
+        if chat_id not in self._history_chat_types:
+            info = await lark_cli.run_json([
+                *lark_cli._base(self._profile), "api", "GET", f"/open-apis/im/v1/chats/{chat_id}", "--as", "bot"])
+            mode = (info.get("data") or {}).get("chat_mode")
+            if mode not in {"group", "p2p", "topic"}:
+                raise lark_cli.LarkCliError("history chat mode is unavailable to the bot")
+            self._history_chat_types[chat_id] = "p2p" if mode == "p2p" else "group"
+        result = await lark_cli.run_json(lark_cli.history_command(
+            chat_id, start=start, end=end, page_token=page_token, profile=self._profile))
+        page = result.get("data", result)
+        if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
+            raise lark_cli.LarkCliError("history did not return a message page")
+        return {**page, "chat_type": self._history_chat_types[chat_id]}
 
     async def send(self, *, chat_id: str | None = None, user_id: str | None = None,
                    text: str | None = None, markdown: str | None = None,
@@ -112,10 +132,11 @@ class CliTransport:
         return _check_lark_cli_available()
 
     async def aclose(self) -> None:
-        pass
+        self._history_chat_types.clear()
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         """Keep stdin open until cancellation, then let lark-cli end its subscription."""
+        self.consumer_started.clear()
         process = await asyncio.create_subprocess_exec(
             *lark_cli.consume_command(self._profile), env=lark_cli.environment(),
             stdin=asyncio.subprocess.PIPE,
@@ -130,6 +151,8 @@ class CliTransport:
             async for raw in process.stderr:
                 text = raw.decode("utf-8", errors="replace").strip()
                 if text:
+                    if text == f"[event] ready event_key={lark_cli.RECEIVE_EVENT}":
+                        self.consumer_started.set()
                     stderr_tail.append(text[:300])
 
         stderr_task = asyncio.create_task(_read_stderr())
@@ -141,6 +164,9 @@ class CliTransport:
                     continue
                 try:
                     event = json.loads(line)
+                    # Older CLIs may omit the ready marker; a live event also proves subscription.
+                    if isinstance(event, dict) and event.get("type") == lark_cli.RECEIVE_EVENT:
+                        self.consumer_started.set()
                     yield event
                 except Exception:
                     logger.debug("skipping non-JSON lark event line")
@@ -148,6 +174,7 @@ class CliTransport:
             stopped = True
             raise
         finally:
+            self.consumer_started.clear()
             await _stop_consumer(process)
             stderr_task.cancel()
             try:

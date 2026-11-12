@@ -432,8 +432,6 @@ def test_attachment_failures_are_reported_and_still_reach_manager(
     count = 11 if case == "over_limit" else 2 if case == "timeout" else 1
     key = "file_exe" if case == "exe" else "img_" + ("slow" if case == "timeout" else case)
     marker = f'<file key="{key}" name="program.exe"/>' if case == "exe" else f"[Image: {key}]"
-    if case == "timeout":
-        monkeypatch.setattr("looper.agents.channels.lark._DOWNLOAD_MESSAGE_SECONDS", 0.2)
     content = b"MZ\x00" if case == "exe" else b"\x89PNG\r\n\x1a\n"
     if case == "large":
         content += b"x" * (files.IMAGE_MAX_BYTES + 1 - len(content))
@@ -448,6 +446,44 @@ def test_attachment_failures_are_reported_and_still_reach_manager(
         bus = MessageBus(runtime_root=tmp_path)
         adapter = _adapter(tmp_path)
         adapter._bus = bus
+        if case == "timeout":
+            from looper.agents.channels import lark
+
+            # Trigger expiry only after the subprocess starts: interpreter startup
+            # can exceed a short wall-clock budget before the stand-in logs its call.
+            script = tmp_path / "bin" / "lark-cli.py"
+            script.write_text(script.read_text().replace(
+                "time.sleep(3)", 'print("download-ready", flush=True)\n        time.sleep(30)'))
+            clock = [0.0]
+            deadline: asyncio.Timeout | None = None
+            monkeypatch.setattr(lark, "monotonic", lambda: clock[0])
+            spawn = asyncio.create_subprocess_exec
+
+            async def spawn_with_ready(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+                process = await spawn(*args, **kwargs)
+                if "+messages-resources-download" in args:
+                    communicate = process.communicate
+
+                    async def communicate_after_ready(input: bytes | None = None) -> tuple[bytes, bytes]:
+                        assert process.stdout is not None
+                        assert await process.stdout.readline() == b"download-ready\n"
+                        clock[0] = lark._DOWNLOAD_MESSAGE_SECONDS + 1
+                        assert deadline is not None
+                        deadline.reschedule(asyncio.get_running_loop().time())
+                        return await communicate(input)
+
+                    monkeypatch.setattr(process, "communicate", communicate_after_ready)
+                return process
+
+            monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn_with_ready)
+            download = adapter._transport.download
+
+            async def expired_download(*args: Any, **kwargs: Any) -> None:
+                nonlocal deadline
+                async with asyncio.timeout(None) as deadline:
+                    await download(*args, **kwargs)
+
+            monkeypatch.setattr(adapter._transport, "download", expired_download)
         try:
             await adapter._handle_lark_event({"type": "im.message.receive_v1", "chat_id": "oc_dm", "chat_type": "p2p",
                 "sender_id": OPEN_ID, "sender_type": "user", "message_id": "om_in", "message_type": "post",

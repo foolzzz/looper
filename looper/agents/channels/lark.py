@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from random import uniform as _reconnect_jitter
-from time import monotonic
-from typing import Any
+from time import monotonic, time
+from typing import Any, Literal
 
 from ..bus import MessageBus
 from .. import chat_attachments as files
@@ -38,6 +40,7 @@ from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat
 from . import lark_content
 from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, mention
 from .lark_transport import CliTransport, LarkTransport
+from .lark_inbox import LarkInbox, history_event
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
 
 logger = logging.getLogger(__name__)
@@ -49,6 +52,11 @@ RejectedListener = Callable[[str, str | None], Awaitable[None]]
 # How long finding a group sender's name may hold up their message; then the Manager gets the open_id.
 _NAME_LOOKUP_SECONDS = 5.0
 _DOWNLOAD_MESSAGE_SECONDS = 60.0
+_CATCHUP_MAX_AGE = 15 * 60
+_CATCHUP_OVERLAP = 10
+_CATCHUP_MAX_CHATS = 100
+_CATCHUP_MAX_PAGES = 5
+_HEARTBEAT_SECONDS = 5
 
 
 def _not_received(attachments: list[Attachment]) -> str:
@@ -121,6 +129,10 @@ class LarkChannelAdapter(ChannelAdapter):
         self._address = channel_address(self.channel_type, self.channel_id)
         self._outbound_task: asyncio.Task[Any] | None = None
         self._collector_task: asyncio.Task[Any] | None = None
+        self._catchup_task: asyncio.Task[Any] | None = None
+        self._heartbeat_task: asyncio.Task[Any] | None = None
+        self._inbox: LarkInbox | None = None
+        self._ingress_lock = asyncio.Lock()
         self._running = False
         # correlation_id → lark chat_id for reply routing
         self._correlation_chat: dict[str, str] = {}
@@ -145,15 +157,30 @@ class LarkChannelAdapter(ChannelAdapter):
             logger.warning("%s not started: its transport is unavailable", self.channel_id)
             return
 
+        if self.channel_type == "lark":
+            self._inbox = LarkInbox(bus.runtime_root / ".local" / "lark" / self.channel_id / "inbox.sqlite3")
+            boundary = self._inbox.boundary
+            # Keep an unfinished recovery window across another crash during startup.
+            self._inbox.checkpoint(boundary if boundary is not None else time())
+        else:
+            boundary = None
         self._bus = bus
         self._running = True
         self._outbound_task = asyncio.create_task(self._outbound_loop())
         self._collector_task = asyncio.create_task(self._event_collector_loop())
+        if self._inbox is not None:
+            self._catchup_task = asyncio.create_task(self._catch_up(boundary))
+            self._heartbeat_task = asyncio.create_task(self._heartbeat())
         logger.info("%s adapter started", self.channel_id)
 
     async def stop(self) -> None:
+        # Cancellation during admission/download must not move the recovery boundary past that message.
+        ready = getattr(self._transport, "consumer_started", None)
+        clean = (not self._ingress_lock.locked() and self._catchup_task is not None and self._catchup_task.done()
+                 and ready is not None and ready.is_set())
+        stopped_at = time()
         self._running = False
-        for task in (self._outbound_task, self._collector_task):
+        for task in (self._heartbeat_task, self._catchup_task, self._outbound_task, self._collector_task):
             if task:
                 task.cancel()
                 try:
@@ -162,6 +189,11 @@ class LarkChannelAdapter(ChannelAdapter):
                     pass
         await self._reactions.stop()
         await self._transport.aclose()
+        if self._inbox is not None:
+            if clean:
+                self._inbox.checkpoint(stopped_at)
+            self._inbox.close()
+            self._inbox = None
         logger.info("%s adapter stopped", self.channel_id)
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:
@@ -380,6 +412,88 @@ class LarkChannelAdapter(ChannelAdapter):
 
     # --- Inbound: transport events → Bus ---
 
+    async def _catchup_chats(self) -> list[str]:
+        from ...db.chat_bindings import catchup_chats
+
+        return await catchup_chats(self.channel_id, _CATCHUP_MAX_CHATS)
+
+    async def _catch_up(self, boundary: float | None) -> None:
+        stats = dict(chats_scanned=0, messages_found=0, handled=0, duplicates=0, too_old=0, failures=0)
+        expired = boundary is not None and time() - boundary > _CATCHUP_MAX_AGE
+        try:
+            if boundary is None or expired or not hasattr(self._transport, "list_messages"):
+                return
+            # Process spawn alone leaves a gap while CLI establishes its subscription.
+            if ready := getattr(self._transport, "consumer_started", None):
+                await asyncio.wait_for(ready.wait(), timeout=60)
+            end = time()
+            chats = await self._catchup_chats()
+            for chat_id in chats[:_CATCHUP_MAX_CHATS]:
+                stats["chats_scanned"] += 1
+                token = ""
+                try:
+                    for _ in range(_CATCHUP_MAX_PAGES):
+                        page = await self._transport.list_messages(  # type: ignore[attr-defined]
+                            chat_id, start=boundary - _CATCHUP_OVERLAP, end=end, page_token=token)
+                        for message in page["messages"][:50]:
+                            stats["messages_found"] += 1
+                            try:
+                                # Accept ISO timestamps as well as API Unix milliseconds.
+                                raw_time = message["create_time"]
+                                try:
+                                    created = float(raw_time)
+                                    if created > 100_000_000_000:
+                                        created /= 1000
+                                except ValueError:
+                                    created = datetime.fromisoformat(raw_time.replace("Z", "+00:00")).timestamp()
+                                if not math.isfinite(created):
+                                    raise ValueError("history creation time is not finite")
+                                if created < time() - _CATCHUP_MAX_AGE:
+                                    stats["too_old"] += 1
+                                    continue
+                                if message.get("deleted") or created > end or created < boundary - _CATCHUP_OVERLAP:
+                                    continue
+                                event = history_event(message, chat_id, page["chat_type"])
+                                event["_catchup_created_at"] = created
+                                outcome = await self._handle_lark_event(event)
+                                if outcome == "duplicate":
+                                    stats["duplicates"] += 1
+                                elif outcome == "handled":
+                                    stats["handled"] += 1
+                                elif outcome == "too_old":
+                                    stats["too_old"] += 1
+                            except Exception:
+                                stats["failures"] += 1
+                                logger.warning("%s: catch-up message failed", self.channel_id, exc_info=True)
+                        if not page.get("has_more"):
+                            break
+                        next_token = page.get("page_token")
+                        if not next_token or next_token == token:
+                            raise ValueError("history pagination did not advance")
+                        token = next_token
+                    else:
+                        logger.warning("%s: catch-up page limit reached", self.channel_id)
+                except Exception:
+                    stats["failures"] += 1
+                    logger.warning("%s: catch-up chat failed", self.channel_id, exc_info=True)
+        except Exception:
+            stats["failures"] += 1
+            logger.warning("%s: catch-up discovery failed", self.channel_id, exc_info=True)
+        finally:
+            logger.info("lark_catchup channel=%s boundary=%s boundary_expired=%s %s", self.channel_id, boundary,
+                        expired, " ".join(f"{key}={value}" for key, value in stats.items()))
+
+    async def _heartbeat(self) -> None:
+        while self._running:
+            await asyncio.sleep(_HEARTBEAT_SECONDS)
+            ready = getattr(self._transport, "consumer_started", None)
+            if (self._inbox is not None and self._catchup_task is not None and self._catchup_task.done()
+                    and not self._ingress_lock.locked() and ready is not None and ready.is_set()):
+                try:
+                    self._inbox.checkpoint(time())
+                except Exception:
+                    logger.warning("%s: could not save consumer heartbeat", self.channel_id, exc_info=True)
+
     async def _event_collector_loop(self) -> None:
         """Restart each ended or broken event stream after a delay."""
         failures = 0
@@ -426,7 +540,19 @@ class LarkChannelAdapter(ChannelAdapter):
             if close := getattr(events, "aclose", None):
                 await close()
 
-    async def _handle_lark_event(self, event: dict[str, Any]) -> None:
+    async def _handle_lark_event(self, event: dict[str, Any]) -> Literal["handled", "duplicate", "ignored", "too_old"]:
+        async with self._ingress_lock:
+            message_id = event.get("message_id")
+            if self._inbox is not None and message_id and self._inbox.processed(message_id):
+                return "duplicate"
+            if event.get("_catchup_created_at", time()) < time() - _CATCHUP_MAX_AGE:
+                return "too_old"
+            handled = await self._process_lark_event(event)
+            if self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT:
+                self._inbox.finish(message_id)
+            return "handled" if handled else "ignored"
+
+    async def _process_lark_event(self, event: dict[str, Any]) -> bool | None:
         """Publish text and rich posts to the Bus, and answer other admitted message types.
         The event is lark-cli's flat one: ``chat_id``,
         ``chat_type`` (``p2p`` or ``group``), ``message_id``, ``message_type``, ``sender_id`` (the open_id),
@@ -514,7 +640,7 @@ class LarkChannelAdapter(ChannelAdapter):
             except LarkCliError:
                 logger.warning("%s: could not answer an unsupported message in %s", self.channel_id,
                                chat_id, exc_info=True)
-            return
+            return True
         self._reactions.add(chat_id, message_id)  # the bot saw it; in the background, the Manager gets it now
         attachments = await self._collect(message_id, inbound.resources) if inbound.resources else []
         if any(item.state is not AttachmentState.SAVED for item in attachments):
@@ -555,6 +681,7 @@ class LarkChannelAdapter(ChannelAdapter):
             metadata=metadata,
         )
         await self._bus.publish(envelope)
+        return True
 
     async def _collect(self, message_id: str, refs: tuple[lark_content.ResourceRef, ...]) -> list[Attachment]:
         deadline = monotonic() + _DOWNLOAD_MESSAGE_SECONDS

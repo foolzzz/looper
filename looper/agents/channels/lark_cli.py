@@ -22,6 +22,7 @@ import re
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -70,6 +71,15 @@ def _base(profile: str | None) -> list[str]:
 def consume_command(profile: str | None = None) -> list[str]:
     """The lark-cli argv that streams the messages the bot receives, one JSON object per line."""
     return [*_base(profile), "event", "consume", RECEIVE_EVENT, "--as", "bot"]
+
+
+def history_command(chat_id: str, *, start: float, end: float, page_token: str = "",
+                    profile: str | None = None) -> list[str]:
+    return [*_base(profile), "im", "+chat-messages-list", "--as", "bot", "--chat-id", chat_id,
+            "--start", datetime.fromtimestamp(start, timezone.utc).isoformat(),
+            "--end", datetime.fromtimestamp(end, timezone.utc).isoformat(), "--order", "asc",
+            "--page-size", "50", "--no-reactions", "--format", "json",
+            *(["--page-token", page_token] if page_token else [])]
 
 
 def send_command(*, chat_id: str | None = None, user_id: str | None = None, text: str | None = None,
