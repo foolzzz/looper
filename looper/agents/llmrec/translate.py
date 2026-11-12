@@ -227,6 +227,17 @@ def _messages(body: dict, dialect: Dialect, notes: dict) -> list[dict]:
     return apply_cache_markers(result, messages, dialect)
 
 
+def resolve_session_id(body: dict, session_id: str | None = None) -> str | None:
+    """Prefer the client header, then Claude Code's metadata session suffix."""
+    if session_id:
+        return session_id
+    metadata = body.get('metadata', {})
+    user_id = metadata.get('user_id') if isinstance(metadata, dict) else None
+    if isinstance(user_id, str) and 'session_' in user_id:
+        return user_id.split('session_', 1)[1]
+    return None
+
+
 def to_chat(body: dict, dialect: Dialect, models: Mapping[str, str], *, session_id: str | None) -> ChatRequest:
     dialect = _dialect(dialect)
     if not isinstance(body, dict):
@@ -349,8 +360,7 @@ def _to_chat(body: dict, dialect: Dialect, models: Mapping[str, str], session_id
     if not isinstance(metadata, dict):
         raise _bad('metadata must be an object')
     user_id = metadata.get('user_id')
-    if not session_id and isinstance(user_id, str) and 'session_' in user_id:
-        session_id = user_id.split('session_', 1)[1]
+    session_id = resolve_session_id(body, session_id)
     if dialect.prompt_cache_key and session_id:
         result['prompt_cache_key'] = 'lg-' + hashlib.sha256(session_id.encode()).hexdigest()[:32]
     if dialect.send_user and isinstance(user_id, str):

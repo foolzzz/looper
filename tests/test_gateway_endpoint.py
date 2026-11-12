@@ -178,6 +178,64 @@ def test_external_recording_uses_alias_identity_and_redacts_credentials(tmp_path
     run_db(check, timeout=15)
 
 
+def test_rebinding_alias_preserves_each_upstream_route(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from looper.agents.llmrec import gateway
+
+    async def check(pool):
+        async with endpoint(tmp_path, pool, record=True) as (client, base, proxy, received, key, sink):
+            now = gateway.time.monotonic()
+            monkeypatch.setattr(gateway, 'time', SimpleNamespace(monotonic=lambda: now))
+            headers = {'x-api-key': key}
+            payload = {'model': 'local-chat', 'messages': [{'role': 'user', 'content': 'hello'}]}
+            assert (await client.post(base + '/v1/messages', headers=headers, json=payload)).status_code == 200
+            await until(lambda: sink.recorded == 1, 'first binding capture', timeout=3)
+            upstream = await pool.fetchval("SELECT base_url FROM llm_provider_endpoints WHERE provider_id='prov-external'")
+            await pool.execute("INSERT INTO llm_providers(id,name,vendor_type,auth) VALUES ('prov-other','Other','custom','api_key')")
+            await pool.execute("INSERT INTO llm_provider_secrets VALUES ('prov-other','other-secret')")
+            await pool.execute("INSERT INTO llm_provider_endpoints(provider_id,protocol,base_url) VALUES ('prov-other','openai-chat',$1)",
+                               upstream.replace('127.0.0.1', 'localhost') + '/other')
+            await pool.execute("INSERT INTO llm_models(id,provider_id,protocol,name) VALUES ('model-other','prov-other','openai-chat','other-model')")
+            await pool.execute("UPDATE gateway_aliases SET model_id='model-other' WHERE alias='local-chat'")
+            now += 10  # Observe the new binding after the resolver's cache expires.
+            assert (await client.post(base + '/v1/messages', headers=headers, json=payload)).status_code == 200
+            await until(lambda: sink.recorded == 2, 'second binding capture', timeout=3)
+            rows = await pool.fetch('''SELECT r.id, r.provider_id, r.upstream_host, r.upstream_path,
+                q.translation FROM llm_requests q JOIN llm_request_routes r ON r.id=q.route_id ORDER BY q.proxy_seq''')
+            assert [(row['provider_id'], row['upstream_host'], row['upstream_path']) for row in rows] == [
+                ('prov-external', '127.0.0.1', '/v1'), ('prov-other', 'localhost', '/v1/other')]
+            assert rows[0]['id'] != rows[1]['id']
+            assert all(json.loads(row['translation'])['common_prefix_bytes'] is None for row in rows)
+            assert received[-1][1]['model'] == 'other-model'
+    run_db(check, timeout=15)
+
+
+@pytest.mark.parametrize('session_source', ['metadata', 'header'])
+def test_external_prefix_history_groups_resolved_sessions(tmp_path, session_source):
+    async def check(pool):
+        async with endpoint(tmp_path, pool, record=True) as (client, base, proxy, received, key, sink):
+            for turn, session in enumerate(('A', 'B', 'A'), 1):
+                headers = {'x-api-key': key}
+                if session_source == 'header':
+                    headers['x-claude-code-session-id'] = session
+                messages = [{'role': 'user', 'content': 'First question ' * 100 if session == 'A' else 'Other'}]
+                if turn == 3:
+                    messages += [{'role': 'assistant', 'content': 'Answer'}, {'role': 'user', 'content': 'Next'}]
+                response = await client.post(base + '/v1/messages', headers=headers, json={
+                    'model': 'local-chat', 'messages': messages,
+                    'metadata': {'user_id': 'user_session_' + (session if session_source == 'metadata' else 'shared')}})
+                assert response.status_code == 200
+                await until(lambda: sink.recorded == turn, 'session capture', timeout=3)
+            rows = await pool.fetch('SELECT translation FROM llm_requests ORDER BY proxy_seq')
+            first, other, follow_up = [json.loads(row['translation']) for row in rows]
+            assert first['common_prefix_bytes'] is None
+            assert other['common_prefix_bytes'] is None
+            assert other['previous_prompt_tokens'] is None
+            assert follow_up['common_prefix_tokens'] == follow_up['previous_prompt_tokens']
+            assert follow_up['common_prefix_tokens'] > 300
+    run_db(check, timeout=15)
+
+
 def test_alias_cache_expires_after_ten_seconds(tmp_path, monkeypatch):
     from looper.agents.llmrec import gateway
     from types import SimpleNamespace

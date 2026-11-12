@@ -1661,10 +1661,14 @@ def test_gateway_env_prints_selected_alias_and_transient_operator_credentials(tm
             'ANTHROPIC_DEFAULT_HAIKU_MODEL': 'local-chat', 'ANTHROPIC_SMALL_FAST_MODEL': 'local-chat',
             'CLAUDE_CODE_SUBAGENT_MODEL': 'local-chat', 'CLAUDE_CODE_ATTRIBUTION_HEADER': '0',
             'ENABLE_TOOL_SEARCH': 'false', 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS': '1',
+            **dict.fromkeys(('CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+                             'CLAUDE_CODE_USE_ANTHROPIC_AWS', 'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+                             'CLAUDE_CODE_USE_MANTLE', 'CLAUDE_CODE_USE_GATEWAY'), '0'),
         }
         assert all(line.startswith('export ') for line in captured.out.splitlines())
         shell = subprocess.run(['bash', '-c', 'eval "$1"; env', 'bash', captured.out],
-                               env={'PATH': os.defpath, 'ANTHROPIC_API_KEY': 'operator-key'},
+                               env={'PATH': os.defpath, 'ANTHROPIC_API_KEY': 'operator-key',
+                                    **{name: '1' for name in expected if name.startswith('CLAUDE_CODE_USE_')}},
                                capture_output=True, text=True, check=True, timeout=5)
         exported = dict(line.split('=', 1) for line in shell.stdout.splitlines())
         assert {name: exported.get(name) for name in expected} == expected

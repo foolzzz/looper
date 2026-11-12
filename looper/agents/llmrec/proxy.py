@@ -32,7 +32,7 @@ from . import ROUTE_FORMAT, ROUTE_ID, ROUTES_DIR, TLS_ENV, RouteFile, code_sha25
 from .capture import MIB, build_capture, kind_of, redact_headers, redact_query
 from .dialects import DIALECTS, ChatDialect
 from .gateway import GatewayKey, GatewayConfig, AliasResolver, Unavailable, request_guard
-from .translate import Rejection, RejectionCode, to_chat, from_chat, local_response, error_response, anthropic_usage
+from .translate import Rejection, RejectionCode, to_chat, from_chat, local_response, error_response, anthropic_usage, resolve_session_id
 from .translate_stream import StreamTranslator, sse_events
 
 log = logging.getLogger(__name__)
@@ -566,7 +566,8 @@ class Proxy:
             if target is None:
                 raise Rejection(404, 'not_found_error', 'Unknown model alias through the Looper gateway')
             now = datetime.now(timezone.utc)
-            route = RouteFile(id='gw_' + hashlib.sha256(alias.encode()).hexdigest()[:16] + '_' + now.strftime('%Y%m%d'),
+            binding = '\0'.join((alias, target.provider_id, target.base_url, target.upstream_model, target.dialect))
+            route = RouteFile(id='gw_' + hashlib.sha256(binding.encode()).hexdigest()[:16] + '_' + now.strftime('%Y%m%d'),
                 upstream=target.base_url, kind='translate', record=config['record'], api='openai-chat',
                 dialect=target.dialect, models={alias: target.upstream_model}, protocol='openai-chat',
                 provider_id=target.provider_id, model=alias, agent_id='gateway:' + alias,
@@ -674,17 +675,18 @@ class Proxy:
                 if not isinstance(parsed, dict):
                     raise Rejection(400, 'invalid_request_error', 'Expected an object through the Looper gateway')
                 request_headers = dict(request.headers)
-                session = request_headers.get(b'x-claude-code-session-id')
-                history_key = (route.id, session or b'') if route.runtime_type == 'external' else route.id
-                chat = to_chat(parsed, dialect, route.models,
-                               session_id=session.decode('utf-8', errors='replace') if session else None)
+                session_header = request_headers.get(b'x-claude-code-session-id')
+                session = resolve_session_id(parsed, session_header.decode('utf-8', errors='replace') if session_header else None)
+                history_key = (route.id, session or '') if route.runtime_type == 'external' else route.id
+                chat = to_chat(parsed, dialect, route.models, session_id=session)
                 common, reused, previous = self._prefix_history.remember((route.id, session), chat.body)
                 translation.update(upstream_model=chat.upstream_model, notes=chat.notes,
                     upstream_request_bytes=len(chat.body), upstream_request_sha256=hashlib.sha256(chat.body).hexdigest(),
                     common_prefix_bytes=common, common_prefix_tokens=reused, previous_prompt_tokens=previous)
                 for category in ('dropped', 'degraded', 'clamped'):
                     stats[category].update(chat.notes.get(category, {}))
-                url = route.upstream.rstrip('/') + '/chat/completions'
+                upstream = urlsplit(route.upstream)
+                url = urlunsplit(upstream._replace(path=upstream.path.rstrip('/') + '/chat/completions'))
                 headers = {'content-type': 'application/json',
                     'accept': 'text/event-stream' if chat.stream else 'application/json',
                     'accept-encoding': 'gzip, deflate', 'user-agent': 'looper-gateway/' + __version__}

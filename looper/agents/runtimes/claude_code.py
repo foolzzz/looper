@@ -71,6 +71,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from ... import child_env
+from ...gateway_env import TRANSLATED_BACKEND_ENV
 from .. import claude_cli
 from . import (
     ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
@@ -96,15 +97,6 @@ BACKGROUND_MODEL_VARS = ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_
 AGENT_TEAMS = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
 TEAMMATE_MODE_ARGS = ("--teammate-mode", "in-process")
 # Gateway safeguards override settings and provider environment variables.
-TRANSLATED_BACKEND_ENV = (
-    ("CLAUDE_CODE_USE_BEDROCK", "0"),
-    ("CLAUDE_CODE_USE_VERTEX", "0"),
-    ("CLAUDE_CODE_USE_FOUNDRY", "0"),
-    ("CLAUDE_CODE_USE_ANTHROPIC_AWS", "0"),
-    ("CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "0"),
-    ("CLAUDE_CODE_USE_MANTLE", "0"),
-    ("CLAUDE_CODE_USE_GATEWAY", "0"),
-)
 TRANSLATED_ENV = (
     *TRANSLATED_BACKEND_ENV,
     ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
