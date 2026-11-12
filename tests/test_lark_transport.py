@@ -104,6 +104,90 @@ def _envelope(correlation_id: str, message_type: MessageType = MessageType.AGENT
                                   correlation_id=correlation_id, payload=payload)
 
 
+@pytest.mark.parametrize("route", ["admitted", "silent", "off"])
+def test_unsupported_group_messages_follow_routing_before_replying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str,
+) -> None:
+    from looper.agents.channels.chat_routing import RouteAction, RouteDecision
+    from looper.agents.tiers.manager import TURNED_OFF_REPLY
+
+    async def main() -> None:
+        observed: list[bool] = []
+
+        async def observe(*args: Any, suppressed: bool) -> None:
+            observed.append(suppressed)
+
+        monkeypatch.setattr("looper.agents.channels.lark.observe_chat", observe)
+        transport = StubTransport()
+        adapter = _adapter(tmp_path, transport, resolve_chat=lambda *_: RouteDecision(
+            RouteAction.SILENT if route == "silent" else RouteAction.ADMIT, "manager-helper", True),
+            manager_running=lambda _: route != "off")
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        try:
+            await adapter._handle_lark_event(_event(chat_type="group", chat_id="oc_team", content="",
+                                                   message_type="share_chat", mentions=[BOT_MENTION]))
+            assert observed == [route == "silent"]
+            assert bus.journal.undelivered() == []
+            expected = (TURNED_OFF_REPLY if route == "off" else
+                        "暂不支持这类飞书消息（share_chat），请发文字或富文本。")
+            assert transport.calls == ([] if route == "silent" else [
+                ("reply", {"message_id": "om_in", "text": expected})])
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
+
+
+def test_an_unsupported_reply_failure_does_not_stop_the_next_event(tmp_path: Path) -> None:
+    async def main() -> None:
+        transport = StubTransport()
+        adapter = _adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        try:
+            transport.error = LarkCliError("reply failed")
+            await adapter._handle_lark_event(_event(chat_type="group", chat_id="oc_team",
+                                                   message_type="share_chat", mentions=[BOT_MENTION]))
+            assert transport.calls == [("reply", {"message_id": "om_in", "text":
+                                                   "暂不支持这类飞书消息（share_chat），请发文字或富文本。"})]
+            transport.error = None
+            await adapter._handle_lark_event(_event(message_id="om_next"))
+            (message,) = bus.journal.undelivered()
+            assert message.payload["text"] == "hello"
+            await asyncio.gather(*adapter._reactions._pending)
+            assert transport.calls[-1] == ("react", {"message_id": "om_next"})
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(("content", "reply_to", "delivered"), [
+    ("@@HelperBot ", None, False), ("@@HelperBot ", "om_parent", True), (" ", "om_parent", False),
+    ("[Rich text message]", None, True),
+])
+def test_posts_keep_the_empty_message_and_reply_rules(
+    tmp_path: Path, content: str, reply_to: str | None, delivered: bool,
+) -> None:
+    async def main() -> None:
+        transport = StubTransport()
+        adapter = _adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        try:
+            await adapter._handle_lark_event(_event(message_type="post", chat_type="group",
+                                                   content=content, mentions=[BOT_MENTION], reply_to=reply_to))
+            assert bool(bus.journal.undelivered()) is delivered
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
+
+
 @pytest.mark.parametrize("printed", ["", "sent, without JSON"])
 @pytest.mark.parametrize("reply", [False, True])
 def test_cli_ordinary_messages_ignore_successful_stdout(
