@@ -13,16 +13,21 @@ from tests.db_support import DSN, run_db
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 
-@pytest.mark.parametrize(("layer", "kind", "role"), [
-    ("task_role", "work", "worker"),
-    ("task_role", "review", "reviewer"),
-    ("task", "work", "worker"),
+@pytest.mark.parametrize(("layer", "kind", "role", "via", "roles_on"), [
+    ("task_role", "work", "worker", "planner", True),
+    ("task_role", "work", "worker", "planner", False),
+    ("task_role", "work", "worker", "workflow", True),
+    ("task_role", "work", "worker", "template", True),
+    ("task_role", "work", "worker", "user", True),
+    ("task_role", "review", "reviewer", "workflow", False),
+    ("task", "work", "worker", None, True),
 ])
 def test_profile_choice_refuses_a_pin_then_applies_without_it(
-    monkeypatch: pytest.MonkeyPatch, layer: str, kind: str, role: str,
+    monkeypatch: pytest.MonkeyPatch, layer: str, kind: str, role: str, via: str | None, roles_on: bool,
 ) -> None:
     async def test(pool: Any) -> None:
         project = await projects.create_project(name="profile choice")
+        await projects.update_project(project["id"], execution={"planner_roles": "on" if roles_on else "off"})
         await tasks.create_task(task_id="task-a", requirement="Do the step", project_id=project["id"],
                                 status="running")
         await pool.execute(
@@ -38,8 +43,8 @@ def test_profile_choice_refuses_a_pin_then_applies_without_it(
             # A new attempt uses the latest definition, not the previous attempt's version.
             await pool.execute(
                 "INSERT INTO task_roles (task_id, role_key, version, kind, role_prompt, profile_id, via) "
-                "VALUES ('task-a', 'specialist', 1, $1, 'Do the work', NULL, 'workflow'), "
-                "('task-a', 'specialist', 2, $1, 'Do the work', $2, 'workflow')", kind, pinned)
+                "VALUES ('task-a', 'specialist', 1, $1, 'Do the work', NULL, $3), "
+                "('task-a', 'specialist', 2, $1, 'Do the work', $2, $3)", kind, pinned, via)
             await pool.execute("UPDATE task_steps SET role_key = 'specialist', role_version = 1")
             task_role = ("specialist", 2)
         else:
@@ -62,16 +67,23 @@ def test_profile_choice_refuses_a_pin_then_applies_without_it(
         assert answer["error"]["code"] == "forbidden"
         message = answer["error"]["message"]
         assert f"{layer} layer" in message and before["name"] in message
-        assert "dashboard" in message and "user gate" in message
         if layer == "task_role":
-            assert "Roles" in message
+            assert "specialist" in message
+            assert {"planner": "Planner", "workflow": "workflow", "template": "task template",
+                    "user": "user edit"}[via] in message
+        if layer == "task_role" and via == "planner" and roles_on:
+            assert "looper_task_role_set" in message and "profile_id" in message
+            assert "new version" in message
+        else:
+            assert "looper_task_role_set" not in message
+            assert "dashboard" in message and "user gate" in message
         assert await next_run() == before
         assert await agent_setting_layers.planner_profiles("task-a") == []
         assert await pool.fetchval("SELECT count(*) FROM task_journal WHERE kind = 'profile_choice'") == 0
         assert not await pool.fetchval("SELECT EXISTS (SELECT 1 FROM activity "
                                        "WHERE summary LIKE 'Planner chose the Agent Profile:%')")
 
-        # Removing the operator pin makes the same call effective; clearing it resolves inheritance too.
+        # Removing the pin makes the same call effective; clearing it resolves inheritance too.
         await pool.execute("UPDATE task_steps SET role_key = NULL, role_version = NULL")
         task_role = None
         await agent_setting_layers.set_task_layer("task-a", profiles={role: None})

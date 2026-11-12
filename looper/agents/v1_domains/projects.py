@@ -112,10 +112,11 @@ async def impact(server, operation, arguments, principal, headers):
             return None
         project = await answered(core._existing_project(arguments["project_id"]))
         change = await answered(core.directory_change(project, arguments["fields"]["work_dir"]))
+        # Bind even an empty preview; execution rechecks it after taking the project lock.
+        if change.old != change.new:
+            arguments["_directory_version"] = change.version
         if not change.schedules:
             return None
-        # Bind the shown read; the closed request cannot supply this server-owned version.
-        arguments["_directory_version"] = change.version
         return directory_change_impact(project, change, arguments["fields"])
     if operation.operation_id not in ("project_admin.delete", "project_admin.preview_delete"):
         return None

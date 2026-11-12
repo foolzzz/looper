@@ -451,9 +451,16 @@ class LarkChannelAdapter(ChannelAdapter):
             return
 
         # Before anything else: an unlisted sender is logged, recorded (who, where and when) and never answered.
-        decision = self._resolve_chat(self.channel_id, chat_id) if self._resolve_chat is not None else None
+        # The bot stream already decided admission before queueing; CLI events decide here.
+        admitted = event.get("admitted")
+        decision = (self._resolve_chat(self.channel_id, chat_id)
+                    if admitted is not False and self._resolve_chat is not None else None)
         chat_senders = decision.senders if decision is not None else frozenset()
-        if not self._allowlist.admits(sender_open_id, chat_senders=chat_senders):
+        if admitted is False:
+            logger.warning("%s: dropped a message from sender %r, refused by the stream prefilter",
+                           self.channel_id, str(sender_open_id or "<unknown>")[:80])
+        if admitted is False or (admitted is not True and not self._allowlist.admits(
+                sender_open_id, chat_senders=chat_senders)):
             if self._on_rejected is not None and isinstance(sender_open_id, str) and sender_open_id:
                 try:
                     await self._on_rejected(sender_open_id, chat_id if group else None)

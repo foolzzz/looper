@@ -1,5 +1,9 @@
 """Project directory moves through authenticated admin and compact API operations."""
 
+import os
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from looper.agents import api_v1, operator_notes, schedules
@@ -20,6 +24,84 @@ async def _schedule(project_id, kind, directory):
         "work_dir": str(directory), "requirement": "Read reports" if kind == "agent" else "",
         **({"command": "git status"} if kind == "command" else {}),
     })
+
+
+def _git(directory, *args):
+    return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(directory), *args],
+                          check=True, capture_output=True, text=True, timeout=10).stdout.strip()
+
+
+def test_move_repairs_bare_repository_and_checkout_inside_project(tmp_path, monkeypatch):
+    old, new = tmp_path / "source", tmp_path / "destination"
+    old.mkdir()
+    _git(old, "init", "--bare", ".bare")
+    _git(old, "--git-dir=.bare", "worktree", "add", "-b", "main", str(old / "main"))
+    (old / "main" / "kept.txt").write_text("Keep committed files")
+    _git(old / "main", "add", "kept.txt")
+    _git(old / "main", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+         "commit", "-qm", "Initial")
+    head = _git(old / "main", "rev-parse", "HEAD")
+    assert _git(old / "main", "status", "--porcelain") == ""
+
+    async def run(pool):
+        project = await projects.create_project(name="Bare project", work_dir=str(old), pool=pool)
+        async with _api(tmp_path, pool) as call:
+            status, answer = await call("project_admin.move_dir", {
+                "project": project["id"], "to": str(new), "link_old": False})
+            assert status == 200, answer
+            repairs = answer["result"]["repairs"]
+            assert repairs and all(row["ok"] for row in repairs), repairs
+            assert not old.exists() and not old.is_symlink()
+            assert _git(new / "main", "status", "--porcelain") == ""
+            assert _git(new / "main", "rev-parse", "HEAD") == head
+            assert str(new / "main") in _git(new, "--git-dir=.bare", "worktree", "list", "--porcelain")
+
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("layout", ["main-outside", "linked-outside", "linked-inside", "linked-absolute"])
+def test_move_preview_refuses_relative_submodule_worktree_outside_project(tmp_path, monkeypatch, layout):
+    old, module = tmp_path / "source", tmp_path / "module"
+    destination = tmp_path / "deeper"
+    destination.mkdir()
+    new = destination / "destination"
+    for repo in (old, module):
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        _git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+             "commit", "--allow-empty", "-qm", "Initial")
+    _git(old, "-c", "protocol.file.allow=always", "submodule", "add", str(module), "child")
+    _git(old, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qam", "Add module")
+    if layout == "main-outside":
+        checkout = tmp_path / "external"
+        (old / "child").rename(checkout)
+        git_dir = old / ".git" / "modules" / "child"
+        (checkout / ".git").write_text(f"gitdir: {git_dir}\n")
+    else:
+        linked = old / "linked" if layout == "linked-inside" else tmp_path / "external"
+        _git(old, "worktree", "add", "-qb", "linked", str(linked))
+        _git(linked, "-c", "protocol.file.allow=always", "submodule", "update", "--init")
+        checkout = linked / "child"
+        git_dir = Path(_git(checkout, "rev-parse", "--absolute-git-dir"))
+    target = str(checkout) if layout == "linked-absolute" else os.path.relpath(checkout, git_dir)
+    _git(old, "config", "--file", str(git_dir / "config"), "core.worktree", target)
+    assert _git(checkout, "status", "--porcelain") == ""
+
+    async def run(pool):
+        project = await projects.create_project(name="Submodule project", work_dir=str(old), pool=pool)
+        async with _api(tmp_path, pool) as call:
+            status, answer = await call("project_admin.preview_move_dir", {"project": project["id"], "to": str(new)})
+            if layout in ("main-outside", "linked-outside"):
+                assert status == 400, answer
+                assert "relative core.worktree" in answer["error"]["message"]
+                assert "outside" in answer["error"]["message"]
+            else:
+                assert status == 200, answer
+            assert old.is_dir() and not old.is_symlink() and not new.exists()
+            assert (await projects.get_project(project["id"], pool=pool))["work_dir"] == str(old)
+            assert _git(checkout, "status", "--porcelain") == ""
+
+    run_db(run, monkeypatch, timeout=30)
 
 
 @pytest.mark.parametrize("client", [True, False], ids=["client", "operator"])

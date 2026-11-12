@@ -18,6 +18,27 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.167] - 2026-11-12
+
+### Fixed
+
+- **Planner profile refusals.** ([#1305](https://github.com/foolzzz/looper/pull/1305); fixes #1228)
+  - A refused `looper_task_profile_set` names the pinning task role with its origin and, for a Planner-defined role with the project's role tools on, points to `looper_task_role_set` with `profile_id`.
+  - Model-visible: the Planner prompt text and the tool description for this tool changed.
+- **Overview and Lark admission.** ([#1303](https://github.com/foolzzz/looper/pull/1303); fixes #1097, part of #1132)
+  - Overview run counts use each task's current project in every scope, not only project-scoped ones.
+  - The Lark bot stream decides sender admission once per event and the adapter reuses it.
+  - No model-visible change.
+
+## [2.14.166] - 2026-11-12
+
+### Fixed
+
+- **Project moves and directory changes.** ([#1301](https://github.com/foolzzz/looper/pull/1301); fixes #1054, part of #1079)
+  - A move repairs bare-repo worktrees (the bare repository first, with `--git-dir=.`) and refuses a submodule whose relative `core.worktree` points outside the project.
+  - A directory-change confirmation is bound to the previewed project version even when no command schedule was listed, and execution rechecks it under the project lock.
+  - No model-visible change beyond the new refusal messages.
+
 ## [2.14.165] - 2026-11-12
 
 ### Fixed

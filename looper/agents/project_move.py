@@ -115,6 +115,20 @@ def _inventory(old: Path) -> tuple[int, int, bool]:
     return files, size, False
 
 
+def _submodule_configs(root: Path) -> list[Path]:
+    def failed(exc: OSError) -> None:
+        raise exc
+
+    configs = []
+    for directory, dirs, files in os.walk(root, onerror=failed):
+        if "HEAD" in files and "config" in files and "objects" in dirs:
+            common = Path(directory)
+            configs.extend(common.glob("modules/**/config"))
+            configs.extend(common.glob("worktrees/*/modules/**/config"))
+            dirs.clear()
+    return configs
+
+
 async def _check_directory_dependencies(db: Any, project_id: str, old: Path) -> None:
     # A project's default is not the only dependency: stopped tasks may own checkouts
     # elsewhere while their cleanup still needs the repository being moved. This
@@ -141,7 +155,16 @@ async def preview(project: Mapping[str, Any], data: Mapping[str, Any], *, db: An
 
     try:
         old, new = _destination(project, data)
-    except OSError as exc:
+        for config in await asyncio.to_thread(_submodule_configs, old):
+            run = await step_workspaces._git(old, "config", "--file", str(config), "--get", "core.worktree", check=False)
+            if run.returncode not in (0, 1):
+                raise projects.RequestError(projects.HTTP_400, "cannot inspect submodule core.worktree configuration")
+            if run.returncode == 0 and not Path(run.text).is_absolute() \
+                    and _under(str(config.parent / run.text), str(old)) is None:
+                raise projects.RequestError(projects.HTTP_400,
+                                            "a submodule has a relative core.worktree outside the project; "
+                                            "relocate the checkout or use an absolute core.worktree before moving")
+    except (OSError, step_workspaces.GitError) as exc:
         raise projects.RequestError(projects.HTTP_400, f"cannot move project directory: {exc}") from None
     db = db or connection.get_pool()
     busy = await db.fetchval(
@@ -218,10 +241,15 @@ def _repositories(root: Path) -> list[Path]:
             # Running repair on it would also rewrite its relative .git pointer.
             if git_dir.parent.name == "worktrees":
                 found.append(Path(directory))
+                if not git_dir.is_absolute():
+                    git_dir = Path(directory) / git_dir
+                common = git_dir.resolve().parent.parent
+                if common.is_relative_to(root.resolve()) and common.name != ".git":
+                    found.append(root / common.relative_to(root.resolve()))
         if ".git" in dirs:
             dirs.remove(".git")
     # Repair common repositories before linked checkouts whose .git files may still name the old path.
-    return sorted(found, key=lambda path: (not (path / ".git").is_dir(), str(path)))
+    return sorted(set(found), key=lambda path: ((path / ".git").is_file(), str(path)))
 
 
 async def _repair(move: ProjectMove, worktrees: list[Any], source: str,
@@ -234,9 +262,11 @@ async def _repair(move: ProjectMove, worktrees: list[Any], source: str,
     checkouts = [*repositories, *(Path(row["path"]) for row in worktrees)]
     for repo in repositories:
         paths = []
+        bare = not (repo / ".git").exists()
+        common = repo if bare else repo / ".git"
         # Both ends of a link may have moved together, including worktrees Looper did not create.
         # Git cannot discover a checkout at its new path from its old registration alone.
-        if (repo / ".git").is_dir():
+        if common.is_dir():
             for checkout in checkouts:
                 marker = checkout / ".git"
                 if not marker.is_file():
@@ -250,12 +280,13 @@ async def _repair(move: ProjectMove, worktrees: list[Any], source: str,
                     relative = _under(str(git_dir), source)
                     if relative is not None:
                         git_dir = Path(move.new) / relative
-                    if git_dir.resolve().is_relative_to((repo / ".git" / "worktrees").resolve()):
+                    if git_dir.resolve().is_relative_to((common / "worktrees").resolve()):
                         paths.append(str(checkout))
                 except (OSError, UnicodeError) as exc:
                     logger.warning("cannot inspect moved worktree %s: %s", checkout, exc)
         try:
-            run = await step_workspaces._git(repo, "worktree", "repair", *sorted(set(paths)))
+            args = ("--git-dir=.",) if bare else ()
+            run = await step_workspaces._git(repo, *args, "worktree", "repair", *sorted(set(paths)))
             output = (run.stdout + run.stderr).decode("utf-8", "replace").strip()
             result = {"repository": str(repo), "ok": True, "output": output}
             logger.info("repaired moved repository %s: %s", repo, output)

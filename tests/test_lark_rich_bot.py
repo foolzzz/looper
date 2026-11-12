@@ -4,15 +4,65 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import aclosing
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
 from lark_platform_fake import FakeLarkPlatform
 from looper.agents.bus import MessageBus
 from looper.agents.channels.allowlist import SenderAllowlist
+from looper.agents.channels import lark
+from looper.agents.channels.chat_routing import RouteAction, RouteDecision
 from looper.agents.channels.lark_bot import make_adapter
 from looper.agents.message import MessageType, channel_address
+
+
+@pytest.mark.parametrize("admitted", [False, True])
+def test_bot_stream_keeps_admission_when_chat_senders_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, admitted: bool,
+) -> None:
+    monkeypatch.setattr(lark, "observe_chat", AsyncMock())
+
+    async def main() -> None:
+        async with FakeLarkPlatform() as fake:
+            sender = "ou_sender"
+            senders = frozenset({sender}) if admitted else frozenset()
+            rejected = []
+
+            async def on_rejected(sender_id: str, chat_id: str | None) -> None:
+                rejected.append((sender_id, chat_id))
+
+            bus = MessageBus(runtime_root=tmp_path)
+            adapter = make_adapter({"app_id": fake.app_id}, "test-secret", runtime_root=tmp_path,
+                allowlist=SenderAllowlist("channel-lark_bot", frozenset({"ou_other"})), on_rejected=on_rejected,
+                bot_open_id=fake.bot["open_id"], base_url=fake.base_url,
+                resolve_chat=lambda *_: RouteDecision(RouteAction.ADMIT, "manager", senders=senders))
+            adapter._bus = bus
+            try:
+                async with aclosing(adapter._transport.events()) as events:
+                    pending = asyncio.create_task(anext(events))
+                    await fake.push_message(text="hello", sender=sender)
+                    event = await asyncio.wait_for(pending, 2)
+                    assert event["content"] == ("hello" if admitted else "")
+                    senders = frozenset() if admitted else frozenset({sender})
+                    await adapter._handle_lark_event(event)
+                    queue = bus.get_queue("manager")
+                    if admitted:
+                        assert rejected == []
+                        assert queue.get_nowait().payload["text"] == "hello"
+                        await asyncio.wait_for(asyncio.gather(*adapter._reactions._pending), 2)
+                        assert [sent["kind"] for sent in fake.sent] == ["reaction"]
+                    else:
+                        assert rejected == [(sender, None)]
+                        assert queue.empty()
+                        assert fake.sent == []
+            finally:
+                await adapter.stop()
+                await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(main(), 10))
 
 
 @pytest.mark.parametrize("group", [False, True])
