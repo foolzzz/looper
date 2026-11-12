@@ -234,6 +234,89 @@ def _object(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _attribute(value: str) -> str:
+    """Escape resource attributes the way lark-cli renders them."""
+    for raw, escaped in (("\\", "\\\\"), ('"', '\\"'), ("\n", "\\n"), ("\r", "\\r"), ("\t", "\\t")):
+        value = value.replace(raw, escaped)
+    return value
+
+
+def _resource_tag(kind: str, item: dict[str, Any]) -> str:
+    key = item.get("file_key") or ""
+    name = item.get("file_name") or key
+    attributes = f'key="{_attribute(key)}"'
+    if kind != "audio":
+        attributes += f' name="{_attribute(name)}"'
+    return f"<{kind} {attributes}/>"
+
+
+def _render(message_type: str, raw_content: str, mentions: list[dict[str, Any]]) -> str:
+    """Render non-text events using lark-cli's resource and rich-text notation."""
+    try:
+        body = _object(json.loads(raw_content))
+    except (ValueError, TypeError):
+        return ""
+    if message_type == "image":
+        return f"[Image: {body.get('image_key') or ''}]"
+    if message_type in {"file", "audio", "media", "video"}:
+        return _resource_tag("video" if message_type in {"media", "video"} else message_type, body)
+    if message_type == "sticker":
+        return "[Sticker]"
+    if message_type != "post":
+        return f"[{message_type}]"
+
+    original = body
+    if "content" not in body and "title" not in body:
+        locales = [key for key in ("zh_cn", "en_us", "ja_jp") if isinstance(body.get(key), dict)]
+        locales += [key for key in sorted(body) if key not in locales and isinstance(body[key], dict)]
+        body = _object(body.get(locales[0])) if locales else {}
+    names = {mention["key"]: mention["name"] for mention in mentions if mention["key"]}
+
+    def element(item: Any) -> str:
+        item = _object(item)
+        text, tag = item.get("text") or "", item.get("tag")
+        if tag == "text":
+            styles = item.get("style") or []
+            for style, before, after in (("bold", "**", "**"), ("italic", "*", "*"),
+                                         ("underline", "<u>", "</u>"), ("lineThrough", "~~", "~~")):
+                if style in styles:
+                    text = before + text + after
+            return text
+        if tag == "a":
+            return f"[{text}]({item.get('href') or ''})"
+        if tag == "at":
+            user_id = item.get("user_id") or ""
+            if user_id in {"@_all", "all"}:
+                return '<at user_id="all"></at>'
+            return "@" + (item.get("user_name") or names.get(user_id) or user_id)
+        if tag == "img":
+            return f"![Image]({item.get('image_key') or ''})"
+        if tag == "media":
+            return f"[Media: {item.get('file_key') or ''}]"
+        if tag == "emotion":
+            return f":{item.get('emoji_type') or ''}:"
+        if tag == "code_block":
+            return f"\n```{item.get('language') or ''}\n{text}\n```\n"
+        if tag == "hr":
+            return "\n---\n"
+        return text
+
+    blocks = body.get("content_v2")
+    if not isinstance(blocks, list) or not blocks:
+        blocks = body.get("content") or []
+    lines = [body.get("title") or ""]
+    if isinstance(blocks, list):
+        lines.extend("".join(element(item) for item in paragraph)
+                     for paragraph in blocks if isinstance(paragraph, list))
+    text = "\n".join(lines).strip() or "[Rich text message]"
+    files = original.get("files") or body.get("files") or []
+    if isinstance(files, list):
+        for item in files:
+            if isinstance(item, dict):
+                text += "\n" + _resource_tag("folder" if item.get("is_folder") else "file", item)
+    return text
+
+
 def _flat_event(payload: bytes) -> dict[str, Any] | None:
     data = _object(json.loads(payload))
     header = _object(data.get("header"))
@@ -241,6 +324,8 @@ def _flat_event(payload: bytes) -> dict[str, Any] | None:
         return None
     event = _object(data.get("event"))
     message, sender = _object(event.get("message")), _object(event.get("sender"))
+    if message.get("message_type") == "interactive":
+        return None
     mentions = [{"id": _object(mention.get("id")).get("open_id") or "", "key": mention.get("key") or "",
                  "name": mention.get("name") or ""} for mention in message.get("mentions") or []
                 if isinstance(mention, dict)]
@@ -255,6 +340,8 @@ def _flat_event(payload: bytes) -> dict[str, Any] | None:
         for mention in sorted(mentions, key=lambda item: len(item["key"]), reverse=True):
             if mention["key"]:
                 content = content.replace(mention["key"], "@" + mention["name"])
+    else:
+        content = _render(message.get("message_type") or "", content, mentions)
     flat = {"type": RECEIVE_EVENT, "event_id": header.get("event_id") or "", "chat_id": message.get("chat_id") or "",
             "chat_type": message.get("chat_type") or "", "message_id": message.get("message_id") or "",
             "message_type": message.get("message_type") or "", "sender_id": _object(sender.get("sender_id")).get("open_id") or "",

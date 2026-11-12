@@ -145,6 +145,90 @@ def report(deployment):
     return json.loads((deployment.root / "logs/serve.log").read_text().splitlines()[-1])
 
 
+@pytest.mark.parametrize("kind", [UpgradeKind.CONTROL_PLANE, UpgradeKind.FULL])
+def test_slow_start_with_advancing_log_succeeds_with_default_timeout(deployment, monkeypatch, kind):
+    import looper.upgrade
+
+    monkeypatch.setattr(looper.upgrade, "decide", lambda *args, **kwargs: UpgradePlan(kind, (), ("control_plane",)))
+    log = deployment.root / "logs/serve.log"
+    log.parent.mkdir(parents=True)
+    started = []
+
+    def status(*args, **kwargs):
+        if "start" not in deployment.events:
+            return deployment.responses.status
+        if not started:
+            started.append(deployment.elapsed[0])
+        with log.open("a") as output:
+            output.write(f"startup progress {deployment.elapsed[0]}\n")
+        if deployment.elapsed[0] - started[0] >= 200:
+            return {**deployment.responses.status, "keepers": {"pending": 0}}
+        return None
+
+    deployment.host.get_status = status
+    assert cli.main(["service", "upgrade"]) == 0
+    assert deployment.elapsed[0] - started[0] == 200
+    assert deployment.events.count("start") == 1
+    assert deployment.events.count("stop") == 1
+    assert report(deployment)["serving"] is True
+
+
+@pytest.mark.parametrize("flags, deadline", [([], 300), (["--start-timeout", "0.5"], 0.5), (["--timeout", "4"], 4)])
+@pytest.mark.parametrize("progress", [True, False])
+def test_live_start_timeout_reports_starting_without_restarting(deployment, capsys, flags, deadline, progress):
+    log = deployment.root / "logs/serve.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("startup step: old_step\n")
+    started = []
+
+    def status(*args, **kwargs):
+        if "start" not in deployment.events:
+            return deployment.responses.status
+        if not started:
+            started.append(deployment.elapsed[0])
+        if progress:
+            with log.open("a") as output:
+                output.write("INFO looper.agents.serve: startup step: kept_scan\nworking\n")
+        return None
+
+    deployment.host.get_status = status
+    assert cli.main(["service", "upgrade", *flags]) == 1
+    assert deployment.elapsed[0] - started[0] == deadline
+    assert deployment.state.running
+    assert deployment.events.count("start") == 1
+    assert deployment.events.count("stop") == 1
+    assert "drain_cancel" not in deployment.events
+    data = report(deployment)
+    assert data["starting"] is True and data["serving"] is False
+    assert data["status"] == "starting"
+    assert data["last_startup_step"] == ("kept_scan" if progress else None)
+    assert "restart_hint" not in data
+    error = capsys.readouterr().err
+    assert "still starting" in data["error"] and "do not restart" in error
+    assert "starting: yes" in error
+    assert "serving: no" not in error.splitlines()[0]
+
+
+def test_recovery_start_timeout_also_leaves_live_process_starting(deployment, capsys):
+    deployment.scenario.install_error = True
+    deployment.host.get_status = lambda *args, **kwargs: (
+        deployment.responses.status if "start" not in deployment.events else None)
+    assert cli.main(["service", "upgrade", "--start-timeout", "2"]) == 1
+    assert deployment.events.count("start") == 1 and deployment.state.running
+    assert "drain_cancel" not in deployment.events
+    data = report(deployment)
+    assert data["starting"] is True and data["serving"] is False
+    assert "still starting" in data["recovery_error"]
+    assert "restart_hint" not in data
+    assert "do not restart" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_invalid_start_timeout_refused_without_any_mutation(deployment, value):
+    assert cli.main(["service", "upgrade", "--start-timeout", value]) == 1
+    assert deployment.events == []
+
+
 @pytest.mark.parametrize("startup_steps", [None, {"imports": 1.3, "pool": 0.1, "total": 2.6}])
 def test_upgrade_report_copies_startup_steps_when_available(deployment, startup_steps):
     if startup_steps is not None:
@@ -537,8 +621,10 @@ def test_manager_restart_during_drain_waits_for_serving_without_starting(
     assert data["serving"] is serving
     assert data["running_code_fingerprint"] == (
         deployment.scenario.current.components["control_plane"] if serving else None)
-    assert ("restart_hint" in data) is not serving
-    assert f"serving: {'yes' if serving else 'no'}" in capsys.readouterr().err
+    assert "restart_hint" not in data
+    if not serving:
+        assert data["starting"] is True
+    assert ("serving: yes" if serving else "starting: yes") in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("late_exit", [True, False])
@@ -1285,14 +1371,26 @@ def test_failed_start_retries_new_install_and_reports_serving(deployment, recove
     log = deployment.root / "logs/serve.log"
     log.parent.mkdir(parents=True)
     log.write_text("startup output\n")
-    deployment.host.get_status = lambda *args, **kwargs: (
-        deployment.responses.status if "stop" not in deployment.events or (recovery_serves and deployment.events.count("start") == 2) else None)
+    failed_at = []
+
+    def status(*args, **kwargs):
+        if "stop" not in deployment.events or (recovery_serves and deployment.events.count("start") == 2):
+            return deployment.responses.status
+        deployment.state.running = False
+        deployment.state.pid = None
+        deployment.state.last_exit = "status 1"
+        failed_at.append(deployment.elapsed[0])
+        return None
+
+    deployment.host.get_status = status
     assert cli.main(["service", "upgrade", "--timeout", "1"]) == 1
     assert deployment.events.count("start") == 2
     assert deployment.events.count("install") == 1
     assert deployment.scenario.current is deployment.scenario.target
     data = report(deployment)
     assert data["status"] == "failed"
+    assert "exited before answering" in data["error"]
+    assert deployment.elapsed[0] == failed_at[0]
     assert data["serving"] is recovery_serves
     assert ("recovery_error" in data) is not recovery_serves
     error_line = capsys.readouterr().err.splitlines()[0]

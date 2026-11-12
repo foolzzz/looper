@@ -12,7 +12,7 @@ import pytest
 from looper.agents import cron, schedule_notify, schedules
 from looper.db import schedules as db_schedules
 from tests.db_support import DSN
-from tests.schedule_support import UTC, ScheduleEnv, run_scheduled, with_sender
+from tests.schedule_support import UTC, TELEGRAM_CHAT, ScheduleEnv, allow_telegram, run_scheduled, with_sender
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 LA = cron.zone("America/Los_Angeles")
@@ -23,11 +23,12 @@ def local(day: int, hour: int, minute: int = 0) -> datetime:
 
 
 async def configured(env: ScheduleEnv, **fields: Any) -> str:
+    await allow_telegram(env)
     async with env.pool.acquire() as conn, conn.transaction():
         sid = await db_schedules.create_schedule(conn, project_id=env.project_id, profiles={}, fields={
             "name": "daily", "kind": "command", "command": "printf failure; exit 1", "requirement": "",
             "cron": "30 5 * * *", "timezone": "America/Los_Angeles", "run_timeout_mode": "none",
-            "notify": "failures", "notify_channel": "telegram", "notify_chat": "stand-in", **fields,
+            "notify": "failures", "notify_channel": "telegram", "notify_chat": TELEGRAM_CHAT, **fields,
         })
         await db_schedules.update_schedule(conn, sid, {"enabled": True, "enabled_at": env.clock.now})
     return sid

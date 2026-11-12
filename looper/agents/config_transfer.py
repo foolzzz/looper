@@ -48,9 +48,9 @@ task limits, not whether they are enabled, their runs or counters, nor their
 own directory (a machine path: ``repoint`` marks one that had it). An import
 creates a schedule it adds, and rewrites one whose settings differ, disabled
 (enabling is the approval, scheduled-tasks RFC D6), with a note; one whose
-settings match is left as it is. A ``notify_target`` this machine's sender
-allowlists (as the import leaves the channels) do not allow is dropped, with a
-note.
+settings match is left as it is. A ``notify_target`` neither this machine's sender
+allowlists (as the import leaves the channels) nor its built-in bot bindings
+offer is dropped, with a note.
 
 **Runtimes** are destination-local. A referenced custom runtime uses the same
 name and type here, or the built-in runtime of its type with a note. Imports
@@ -997,6 +997,7 @@ class _Target:
     layers: dict[tuple[str, str | None, str | None], dict[str, Any]] = field(default_factory=dict)
     roles: dict[str, dict[str, Any]] = field(default_factory=dict)
     channels: dict[str, dict[str, Any]] = field(default_factory=dict)
+    bound_notify_targets: set[tuple[str, str]] = field(default_factory=set)
     items: dict[tuple[str, str, str | None], dict[str, Any]] = field(default_factory=dict)
     installs: dict[tuple[str, str | None], dict[str, Any]] = field(default_factory=dict)
     projects: dict[str, dict[str, Any]] = field(default_factory=dict)  # by lower-case name
@@ -1025,6 +1026,11 @@ class _Target:
             target.layers[(row["scope"], row["role"], row["project_id"])] = row
         target.roles = {row["role"]: row for row in await db.read_roles(conn)}
         target.channels = {row["channel_id"]: row for row in await db.read_channels(conn)}
+        from ..db import chat_bindings
+
+        target.bound_notify_targets = {(row["channel_type"], row["chat_id"]) for row in
+                                       await chat_bindings.notification_targets(pool=conn)
+                                       if row["channel_id"] == builtin_channel_id(row["channel_type"])}
         target.bot_sequence = await db.read_bot_sequence(conn)
         target.items = {(row["kind"], row["name"], row["owner_project_id"]): row for row in await db.read_items(conn)}
         target.installs = {(row["item_id"], row["project_id"]): row for row in await db.read_installs(conn)}
@@ -1087,7 +1093,7 @@ class _Importer:
         self.seen_items: set[tuple[str, str, str | None]] = set()
         self.seen_projects: set[str] = set()
         # Each channel's configuration as the import leaves it (the file's over this machine's): its sender allowlist
-        # says which chats a schedule may tell.
+        # and this machine's built-in bot bindings say which chats a schedule may tell.
         self.channel_configs = {row["channel_type"]: dict(row["config"] or {}) for row in target.channels.values()
                                 if row["channel_id"] in BUILTIN_CHANNEL_IDS}
         # Imported configs by immutable id; identity checks see the final graph even in a preview.
@@ -2334,6 +2340,8 @@ class _Importer:
 
         if channel not in SENDER_ID_FORMATS or not isinstance(chat, str):
             return False
+        if (channel, chat) in self.target.bound_notify_targets:
+            return True
         config = self.channel_configs.get(channel) or {}
         try:
             return chat in sender_ids(channel, config.get(SENDER_ID_FORMATS[channel].field))
@@ -2344,7 +2352,7 @@ class _Importer:
                          ) -> tuple[dict[str, Any], dict[str, tuple[str, str]], dict[str, int]]:
         """A schedule of the file, checked as the API checks one: its settings (``schedules.FIELDS`` but its
         directory), its Agent Profiles as role -> (name, id; ``new:...`` in a preview) and its task limits.
-        ``_Skip`` otherwise; a notify target this machine's allowlists do not allow is dropped, with a note."""
+        ``_Skip`` otherwise; a notify target this machine's allowlists and bindings do not offer is dropped, with a note."""
         from . import cron, schedules
         from .profile_registry import RegistryError, check_roles
         from .projects import TASK_PROFILE_ROLES, RequestError, _concurrency_limits
@@ -2406,8 +2414,9 @@ class _Importer:
                 values["notify_channel"], values["notify_chat"] = target["channel"], target["chat"]
             else:
                 self.plan.notes.append(f"schedule {label}{values['name']}: {target.get('channel')} chat "
-                                       f"{target.get('chat')!r} is not in this machine's sender allowlist, so it "
-                                       "tells the dashboard only; add the sender in Settings → Channels, then pick it")
+                                       f"{target.get('chat')!r} is not in this machine's sender allowlist or bound "
+                                       "to a Manager on its built-in bot, so it tells the dashboard only; "
+                                       "bind the chat in Settings → Channels, then pick it")
         profiles: dict[str, tuple[str, str]] = {}
         for role, name in _mapping(entry.get("profiles") or {}, "profiles").items():
             if role not in TASK_PROFILE_ROLES:

@@ -749,10 +749,11 @@ class TestLarkAllowlist:
         assert self._run(tmp_path, monkeypatch, _lark_event(None), OPEN_ID).messages == []
         assert self._run(tmp_path, monkeypatch, _lark_event(OTHER_OPEN_ID), "5d9bdxxx").messages == []
 
-    @pytest.mark.parametrize("fields", [{"message_type": "image", "content": "[Image]"}, {"sender_type": "bot"},
+    @pytest.mark.parametrize("fields", [{"sender_type": "bot"},
                                         {"type": "im.message.reaction.created_v1"}, {"content": "  "}])
-    def test_only_a_users_text_message_reaches_the_manager(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                                           fields: dict[str, Any]) -> None:
+    def test_bots_other_events_and_empty_messages_do_not_reach_the_manager(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fields: dict[str, Any],
+    ) -> None:
         assert self._run(tmp_path, monkeypatch, _lark_event(OPEN_ID, **fields), OPEN_ID).messages == []
 
     @pytest.mark.parametrize("sender", [OPEN_ID, OTHER_OPEN_ID])

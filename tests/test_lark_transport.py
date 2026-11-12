@@ -104,6 +104,90 @@ def _envelope(correlation_id: str, message_type: MessageType = MessageType.AGENT
                                   correlation_id=correlation_id, payload=payload)
 
 
+@pytest.mark.parametrize("route", ["admitted", "silent", "off"])
+def test_unsupported_group_messages_follow_routing_before_replying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str,
+) -> None:
+    from looper.agents.channels.chat_routing import RouteAction, RouteDecision
+    from looper.agents.tiers.manager import TURNED_OFF_REPLY
+
+    async def main() -> None:
+        observed: list[bool] = []
+
+        async def observe(*args: Any, suppressed: bool) -> None:
+            observed.append(suppressed)
+
+        monkeypatch.setattr("looper.agents.channels.lark.observe_chat", observe)
+        transport = StubTransport()
+        adapter = _adapter(tmp_path, transport, resolve_chat=lambda *_: RouteDecision(
+            RouteAction.SILENT if route == "silent" else RouteAction.ADMIT, "manager-helper", True),
+            manager_running=lambda _: route != "off")
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        try:
+            await adapter._handle_lark_event(_event(chat_type="group", chat_id="oc_team", content="",
+                                                   message_type="share_chat", mentions=[BOT_MENTION]))
+            assert observed == [route == "silent"]
+            assert bus.journal.undelivered() == []
+            expected = (TURNED_OFF_REPLY if route == "off" else
+                        "暂不支持这类飞书消息（share_chat），请发文字或富文本。")
+            assert transport.calls == ([] if route == "silent" else [
+                ("reply", {"message_id": "om_in", "text": expected})])
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
+
+
+def test_an_unsupported_reply_failure_does_not_stop_the_next_event(tmp_path: Path) -> None:
+    async def main() -> None:
+        transport = StubTransport()
+        adapter = _adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        try:
+            transport.error = LarkCliError("reply failed")
+            await adapter._handle_lark_event(_event(chat_type="group", chat_id="oc_team",
+                                                   message_type="share_chat", mentions=[BOT_MENTION]))
+            assert transport.calls == [("reply", {"message_id": "om_in", "text":
+                                                   "暂不支持这类飞书消息（share_chat），请发文字或富文本。"})]
+            transport.error = None
+            await adapter._handle_lark_event(_event(message_id="om_next"))
+            (message,) = bus.journal.undelivered()
+            assert message.payload["text"] == "hello"
+            await asyncio.gather(*adapter._reactions._pending)
+            assert transport.calls[-1] == ("react", {"message_id": "om_next"})
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(("content", "reply_to", "delivered"), [
+    ("@@HelperBot ", None, False), ("@@HelperBot ", "om_parent", True), (" ", "om_parent", False),
+    ("[Rich text message]", None, True),
+])
+def test_posts_keep_the_empty_message_and_reply_rules(
+    tmp_path: Path, content: str, reply_to: str | None, delivered: bool,
+) -> None:
+    async def main() -> None:
+        transport = StubTransport()
+        adapter = _adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        try:
+            await adapter._handle_lark_event(_event(message_type="post", chat_type="group",
+                                                   content=content, mentions=[BOT_MENTION], reply_to=reply_to))
+            assert bool(bus.journal.undelivered()) is delivered
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
+
+
 @pytest.mark.parametrize("printed", ["", "sent, without JSON"])
 @pytest.mark.parametrize("reply", [False, True])
 def test_cli_ordinary_messages_ignore_successful_stdout(
@@ -359,7 +443,7 @@ def test_a_post_without_a_message_id_is_not_successful(tmp_path: Path) -> None:
     asyncio.run(main())
 
 
-@pytest.mark.parametrize("operation", ["answer", "group_answer", "notify"])
+@pytest.mark.parametrize("operation", ["answer", "group_answer", "notify", "group_notify"])
 def test_transport_send_failures_are_returned_as_receipts(tmp_path: Path, operation: str) -> None:
     async def main() -> None:
         transport = StubTransport()
@@ -368,11 +452,42 @@ def test_transport_send_failures_are_returned_as_receipts(tmp_path: Path, operat
         adapter._correlation_chat["c1"] = "oc_dm"
         if operation == "group_answer":
             adapter._group_message["c1"] = "om_in"
-        receipt = (await adapter.notify(OPEN_ID, "notice") if operation == "notify" else
+        receipt = (await adapter.notify("oc_team" if operation == "group_notify" else OPEN_ID, "notice")
+                   if operation in ("notify", "group_notify") else
                    await adapter.deliver(_envelope("c1", text="answer")))
         assert not receipt.success and receipt.channel == "lark_bot"
         assert "the platform refused" in (receipt.error or "")
         await adapter.stop()
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("target,field", [(OPEN_ID, "user_id"), ("oc_team", "chat_id")])
+def test_schedule_notification_uses_the_native_destination(tmp_path, target, field):
+    async def main():
+        transport = StubTransport()
+        adapter = _adapter(tmp_path, transport)
+        try:
+            receipt = await adapter.notify(target, "Project progress report")
+            assert receipt.success
+            assert transport.calls == [("send", {field: target, "text": "Project progress report"})]
+        finally:
+            await adapter.stop()
+
+    asyncio.run(main())
+
+
+def test_schedule_notification_refuses_unknown_id_prefix(tmp_path):
+    async def main():
+        transport = StubTransport()
+        adapter = _adapter(tmp_path, transport)
+        try:
+            receipt = await adapter.notify("on_unknown", "Project progress report")
+            assert not receipt.success
+            assert "oc_" in receipt.error and "ou_" in receipt.error
+            assert transport.calls == []
+        finally:
+            await adapter.stop()
 
     asyncio.run(main())
 

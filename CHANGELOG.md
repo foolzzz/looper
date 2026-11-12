@@ -18,6 +18,54 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.152] - 2026-11-12
+
+### Changed
+
+- **A slow start during `looper service upgrade` is waited for, not reported as a failure.** ([#1274](https://github.com/foolzzz/looper/pull/1274))
+  - `--start-timeout` (alias `--timeout`) defaults to 300 s instead of 120 s. A live process is allowed the whole interval.
+  - A new process that has exited fails at once, also for `looper service install` and `restart`.
+  - At the deadline with the process alive, the report has `status: "starting"`, `starting: true`, `serving: false` and `last_startup_step`; the process is left running and the CLI exits nonzero, saying not to restart it.
+  - The serve log records `startup step: <name>` before each startup step.
+  - Not model-visible.
+
+## [2.14.151] - 2026-11-12
+
+### Changed
+
+- **Managers with `tools = tasks` can create and manage agent schedules in their scope.** ([#1268](https://github.com/foolzzz/looper/pull/1268))
+  - A task-scoped Manager now has the schedule tool. Its project scope limits it to its projects, and its own scope to schedules it created. The check runs before confirmation and again at execution, against the confirmed schedule's id.
+  - It may list and read command schedules and schedules with a gate, but cannot create, change, enable, disable, run or delete them. Creates and updates that set `command`, `env`, `env_file`, `gate_command` or `gate_timeout_seconds`, or the command kind, are refused as forbidden, including attempts to clear gate fields.
+  - Notification targets: a task-scoped Manager may select only chats bound to itself, checked on create, update, enable and manual run; a schedule made from a bound group chat defaults to that chat. The dashboard, the operator API and Managers with every tool are unchanged.
+  - Lark notices go to `oc_` chat ids as chats and `ou_` open ids as users; any other id fails delivery with a clear error instead of being sent as a direct message.
+  - The Manager scope text and the refusal texts are model-visible.
+
+## [2.14.150] - 2026-11-12
+
+### Changed
+
+- **Schedules can notify a group chat bound to a Manager.** ([#1267](https://github.com/foolzzz/looper/pull/1267))
+  - Chats explicitly bound to a Manager on a built-in channel are now valid schedule notify targets, besides allowlisted senders' direct chats. Notices go through the binding's bot; a Lark native chat id (`oc_`) is sent to the chat.
+  - A target whose allowlist entry or binding was removed is kept but unavailable: delivery is recorded as failed and nothing is rerouted. This check now also covers allowlisted direct chats. Schedule views carry `notify_target_available`, and the dashboard marks such targets "(unavailable)".
+  - A Manager with limited scope may select only chats bound to itself. Config import keeps a target the destination allowlists or binds. The schedule view, the refusal texts and the target labels are model-visible.
+
+## [2.14.149] - 2026-11-11
+
+### Changed
+
+- **Lark: rich-text posts reach the Manager as text; other message types are answered.** ([#1270](https://github.com/foolzzz/looper/pull/1270))
+  - A `post` from an admitted sender, in a direct message or as a group @-mention of the bot, now reaches the Manager (it was ignored) as lark-cli's rendering: title, paragraphs, `[text](url)` links and fenced code, mentions as `@name`, the bot's own mention removed. Inline images and attached files appear as `[image N]` / `[file N: name]`, followed by a line saying Looper cannot receive images or files yet. The text is model-visible.
+  - Any other type from an admitted sender (image, file, audio, media, sticker, and so on) now gets one reply, 「暂不支持这类飞书消息（<type>），请发文字或富文本。」, instead of silence: a reply to the message in a group, a message in a direct chat. It starts no Manager turn and adds no reaction; a silent chat gets nothing and a turned-off Manager gets only its usual reply.
+  - The `lark_bot` channel renders non-text content the way lark-cli does instead of passing the message's raw JSON, and drops `interactive` cards. Bots' messages, unlisted senders, group messages without an @-mention and empty messages are unchanged.
+
+## [2.14.148] - 2026-11-11
+
+### Changed
+
+- **Cursor Workers: a dropped connection resumes the same session instead of restarting the run.** ([#1263](https://github.com/foolzzz/looper/pull/1263))
+  - A Worker or Reviewer run that ends with `RetriableError: WritableIterable is closed` relaunches with `--resume <session id>` and a short continuation prompt, up to three times within the run's deadline, when the failed attempt produced model output; otherwise it keeps the single fresh restart. The continuation prompt is model-visible.
+  - `cursor_run_retry` events gain `mode` (`resume` or `restart`) and `attempt` up to 3; failed attempts share the 1,000-character stderr limit. Manager and Planner turns keep their single retry.
+
 ## [2.14.147] - 2026-11-11
 
 ### Changed

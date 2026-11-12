@@ -22,7 +22,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ... import child_env
 from ..run_usage import Usage, reported_totals, run_usage
@@ -58,6 +58,11 @@ _PROBE_TIMEOUT_SEC = 10.0
 MCP_MAX_WAIT_SECONDS = 50
 _ROUTED_MODEL = re.compile(r"^> Auto routed to ([^\n]+)\n\n?")
 RETRY_SUMMARY = "Cursor's CLI gave up after reconnecting; retried once"
+CONTINUATION_PROMPT = (
+    "[Looper] Your previous reply was cut off by a connection error before it reached Looper. "
+    "Continue from where you stopped. If your step's work is already done, send your final JSON report now; "
+    "do not redo work that is already in the files or commits."
+)
 # Observed when Cursor's CLI gives up after its reconnects, without a result.
 _TRANSIENT_ERRORS = ("RetriableError: WritableIterable is closed",)
 
@@ -72,15 +77,21 @@ def cursor_failure(result: dict[str, Any] | None, stderr: str) -> CursorFailure 
     return None
 
 
-def retry_event(stderr: str) -> dict[str, Any]:
-    return {"type": "system", "subtype": "cursor_run_retry", "attempt": 1,
-            "reason": CursorFailure.TRANSIENT_BACKEND.value, "summary": RETRY_SUMMARY,
+def retry_event(stderr: str, *, attempt: int = 1, mode: Literal["resume", "restart"] | None = None) -> dict[str, Any]:
+    summary = f"Cursor's CLI gave up after reconnecting; resumed session (attempt {attempt}/3)" \
+        if mode == "resume" else RETRY_SUMMARY
+    return {"type": "system", "subtype": "cursor_run_retry", "attempt": attempt,
+            **({"mode": mode} if mode is not None else {}),
+            "reason": CursorFailure.TRANSIENT_BACKEND.value, "summary": summary,
             "stderr": ttadk.error_tail(stderr)[-400:]}
 
 
-def retry_stderr(first: str, second: str) -> str:
-    # Keep both attempts within the tiers' 1,000-character diagnostic limit.
-    return f"Attempt 1 (RetriableError):\n{ttadk.error_tail(first)[-400:]}\nAttempt 2:\n{ttadk.error_tail(second)[-400:]}"
+def retry_stderr(first: str, *following: str) -> str:
+    # Share the tiers' 1,000-character diagnostic limit across every attempt.
+    attempts = (first, *following)
+    headers = ["Attempt 1 (RetriableError):\n", *(f"Attempt {i}:\n" for i in range(2, len(attempts) + 1))]
+    budget = min(400, (1000 - sum(map(len, headers)) - len(attempts) + 1) // len(attempts))
+    return "\n".join(header + ttadk.error_tail(stderr)[-budget:] for header, stderr in zip(headers, attempts))
 
 
 def write_ttadk_shim(local: Path) -> Path:
@@ -379,7 +390,7 @@ class CursorAgentRuntime(RuntimeAdapter):
                          instructions: str = "") -> None:
         if stdin.is_closing():
             raise RuntimeError("Cursor Agent reads one prompt per run: it takes no user turn while it runs")
-        stdin.write((instructions_block(instructions) + "\n\n" + text).encode("utf-8"))
+        stdin.write(((instructions_block(instructions) + "\n\n" if instructions else "") + text).encode("utf-8"))
         await stdin.drain()
         stdin.close()
 
@@ -457,10 +468,15 @@ class CursorChannel(StreamChannel):
         super().__init__(runtime, process, model=model)
         self._cursor = runtime
         self._instructions = instructions
+        self.stream = CursorStream(model=model)
 
-    async def start(self, prompt: str) -> None:
+    async def start(self, prompt: str, *, resume: bool = False) -> None:
         assert self._process.stdin is not None
-        await self._cursor.write_turn(self._process.stdin, prompt, instructions=self._instructions)
+        await self._cursor.write_turn(self._process.stdin, prompt, instructions="" if resume else self._instructions)
+
+    def events(self) -> AsyncIterator[dict[str, Any]]:
+        assert self._process.stdout is not None
+        return self.stream.events(self._process.stdout)
 
 
 def tool_name(key: str, args: Mapping[str, Any]) -> str:

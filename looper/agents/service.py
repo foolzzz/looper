@@ -71,6 +71,7 @@ from .self_check import OK, SKIP, WARN, Check
 DEFAULT_LABEL = "com.looper.serve"
 DEFAULT_PORT = 8767
 DEFAULT_TIMEOUT_SECONDS = 120.0
+DEFAULT_START_TIMEOUT_SECONDS = 300.0
 LOG_RELATIVE_PATH = Path("logs") / "serve.log"
 PROBE_INTERVAL_SECONDS = 60
 PROBE_LOG_RELATIVE_PATH = Path("logs") / "probe.log"
@@ -807,6 +808,30 @@ class Serving:
     status: dict
 
 
+class ServiceStarting(ServiceError):
+    """The readiness deadline passed without evidence that the new process exited."""
+
+    def __init__(self, message: str, last_startup_step: str | None) -> None:
+        super().__init__(message)
+        self.last_startup_step = last_startup_step
+
+
+def _last_startup_step(log_path: Path | None, offset: int) -> str | None:
+    step = None
+    if log_path is None:
+        return step
+    try:
+        with log_path.open("rb") as source:
+            # Only this start's entries count; tolerate a truncated log.
+            source.seek(offset if log_path.stat().st_size >= offset else 0)
+            for line in source:
+                if b"startup step: " in line:
+                    step = line.split(b"startup step: ", 1)[1].decode(errors="replace").strip()
+    except OSError:
+        pass
+    return step
+
+
 def _start_and_wait(mgr: _Manager, port: int, log_path: Path | None, timeout: float,
                     runtime_root: Path | None, address: str = "127.0.0.1") -> Serving:
     """Start the stopped service on a free ``port`` and wait until it answers ``POST /api/v1/system/status``."""
@@ -815,18 +840,38 @@ def _start_and_wait(mgr: _Manager, port: int, log_path: Path | None, timeout: fl
         raise ServiceError(f"port {port} is in use by another process, so the service is installed but not "
                            "started; stop that process (or install again with another --port), then run "
                            "`looper service restart`")
+    try:
+        log_offset = log_path.stat().st_size if log_path else 0
+    except OSError:
+        log_offset = 0
     mgr.start()
     deadline = host.clock() + timeout
+    seen_running = False
+    pid = None
     while True:
         token = operator_auth.read_token(runtime_root) if runtime_root is not None else None
         status = host.get_status(port, token, address)
         if status is not None:
             return Serving(pid=mgr.state().pid, status=status)
+        state = mgr.state()
+        pid = state.pid or pid
+        alive = state.running or (pid is not None and host.pid_alive(pid))
+        seen_running = seen_running or alive
+        if not alive and (seen_running or not state.loaded
+                          or state.last_exit not in ("", "(never exited)")):
+            raise ServiceError(f"the service exited before answering on port {port} "
+                               f"({_describe(state)}); see {log_path}{_log_tail(log_path)}")
         if host.clock() >= deadline:
-            state = mgr.state()
+            if alive:
+                step = _last_startup_step(log_path, log_offset)
+                progress = f"; last startup step: {step}" if step else "; no startup step logged yet"
+                raise ServiceStarting(
+                    f"the service did not answer on port {port} within {timeout:.0f} s "
+                    f"({_describe(state)}); it is still starting; do not restart it{progress}; "
+                    f"see {log_path}{_log_tail(log_path)}", step)
             raise ServiceError(f"the service did not answer on port {port} within {timeout:.0f} s "
                                f"({_describe(state)}); see {log_path}{_log_tail(log_path)}")
-        host.sleep(1.0)
+        host.sleep(min(1.0, max(0.0, deadline - host.clock())))
 
 
 def _log_tail(log_path: Path | None, lines: int = 15) -> str:
@@ -1270,7 +1315,8 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
     from ..upgrade import UpgradeKind
 
     if not all(math.isfinite(value) and value > 0 for value in (timeout, drain_timeout, turns_timeout)):
-        raise ServiceError("--timeout, --drain-timeout and --turns-timeout must be positive finite numbers")
+        raise ServiceError("--start-timeout (--timeout), --drain-timeout and --turns-timeout "
+                           "must be positive finite numbers")
     control_plane = plan.kind == UpgradeKind.CONTROL_PLANE
     token = operator_auth.read_token(root)
     if not token:
@@ -1398,7 +1444,8 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                       running_version=whoami["looper_version"], web_fingerprint=actual.components["web"])
     except BaseException as exc:
         report["error"] = str(exc)
-        if draining and not restart_started:
+        starting = exc if isinstance(exc, ServiceStarting) else None
+        if draining and not restart_started and starting is None:
             try:
                 # bootout/stop can take effect and then report an error. Check
                 # exit evidence before deciding that only drain_cancel is needed.
@@ -1435,8 +1482,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                         if host.port_in_use(port):
                             raise port_conflict()
                         stopped = True
-                # A timed-out start can leave a loaded unit or a partial process.
-                # Retry the current install from a stopped unit before cancelling.
+                # Retry an exited or failed start from a stopped unit before cancelling.
                 if stopped:
                     pid = None
                     if start_attempted:
@@ -1452,10 +1498,13 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                     _start_and_wait(mgr, port, log_path, timeout, root)
             except Exception as cancel_error:
                 report["recovery_error"] = str(cancel_error)
-            try:
-                host.system_operation(port, token, "drain_cancel", {})
-            except (ServiceError, OSError) as cancel_error:
-                report["recovery_error"] = "; ".join(filter(None, (report.get("recovery_error"), str(cancel_error))))
+                if isinstance(cancel_error, ServiceStarting):
+                    starting = cancel_error
+            if starting is None:
+                try:
+                    host.system_operation(port, token, "drain_cancel", {})
+                except (ServiceError, OSError) as cancel_error:
+                    report["recovery_error"] = "; ".join(filter(None, (report.get("recovery_error"), str(cancel_error))))
         try:
             answer = host.get_status(port, token, "127.0.0.1")
             if answer is None and draining and not stop_attempted and before is not None:
@@ -1466,6 +1515,10 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                     while answer is None and host.clock() < deadline:
                         host.sleep(min(1.0, deadline - host.clock()))
                         answer = host.get_status(port, token, "127.0.0.1")
+                    if answer is None and mgr.state().running and host.clock() >= deadline:
+                        starting = ServiceStarting(
+                            f"the service is still starting after {timeout:.0f} s; do not restart it",
+                            _last_startup_step(log_path, 0))
             report["serving"] = answer is not None and answer.get("status") != "unauthorized"
         except Exception:
             report["serving"] = False
@@ -1476,6 +1529,9 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 report["running_code_fingerprint"] = actual.components["control_plane"]
             except Exception as fingerprint_error:
                 report["running_code_fingerprint_error"] = str(fingerprint_error)
+        elif starting is not None:
+            report.update(status="starting", starting=True, last_startup_step=starting.last_startup_step)
+            report["running_code_fingerprint_error"] = "the service is still starting"
         else:
             report["running_code_fingerprint_error"] = "the service is not serving"
             report["restart_hint"] = "looper service restart"
@@ -1483,9 +1539,10 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
             raise
         serving = "yes" if report["serving"] else "no"
-        hint = f"; run `{report['restart_hint']}`" if not report["serving"] else ""
+        readiness = "starting: yes; still starting; do not restart it" if report.get("starting") else f"serving: {serving}"
+        hint = f"; run `{report['restart_hint']}`" if "restart_hint" in report else ""
         error, separator, detail = str(exc).partition("\n")
-        raise ServiceError(f"{error}; serving: {serving}{hint}{separator}{detail}\n{line}") from exc
+        raise ServiceError(f"{error}; {readiness}{hint}{separator}{detail}\n{line}") from exc
     return (f"plan       {plan.kind.value}\n"
             + "\n".join("reason     " + reason for reason in plan.reasons)
             + f"\nrunning code fingerprint {report['running_code_fingerprint']}, "
@@ -1550,7 +1607,7 @@ def _checkout_sync_environment(host: Host) -> Path:
 
 
 def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dry_run: bool = False,
-            timeout: float = DEFAULT_TIMEOUT_SECONDS, drain_timeout: float = 1200, turns_timeout: float = 180,
+            timeout: float = DEFAULT_START_TIMEOUT_SECONDS, drain_timeout: float = 1200, turns_timeout: float = 180,
             no_force: bool = False) -> str:
     """Compute a plan before mutating files; stop the old interpreter before a full install."""
     from .. import components
