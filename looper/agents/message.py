@@ -197,7 +197,7 @@ class MessageEnvelope:
 class UserMessagePayload(TypedDict, total=False):
     text: str
     language: str
-    attachments: list[dict[str, Any]]
+    attachments: list[dict[str, Any]]  # chat_attachments.Attachment.to_payload(): Looper-saved files and receipt states
     channel_context: dict[str, Any]
 
 

@@ -1,8 +1,13 @@
 """Operator dashboard chat delivery and its reply and open-thread streams."""
 
+import base64
+import binascii
 import json
+import shutil
+from uuid import uuid4
 
-from .. import profile_registry
+from .. import chat_attachments, profile_registry
+from ..chat_attachments import AttachmentState, PER_MESSAGE_MAX, WEB_TOTAL_MAX_BYTES
 from ..api_v1 import Operation, _array, _object, _STR
 from ..chat_targets import HTTP_409, ChatTargetError, resolve_chat_target
 from ..ops import ErrorCode, OpError
@@ -47,7 +52,10 @@ OPERATIONS = (
         "Returns correlation_id for reply_events; a thread owned by another Manager returns conflict with manager_id.",
         _object({"text": {"type": "string", "minLength": 1, "maxLength": 32000}, "session_id": _STR,
             "message_id": _STR, "target": CHAT_TARGET, "new_session_profile_id": _STR,
-            "language": {"enum": ["zh", "en"]}, "goal_id": _STR, "attachments": _array({"type": "object"})},
+            "language": {"enum": ["zh", "en"]}, "goal_id": _STR, "attachments": {
+                **_array(_object({"filename": {"type": "string", "minLength": 1, "maxLength": 255},
+                    "content_base64": {"type": "string", "maxLength": 4 * ((WEB_TOTAL_MAX_BYTES + 2) // 3)}},
+                    ["filename", "content_base64"], closed=True)), "maxItems": PER_MESSAGE_MAX}},
             ["text"], closed=True), _object({"correlation_id": _STR}, closed=True),
         risk="write", operator_only=True),
     _stream("reply_events", {"correlation_id": _ID}, ["correlation_id"],
@@ -80,9 +88,33 @@ async def run(server, operation, arguments, principal, headers):
         owner = await server._thread_owner_for_send(session_id, target.agent_id)
         if owner != target.agent_id:
             raise await server._foreign_thread_error(owner)
+    attachments = arguments.get("attachments")
+    if attachments:
+        if target.agent_type != "manager":
+            raise OpError(ErrorCode.INVALID, "attachments go only to a Manager")
+        if server._runtime_root is None:
+            raise OpError(ErrorCode.INVALID, "attachment storage is unavailable")
+        items = []
+        total = 0
+        for upload in attachments:
+            name = upload["filename"]
+            try:
+                content = base64.b64decode(upload["content_base64"], validate=True)
+            except (binascii.Error, ValueError):
+                raise OpError(ErrorCode.INVALID, f"{name}: invalid base64") from None
+            total += len(content)
+            if total > WEB_TOTAL_MAX_BYTES:
+                raise OpError(ErrorCode.INVALID, f"{name}: attachments exceed {WEB_TOTAL_MAX_BYTES} bytes")
+            items.append((name, content))
+        upload_id = uuid4().hex
+        saved = chat_attachments.store_upload(server._runtime_root, "web", upload_id, items)
+        if rejected := next((item for item in saved if item.state is not AttachmentState.SAVED), None):
+            shutil.rmtree(chat_attachments.root(server._runtime_root) / "web" / upload_id)
+            raise OpError(ErrorCode.INVALID, f"{rejected.name}: {rejected.reason or rejected.state.value}")
+        attachments = [item.to_payload() for item in saved]
     return await server._deliver_chat(text=text, target=target, session_id=session_id,
         message_id=arguments.get("message_id"), language=arguments.get("language", "zh"),
-        goal_id=arguments.get("goal_id"), attachments=arguments.get("attachments"), new_session_profile_id=profile)
+        goal_id=arguments.get("goal_id"), attachments=attachments, new_session_profile_id=profile)
 
 
 async def stream(server, operation, arguments, principal, headers, writer):

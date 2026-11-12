@@ -1,7 +1,9 @@
 """Dashboard chat keeps its own typed operator transport and closes abandoned subscriptions."""
 
 import asyncio
+import base64
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -66,7 +68,8 @@ def test_client_refusal_precedes_body_validation_and_dispatch(tmp_path, clients,
     ("thread_events", {"session_id": 1}), ("thread_events", {"session_id": "thread", "manager": None})])
 def test_stream_requests_are_closed_with_required_typed_identifiers(tmp_path, action, body):
     async def run():
-        async with _serving(tmp_path, listen=True) as server:
+        # Schema refusals need no subscription or socket; disconnects are exercised below.
+        async with _serving(tmp_path) as server:
             status, _, answer = await post(server, action, body)
             assert status == 400 and answer["error"]["code"] == "invalid"
     asyncio.run(run())
@@ -94,7 +97,9 @@ def test_manager_send_preserves_web_context_attachments_and_typed_correlation(tm
     async def run():
         async with _serving(tmp_path) as server:
             prepare(server, state)
-            attachments = [{"name": "note.txt", "path": "note.txt", "mime_type": "text/plain", "size": 3}]
+            files = [("screenshot.png", b"\x89PNG\r\n\x1a\n"), ("../../note.txt", b"note")]
+            attachments = [{"filename": name, "content_base64": base64.b64encode(data).decode()}
+                           for name, data in files]
             status, _, answer = await post(server, "send", {
                 "text": "hello", "session_id": "thread", "message_id": "message", "attachments": attachments})
             assert status == 200
@@ -103,11 +108,63 @@ def test_manager_send_preserves_web_context_attachments_and_typed_correlation(tm
             assert set(result) == {"correlation_id"} and result["correlation_id"]
             (envelope,) = state.published
             assert envelope.source == channel_address("web", "channel-web") and envelope.target == MANAGER_ADDRESS
-            assert envelope.payload["attachments"] == attachments
+            saved = envelope.payload["attachments"]
+            assert len(saved) == 2
+            for index, (item, (_, data)) in enumerate(zip(saved, files), 1):
+                path = Path(item["path"])
+                assert item["index"] == index and item["state"] == "saved" and item["source"] == "web"
+                assert item["kind"] == ("image" if index == 1 else "file")
+                assert item["mime"] == ("image/png" if index == 1 else "text/plain")
+                assert item["size"] == len(data) and path.read_bytes() == data
+                assert path.is_relative_to(tmp_path / "chat-attachments" / "web")
+                assert path.name == ("1-screenshot.png" if index == 1 else "2-note.txt")
+                assert path.stat().st_mode & 0o777 == 0o600
+                assert path.parent.stat().st_mode & 0o777 == 0o700
             assert envelope.payload["channel_context"] == {"session_id": "thread", "goal_id": None,
                                                             "client_message_id": "message"}
             chat.save_message.assert_awaited_once_with(session_id="thread", message_id="message", role="user", content="hello")
             assert (await _send(server, "POST /api/chat/send", _bearer(TOKEN), '{"text":"hello"}'))[0] == 404
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("attachments,target", [
+    ([{"name": "x", "path": "/etc/hosts"}], None),
+    ([{"filename": "note.txt", "content_base64": "!not-base64!"}], None),
+    ([{"filename": "note.txt", "content_base64": "eA=="}] * 11, None),
+    ([{"filename": "first.txt", "content_base64": base64.b64encode(b"x" * 3_000_001).decode()},
+      {"filename": "second.txt", "content_base64": base64.b64encode(b"x" * 3_000_001).decode()}], None),
+    ([{"filename": "valid.txt", "content_base64": "eA=="},
+      {"filename": "program.exe", "content_base64": base64.b64encode(b"MZ\x00\xff").decode()}], None),
+    ([{"filename": "note.txt", "content_base64": "eA=="}], {"kind": "planner", "task_id": "running"}),
+], ids=["legacy-path", "bad-base64", "too-many", "total-too-large", "rejected-file", "planner"])
+def test_attachment_refusal_is_atomic_and_leaves_no_message_directory(tmp_path, state, attachments, target):
+    async def run():
+        async with _serving(tmp_path) as server:
+            prepare(server, state)
+            body = {"text": "read these", "attachments": attachments}
+            if target is not None:
+                body["target"] = target
+            status, _, answer = await post(server, "send", body)
+            assert status == 400 and answer["error"]["code"] == "invalid"
+            if attachments[0].get("content_base64") == "!not-base64!":
+                assert "note.txt" in answer["error"]["message"]
+            if any(item.get("filename") == "program.exe" for item in attachments):
+                assert "program.exe" in answer["error"]["message"]
+            assert state.published == []
+            assert not list((tmp_path / "chat-attachments").glob("*/*"))
+            chat.save_message.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_attachments_require_an_available_runtime_root(tmp_path, state):
+    async def run():
+        async with _serving(tmp_path) as server:
+            prepare(server, state)
+            server._runtime_root = None
+            status, _, answer = await post(server, "send", {
+                "text": "read this", "attachments": [{"filename": "note.txt", "content_base64": "eA=="}]})
+            assert status == 400 and answer["error"]["code"] == "invalid"
+            assert state.published == []
     asyncio.run(run())
 
 

@@ -198,6 +198,13 @@ class Capability(str, Enum):
     COST_REPORT = "cost_report"  # it reports what a run cost
 
 
+class ImageInput(str, Enum):
+    """How a runtime's model looks at an image file (a chat attachment)."""
+
+    NONE = "none"
+    READ_TOOL = "read_tool"
+
+
 class ReadOnly(str, Enum):
     """How a run that must not change files (``Launch.read_only``, a Planner's) is kept from changing them."""
 
@@ -371,6 +378,7 @@ class RuntimeAdapter(ABC):
     label: ClassVar[str]  # how the dashboard names the type
     default_executable: ClassVar[str]
     capabilities: ClassVar[frozenset[Capability]]
+    image_input: ClassVar[ImageInput] = ImageInput.NONE
     # The only roles allowed; None leaves ROLE_CAPABILITIES to decide.
     roles: ClassVar[frozenset[str] | None] = None
     # Runs and calls tools inside looper serve, with no executable to find or probe.

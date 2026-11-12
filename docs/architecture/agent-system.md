@@ -73,6 +73,14 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   sent: no earlier topic, check or status report unless that message asks for
   one, and a short reply to a greeting or a check-in. A manager row still
   holding the previous recommended prompt gets this one at startup
+- A message can carry files Looper saved itself. Its turn lists each attachment
+  after the user text: kind, name, MIME type, size and local path, or why it was
+  not received. Claude Code opens them with its file-reading tool; other
+  runtimes are told they cannot view images. Paths are never part of the stored
+  user text and the turn tells the model not to put them in replies. Files live
+  under `chat-attachments/<source>/<message>/` in the runtime root (directories
+  0700, files 0600); hourly housekeeping removes message directories older than
+  7 days. A replay after cleanup says the file is no longer available.
 - Maintains chat conversation context per session
 - Runs one resident Claude process through `ResidentClaude`
   (`looper/agents/claude_cli.py`), which each task's Planner uses too, started
@@ -5493,6 +5501,13 @@ separate tokens and is not exported to API clients. No unversioned operator rout
   and `looper_gates` (list a task's gates, read their messages, reply, end a gate) exist for clients. A client does not
   get `looper_task_gate_reply`, because a gate reply there is the user's own words in a chat (a client answers with
   `looper_gates`), nor the Manager's confirmation tool, because a client confirms through `/api/v1/confirm`.
+- **Dashboard attachments.** `operator_chat.send` accepts up to 10 inline
+  `attachments: [{filename, content_base64}]`, totaling at most 6,000,000 decoded
+  bytes, only for a Manager. Arbitrary objects and local paths are refused.
+  Every file is content-checked: PNG, JPEG, GIF, WEBP, PDF, docx/xlsx/pptx, or
+  UTF-8 text, at most 20 MB each. One invalid file refuses the whole send and
+  removes its files. The generated CLI uses this same schema. Dashboard file
+  selection and channel downloads are separate features.
 - **Chat.** `chat.send` posts one message (at most 32,000 characters) and answers with server-sent events (a heartbeat
   every 15 s, up to 1,800 s for the Manager's answer). A conversation belongs to the pair `manager_id` (the default
   Manager when omitted) and `client_id`: another client, or the same id on another Manager, finds it unknown. A
