@@ -113,9 +113,12 @@ steps.
   dispatches the step (the plan, a retry, a replan); a run already started
   keeps its own. Before your plan exists only the rest of the task can be
   chosen; a step not started yet can be chosen in a later turn. You never
-  choose the Planner's own profile. Refused if the task or step's task role
-  pins the profile; the operator can change it in the dashboard (task → Roles),
-  or you can ask through a user gate.
+  choose the Planner's own profile. Refused if the user's task choice or a
+  step's task role pins the profile. For a pin from a role you defined, with
+  this project's role tools enabled, define a new version with
+  looper_task_role_set and profile_id. For the user's task choice, a workflow,
+  task-template or user-edited role, or with role tools off, the operator can
+  change it in the dashboard (task → Roles), or you can ask through a user gate.
 - looper_task_concurrency: how many of this task's Workers or Reviewers run
   at once. Lower it when steps that run at the same time would get in each
   other's way (one build, one database, one port) or when the requirement or
@@ -499,7 +502,7 @@ async def _profile_set(call: PlannerCall) -> dict[str, Any]:
         except RegistryError as exc:
             raise OpError(ErrorCode.INVALID, str(exc)) from None
     step_id = step["id"] if step else None
-    task_roles: list[tuple[str, int] | None] = [None]
+    task_roles: list[dict[str, Any] | None] = [None]
     if step:
         keys = [step["role_key"]] if step.get("role_key") else []
         if role is AgentType.REVIEWER:
@@ -508,22 +511,33 @@ async def _profile_set(call: PlannerCall) -> dict[str, Any]:
             # New attempts load the latest definition, including each role in a work step's review chain.
             defined = await db_roles.get(call.task_id, key)
             if defined is not None and RoleKind(defined["kind"]).agent is role:
-                task_roles.append((defined["role_key"], defined["version"]))
+                task_roles.append(defined)
     choice = (Layer.PLANNER_STEP if step else Layer.PLANNER_TASK, role)
     for task_role in task_roles:
         layers = index_layers(await db_layers.list_layers(project_id, task_id=call.task_id, step_id=step_id,
-                                                          task_role=task_role), project_id)
+                                                          task_role=(task_role["role_key"], task_role["version"])
+                                                          if task_role else None), project_id)
         if profile is None:
             layers.pop(choice, None)
         else:
             layers[choice] = LayerValues.from_row({"profile": profile})
         runs = resolve(role, layers, project_id)
         if runs.profile_source in (Layer.TASK_ROLE, Layer.TASK):
-            owner = (f"the user chose {runs.profile.name} for this task's {_label(role)}; their choice stands over yours"
-                     if runs.profile_source is Layer.TASK else f"the task role pins {runs.profile.name}")
+            guidance = ("The operator can change the profile in the dashboard "
+                        "(task → Roles), or you can ask through a user gate.")
+            if runs.profile_source is Layer.TASK:
+                owner = (f"the user chose {runs.profile.name} for this task's {_label(role)}; "
+                         "their choice stands over yours")
+            else:
+                assert task_role is not None
+                origin = {Via.PLANNER: "Planner", Via.WORKFLOW: "workflow", Via.TEMPLATE: "task template",
+                          Via.USER: "user edit"}[Via(task_role["via"])]
+                owner = f"the task role {task_role['role_key']} ({origin}) pins {runs.profile.name}"
+                if task_role["via"] == Via.PLANNER.value and await _roles_on(call.task_id):
+                    guidance = (f"Define a new version of {task_role['role_key']} with looper_task_role_set "
+                                "and profile_id to change its profile.")
             raise OpError(ErrorCode.FORBIDDEN, f"{owner} ({runs.profile_source.value} layer). Nothing changed. "
-                                               "The operator can change the profile in the dashboard "
-                                               "(task → Roles), or you can ask through a user gate.")
+                                               f"{guidance}")
     before = next((c for c in await db_layers.planner_profiles(call.task_id)
                    if c["role"] == role.value and c["step_id"] == step_id), None)
     if profile is None and before is None:
@@ -802,8 +816,9 @@ TOOLS: tuple[Tool, ...] = (
         description="Choose an allowed Agent Profile from looper_task_profiles for this task's Workers or "
                     "Reviewers: for the rest of the task, or with step for each attempt of that step. profile_id "
                     "null clears your choice. Applies to new runs; next_run gives the resolved profile. Refused "
-                    "when task or task_role pins it: ask through a user gate or have the operator change the "
-                    "profile in the dashboard (task → Roles).",
+                    "when the user's task choice or a step's task role pins it. For a role you defined, with role "
+                    "tools on, define a new version with looper_task_role_set and profile_id; otherwise ask "
+                    "through a user gate or have the operator change the profile in the dashboard (task → Roles).",
         schema={"type": "object", "required": ["role"], "additionalProperties": False, "properties": {
             "role": _ROLE,
             "profile_id": {"type": "string", "minLength": 1,
