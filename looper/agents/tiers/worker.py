@@ -70,14 +70,14 @@ from ..project_execution import ProjectExecution
 from ..verification_writes import VerificationWrites
 from ..library import items_label, load_installed
 from ..log_redaction import redact
-from ..runtimes import ADAPTERS, RunChannel, RuntimeAdapter, RuntimeUnsupported, waits_without_turns
+from ..runtimes import ADAPTERS, RoomPush, RunChannel, RuntimeAdapter, RuntimeUnsupported, room_push, waits_without_turns
 from ..runtimes.channel import DeliveryResult, RunHandle, RunStartError
 from ..runtimes.codex import CodexRuntime
 from ..runtimes.cursor_agent import CONTINUATION_PROMPT, CursorChannel, cursor_failure, retry_event, retry_stderr
 from ..runtimes.omp import safe_error
 from ..runtimes.api.tools import RoomTurnTools
 from ..task_roles import TaskRole, run_role
-from ..room import MemberKind, Seat, room_section, run_seat, run_session_dir
+from ..room import MemberKind, RoomDelivery, Seat, room_section, run_seat, run_session_dir
 from ..message import (
     AgentAddress,
     MessageEnvelope,
@@ -442,21 +442,39 @@ class WorkerConfig:
     sandbox: str = "workspace-write"
 
 
-# How often a run gets a room reminder at most.
+# Seconds between deliveries that carry no message for the member.
 REMINDER_INTERVAL_SEC = 60.0
+ADDRESSED_INTERVAL_SEC = 10.0
+REMINDER_PREFIX = "looper-reminder-"
 ADOPT_WINDOW_SECONDS = 300
 
 
 @dataclass
 class _Reminders:
-    """A running Claude's room reminders (``WorkerPool.remind``)."""
+    """A running Claude's room deliveries (``WorkerPool.remind``)."""
 
-    pending: str | None = None  # the one waiting for a tool call or an idle wait
+    pending: bool = False
+    notified: int = 0
+    next_delivery: Callable[[int], Awaitable[RoomDelivery | None]] | None = None
+    confirm: Callable[[int], Awaitable[None]] | None = None
+    through: int = 0
+    confirmed: int = 0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    retry: asyncio.Task | None = None
     uuids: set[str] = field(default_factory=set)  # the ones written, by the uuid Claude names in a result
     last_at: float = float("-inf")
     tools_running: int = 0  # its tool calls that have no result yet
     waiting: bool = False
     sent: int = 0
+
+
+def delivery_uuid(through: int) -> str:
+    return f"{REMINDER_PREFIX}{uuid.uuid4().hex[:12]}-{through}"
+
+
+def uuid_through(value: object) -> int | None:
+    found = re.fullmatch(r"looper-reminder-[0-9a-f]{12}-(\d+)", value) if isinstance(value, str) else None
+    return int(found[1]) if found else None
 
 
 def answers_only_reminders(result_event: dict[str, Any], reminders: set[str]) -> bool:
@@ -1163,7 +1181,7 @@ class WorkerPool:
                 if recorder is not None:
                     recorder.detach()
                 self._inputs.pop(wid, None)
-                self._reminders.pop(wid, None)
+                self._drop_reminders(wid)
             return outcome
 
         outcomes = await asyncio.gather(*(detach(wid, handle, recorder) for wid, handle, _, recorder in runs),
@@ -1263,12 +1281,14 @@ class WorkerPool:
                                status="running", since=started_at, keepable=True, handle=handle, project_id=project_id,
                                runtime_id=launch.profile.runtime.id, runtime_type=launch.profile.runtime.type)
             if seat is not None:
-                reminders = _Reminders()
+                reminders = self._room_reminders(task_id, seat)
                 for line in (run_dir / keeper.STDIN).read_text().splitlines():
                     message = json.loads(line)
                     reminder_id = message.get("uuid")
-                    if isinstance(reminder_id, str) and reminder_id.startswith("looper-reminder-"):
+                    if isinstance(reminder_id, str) and reminder_id.startswith(REMINDER_PREFIX):
                         reminders.uuids.add(reminder_id)
+                        reminders.through = max(reminders.through, uuid_through(reminder_id) or 0)
+                reminders.pending = True
                 self._reminders[run_id] = reminders
             self._active[run_id] = wp
             self._slots[run_id] = (agent, task_id)
@@ -1505,43 +1525,112 @@ class WorkerPool:
         return {wp.worker_id: (wp.status, wp.since) for wp in self._active.values()
                 if wp.parent_task_id == task_id and wp.status in ("pending", "running")}
 
-    async def remind(self, worker_id: str, text: str) -> bool:
-        """Tell a running Claude that the room has something for it: one line, written while one of its tool calls
-        runs (Claude then folds it into the turn it is in, at the next tool result; written while it writes its final
-        reply, it would start a turn of its own after the report), at most every ``REMINDER_INTERVAL_SEC``. A
-        reminder that cannot go now waits for the next tool call or waiting report; the newest replaces it.
-        While a Worker waits between turns, reminders can start its next turn. Whether it went now."""
+    def _room_reminders(self, task_id: str, seat: Seat) -> _Reminders:
+        if self.room_ops is None:
+            return _Reminders()
+        room = self.room_ops.room
+        return _Reminders(next_delivery=lambda after: room.delivery(task_id, seat, after=after),
+                          confirm=lambda through: room.confirm(task_id, seat.key, through))
+
+    def room_in_flight(self, worker_id: str) -> int:
+        state = self._reminders.get(worker_id)
+        return state.through if state else 0
+
+    def _drop_reminders(self, worker_id: str) -> None:
+        state = self._reminders.pop(worker_id, None)
+        if state is not None and state.retry is not None:
+            state.retry.cancel()
+
+    def _retry_reminder(self, worker_id: str, state: _Reminders, delay: float) -> None:
+        if state.retry is not None and not state.retry.done() and state.retry is not asyncio.current_task():
+            return
+
+        async def retry() -> None:
+            try:
+                await asyncio.sleep(delay)
+                await self._flush_reminder(worker_id)
+            finally:
+                if state.retry is asyncio.current_task():
+                    state.retry = None
+
+        state.retry = asyncio.create_task(retry())
+
+    async def remind(self, worker_id: str) -> bool:
+        """Deliver room messages while a tool call runs or a Worker waits between turns.
+
+        Claude folds the delivery into its turn at the next tool result. Pending
+        deliveries retry when their interval ends, or at the next eligible event.
+        """
         state = self._reminders.get(worker_id)
         if state is None:
             return False
-        state.pending = text
+        state.notified += 1
+        state.pending = True
         return await self._flush_reminder(worker_id)
 
     async def _flush_reminder(self, worker_id: str) -> bool:
         state = self._reminders.get(worker_id)
         channel = self._inputs.get(worker_id)
-        if state is None or state.pending is None or channel is None or (not state.tools_running and not state.waiting):
+        if state is None or channel is None or not state.pending or state.next_delivery is None:
             return False
-        if time.monotonic() - state.last_at < REMINDER_INTERVAL_SEC:
-            return False
-        reminder = f"looper-reminder-{uuid.uuid4().hex[:12]}"
-        state.uuids.add(reminder)  # An echo may arrive while the send is still awaiting acceptance.
+        sent = False
+        async with state.lock:
+            while True:
+                if not state.pending or (not state.tools_running and not state.waiting):
+                    return sent
+                notified = state.notified
+                try:
+                    delivery = await state.next_delivery(state.through)
+                except Exception:
+                    logger.warning("worker %s failed to read room delivery", worker_id, exc_info=True)
+                    return sent
+                if delivery is None:
+                    state.pending = state.notified != notified
+                    continue
+                now = time.monotonic()
+                interval = ADDRESSED_INTERVAL_SEC if delivery.addressed else REMINDER_INTERVAL_SEC
+                if state.last_at + interval > now:
+                    self._retry_reminder(worker_id, state, state.last_at + interval - now)
+                    return sent
+                reminder = delivery_uuid(delivery.through)
+                state.uuids.add(reminder)  # An echo may arrive while send awaits acceptance.
+                try:
+                    result = await channel.send(delivery.text, uuid=reminder)
+                except (BrokenPipeError, ConnectionResetError, RuntimeError):
+                    result = DeliveryResult.REJECTED
+                if result is DeliveryResult.REJECTED:
+                    state.uuids.discard(reminder)
+                    return sent
+                state.through = max(state.through, delivery.through)
+                state.last_at = now
+                state.pending = delivery.more > 0 or state.notified != notified
+                if result is DeliveryResult.UNKNOWN:
+                    logger.warning("worker %s room delivery acceptance unknown; not retrying", worker_id)
+                    return sent
+                state.sent += 1
+                sent = True
+                wp = self._active.get(worker_id)
+                if wp is not None and wp.parent_task_id:
+                    await self._activity(wp.parent_task_id, worker_id, "phase",
+                                         ("Room messages delivered: " + ", ".join(f"#{i}" for i in delivery.ids))[:300],
+                                         metadata={"room_delivery": {"ids": list(delivery.ids),
+                                                                      "through": delivery.through,
+                                                                      "chars": len(delivery.text)}})
+                # A post may arrive during the read, write or activity await. Read it before releasing the lock.
+                if state.notified != notified:
+                    continue
+                if state.pending:
+                    self._retry_reminder(worker_id, state, interval)
+                return sent
+
+    async def _confirm_delivery(self, worker_id: str, state: _Reminders, through: int) -> None:
+        if through <= state.confirmed or state.confirm is None:
+            return
+        state.confirmed = through
         try:
-            result = await channel.send(state.pending, uuid=reminder)
-        except (BrokenPipeError, ConnectionResetError, RuntimeError):
-            result = DeliveryResult.REJECTED
-        if result is DeliveryResult.REJECTED:
-            state.uuids.discard(reminder)
-            return False
-        state.pending, state.last_at = None, time.monotonic()
-        if result is DeliveryResult.UNKNOWN:
-            logger.warning("worker %s room reminder acceptance unknown; not retrying", worker_id)
-            return False
-        state.sent += 1
-        wp = self._active.get(worker_id)
-        if wp is not None and wp.parent_task_id:
-            await self._activity(wp.parent_task_id, worker_id, "phase", "Room reminder sent")
-        return True
+            await state.confirm(through)
+        except Exception:
+            logger.warning("worker %s failed to confirm room delivery through %d", worker_id, through, exc_info=True)
 
     @contextlib.asynccontextmanager
     async def slot_for(self, wp: WorkerProcess) -> AsyncIterator[None]:
@@ -1736,7 +1825,7 @@ class WorkerPool:
             finally:
                 if isinstance(wp.handle, KeptRun) and wp.handle.state is KeptRunState.DETACHED:
                     raise asyncio.CancelledError
-                self._reminders.pop(worker_id, None)
+                self._drop_reminders(worker_id)
                 if seat is not None:
                     await self._end_room_run(worker_id, parent_task_id, seat)
 
@@ -2150,7 +2239,7 @@ class WorkerPool:
                 ctx.handle.release()
             if ctx.handle is not None:
                 missed_input.extend(ctx.handle.dropped_input())
-            self._reminders.pop(ctx.worker_id, None)
+            self._drop_reminders(ctx.worker_id)
             await self._end_room_run(ctx.worker_id)
         if not is_verify and isinstance(ctx, RunContext) and "runtime_id" not in result:
             result.update(head=await asyncio.to_thread(_git_head, ctx.work_dir), runtime_id=ctx.launch.profile.runtime.id)
@@ -2328,6 +2417,10 @@ class WorkerPool:
 
         async def _send_check() -> None:
             if waiting is not None and not input_ended:
+                report = waiting
+                delivered = await self._flush_reminder(worker_id)
+                if delivered or waiting is not report or input_ended:
+                    return
                 await _send_control(
                     f"[Looper] {waiting.check_after_seconds} s have passed since you began waiting for: "
                     f"{waiting.waiting_for}. Check on it, then go on, wait again with a waiting report, "
@@ -2445,6 +2538,9 @@ class WorkerPool:
                                         logger.debug("failed to insert text activity", exc_info=True)
 
                 elif event_type == "user" and (reminders := self._reminders.get(worker_id)) is not None:
+                    if event.get("isReplay") is True and event.get("uuid") in reminders.uuids:
+                        if (through := uuid_through(event.get("uuid"))) is not None:
+                            await self._confirm_delivery(worker_id, reminders, through)
                     content = (event.get("message") or {}).get("content")
                     done = sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_result") \
                         if isinstance(content, list) else 0
@@ -2456,6 +2552,10 @@ class WorkerPool:
                     # its outcome, unless its turn only answered room reminders after input ended or without
                     # a status report. While input is open, a reminder can wake a waiting Worker to report.
                     reminders = self._reminders.get(worker_id)
+                    if reminders is not None:
+                        for value in event.get("user_message_uuids") or []:
+                            if value in reminders.uuids and (through := uuid_through(value)) is not None:
+                                await self._confirm_delivery(worker_id, reminders, through)
                     reminder_only = result_event is not None and reminders is not None \
                         and answers_only_reminders(event, reminders.uuids) \
                         and (input_ended or extract_report(str(event.get("result") or ""), "status") is None)
@@ -2574,8 +2674,8 @@ class WorkerPool:
                     self._inputs[worker_id] = channel
                     if ready := self._input_ready.get(worker_id):
                         ready.set()
-                    if seat is not None and runtime.run_input:
-                        self._reminders.setdefault(worker_id, _Reminders())
+                    if seat is not None and room_push(launch) is RoomPush.USER_TURN:
+                        self._reminders.setdefault(worker_id, self._room_reminders(parent_task_id, seat))
                 except (BrokenPipeError, ConnectionResetError):
                     # The process exited before reading; its output decides the outcome.
                     logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
@@ -2964,9 +3064,11 @@ class WorkerPool:
         return None
 
     @staticmethod
-    async def _activity(task_id: str, worker_id: str, kind: str, summary: str) -> None:
+    async def _activity(task_id: str, worker_id: str, kind: str, summary: str, *,
+                        metadata: dict[str, Any] | None = None) -> None:
         try:
-            await db_activity.insert_activity(task_id=task_id, worker=worker_id, kind=kind, summary=summary)
+            await db_activity.insert_activity(task_id=task_id, worker=worker_id, kind=kind, summary=summary,
+                                              **({"metadata": metadata} if metadata is not None else {}))
         except Exception:
             logger.debug("failed to insert %s activity", kind, exc_info=True)
 

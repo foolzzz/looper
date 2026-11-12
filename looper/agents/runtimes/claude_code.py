@@ -74,7 +74,7 @@ from ... import child_env
 from .. import claude_cli
 from . import (
     ApiProtocol, AuthKind, Capability, CostSource, ImageInput, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
-    RuntimeAdapter, RuntimeUnsupported, instructions,
+    RoomPush, RuntimeAdapter, RuntimeUnsupported, instructions,
 )
 from .instructions import InstructionFile
 
@@ -144,6 +144,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # Verified against Claude Code 2.1.285 (claude_cli); its replies follow Looper's contracts by prompt, so no
     # structured_output.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})
+    room_push = RoomPush.USER_TURN
     run_input = True  # stdin can stay open between a Worker's waiting turns
     keepable = True
     can_interrupt = True  # its resident session's control request ``interrupt``

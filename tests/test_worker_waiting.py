@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper.agents.bus import MessageBus
+from looper.agents.room import RoomDelivery
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
 from looper.agents.runtimes import ADAPTERS, Capability
 from looper.agents.runtimes.channel import DeliveryResult
@@ -215,7 +216,8 @@ def test_subagent_events_preserve_the_waiting_check_and_reminders(tmp_path, monk
         monkeypatch.setattr(worker, "_waiting_sleep", sleep)
         run = Run()
         async with _pool(tmp_path, monkeypatch, run, timeout=1) as (pool, results):
-            pool._reminders["w1"] = state = worker._Reminders()
+            pool._reminders["w1"] = state = worker._Reminders(next_delivery=AsyncMock(return_value=RoomDelivery(
+                "the room has new information", 42, (42,), True, 0)), confirm=AsyncMock())
             run.turn(_waiting())
             await sleeping.wait()
             for event in background:
@@ -224,7 +226,7 @@ def test_subagent_events_preserve_the_waiting_check_and_reminders(tmp_path, monk
             assert state.waiting and state.tools_running == 0
             assert not any(call.kwargs.get("metadata") == {"state": "resumed"}
                            for call in agent_db.insert_activity.await_args_list)
-            assert await pool.remind("w1", "the room has new information")
+            assert await pool.remind("w1")
             assert await run.writes.get() == "the room has new information"
             release.set()
             assert "600 s have passed since you began waiting for: the build" in await run.writes.get()
@@ -273,8 +275,9 @@ def test_a_room_reminder_is_written_while_waiting_without_tools(tmp_path, monkey
     async def scenario():
         run = _Run()
         async with _pool(tmp_path, monkeypatch, run) as (pool, _):
-            pool._reminders["w1"] = state = worker._Reminders()
-            assert not await pool.remind("w1", "the room has new information")
+            pool._reminders["w1"] = state = worker._Reminders(next_delivery=AsyncMock(return_value=RoomDelivery(
+                "the room has new information", 42, (42,), True, 0)), confirm=AsyncMock())
+            assert not await pool.remind("w1")
             run.turn(_waiting())
             await run.results_seen.get()
             assert state.tools_running == 0 and state.waiting
@@ -370,17 +373,22 @@ def test_a_reminder_only_turn_rearms_the_original_wait(tmp_path, monkeypatch, ag
         monkeypatch.setattr(worker, "_waiting_sleep", sleep)
         run = _Run()
         async with _pool(tmp_path, monkeypatch, run) as (pool, results):
-            pool._reminders["w1"] = state = worker._Reminders()
+            pool._reminders["w1"] = state = worker._Reminders(next_delivery=AsyncMock(return_value=RoomDelivery(
+                "the room has new information", 42, (42,), True, 0)), confirm=AsyncMock())
             run.turn(_waiting())
             original = await sleeps.get()
             await run.results_seen.get()
-            assert await pool.remind("w1", "there is a room message")
+            assert await pool.remind("w1")
+            state.confirm.assert_not_awaited()
+            run.events_in.put_nowait({"type": "user", "isReplay": True, "uuid": next(iter(state.uuids)),
+                                     "message": {"role": "user", "content": "the room has new information"}})
             run.turn(_result("room acknowledged", user_message_uuids=list(state.uuids)))
             await run.results_seen.get()
             remaining = await sleeps.get()
             assert 0 < remaining <= original <= 600
             assert state.waiting and not run.ended_after
-            assert run.inputs == ["there is a room message"]
+            state.confirm.assert_awaited_once_with(42)
+            assert run.inputs == ["the room has new information"]
             run.turn(_completed(), init=False)
             await pool._tasks["w1"]
             assert results[0].payload["status"] == "completed"
@@ -393,17 +401,19 @@ def test_a_room_reminder_turn_can_complete_the_work(tmp_path, monkeypatch, agent
     async def scenario():
         run = _Run()
         async with _pool(tmp_path, monkeypatch, run) as (pool, results):
-            pool._reminders["w1"] = state = worker._Reminders()
+            pool._reminders["w1"] = state = worker._Reminders(next_delivery=AsyncMock(return_value=RoomDelivery(
+                "the room has new information", 42, (42,), True, 0)), confirm=AsyncMock())
             run.turn(_waiting(check_after_seconds=1800))
             await run.results_seen.get()
-            assert await pool.remind("w1", "the build is ready")
+            assert await pool.remind("w1")
             run.turn({**_completed(), "user_message_uuids": list(state.uuids)}, init=init)
             await run.results_seen.get()
             assert run.ended_after == [2]
+            state.confirm.assert_awaited_once_with(42)
             await pool._tasks["w1"]
             assert results[0].payload["status"] == "completed"
             assert not pool.accepts_input("w1")
-            assert run.inputs == ["the build is ready"]
+            assert run.inputs == ["the room has new information"]
 
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
@@ -420,11 +430,12 @@ def test_a_room_reminder_turn_processes_a_new_waiting_report(tmp_path, monkeypat
         monkeypatch.setattr(worker, "_waiting_sleep", sleep)
         run = _Run()
         async with _pool(tmp_path, monkeypatch, run) as (pool, results):
-            pool._reminders["w1"] = state = worker._Reminders()
+            pool._reminders["w1"] = state = worker._Reminders(next_delivery=AsyncMock(return_value=RoomDelivery(
+                "the room has new information", 42, (42,), True, 0)), confirm=AsyncMock())
             run.turn(_waiting(check_after_seconds=1800))
             await sleeps.get()
             await run.results_seen.get()
-            assert await pool.remind("w1", "the build is ready; check the tests")
+            assert await pool.remind("w1")
             run.turn({**_waiting(waiting_for="the tests", check_after_seconds=seconds),
                       "user_message_uuids": list(state.uuids)})
             await run.results_seen.get()
@@ -465,7 +476,17 @@ def test_a_valid_waiting_report_resets_the_repair_allowance(tmp_path, monkeypatc
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
-def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch, agent_db):
+@pytest.fixture
+def kept_manifest():
+    from looper import components
+
+    # Keeper startup hashes the checkout; the stream deadline tests only replay.
+    return components.loaded_manifest()
+
+
+@pytest.mark.parametrize(("room_pending", "resume_during_delivery"), [(False, False), (True, False), (True, True)])
+def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch, agent_db, kept_manifest,
+                                                        room_pending, resume_during_delivery):
     from datetime import datetime, timezone
     from types import SimpleNamespace
     from unittest.mock import Mock
@@ -476,6 +497,9 @@ def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch
         launch = builtin_launch()
         runtime = ClaudeCodeRuntime()
         pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path)
+        delivery = RoomDelivery("A question posted while Looper was down", 42, (42,), True, 0)
+        if room_pending:
+            pool._reminders["w1"] = worker._Reminders(pending=True, next_delivery=AsyncMock(return_value=delivery))
         handle = KeptRun(runtime, ["claude"], launch=launch, cwd=tmp_path,
                          session_dir=None, label="waiting-run", run_dir=tmp_path / "kept",
                          runtime_root=tmp_path, epoch=2, on_stale=lambda reason: None)
@@ -483,15 +507,25 @@ def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch
         handle._process.stdout.replay_until = 1
         handle.end, handle.wait = AsyncMock(), AsyncMock(return_value=0)
         checked = asyncio.Event()
+        resumed = asyncio.Event()
         sleep = AsyncMock(side_effect=AssertionError("an adopted wait must be checked immediately"))
         monkeypatch.setattr(worker, "_waiting_sleep", sleep)
         accounted, persisted = [], []
         recorder = SimpleNamespace(cap_stop=None, account=accounted.append,
                                    record=AsyncMock(side_effect=persisted.append), finish=AsyncMock())
 
+        written = []
+
         async def send(text, **kwargs):
             assert handle.replay_finished.is_set()
             assert not agent_db.insert_activity.await_args_list
+            written.append(text)
+            if text == delivery.text:
+                assert worker.uuid_through(kwargs["uuid"]) == 42
+                checked.set()
+                if resume_during_delivery:
+                    await resumed.wait()
+                return DeliveryResult.ACCEPTED
             assert text.startswith("[Looper] 600 s have passed since you began waiting for: the build.")
             checked.set()
             return DeliveryResult.ACCEPTED
@@ -503,12 +537,16 @@ def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch
             await checked.wait()
             yield {"type": "assistant", "message": {"content": []}}
             yield _completed()
+            resumed.set()
 
         handle._channel = SimpleNamespace(events=events, send=send, end_input=Mock(), start=AsyncMock())
         ctx = worker.RunContext("w1", "task", None, str(tmp_path), "", False, launch, runtime,
                                 None, 0, datetime.now(timezone.utc), False, ["claude"])
         outcome = await pool._consume(ctx, handle, recorder, start=worker.ConsumeStart.ADOPTED)
         assert outcome["status"] == "completed"
+        if room_pending:
+            assert written == [delivery.text]
+            assert pool._reminders["w1"].through == 42
         assert accounted == [_waiting()] and persisted[-1] == _completed()
         assert not any((call.kwargs.get("metadata") or {}).get("state") == "waiting"
                        for call in agent_db.insert_activity.await_args_list)
@@ -518,7 +556,7 @@ def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch
     asyncio.run(asyncio.wait_for(scenario(), 5))
 
 
-def test_an_adopted_wait_over_budget_ends_without_a_check_or_live_event(tmp_path, monkeypatch, agent_db):
+def test_an_adopted_wait_over_budget_ends_without_a_check_or_live_event(tmp_path, monkeypatch, agent_db, kept_manifest):
     from datetime import datetime, timezone
     from types import SimpleNamespace
     from unittest.mock import Mock

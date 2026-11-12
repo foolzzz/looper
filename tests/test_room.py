@@ -3,6 +3,10 @@ seats trade too long, which result a run's reminders never replace, and the prom
 
 from __future__ import annotations
 
+import asyncio
+import re
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from datetime import datetime, timezone
 from typing import Any
 
@@ -13,6 +17,8 @@ from looper.agents.room import (
     MemberKind,
     MessageKind,
     Presence,
+    RoomDelivery,
+    RoomService,
     Seat,
     Target,
     addressed,
@@ -171,6 +177,7 @@ def test_an_answer_settles_the_trade_before_it() -> None:
 
 @pytest.mark.parametrize(("answered", "reminders", "only"), [
     (["reminder-1"], {"reminder-1"}, True),
+    (["looper-reminder-0123456789ab-7"], {"looper-reminder-0123456789ab-7"}, True),
     (["reminder-1", "reminder-2"], {"reminder-1", "reminder-2"}, True),
     (["prompt", "reminder-1"], {"reminder-1"}, False),  # folded into the step's own turn
     ([], {"reminder-1"}, False),  # a turn of Claude's own (background work)
@@ -205,34 +212,260 @@ def test_the_reply_contract_and_the_prompts_are_unchanged_with_the_room_off() ->
     assert on.text.index("## The task room") < on.text.index("## Your step and its report")
 
 
-def test_a_reminder_waits_for_a_tool_call_and_comes_at_most_once_a_minute(tmp_path: Any) -> None:
-    import asyncio
-    from types import SimpleNamespace
-
+def test_a_delivery_waits_for_tools_and_respects_addressed_and_interface_intervals(tmp_path, monkeypatch, agent_db):
     from looper.agents.runtimes import StreamChannel
-    from looper.agents.tiers.worker import WorkerConfig, WorkerPool, _Reminders
+    from looper.agents.tiers import worker
 
-    async def run() -> None:
-        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
-        written: list[tuple[str, str | None]] = []
+    async def run():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path)
+        written = []
+        clock = 1000.0
+        monkeypatch.setattr(worker.time, "monotonic", lambda: clock)
 
         class Runtime:
-            async def write_turn(self, stdin: Any, text: str, *, uuid: str | None = None) -> None:
+            async def write_turn(self, stdin, text, *, uuid=None):
                 written.append((text, uuid))
 
-        pool._inputs["w1"] = StreamChannel(Runtime(), SimpleNamespace(stdin=object()), model=None)  # type: ignore[arg-type]
-        pool._reminders["w1"] = state = _Reminders()
-        assert not await pool.remind("w1", "one")  # no tool call runs: it waits
+        next_delivery = AsyncMock(return_value=RoomDelivery("one", 41, (41,), True, 0))
+        confirm = AsyncMock()
+        pool._inputs["w1"] = StreamChannel(Runtime(), SimpleNamespace(stdin=object()), model=None)
+        pool._active["w1"] = SimpleNamespace(parent_task_id="task")
+        pool._reminders["w1"] = state = worker._Reminders(next_delivery=next_delivery, confirm=confirm)
+        assert not await pool.remind("w1")
+        next_delivery.assert_not_awaited()
         state.tools_running = 1
         assert await pool._flush_reminder("w1")
-        assert written[0][0] == "one" and str(written[0][1]).startswith("looper-reminder-")
-        assert not await pool.remind("w1", "two")  # within the minute: it waits
-        state.last_at -= 61
-        assert await pool.remind("w1", "three")  # the newest replaced the one waiting
-        assert [text for text, _ in written] == ["one", "three"] and state.uuids == {u for _, u in written}
-        assert not await pool.remind("w2", "a run without a room")
+        assert written[0][0] == "one" and re.fullmatch(r"looper-reminder-[0-9a-f]{12}-41", written[0][1])
+        assert pool.room_in_flight("w1") == 41
+        confirm.assert_not_awaited()
+        activity = agent_db.insert_activity.await_args.kwargs
+        assert activity["summary"] == "Room messages delivered: #41"
+        assert activity["metadata"] == {"room_delivery": {"ids": [41], "through": 41, "chars": 3}}
+        next_delivery.return_value = RoomDelivery("two", 42, (42,), True, 0)
+        clock += 5
+        assert not await pool.remind("w1") and state.retry is not None
+        state.last_at -= 11
+        assert await pool._flush_reminder("w1")
+        next_delivery.assert_awaited_with(41)
+        next_delivery.return_value = RoomDelivery("three", 43, (43,), False, 0)
+        clock += 30
+        assert not await pool.remind("w1")
+        state.last_at -= 31
+        assert await pool._flush_reminder("w1")
+        assert [text for text, _ in written] == ["one", "two", "three"]
+        assert not await pool.remind("w2")
+        retry = state.retry
+        pool._drop_reminders("w1")
+        await asyncio.gather(retry, return_exceptions=True)
+        assert retry.cancelled() and pool.room_in_flight("w1") == 0
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("outcome", ["rejected", "unknown", "empty", "error", "concurrent"])
+def test_delivery_failures_and_concurrent_flushes(tmp_path, outcome):
+    from looper.agents.runtimes.channel import DeliveryResult
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool, _Reminders
+
+    async def run():
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        async def next_delivery(after):
+            await asyncio.sleep(0)
+            return RoomDelivery("body", 42, (42,), True, 0) if after < 42 else None
+
+        select = AsyncMock(side_effect=next_delivery)
+        channel = SimpleNamespace(send=AsyncMock(return_value=DeliveryResult.ACCEPTED))
+        pool._inputs["w1"] = channel
+        pool._reminders["w1"] = state = _Reminders(next_delivery=select, tools_running=1)
+        if outcome == "rejected":
+            channel.send.side_effect = BrokenPipeError()
+        elif outcome == "unknown":
+            channel.send.return_value = DeliveryResult.UNKNOWN
+        elif outcome == "empty":
+            select.side_effect = None
+            select.return_value = None
+        elif outcome == "error":
+            select.side_effect = OSError("database unavailable")
+        if outcome == "concurrent":
+            assert sum(await asyncio.gather(pool.remind("w1"), pool.remind("w1"))) == 1
+            channel.send.assert_awaited_once()
+        else:
+            assert not await pool.remind("w1")
+        if outcome in ("rejected", "error"):
+            assert state.through == 0 and not state.uuids and state.pending
+        elif outcome == "unknown":
+            assert state.through == 42 and state.sent == 0
+            assert not await pool.remind("w1")
+            select.assert_awaited_with(42)
+            channel.send.assert_awaited_once()
+        elif outcome == "empty":
+            assert not state.pending
+            channel.send.assert_not_awaited()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("paused_at", ["empty_read", "read", "send", "activity"])
+@pytest.mark.parametrize("waiting", [False, True])
+def test_a_post_during_delivery_is_not_lost(tmp_path, monkeypatch, agent_db, paused_at, waiting):
+    from looper.agents.runtimes.channel import DeliveryResult
+    from looper.agents.tiers import worker
+
+    async def run():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path)
+        entered, release, posted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        monkeypatch.setattr(worker, "ADDRESSED_INTERVAL_SEC", 0)
+        written, afters = [], []
+
+        async def pause():
+            entered.set()
+            await release.wait()
+
+        async def next_delivery(after):
+            afters.append(after)
+            if len(afters) == 1:
+                if paused_at in ("empty_read", "read"):
+                    await pause()
+                return None if paused_at == "empty_read" else RoomDelivery("first", 41, (41,), True, 0)
+            return RoomDelivery("second", 42, (42,), True, 0) if after < 42 else None
+
+        async def send(text, **kwargs):
+            written.append(text)
+            if paused_at == "send" and len(written) == 1:
+                await pause()
+            return DeliveryResult.ACCEPTED
+
+        if paused_at == "activity":
+            pool._active["w1"] = SimpleNamespace(parent_task_id="task")
+
+            async def activity(**kwargs):
+                if len(written) == 1:
+                    await pause()
+
+            agent_db.insert_activity.side_effect = activity
+        pool._inputs["w1"] = SimpleNamespace(send=send)
+        pool._reminders["w1"] = state = worker._Reminders(
+            next_delivery=next_delivery, tools_running=int(not waiting), waiting=waiting)
+        first = asyncio.create_task(pool.remind("w1"))
+        await entered.wait()
+
+        async def post():
+            posted.set()
+            return await pool.remind("w1")
+
+        second = asyncio.create_task(post())
+        await posted.wait()
+        release.set()
+        await asyncio.gather(first, second)
+        assert written == (["second"] if paused_at == "empty_read" else ["first", "second"])
+        assert afters[:2] == [0, 0 if paused_at == "empty_read" else 41]
+        assert state.through == 42 and not state.pending
+        pool._drop_reminders("w1")
+
+    asyncio.run(asyncio.wait_for(run(), 3))
+
+
+def test_pending_delivery_retries_when_the_interval_ends(tmp_path, monkeypatch):
+    from looper.agents.tiers import worker
+    from looper.agents.runtimes.channel import DeliveryResult
+
+    async def run():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path)
+        released, sleeping = asyncio.Event(), asyncio.Event()
+        delays = []
+        async def sleep(delay):
+            delays.append(delay)
+            sleeping.set()
+            await released.wait()
+        monkeypatch.setattr(worker.asyncio, "sleep", sleep)
+        delivery = RoomDelivery("body", 42, (42,), True, 0)
+        pool._inputs["w1"] = channel = SimpleNamespace(send=AsyncMock(return_value=DeliveryResult.ACCEPTED))
+        pool._reminders["w1"] = state = worker._Reminders(
+            next_delivery=AsyncMock(return_value=delivery), waiting=True, last_at=worker.time.monotonic())
+        assert not await pool.remind("w1")
+        await sleeping.wait()
+        assert 0 < delays[0] <= 10
+        state.last_at -= 11
+        retry = state.retry
+        released.set()
+        await retry
+        channel.send.assert_awaited_once()
+        assert not state.pending and state.retry is None
+
+    asyncio.run(asyncio.wait_for(run(), 3))
+
+
+def test_room_deliveries_include_visible_bodies_refs_and_continuations(monkeypatch):
+    from looper.agents.room import db_room
+
+    async def run():
+        rows = [{**_message("fe_rd@s2", "question", to=(WORKER.key,), id=41), "body": "Which file?\nPlease answer."},
+                {**_message("fe_rd@s2", "interface", everyone=True, id=42), "body": "Use port 8123",
+                 "refs": [{"file": "api.md"}, {"commit": "abc1234"}], "reply_to": 40}]
+        monkeypatch.setattr(RoomService, "enabled", AsyncMock(return_value=True))
+        monkeypatch.setattr(db_room, "last_read", AsyncMock(return_value=0))
+        monkeypatch.setattr(db_room, "messages", AsyncMock(return_value=rows))
+        delivery = await RoomService().delivery("task", WORKER)
+        assert delivery is not None
+        assert delivery.ids == (41, 42) and delivery.through == 42 and delivery.addressed and delivery.more == 0
+        assert "question, for you): Which file?\n  Please answer." in delivery.text
+        assert delivery.text.index("#41") < delivery.text.index("#42")
+        assert "re #40; files: api.md; commits: abc1234): Use port 8123" in delivery.text
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", ["info", "clipped", "count", "size", "visibility", "after", "off"])
+def test_room_delivery_limits_visibility_and_trigger(monkeypatch, case):
+    from looper.agents.room import db_room
+
+    async def run():
+        rows = [{**_message("fe_rd@s2", to=(WORKER.key,), id=i), "body": "port 8123"} for i in range(1, 13)]
+        last_read = 0
+        if case == "info":
+            rows = [_message("fe_rd@s2", everyone=True)]
+        elif case == "clipped":
+            rows = [{**rows[0], "body": "a" * 3000},
+                    {**_message("fe_rd@s2", everyone=True, id=2), "body": "b" * 1000}]
+        elif case == "size":
+            rows = [{**r, "body": "x" * 1500} for r in rows]
+        elif case == "visibility":
+            rows = [rows[0], _message("fe_rd@s2", to=("worker@s3",), id=2), rows[2],
+                    _message(WORKER.key, everyone=True, id=4), _message("fe_rd@s2", to=("worker@s3",), id=5)]
+        elif case == "after":
+            last_read = 2
+        monkeypatch.setattr(RoomService, "enabled", AsyncMock(return_value=case != "off"))
+        monkeypatch.setattr(db_room, "last_read", AsyncMock(return_value=last_read))
+        async def select(task, *, after):
+            return [r for r in rows if r["id"] > after]
+        monkeypatch.setattr(db_room, "messages", select)
+        delivery = await RoomService().delivery("task", WORKER, after=7 if case == "after" else 0)
+        if case in ("off", "info"):
+            assert delivery is None
+        elif case == "clipped":
+            assert "a" * 1500 + " … (clipped; read it whole with looper_room_read about=1)" in delivery.text
+            assert "a" * 1501 not in delivery.text and "b" * 301 not in delivery.text
+            assert "b" * 300 in delivery.text and "looper_room_read about=2" in delivery.text
+        elif case == "count":
+            assert delivery.ids == tuple(range(1, 11)) and delivery.through == 10 and delivery.more == 2
+            assert "2 more unread" in delivery.text
+        elif case == "size":
+            assert len(delivery.text) <= 4000 and delivery.ids == (1, 2) and delivery.more == 10
+        elif case == "visibility":
+            assert delivery.ids == (1, 3) and delivery.through == 5
+        elif case == "after":
+            assert delivery.ids == tuple(range(8, 13)) and delivery.through == 12
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("runtime,input_enabled,expected", [("claude-code", True, "user_turn"),
+                                                          ("claude-code", False, "none"), ("codex", False, "none")])
+def test_room_push_requires_an_opted_in_runtime_with_input(monkeypatch, runtime, input_enabled, expected):
+    from looper.agents.runtimes import ADAPTERS, room_push
+    adapter = ADAPTERS[runtime]
+    monkeypatch.setattr(adapter, "run_input", input_enabled)
+    assert room_push(SimpleNamespace(runtime=adapter)).value == expected
 
 
 def test_kept_run_sessions_go_with_their_task(tmp_path: Any) -> None:
@@ -339,6 +572,61 @@ def test_inbox_subscribes_before_its_query(monkeypatch: pytest.MonkeyPatch) -> N
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("delivery", ["addressed", "role", "interface", "confirmed", "during_query"])
+def test_an_inbox_wait_returns_ids_for_messages_pushed_into_its_run(monkeypatch, delivery):
+    from looper.agents import room as module
+    from looper.agents.project_execution import RoomLimits
+
+    async def run():
+        cursor, read = 0, 0
+        rows = []
+        queried = asyncio.Event()
+        room = RoomService(worker_pool=SimpleNamespace(room_in_flight=lambda run: cursor))
+        monkeypatch.setattr(room, "_context", AsyncMock(return_value=SimpleNamespace(limits=RoomLimits())))
+        monkeypatch.setattr(module.db_room, "last_read", AsyncMock(side_effect=lambda *args: read))
+        mark = AsyncMock()
+        monkeypatch.setattr(module.db_room, "mark_read", mark)
+
+        async def messages(task, *, after=0):
+            nonlocal cursor, read
+            queried.set()
+            if rows and delivery == "during_query":
+                cursor = rows[-1]["id"]
+            return [r for r in rows if r["id"] > after]
+
+        monkeypatch.setattr(module.db_room, "messages", messages)
+        waiting = asyncio.create_task(room.inbox("task", FE, wait_seconds=5))
+        try:
+            await queried.wait()
+            # Neither an unrelated broadcast nor another seat's private message ends the wait.
+            rows.extend([_message(WORKER.key, everyone=True, id=1),
+                         _message(WORKER.key, to=(PLANNER.key,), id=2)])
+            cursor = 2
+            queried.clear()
+            room._wake_inboxes("task")
+            await queried.wait()
+            assert not waiting.done()
+            rows.append(_message(WORKER.key, "interface" if delivery == "interface" else "question",
+                                 to=() if delivery == "interface" else (FE.role if delivery == "role" else FE.key,),
+                                 everyone=delivery == "interface", id=3))
+            if delivery != "during_query":
+                cursor = 3
+            if delivery == "confirmed":
+                read = 3  # Claude's echo may mark it read before the wait resumes.
+            room._wake_inboxes("task")
+            result = await asyncio.wait_for(waiting, 0.5)
+            assert result["messages"] == [] and result["more"] is False and result["waited"]
+            assert result["delivered_message_ids"] == [3]
+            assert "separate user messages" in result["note"]
+            assert result["unread"] == {"for_you": 0, "interface": 0, "room": 0}
+            mark.assert_not_awaited()  # Writing the delivery never marks it read.
+        finally:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+
+    asyncio.run(asyncio.wait_for(run(), 2))
+
+
 def test_reference_lengths_and_inbox_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio
     from types import SimpleNamespace
@@ -397,5 +685,29 @@ def test_delayed_planner_wakes_are_deduplicated() -> None:
         assert len(sent) == 1 and sent[0].message_type is MessageType.ROOM_MESSAGE
         assert sent[0].target == planner_address("task")
         assert not room._wakes
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('value,expected', [
+    ('looper-reminder-0123456789ab-42', 42), ('looper-reminder-0123456789ab-0', 0),
+    ('looper-reminder-0123456789ab', None), ('looper-reminder-0123456789AB-42', None),
+    ('looper-reminder-0123456789ab-42-extra', None), (None, None),
+])
+def test_delivery_cursor_requires_a_complete_delivery_uuid(value, expected):
+    from looper.agents.tiers.worker import uuid_through
+    assert uuid_through(value) == expected
+
+
+def test_confirmation_failure_does_not_interrupt_the_stream(tmp_path, caplog):
+    from looper.agents.tiers.worker import WorkerConfig, WorkerPool, _Reminders
+
+    async def run():
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        state = _Reminders(confirm=AsyncMock(side_effect=OSError('database unavailable')))
+        await pool._confirm_delivery('w1', state, 42)
+        await pool._confirm_delivery('w1', state, 42)
+        state.confirm.assert_awaited_once_with(42)
+        assert 'failed to confirm room delivery through 42' in caplog.text
 
     asyncio.run(run())
