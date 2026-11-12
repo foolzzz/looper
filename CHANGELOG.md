@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.161] - 2026-11-12
+
+### Changed
+
+- **README describes Looper as it is now.** ([#1291](https://github.com/foolzzz/looper/pull/1291))
+  - Documentation only: `README.md` and `README.zh-CN.md`. The first screen matches the repository description (a self-hosted, planner-driven multi-agent system for orchestrating coding agents), and the key features, quick start, architecture table, channels, runtime list, Settings pages and dashboard table are corrected to the current code.
+  - No behavior change and no model-visible change.
+
 ## [2.14.160] - 2026-11-12
 
 ### Changed
