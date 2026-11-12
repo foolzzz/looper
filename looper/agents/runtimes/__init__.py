@@ -219,6 +219,7 @@ class RoomPush(str, Enum):
 
     NONE = "none"
     USER_TURN = "user_turn"  # run_input; folded in at a tool result
+    STEER = "steer"  # Launch.steers; steered into the run's turn and acknowledged by the runtime
 
 
 class ResidentTransport(str, Enum):
@@ -671,6 +672,8 @@ class RuntimeAdapter(ABC):
 def room_push(launch: Launch) -> RoomPush:
     """How ``launch``'s run gets room messages while it runs."""
     runtime = launch.runtime
+    if runtime.room_push is RoomPush.STEER and launch.steers:
+        return RoomPush.STEER
     return RoomPush.USER_TURN if runtime.room_push is RoomPush.USER_TURN and runtime.run_input else RoomPush.NONE
 
 

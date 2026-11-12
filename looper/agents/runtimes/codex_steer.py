@@ -132,6 +132,19 @@ class CodexChannel:
                 "errors": [f"Codex app-server: {message}"]}
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
+        # A consumer may await send() while handling an event. Keep reading RPC
+        # replies independently so that its acknowledgement can complete.
+        events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        reader = asyncio.create_task(self._read_events(events))
+        try:
+            while (event := await events.get()) is not None:
+                yield event
+            await reader
+        finally:
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+
+    async def _read_events(self, events: asyncio.Queue[dict[str, Any] | None]) -> None:
         assert self._process.stdout is not None
         usage: Mapping[str, Any] = {}
         try:
@@ -164,7 +177,7 @@ class CodexChannel:
                         async with self._lock:
                             await self._write({"id": message["id"], "error": {
                                 "code": -32601, "message": "Looper runs Codex without interactive requests"}})
-                        yield {"type": "system", "subtype": "codex_server_request", "method": method}
+                        events.put_nowait({"type": "system", "subtype": "codex_server_request", "method": method})
                         continue
                     params = params or {}
                     if method == "thread/tokenUsage/updated":
@@ -172,7 +185,7 @@ class CodexChannel:
                         total = token_usage.get("total") if isinstance(token_usage, dict) else None
                         usage = total if isinstance(total, dict) else {}
                         # Totals are charged once at turn completion; retain early work evidence separately.
-                        yield {"type": "system", "subtype": "codex_usage", "usage": dict(usage)}
+                        events.put_nowait({"type": "system", "subtype": "codex_usage", "usage": dict(usage)})
                     if method == "turn/completed":
                         self._turn_id = None
                     try:
@@ -183,7 +196,7 @@ class CodexChannel:
                                      type(exc).__name__)
                         continue
                     for event in translated:
-                        yield event
+                        events.put_nowait(event)
                     continue
                 future = self._pending.pop(request_id, None)
                 if future is None or future.done():
@@ -194,8 +207,8 @@ class CodexChannel:
                 method = self._handshake[0]
                 if "error" in message:
                     error = message["error"]
-                    yield self._failed(str((error.get("message") if isinstance(error, dict) else None)
-                                           or "request failed"))
+                    events.put_nowait(self._failed(str((error.get("message") if isinstance(error, dict) else None)
+                                                      or "request failed")))
                     return
                 result = result or {}
                 if method == "initialize":
@@ -209,10 +222,10 @@ class CodexChannel:
                     thread = result.get("thread")
                     self._thread_id = thread.get("id") if isinstance(thread, dict) else None
                     if not self._thread_id:
-                        yield self._failed("thread/start returned no thread id")
+                        events.put_nowait(self._failed("thread/start returned no thread id"))
                         return
                     for event in self._stream.translate({"type": "thread.started", "thread_id": self._thread_id}):
-                        yield event
+                        events.put_nowait(event)
                     await self._handshake_request("turn/start", {
                         "threadId": self._thread_id, "input": [{"type": "text", "text": self._prompt}],
                         **({"effort": self._effort} if self._effort else {}),
@@ -221,15 +234,15 @@ class CodexChannel:
                     turn = result.get("turn")
                     self._turn_id = turn.get("id") if isinstance(turn, dict) else None
                     if not self._turn_id:
-                        yield self._failed("turn/start returned no turn id")
+                        events.put_nowait(self._failed("turn/start returned no turn id"))
                         return
                     self._handshake = None
                     self._turn_ready.set()
             if not self._turn_ready.is_set():
-                yield self._failed("connection closed before the turn started")
+                events.put_nowait(self._failed("connection closed before the turn started"))
         except (BrokenPipeError, ConnectionResetError) as exc:
             if not self._turn_ready.is_set():
-                yield self._failed(str(exc))
+                events.put_nowait(self._failed(str(exc)))
         finally:
             self._ended = True
             self._turn_id = None
@@ -240,6 +253,7 @@ class CodexChannel:
                     if self._handshake is not None and self._handshake[1] == request_id:
                         future.exception()  # The handshake is driven here, not awaited by a caller.
             self._pending.clear()
+            events.put_nowait(None)
 
     def _check_open(self) -> None:
         assert self._process.stdin is not None

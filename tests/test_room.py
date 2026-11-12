@@ -573,7 +573,7 @@ def test_room_push_requires_an_opted_in_runtime_with_input(monkeypatch, runtime,
     from looper.agents.runtimes import ADAPTERS, room_push
     adapter = ADAPTERS[runtime]
     monkeypatch.setattr(adapter, "run_input", input_enabled)
-    assert room_push(SimpleNamespace(runtime=adapter)).value == expected
+    assert room_push(SimpleNamespace(runtime=adapter, steers=False)).value == expected
 
 
 def test_kept_run_sessions_go_with_their_task(tmp_path: Any) -> None:
