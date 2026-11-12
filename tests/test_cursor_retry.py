@@ -30,7 +30,7 @@ CONTINUATION_PROMPT = (
 
 
 def _stand_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, *, wrapped: bool = False,
-              verify: bool = False):
+              verify: bool = False, progress: tuple[str, ...] = ("assistant",)):
     calls = tmp_path / "calls.jsonl"
     report = {"passed": True, "findings": [], "summary": "recovered"} if verify else {
         "status": "completed", "changed_files": {}, "summary": "recovered"}
@@ -61,7 +61,13 @@ if mode == 'held-stderr' and attempt == 1:
     subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
 if (attempt == 1 and mode != 'retry-lost-session') or (mode == 'three' and attempt <= 3) or mode in ('twice', 'no-chat-fails', 'resume-no-init', 'long-failure', 'resume-other', 'other', 'other-retriable', 'result', 'timeout', 'signal', 'lost-init', 'exit2'):
-    print(json.dumps({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': 'abandoned draft'}}]}}}}), flush=True)
+    progress = {progress!r}
+    event = progress[min(attempt - 1, len(progress) - 1)]
+    if event == 'assistant':
+        print(json.dumps({{'type': 'assistant', 'message': {{'content': [{{'type': 'text', 'text': 'abandoned draft'}}]}}}}), flush=True)
+    elif event == 'tool':
+        print(json.dumps({{'type': 'tool_call', 'subtype': 'started', 'call_id': 'read-1',
+                          'tool_call': {{'readToolCall': {{'args': {{'path': 'task.txt'}}}}}}}}), flush=True)
     print(json.dumps({{'type': 'connection', 'subtype': 'reconnecting'}}), flush=True)
     error = {{'other': 'unrelated failure', 'other-retriable': 'RetriableError: authentication failed'}}.get(mode, {SIGNATURE!r})
     if mode == 'resume-other' and attempt > 1: error = 'unrelated failure'
@@ -166,6 +172,49 @@ def test_worker_cursor_retry(mode, wrapped, verify, attempts, tmp_path, monkeypa
                 assert f"attempt-{attempt}" in result["error"]
                 assert f"attempt-{attempt}" in result["stderr"]
                 assert f"attempt-{attempt}" in agent_db.finish_record.await_args.kwargs["error"]
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize(("mode", "progress", "retry_modes"), [
+    ("once", ("init",), ["restart"]),
+    ("twice", ("init",), ["restart"]),
+    ("once", ("tool",), ["resume"]),
+    ("three", ("init", "assistant"), ["restart", "resume", "resume"]),
+    ("twice", ("init", "assistant"), ["restart", "resume", "resume"]),
+    ("twice", ("assistant", "init", "assistant"), ["resume", "restart", "resume"]),
+    ("twice", ("assistant", "init"), ["resume", "restart"]),
+])
+def test_worker_cursor_retry_requires_progress_in_failed_attempt(
+    mode, progress, retry_modes, wrapped, tmp_path, monkeypatch, agent_db: Any,
+):
+    launch, calls = _stand_in(tmp_path, monkeypatch, mode, wrapped=wrapped, progress=progress)
+    _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 15, "max_turns": 0})
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=launch.settings))
+    work = tmp_path / "work"
+    work.mkdir()
+
+    async def run():
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+        return await pool._execute(_step_envelope(work, verify=False))
+
+    result = asyncio.run(asyncio.wait_for(run(), 30))
+    invocations = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert len(invocations) == len(retry_modes) + 1
+    assert "ROLE" in invocations[0]["stdin"]
+    for invocation, retry_mode in zip(invocations[1:], retry_modes):
+        if retry_mode == "restart":
+            assert invocation["argv"] == invocations[0]["argv"]
+            assert "--resume" not in invocation["argv"]
+            assert invocation["stdin"] == invocations[0]["stdin"]
+        else:
+            assert invocation["argv"] == invocations[0]["argv"] + ["--resume", "chat-retry"]
+            assert invocation["stdin"] == CONTINUATION_PROMPT
+    events = [event for call in agent_db.append_events.await_args_list for _, event in call.args[1]]
+    retries = [event for event in events if event.get("subtype") == "cursor_run_retry"]
+    assert [event["mode"] for event in retries] == retry_modes
+    assert [event["attempt"] for event in retries] == list(range(1, len(retry_modes) + 1))
+    assert result["status"] == ("completed" if mode in ("once", "three") else "failed")
+    assert all(not Path(call["tmpdir"]).exists() for call in invocations)
 
 
 @pytest.mark.parametrize(("mode", "wrapped", "attempts"), [

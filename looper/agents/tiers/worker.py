@@ -2276,7 +2276,7 @@ class WorkerPool:
         stderr: str | None = None
         attempt_stderr: list[str] = []
         resume_session_id: str | None = None
-        retry_limit = 1
+        restarted = False
 
         async def _end_run() -> None:
             nonlocal ended
@@ -2557,6 +2557,7 @@ class WorkerPool:
                     raise asyncio.TimeoutError
             deadline = time.monotonic() + remaining if run_timeout > 0 else None
             while True:
+                attempt_model_events = ctx.model_events
                 try:
                     if start is ConsumeStart.NEW:
                         if isinstance(channel, CursorChannel) and resume_session_id:
@@ -2583,12 +2584,15 @@ class WorkerPool:
                     break
                 stderr = await handle.error_output()
                 attempt_stderr.append(stderr)
-                if isinstance(channel, CursorChannel):
+                # Init names a chat before Cursor stores the task. Only model
+                # output from this attempt proves a continuation has its context.
+                if isinstance(channel, CursorChannel) and ctx.model_events > attempt_model_events:
                     resume_session_id = channel.stream.session_id or resume_session_id
-                if len(attempt_stderr) == 1:
-                    retry_limit = 3 if resume_session_id else 1
+                else:
+                    resume_session_id = None
                 if ended or return_code not in (0, 1) or cursor_failure(result_event, stderr) is None \
-                        or not isinstance(handle, ProcessRun) or len(attempt_stderr) > retry_limit:
+                        or not isinstance(handle, ProcessRun) or len(attempt_stderr) > 3 \
+                        or (not resume_session_id and restarted):
                     if len(attempt_stderr) > 1:
                         stderr = retry_stderr(*attempt_stderr)
                     break
@@ -2598,6 +2602,7 @@ class WorkerPool:
                     raise asyncio.TimeoutError
                 event = retry_event(stderr, attempt=len(attempt_stderr),
                                     mode="resume" if resume_session_id else "restart")
+                restarted = restarted or not resume_session_id
                 await recorder.record(event)
                 if parent_task_id:
                     await self._activity(parent_task_id, worker_id, "phase", event["summary"])
