@@ -18,6 +18,7 @@ from looper.agents.channels.allowlist import SenderAllowlist
 from looper.agents.channels.lark import LarkChannelAdapter
 from looper.agents.channels.registry import ChannelRegistry
 from looper.agents.channels.telegram import TelegramChannelAdapter
+from looper.agents.gate_service import _dashboard_chat, gate_chat
 
 
 class _Bot:
@@ -59,6 +60,27 @@ def test_lark_sends_as_the_bot_to_the_users_open_id(tmp_path: Path, monkeypatch:
     assert receipt.success
     assert json.loads(log.read_text()) == ["im", "+messages-send", "--as", "bot", "--user-id", "ou_abcdefgh12",
                                            "--text", "告警：定时任务「triage」已连续失败 3 次。"]
+
+
+@pytest.mark.parametrize("source", ["schedule", "dashboard"])
+@pytest.mark.parametrize("channel", ["lark", "lark_bot"])
+@pytest.mark.parametrize(("chat_id", "target_flag"), [("oc_team", "--chat-id"), ("ou_requester", "--user-id")])
+def test_lark_gate_posts_to_the_configured_chat_or_user(
+    tmp_path: Path, lark_cli_stand_in: Path, source: str, channel: str, chat_id: str, target_flag: str,
+) -> None:
+    if source == "schedule":
+        chat = gate_chat({"schedule_id": "schedule-a", "schedule_notify_channel": channel,
+                          "schedule_notify_chat": chat_id}, None)
+    else:
+        chat = _dashboard_chat(json.dumps({"channel": channel, "chat": chat_id}))
+    assert chat is not None
+    adapter = LarkChannelAdapter(channel_type=channel, runtime_root=tmp_path,
+                                 allowlist=SenderAllowlist(f"channel-{channel}", frozenset({"ou_requester"})))
+    receipt = asyncio.run(adapter.post(chat.target, "Which database?"))
+    assert receipt.success and receipt.external_ids
+    calls = [json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
+    assert calls == [["im", "+messages-send", "--as", "bot", target_flag, chat_id,
+                      "--markdown", "Which database?"]]
 
 
 def test_a_channel_that_is_not_running_says_so() -> None:
