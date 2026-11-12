@@ -422,10 +422,12 @@ async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
                 if event is None:
                     logger.debug("Lark stream ignored a non-message event")
                 elif seen.first(event["event_id"], event["message_id"]):
-                    if admit is not None and not admit(event):
+                    if admit is not None:
+                        event["admitted"] = admit(event)
+                    if event.get("admitted") is False:
                         event = {key: event[key] for key in (
                             "type", "event_id", "message_id", "chat_id", "chat_type", "sender_id",
-                            "sender_type", "mentions", "message_type")}
+                            "sender_type", "mentions", "message_type", "admitted")}
                         event["content"] = ""
                     try:
                         events.put_nowait(event)

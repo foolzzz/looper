@@ -109,12 +109,12 @@ async def build_overview(
         for p in task_router.running_planners()
     ]
     runs = sorted(worker_pool.runs() if worker_pool else [], key=lambda r: (r["state"] != "running", r["since"]))
+    # A task can move while its Workers run; dispatch-time project IDs are no longer its scope.
+    current_projects = await db_tasks.project_of({r["task_id"] for r in runs})
+    runs = [{**r, "project_id": current_projects.get(r["task_id"], r["project_id"])} for r in runs]
     if project_ids is not None:
-        # A task can move while its Workers run; dispatch-time project IDs are no longer its scope.
-        current_projects = await db_tasks.project_of({r["task_id"] for r in runs})
         planners = [p for p in planners if p["project_id"] in project_ids]
-        runs = [{**r, "project_id": current_projects[r["task_id"]]} for r in runs
-                if current_projects.get(r["task_id"]) in project_ids]
+        runs = [r for r in runs if current_projects.get(r["task_id"]) in project_ids]
     elif manager_id is not None:
         owners = await db_tasks.manager_of({p["task_id"] for p in planners} | {r["task_id"] for r in runs})
         own = {task_id for task_id, owner in owners.items() if owner == manager_id}
