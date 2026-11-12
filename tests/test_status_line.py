@@ -390,7 +390,7 @@ def test_lark_a_rejected_sender_or_a_group_message_gets_no_reaction(tmp_path: Pa
         adapter._bus = bus
         await adapter._handle_lark_event(_lark_dm("om_1", sender=OTHER))
         await adapter._handle_lark_event(_lark_dm("om_2", chat_type="group"))
-        await adapter._handle_lark_event(_lark_dm("om_3", message_type="image", content="[Image]"))
+        await adapter._handle_lark_event(_lark_dm("om_3", message_type="sticker", content="[Sticker]"))
         await _settled(adapter)
         texts = _manager_texts(bus)
         await bus.shutdown()
