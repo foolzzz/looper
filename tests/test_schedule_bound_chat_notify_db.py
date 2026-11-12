@@ -83,6 +83,11 @@ def test_bound_notice_uses_exact_bot_and_chat_then_stops_after_unbinding(
                 # A binding of the same chat on another bot must not become a fallback.
                 other = "lark_bot" if channel == "lark" else "lark"
                 await bind(env, other)
+            listed = (await env.ok("POST", "/api/v1/schedule_admin/list", {}))["schedules"]
+            page = await env.ok("POST", "/api/v1/schedule_admin/project_list", {"project_id": env.project_id})
+            detail = await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid})
+            assert listed == page["schedules"] == [detail["schedule"]]
+            assert detail["schedule"]["notify_target_available"] is (not removed)
             run = (await env.ok("POST", "/api/v1/schedule_admin/run", {"schedule_id": sid}))["run"]
             await env.end_task(run["task_id"], "completed", summary="Report ready")
             await env.scheduler.idle()

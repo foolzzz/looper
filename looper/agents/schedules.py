@@ -302,14 +302,7 @@ def local_midnight(now: datetime | None = None) -> datetime:
 
 async def _schedule_answer(schedule_id: str, *, runtime_root: Path | None = None) -> dict[str, Any]:
     row = await _existing(schedule_id)
-    latest = (await db_schedules.latest_runs([schedule_id])).get(schedule_id)
-    last_run = (await _run_views([latest], runtime_root=runtime_root))[0] if latest else None
-    spent = await db_schedules.spent_since(db_connection.get_pool(), schedule_id, local_midnight())
-    view = schedule_view(row, last_run, spent_today=spent, default_timeout=await default_run_timeout())
-    target = view["notify_target"]
-    view["notify_target_available"] = target is None or any(
-        (t["channel"], t["chat"]) == (target["channel"], target["chat"]) for t in await notify_targets())
-    return {"schedule": view}
+    return {"schedule": (await _schedule_views([row], runtime_root=runtime_root))[0]}
 
 
 async def notify_targets(*, manager_id: str | None = None) -> list[dict[str, Any]]:
@@ -650,7 +643,10 @@ async def _schedule_views(rows: list[dict[str, Any]], *, runtime_root: Path | No
     views = dict(zip(latest, await _run_views(list(latest.values()), runtime_root=runtime_root)))
     spent = await db_schedules.spent_since_each(db_connection.get_pool(), ids, local_midnight())
     default = await default_run_timeout()
-    return [schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]], default_timeout=default)
+    targets = {(target["channel"], target["chat"]) for target in await notify_targets()}
+    return [{**schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]], default_timeout=default),
+             "notify_target_available": not row.get("notify_channel") or
+                 (row["notify_channel"], row["notify_chat"]) in targets}
             for row in rows]
 
 
