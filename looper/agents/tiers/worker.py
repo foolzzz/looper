@@ -75,6 +75,7 @@ from ..runtimes.channel import DeliveryResult, RunHandle, RunStartError
 from ..runtimes.codex import CodexRuntime
 from ..runtimes.cursor_agent import CONTINUATION_PROMPT, CursorChannel, cursor_failure, retry_event, retry_stderr
 from ..runtimes.omp import safe_error
+from ..runtimes.per_turn import STDERR_DRAIN_SEC, stderr_tail
 from ..runtimes.api.tools import RoomTurnTools
 from ..task_roles import TaskRole, run_role
 from ..room import MemberKind, RoomDelivery, RoomInput, Seat, room_section, run_seat, run_session_dir
@@ -557,10 +558,7 @@ class ProcessRun:
 
     async def error_output(self) -> str:
         assert self.process is not None
-        if self.process.stderr:
-            data = await self.process.stderr.read()
-            return data.decode("utf-8", errors="replace") if data else ""
-        return ""
+        return await stderr_tail(self.process.stderr, STDERR_DRAIN_SEC)
 
     def dropped_input(self) -> list[str]:
         return []
@@ -2767,11 +2765,18 @@ class WorkerPool:
                 await asyncio.wait_for(_read_output(), timeout=max(0, deadline - time.monotonic())
                                        if deadline is not None else None)
                 _end_input()
-                return_code = await handle.wait()
+                return_code = await asyncio.wait_for(handle.wait(), timeout=max(0, deadline - time.monotonic())
+                                                     if deadline is not None else None)
                 waited = True
+                result_ok = (result_event is not None and not result_event.get("is_error")
+                             and result_event.get("subtype") == "success")
+                if not result_ok:
+                    # Diagnose failures within this run's budget, including non-Cursor exits.
+                    stderr = await asyncio.wait_for(handle.error_output(), timeout=max(0, deadline - time.monotonic())
+                                                    if deadline is not None else None)
                 if runtime.type != "cursor-agent" or result_event is not None:
                     break
-                stderr = await handle.error_output()
+                assert stderr is not None
                 attempt_stderr.append(stderr)
                 # Init names a chat before Cursor stores the task. Only model
                 # output from this attempt proves a continuation has its context.
@@ -2856,11 +2861,6 @@ class WorkerPool:
         # exits non-zero: Claude Code can exit 1 for reasons unrelated to the
         # work (an MCP server or hook erroring on teardown, for example). Only
         # when there is no usable result does the exit code become the failure.
-        result_ok = (
-            result_event is not None
-            and not result_event.get("is_error")
-            and result_event.get("subtype") == "success"
-        )
         detail = (runtime.failure_detail(result_event, launch=launch, command=command, pid=handle.pid)
                   if not result_ok else None)
         errors = (result_event or {}).get("errors") or []
@@ -2875,7 +2875,6 @@ class WorkerPool:
         if ((return_code != 0 or launch_refused or launch_ended_without_result)
                 and runtime.first_event_known and ctx.model_events == 0
                 and not result_ok and runtime.budget_error(result_event) is None):
-            stderr = stderr if stderr is not None else await handle.error_output()
             message = safe_error(redact(detail or (str(errors[0]) if errors else "") or stderr or ""), limit=None)
             message = message or f"{runtime.label} exited with code {return_code}"
             ctx.fallback_reason = f"exited before any model event: {message.splitlines()[0]}"[:299]
@@ -2883,7 +2882,7 @@ class WorkerPool:
         if ((return_code != 0 or not launch.exit_code_reliable or result_event is None or len(attempt_stderr) > 1)
                 and not result_ok
                 and runtime.budget_error(result_event) is None and not detail):
-            stderr = safe_error(redact(stderr if stderr is not None else await handle.error_output()), limit=None)
+            stderr = safe_error(redact(stderr or ""), limit=None)
             error = (f"{runtime.label} through TTADK ended without a result" if not launch.exit_code_reliable
                      else f"{runtime.label} ended without a result" if return_code == 0 and result_event is None
                      else f"{runtime.label} exited with code {return_code}")

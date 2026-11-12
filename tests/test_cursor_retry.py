@@ -343,7 +343,7 @@ def test_worker_timeout_does_not_retry(tmp_path, monkeypatch, agent_db: Any):
 
 
 @pytest.mark.parametrize("boundary", ["before-retry", "after-retry-event", "after-first-resume"])
-def test_worker_cursor_retry_keeps_original_deadline(boundary, tmp_path, monkeypatch, agent_db: Any, no_tree_end):
+def test_worker_cursor_retry_keeps_original_deadline(boundary, tmp_path, monkeypatch, agent_db: Any):
     launch, calls = _stand_in(tmp_path, monkeypatch, "twice")
     _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 15, "max_turns": 0})
     monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=launch.settings))
@@ -374,6 +374,61 @@ def test_worker_cursor_retry_keeps_original_deadline(boundary, tmp_path, monkeyp
     asyncio.run(asyncio.wait_for(run(), 30))
     assert len(calls.read_text().splitlines()) == (2 if boundary == "after-first-resume" else 1)
     assert agent_db.start_record.await_count == agent_db.finish_record.await_count == 1
+
+
+@pytest.mark.parametrize("blocked", ["wait", "stderr", "failure-stderr", "stderr-eof"])
+def test_worker_exit_waits_respect_run_timeout(blocked, tmp_path, monkeypatch, agent_db: Any):
+    launch, calls = _stand_in(tmp_path, monkeypatch, "result" if blocked == "failure-stderr" else "once")
+    _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 0 if blocked == "stderr-eof" else 1,
+                             "max_turns": 0})
+    monkeypatch.setattr(worker, "load_agent_settings", AsyncMock(return_value=launch.settings))
+    work = tmp_path / "work"
+    work.mkdir()
+
+    async def run():
+        entered = asyncio.Event()
+        wait = worker.ProcessRun.wait
+
+        async def held_open(self):
+            if blocked == "wait":
+                await wait(self)
+            entered.set()
+            await asyncio.Event().wait()
+
+        if blocked == "stderr-eof":
+            async def exited_with_open_stderr(self):
+                code = await wait(self)
+                if not entered.is_set():
+                    # Retain the transient error even though the inherited pipe never reaches EOF.
+                    self.process.stderr = asyncio.StreamReader()
+                    self.process.stderr.feed_data(SIGNATURE.encode())
+                    entered.set()
+                return code
+            monkeypatch.setattr(worker.ProcessRun, "wait", exited_with_open_stderr)
+        else:
+            monkeypatch.setattr(worker.ProcessRun, "wait" if blocked == "wait" else "error_output", held_open)
+        pool = worker.WorkerPool(config=worker.WorkerConfig(), runtime_root=tmp_path / "runtime")
+        started = asyncio.get_running_loop().time()
+        if blocked == "stderr-eof":
+            result = await asyncio.wait_for(pool._execute(_step_envelope(work, verify=False)), 3)
+            assert result["status"] == "completed"
+        else:
+            with pytest.raises(asyncio.TimeoutError, match="timeout_seconds"):
+                await asyncio.wait_for(pool._execute(_step_envelope(work, verify=False)), 3)
+        assert entered.is_set(), "the stalled exit operation must be reached"
+        assert asyncio.get_running_loop().time() - started < 2
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+    assert len(calls.read_text().splitlines()) == (2 if blocked == "stderr-eof" else 1)
+    assert agent_db.start_record.await_count == agent_db.finish_record.await_count == 1
+    finish = agent_db.finish_record.await_args.kwargs
+    if blocked == "stderr-eof":
+        events = [event for call in agent_db.append_events.await_args_list for _, event in call.args[1]]
+        assert any(event.get("subtype") == "cursor_run_retry" and SIGNATURE in event["stderr"] for event in events)
+        assert finish["error"] is None
+    else:
+        assert finish["status"] == "failed"
+        assert "timeout_seconds" in finish["error"]
 
 
 def test_worker_cancel_before_retry_leaves_exited_tree_alone(tmp_path, monkeypatch, agent_db: Any, no_tree_end):
