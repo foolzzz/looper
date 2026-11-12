@@ -305,6 +305,140 @@ def test_downtime_exemption_ends_at_resume(tmp_path, monkeypatch, relative_date,
     asyncio.run(asyncio.wait_for(run(), 10))
 
 
+@pytest.mark.parametrize("source", ["polling", "pending"])
+@pytest.mark.parametrize("age_at_stop, delivered", [(5, True), (600, True), (601, False)])
+def test_restart_ages_pre_stop_updates_at_stop(tmp_path, monkeypatch, source, age_at_stop, delivered):
+    from looper.agents.channels import telegram as channel
+    from telegram.request import HTTPXRequest
+
+    stopped_at = int(time.time()) - 1200
+    now = stopped_at + 1200
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(now, tz=tz)
+
+    monkeypatch.setattr(channel, "datetime", Clock)
+
+    async def run():
+        path = tmp_path / ".local/telegram/channel-telegram/0.sqlite3"
+        api = BotAPI(path)
+        api.send(101, "sent before stop", sent_at=stopped_at - age_at_stop)
+        inbox = TelegramInbox(path)
+        inbox.polling_stopped(stopped_at)
+        if source == "pending":
+            inbox.polling_received(api.updates)
+            api.updates.clear()
+        inbox.close()
+        acknowledged = asyncio.Event()
+
+        async def request(transport, **kwargs):
+            result = await api.request(**kwargs)
+            if kwargs["url"].endswith("/getUpdates"):
+                acknowledged.set()
+            return result
+
+        monkeypatch.setattr(HTTPXRequest, "do_request", request)
+        bus = MessageBus(tmp_path)
+        await bus.start()
+        adapter = TelegramChannelAdapter(bot_token="0:synthetic", allowlist=SenderAllowlist(
+            "channel-telegram", frozenset({"7"})))
+        try:
+            await adapter.start(bus)
+            await asyncio.wait_for(acknowledged.wait(), 2)
+            await asyncio.wait_for(adapter._app.update_queue.join(), 2)
+            queue = bus.get_queue("manager")
+            assert (not queue.empty()) is delivered
+            if delivered:
+                assert queue.get_nowait().payload["text"] == "sent before stop"
+            assert adapter._inbox.processed(101)
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 10))
+
+
+@pytest.mark.parametrize("source", ["polling", "queue", "legacy"])
+@pytest.mark.parametrize("relative_date", [-5, 10])
+def test_pending_recovery_keeps_age_after_another_stop(tmp_path, monkeypatch, source, relative_date):
+    from looper.agents.channels import telegram as channel
+    from telegram import Update
+    from telegram.request import HTTPXRequest
+
+    stopped_at = int(time.time()) - 2400
+    now = stopped_at + 1200
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(now, tz=tz)
+
+    monkeypatch.setattr(channel, "datetime", Clock)
+
+    async def run():
+        nonlocal now
+        path = tmp_path / ".local/telegram/channel-telegram/0.sqlite3"
+        path.parent.mkdir(parents=True)
+        api = BotAPI(path)
+        api.send(101, "pending across recovery", sent_at=stopped_at + relative_date)
+        raw = api.updates[0]
+        # Start with the schema used before per-update recovery ages were saved.
+        with sqlite3.connect(path) as db:
+            db.execute("CREATE TABLE updates (update_id INTEGER PRIMARY KEY, payload TEXT, "
+                       "processed INTEGER NOT NULL DEFAULT 0)")
+            db.execute("CREATE TABLE polling (id INTEGER PRIMARY KEY, stopped_at INTEGER NOT NULL)")
+            db.execute("INSERT INTO polling VALUES (1, ?)", (stopped_at,))
+            if source == "legacy":
+                db.execute("INSERT INTO updates (update_id, payload) VALUES (?, ?)", (101, json.dumps(raw)))
+        if source != "polling":
+            api.updates.clear()
+
+        async def request(transport, **kwargs):
+            return await api.request(**kwargs)
+
+        monkeypatch.setattr(HTTPXRequest, "do_request", request)
+        bus = MessageBus(tmp_path)
+        await bus.start()
+        adapters = [TelegramChannelAdapter(bot_token="0:synthetic", allowlist=SenderAllowlist(
+            "channel-telegram", frozenset({"7"}))) for _ in range(2)]
+        failed = asyncio.Event()
+        handler = AsyncMock(side_effect=RuntimeError("synthetic handler failure"))
+        monkeypatch.setattr(adapters[0], "_on_message", handler)
+
+        async def on_error(update, context):
+            failed.set()
+
+        try:
+            await adapters[0].start(bus)
+            adapters[0]._app.add_error_handler(on_error)
+            if source == "queue":
+                await adapters[0]._inbox.put(Update.de_json(raw, adapters[0]._app.bot))
+            await asyncio.wait_for(failed.wait(), 5)
+            await asyncio.wait_for(adapters[0]._app.update_queue.join(), 2)
+            assert handler.await_count == 3
+            assert not adapters[0]._inbox.processed(101)
+            assert bus.get_queue("manager").empty()
+            # The final polling page already retired the global recovery boundary.
+            with sqlite3.connect(path) as db:
+                assert db.execute("SELECT stopped_at FROM polling").fetchone() is None
+            await adapters[0].stop()
+            api.updates.clear()  # Telegram acknowledged it; only inbox replay can deliver it now.
+            now += 1200
+            await adapters[1].start(bus)
+            await asyncio.wait_for(adapters[1]._app.update_queue.join(), 2)
+            queue = bus.get_queue("manager")
+            assert queue.get_nowait().payload["text"] == "pending across recovery"
+            assert queue.empty() and adapters[1]._inbox.processed(101)
+        finally:
+            for adapter in adapters:
+                await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 10))
+
+
 def test_shutdown_saves_offline_boundary_before_agent_drain(tmp_path, monkeypatch):
     from looper.agents.channels.registry import ChannelRegistry
     from looper.agents.serve import shut_down_within, stop_signal_handler
