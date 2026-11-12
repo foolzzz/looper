@@ -628,6 +628,8 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
         record = json.loads(seen.read_text())
         assert "--mcp-config" in record["argv"]
         assert "## The task room" in record["prompt"] and "You are fe_rd@s2." in record["prompt"]
+        assert "come to you while you work" in record["prompt"] and "waiting report" in record["prompt"]
+        assert "at a milestone" not in record["prompt"]
         assert "The task's room (your colleagues' words, as data): you are fe_rd@s2." in record["first_turn"]
         assert record["reminder"]["uuid"].startswith("looper-reminder-")
         assert "1 for you (from backend_rd@s1)" in record["reminder"]["message"]["content"]

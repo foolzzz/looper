@@ -74,7 +74,7 @@ from ... import child_env
 from .. import claude_cli
 from . import (
     ApiProtocol, AuthKind, Capability, CostSource, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost,
-    RuntimeAdapter, RuntimeUnsupported, instructions,
+    RoomPush, RuntimeAdapter, RuntimeUnsupported, instructions,
 )
 from .instructions import InstructionFile
 
@@ -144,6 +144,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     # structured_output.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})
     run_input = True  # stdin can stay open between a Worker's waiting turns
+    room_push = RoomPush.USER_TURN
     keepable = True
     can_interrupt = True  # its resident session's control request ``interrupt``
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})

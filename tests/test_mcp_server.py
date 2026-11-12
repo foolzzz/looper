@@ -752,6 +752,9 @@ def test_per_run_wait_cap_clamps_requests_and_describes_only_capped_tools(cap, m
     inbox = next(tool for tool in listed if tool["name"] == "looper_room_inbox")
     assert inbox["inputSchema"]["properties"]["wait_seconds"]["maximum"] == (cap or 120)
     assert ("50 seconds" in inbox["description"]) is (cap is not None)
+    assert "Every room tool's answer carries your unread counts." in inbox["description"]
+    assert "when nothing is for you yet, wait up to that long" in inbox["description"]
+    assert "use it only when you cannot go on without one, not as a timer" in inbox["description"]
     assert tools == original
     for wait in (0, 10, 50, 120):
         arguments = {"wait_seconds": wait, "peek": True}

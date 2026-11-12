@@ -4564,16 +4564,31 @@ before.
   (with `reply_to` a question), `interface`, `announce`; Looper's `notice` and
   `escalation`. Messages are only added; they go with their task and with a
   start-over (`reset_task_for_restart`). Refused posts are a task activity line.
-- **Delivery is pulled.** A run's first user turn says its seat, who is
+- **Room input and guidance.** A run's first user turn says its seat, who is
   online, the messages for it in full and the interface posts it has not read
   (within 2,000 characters), after the Findings; the system prompt has the
   room's section after the task (and before a role's boundaries;
-  `prompt_layers.room`). `looper_room_inbox` gives the unread messages oldest
+  `prompt_layers.room`). The section follows the run's delivery capability
+  (`RoomInput`): runs without room deliveries use `PULL`, reading their inbox
+  at milestones, before their report and before using another step's
+  interface. Runs with deliveries use `PUSHED`: messages and answers arrive
+  after a tool result, so they use the inbox only when a delivery says more
+  are waiting, and `looper_room_read` for earlier messages. Workers that can
+  stay idle between turns use `PUSHED_WAITS`, waiting for a needed answer
+  with a waiting report; deliveries can then arrive as their own turn.
+  Reviewers never use `PUSHED_WAITS`. Claude Code Workers use `PUSHED_WAITS`
+  and its Reviewers `PUSHED`; runtimes without deliveries, including Cursor,
+  keep `PULL`. Pulling Workers use `wait_seconds` only for an answer they
+  cannot go on without, after doing the rest, never as a timer.
+  `looper_room_inbox` gives the unread messages oldest
   first (`for_you` on those that name the seat; at most 20 and 8,000
   characters) and marks them read per seat (a retry reads on); `peek` reads
   without marking; `wait_seconds` waits, up to the project's
   `room_wait_max_seconds`, for a message for the seat or an interface post.
-  Every tool's answer carries the seat's unread counts.
+  Every tool's answer carries the seat's unread counts. The inbox description
+  tells every runtime to wait only for a message it cannot go on without,
+  not as a timer; each call costs a request. Per-runtime wait caps still
+  follow that description.
 - **Reminders.** A run on a runtime that reads user turns while it runs
   (`RuntimeAdapter.run_input`: Claude Code; not a stored capability) that a
   message names, or that an interface post or a watch reaches, gets one line,
