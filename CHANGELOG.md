@@ -18,6 +18,18 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.167] - 2026-11-12
+
+### Fixed
+
+- **Planner profile refusals.** ([#1305](https://github.com/foolzzz/looper/pull/1305); fixes #1228)
+  - A refused `looper_task_profile_set` names the pinning task role with its origin and, for a Planner-defined role with the project's role tools on, points to `looper_task_role_set` with `profile_id`.
+  - Model-visible: the Planner prompt text and the tool description for this tool changed.
+- **Overview and Lark admission.** ([#1303](https://github.com/foolzzz/looper/pull/1303); fixes #1097, part of #1132)
+  - Overview run counts use each task's current project in every scope, not only project-scoped ones.
+  - The Lark bot stream decides sender admission once per event and the adapter reuses it.
+  - No model-visible change.
+
 ## [2.14.166] - 2026-11-12
 
 ### Fixed
