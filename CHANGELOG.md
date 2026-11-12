@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.155] - 2026-11-12
+
+### Changed
+
+- **Room messages are delivered into running Claude Code runs as bodies, not a reminder.** ([#1266](https://github.com/foolzzz/looper/pull/1266))
+  - A running Claude Code Worker or Reviewer gets up to 10 messages (4,000 characters; 1,500 each for messages for it and interface posts, 300 otherwise) as a user message at a tool call or while waiting, and they are marked read when it echoes them, without a `looper_room_inbox` call. While a delivery is in flight, that run's inbox and unread counts start after it.
+  - Messages for the seat reach the run up to every 10 s (was 60 s); a delivery that had to wait for its interval is retried when it ends. After a keeper adoption, messages that arrived while Looper was down are delivered at the next tool call or check.
+  - Model-visible: the one-line reminder is replaced by a "[Looper room] New in the task's room" message with the bodies; a `looper_room_inbox` wait ended by a delivered message returns `delivered_message_ids` and a note. The activity row reads "Room messages delivered: #ids".
+  - Other runtimes, the Planner's `[ROOM]` turns, consults and the first turn are unchanged.
+
 ## [2.14.154] - 2026-11-12
 
 ### Changed
