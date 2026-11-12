@@ -402,3 +402,84 @@ def test_live_checks_all_identities_in_one_snapshot(monkeypatch):
     monkeypatch.setattr(proc_tree, "_start_times", starts)
     assert kept_dirs.live(records) == {"same": True, "reused": False}
     assert calls == [[123, 125]]
+
+
+@pytest.mark.parametrize(("filename", "field", "value"), [
+    (keeper.STATE, "child_started", None),
+    (keeper.MANIFEST, "manifest_version", 2),
+    (keeper.DETACH, "stdin_offset", -1),
+    (keeper.GRANT, "format", "invalid"),
+    (keeper.STATE, "quarantine_unwritable", None),
+    (keeper.STATE, "quarantine_symlink", None),
+])
+def test_rejected_files_are_diagnosed_and_preserved_before_cleanup(tmp_path, monkeypatch, caplog,
+                                                                filename, field, value):
+    from looper import components
+
+    copy_failure = field.startswith("quarantine_")
+    symlink = field == "quarantine_symlink"
+    if copy_failure:
+        field = "child_started"
+    monkeypatch.setattr(kept_dirs, "_QUARANTINE_KEEP", 1, raising=False)
+    monkeypatch.setattr(kept_dirs, "_QUARANTINE_FILE_BYTES", 512, raising=False)
+    old_copy = tmp_path / ".local" / "kept-run-quarantine" / "old"
+    if copy_failure and not symlink:
+        old_copy.parent.parent.mkdir(parents=True)
+        old_copy.parent.write_text("cannot create quarantine here")
+    else:
+        old_copy.mkdir(parents=True)
+        (old_copy / keeper.STATE).write_text("previous evidence")
+    directory = tmp_path / keeper.RUNS_DIR / "worker-rejected"
+    directory.mkdir(parents=True)
+    data = {
+        keeper.STATE: dict(format=1, keeper_pid=123, keeper_started="start", child_pid=124,
+                           child_started="start", state="running", end_reason=None,
+                           controller_epoch=1, socket=None),
+        keeper.MANIFEST: dict(manifest_version=1, record_id=1, adoption=components.loaded_manifest().adoption),
+        keeper.DETACH: dict(format=1, epoch=1, consumed={"stdout": 0}, stdin_offset=0, at="now"),
+        keeper.GRANT: {"format": "invalid"},
+    }
+    if filename != keeper.GRANT:
+        data.pop(keeper.GRANT)
+    data[keeper.MANIFEST]["padding"] = "x" * 1024
+    data[filename][field] = value
+    for name, content in data.items():
+        keeper.write_json(directory / name, content)
+    original = (directory / filename).read_bytes()
+    if symlink:
+        source = tmp_path / "rejected-state.json"
+        (directory / filename).rename(source)
+        (directory / filename).symlink_to(source)
+    (directory / keeper.STDOUT).write_bytes(b"")
+    records = tmp_path / proc_tree.RECORDS_DIR
+    records.mkdir(parents=True)
+    keeper.write_json(records / "124.json", dict(pid=124, started="start", server_pid=123,
+                      server_started="start", run_dir=str(directory.resolve())))
+    monkeypatch.setattr(kept_dirs, "live", lambda records: {name: True for name in records})
+    monkeypatch.setattr(kept_dirs.plans, "run_holds", AsyncMock(return_value={
+        directory.name: {"task_id": "task", "id": "step", "status": "dispatched"}}))
+
+    async def end(*args):
+        # Shutdown can rewrite the rejected state; preserve the original evidence first.
+        keeper.write_json(directory / keeper.STATE, {"state": "exited"})
+
+    monkeypatch.setattr(kept_dirs, "end_keeper", end)
+    scan = asyncio.run(kept_dirs.scan_at_start(tmp_path, epoch=2, resumable={"task"},
+                       pool=SimpleNamespace(fetch=AsyncMock(return_value=[{"id": 1}]))))
+    assert scan.ended == {kept_dirs.Reason.BAD_FILES: 1}
+    warnings = [entry.message for entry in caplog.records if entry.levelname == "WARNING"]
+    assert len(warnings) == (2 if copy_failure else 1)
+    assert all(part in warnings[0] for part in (directory.name, filename, field))
+    if copy_failure:
+        assert "could not preserve" in warnings[1]
+        assert keeper.read_json(directory / keeper.STATE) == {"state": "exited"}
+        assert (directory / keeper.MANIFEST).exists()
+        if symlink:
+            assert list(old_copy.parent.iterdir()) == [old_copy]
+        return
+    assert not directory.exists()
+    copies = list((tmp_path / ".local" / "kept-run-quarantine").glob(f"*/{filename}"))
+    assert len(copies) == 1 and copies[0].read_bytes() == original[:512]
+    assert stat.S_IMODE(copies[0].stat().st_mode) == 0o600
+    assert not old_copy.exists()
+    assert all(path.name in data and path.stat().st_size <= 512 for path in copies[0].parent.iterdir())

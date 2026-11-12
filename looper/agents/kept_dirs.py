@@ -5,6 +5,8 @@ import logging
 import os
 import shutil
 import signal
+import stat
+import tempfile
 from collections import Counter
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
@@ -19,6 +21,39 @@ from .kept_run import RunHold
 from .keeper import DETACH, GRANT, MANIFEST, STDOUT, RUNS_DIR, STATE, STATE_FORMAT, EndReason, KeeperState, read_json
 
 logger = logging.getLogger(__name__)
+_QUARANTINE_KEEP = 20
+_QUARANTINE_FILE_BYTES = 64 * 1024
+
+
+def _invalid_file(path: Path, field: str, value) -> None:
+    logger.warning("rejected kept run=%s file=%s field=%s value=%.200r", path.parent.name, path.name, field, value)
+
+
+def _quarantine(path: Path, runtime_root: Path) -> None:
+    root = runtime_root / ".local" / "kept-run-quarantine"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    destination = Path(tempfile.mkdtemp(prefix=f"{path.name}-", dir=root))
+    try:
+        for name in (STATE, MANIFEST, DETACH, GRANT):
+            try:
+                fd = os.open(path / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                continue
+            with os.fdopen(fd, "rb") as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    continue
+                data = source.read(_QUARANTINE_FILE_BYTES)
+            target = destination / name
+            with target.open("xb") as output:
+                target.chmod(0o600)
+                output.write(data)
+    except OSError:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+    copies = sorted((entry for entry in root.iterdir() if entry.is_dir()),
+                    key=lambda entry: (entry.stat().st_mtime_ns, entry.name))
+    for entry in copies[:-_QUARANTINE_KEEP]:
+        shutil.rmtree(entry)
 
 
 @dataclass(frozen=True)
@@ -33,34 +68,48 @@ class KeeperRecord:
     socket: str | None
 
     @classmethod
-    def read(cls, path: Path) -> "KeeperRecord | None":
-        data = read_json(path)
-        if data is None or type(data.get("format")) is not int or data["format"] != STATE_FORMAT:
+    def read(cls, path: Path, *, diagnose: bool = False) -> "KeeperRecord | None":
+        def invalid(name, value):
+            if diagnose:
+                _invalid_file(path, name, value)
             return None
+
+        data = read_json(path)
+        if data is None:
+            return invalid("json", "missing or unreadable object")
+        if type(data.get("format")) is not int or data["format"] != STATE_FORMAT:
+            return invalid("format", data.get("format"))
         try:
-            values = {name: data[name] for name in cls.__dataclass_fields__}
+            values = {}
+            for name in cls.__dataclass_fields__:
+                if name not in data:
+                    return invalid(name, "missing")
+                values[name] = data[name]
             for name in ("keeper_pid", "child_pid", "controller_epoch"):
                 value = values[name]
                 if value is None and name != "keeper_pid":
                     continue
                 if type(value) is not int or value < (0 if name == "controller_epoch" else 1):
-                    return None
+                    return invalid(name, value)
             for name in ("keeper_started", "child_started", "socket"):
                 value = values[name]
                 if value is None and name != "keeper_started":
                     continue
                 if not isinstance(value, str) or not value.strip():
-                    return None
+                    return invalid(name, value)
+            name = "state"
             values["state"] = KeeperState(values["state"])
+            name = "end_reason"
             if values["end_reason"] is not None:
                 values["end_reason"] = EndReason(values["end_reason"])
             if (values["state"] != KeeperState.EXITED
                     and ((values["child_pid"] is None) != (values["child_started"] is None)
                          or (values["state"] == KeeperState.RUNNING and values["child_pid"] is None))):
-                return None
+                name = "child_started" if values["child_pid"] is not None else "child_pid"
+                return invalid(name, values[name])
             return cls(**values)
         except (KeyError, TypeError, ValueError):
-            return None
+            return invalid(name, data.get(name))
 
 
 def live(records: Mapping[str, KeeperRecord]) -> dict[str, bool]:
@@ -178,17 +227,26 @@ class StartScan:
 def _candidate_reason(path: Path, record: KeeperRecord, alive: bool, epoch: int,
                       manifest: dict | None, hold: Mapping | None, running: set[int]) -> Reason | None:
     if manifest is None or type(manifest.get("manifest_version")) is not int or manifest["manifest_version"] != 1:
+        _invalid_file(path / MANIFEST, "manifest_version", (manifest or {}).get("manifest_version"))
         return Reason.BAD_FILES
     detach = read_json(path / DETACH)
     if detach is None:
+        if (path / DETACH).exists():
+            _invalid_file(path / DETACH, "json", "unreadable object")
+            return Reason.BAD_FILES
         return Reason.NO_DETACH
     consumed = (detach.get("consumed") or {}).get("stdout") if isinstance(detach.get("consumed"), dict) else None
-    if (type(detach.get("format")) is not int or detach["format"] != 1
-            or type(detach.get("epoch")) is not int or detach["epoch"] < 0
-            or type(consumed) is not int or consumed < 0
-            or type(detach.get("stdin_offset")) is not int or detach["stdin_offset"] < 0
-            or not isinstance(detach.get("at"), str)):
-        return Reason.BAD_FILES
+    for name, value, valid in (
+        ("format", detach.get("format"), type(detach.get("format")) is int and detach["format"] == 1),
+        ("epoch", detach.get("epoch"), type(detach.get("epoch")) is int and detach["epoch"] >= 0),
+        ("consumed.stdout", consumed, type(consumed) is int and consumed >= 0),
+        ("stdin_offset", detach.get("stdin_offset"),
+         type(detach.get("stdin_offset")) is int and detach["stdin_offset"] >= 0),
+        ("at", detach.get("at"), isinstance(detach.get("at"), str)),
+    ):
+        if not valid:
+            _invalid_file(path / DETACH, name, value)
+            return Reason.BAD_FILES
     if detach["epoch"] != record.controller_epoch or detach["epoch"] >= epoch:
         return Reason.EPOCH_MISMATCH
     if record.state == KeeperState.EXITED:
@@ -217,7 +275,8 @@ async def scan_at_start(runtime_root: Path, *, epoch: int | None = None,
     runs = runtime_root / RUNS_DIR
     if not runs.exists():
         return scan
-    records = {path: KeeperRecord.read(path / STATE) for path in sorted(runs.iterdir()) if path.is_dir()}
+    records = {path: KeeperRecord.read(path / STATE, diagnose=True)
+               for path in sorted(runs.iterdir()) if path.is_dir()}
     bad_files = {path for path, record in records.items() if record is None}
     for path in bad_files:
         records[path] = _recover(path, runtime_root / proc_tree.RECORDS_DIR)
@@ -246,12 +305,13 @@ async def scan_at_start(runtime_root: Path, *, epoch: int | None = None,
                 hold = None
             reason = _candidate_reason(path, record, alive[path.name], epoch, manifests[path], hold, running)
             grant = read_json(path / GRANT)
-            if reason is None and (manifests[path].get("room_seat") or grant is not None):
+            if reason is None and (manifests[path].get("room_seat") or (path / GRANT).exists()):
                 from .ops.room import validate_grant
 
                 try:
                     validate_grant(grant, run_id=path.name, task_id=hold["task_id"])
-                except ValueError:
+                except ValueError as exc:
+                    _invalid_file(path / GRANT, "validation", str(exc))
                     reason = Reason.BAD_FILES
             if reason is None:
                 role = AgentType.WORKER if hold["status"] == "dispatched" else AgentType.REVIEWER
@@ -264,13 +324,24 @@ async def scan_at_start(runtime_root: Path, *, epoch: int | None = None,
             verdicts[path] = (Verdict.RELEASE, Reason.KEEPER_DEAD)
         else:
             verdicts[path] = (Verdict.END, Reason.NOT_ADOPTABLE)
+    # Ending a keeper can rewrite its state; retain the rejected bytes before signalling it.
+    unpreserved = set()
+    for path in records:
+        if path in bad_files or verdicts.get(path, (None, None))[1] == Reason.BAD_FILES:
+            try:
+                _quarantine(path, runtime_root)
+            except OSError:
+                logger.warning("could not preserve rejected kept run=%s; leaving its directory in place",
+                               path.name, exc_info=True)
+                unpreserved.add(path)
     await asyncio.gather(*((end_keeper(records[path], path) if verdict == Verdict.END
                             else _end_child(records[path], path)) for path, (verdict, _) in verdicts.items()
                             if verdict != Verdict.CANDIDATE))
     for path, (verdict, reason) in verdicts.items():
         if verdict == Verdict.CANDIDATE:
             continue
-        shutil.rmtree(path)
+        if path not in unpreserved:
+            shutil.rmtree(path)
         if verdict == Verdict.END:
             scan.ended[reason] += 1
         else:

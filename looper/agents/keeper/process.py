@@ -192,20 +192,37 @@ class Keeper:
             for name in (STDOUT, STDERR, STDIN):
                 self.fds[name] = os.open(self.run_dir / name, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
                 self.offsets[name] = os.fstat(self.fds[name]).st_size
-            self._write_state(keeper_started=proc_tree._start_time(os.getpid()))
             try:
+                keeper_started = proc_tree._start_time(os.getpid())
+                if keeper_started is None:
+                    raise RuntimeError("cannot read the keeper's start time")
+                self._write_state(keeper_started=keeper_started)
                 await self.server.start()
                 proc_tree.own_records(self.runtime_root, run_dir=self.run_dir)
                 self.child = await proc_tree.spawn(*self.argv, cwd=self.cwd, env=dict(os.environ),
                                                   stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                                                   stderr=asyncio.subprocess.PIPE)
+                # spawn already read this identity for its durable agent record.
+                recorded = proc_tree._recorded.get(self.child.pid)
+                child_started = recorded[1] if recorded is not None else proc_tree._start_time(self.child.pid)
+                if child_started is None and self.child.returncode is None:
+                    # ps can miss a short-lived child before the event loop reaps it.
+                    try:
+                        await asyncio.wait_for(self.child.wait(), 0.1)
+                    except TimeoutError:
+                        pass
+                if child_started is None and self.child.returncode is None:
+                    raise RuntimeError("cannot read the child's start time")
             except (OSError, RuntimeError) as exc:
+                if self.child is not None:
+                    await proc_tree.end(self.child, label=f"keeper {self.run_id}")
                 for fd in self.fds.values():
                     os.fsync(fd)
                 self._exited(EndReason.START_FAILED, str(exc)[:300])
                 return 3
-            self._write_state(state=KeeperState.RUNNING, child_pid=self.child.pid,
-                              child_started=proc_tree._start_time(self.child.pid))
+            if child_started is not None:
+                self._write_state(state=KeeperState.RUNNING, child_pid=self.child.pid,
+                                  child_started=child_started)
             pumps = [asyncio.create_task(self._pump(self.child.stdout, STDOUT, self.stdout_limit_bytes)),
                      asyncio.create_task(self._pump(self.child.stderr, STDERR, STDERR_LIMIT_BYTES))]
             self._stdin_task = asyncio.create_task(self._write_stdin())
