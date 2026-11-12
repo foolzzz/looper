@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.150] - 2026-11-12
+
+### Changed
+
+- **Schedules can notify a group chat bound to a Manager.** ([#1267](https://github.com/foolzzz/looper/pull/1267))
+  - Chats explicitly bound to a Manager on a built-in channel are now valid schedule notify targets, besides allowlisted senders' direct chats. Notices go through the binding's bot; a Lark native chat id (`oc_`) is sent to the chat.
+  - A target whose allowlist entry or binding was removed is kept but unavailable: delivery is recorded as failed and nothing is rerouted. This check now also covers allowlisted direct chats. Schedule views carry `notify_target_available`, and the dashboard marks such targets "(unavailable)".
+  - A Manager with limited scope may select only chats bound to itself. Config import keeps a target the destination allowlists or binds. The schedule view, the refusal texts and the target labels are model-visible.
+
 ## [2.14.149] - 2026-11-11
 
 ### Changed
