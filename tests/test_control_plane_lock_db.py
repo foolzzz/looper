@@ -18,11 +18,18 @@ import asyncpg
 import pytest
 
 from db_support import DSN, fresh_schema, until
+from looper import components
 from looper.agents import control_plane, proc_tree, serve
 from looper.db import connection
 from looper.ops_config import KeeperMode, OpsConfig
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def loaded_components():
+    # The HTTP server's first manifest probes contracts in a subprocess, before readiness is timed.
+    components.loaded_manifest()
 
 
 @pytest.fixture
@@ -45,6 +52,10 @@ async def _running(pool: Any, monkeypatch: pytest.MonkeyPatch, root: Path, *, ke
     from looper.agents import managers_api, operator_notes, profile_registry
     from looper.agents.runtimes import codex_login, grok_login
 
+    # Schema creation and the independent recorder are not part of lock ownership.
+    # Prepare the database before timing readiness; do not leave a recorder using it after the test.
+    await connection.ensure_schema(pool)
+    await pool.execute("INSERT INTO system_settings (key, value) VALUES ('llmrec.enabled', 'false')")
     schema = await pool.fetchval("SELECT current_schema()")
     dsn = _schema_dsn(schema)
     signals: dict[int, Any] = {}
@@ -96,7 +107,8 @@ async def _running(pool: Any, monkeypatch: pytest.MonkeyPatch, root: Path, *, ke
         return bool(servers and signal.SIGTERM in signals)
 
     try:
-        await until(ready, "the full control plane startup", timeout=15)
+        # This guard allows real startup under test load; these tests do not assert a startup SLA.
+        await until(ready, "the full control plane startup", timeout=30)
         yield SimpleNamespace(exits=exits, server=servers[0], system=system, dsn=dsn, signals=signals)
     finally:
         # A real os._exit needs no orderly shutdown; an injected exit leaves tasks to reap here.
@@ -176,7 +188,8 @@ def test_keeper_off_takes_no_lock_and_writes_no_epoch(monkeypatch: pytest.Monkey
                 assert system.server._server.is_serving()
                 assert system.exits == []
 
-    asyncio.run(asyncio.wait_for(test(), 25))
+    # Include isolated schema setup as well as the separately bounded startup and shutdown.
+    asyncio.run(asyncio.wait_for(test(), 90))
 
 
 @pytest.mark.parametrize("write_path", ["execute", "acquire", "transaction"])
@@ -295,15 +308,23 @@ async def _lose_running_system(pool: Any, monkeypatch: pytest.MonkeyPatch, root:
             await asyncio.wait_for(created.wait(), 5)
             assert inflight[0].pid in proc_tree._snapshot()
             assert inflight[0].pid not in proc_tree._recorded
-            pid = await probe.fetchval("""SELECT pid FROM pg_stat_activity
-                WHERE datname=current_database() AND application_name LIKE 'looper serve %'""")
-            assert pid is not None
+            lease_pids = {row["pid"] for row in await probe.fetch("""SELECT pid FROM pg_stat_activity
+                WHERE datname=current_database() AND application_name LIKE 'looper serve %'""")}
+            assert len(lease_pids) == 1
             if restart:
+                async with pool.acquire() as first, pool.acquire() as second, pool.acquire() as third:
+                    pool_pids = {await conn.fetchval("SELECT pg_backend_pid()") for conn in (first, second, third)}
+                assert len(pool_pids) >= 3, "the restart must cover connections opened by pool growth"
+                system_pids |= pool_pids | lease_pids
+                assert not before & system_pids, "no system connection may be exempted from the restart"
+                # End the lease last so its fence cannot close pool connections before this query does.
                 ended = {row["pid"] for row in await probe.fetch("""SELECT pid, pg_terminate_backend(pid) AS ended
                     FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()
-                    AND NOT (pid=ANY($1::int[]))""", list(before)) if row["ended"]}
-                assert system_pids | {pid} <= ended, "a restart must end every connection of the system"
+                    AND NOT (pid=ANY($1::int[])) ORDER BY application_name LIKE 'looper serve %'""",
+                    list(before)) if row["ended"]}
+                assert system_pids <= ended, "a restart must end every connection of the system"
             else:
+                pid, = lease_pids
                 assert await probe.fetchval("SELECT pg_terminate_backend($1)", pid)
             await until(lambda: proc_tree._spawns_fenced, "the lost-lock spawn fence", timeout=5)
             assert not spawning.done()
@@ -356,7 +377,7 @@ def test_losing_the_lock_fences_and_exits(monkeypatch: pytest.MonkeyPatch, tmp_p
     async def test() -> None:
         async with fresh_schema(max_size=3) as pool:
             await _lose_running_system(pool, monkeypatch, tmp_path, restart=False)
-    asyncio.run(asyncio.wait_for(test(), 30))
+    asyncio.run(asyncio.wait_for(test(), 90))
 
 
 @pytest.mark.parametrize("extra_idle_connection", [False, True])
@@ -373,4 +394,4 @@ def test_a_database_restart_is_a_lost_lock(
             finally:
                 if extra is not None:
                     await extra.close()
-    asyncio.run(asyncio.wait_for(test(), 30))
+    asyncio.run(asyncio.wait_for(test(), 90))
