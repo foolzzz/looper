@@ -4,7 +4,7 @@ import pytest
 
 from looper.agents import api_v1, schedules
 from looper.db import projects
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, run_db, v1_api
 from tests.test_api_v1_project_role_templates_db import _api
 from tests.test_ops_tasks_db import _task
 
@@ -203,6 +203,23 @@ def test_name_collision_is_conflict_and_preserves_original_project(tmp_path, mon
             assert status == 409 and answer["error"]["code"] == "conflict", answer
             assert await projects.get_project(original["id"], pool=pool) == before
             assert (await projects.get_project(other["id"], pool=pool))["name"] == "Other"
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("client", [False, True], ids=["operator", "client"])
+def test_project_delete_preview_names_scoped_managers_without_changing_project_or_scope(tmp_path, monkeypatch, client):
+    async def run(pool):
+        project = await projects.create_project(name="Example", pool=pool)
+        await pool.execute("INSERT INTO managers (id, name, system_prompt, task_scope, scope_project_ids) VALUES "
+                           "('manager-release', 'Release', 'Manage release tasks.', 'projects', $1)", [project["id"]])
+        before = await projects.get_project(project["id"], pool=pool)
+        scope = await pool.fetchrow("SELECT * FROM managers WHERE id = 'manager-release'")
+        async with v1_api(tmp_path, pool) as call:
+            status, answer = await call("project_admin.preview_delete", {"project_id": project["id"]}, client=client)
+            assert status == 200 and answer["status"] == "ok", answer
+            assert "Release" in answer["result"]["impact"]
+            assert await projects.get_project(project["id"], pool=pool) == before
+            assert await pool.fetchrow("SELECT * FROM managers WHERE id = 'manager-release'") == scope
     run_db(run, monkeypatch, timeout=30)
 
 

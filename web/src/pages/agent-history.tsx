@@ -341,7 +341,10 @@ function ModelRequests({ record }: { record: LlmRecord }) {
   </div>);
   return <section className="rounded-md border border-border" aria-label="Model requests">
     <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2">
-      <button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className="flex min-h-11 items-center gap-2 text-xs">
+      <button type="button" aria-expanded={open} onClick={() => {
+        if (!open) setAttempt(attempt + 1);
+        setOpen(!open);
+      }} className="flex min-h-11 items-center gap-2 text-xs">
         {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}Model requests · {rows.length + between.length}
       </button>
       <LlmRequestExport filter={{ record_id: record.id }} label="Export JSONL" />
@@ -1111,6 +1114,9 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOp
           <LaunchCommand record={record} />
           <SystemPrompt record={record} />
           <LoadedLibrary record={record} />
+          {record.metadata?.ttadk_check && <p className="text-xs text-warning">
+            TTADK sign-in check could not finish before this run started: {record.metadata.ttadk_check}
+          </p>}
           <ModelRequests record={record} />
           {record.input_text && (
             <Collapsible icon={<User className="h-3 w-3" />} title={`Input · ${record.input_text.length} chars`} defaultOpen={record.input_text.length < 400}>

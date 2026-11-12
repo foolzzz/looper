@@ -1022,6 +1022,12 @@ export async function moveProjectDirectory(projectId: string, fields: ProjectMov
   return result;
 }
 
+export async function previewProjectDelete(projectId: string): Promise<{ impact: string }> {
+  const result = await callV1<{ impact: string }>("/api/v1/project_admin/preview_delete", { project_id: projectId });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
 /** Delete after UI confirmation; if the server requires confirmation too, keep its original session. */
 export async function deleteProject(projectId: string, confirmation?: V1PendingConfirmation): Promise<void | V1PendingConfirmation> {
   const result = confirmation
@@ -2716,6 +2722,7 @@ export interface LlmRecord {
   error: string | null;
   metadata: {
     llmrec?: { state: string; reason?: string; detail?: string; route_id?: string };
+    ttadk_check?: string;
     command?: string[];
     cwd?: string;
     /** The task step a Worker or Reviewer ran. */
@@ -3037,6 +3044,8 @@ export async function exportLlmRequests(filter: LlmRequestFilter, options: {
   const chunks: BlobPart[] = [JSON.stringify({ type: "llmrec_export", format: 1,
     exported_at: new Date().toISOString(), filter,
     redaction: "header values outside the allowlist are never stored; bodies are complete unless record_gap says otherwise" }) + "\n"];
+  const maxBytes = 256 * 1024 * 1024;
+  let bytes = new Blob(chunks).size;
   let after: number | undefined, count = 0;
   do {
     options.signal?.throwIfAborted();
@@ -3045,7 +3054,11 @@ export async function exportLlmRequests(filter: LlmRequestFilter, options: {
       { signal: options.signal });
     if ("status" in page) throw new V1Error(202, "unavailable", page.impact);
     options.signal?.throwIfAborted();
-    chunks.push(page.requests.map((request) => JSON.stringify(request) + "\n").join(""));
+    const chunk = new Blob(page.requests.map((request) => JSON.stringify(request) + "\n"));
+    bytes += chunk.size;
+    if (bytes > maxBytes)
+      throw new Error("Dashboard exports are limited to 256 MiB. Use loopercli llm-requests export for larger exports.");
+    chunks.push(chunk);
     count += page.requests.length;
     options.onProgress?.(count);
     if (page.next_after_id !== null && (page.next_after_id <= (after ?? 0) || !page.requests.length))
@@ -3143,6 +3156,7 @@ export interface ProviderEnvEntry {
 export interface ProviderLogin {
   state: "chatgpt" | "logged_in" | "other_method" | "not_logged_in" | "checking" | "unknown" | "unavailable";
   detail: string;
+  refreshing?: boolean;
 }
 
 /** How a profile's runs are priced: by its runtime, or by Looper at the provider's prices; which models lack a

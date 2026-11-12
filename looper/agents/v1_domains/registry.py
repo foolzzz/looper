@@ -24,7 +24,7 @@ PRICE = _object(dict.fromkeys(profile_registry.PRICE_FIELDS, _NULL_NUMBER), clos
 PROVIDER_ENV_ENTRY = _object({"key": _STR, "value": _STR}, closed=True)
 PROVIDER_LOGIN = _object({"state": {"type": "string", "enum": [
     "chatgpt", "logged_in", "other_method", "not_logged_in", "checking", "unknown", "unavailable"]},
-    "detail": _STR}, closed=True)
+    "detail": _STR, "refreshing": _BOOL}, ["state", "detail"], closed=True)
 PROVIDER_ENDPOINT = _object({"provider_id": _STR, "protocol": API_PROTOCOL,
     "base_url": _STR, "use_runtime_default": _BOOL},
     ["protocol", "base_url", "use_runtime_default"], closed=True)

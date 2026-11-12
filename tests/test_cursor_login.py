@@ -148,17 +148,14 @@ def test_cursor_login_view_returns_while_one_status_check_runs(cached, monkeypat
             start = time.monotonic()
             view = await cursor_login.login_view()
             assert time.monotonic() - start < 0.2
-            assert view == ({"state": "not_logged_in", "detail": "not signed in"} if cached else
-                            {"state": "checking", "detail": "checking the Cursor login"})
+            assert view == ({"state": "not_logged_in", "detail": "not signed in", "refreshing": True} if cached else
+                            {"state": "checking", "detail": "checking the Cursor login", "refreshing": True})
             for _ in range(3):
                 assert await cursor_login.login_view() == view
             assert await asyncio.to_thread(complete.wait, 3)
             monkeypatch.setattr(cursor_login, "_PROBE_TTL_SEC", 30)
-            for _ in range(100):
-                view = await cursor_login.login_view()
-                if view["state"] == "logged_in":
-                    break
-                await asyncio.sleep(0.01)
+            await asyncio.to_thread(cursor_login.cached_probe)
+            view = await cursor_login.login_view()
             assert view == {"state": "logged_in", "detail": "signed in"}
             assert len(calls) == 1
         finally:

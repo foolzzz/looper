@@ -73,6 +73,8 @@ def _op(action, request, result, risk):
     if action == "move_dir":
         description = ("Move a project's directory and files, rewriting schedule directories and preserving the old "
                        "path as a symbolic link by default; refuses active work and asks clients to confirm first.")
+    if action == "preview_delete":
+        description = "Preview deleting a project and its Manager-scope impact without changing anything."
     if action == "preview_move_dir":
         description = "Preview a project's directory move and its confirmation impact without moving files."
     return Operation(f"project_admin.{action}", "POST", f"/api/v1/project_admin/{action}",
@@ -84,6 +86,7 @@ OPERATIONS = (
     _op("create", _object(PATCH_FIELDS, ["name"], closed=True), PROJECT_RESULT, "write"),
     _op("update", _object({"project_id": _STR, "fields": PATCH}, closed=True), PROJECT_RESULT, "write"),
     _op("delete", _object({"project_id": _STR}, closed=True), DELETED, "high"),
+    _op("preview_delete", _object({"project_id": _STR}, closed=True), _object({"impact": _STR}), "read"),
     _op("preview_move_dir", _object(MOVE_REQUEST, ["project"], closed=True), MOVE_PREVIEW, "read"),
     _op("move_dir", _object({**MOVE_REQUEST, "move_version": _STR}, ["project"], closed=True), MOVED, "high"),
 )
@@ -114,7 +117,7 @@ async def impact(server, operation, arguments, principal, headers):
         # Bind the shown read; the closed request cannot supply this server-owned version.
         arguments["_directory_version"] = change.version
         return directory_change_impact(project, change, arguments["fields"])
-    if operation.operation_id != "project_admin.delete":
+    if operation.operation_id not in ("project_admin.delete", "project_admin.preview_delete"):
         return None
     project = await answered(core.deletable_project(arguments["project_id"]))
     # Use the compact operation's impact and occupancy checks without changing its Tool contract.
@@ -139,6 +142,8 @@ async def run(server, operation, arguments, principal, headers):
         return await core.list_projects()
     if action == "create":
         return {"project": await answered(core.create_project(_input_fields(arguments)))}
+    if action == "preview_delete":
+        return {"impact": await impact(server, operation, arguments, principal, headers)}
     if action == "preview_move_dir":
         project = await _move_project(arguments)
         move = await core.preview_project_move(project, arguments)

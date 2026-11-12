@@ -1011,7 +1011,7 @@ def _login_modules() -> dict[str, Any]:
     return {"codex": codex_login, "grok": grok_login, "cursor-agent": cursor_login, "coco": coco_login}
 
 
-async def _logins(providers: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, str]]:
+async def _logins(providers: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, str | bool]]:
     """The state of each runtime login a listed OAuth provider stands for, by runtime type (Codex's, Grok's, Cursor's and coco's:
     their module's ``login_view``; Claude Code's comes from the startup self-check)."""
     types = {row["oauth_runtime_type"] for row in providers if row["auth"] == AuthKind.OAUTH.value}
