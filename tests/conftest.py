@@ -91,12 +91,6 @@ def staged_dashboard_dir() -> Path:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    # Keep retention cleanup away from other checkouts' potentially large test trees.
-    # Respect explicit pytest temporary-directory settings, including nested sessions.
-    if config.option.basetemp is None and "PYTEST_DEBUG_TEMPROOT" not in os.environ:
-        temporary_root = REPO_ROOT / ".local" / "pytest"
-        temporary_root.mkdir(parents=True, exist_ok=True)
-        os.environ["PYTEST_DEBUG_TEMPROOT"] = str(temporary_root)
     if (shard := os.environ.get("LOOPER_TEST_SHARD")) is not None:
         match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", shard)
         if match is None or int(match[1]) > int(match[2]):
