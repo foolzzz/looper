@@ -35,6 +35,22 @@ async def logical_bytes(conn) -> int:
     """))
 
 
+async def fill_missing_stored_bytes(conn, batch: int = 2000) -> int:
+    """Measure rows inserted by a proxy predating the stored byte counters."""
+    count = 0
+    for table in ("llm_requests", "llm_request_parts"):
+        # Retry busy rows next pass rather than invert the writer/GC row lock order.
+        result = await conn.execute(f"""
+            UPDATE {table} AS row SET stored_bytes = octet_length(row::text)
+            WHERE ctid IN (
+                SELECT ctid FROM {table} WHERE stored_bytes = 0
+                LIMIT $1 FOR UPDATE SKIP LOCKED
+            )
+        """, min(batch, 2000))
+        count += int(result.split()[-1])
+    return count
+
+
 async def count_requests(conn, *, task_id: str | None = None, agent_id: str | None = None) -> int:
     if task_id is not None:
         return await conn.fetchval("SELECT count(*) FROM llm_requests WHERE task_id = $1", task_id)

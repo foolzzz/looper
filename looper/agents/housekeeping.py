@@ -201,6 +201,11 @@ async def _prune_llm_requests(report: Report, now: datetime) -> None:
         retention = await llmrec_settings.settings_view(conn)
     before = now - timedelta(days=retention["retention_days"]["value"])
     cap = int(retention["max_total_mb"]["value"] * MIB)
+    while True:
+        async with db_connection.transaction() as conn:
+            measured = await llm_requests.fill_missing_stored_bytes(conn)
+        if measured == 0:
+            break
     for prune, counter in ((lambda conn: llm_requests.prune_older(conn, before), "llm_requests"),
                            (llm_requests.prune_empty_routes, "llm_routes")):
         while True:

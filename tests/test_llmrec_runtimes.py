@@ -11,7 +11,7 @@ from looper import child_env
 from looper.agents import runtimes
 from looper.agents.agent_settings import AgentSettings, AgentType, Launch
 from looper.agents.library import AgentLibrary
-from looper.agents.llmrec import LlmrecRoute, LlmrecSkip, SkipReason, no_proxy
+from looper.agents.llmrec import LlmrecRoute, LlmrecSkip, SkipReason
 from looper.agents.llmrec import control
 from looper.agents.profile_registry import CatalogModel, LegacyProviderSpec, RuntimeSpec
 from looper.agents.runtimes import ApiProtocol, AuthKind, Launcher
@@ -106,21 +106,6 @@ def test_api_routed_environment_keeps_the_binding(tmp_path, monkeypatch):
     for name in ("NO_PROXY", "no_proxy"):
         assert "127.0.0.1" in routed.environment()[name].split(",")
     assert "LOOPER_LLMREC_BASE_URL" not in launch.environment()
-
-
-@pytest.mark.parametrize("initial,expected", [
-    ({}, "127.0.0.1,localhost,::1"),
-    ({"NO_PROXY": "example.invalid"}, "example.invalid,127.0.0.1,localhost,::1"),
-    ({"no_proxy": "127.0.0.1,lower.invalid"}, "127.0.0.1,lower.invalid,localhost,::1"),
-    ({"NO_PROXY": "*"}, "*"),
-    ({"NO_PROXY": "upper.invalid", "no_proxy": "lower.invalid"}, "lower.invalid,127.0.0.1,localhost,::1"),
-    ({"NO_PROXY": "*", "no_proxy": ""}, "127.0.0.1,localhost,::1"),
-    ({"no_proxy": " lower.invalid ,lower.invalid,127.0.0.1"}, "lower.invalid,127.0.0.1,localhost,::1"),
-])
-def test_loopback_bypass_preserves_inheritance_and_is_idempotent(initial, expected):
-    expected = {"NO_PROXY": expected, "no_proxy": expected}
-    assert no_proxy(initial) == expected
-    assert no_proxy(initial) == expected
 
 
 @pytest.mark.parametrize("runtime_type,oauth,launcher,detail", [

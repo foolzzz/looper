@@ -102,6 +102,8 @@ class ProxyControl:
         self._start_attempted = False
         self._children: dict[int, asyncio.subprocess.Process] = {}
         self._resident: dict[str, RouteFile] = {}
+        # Queued turns belong to this controller; keep old proxies' route files compatible.
+        self._pending_record_ids: dict[str, int] = {}
 
     def _state(self) -> dict | None:
         state = read_json(self.runtime_root / STATE_FILE)
@@ -511,6 +513,10 @@ class ProxyControl:
         route = RouteFile.read(path, allow_legacy=True)
         if route is None:
             raise ValueError("request recording route is missing")
+        if route.record_id is not None:
+            if route.record_id != record_id:
+                self._pending_record_ids[route_id] = record_id
+            return
         # A replaced resident route may still serve its final handoff turn.
         replace(route, record_id=record_id).write(path)
 
@@ -518,8 +524,12 @@ class ProxyControl:
         for path in (self.runtime_root / ROUTES_DIR).glob("*.json"):
             route = RouteFile.read(path, allow_legacy=True)
             if route and route.record_id == record_id:
-                replace(route, last_record_id=record_id, record_id=None,
+                pending = self._pending_record_ids.get(route.id)
+                replace(route, last_record_id=record_id, record_id=None if end_route else pending,
                         ended_at=(_now() if end_route else route.ended_at)).write(path)
+                self._pending_record_ids.pop(route.id, None)
+            elif route and self._pending_record_ids.get(route.id) == record_id:
+                self._pending_record_ids.pop(route.id)
 
 
 async def attach(launch, **kwargs):

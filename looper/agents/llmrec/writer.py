@@ -41,7 +41,7 @@ class DbSink:
         self._queue.put_nowait((capture, size))
         return True
 
-    async def run(self) -> None:
+    async def run(self, *, recover: bool = False) -> None:
         self._task = asyncio.current_task()
         batch: list[tuple[Capture, int]] = []
         backoff = 1
@@ -79,8 +79,14 @@ class DbSink:
                     continue
                 except Exception as error:
                     self.write_errors += 1
-                    logger.error("model request writer stopped; error_class=%s", type(error).__name__)
-                    raise
+                    logger.error("model request write failed; error_class=%s", type(error).__name__)
+                    if not recover:
+                        raise
+                    # Keep the same batch and shutdown task while the forwarding
+                    # endpoint stays healthy; the controller must not replace it.
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, 30)
+                    continue
                 for capture, _ in batch:
                     if reason := getattr(capture, "record_gap", None):
                         self.gaps += 1
