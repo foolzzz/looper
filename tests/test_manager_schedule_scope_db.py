@@ -166,7 +166,9 @@ def test_project_executable_schedules_are_read_only_and_all_manager_is_unchanged
 
 @pytest.mark.parametrize("channel,own_chat,other_chat", [("lark", "oc_own", "oc_other"),
                                                        ("telegram", "-12345", "-67890")])
-def test_task_manager_notification_targets_respect_chat_bindings(monkeypatch, tmp_path, channel, own_chat, other_chat):
+@pytest.mark.parametrize("override", ["omitted", "own", "null", "empty", "malformed"])
+def test_task_manager_notification_targets_respect_chat_bindings(
+        monkeypatch, tmp_path, channel, own_chat, other_chat, override):
     async def test(pool):
         from looper.agents.serve import seed_channel_configs
         from looper.db import chat_bindings
@@ -194,19 +196,33 @@ def test_task_manager_notification_targets_respect_chat_bindings(monkeypatch, tm
         _ok(updated)
         assert (await db_schedules.get_schedule(mine["schedule_id"]))["notify_chat"] == other_chat
         # The operator's existing target cannot be used by enabling or running the schedule either.
+        fields = {} if override == "omitted" else {"notify_target": {
+            "own": {"channel": channel, "chat": own_chat}, "null": None, "empty": {},
+            "malformed": {"channel": channel},
+        }[override]}
         for action in ("enable", "run"):
-            (refused,) = await chat.say("Start", (TOOL, {"action": action, "schedule": mine["schedule_id"]}))
+            (refused,) = await chat.say("Start", (TOOL, {
+                "action": action, "schedule": mine["schedule_id"], "fields": fields}))
             assert _error(refused) == "forbidden", refused
+            assert not chat.turns[-1].blocks
+        row = await db_schedules.get_schedule(mine["schedule_id"])
+        assert (row["enabled"], row["notify_channel"], row["notify_chat"]) == (False, channel, other_chat)
+        assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
         (updated,) = await chat.say("Notify own chat", (TOOL, {"action": "update",
             "schedule": mine["schedule_id"], "fields": {"notify_target": {"channel": channel, "chat": own_chat}}}))
         _ok(updated)
         assert (await db_schedules.get_schedule(mine["schedule_id"]))["notify_chat"] == own_chat
-        (asked,) = await chat.say("Enable", (TOOL, {"action": "enable", "schedule": mine["schedule_id"]}))
-        assert asked["status"] == "needs_confirmation"
-        async with pool.acquire() as conn, conn.transaction():
-            await chat_bindings.put_binding(channel_id, own_chat, "manager", conn=conn)
-        assert _error(await _confirm(chat, asked)) == "forbidden"
+        for action in ("enable", "run"):
+            async with pool.acquire() as conn, conn.transaction():
+                await chat_bindings.put_binding(channel_id, own_chat, REVIEW, conn=conn)
+            (asked,) = await chat.say("Start", (TOOL, {
+                "action": action, "schedule": mine["schedule_id"], "fields": fields}))
+            assert asked["status"] == "needs_confirmation"
+            async with pool.acquire() as conn, conn.transaction():
+                await chat_bindings.put_binding(channel_id, own_chat, "manager", conn=conn)
+            assert _error(await _confirm(chat, asked)) == "forbidden"
         assert not (await db_schedules.get_schedule(mine["schedule_id"]))["enabled"]
+        assert await pool.fetchval("SELECT count(*) FROM schedule_runs") == 0
 
     run_db(test, monkeypatch, timeout=30)
 

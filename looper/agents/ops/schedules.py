@@ -184,7 +184,10 @@ async def _authorize(call: Call) -> None:
                                                "Manager or the dashboard for command or gated schedules")
     if action in ("create", "update", "enable", "run"):
         target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row else None
-        await _check_notify_target(call, (arguments.get("fields") or {}).get("notify_target", target))
+        # Only create/update write fields; enable/run use the stored notification destination.
+        if action in ("create", "update"):
+            target = (arguments.get("fields") or {}).get("notify_target", target)
+        await _check_notify_target(call, target)
 
 
 async def _check_notify_target(call: Call, target: Any) -> None:
