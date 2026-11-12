@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.154] - 2026-11-12
+
+### Changed
+
+- **A dashboard chat message to a Manager can carry attachments.** ([#1278](https://github.com/foolzzz/looper/pull/1278))
+  - `operator_chat.send` `attachments` is now at most 10 `{filename, content_base64}` items, decoded total at most 6,000,000 bytes; anything else, or a Planner target, is refused `invalid`. Breaking for callers that passed arbitrary objects.
+  - Each file is saved and checked by content (PNG, JPEG, GIF, WEBP, PDF, docx/xlsx/pptx, UTF-8 text; up to 20 MB each); a failing file refuses the whole send.
+  - Files live under `chat-attachments/<source>/<message>/` in the runtime root (0700/0600) and hourly housekeeping deletes them after 7 days.
+  - Model-visible: the Manager's turn gets an "Attachments" section after the message (number, kind, name, type, size, path, or why not received). Claude Code is told to open files with its file-reading tool; other runtimes are told they cannot view images.
+  - New `attachment_read` prompt-regression dialog (61 dialogs).
+
 ## [2.14.153] - 2026-11-12
 
 ### Changed
