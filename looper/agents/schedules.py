@@ -12,9 +12,9 @@ schedule that fires more often is refused.
 The minimum interval is a system setting (``scheduler_settings``).
 
 S2 adds a gate command (run before each run), a daily spend cap, and whom to
-tell (``notify`` and a ``notify_target``: a chat that a channel's sender
-allowlist in Settings → Channels already allows; none means the dashboard
-only). Each schedule's view carries what its runs cost today and its active
+tell (``notify`` and a ``notify_target``: a sender the built-in channel's
+allowlist allows or an explicitly bound chat; none means the dashboard only).
+Each schedule's view carries what its runs cost today and its active
 alerts; ``schedule_overview`` is the dashboard's summary.
 
 A schedule's ``profile_overrides`` and ``task_limits`` (how many of a run's

@@ -111,13 +111,15 @@ def test_schedule_reads_and_writes_respect_project_or_owner(monkeypatch, tmp_pat
 
 
 @pytest.mark.parametrize("fields", [{"kind": "command"}, {"command": "exit 0"},
-                                    {"env": {"MODE": "test"}}, {"env_file": "command.env"}])
+                                    {"env": {"MODE": "test"}}, {"env_file": "command.env"},
+                                    {"gate_command": "exit 0"}, {"gate_command": None},
+                                    {"gate_timeout_seconds": 10}])
 def test_task_manager_refuses_command_fields_on_create_and_update(monkeypatch, tmp_path, fields):
     async def test(pool):
         project = await _project(pool, work_dir=str(tmp_path))
         chat, _ = await _review(pool, tmp_path, tools="tasks", task_scope="projects",
                                 scope_project_ids=[project["id"]])
-        mine = await _schedule(project, "progress", manager_id=REVIEW)
+        mine = await _schedule(project, "existing", manager_id=REVIEW, enabled=True)
         for action in ("create", "update"):
             arguments = {"action": action, "fields": {**FIELDS, **fields}}
             arguments.update({"project": "calc"} if action == "create" else {"schedule": mine["schedule_id"]})
@@ -129,28 +131,82 @@ def test_task_manager_refuses_command_fields_on_create_and_update(monkeypatch, t
     run_db(test, monkeypatch, timeout=30)
 
 
-def test_project_command_schedules_are_read_only_and_all_manager_is_unchanged(monkeypatch, tmp_path):
+@pytest.mark.parametrize("execution", [{"kind": "command", "command": "exit 0", "requirement": ""},
+                                     {"gate_command": "exit 0"}])
+def test_project_executable_schedules_are_read_only_and_all_manager_is_unchanged(monkeypatch, tmp_path, execution):
     async def test(pool):
         project = await _project(pool, work_dir=str(tmp_path))
         chat, default = await _review(pool, tmp_path, tools="tasks", task_scope="projects",
                                       scope_project_ids=[project["id"]])
-        command = await _schedule(project, "command", kind="command", command="exit 0", requirement="")
+        command = await _schedule(project, "command", **execution)
         sid = command["schedule_id"]
         (listed,) = await chat.say("List", (TOOL, {"action": "list"}))
-        assert [(s["schedule_id"], s["kind"]) for s in _ok(listed)["schedules"]] == [(sid, "command")]
+        assert [(s["schedule_id"], s["kind"]) for s in _ok(listed)["schedules"]] == [(sid, command["kind"])]
         (got,) = await chat.say("Read", (TOOL, {"action": "get", "schedule": sid}))
-        assert _ok(got)["schedule"]["command"] == "exit 0"
+        assert _ok(got)["schedule"]["command" if command["kind"] == "command" else "gate_command"] == "exit 0"
         for action in ("update", "enable", "disable", "run", "delete", "reset_planner_session"):
             (refused,) = await chat.say("Change", (TOOL, {"action": action, "schedule": sid,
                 **({"fields": {"name": "changed"}} if action == "update" else {})}))
             assert _error(refused) == "forbidden", (action, refused)
             assert not chat.turns[-1].blocks
+        if command["gate_command"]:
+            (refused,) = await chat.say("Remove gate", (TOOL, {"action": "update", "schedule": sid,
+                                                             "fields": {"gate_command": None}}))
+            assert _error(refused) == "forbidden"
+            assert (await db_schedules.get_schedule(sid))["gate_command"] == "exit 0"
         assert (await db_schedules.get_schedule(sid))["name"] == "command"
         (asked,) = await default.say("Enable", (TOOL, {"action": "enable", "schedule": sid}))
         assert _ok(await _confirm(default, asked))["schedule"]["enabled"]
         (created,) = await default.say("Create command", (TOOL, {"action": "create", "project": "calc",
             "fields": {"name": "second-command", "cron": "*/30 * * * *", "kind": "command", "command": "exit 0"}}))
         assert _ok(created)["schedule"]["kind"] == "command"
+
+    run_db(test, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("channel,own_chat,other_chat", [("lark", "oc_own", "oc_other"),
+                                                       ("telegram", "-12345", "-67890")])
+def test_task_manager_notification_targets_respect_chat_bindings(monkeypatch, tmp_path, channel, own_chat, other_chat):
+    async def test(pool):
+        from looper.agents.serve import seed_channel_configs
+        from looper.db import chat_bindings
+
+        project = await _project(pool, work_dir=str(tmp_path))
+        chat, default = await _review(pool, tmp_path, tools="tasks", task_scope="projects",
+                                      scope_project_ids=[project["id"]])
+        await seed_channel_configs(pool)
+        channel_id = f"channel-{channel}"
+        async with pool.acquire() as conn, conn.transaction():
+            await chat_bindings.put_binding(channel_id, own_chat, REVIEW, conn=conn)
+            await chat_bindings.put_binding(channel_id, other_chat, "manager", conn=conn)
+        target = {"channel": channel, "chat": other_chat}
+        mine = await _schedule(project, "existing", manager_id=REVIEW)
+        for action in ("create", "update"):
+            arguments = {"action": action, "fields": {**FIELDS, "notify_target": target}}
+            arguments.update({"project": "calc"} if action == "create" else {"schedule": mine["schedule_id"]})
+            (refused,) = await chat.say("Notify other chat", (TOOL, arguments))
+            assert _error(refused) == "forbidden", refused
+            assert not chat.turns[-1].blocks
+        assert await pool.fetchval("SELECT count(*) FROM schedules") == 1
+        assert (await db_schedules.get_schedule(mine["schedule_id"]))["notify_chat"] is None
+        (updated,) = await default.say("Notify bound chat", (TOOL, {"action": "update",
+            "schedule": mine["schedule_id"], "fields": {"notify_target": target}}))
+        _ok(updated)
+        assert (await db_schedules.get_schedule(mine["schedule_id"]))["notify_chat"] == other_chat
+        # The operator's existing target cannot be used by enabling or running the schedule either.
+        for action in ("enable", "run"):
+            (refused,) = await chat.say("Start", (TOOL, {"action": action, "schedule": mine["schedule_id"]}))
+            assert _error(refused) == "forbidden", refused
+        (updated,) = await chat.say("Notify own chat", (TOOL, {"action": "update",
+            "schedule": mine["schedule_id"], "fields": {"notify_target": {"channel": channel, "chat": own_chat}}}))
+        _ok(updated)
+        assert (await db_schedules.get_schedule(mine["schedule_id"]))["notify_chat"] == own_chat
+        (asked,) = await chat.say("Enable", (TOOL, {"action": "enable", "schedule": mine["schedule_id"]}))
+        assert asked["status"] == "needs_confirmation"
+        async with pool.acquire() as conn, conn.transaction():
+            await chat_bindings.put_binding(channel_id, own_chat, "manager", conn=conn)
+        assert _error(await _confirm(chat, asked)) == "forbidden"
+        assert not (await db_schedules.get_schedule(mine["schedule_id"]))["enabled"]
 
     run_db(test, monkeypatch, timeout=30)
 

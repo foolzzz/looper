@@ -393,6 +393,21 @@ def test_schedule_notification_uses_the_native_destination(tmp_path, target, fie
     asyncio.run(main())
 
 
+def test_schedule_notification_refuses_unknown_id_prefix(tmp_path):
+    async def main():
+        transport = StubTransport()
+        adapter = _adapter(tmp_path, transport)
+        try:
+            receipt = await adapter.notify("on_unknown", "Project progress report")
+            assert not receipt.success
+            assert "oc_" in receipt.error and "ou_" in receipt.error
+            assert transport.calls == []
+        finally:
+            await adapter.stop()
+
+    asyncio.run(main())
+
+
 @pytest.mark.parametrize("failure", [False, True])
 def test_streams_restart_after_ending_or_raising_and_stop_closes_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: bool,

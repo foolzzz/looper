@@ -116,6 +116,9 @@ async def test_scenario_prompt(tmp_path: Path, tools: ManagerTools, scope: TaskS
     assert DEFAULT_SYSTEM_PROMPT not in text
     contract = " ".join(scope_contract(definition).split())
     assert tool_text in contract
+    if tools is ManagerTools.TASKS:
+        assert "must not be used to run shell commands or file operations on the server" in contract
+        assert "Bound-chat notification targets must be chats bound to this Manager" in contract
     for fragment in scope_texts:
         assert fragment in contract
     assert all(len(line) < 80 for line in scope_contract(definition).splitlines())

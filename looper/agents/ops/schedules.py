@@ -33,7 +33,7 @@ from ...db import chat_bindings as db_chat_bindings, connection as db_connection
 from ...db import tasks as db_tasks
 from .. import cron, schedules
 from ..managers_api import ManagerTools
-from ..message import is_lark, parse_channel_id
+from ..message import builtin_channel_id, is_lark, parse_channel_id
 from ..project_execution import format_usd
 from ..schedule_templates import MissingDirectory, effective_schedule, merge_selection
 from ..tiers.journal import clip
@@ -170,17 +170,36 @@ async def _authorize(call: Call) -> None:
         arguments = {**arguments, "schedule": call.confirmation["schedule_id"], "project": None}
     if arguments.get("project") is not None:
         _check_project(call, await project_named(arguments["project"]))
+    row = None
     if action not in ("list", "create"):
         row = await _schedule(arguments, call)
-        if row["kind"] == schedules.Kind.COMMAND.value and action != "get":
-            raise OpError(ErrorCode.FORBIDDEN, "this Manager can only list and read command schedules; use the "
+        if (row["kind"] == schedules.Kind.COMMAND.value or row["gate_command"]) and action != "get":
+            raise OpError(ErrorCode.FORBIDDEN, "this Manager can only list and read command or gated schedules; use the "
                                                "general Manager or the dashboard to change or run them")
     if action in ("create", "update"):
         fields = arguments.get("fields") or {}
         if fields.get("kind") == schedules.Kind.COMMAND.value or any(
-                key in fields for key in ("command", "env", "env_file")):
+                key in fields for key in ("command", "env", "env_file", "gate_command", "gate_timeout_seconds")):
             raise OpError(ErrorCode.FORBIDDEN, "this Manager manages agent schedules only; use the general "
-                                               "Manager or the dashboard for command schedules")
+                                               "Manager or the dashboard for command or gated schedules")
+    if action in ("create", "update", "enable", "run"):
+        target = {"channel": row["notify_channel"], "chat": row["notify_chat"]} if row else None
+        await _check_notify_target(call, (arguments.get("fields") or {}).get("notify_target", target))
+
+
+async def _check_notify_target(call: Call, target: Any) -> None:
+    """Bound chats are destinations only for their own task-scoped Manager."""
+    if call.scope.tool_scope is not ManagerTools.TASKS or not isinstance(target, Mapping):
+        return
+    if not isinstance(target.get("channel"), str) or not isinstance(target.get("chat"), str):
+        return  # ordinary field validation reports malformed targets
+    await answered(schedules._notify_target(target))
+    channel_id = builtin_channel_id(target["channel"])
+    for binding in await db_chat_bindings.list_bindings():
+        if (binding["channel_id"] == channel_id and binding["chat_id"] == target["chat"]
+                and binding["manager_id"] != call.manager_id):
+            raise OpError(ErrorCode.FORBIDDEN, "this chat is bound to another Manager; use a chat bound to this "
+                                               "Manager, the general Manager or the dashboard")
 
 
 async def _schedule(arguments: Mapping[str, Any], call: Call | None = None) -> dict[str, Any]:
@@ -305,6 +324,7 @@ async def _create(call: Call) -> dict[str, Any]:
                 asked["chat"] = turn.chat
         if any((t["channel"], t["chat"]) == (asked["channel"], asked["chat"]) for t in await schedules.notify_targets()):
             data["notify_target"] = asked
+    await _check_notify_target(call, data.get("notify_target"))
     view = (await answered(schedules.create_schedule(project["id"], data, created_via="manager")))["schedule"]
     turn.created.add(view["schedule_id"])
     turn.blocks.append("\n".join([

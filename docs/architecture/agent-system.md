@@ -3129,8 +3129,10 @@ evaluation is required before the original schedule requirement is complete.
   summary snippet, its cost and the link to the task, absolute (`links`)). It goes through
   the channel registry to the running Telegram or Lark channel
   (`ChannelAdapter.notify`: Telegram's bot to the configured chat; Lark's
-  bot to an `open_id` user or an `oc_` chat id), to a sender the built-in
-  channel's allowlist allows or a chat explicitly bound to that bot. Every
+  bot to an `ou_` user open id or an `oc_` chat id; other prefixes are refused),
+  to a sender the built-in channel's allowlist allows or a chat explicitly
+  bound to that bot. A `tasks` Manager may target only its own bound chats;
+  the operator API and `all` Managers may select any offered target. Every
   message is recorded in
   `schedule_notifications`: `sent`, `failed` with the reason (such as a channel
   that is not running), or `dashboard` (no chat, or an alert under `never`).
@@ -3898,9 +3900,13 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
   `scope_project_ids`, whoever created them; `own` admits only schedules
   whose immutable `manager_id` is this Manager's. Creation assigns that id
   and, for `projects`, requires one of those projects. Within that boundary,
-  agent schedules can be managed and command schedules only listed or read:
-  creating a command schedule or changing, enabling, disabling, running,
-  resetting or deleting one is `forbidden`. Agent Profiles, providers,
+  agent schedules without a gate can be managed; command schedules and agent
+  schedules with a gate can only be listed or read. Creating or updating with
+  `command`, `env`, `env_file`, `gate_command` or `gate_timeout_seconds`, or
+  changing, enabling, disabling, running, resetting or deleting a command or
+  gated schedule, is `forbidden`. Its scope contract also prohibits using
+  schedules for server shell commands or file operations. Agent Profiles,
+  providers,
   settings and skills remain the general Manager's or dashboard's business.
   `task_scope` says which tasks it sees and may
   act on: `all` every task, `own` only the tasks it created, and `projects`

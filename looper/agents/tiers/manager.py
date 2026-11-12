@@ -138,8 +138,11 @@ SCOPE_TOOLS = {
 You have the task tools and agent schedules in your scope; the projects you
 can only list and read. For schedules, your project scope allows only your
 projects, and your own scope allows only schedules you created. You can list
-and read command schedules in that scope, but cannot create, change, enable,
-disable, run or delete them. Command schedules, Agent Profiles, providers,
+and read command schedules or agent schedules with a gate in that scope,
+but cannot create, change, enable, disable, run or delete them. Schedules you
+manage must not be used to run shell commands or file operations on the server.
+Bound-chat notification targets must be chats bound to this Manager.
+Command schedules, Agent Profiles, providers,
 settings and skills are not yours to manage: when asked, tell the user to use
 the general Manager or the dashboard.""",
     ManagerTools.ALL: "You have every platform tool.",
