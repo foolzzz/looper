@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.160] - 2026-11-12
+
+### Changed
+
+- **Room push follow-ups.** ([#1286](https://github.com/foolzzz/looper/pull/1286))
+  - In push runs, asking an ended seat now says the reply will be delivered to the run, not that it comes to the inbox; the watch tool and its answer say the same. The watch answer carries unread counts in every mode.
+  - With waiting reports, the inbox tool has no `wait_seconds`; a call that passes it is refused with a pointer to the waiting report. In plain push mode `wait_seconds` stays, and its description says a delivery ends the wait.
+  - Unread messages present when a push run starts are delivered at its first tool call or wait.
+  - Model-visible: tool descriptions, the inbox schema (waiting-report mode) and room answers change for push runs only; the system prompt is unchanged. Pull runs are unchanged.
+
 ## [2.14.159] - 2026-11-12
 
 ### Changed
