@@ -1,6 +1,6 @@
 """Startup retains exactly the detached runs their persisted steps still hold."""
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -37,7 +37,7 @@ def test_startup_verdict_preserves_only_adoptable_records(tmp_path, monkeypatch,
         manifest = {'manifest_version': 1, 'adoption': components.loaded_manifest().adoption,
                     'record_id': record_id}
         detach = {'format': 1, 'epoch': 1, 'consumed': {'stdout': 3}, 'stdin_offset': 0, 'at': 'now'}
-        state = kept_dirs.KeeperRecord(1, 'identity', None, None, keeper.KeeperState.RUNNING,
+        state = kept_dirs.KeeperRecord(1, 'identity', 2, 'child-identity', keeper.KeeperState.RUNNING,
                                       None, 1, 'socket')
         resumable = ['task-start']
         if reason == 'epoch_mismatch':
@@ -62,7 +62,7 @@ def test_startup_verdict_preserves_only_adoptable_records(tmp_path, monkeypatch,
         if reason != 'no_detach':
             keeper.write_json(directory / keeper.DETACH, detach)
         (directory / keeper.STDOUT).write_bytes(b'{}\n' if reason != 'log_short' else b'')
-        monkeypatch.setattr(kept_dirs.KeeperRecord, 'read', lambda path: state)
+        keeper.write_json(directory / keeper.STATE, {'format': keeper.STATE_FORMAT, **asdict(state)})
         monkeypatch.setattr(kept_dirs, 'live', lambda records: {run_id: reason != 'keeper_dead'})
         end = AsyncMock()
         monkeypatch.setattr(kept_dirs, 'end_keeper', end)
