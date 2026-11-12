@@ -162,6 +162,7 @@ def test_docs_and_two_dashboard_upgrades_keep_real_serve_pid_and_refresh_compone
                 unit_path=unit, state=lambda: state,
                 unit_settings=lambda **kwargs: (port, state.log_path, runtime),
                 unit_argv=lambda: service.looper_command(sys.executable) + ["serve"],
+                ops=lambda: None,
                 start=forbidden, stop=forbidden, restart=forbidden,
             )
             monkeypatch.setattr(service, "manager", lambda host, label: manager)
@@ -317,6 +318,7 @@ def test_ignored_web_files_allow_dashboard_and_full_upgrade_on_real_serve(tmp_pa
         manager = SimpleNamespace(unit_path=unit, state=lambda: state,
                                   unit_settings=lambda **kwargs: (port, state.log_path, runtime),
                                   unit_argv=lambda: service.looper_command(sys.executable) + ["serve"],
+                                  ops=lambda: None,
                                   start=start, stop=stop)
         host = service.Host(system="Linux", home=home, uid=os.getuid(),
                             environ={"UV_PROJECT_ENVIRONMENT": sys.prefix},
