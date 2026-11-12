@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.151] - 2026-11-12
+
+### Changed
+
+- **Managers with `tools = tasks` can create and manage agent schedules in their scope.** ([#1268](https://github.com/foolzzz/looper/pull/1268))
+  - A task-scoped Manager now has the schedule tool. Its project scope limits it to its projects, and its own scope to schedules it created. The check runs before confirmation and again at execution, against the confirmed schedule's id.
+  - It may list and read command schedules and schedules with a gate, but cannot create, change, enable, disable, run or delete them. Creates and updates that set `command`, `env`, `env_file`, `gate_command` or `gate_timeout_seconds`, or the command kind, are refused as forbidden, including attempts to clear gate fields.
+  - Notification targets: a task-scoped Manager may select only chats bound to itself, checked on create, update, enable and manual run; a schedule made from a bound group chat defaults to that chat. The dashboard, the operator API and Managers with every tool are unchanged.
+  - Lark notices go to `oc_` chat ids as chats and `ou_` open ids as users; any other id fails delivery with a clear error instead of being sent as a direct message.
+  - The Manager scope text and the refusal texts are model-visible.
+
 ## [2.14.150] - 2026-11-12
 
 ### Changed
