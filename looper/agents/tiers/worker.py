@@ -73,7 +73,7 @@ from ..log_redaction import redact
 from ..runtimes import ADAPTERS, RunChannel, RuntimeAdapter, RuntimeUnsupported, waits_without_turns
 from ..runtimes.channel import DeliveryResult, RunHandle, RunStartError
 from ..runtimes.codex import CodexRuntime
-from ..runtimes.cursor_agent import cursor_failure, retry_event, retry_stderr, RETRY_SUMMARY
+from ..runtimes.cursor_agent import CONTINUATION_PROMPT, CursorChannel, cursor_failure, retry_event, retry_stderr
 from ..runtimes.omp import safe_error
 from ..runtimes.api.tools import RoomTurnTools
 from ..task_roles import TaskRole, run_role
@@ -2274,7 +2274,9 @@ class WorkerPool:
         run_timeout, started_at, command = ctx.run_timeout, ctx.started_at, ctx.command
         waited, ended = False, False
         stderr: str | None = None
-        first_stderr: str | None = None
+        attempt_stderr: list[str] = []
+        resume_session_id: str | None = None
+        retry_limit = 1
 
         async def _end_run() -> None:
             nonlocal ended
@@ -2557,7 +2559,10 @@ class WorkerPool:
             while True:
                 try:
                     if start is ConsumeStart.NEW:
-                        await channel.start(prompt)
+                        if isinstance(channel, CursorChannel) and resume_session_id:
+                            await channel.start(CONTINUATION_PROMPT, resume=True)
+                        else:
+                            await channel.start(prompt)
                     self._inputs[worker_id] = channel
                     if ready := self._input_ready.get(worker_id):
                         ready.set()
@@ -2577,23 +2582,31 @@ class WorkerPool:
                 if runtime.type != "cursor-agent" or result_event is not None:
                     break
                 stderr = await handle.error_output()
-                if first_stderr is not None:
-                    stderr = retry_stderr(first_stderr, stderr)
-                    break
+                attempt_stderr.append(stderr)
+                if isinstance(channel, CursorChannel):
+                    resume_session_id = channel.stream.session_id or resume_session_id
+                if len(attempt_stderr) == 1:
+                    retry_limit = 3 if resume_session_id else 1
                 if ended or return_code not in (0, 1) or cursor_failure(result_event, stderr) is None \
-                        or not isinstance(handle, ProcessRun):
+                        or not isinstance(handle, ProcessRun) or len(attempt_stderr) > retry_limit:
+                    if len(attempt_stderr) > 1:
+                        stderr = retry_stderr(*attempt_stderr)
                     break
-                first_stderr = stderr
-                # The CLI exited; keep this run's helper for its one retry.
+                # The CLI exited; keep this run's helper and original deadline.
                 ended = True
                 if deadline is not None and time.monotonic() >= deadline:
                     raise asyncio.TimeoutError
-                await recorder.record(retry_event(stderr))
+                event = retry_event(stderr, attempt=len(attempt_stderr),
+                                    mode="resume" if resume_session_id else "restart")
+                await recorder.record(event)
                 if parent_task_id:
-                    await self._activity(parent_task_id, worker_id, "phase", RETRY_SUMMARY)
+                    await self._activity(parent_task_id, worker_id, "phase", event["summary"])
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise asyncio.TimeoutError
                 # Reuse the prepared inputs and this run's private directory. Only
                 # the process and its channel are fresh; this is still one run.
-                handle = ProcessRun(runtime, command, launch=launch, cwd=work_dir,
+                retry_command = command + (runtime.resume_args(resume_session_id) if resume_session_id else [])
+                handle = ProcessRun(runtime, retry_command, launch=launch, cwd=work_dir,
                                     session_dir=handle._session_dir, prompt_file=handle._prompt_file,
                                     label=f"worker {worker_id}")
                 waited, ended, input_ended = False, False, False
@@ -2673,7 +2686,7 @@ class WorkerPool:
             message = message or f"{runtime.label} exited with code {return_code}"
             ctx.fallback_reason = f"exited before any model event: {message.splitlines()[0]}"[:299]
         # A run stopped at its spend cap exits non-zero too; its result says why.
-        if ((return_code != 0 or not launch.exit_code_reliable or result_event is None or first_stderr is not None)
+        if ((return_code != 0 or not launch.exit_code_reliable or result_event is None or len(attempt_stderr) > 1)
                 and not result_ok
                 and runtime.budget_error(result_event) is None and not detail):
             stderr = safe_error(redact(stderr if stderr is not None else await handle.error_output()), limit=None)
@@ -2686,14 +2699,14 @@ class WorkerPool:
                 stderr = error_tail(stderr)
                 if stderr:
                     error += f": {stderr}"
-            elif first_stderr is not None:
+            elif len(attempt_stderr) > 1:
                 error += f": {stderr}"
             elif stderr.strip():
                 error += f": {stderr.strip()[:500]}"
             await recorder.finish(output_text=final_text, result_event=recorded, error=error,
                                   outcome=RunOutcome.RUN_FAILED.value)
             return {"status": "failed", "error": error,
-                    "stderr": stderr[:500] if launch.exit_code_reliable and first_stderr is None else stderr}
+                    "stderr": stderr[:500] if launch.exit_code_reliable and len(attempt_stderr) <= 1 else stderr}
         if return_code != 0 and result_ok:
             logger.warning(
                 "worker %s: Claude exited %d but produced a successful result; judging the result",
