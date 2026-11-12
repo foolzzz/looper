@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.168] - 2026-11-12
+
+### Fixed
+
+- **Dashboard follow-ups.** ([#1306](https://github.com/foolzzz/looper/pull/1306); fixes #1140, #1127, #1076, part of #1132)
+  - Agent history re-fetches Model requests when the section is opened; a run's TTADK sign-in check warning is shown on the run card.
+  - Dashboard LLM-request export stops at 256 MiB and points to `loopercli llm-requests export`.
+  - Deleting a project first asks the server for the impact (new read operation `project_admin.preview_delete`) and shows it, with Cancel focused; delete errors show beside the button.
+  - The provider login view reports `refreshing` while a Cursor login probe is running, and the dashboard keeps polling until it ends.
+  - The launch note for an inconclusive TTADK check now reads "timed out or failed; the run started anyway".
+
 ## [2.14.167] - 2026-11-12
 
 ### Fixed
