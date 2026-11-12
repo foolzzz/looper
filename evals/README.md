@@ -80,8 +80,10 @@ gate's conclusion, `conclusion_reads`), the waits whose `opened_at` is set (`wai
 directly depending on at least one wait (`wait_dependents`, once per step), waits currently in `timed_out`
 (`waits_timed_out`), what the agents did in the task's agent room (`room_messages`, Looper's notices
 and escalations apart; of them `room_questions`, `room_unanswered` and `room_interface`; `room_escalations`;
-`room_reminders`, the reminders Claude Code runs got; `room_refused`, the posts the room refused; and
-`room_tool_calls`, the runs' calls of the room's tools, reads included; `room_consults`, the consults of seats whose run
+`room_reminders`, the reminders Claude Code runs got; `room_deliveries`, room deliveries recorded in activity;
+`room_refused`, the posts the room refused; `room_tool_calls`, the runs' calls of the room's tools, reads included;
+`room_inbox_calls`, inbox calls, and `room_inbox_empty`, those that returned an empty messages list;
+`room_consults`, the consults of seats whose run
 had ended, of them answered `room_consults_answered`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
