@@ -29,9 +29,10 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-from ...db import connection as db_connection, profile_registry as db_profiles, projects as db_projects, schedules as db_schedules
+from ...db import chat_bindings as db_chat_bindings, connection as db_connection, profile_registry as db_profiles, projects as db_projects, schedules as db_schedules
 from ...db import tasks as db_tasks
 from .. import cron, schedules
+from ..managers_api import ManagerTools
 from ..message import is_lark, parse_channel_id
 from ..project_execution import format_usd
 from ..schedule_templates import MissingDirectory, effective_schedule, merge_selection
@@ -149,7 +150,48 @@ async def _in_scope(call: Call, view: dict[str, Any]) -> dict[str, Any]:
     return view
 
 
-async def _schedule(arguments: Mapping[str, Any]) -> dict[str, Any]:
+def _admits(call: Call, row: Mapping[str, Any]) -> bool:
+    return call.scope.tool_scope is not ManagerTools.TASKS or call.scope.tasks.admits(row)
+
+
+def _check_project(call: Call, project: Mapping[str, Any]) -> None:
+    projects = call.scope.tasks.project_ids
+    if call.scope.tool_scope is ManagerTools.TASKS and projects is not None and project["id"] not in projects:
+        raise OpError(ErrorCode.FORBIDDEN, "this project is outside this Manager's projects; use the general "
+                                           "Manager or the dashboard")
+
+
+async def _authorize(call: Call) -> None:
+    """Check before confirmation and again at execution, against the confirmed schedule's immutable id."""
+    if call.scope.tool_scope is not ManagerTools.TASKS:
+        return
+    arguments, action = call.arguments, call.arguments["action"]
+    if call.confirmation:
+        arguments = {**arguments, "schedule": call.confirmation["schedule_id"], "project": None}
+    if arguments.get("project") is not None:
+        _check_project(call, await project_named(arguments["project"]))
+    row = None
+    if action not in ("list", "create"):
+        row = await _schedule(arguments, call)
+        if (row["kind"] == schedules.Kind.COMMAND.value or row["gate_command"]) and action != "get":
+            raise OpError(ErrorCode.FORBIDDEN, "this Manager can only list and read command or gated schedules; use the "
+                                               "general Manager or the dashboard to change or run them")
+    if action in ("create", "update"):
+        fields = arguments.get("fields") or {}
+        if fields.get("kind") == schedules.Kind.COMMAND.value or any(
+                key in fields for key in ("command", "env", "env_file", "gate_command", "gate_timeout_seconds")):
+            raise OpError(ErrorCode.FORBIDDEN, "this Manager manages agent schedules only; use the general "
+                                               "Manager or the dashboard for command or gated schedules")
+    if action in ("create", "update", "enable", "run"):
+        target = ({"channel": row["notify_channel"], "chat": row["notify_chat"]}
+                  if row and row["notify_channel"] and row["notify_chat"] else None)
+        # Only create/update write fields; enable/run use the stored notification destination.
+        if action in ("create", "update"):
+            target = (arguments.get("fields") or {}).get("notify_target", target)
+        await _check_notify_target(call, {"notify_target": target})
+
+
+async def _schedule(arguments: Mapping[str, Any], call: Call | None = None) -> dict[str, Any]:
     """The schedule the call names (its row), by id or by name within ``project``; refuses an unknown one, naming
     the schedules there are, and a name several projects have, naming each."""
     _required(arguments, arguments["action"], "schedule")
@@ -157,6 +199,13 @@ async def _schedule(arguments: Mapping[str, Any]) -> dict[str, Any]:
     project = await project_named(arguments["project"]) if arguments.get("project") is not None else None
     rows = await db_schedules.list_schedules(project["id"] if project else None)
     found = [r for r in rows if r["id"] == wanted] or [r for r in rows if r["name"].casefold() == wanted.casefold()]
+    if call is not None:
+        rows = [r for r in rows if _admits(call, r)]
+        allowed = [r for r in found if _admits(call, r)]
+        if found and not allowed:
+            raise OpError(ErrorCode.FORBIDDEN, "this schedule is outside this Manager's projects or belongs to "
+                                               "another Manager; use the general Manager or the dashboard")
+        found = allowed
     if len(found) > 1:
         named = "; ".join(f"{r['name']} in project {r['project_name']} ({r['id']})" for r in found)
         raise OpError(ErrorCode.INVALID, f"{len(found)} projects have a schedule named {wanted!r}: {named}. Give "
@@ -169,6 +218,7 @@ async def _schedule(arguments: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def _schedules(call: Call) -> dict[str, Any]:
+    await _authorize(call)
     arguments, action = call.arguments, call.arguments["action"]
     if action == "list":
         views = (await schedules.list_all_schedules())["schedules"]
@@ -177,12 +227,13 @@ async def _schedules(call: Call) -> dict[str, Any]:
             views = [v for v in views if v["project_id"] == project["id"]]
         if arguments.get("enabled") is not None:
             views = [v for v in views if v["enabled"] is arguments["enabled"]]
+        views = [v for v in views if _admits(call, v)]
         return {"schedules": [_listed(await _in_scope(call, v)) for v in views]}
     if action == "create":
         return await _create(call)
     # Resolve a confirmed operation by its immutable id, even if another schedule has since taken its name.
     row = await _schedule({**arguments, "schedule": call.confirmation["schedule_id"], "project": None}
-                          if call.confirmation else arguments)
+                          if call.confirmation else arguments, call)
     expected = {"expected_version": call.confirmation["schedule_version"]} if call.confirmation else {}
     _not_created_now(call, row)
     if action == "update":
@@ -256,6 +307,10 @@ async def _create(call: Call) -> dict[str, Any]:
         # Made from a Telegram or Lark chat: its messages go to whoever asked, when their channel's allowlist lets them.
         # Schedules notify through the built-in rows only: through an added bot the target stays unset.
         asked = {"channel": turn.channel, "chat": turn.sender}
+        if call.scope.tool_scope is ManagerTools.TASKS and turn.group and turn.chat and turn.channel_id:
+            bindings = await db_chat_bindings.list_bindings(turn.channel_id, call.manager_id)
+            if any(binding["chat_id"] == turn.chat for binding in bindings):
+                asked["chat"] = turn.chat
         if any((t["channel"], t["chat"]) == (asked["channel"], asked["chat"])
                for t in await schedules.notify_targets(manager_id=_notify_manager_id(call))):
             data["notify_target"] = asked
@@ -294,8 +349,7 @@ async def _update(call: Call, row: Mapping[str, Any], expected: Mapping[str, str
 
 
 def _notify_manager_id(call: Call) -> str | None:
-    # Tasks-only Managers currently cannot write schedules. Keep this boundary when their tools expand,
-    # including project-scoped Managers whose task filter is not tied to a single owner.
+    # Project-scoped task Managers also need a notification boundary independent of task ownership.
     return call.manager_id if call.scoped or "looper_projects" in call.scope.read_only else None
 
 
@@ -334,11 +388,12 @@ def _raises_a_cap(row: Mapping[str, Any], data: Mapping[str, Any], project_cap: 
 async def _confirming(call: Call) -> str | None:
     """What deleting, enabling or running a schedule, raising its spend cap or editing its unattended command does,
     for the user to confirm; None for any other call (its own tier, and enabling one already enabled)."""
+    await _authorize(call)
     action = call.arguments["action"]
     if action == "delete":
         return await _deleting(call)
     if action == "reset_planner_session":
-        row = await _schedule(call.arguments)
+        row = await _schedule(call.arguments, call)
         return "\n".join([
             f"要重置定时任务「{row['name']}」（项目 {row['project_name']}）的 Planner 会话吗？",
             "已存会话会清掉，下一次运行从新会话开始。" if row.get("planner_session_id") else
@@ -350,7 +405,7 @@ async def _confirming(call: Call) -> str | None:
         return await _disabling(call)
     if action != "update":
         return None
-    row = await _schedule(call.arguments)
+    row = await _schedule(call.arguments, call)
     data = _fields(call.arguments, "update")
     await _check_notify_target(call, data)
     _refuse_other_owner_template(call, row, data)
@@ -403,7 +458,7 @@ async def _confirming(call: Call) -> str | None:
 
 async def _starting(call: Call) -> str | None:
     """What enabling a schedule (it then fires unattended) or running it now does, for the user to confirm."""
-    row = await _schedule(call.arguments)
+    row = await _schedule(call.arguments, call)
     _not_created_now(call, row)
     project = await db_projects.get_project(row["project_id"])
     if project is None:
@@ -447,7 +502,7 @@ async def _starting(call: Call) -> str | None:
 
 async def _disabling(call: Call) -> str | None:
     """Ask before disabling a schedule whose delete was refused in this turn."""
-    row = await _schedule(call.arguments)
+    row = await _schedule(call.arguments, call)
     if not row["enabled"] or row["id"] not in call.turn.refused_deletes:
         return None
     running = await db_schedules.open_runs(db_connection.get_pool(), row["id"]) if row["kind"] == "command" else []
@@ -613,7 +668,7 @@ async def _configuration(view: Mapping[str, Any], project: Mapping[str, Any]) ->
 
 async def _deleting(call: Call) -> str | None:
     """What deleting a schedule does, for the user to confirm."""
-    row = await _schedule(call.arguments)
+    row = await _schedule(call.arguments, call)
     running = await db_schedules.open_runs(db_connection.get_pool(), row["id"])
     if schedules.blocks_delete(row, running):
         call.turn.refused_deletes.add(row["id"])
