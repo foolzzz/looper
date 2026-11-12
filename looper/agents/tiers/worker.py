@@ -461,12 +461,13 @@ ADOPT_WINDOW_SECONDS = 300
 
 @dataclass
 class _Reminders:
-    """A running Claude's room deliveries (``WorkerPool.remind``)."""
+    """A running agent's room deliveries (``WorkerPool.remind``)."""
 
     pending: bool = False
     notified: int = 0
     next_delivery: Callable[[int], Awaitable[RoomDelivery | None]] | None = None
     confirm: Callable[[int], Awaitable[None]] | None = None
+    confirm_on_accept: bool = False
     through: int = 0
     confirmed: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -1535,13 +1536,14 @@ class WorkerPool:
         return {wp.worker_id: (wp.status, wp.since) for wp in self._active.values()
                 if wp.parent_task_id == task_id and wp.status in ("pending", "running")}
 
-    def _room_reminders(self, task_id: str, seat: Seat) -> _Reminders:
+    def _room_reminders(self, task_id: str, seat: Seat, *, confirm_on_accept: bool = False) -> _Reminders:
         if self.room_ops is None:
-            return _Reminders()
+            return _Reminders(confirm_on_accept=confirm_on_accept)
         room = self.room_ops.room
         # Messages can predate the run, so the first tool call or wait must check without a new post.
         return _Reminders(pending=True, next_delivery=lambda after: room.delivery(task_id, seat, after=after),
-                          confirm=lambda through: room.confirm(task_id, seat.key, through))
+                          confirm=lambda through: room.confirm(task_id, seat.key, through),
+                          confirm_on_accept=confirm_on_accept)
 
     def room_in_flight(self, worker_id: str) -> int:
         state = self._reminders.get(worker_id)
@@ -1618,6 +1620,8 @@ class WorkerPool:
                 if result is DeliveryResult.UNKNOWN:
                     logger.warning("worker %s room delivery acceptance unknown; not retrying", worker_id)
                     return sent
+                if state.confirm_on_accept:
+                    await self._confirm_delivery(worker_id, state, delivery.through)
                 state.sent += 1
                 sent = True
                 wp = self._active.get(worker_id)
@@ -2686,8 +2690,9 @@ class WorkerPool:
                     self._inputs[worker_id] = channel
                     if ready := self._input_ready.get(worker_id):
                         ready.set()
-                    if seat is not None and room_push(launch) is RoomPush.USER_TURN:
-                        self._reminders.setdefault(worker_id, self._room_reminders(parent_task_id, seat))
+                    if seat is not None and (push := room_push(launch)) is not RoomPush.NONE:
+                        self._reminders.setdefault(worker_id, self._room_reminders(
+                            parent_task_id, seat, confirm_on_accept=push is RoomPush.STEER))
                 except (BrokenPipeError, ConnectionResetError):
                     # The process exited before reading; its output decides the outcome.
                     logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
