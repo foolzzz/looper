@@ -542,6 +542,10 @@ def test_room_reminders_survive_adoption(tmp_path, monkeypatch):
             from unittest.mock import AsyncMock
             from looper.agents.room import RoomDelivery
 
+            # Events are stored before consumption. Wait for the tool and its initial room check
+            # before installing the delivery, so that only this explicit remind sends it.
+            state = case.a._reminders[case.run_id]
+            await until(lambda: state.tools_running > 0 and not state.lock.locked(), "the run's tool call")
             monkeypatch.setattr(worker, "delivery_uuid", lambda through: "looper-reminder-0123456789ab-42")
             case.a._reminders[case.run_id].next_delivery = AsyncMock(
                 return_value=RoomDelivery("The room has a message for you", 42, (42,), True, 0))
