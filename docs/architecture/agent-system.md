@@ -1649,11 +1649,18 @@ Manager tools.
   as `usage` and `modelUsage`; Cursor reports no cost and the login's models
   have no prices, so cost is unknown (`provider_price`). A per-run spend cap
   cannot stop Cursor. When a process exits without a result and stderr names
-  `RetriableError`, Looper retries once in a fresh process, even when TTADK
-  exits zero. Worker and Reviewer runs reuse the same prompt and input directories;
-  Manager and Planner turns resume the recorded chat, if any, with the same turn.
-  The run records the retry and its reason; a second failure retains both stderr
-  tails. Other failures, stops, cancellations, timeouts and missing logins are
+  `RetriableError: WritableIterable is closed`, Looper retries in a fresh process,
+  even when TTADK exits zero. With a reported session id, Worker and Reviewer runs
+  use `--resume <id>` and a short continuation prompt asking for the final JSON
+  report without redoing completed work. They allow up to three continuations
+  within the original deadline, keeping one run record, private directories,
+  launch settings and helper. Without a session id, they retry once with the
+  original prompt. Each retry records `cursor_run_retry`, its `attempt` (1–3),
+  `mode` (`resume` or `restart`) and reason. If all attempts fail, each attempt's
+  stderr tail shares the existing 1,000-character diagnostic limit.
+  Manager and Planner turns keep their existing single retry, resuming the
+  recorded chat, if any, with the same turn. Other failures, stops,
+  cancellations, timeouts and missing logins are
   not retried. Non-JSON stdout lines,
   including TTADK's login greeting before or between events, are discarded
   before events, logs or failure details are recorded.
