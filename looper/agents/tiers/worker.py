@@ -2411,8 +2411,8 @@ class WorkerPool:
         async def _send_check() -> None:
             if waiting is not None and not input_ended:
                 report = waiting
-                await self._flush_reminder(worker_id)
-                if waiting is not report or input_ended:
+                delivered = await self._flush_reminder(worker_id)
+                if delivered or waiting is not report or input_ended:
                     return
                 await _send_control(
                     f"[Looper] {waiting.check_after_seconds} s have passed since you began waiting for: "

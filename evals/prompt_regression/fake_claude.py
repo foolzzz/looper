@@ -315,16 +315,14 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
     rpc = _mcp(args) if calls else None
     inbox: list[dict[str, Any]] | None = None
     for name, arguments in calls:
-        # A pushed delivery is already in this turn and excluded from the inbox.
-        # Pull without blocking, then wait on stdin if neither path has delivered anything.
-        sent = {**arguments, "wait_seconds": 0} if name == "looper_room_inbox" else arguments
         _emit({"type": "assistant", "session_id": "fake-worker", "message": {"role": "assistant", "content": [
-            {"type": "tool_use", "id": f"toolu_{name}", "name": f"mcp__looper__{name}", "input": sent}]}})
-        result = rpc("tools/call", {"name": name, "arguments": sent})
+            {"type": "tool_use", "id": f"toolu_{name}", "name": f"mcp__looper__{name}", "input": arguments}]}})
+        result = rpc("tools/call", {"name": name, "arguments": arguments})
         if name == "looper_room_inbox":
             answer = json.loads(result["result"]["content"][0]["text"])
             inbox = (inbox or []) + (answer.get("result") or {}).get("messages", [])
-            inbox.extend(_room_input(stdin, 0 if inbox else float(arguments.get("wait_seconds", 0))))
+            # Claude takes queued pushes at the tool result; the tool itself owns the wait.
+            inbox.extend(_room_input(stdin))
     retried = re.search(r"being retried \(attempt (\d+)\)", system_prompt)
     attempt_no = int(retried.group(1)) if retried else 1
     attempts = script.get("attempts", {}).get(label) or [{"status": "completed", "files": {}}]

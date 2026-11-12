@@ -572,6 +572,61 @@ def test_inbox_subscribes_before_its_query(monkeypatch: pytest.MonkeyPatch) -> N
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("delivery", ["addressed", "role", "interface", "confirmed", "during_query"])
+def test_an_inbox_wait_returns_ids_for_messages_pushed_into_its_run(monkeypatch, delivery):
+    from looper.agents import room as module
+    from looper.agents.project_execution import RoomLimits
+
+    async def run():
+        cursor, read = 0, 0
+        rows = []
+        queried = asyncio.Event()
+        room = RoomService(worker_pool=SimpleNamespace(room_in_flight=lambda run: cursor))
+        monkeypatch.setattr(room, "_context", AsyncMock(return_value=SimpleNamespace(limits=RoomLimits())))
+        monkeypatch.setattr(module.db_room, "last_read", AsyncMock(side_effect=lambda *args: read))
+        mark = AsyncMock()
+        monkeypatch.setattr(module.db_room, "mark_read", mark)
+
+        async def messages(task, *, after=0):
+            nonlocal cursor, read
+            queried.set()
+            if rows and delivery == "during_query":
+                cursor = rows[-1]["id"]
+            return [r for r in rows if r["id"] > after]
+
+        monkeypatch.setattr(module.db_room, "messages", messages)
+        waiting = asyncio.create_task(room.inbox("task", FE, wait_seconds=5))
+        try:
+            await queried.wait()
+            # Neither an unrelated broadcast nor another seat's private message ends the wait.
+            rows.extend([_message(WORKER.key, everyone=True, id=1),
+                         _message(WORKER.key, to=(PLANNER.key,), id=2)])
+            cursor = 2
+            queried.clear()
+            room._wake_inboxes("task")
+            await queried.wait()
+            assert not waiting.done()
+            rows.append(_message(WORKER.key, "interface" if delivery == "interface" else "question",
+                                 to=() if delivery == "interface" else (FE.role if delivery == "role" else FE.key,),
+                                 everyone=delivery == "interface", id=3))
+            if delivery != "during_query":
+                cursor = 3
+            if delivery == "confirmed":
+                read = 3  # Claude's echo may mark it read before the wait resumes.
+            room._wake_inboxes("task")
+            result = await asyncio.wait_for(waiting, 0.5)
+            assert result["messages"] == [] and result["more"] is False and result["waited"]
+            assert result["delivered_message_ids"] == [3]
+            assert "separate user messages" in result["note"]
+            assert result["unread"] == {"for_you": 0, "interface": 0, "room": 0}
+            mark.assert_not_awaited()  # Writing the delivery never marks it read.
+        finally:
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+
+    asyncio.run(asyncio.wait_for(run(), 2))
+
+
 def test_reference_lengths_and_inbox_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio
     from types import SimpleNamespace

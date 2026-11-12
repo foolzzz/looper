@@ -896,14 +896,22 @@ class RoomService:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + wait
         waited = False
+        started_after: int | None = None
         while True:
             event = self._events.setdefault(task_id, asyncio.Event())
             event.clear()
-            last = max(await db_room.last_read(task_id, seat.key), self._in_flight(seat))
-            rows = await db_room.messages(task_id, after=last)
+            read = await db_room.last_read(task_id, seat.key)
+            if started_after is None:
+                started_after = read
+            # Keep this wait's starting point even if an echo confirms a push while it sleeps.
+            rows = await db_room.messages(task_id, after=started_after if wait else read)
+            through = self._in_flight(seat)  # A delivery may finish during the query.
+            delivered = [r["id"] for r in rows if wait and r["id"] <= through
+                         and r["sender_seat"] != seat.key and visible(r, seat) and _ends_wait(r, seat)]
+            rows = [r for r in rows if r["id"] > max(read, through)]
             unread = [r for r in rows if r["sender_seat"] != seat.key and visible(r, seat)]
             remaining = deadline - loop.time()
-            if any(_ends_wait(r, seat) for r in unread) or remaining <= 0:
+            if delivered or any(_ends_wait(r, seat) for r in unread) or remaining <= 0:
                 break
             waited = True
             try:
@@ -924,6 +932,9 @@ class RoomService:
                                   "unread": await self._unread(task_id, seat)}
         if waited:
             result["waited"] = True
+        if delivered:
+            result["delivered_message_ids"] = delivered
+            result["note"] = "These room messages were delivered into this run as separate user messages; read them there."
         return result
 
     async def read(self, task_id: str, seat: Seat, *, kind: str | None = None, sender: str | None = None,

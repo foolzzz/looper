@@ -4579,7 +4579,11 @@ before.
   naming the seat; at most 20 and 8,000 characters), marking them read per seat
   (a retry reads on); `peek` does not mark them. `wait_seconds` waits up to the
   project's `room_wait_max_seconds` for a message for the seat or an interface
-  post. Every tool's answer carries unread counts.
+  post. If a matching message is pushed into the same run during that wait,
+  the inbox returns immediately with `delivered_message_ids` and a note that
+  those messages arrived as separate user messages; it does not repeat their
+  bodies. This also holds if their replay echo has already marked them read.
+  Every tool's answer carries unread counts.
   Running Claude Code Workers and Reviewers (`RoomPush.USER_TURN`) instead
   receive message bodies when a message names them or an interface post
   reaches them. Other posts ride along in an oldest-first prefix: at most
@@ -4591,7 +4595,10 @@ before.
   60 s, with a retry when the interval ends. Messages are marked read on the
   delivery's replay echo or a result naming its uuid in `user_message_uuids`,
   never merely on writing stdin. While in flight, that run's inbox and unread
-  counts start after the delivery's cursor. An unconfirmed delivery remains
+  counts exclude the delivered bodies; an inbox wait still detects matching
+  messages within that range as described above. A waiting Worker's check
+  first flushes pending room messages and skips its check turn if it wrote a
+  delivery in that wake. An unconfirmed delivery remains
   unread for a later run. Adoption rebuilds the cursor from stdin uuids and
   checks for messages that arrived while Looper was down at the next tool
   call or check. Delivery uuids retain the `looper-reminder-` prefix; a result

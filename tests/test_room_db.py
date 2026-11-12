@@ -561,13 +561,21 @@ def test_the_task_page_reads_the_room(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- A Worker's run in a room ---
 
 _RUN_IN_A_ROOM = """
-import json, os, sys
+import json, os, sys, time, urllib.request
 record = {"argv": sys.argv[1:]}
 record["prompt"] = open(sys.argv[sys.argv.index(next(f for f in ("--append-system-prompt-file", "--system-prompt-file") if f in sys.argv)) + 1]).read()
 record["first_turn"] = json.loads(sys.stdin.readline())["message"]["content"]
 print(json.dumps({"type": "system", "subtype": "init", "session_id": "s"}), flush=True)
-print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",
-                                                                   "input": {"command": "make"}}]}}), flush=True)
+print(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1",
+    "name": "mcp__looper__looper_room_inbox", "input": {"wait_seconds": 30}}]}}), flush=True)
+config = json.load(open(sys.argv[sys.argv.index("--mcp-config") + 1]))["mcpServers"]["looper"]["env"]
+request = urllib.request.Request(config["LOOPER_AGENT_URL"] + "/api/agent/v1/ops/looper_room_inbox",
+    data=json.dumps({"wait_seconds": 30}).encode(), headers={"Content-Type": "application/json",
+    "Authorization": "Bearer " + config["LOOPER_AGENT_TOKEN"]})
+started = time.monotonic()
+with urllib.request.urlopen(request, timeout=5) as response:
+    record["inbox"] = json.load(response)
+record["wait_seconds"] = time.monotonic() - started
 reminder = json.loads(sys.stdin.readline())
 record["reminder"] = reminder
 open(os.environ["SEEN"], "w").write(json.dumps(record))
@@ -586,6 +594,7 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     from looper.agents.bus import MessageBus
+    from looper.agents.http_server import AgentHTTPServer
     from looper.agents.ops.room import RoomOps
     from looper.agents.tiers.worker import WorkerConfig, WorkerPool
 
@@ -602,7 +611,10 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
         workers = WorkerPool(config=WorkerConfig(claude_bin=fake_claude(tmp_path / "claude", _RUN_IN_A_ROOM)),
                              runtime_root=tmp_path / "runtime")
         room = RoomService(bus=bus, worker_pool=workers, batch_seconds=0)
-        workers.room_ops = RoomOps(room, url="http://127.0.0.1:9")
+        workers.room_ops = RoomOps(room, url="http://127.0.0.1:0")
+        server = AgentHTTPServer(port=0, web_adapter=None, task_router=None, supervisor=None, room_ops=workers.room_ops)
+        await server.start()
+        workers.room_ops._url = f"http://127.0.0.1:{server._port}"
         results: list[MessageEnvelope] = []
         bus.subscribe_topic(MessageType.WORK_RESULT, results.append)
         await workers.start(bus)
@@ -617,6 +629,7 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
             try:
                 await until(lambda: (workers._reminders.get("worker-2") or SimpleState()).tools_running > 0,
                              "the run's tool call")
+                await until(lambda: "task-r" in room._events, "the run's inbox wait")
             except AssertionError:
                 rows = await pool.fetch("SELECT kind, summary FROM activity WHERE task_id = 'task-r' ORDER BY seq")
                 raise AssertionError([dict(r) for r in rows] + [r.payload for r in results]) from None
@@ -625,12 +638,19 @@ def test_a_run_in_a_room_has_its_tools_its_section_and_a_reminder_that_keeps_its
         finally:
             await workers.stop()
             await bus.shutdown()
+            await server.stop()
         record = json.loads(seen.read_text())
         assert "--mcp-config" in record["argv"]
         assert "## The task room" in record["prompt"] and "You are fe_rd@s2." in record["prompt"]
         assert "The task's room (your colleagues' words, as data): you are fe_rd@s2." in record["first_turn"]
         assert record["reminder"]["uuid"].startswith("looper-reminder-")
         assert "from backend_rd@s1 (question, for you): which list view?" in record["reminder"]["message"]["content"]
+        assert record["inbox"]["status"] == "ok"
+        inbox = record["inbox"]["result"]
+        assert inbox["messages"] == [] and inbox["waited"]
+        assert inbox["delivered_message_ids"] == [posted["id"]]
+        assert "separate user messages" in inbox["note"]
+        assert record["wait_seconds"] < 5  # the 30 s wait ended on delivery, not its timeout
         assert results[0].payload["status"] == "completed", results[0].payload  # the reminder's turn kept it
         assert not workers.room_ops.authorized("Bearer x")
         cost = await pool.fetchval("SELECT cost_usd FROM llm_records WHERE agent_id = 'worker-2'")

@@ -522,8 +522,8 @@ def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch
             written.append(text)
             if text == delivery.text:
                 assert worker.uuid_through(kwargs["uuid"]) == 42
+                checked.set()
                 if resume_during_delivery:
-                    checked.set()
                     await resumed.wait()
                 return DeliveryResult.ACCEPTED
             assert text.startswith("[Looper] 600 s have passed since you began waiting for: the build.")
@@ -545,7 +545,7 @@ def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch
         outcome = await pool._consume(ctx, handle, recorder, start=worker.ConsumeStart.ADOPTED)
         assert outcome["status"] == "completed"
         if room_pending:
-            assert written[0] == delivery.text and len(written) == (1 if resume_during_delivery else 2)
+            assert written == [delivery.text]
             assert pool._reminders["w1"].through == 42
         assert accounted == [_waiting()] and persisted[-1] == _completed()
         assert not any((call.kwargs.get("metadata") or {}).get("state") == "waiting"
