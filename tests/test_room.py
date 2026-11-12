@@ -233,6 +233,36 @@ def test_room_deliveries_carry_text_without_inbox_polling(seat: Seat, mode: Room
     assert "looper_room_read for earlier ones" in text
     assert "not the message body" not in text
     assert "call looper_room_inbox now" not in text
+    assert "You need not stay to answer questions; after your step ends, Looper answers them from your session." in text
+
+
+def test_the_planner_leaves_room_reading_and_answering_after_steps_to_looper():
+    from looper.agents.ops.planner import PlannerOps
+
+    ops = PlannerOps(SimpleNamespace(), url="http://127.0.0.1:9")
+    ops.room = SimpleNamespace()
+    text = " ".join(ops.guide_for(roles=False, room=True).split())
+    assert ("Do not tell steps to check, poll or wait on looper_room_inbox: Looper delivers messages to steps "
+            "that can receive them and tells the others how to read them.") in text
+    assert ("A seat whose step has ended still answers questions from its session, so a step others will ask "
+            "need not stay or wait for them.") in text
+
+
+@pytest.mark.parametrize("mode", list(RoomInput))
+def test_the_first_turn_matches_the_runs_room_input(monkeypatch, mode):
+    from looper.agents import room as module
+
+    room = RoomService()
+    monkeypatch.setattr(room, "_context", AsyncMock(return_value=SimpleNamespace(members=[])))
+    monkeypatch.setattr(module.db_room, "last_read", AsyncMock(return_value=0))
+    monkeypatch.setattr(module.db_room, "messages", AsyncMock(return_value=[
+        {**_message(FE.key, to=(WORKER.key,)), "body": "use port 8123"},
+    ]))
+    text = asyncio.run(room.first_turn("task", WORKER, mode=mode))
+    assert "use port 8123" in text
+    assert "Unread: 1 for you" in text
+    assert ("looper_room_inbox" in text) is (mode is RoomInput.PULL)
+    assert ("They will be delivered to you." in text) is (mode is not RoomInput.PULL)
 
 
 @pytest.mark.parametrize(("runtime_type", "is_verify", "expected"), [

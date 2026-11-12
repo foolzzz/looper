@@ -35,7 +35,7 @@ from .. import vault
 from ..vault import VaultConfig
 from . import vault as vault_ops
 from .vault import TOOL_NAMES as VAULT_TOOL_NAMES, VaultUsage
-from ..room import POSTABLE, MemberKind, MessageKind, RoomService, Seat
+from ..room import POSTABLE, MemberKind, MessageKind, RoomInput, RoomService, Seat
 from . import ErrorCode, OpError, RetrySafety, Risk, Tool, check_arguments
 from .service import library_with_server, server_config
 
@@ -201,6 +201,10 @@ def validate_grant(record: Any, *, run_id: str, task_id: str) -> None:
         raise ValueError("invalid run grant seat kind") from exc
     if type(record.get("room")) is not bool:
         raise ValueError("invalid run grant room flag")
+    try:
+        RoomInput(record.get("mode", RoomInput.PULL))
+    except (ValueError, TypeError) as exc:
+        raise ValueError("invalid run grant room input mode") from exc
     for key in ("vault_tools", "mcp_files"):
         if not isinstance(record.get(key), list) or any(not isinstance(value, str) for value in record[key]):
             raise ValueError(f"invalid run grant {key}")
@@ -216,6 +220,7 @@ class _Grant:
     task_id: str
     seat: Seat
     room: bool = True
+    mode: RoomInput = RoomInput.PULL
     vault_tools: tuple[Tool, ...] = ()
     usage: VaultUsage = field(default_factory=VaultUsage)
     state: GrantState = GrantState.ACTIVE
@@ -232,10 +237,10 @@ class RoomOps:
     # --- Tokens ---
 
     def issue(self, task_id: str, seat: Seat, *, room: bool = True, vault: VaultConfig | None = None,
-              kept: bool = False) -> str:
+              kept: bool = False, mode: RoomInput = RoomInput.PULL) -> str:
         """A new token for ``seat``'s run in ``task_id``."""
         token = TOKEN_PREFIX + secrets.token_urlsafe(32)
-        self._grants[_digest(token)] = _Grant(task_id, seat, room=room, kept=kept,
+        self._grants[_digest(token)] = _Grant(task_id, seat, room=room, kept=kept, mode=mode,
                                                vault_tools=vault_ops.tools_for(vault) if vault else ())
         return token
 
@@ -251,7 +256,7 @@ class RoomOps:
         for digest, grant in self._grants.items():
             if grant.seat.run == run:
                 return {"format": 1, "digest": digest, "task_id": grant.task_id,
-                        "seat": asdict(grant.seat), "room": grant.room,
+                        "seat": asdict(grant.seat), "room": grant.room, "mode": grant.mode.value,
                         "vault_tools": [tool.name for tool in grant.vault_tools],
                         "mcp_files": sorted(self._files.get(run, ()))}
         return None
@@ -264,7 +269,7 @@ class RoomOps:
         run = record.get("seat", {}).get("run") if isinstance(record.get("seat"), dict) else None
         validate_grant(record, run_id=run, task_id=record.get("task_id"))
         seat = Seat(**{**record["seat"], "kind": MemberKind(record["seat"]["kind"])})
-        grant = _Grant(record["task_id"], seat, room=record["room"],
+        grant = _Grant(record["task_id"], seat, room=record["room"], mode=RoomInput(record.get("mode", RoomInput.PULL)),
                        vault_tools=tuple(tool for tool in vault_ops.TOOLS if tool.name in record["vault_tools"]),
                        state=GrantState.PENDING_ADOPTION, kept=True)
         self._grants[record["digest"]] = grant
@@ -298,7 +303,17 @@ class RoomOps:
         if grant is None:
             return []
         room_tools = tools_for(grant.seat.kind) if grant.room else ()
-        return [tool.listing() for tool in (*room_tools, *grant.vault_tools)]
+        listed = [tool.listing() for tool in (*room_tools, *grant.vault_tools)]
+        if grant.mode is not RoomInput.PULL:
+            for tool in listed:
+                if tool["name"] == INBOX:
+                    tool["description"] = ("Your unread room messages, oldest first; reading marks them read. "
+                                           "Every room tool's answer carries your unread counts. "
+                                           "Messages are delivered to you; wait_seconds is not needed. "
+                                           "Use this inbox only when a delivery says more are waiting.")
+                    if grant.mode is RoomInput.PUSHED_WAITS:
+                        tool["description"] += " To wait for an answer, use a waiting report."
+        return listed
 
     def retry_safety(self, header: str | None) -> dict[str, str] | None:
         grant = self._grant(header)

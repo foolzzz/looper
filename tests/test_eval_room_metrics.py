@@ -39,6 +39,18 @@ def test_inbox_calls_and_empty_results(wrapped, blocks):
     assert result["room_tool_calls"] == 3
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("delivered", [[], [4]])
+def test_an_inbox_woken_by_delivery_is_counted_separately(wrapped, delivered):
+    payload = {"messages": [], "waited": True, "delivered_message_ids": delivered}
+    content = json.dumps({"status": "ok", "result": payload} if wrapped else payload)
+    events = [_event("assistant", _inbox()), _event("user", _result(content))]
+    result = metrics.room_metrics({}, [], {1: events})
+    assert result["room_inbox_calls"] == 1
+    assert result["room_inbox_woken_by_delivery"] == int(bool(delivered))
+    assert result["room_inbox_empty"] == int(not delivered)
+
+
 @pytest.mark.parametrize("content", [
     "tool failed", "[]", "null", '"text"', '{"result": null}', '{"result": []}',
     '{}', '{"messages": null}', '{"messages": {}}', 123,

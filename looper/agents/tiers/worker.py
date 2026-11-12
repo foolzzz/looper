@@ -2028,13 +2028,14 @@ class WorkerPool:
         if self.room_ops is not None and parent_task_id and (room_on or vault_config is not None):
             seat = run_seat(payload, is_verify=is_verify, run=worker_id)
             try:
-                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config, kept=kept)
+                mode = room_input(launch, is_verify=is_verify)
+                token = self.room_ops.issue(parent_task_id, seat, room=room_on, vault=vault_config, kept=kept, mode=mode)
                 if not hosted:
                     library = await self.room_ops.library_with_server(
                         library, self._runtime_root, token, worker_id, reconnect_seconds=120 if kept else None)
                 if room_on:
-                    prompt = f"{prompt}\n\n{await self.room_ops.room.first_turn(parent_task_id, seat)}"
-                    room_text = room_section(seat, room_input(launch, is_verify=is_verify))
+                    prompt = f"{prompt}\n\n{await self.room_ops.room.first_turn(parent_task_id, seat, mode=mode)}"
+                    room_text = room_section(seat, mode)
                 if vault_config is not None:
                     vault_text = run_section(vault_config)
             except Exception as exc:
