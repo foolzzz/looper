@@ -313,15 +313,23 @@ def _worker(script: dict[str, Any], system_prompt: str, stdin: _Stdin, args: lis
     label = step.group(1) if step else ""
     calls = (script.get("room_calls") or {}).get(label) or []
     rpc = _mcp(args) if calls else None
+    tools = {tool["name"]: tool for tool in rpc("tools/list", {})["result"]["tools"]} if calls else {}
     inbox: list[dict[str, Any]] | None = None
     for name, arguments in calls:
+        if (name == "looper_room_inbox" and arguments.get("wait_seconds")
+                and "wait_seconds" not in tools[name]["inputSchema"]["properties"]):
+            # A push run waits between turns instead of issuing a blocking inbox call.
+            _answer("fake-worker", json.dumps({"status": "waiting", "waiting_for": "a room message",
+                                                "check_after_seconds": 60}), WORKER_RUN_COST)
+            inbox = (inbox or []) + _room_input(stdin, timeout=float(arguments["wait_seconds"]))
+            continue
         _emit({"type": "assistant", "session_id": "fake-worker", "message": {"role": "assistant", "content": [
             {"type": "tool_use", "id": f"toolu_{name}", "name": f"mcp__looper__{name}", "input": arguments}]}})
         result = rpc("tools/call", {"name": name, "arguments": arguments})
         if name == "looper_room_inbox":
             answer = json.loads(result["result"]["content"][0]["text"])
             inbox = (inbox or []) + (answer.get("result") or {}).get("messages", [])
-            # Claude takes queued pushes at the tool result; the tool itself owns the wait.
+            # Claude takes any queued pushes at the tool result.
             inbox.extend(_room_input(stdin))
     retried = re.search(r"being retried \(attempt (\d+)\)", system_prompt)
     attempt_no = int(retried.group(1)) if retried else 1

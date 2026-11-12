@@ -30,6 +30,7 @@ _TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     ("room deliveries", "room_deliveries"),
     ("room inbox calls", "room_inbox_calls"),
     ("empty room inbox calls", "room_inbox_empty"),
+    ("room inbox calls woken by delivery", "room_inbox_woken_by_delivery"),
     ("contract violations", "violations"),
     ("Planner file edits", "planner_modified_files"),
     ("tokens (prompt / output)", "tokens"),
