@@ -5,7 +5,9 @@ from ..drain import DrainScope
 
 DRAIN_POLL_TIMEOUT_SECONDS = 30.0
 
-_RUN = _object({"worker_id": _STR, "task_id": _STR, "role": _STR, "since": _STR, "keepable": _BOOL}, closed=True)
+_RUN = _object({"worker_id": _STR, "task_id": _STR, "role": _STR, "since": _STR, "keepable": _BOOL,
+                "runtime_id": _NULL_STR, "runtime_type": _NULL_STR},
+               ["worker_id", "task_id", "role", "since", "keepable"], closed=True)
 DRAIN = _object({"phase": {"type": "string", "enum": ["serving", "draining", "drained"]},
                  "scope": {"type": ["string", "null"], "enum": ["turns", "runs", None]},
                  "since": _NULL_STR, "deadline": _NULL_STR, "deadline_passed": _BOOL,

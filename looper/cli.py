@@ -142,6 +142,9 @@ def _add_service_parser(commands: argparse._SubParsersAction) -> None:
     upgrade.add_argument("--turns-timeout", type=float, default=180.0,
                          help="Seconds to wait once only turns block a control-plane upgrade; "
                               "resets if a non-keepable run reappears (default 180, capped by --drain-timeout).")
+    upgrade.add_argument("--preflight-wait", type=float, default=0.0,
+                         help="With --no-force on a control-plane upgrade, wait for non-keepable runs "
+                              "before draining, polling every 15 seconds (default 0, disabled).")
     restart.add_argument("--drain", action="store_true", help="Drain active runs before restarting.")
     for command in (upgrade, restart):
         command.add_argument("--drain-timeout", type=float, default=1200.0,
@@ -258,7 +261,8 @@ def _service(args: argparse.Namespace) -> int:
         elif args.service_command == "upgrade":
             print(service.upgrade(host, label=args.label, to=args.to, dry_run=args.dry_run,
                                   timeout=args.timeout, drain_timeout=args.drain_timeout,
-                                  turns_timeout=args.turns_timeout, no_force=args.no_force))
+                                  turns_timeout=args.turns_timeout, no_force=args.no_force,
+                                  preflight_wait=args.preflight_wait))
         elif args.service_command == "restart":
             print(service.restart(host, label=args.label, timeout=args.timeout, drain=args.drain,
                                   drain_timeout=args.drain_timeout, no_force=args.no_force))

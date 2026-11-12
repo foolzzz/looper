@@ -61,6 +61,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .. import child_env, ops_config
@@ -100,6 +101,8 @@ _GIT_REPOSITORY_OVERRIDES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _STOP_WAIT_SECONDS = 30.0  # launchd sends SIGKILL 20 s after SIGTERM by default
 _POLL_SECONDS = 0.5
+_PREFLIGHT_POLL_SECONDS = 15.0
+_DRAIN_SUMMARY_SECONDS = 60.0
 _BOOTSTRAP_ATTEMPTS = 10
 _COMMAND_TIMEOUT_SECONDS = 30.0
 _UPGRADE_READ_TIMEOUT_SECONDS = 15
@@ -172,8 +175,8 @@ def _base_url(address: str, port: int) -> str:
     return f"http://{authority}:{port}"
 
 
-def _system_operation(port: int, token: str, name: str, arguments: dict) -> dict:
-    return _request_json(port, token, f"/api/v1/system/{name}", arguments)
+def _system_operation(port: int, token: str, name: str, arguments: dict, *, timeout: float = 3) -> dict:
+    return _request_json(port, token, f"/api/v1/system/{name}", arguments, timeout=timeout)
 
 
 def _request_json(port: int, token: str, path: str, arguments: dict | None = None, *, timeout: float = 3) -> dict:
@@ -231,7 +234,7 @@ class Host:
     get_status: Callable[..., dict | None] = _get_status
     port_in_use: Callable[[int, str], bool] = _port_in_use
     get_components: Callable[..., dict | None] = _get_components
-    system_operation: Callable[[int, str, str, dict], dict] = _system_operation
+    system_operation: Callable[..., dict] = _system_operation
     get_whoami: Callable[..., dict] = _get_whoami
     get_index: Callable[..., bytes] = _get_index
     pid_alive: Callable[[int], bool] = _pid_alive
@@ -1264,6 +1267,44 @@ def _deploy_report(report: dict, log_path: Path | None) -> str:
     return line
 
 
+def _upgrade_drain_status(host: Host, port: int, token: str) -> dict:
+    # Retry reads only; callers still check the phase in case the controller lease expired.
+    for attempt in range(3):
+        try:
+            return host.system_operation(port, token, "drain_status", {}, timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
+        except (ServiceError, OSError) as exc:
+            cause = exc.__cause__ if isinstance(exc, ServiceError) else exc
+            if isinstance(cause, urllib.error.URLError):
+                cause = cause.reason
+            if not isinstance(cause, TimeoutError) or attempt == 2:
+                raise
+
+
+def _drain_blockers(status: dict, *, include_keepable: bool = False) -> dict:
+    waiting = status.get("waiting", {})
+    runs = []
+    for row in waiting.get("runs", []):
+        if row.get("keepable") is not False:
+            continue
+        run = dict(row)
+        try:
+            since = datetime.fromisoformat(row["since"])
+            run["age_seconds"] = round(max(0, (datetime.now(timezone.utc) - since).total_seconds()), 1)
+        except (KeyError, TypeError, ValueError):
+            run["age_seconds"] = None
+        runs.append(run)
+    blockers = {"non_keepable_runs": runs,
+                **{key: waiting.get(key, []) for key in ("manager_turns", "planner_turns")},
+                **{key: waiting.get(key, 0) for key in ("gates", "waits", "consults", "starting")}}
+    if include_keepable:
+        blockers["keepable_runs"] = [row for row in waiting.get("runs", []) if row.get("keepable") is True]
+    return blockers
+
+
+def _drain_summary(blockers: dict) -> str:
+    return "; ".join(f"{key}={json.dumps(value, sort_keys=True)}" for key, value in blockers.items())
+
+
 def _stop_with_renewal(mgr: _Manager, renew: Callable[[], None] | None) -> None:
     # Both systemctl stop and launchd's unload wait can outlast the drain lease.
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -1309,7 +1350,7 @@ def _deployment_signals():
 @_deployment_signals()
 def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path: Path | None,
                   plan, running, target, installer, timeout: float, drain_timeout: float,
-                  no_force: bool, turns_timeout: float = 180,
+                  no_force: bool, turns_timeout: float = 180, preflight_wait: float = 0,
                   prepare: Callable[[], None] | None = None) -> str:
     from ..components import Manifest
     from ..upgrade import UpgradeKind
@@ -1317,6 +1358,8 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
     if not all(math.isfinite(value) and value > 0 for value in (timeout, drain_timeout, turns_timeout)):
         raise ServiceError("--start-timeout (--timeout), --drain-timeout and --turns-timeout "
                            "must be positive finite numbers")
+    if not math.isfinite(preflight_wait) or preflight_wait < 0:
+        raise ServiceError("--preflight-wait must be a non-negative finite number")
     control_plane = plan.kind == UpgradeKind.CONTROL_PLANE
     token = operator_auth.read_token(root)
     if not token:
@@ -1324,7 +1367,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
 
     def renew() -> None:
         try:
-            host.system_operation(port, token, "drain_status", {})
+            _upgrade_drain_status(host, port, token)
         except (ServiceError, OSError):
             pass  # The old process may already have closed its listener.
 
@@ -1339,7 +1382,8 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
         return ServiceError(f"port {port} is served by another process{owner}; not starting a second server")
 
     report = {"plan": plan.kind.value, "reasons": list(plan.reasons), "drain_seconds": 0.0, "turns_wait_seconds": 0.0,
-              "prepare_seconds": 0.0, "gap_seconds": 0.0, "interrupted": [], "kept_before": 0, "adopted": 0,
+              "prepare_seconds": 0.0, "preflight_wait_seconds": 0.0, "gap_seconds": 0.0,
+              "interrupted": [], "kept_before": 0, "adopted": 0,
               "running_code_fingerprint": running.components["control_plane"],
               "installed_package_version": running.version, "status": "failed"}
     if control_plane:
@@ -1358,8 +1402,25 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
             finally:
                 report["prepare_seconds"] = round(host.clock() - started, 3)
         if plan.kind in (UpgradeKind.FULL, UpgradeKind.CONTROL_PLANE):
+            if control_plane and no_force and preflight_wait > 0:
+                preflight_started = host.clock()
+                while True:
+                    status = _upgrade_drain_status(host, port, token)
+                    report["preflight_wait_seconds"] = round(host.clock() - preflight_started, 3)
+                    if status.get("phase") != "serving":
+                        raise ServiceError("the service is already draining; deployment stopped")
+                    blockers = _drain_blockers(status)
+                    if not blockers["non_keepable_runs"]:
+                        break
+                    remaining = preflight_wait - (host.clock() - preflight_started)
+                    if remaining <= 0:
+                        report["blockers"] = blockers
+                        raise ServiceError(f"{len(blockers['non_keepable_runs'])} non-keepable runs are in flight "
+                                           f"({_drain_summary(blockers)}); nothing was drained; deploy again later")
+                    host.sleep(min(_PREFLIGHT_POLL_SECONDS, remaining))
             started = host.clock()
             turns_started = None
+            next_summary = started + _DRAIN_SUMMARY_SECONDS
             # Mark the attempt first: a lost response may still have begun draining.
             draining = True
             status = host.system_operation(port, token, "drain", {
@@ -1382,9 +1443,16 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                     report["turns_wait_seconds"] = round(turns_wait, 3)
                     passed = passed or (turns_started is not None and turns_wait >= turns_timeout)
                 report["drain_seconds"] = round(now - started, 3)
+                if phase != "drained" and now >= next_summary:
+                    blockers = _drain_blockers(status, include_keepable=not control_plane)
+                    print(f"drain waiting ({report['drain_seconds']:.0f}s): {_drain_summary(blockers)}",
+                          file=sys.stderr, flush=True)
+                    next_summary = now + _DRAIN_SUMMARY_SECONDS
                 if passed and phase != "drained":
                     if no_force:
-                        raise ServiceError("drain deadline passed; --no-force cancelled deployment")
+                        report["blockers"] = _drain_blockers(status, include_keepable=not control_plane)
+                        raise ServiceError("drain deadline passed; --no-force cancelled deployment; "
+                                           + _drain_summary(report["blockers"]))
                     report["interrupted"] = [
                         {"worker_id": row["worker_id"], "role": row["role"],
                          "reason": "not_keepable" if control_plane else "deadline"}
@@ -1397,7 +1465,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 if phase == "drained" or passed:
                     break
                 host.sleep(_POLL_SECONDS)
-                status = host.system_operation(port, token, "drain_status", {})
+                status = _upgrade_drain_status(host, port, token)
             gap_started = host.clock()
             stop_attempted = True
             _stop_for_install(mgr, before, renew)
@@ -1506,7 +1574,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                 except (ServiceError, OSError) as cancel_error:
                     report["recovery_error"] = "; ".join(filter(None, (report.get("recovery_error"), str(cancel_error))))
         try:
-            answer = host.get_status(port, token, "127.0.0.1")
+            answer = host.get_status(port, token, "127.0.0.1", timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
             if answer is None and draining and not stop_attempted and before is not None:
                 state = mgr.state()
                 if state.running and ((state.pid is not None and state.pid != before) or not host.pid_alive(before)):
@@ -1514,7 +1582,7 @@ def _execute_plan(host: Host, mgr: _Manager, *, port: int, root: Path, log_path:
                     deadline = host.clock() + timeout
                     while answer is None and host.clock() < deadline:
                         host.sleep(min(1.0, deadline - host.clock()))
-                        answer = host.get_status(port, token, "127.0.0.1")
+                        answer = host.get_status(port, token, "127.0.0.1", timeout=_UPGRADE_READ_TIMEOUT_SECONDS)
                     if answer is None and mgr.state().running and host.clock() >= deadline:
                         starting = ServiceStarting(
                             f"the service is still starting after {timeout:.0f} s; do not restart it",
@@ -1608,7 +1676,7 @@ def _checkout_sync_environment(host: Host) -> Path:
 
 def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dry_run: bool = False,
             timeout: float = DEFAULT_START_TIMEOUT_SECONDS, drain_timeout: float = 1200, turns_timeout: float = 180,
-            no_force: bool = False) -> str:
+            no_force: bool = False, preflight_wait: float = 0) -> str:
     """Compute a plan before mutating files; stop the old interpreter before a full install."""
     from .. import components
     from ..upgrade import UpgradeKind, UpgradePlan, decide, scan_keepers
@@ -1705,6 +1773,7 @@ def upgrade(host: Host, *, label: str = DEFAULT_LABEL, to: str | None = None, dr
                 installer=lambda: _install_target(host, source, wheel=wheel, build_web=build_web,
                     dependencies=dependencies, sync_environment=sync_environment, wheel_environment=wheel_environment,
                     prepared_web=prepared_web),
-                timeout=timeout, drain_timeout=drain_timeout, turns_timeout=turns_timeout, no_force=no_force)
+                timeout=timeout, drain_timeout=drain_timeout, turns_timeout=turns_timeout,
+                no_force=no_force, preflight_wait=preflight_wait)
     except (ValueError, KeyError, zipfile.BadZipFile) as exc:
         raise ServiceError(str(exc)) from exc

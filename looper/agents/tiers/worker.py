@@ -545,6 +545,8 @@ class WorkerProcess:
     since: datetime = field(default_factory=lambda: datetime.now(timezone.utc))  # when it began to wait, then to run
     keepable: bool = False  # a keeper holds this run across a control-plane restart
     task_role: dict[str, Any] | None = None  # the role its dispatch names (``task_roles.run_role``); None: built-in
+    runtime_id: str | None = None
+    runtime_type: str | None = None
 
 
 class ConsumeStart(StrEnum):
@@ -1258,7 +1260,8 @@ class WorkerPool:
             wp = WorkerProcess(worker_id=run_id, task_id=step_id, plan_id=manifest.get("plan_id") or "",
                                role=agent, parent_task_id=task_id, step=manifest.get("step_key") or "",
                                instruction=manifest.get("instruction") or "", task_role=run_role(manifest.get("task_role")),
-                               status="running", since=started_at, keepable=True, handle=handle, project_id=project_id)
+                               status="running", since=started_at, keepable=True, handle=handle, project_id=project_id,
+                               runtime_id=launch.profile.runtime.id, runtime_type=launch.profile.runtime.type)
             if seat is not None:
                 reminders = _Reminders()
                 for line in (run_dir / keeper.STDIN).read_text().splitlines():
@@ -1589,7 +1592,8 @@ class WorkerPool:
     def drain_waiting(self) -> dict[str, Any]:
         # Keep the slot counted through result publication, not just subprocess completion.
         return {"runs": [{"worker_id": wp.worker_id, "task_id": wp.parent_task_id or wp.task_id,
-                          "role": wp.role.value, "since": wp.since.isoformat(), "keepable": wp.keepable}
+                          "role": wp.role.value, "since": wp.since.isoformat(), "keepable": wp.keepable,
+                          "runtime_id": wp.runtime_id, "runtime_type": wp.runtime_type}
                          for wid, wp in self._active.items() if wid in self._slots]}
 
     async def recheck(self) -> None:
@@ -1911,6 +1915,9 @@ class WorkerPool:
         hosted = profile_runtime is not None and profile_runtime.hosts_runs
         launch = Launch(agent_settings, library, knowledge, role=AgentType.REVIEWER if is_verify else AgentType.WORKER)
         runtime = launch.runtime
+        if (wp := self._active.get(worker_id)) is not None:
+            wp.runtime_id = launch.profile.runtime.id
+            wp.runtime_type = launch.profile.runtime.type
         kept = (self._keeper is not None and runtime.keepable and not hosted and not launch.steers
                 and launch.exit_code_reliable and bool(parent_task_id) and verification is None)
         token: str | None = None
