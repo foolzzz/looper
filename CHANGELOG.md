@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.152] - 2026-11-12
+
+### Changed
+
+- **A slow start during `looper service upgrade` is waited for, not reported as a failure.** ([#1274](https://github.com/foolzzz/looper/pull/1274))
+  - `--start-timeout` (alias `--timeout`) defaults to 300 s instead of 120 s. A live process is allowed the whole interval.
+  - A new process that has exited fails at once, also for `looper service install` and `restart`.
+  - At the deadline with the process alive, the report has `status: "starting"`, `starting: true`, `serving: false` and `last_startup_step`; the process is left running and the CLI exits nonzero, saying not to restart it.
+  - The serve log records `startup step: <name>` before each startup step.
+  - Not model-visible.
+
 ## [2.14.151] - 2026-11-12
 
 ### Changed
