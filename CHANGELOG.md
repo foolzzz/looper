@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.159] - 2026-11-12
+
+### Changed
+
+- **Steered Codex room messages are marked read when they reach the history.** ([#1288](https://github.com/foolzzz/looper/pull/1288))
+  - A message pushed into a steering Codex run is now marked read when the app-server's `userMessage` history item carrying its ids appears, not on the steer acknowledgement. If no item arrives within 30 s of the acknowledgement while the run is active, Looper logs a warning and falls back to the acknowledgement. A run that ends first leaves the messages unread.
+  - Messages are confirmed in order: a later receipt never skips an earlier unconfirmed delivery.
+  - Rejection, no active turn and an unknown acknowledgement behave as before.
+  - Not model-visible: the history item is a receipt kept out of the model's output, and prompts are unchanged.
+
 ## [2.14.158] - 2026-11-12
 
 ### Changed
