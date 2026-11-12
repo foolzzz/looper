@@ -21,7 +21,11 @@ def exec_item(item: Mapping[str, Any]) -> dict[str, Any] | None:
     """An app-server item in the shape ``CodexStream`` already reads from exec."""
     kind = item.get("type", "")
     if kind == "userMessage":
-        return None
+        parts = item.get("content") or []
+        return {"id": item.get("id"), "type": "user_message", "text": "\n".join(
+            part if isinstance(part, str) else part["text"]
+            for part in parts if isinstance(part, str) or (
+                isinstance(part, Mapping) and part.get("type") == "text" and isinstance(part.get("text"), str)))}
     converted = {**item, "type": re.sub(r"(?<!^)(?=[A-Z])", "_", str(kind)).lower()}
     if kind == "agentMessage":
         converted.pop("phase", None)
@@ -189,8 +193,15 @@ class CodexChannel:
                     if method == "turn/completed":
                         self._turn_id = None
                     try:
-                        translated = [event for raw in exec_events(method, params, usage)
-                                      for event in self._stream.translate(raw)]
+                        translated = []
+                        for raw in exec_events(method, params, usage):
+                            item = raw.get("item") or {}
+                            if item.get("type") == "user_message":
+                                # History receipt, never model output or evidence of model work.
+                                translated.append({"type": "system", "subtype": "codex_user_message",
+                                                   "text": item["text"]})
+                            else:
+                                translated.extend(self._stream.translate(raw))
                     except (AttributeError, TypeError, ValueError) as exc:
                         logger.debug("ignoring a Codex app-server notification that does not fit its shape (%s)",
                                      type(exc).__name__)

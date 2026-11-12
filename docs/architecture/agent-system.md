@@ -4623,11 +4623,16 @@ before.
   60 s, with a retry when the interval ends. Claude Code messages are marked
   read on the delivery's replay echo or a result naming its uuid in `user_message_uuids`,
   never merely on writing stdin. Codex deliveries use `turn/steer` only while
-  a tool call runs and are marked read when the app-server acknowledges the
-  steer. A rejection or no active turn leaves them unread; an unknown
+  a tool call runs and remain in flight after acknowledgement. They are marked
+  read when an app-server `userMessage` history item carries the delivery's
+  message ids, advancing only past earlier confirmed deliveries. These items
+  are receipts, not assistant output. If no item arrives within 30 s of
+  acknowledgement while the run is still active, Looper logs a warning and
+  falls back to acknowledging that delivery as read. A run ending before
+  receipt or fallback leaves the messages unread for its next turn or retry.
+  A rejection or no active turn leaves them unread; an unknown
   acknowledgement advances the in-flight cursor without marking them read
-  or retrying, and logs the uncertainty. A run killed after acknowledgement
-  but before its next model request can leave an accepted delivery unseen.
+  or retrying, and logs the uncertainty.
   While in flight, that run's inbox and unread counts exclude the delivered
   bodies; an inbox wait still detects matching
   messages within that range as described above. A waiting Worker's check
