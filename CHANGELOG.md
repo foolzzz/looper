@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.162] - 2026-11-12
+
+### Fixed
+
+- **Request recording follow-ups.** ([#1293](https://github.com/foolzzz/looper/pull/1293); review follow-ups #1142, #1144, #1154)
+  - A queued turn's record id is kept by the controller (pending record ids) instead of being written into a route file that an older proxy still serves; it is applied when the current record ends.
+  - The recording proxy's database writer recovers from an unexpected write error: it logs the error class, backs off up to 30 seconds and retries the same batch instead of stopping, so the forwarding endpoint stays healthy and the controller does not replace the proxy.
+  - `NO_PROXY` and `no_proxy` are extended with the loopback entries (`127.0.0.1`, `localhost`, `::1`) per variable; an explicitly empty value of one no longer overrides the other.
+  - Retention housekeeping measures rows with `stored_bytes = 0` (written by a proxy older than the byte counters) before pruning, so the size cap counts them.
+  - No model-visible change.
+
 ## [2.14.161] - 2026-11-12
 
 ### Changed
