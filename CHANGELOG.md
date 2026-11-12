@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.149] - 2026-11-11
+
+### Changed
+
+- **Lark: rich-text posts reach the Manager as text; other message types are answered.** ([#1270](https://github.com/foolzzz/looper/pull/1270))
+  - A `post` from an admitted sender, in a direct message or as a group @-mention of the bot, now reaches the Manager (it was ignored) as lark-cli's rendering: title, paragraphs, `[text](url)` links and fenced code, mentions as `@name`, the bot's own mention removed. Inline images and attached files appear as `[image N]` / `[file N: name]`, followed by a line saying Looper cannot receive images or files yet. The text is model-visible.
+  - Any other type from an admitted sender (image, file, audio, media, sticker, and so on) now gets one reply, 「暂不支持这类飞书消息（<type>），请发文字或富文本。」, instead of silence: a reply to the message in a group, a message in a direct chat. It starts no Manager turn and adds no reaction; a silent chat gets nothing and a turned-off Manager gets only its usual reply.
+  - The `lark_bot` channel renders non-text content the way lark-cli does instead of passing the message's raw JSON, and drops `interactive` cards. Bots' messages, unlisted senders, group messages without an @-mention and empty messages are unchanged.
+
 ## [2.14.148] - 2026-11-11
 
 ### Changed
