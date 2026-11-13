@@ -1,8 +1,11 @@
 """Latency diagnostics on the public serve path, using an isolated runtime."""
 from __future__ import annotations
 
+import shutil
 import sys
 import time
+from pathlib import Path
+from zoneinfo import TZPATH
 
 import pytest
 
@@ -42,6 +45,12 @@ def test_serve_logs_startup_and_request_stacks_recovery_and_slow_op(tmp_path, mo
     runtime, home, bin_dir = (tmp_path / name for name in ("runtime", "home", "bin"))
     home.mkdir()
     bin_dir.mkdir()
+    # Only UTC is needed here; scanning the host's zone database can exhaust
+    # the readiness deadline before the latency checks run.
+    zones = tmp_path / "zoneinfo"
+    zones.mkdir()
+    utc = next(Path(root) / "UTC" for root in TZPATH if (Path(root) / "UTC").is_file())
+    shutil.copyfile(utc, zones / "UTC")
     script = (f"#!{sys.executable}\nimport sys\n"
               "if '--version' in sys.argv:\n    print('2.1.285 (test runtime)'); sys.exit(0)\n"
               "if sys.argv[1:] == ['auth', '--help']:\n    print('Usage: claude auth status'); sys.exit(0)\n"
@@ -54,7 +63,8 @@ def test_serve_logs_startup_and_request_stacks_recovery_and_slow_op(tmp_path, mo
     environment = {"CLAUDE_CONFIG_DIR": str(home / ".claude"), "CODEX_HOME": str(home / ".codex"),
                    "GROK_HOME": str(home / ".grok"), "CURSOR_CONFIG_DIR": str(home / ".cursor-config"),
                    "CURSOR_DATA_DIR": str(home / ".cursor-data"), "XDG_CONFIG_HOME": str(home / ".config"),
-                   "XDG_CACHE_HOME": str(home / ".cache"), "LOOPER_TELEGRAM_BOT_TOKEN": ""}
+                   "XDG_CACHE_HOME": str(home / ".cache"), "LOOPER_TELEGRAM_BOT_TOKEN": "",
+                   "TZ": "UTC", "PYTHONTZPATH": str(zones)}
     log_path = tmp_path / "serve.log"
     with fresh_database_without_recording(str(DSN)) as (url, _):
         require_disposable_database(url, served=True)

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper import db, ops_config
-from looper.agents import profile_registry, serve
+from looper.agents import cron, profile_registry, serve
 from tests.db_support import DSN, run_db
 
 
@@ -25,6 +25,10 @@ def test_scheduler_start_failure_closes_listener_and_latency_observers(monkeypat
         monkeypatch.setattr(profile_registry, "register_found_runtimes", AsyncMock(return_value=[]))
         monkeypatch.setattr(serve, "_enabled_bot_rows", AsyncMock(return_value=[]))
         monkeypatch.setattr(serve, "_advisory_startup_checks", AsyncMock())
+        # Time-zone discovery is not under test; avoid scanning the host's
+        # entire zone database before reaching Scheduler.start.
+        monkeypatch.setenv("TZ", "UTC")
+        monkeypatch.setattr(cron, "_known_zones", lambda: frozenset({"UTC"}))
         monkeypatch.setattr(serve.AgentSupervisor, "start_all", AsyncMock())
         monkeypatch.setattr(serve.self_check, "check_database", AsyncMock(return_value=
                             serve.self_check.Check("database", "Database", "ok", "ready")))
