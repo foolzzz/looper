@@ -32,6 +32,7 @@ describe("Dashboard waiting gates", () => {
   let overview: Overview;
   beforeEach(() => {
     vi.useFakeTimers();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     vi.setSystemTime(new Date("2026-10-20T10:12:00Z"));
     vi.resetAllMocks();
     details = [];
@@ -269,14 +270,39 @@ describe("Dashboard waiting gates", () => {
     expect(section()).toBeNull();
   });
 
-  it("refreshes waiting gates on the dashboard poll without losing a draft", async () => {
+  it("does not reread waiting gates for an unchanged overview count", async () => {
     details = [task("a", [gate("g1")])];
     await show();
     const input = await answer("Draft");
-    details = [task("a", [gate("g1", { topic: "New topic" })])];
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(fetchOverview).toHaveBeenCalledTimes(7);
+    expect(fetchTasks).toHaveBeenCalledTimes(1);
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(1);
+    overview.tasks.needs_you = 2;
+    details.push(task("b", [gate("g2")]));
     await act(async () => vi.advanceTimersByTimeAsync(5000));
-    expect(section()!.textContent).toContain("New topic");
+    expect(fetchTasks).toHaveBeenCalledTimes(2);
+    expect(section()!.querySelectorAll("article")).toHaveLength(2);
     expect(input.value).toBe("Draft");
+  });
+
+  it("pauses overview reads while hidden and refreshes once on visibility", async () => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    await show();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(fetchOverview).not.toHaveBeenCalled();
+    await act(async () => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(fetchOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not overlap a slow overview request", async () => {
+    vi.mocked(fetchOverview).mockImplementation(() => new Promise(() => {}));
+    await show();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(fetchOverview).toHaveBeenCalledTimes(1);
   });
 
   it.each(["deleted", "attention", "cancelled", "completed", "ready", "other"] as const)(
@@ -290,6 +316,7 @@ describe("Dashboard waiting gates", () => {
       await act(async () => input.form!.requestSubmit());
       expect(section()!.textContent).toContain("You replied: My answer");
 
+      overview.tasks.needs_you++;
       details = [task("b", [gate("g2", { topic: "Updated other gate" })])];
       const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 404 })));
@@ -303,6 +330,7 @@ describe("Dashboard waiting gates", () => {
       expect(container.querySelector('[role="alert"]')).toBeNull();
 
       vi.mocked(fetchTaskDetail).mockClear();
+      overview.tasks.needs_you++;
       details = [task("b", [gate("g2", { topic: "Next other gate" })])];
       await act(async () => vi.advanceTimersByTimeAsync(5000));
       expect(section()!.textContent).toContain("Next other gate");
@@ -318,6 +346,7 @@ describe("Dashboard waiting gates", () => {
     vi.mocked(postGateMessage).mockResolvedValue({ gate: details[0].gates[0] } as GatePosted);
     await act(async () => input.form!.requestSubmit());
 
+    overview.tasks.needs_you++;
     details = [task("b", [gate("g2", { topic: "Updated other gate" })])];
     const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
     const fetch = vi.fn();
@@ -409,14 +438,15 @@ describe("Dashboard waiting gates", () => {
     }
     await act(async () => releases[0](task("a", [gate("g1", { topic: "Slow result" })])));
     expect(section()!.textContent).toContain("Slow result");
-    expect(fetchTaskDetail).toHaveBeenCalledTimes(2);
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(1);
+    overview.tasks.needs_you++;
     for (let poll = 0; poll < 2; poll++) {
       await act(async () => vi.advanceTimersByTimeAsync(5000));
       expect(fetchTaskDetail).toHaveBeenCalledTimes(2);
     }
     await act(async () => releases[1](task("a", [gate("g1", { topic: "Next result" })])));
     expect(section()!.textContent).toContain("Next result");
-    expect(fetchTaskDetail).toHaveBeenCalledTimes(3);
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(2);
   });
 
   it("keeps a reply sent while the Planner is answering after that turn raises the count", async () => {
@@ -493,6 +523,7 @@ describe("Dashboard waiting gates", () => {
     const input = await answer("Answer");
     const stale = task("a", [gate("g1", { topic: "Stale topic" })]);
     let release!: (task: TaskDetail) => void;
+    overview.tasks.needs_you++;
     vi.mocked(fetchTaskDetail).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
     await act(async () => vi.advanceTimersByTimeAsync(5000));
     details = [task("a", [gate("g1", { topic: "Fresh topic" })])];

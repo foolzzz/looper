@@ -1,3 +1,4 @@
+import { startPolling } from "@/lib/polling";
 import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -411,16 +412,15 @@ export function DashboardPage() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const load = () =>
-      fetchOverview()
+    return startPolling(async (signal) => {
+      await fetchOverview()
         .then((o) => {
+          if (signal.aborted) return;
           setOverview(o);
           setError("");
         })
-        .catch((e) => setError(e.message));
-    load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
+        .catch((e) => { if (!signal.aborted) setError(e.message); });
+    }, 5000);
   }, []);
 
   if (error && !overview) {

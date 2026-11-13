@@ -138,6 +138,7 @@ function App() {
         <main className="min-h-0 flex-1 overflow-hidden">
           <div className={route.page === "chat" ? "h-full" : "hidden"}>
             <ChatPage
+              active={route.page === "chat"}
               query={route.page === "chat" ? route.query : undefined}
               onQuery={(q, replace, from) => navigateSub("chat", "", q, replace, from)}
             />
