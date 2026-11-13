@@ -281,7 +281,8 @@ async def _gateway_change(call: Call) -> tuple[str, dict[str, Any]]:
 
     values = call.arguments.get("gateway")
     if not isinstance(values, Mapping) or not values:
-        raise OpError(ErrorCode.INVALID, "gateway: give enabled/port, alias_set {alias, model_id}, or alias_delete")
+        raise OpError(ErrorCode.INVALID, "gateway: to read the gateway use view; to change it give enabled/port, "
+                                         "alias_set {alias, model_id}, or alias_delete")
     if call.platform.runtime_root is None:
         raise OpError(ErrorCode.UNAVAILABLE, "local gateway runtime unavailable")
     if set(values) <= {"enabled", "port"}:
@@ -306,7 +307,8 @@ async def _gateway_confirming(call: Call) -> str:
     lines = ["要修改本地 LLM 网关设置吗？"]
     if action == "update":
         for name in call.arguments["gateway"]:
-            lines.append(f"- {name}：{before[name]} → {arguments[name]}")
+            if before[name] != arguments[name]:
+                lines.append(f"- {name}：{before[name]} → {arguments[name]}")
     else:
         alias = arguments["alias"]
         binding = next((row["model_id"] for row in before["aliases"] if row["alias"] == alias), "未设置")
@@ -571,14 +573,15 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_settings",
         description="Settings agents inherit, a later layer winning: shared defaults → role → project → role in "
-                    "project. view (with project: its layers and allowed profiles); set values on one layer (no role "
+                    "project. view (with project: its layers and allowed profiles) includes the gateway "
+                    "(enabled, port, aliases; no key); set values on one layer (no role "
                     "nor project: shared defaults); allowed_profiles: add or remove the profiles a project's Planners "
                     "may choose (an empty list: they may choose any profile); scheduler: the schedules' system settings (the user "
                     "confirms them first); llmrec: recording retention_days (1–90, default 7) and "
                     "max_total_mb (256–65536 MiB, default 2048), read by view and changed after confirmation; "
-                    "gateway: view reads enabled, port and model aliases; change enabled/port, "
-                    "alias_set {alias, model_id}, or alias_delete (alias name), one change per call, "
-                    "always after user confirmation. Gateway key reveal and rotation are dashboard-only; "
+                    "gateway: change the local gateway (enabled, port, alias_set, alias_delete); "
+                    "each change needs the user's confirmation; to read it use view. "
+                    "Gateway key reveal and rotation are dashboard-only; "
                     "waits: system limits for wait steps (the user confirms first). "
                     "knowledge_vault: the notes folder agents read in projects that turn it on, and "
                     "the folders they may write (the user confirms first). The user confirms shared defaults, limits and "

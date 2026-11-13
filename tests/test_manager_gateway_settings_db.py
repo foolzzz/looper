@@ -8,6 +8,7 @@ import pytest
 
 from looper.agents.llmrec import control
 from looper.agents.llmrec.gateway import GatewayKey
+from looper.agents.ops.settings import TOOLS
 from looper.db import gateway, system_settings
 from tests.db_support import run_db, v1_api
 from tests.test_ops_tasks_db import _Chat
@@ -31,6 +32,13 @@ def _chat(tmp_path):
     return chat
 
 
+def test_manager_gateway_tool_description_separates_read_and_change():
+    description = next(tool.description for tool in TOOLS if tool.name == 'looper_settings')
+    assert 'includes the gateway (enabled, port, aliases; no key)' in description
+    assert description.split('gateway: ', 1)[1].startswith('change')
+    assert 'to read it use view' in description
+
+
 def test_manager_gateway_view_has_bindings_without_keys_or_client_environment(tmp_path, monkeypatch):
     async def check(pool):
         monkeypatch.setattr(control, '_control', None)
@@ -49,6 +57,27 @@ def test_manager_gateway_view_has_bindings_without_keys_or_client_environment(tm
         assert not {'key', 'key_exists', 'client_environment'} & reply['result']['gateway'].keys()
 
     run_db(check, monkeypatch, setup=_seed, timeout=30)
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+@pytest.mark.parametrize('include_enabled', [False, True])
+def test_manager_gateway_port_confirmation_only_lists_changes(tmp_path, monkeypatch, enabled, include_enabled):
+    async def check(pool):
+        monkeypatch.setattr(control, '_control', None)
+        await system_settings.put_settings({'gateway.enabled': str(enabled).lower(), 'gateway.port': '32123'})
+        values = {'port': 32124}
+        if include_enabled:
+            values['enabled'] = enabled
+        chat = _chat(tmp_path)
+        (asked,) = await chat.say('修改网关端口', ('looper_settings', {'action': 'gateway', 'gateway': values}))
+        assert asked['status'] == 'needs_confirmation', asked
+        text = chat.turns[-1].blocks[-1]
+        assert '- port：32123 → 32124' in text
+        assert 'enabled' not in text
+        assert await system_settings.get_settings(['gateway.enabled', 'gateway.port']) == {
+            'gateway.enabled': str(enabled).lower(), 'gateway.port': '32123'}
+
+    run_db(check, monkeypatch, timeout=30)
 
 
 @pytest.mark.parametrize('values,before,after', [
@@ -131,6 +160,7 @@ def test_manager_refuses_invalid_gateway_changes_with_dashboard_error(tmp_path, 
     {'action': 'key_reveal'}, {'action': 'key_rotate'},
     {'action': 'gateway', 'gateway': {'key_reveal': True}},
     {'action': 'gateway', 'gateway': {'key_rotate': True}},
+    {'action': 'gateway'},
     {'action': 'gateway', 'gateway': {}},
     {'action': 'gateway', 'gateway': {'enabled': True, 'alias_delete': 'chat'}},
     {'action': 'gateway', 'gateway': {'alias_set': {'alias': 'chat'}}},
@@ -141,6 +171,11 @@ def test_manager_gateway_has_no_key_actions_or_ambiguous_writes(tmp_path, monkey
         chat = _chat(tmp_path)
         (reply,) = await chat.say('修改网关', ('looper_settings', arguments))
         assert reply['status'] == 'error', reply
+        if arguments['action'] == 'gateway' and not arguments.get('gateway'):
+            assert reply['error']['code'] == 'invalid'
+            message = reply['error']['message']
+            assert 'view' in message
+            assert all(field in message for field in ('enabled', 'port', 'alias_set', 'alias_delete'))
         assert GatewayKey(tmp_path).reveal() == key
         assert not (tmp_path / '.local/llmrec/gateway.json').exists()
         assert await system_settings.get_settings(['gateway.enabled', 'gateway.port']) == {}
