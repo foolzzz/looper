@@ -122,14 +122,15 @@ def send_command(*, chat_id: str | None = None, user_id: str | None = None, text
 
 
 def reply_command(message_id: str, *, text: str | None = None, markdown: str | None = None,
-                  profile: str | None = None, idempotency_key: str | None = None) -> list[str]:
+                  profile: str | None = None, idempotency_key: str | None = None,
+                  reply_in_thread: bool = False) -> list[str]:
     """The lark-cli argv that answers, as the bot, a message (``om_...``) with ``text`` or ``markdown``: a message in
     the same chat that quotes it; ``idempotency_key`` as for ``send_command``."""
     if (text is None) == (markdown is None):
         raise ValueError("reply with exactly one of text and markdown")
     body = ["--text", text] if text is not None else ["--markdown", markdown]
     return [*_base(profile), "im", "+messages-reply", "--as", "bot", "--message-id", message_id, *body,
-            *_key(idempotency_key)]
+            *(["--reply-in-thread"] if reply_in_thread else []), *_key(idempotency_key)]
 
 
 def _key(idempotency_key: str | None) -> list[str]:

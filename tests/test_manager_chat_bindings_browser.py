@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,7 @@ def _binding(channel, manager, name, bot):
     return {"channel_id": channel, "chat_id": "42", "manager_id": manager,
             "created_at": "2026-01-01T00:00:00Z", "channel_type": "telegram", "bot_name": bot,
             "chat_name": name, "manager_name": "Manager" if manager == "manager" else "Review",
-            "manager_enabled": manager != "manager-review", "manager_deleted": False, "allowed_senders": []}
+            "manager_enabled": manager != "manager-review", "manager_deleted": False, "allowed_senders": [], "sender_policy": "listed"}
 
 
 @pytest.fixture
@@ -68,6 +69,7 @@ def managers_dashboard(dashboard_url):
                 row = next(b for b in state["bindings"] if b["channel_id"] == body["channel_id"])
                 target = next(m for m in managers if m["id"] == body["manager_id"])
                 row.update(manager_id=target["id"], manager_name=target["name"], manager_enabled=target["enabled"])
+                row.update({key: body[key] for key in ("allowed_senders", "sender_policy") if key in body})
                 result = {"binding": row}
             elif path == "channel_chats/list":
                 result = {"channel_id": body["channel_id"], "bot_manager_id": "manager",
@@ -218,7 +220,8 @@ def test_manager_binding_controls_have_keyboard_focus_without_horizontal_overflo
 def test_real_serve_managers_readback_matches_typed_binding_writes(tmp_path, dashboard_url):
     from playwright.sync_api import expect, sync_playwright
 
-    from evals.prompt_regression.runner import fresh_database, running_server
+    from evals.prompt_regression.runner import running_server
+    from tests.db_support import fresh_database_without_recording
     from tests.fake_claude import fake_claude
 
     async def seed(database_url):
@@ -247,10 +250,13 @@ def test_real_serve_managers_readback_matches_typed_binding_writes(tmp_path, das
     for directory in (bin_dir, runtime, home, notes):
         directory.mkdir()
     fake_claude(bin_dir / "claude", "import sys\nsys.exit(0)\n")
-    with fresh_database(str(DSN)) as (database_url, _):
+    # Binding readback needs neither the detached recorder nor installed agent
+    # CLIs. Keep their startup/probes out of this isolated server's readiness.
+    with fresh_database_without_recording(str(DSN)) as (database_url, _):
         asyncio.run(seed(database_url))
         with running_server(database_url=database_url, runtime_root=runtime, bin_dir=bin_dir, home=home,
-                            notes_root=notes, log_path=tmp_path / "serve.log", startup_timeout=60) as api:
+                            notes_root=notes, log_path=tmp_path / "serve.log", startup_timeout=60,
+                            env={"PATH": os.pathsep.join((str(bin_dir), os.defpath))}) as api:
             body = {"channel_id": "channel-telegram-201", "chat_id": "42", "manager_id": "manager"}
             assert api.post("/api/v1/manager_chat_bindings/put", body)["result"]["binding"]["manager_id"] == "manager"
             with sync_playwright() as driver:
@@ -280,3 +286,31 @@ def test_real_serve_managers_readback_matches_typed_binding_writes(tmp_path, das
                 finally:
                     context.close()
                     browser.close()
+
+
+@pytest.mark.parametrize("width", [1280, 768])
+def test_lark_binding_sender_policy_roundtrip(managers_dashboard, width):
+    from playwright.sync_api import expect
+
+    page, url, state = managers_dashboard
+    state["bindings"][0]["channel_type"] = "lark"
+    page.set_viewport_size({"width": width, "height": 900})
+    page.goto(f"{url}/#settings/managers")
+    section = _chats(page, "Manager")
+    policy = section.get_by_label("Sender policy for Example room", exact=True)
+    expect(policy).to_have_value("listed")
+    policy.select_option("chat")
+    policy.focus()
+    page.keyboard.press("Tab")
+    expect(section.get_by_role("button", name="Save senders", exact=True)).to_be_focused()
+    expect(policy).to_have_value("chat")
+    expect(section).to_contain_text("Anyone who can post in this chat, including other bots")
+    section.get_by_role("button", name="Save senders", exact=True).click()
+    expect(section.get_by_role("button", name="Save senders", exact=True)).to_be_disabled()
+    assert state["bindings"][0]["sender_policy"] == "chat"
+    page.reload()
+    expect(section.get_by_label("Sender policy for Example room", exact=True)).to_have_value("chat")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    directory = ROOT / ".local" / "validation"
+    directory.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(directory / f"lark-binding-sender-policy-{width}.png"), full_page=True)

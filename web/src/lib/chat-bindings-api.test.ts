@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { deleteChatBinding, fetchChannelChats, fetchChatBindings, putChatBinding, setBoundChatsOnly,
+import { ChatBindingConfirmation, confirmChatBinding, deleteChatBinding, fetchChannelChats, fetchChatBindings, putChatBinding, setBoundChatsOnly,
   type Binding, type ChannelChats } from "./chat-bindings-api";
 import { V1Error } from "@/lib/v1";
 
@@ -8,7 +8,7 @@ afterEach(() => vi.unstubAllGlobals());
 const binding: Binding = {
   channel_id: "bot-example", chat_id: "-100123", manager_id: "manager-review",
   created_at: "2026-10-25T10:00:00+00:00", channel_type: "telegram", bot_name: "Example",
-  chat_name: null, manager_name: "Review", manager_enabled: false, manager_deleted: true, allowed_senders: [],
+  chat_name: null, manager_name: "Review", manager_enabled: false, manager_deleted: true, allowed_senders: [], sender_policy: "listed",
 };
 const catalog: ChannelChats = {
   channel_id: binding.channel_id, bot_manager_id: "manager-owner", bound_chats_only: false,
@@ -94,4 +94,26 @@ it.each([{ senders: undefined }, { senders: [] }, { senders: ["ou_example"] }])(
   const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
   if (senders === undefined) expect(body).not.toHaveProperty("allowed_senders");
   else expect(body.allowed_senders).toEqual(senders);
+});
+
+it.each(["listed", "chat"] as const)("round-trips sender_policy=%s", async (sender_policy) => {
+  const saved = { ...binding, sender_policy };
+  const fetcher = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => Response.json({ status: "ok", result: { binding: saved } }));
+  vi.stubGlobal("fetch", fetcher);
+  await expect(putChatBinding(binding.channel_id, binding.chat_id, binding.manager_id, [], sender_policy)).resolves.toEqual({ binding: saved });
+  expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body)).sender_policy).toBe(sender_policy);
+});
+
+it("preserves pending binding policy and confirms only on explicit request in the same session", async () => {
+  const fetcher = vi.fn().mockResolvedValueOnce(Response.json({ status: "needs_confirmation", confirmation_id: "pending-example",
+    impact: "Anyone in this chat can reach a Manager with all tools.", expires_in_seconds: 60 }, { status: 202 }))
+    .mockResolvedValueOnce(Response.json({ status: "ok", result: { binding: { ...binding, sender_policy: "chat" } } }));
+  vi.stubGlobal("fetch", fetcher);
+  const error = await putChatBinding(binding.channel_id, binding.chat_id, binding.manager_id, [], "chat").catch((error) => error);
+  expect(error).toBeInstanceOf(ChatBindingConfirmation);
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  await expect(confirmChatBinding(error.confirmation)).resolves.toMatchObject({ binding: { sender_policy: "chat" } });
+  expect(fetcher.mock.calls[1][0]).toBe("/api/v1/confirm");
+  expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({ confirmation_id: "pending-example" });
+  expect(fetcher.mock.calls[1][1].headers["X-Looper-Session"]).toBe(fetcher.mock.calls[0][1].headers["X-Looper-Session"]);
 });

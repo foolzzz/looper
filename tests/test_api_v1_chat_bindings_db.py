@@ -19,7 +19,7 @@ from looper.agents.ops.clients import ClientOps
 from looper.agents.ops.service import Platform
 from looper.agents.serve import seed_channel_configs
 from looper.db import api_clients, channel_configs, chat, chat_bindings, connection
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, fresh_connection, run_db
 from tests.test_agent_channels import _allowlist, _tg_update
 from tests.test_api_v1_auth import _bearer, _send, _serving
 from tests.test_channel_post import _Bot
@@ -61,7 +61,7 @@ async def _api(tmp_path, pool, *, registry=True, listen=True):
             path = "/api/v1/" + operation.replace(".", "/")
             status, _, answer = await _send(server, "POST " + path, {
                 **_bearer(token if client else TOKEN), "X-Looper-Session": "routing"}, json.dumps(body or {}))
-            if status == 200:
+            if status == 200 and operation != "confirm":
                 api_v1.validate_arguments({"type": "object", "properties": {
                     "result": api_v1.find("POST", path).result}}, {"result": answer["result"]})
             return status, answer
@@ -102,7 +102,7 @@ def test_binding_crud_filters_and_idempotency_have_closed_enriched_readback(tmp_
             first = answer["result"]["binding"]
             assert first == {**_binding(), "created_at": first["created_at"], "channel_type": "telegram",
                 "bot_name": "Example bot", "chat_name": None, "manager_name": "Review",
-                "manager_enabled": True, "manager_deleted": False, "allowed_senders": []}
+                "manager_enabled": True, "manager_deleted": False, "allowed_senders": [], "sender_policy": "listed"}
             assert (await call("manager_chat_bindings.put", _binding()))[1]["result"]["binding"] == first
             for filters in ({}, {"channel_id": BOT}, {"manager_id": TARGET},
                             {"channel_id": BOT, "manager_id": TARGET}):
@@ -626,3 +626,98 @@ def test_extra_senders_readback_and_invalid_id_leave_binding_and_snapshot_unchan
             status, answer = await call("manager_chat_bindings.put", {"channel_id": bot, "chat_id": chat_id, "manager_id": TARGET})
             assert status == 200 and answer["result"]["binding"]["allowed_senders"] == []
     _run(run, monkeypatch)
+
+
+def _policy_binding(manager=TARGET, policy="chat"):
+    return {"channel_id": "channel-lark", "chat_id": "oc_example", "manager_id": manager,
+            "sender_policy": policy}
+
+
+def test_tasks_chat_policy_roundtrips_and_is_scoped_to_exact_binding(tmp_path, monkeypatch):
+    async def run(pool):
+        async with _api(tmp_path, pool) as (call, registry, _):
+            registry.bindings_changed("channel-lark", await routing.load_snapshot("channel-lark"))
+            status, answer = await call("manager_chat_bindings.put", _policy_binding())
+            assert status == 200, answer
+            binding = answer["result"]["binding"]
+            assert binding["sender_policy"] == "chat"
+            assert registry.resolve_chat("channel-lark", "oc_example").sender_policy is routing.SenderPolicy.CHAT
+            assert registry.resolve_chat("channel-lark", "oc_other").sender_policy is routing.SenderPolicy.LISTED
+            listed = (await call("manager_chat_bindings.list", {"channel_id": "channel-lark"}))[1]
+            assert listed["result"]["bindings"] == [binding]
+            # Ordinary saves retain the policy, but moving the chat resets admission.
+            request = {key: value for key, value in _policy_binding().items() if key != "sender_policy"}
+            assert (await call("manager_chat_bindings.put", request))[1]["result"]["binding"] == binding
+            request["manager_id"] = OTHER
+            moved = (await call("manager_chat_bindings.put", request))[1]["result"]["binding"]
+            assert moved["sender_policy"] == "listed"
+            assert registry.resolve_chat("channel-lark", "oc_example").sender_policy is routing.SenderPolicy.LISTED
+    _run(run, monkeypatch)
+
+
+def test_all_tools_chat_policy_requires_operator_confirmation_before_write(tmp_path, monkeypatch):
+    async def run(pool):
+        async with _api(tmp_path, pool) as (call, registry, _):
+            registry.bindings_changed("channel-lark", await routing.load_snapshot("channel-lark"))
+            status, answer = await call("manager_chat_bindings.put", _policy_binding(manager="manager"))
+            assert status == 202 and answer["status"] == "needs_confirmation", answer
+            assert "Anyone in this chat" in answer["impact"] and "all tools" in answer["impact"]
+            assert await pool.fetchval("SELECT count(*) FROM manager_chat_bindings") == 0
+            assert registry.resolve_chat("channel-lark", "oc_example").sender_policy is routing.SenderPolicy.LISTED
+            status, confirmed = await call("confirm", {"confirmation_id": answer["confirmation_id"]})
+            assert status == 200 and confirmed["result"]["binding"]["sender_policy"] == "chat", confirmed
+            assert registry.resolve_chat("channel-lark", "oc_example").sender_policy is routing.SenderPolicy.CHAT
+    _run(run, monkeypatch)
+
+
+def test_confirmation_refuses_changed_manager_permissions(tmp_path, monkeypatch):
+    async def run(pool):
+        async with _api(tmp_path, pool) as (call, _, _):
+            await pool.execute("UPDATE managers SET tools = 'all', revision = revision + 1 WHERE id = $1", TARGET)
+            status, pending = await call("manager_chat_bindings.put", _policy_binding())
+            assert status == 202, pending
+            await pool.execute("UPDATE managers SET tools = 'tasks', revision = revision + 1 WHERE id = $1", TARGET)
+            status, refused = await call("confirm", {"confirmation_id": pending["confirmation_id"]})
+            assert status == 400 and refused["status"] == "error"
+            assert await pool.fetchval("SELECT count(*) FROM manager_chat_bindings") == 0
+    _run(run, monkeypatch)
+
+
+@pytest.mark.parametrize("policy", ["unknown", "", None, True])
+def test_api_rejects_unknown_sender_policy_without_writing(tmp_path, monkeypatch, policy):
+    async def run(pool):
+        async with _api(tmp_path, pool) as (call, _, _):
+            status, answer = await call("manager_chat_bindings.put", _policy_binding(policy=policy))
+            assert status == 400 and answer["error"]["code"] == "invalid", answer
+            assert await pool.fetchval("SELECT count(*) FROM manager_chat_bindings") == 0
+    _run(run, monkeypatch)
+
+
+def test_telegram_cannot_enable_chat_policy(tmp_path, monkeypatch):
+    async def run(pool):
+        async with _api(tmp_path, pool) as (call, _, _):
+            request = {**_policy_binding(), "channel_id": "channel-telegram", "chat_id": "42"}
+            status, answer = await call("manager_chat_bindings.put", request)
+            assert status == 400 and "Lark" in answer["error"]["message"]
+            assert await pool.fetchval("SELECT count(*) FROM manager_chat_bindings") == 0
+    _run(run, monkeypatch)
+
+
+def test_sender_policy_upgrade_defaults_existing_bindings_and_is_idempotent():
+    async def run():
+        async with fresh_connection() as conn:
+            await connection.ensure_schema(conn)
+            await conn.execute("ALTER TABLE manager_chat_bindings DROP COLUMN sender_policy")
+            await conn.execute("DELETE FROM schema_migrations WHERE name = $1", connection._CHAT_BINDING_SENDER_POLICY)
+            await conn.execute("INSERT INTO channel_configs (channel_id, channel_type, display_name) "
+                               "VALUES ('channel-lark', 'lark', 'Example bot')")
+            await conn.execute("INSERT INTO manager_chat_bindings (channel_id, chat_id, manager_id) "
+                               "VALUES ('channel-lark', 'oc_example', 'manager')")
+            assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+            assert not await connection.schema_change_pending(conn)
+            assert (await chat_bindings.list_bindings("channel-lark", pool=conn))[0]["sender_policy"] == "listed"
+            with pytest.raises(asyncpg.CheckViolationError):
+                await conn.execute("UPDATE manager_chat_bindings SET sender_policy = 'unknown'")
+            await connection.ensure_schema(conn)
+    asyncio.run(asyncio.wait_for(run(), 20))

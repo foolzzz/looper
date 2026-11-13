@@ -163,9 +163,12 @@ class LarkApi:
                                                body=body))
 
     async def reply(self, message_id: str, *, text: str | None = None, markdown: str | None = None,
-                    idempotency_key: str | None = None) -> str | None:
+                    idempotency_key: str | None = None, reply_in_thread: bool = False) -> str | None:
+        body = self._message(text, markdown, idempotency_key)
+        if reply_in_thread:
+            body["reply_in_thread"] = True
         return sent_message_id(await self.call("POST", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}/reply",
-                                               body=self._message(text, markdown, idempotency_key)))
+                                               body=body))
 
     async def edit(self, message_id: str, *, text: str) -> None:
         await self.call("PUT", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}", body=self._message(text, None))

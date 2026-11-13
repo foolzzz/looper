@@ -138,7 +138,7 @@ def _telegram_adapter_from_config(
 
 
 def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path, *,
-                              bot_open_id: str = "", channel_id: str = "channel-lark",
+                              bot_open_id: str = "", bot_app_id: str = "", channel_id: str = "channel-lark",
                               manager_id: str = "manager",
                               manager_running: Callable[[str], bool] | None = None,
                               resolve_chat: ChatResolver | None = None,
@@ -154,7 +154,7 @@ def _lark_adapter_from_config(config: dict[str, Any], runtime_root: Path, *,
         await record_rejected(channel_id, sender_id, chat_id=chat_id)
 
     return LarkChannelAdapter(profile=config.get("profile") or "", runtime_root=runtime_root, allowlist=allowlist,
-                              on_rejected=rejected, bot_open_id=bot_open_id, channel_id=channel_id,
+                              on_rejected=rejected, bot_open_id=bot_open_id, bot_app_id=bot_app_id, channel_id=channel_id,
                               manager_id=manager_id, manager_running=manager_running,
                               resolve_chat=resolve_chat, stop_chat=stop_chat)
 
@@ -179,7 +179,7 @@ async def _lark_adapter(config: dict[str, Any], runtime_root: Path, *, channel_i
         logger.error("%s not started: it is the same bot as %s", channel_id, earlier)
         return None
     logger.info("%s: bot %s (app %s, lark-cli profile %s)", channel_id, bot.bot_name, bot.app_id, bot.profile)
-    return _lark_adapter_from_config(config, runtime_root, bot_open_id=bot.bot_open_id, channel_id=channel_id,
+    return _lark_adapter_from_config(config, runtime_root, bot_open_id=bot.bot_open_id, bot_app_id=bot.app_id, channel_id=channel_id,
                                      manager_id=manager_id, manager_running=manager_running,
                                      resolve_chat=resolve_chat, stop_chat=stop_chat)
 

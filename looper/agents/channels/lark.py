@@ -1,6 +1,6 @@
 """The Manager in Lark direct messages and group @-mentions, over a pluggable transport.
 
-Only allowlisted senders reach the Manager. Group messages must mention the
+Senders reach the Manager through an allowlist or an explicitly open chat binding. Group messages must mention the
 bot; answers and status lines reply to that message, while task notices go
 to the group and mention their requester. Gate posts preserve external ids
 and reply references for routing and idempotent retries.
@@ -12,6 +12,7 @@ import asyncio
 import logging
 import math
 import re
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -36,7 +37,7 @@ from ..task_notice import Notice, NotifyTarget, TargetKind
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
-from .chat_routing import ChatResolver, RouteAction, RouteDecision, observe_chat, log_route
+from .chat_routing import ChatResolver, RouteAction, RouteDecision, SenderPolicy, observe_chat, log_route
 from . import lark_content
 from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, mention
 from .lark_transport import CliTransport, LarkTransport
@@ -57,6 +58,9 @@ _CATCHUP_OVERLAP = 10
 _CATCHUP_MAX_CHATS = 100
 _CATCHUP_MAX_PAGES = 5
 _HEARTBEAT_SECONDS = 5
+_BOT_POLL_SECONDS = 30
+_BOT_TURNS_PER_HOUR = 10
+_BOT_WINDOW_SECONDS = 60 * 60
 
 
 def _history_messages(messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
@@ -125,6 +129,7 @@ class LarkChannelAdapter(ChannelAdapter):
         runtime_root: Path | None = None,
         on_rejected: RejectedListener | None = None,
         bot_open_id: str = "",
+        bot_app_id: str = "",
         transport: LarkTransport | None = None,
         channel_type: str = "lark",
         backoff: bool = False,
@@ -149,6 +154,9 @@ class LarkChannelAdapter(ChannelAdapter):
         self._profile = profile  # lark-cli's --profile; "" for its active one
         # The bot's own open_id: a group message is handled only when it @-mentions this; none, none is.
         self._bot_open_id = bot_open_id
+        self._bot_app_id = bot_app_id
+        self._bot_turns: dict[str, deque[float]] = {}
+        self._bot_refusals: dict[tuple[str, str], float] = {}
         # One status message per message answered, edited in place (``status_line``), keyed by correlation id:
         # it goes where the answer goes (``_answer``).
         self._status = StatusLines(channel=self.channel_id, send=self._send_status, edit=self._edit_status)
@@ -161,6 +169,7 @@ class LarkChannelAdapter(ChannelAdapter):
         self._collector_task: asyncio.Task[Any] | None = None
         self._catchup_task: asyncio.Task[Any] | None = None
         self._heartbeat_task: asyncio.Task[Any] | None = None
+        self._bot_poll_task: asyncio.Task[Any] | None = None
         self._inbox: LarkInbox | None = None
         self._ingress_lock = asyncio.Lock()
         self._running = False
@@ -168,6 +177,7 @@ class LarkChannelAdapter(ChannelAdapter):
         self._correlation_chat: dict[str, str] = {}
         # correlation_id → the group message it answers: its answer and status message reply to it
         self._group_message: dict[str, str] = {}
+        self._thread_messages: set[str] = set()
 
     @property
     def channel_type(self) -> str:
@@ -204,6 +214,7 @@ class LarkChannelAdapter(ChannelAdapter):
         if self._inbox is not None:
             self._catchup_task = asyncio.create_task(self._catch_up(boundary))
             self._heartbeat_task = asyncio.create_task(self._heartbeat())
+            self._bot_poll_task = asyncio.create_task(self._bot_poll_loop())
         logger.info("%s adapter started", self.channel_id)
 
     async def stop(self) -> None:
@@ -213,7 +224,7 @@ class LarkChannelAdapter(ChannelAdapter):
                  and ready is not None and ready.is_set())
         stopped_at = time()
         self._running = False
-        for task in (self._heartbeat_task, self._catchup_task, self._outbound_task, self._collector_task):
+        for task in (self._bot_poll_task, self._heartbeat_task, self._catchup_task, self._outbound_task, self._collector_task):
             if task:
                 task.cancel()
                 try:
@@ -253,7 +264,7 @@ class LarkChannelAdapter(ChannelAdapter):
                         and isinstance(route.get("reply_to"), str) and route["reply_to"]):
                     # A recovered task report answers its original message without changing live routing.
                     try:
-                        await self._transport.reply(route["reply_to"], markdown=str(envelope.payload["text"]))
+                        await self._reply(route["reply_to"], markdown=str(envelope.payload["text"]))
                     except LarkCliError as exc:
                         logger.warning("%s: a recovered task progress reply failed: %s", self.channel_id, exc)
                         if exc.code in MESSAGE_GONE_CODES:
@@ -294,12 +305,17 @@ class LarkChannelAdapter(ChannelAdapter):
                                       stopped=envelope.payload.get("outcome") == "stopped")
         return receipt
 
+    async def _reply(self, message_id: str, **kwargs: Any) -> str | None:
+        if message_id in self._thread_messages:
+            kwargs["reply_in_thread"] = True
+        return await self._transport.reply(message_id, **kwargs)
+
     async def _answer(self, correlation_id: str, *, text: str | None = None,
                       markdown: str | None = None, return_id: bool = False) -> str | None:
         """Answer the triggering group message, or send to its direct chat."""
         message_id = self._group_message.get(correlation_id)
         if message_id is not None:
-            return await self._transport.reply(message_id, text=text, markdown=markdown, return_id=return_id)
+            return await self._reply(message_id, text=text, markdown=markdown, return_id=return_id)
         return await self._transport.send(chat_id=self._correlation_chat[correlation_id], text=text, markdown=markdown,
                                           return_id=return_id)
 
@@ -363,7 +379,7 @@ class LarkChannelAdapter(ChannelAdapter):
         outcome = "answered"
         try:
             if group_message:
-                await self._transport.reply(group_message, text=text)
+                await self._reply(group_message, text=text)
             else:
                 await self._transport.send(chat_id=chat_id, text=text)
         except Exception as exc:
@@ -416,7 +432,7 @@ class LarkChannelAdapter(ChannelAdapter):
         text = files.redact(text, self._runtime_root)
         try:
             if reply_to:
-                message_id = await self._transport.reply(reply_to, markdown=text, idempotency_key=idempotency_key,
+                message_id = await self._reply(reply_to, markdown=text, idempotency_key=idempotency_key,
                                                          return_id=True)
             else:
                 message_id = await self._send_target(target, text, idempotency_key=idempotency_key, return_id=True)
@@ -465,7 +481,7 @@ class LarkChannelAdapter(ChannelAdapter):
         raise ValueError("catch-up page limit reached")
 
     async def _catchup_messages(self, page: dict[str, Any], chat_id: str, *, start: float, end: float,
-                                stats: dict[str, int]) -> None:
+                                stats: dict[str, int], bots_only: bool = False) -> None:
         for message in _history_messages(page["messages"][:50]):
             stats["messages_found"] += 1
             try:
@@ -476,6 +492,10 @@ class LarkChannelAdapter(ChannelAdapter):
                 if message.get("deleted") or created.at > end or created.before(start):
                     continue
                 event = history_event(message, chat_id, page["chat_type"])
+                if bots_only and (event.get("sender_type") not in {"app", "bot"}
+                                  or page["chat_type"] != "group" or not self._bot_mentions(event)
+                                  or self._own_message(event)):
+                    continue
                 event["_catchup_created_at"] = created
                 outcome = await self._handle_lark_event(event)
                 if outcome == "duplicate":
@@ -489,17 +509,17 @@ class LarkChannelAdapter(ChannelAdapter):
                 logger.warning("%s: catch-up message failed", self.channel_id, exc_info=True)
 
     async def _catchup_threads(self, chat_id: str, *, start: float, end: float, stats: dict[str, int],
-                               seen: set[str]) -> None:
+                               seen: set[str], bots_only: bool = False) -> None:
         if not hasattr(self._transport, "list_threads"):
             return
         async for roots in self._history_pages(
             self._transport.list_threads, chat_id,  # type: ignore[attr-defined]
         ):
             for thread_id in roots["threads"]:
-                await self._catchup_thread(thread_id, chat_id, start=start, end=end, stats=stats, seen=seen)
+                await self._catchup_thread(thread_id, chat_id, start=start, end=end, stats=stats, seen=seen, bots_only=bots_only)
 
     async def _catchup_thread(self, thread_id: str, chat_id: str, *, start: float, end: float,
-                              stats: dict[str, int], seen: set[str]) -> None:
+                              stats: dict[str, int], seen: set[str], bots_only: bool = False) -> None:
         if thread_id in seen or not hasattr(self._transport, "list_thread_messages"):
             return
         seen.add(thread_id)
@@ -515,7 +535,7 @@ class LarkChannelAdapter(ChannelAdapter):
             for page in reversed(pages):
                 await self._catchup_messages(
                     {**page, "messages": list(reversed(page["messages"][:50]))}, chat_id,
-                    start=start, end=end, stats=stats)
+                    start=start, end=end, stats=stats, bots_only=bots_only)
         except Exception:
             stats["failures"] += 1
             logger.warning("%s: catch-up thread failed chat=%s thread=%s", self.channel_id, chat_id,
@@ -597,6 +617,54 @@ class LarkChannelAdapter(ChannelAdapter):
             logger.info("lark_catchup channel=%s boundary=%s boundary_expired=%s %s", self.channel_id, boundary,
                         expired, " ".join(f"{key}={value}" for key, value in stats.items()))
 
+    async def _bound_chats(self) -> list[str]:
+        from ...db.chat_bindings import list_bindings
+
+        return [binding["chat_id"] for binding in await list_bindings(self.channel_id)]
+
+    async def _poll_bot_chats(self, last_poll: dict[str, float]) -> None:
+        now = time()
+        chats = await self._bound_chats()
+        for removed in last_poll.keys() - set(chats):
+            del last_poll[removed]
+        for chat_id in chats:
+            start = max(last_poll.get(chat_id, now - _BOT_POLL_SECONDS), now - _CATCHUP_MAX_AGE) - _CATCHUP_OVERLAP
+            stats = dict(messages_found=0, handled=0, duplicates=0, too_old=0, failures=0)
+            try:
+                seen: set[str] = set()
+                async for page in self._history_pages(
+                    self._transport.list_messages, chat_id, start=start, end=now,  # type: ignore[attr-defined]
+                ):
+                    await self._catchup_messages(page, chat_id, start=start, end=now, stats=stats, bots_only=True)
+                    if page["chat_type"] == "group":
+                        for message in _history_messages(page["messages"][:50]):
+                            if thread_id := message.get("thread_id"):
+                                await self._catchup_thread(thread_id, chat_id, start=start, end=now,
+                                                           stats=stats, seen=seen, bots_only=True)
+                await self._catchup_threads(chat_id, start=start, end=now, stats=stats, seen=seen, bots_only=True)
+                if not stats["failures"]:
+                    last_poll[chat_id] = now
+                else:
+                    logger.warning("%s: bot poll failed chat=%s failures=%s", self.channel_id, chat_id, stats["failures"])
+            except Exception:
+                logger.warning("%s: bot poll failed chat=%s", self.channel_id, chat_id, exc_info=True)
+
+    async def _bot_poll_loop(self) -> None:
+        if not hasattr(self._transport, "list_messages"):
+            return
+        last_poll: dict[str, float] = {}
+        while self._running:
+            await asyncio.sleep(_BOT_POLL_SECONDS)
+            try:
+                await self._poll_bot_chats(last_poll)
+            except Exception:
+                logger.warning("%s: bot poll discovery failed", self.channel_id, exc_info=True)
+
+    def _own_message(self, event: dict[str, Any]) -> bool:
+        identities = {identity for identity in (self._bot_open_id, self._bot_app_id) if identity}
+        return any(isinstance(event.get(key), str) and event[key] in identities
+                   for key in ("sender_id", "sender_app_id"))
+
     async def _heartbeat(self) -> None:
         while self._running:
             await asyncio.sleep(_HEARTBEAT_SECONDS)
@@ -662,7 +730,15 @@ class LarkChannelAdapter(ChannelAdapter):
             created = event.get("_catchup_created_at")
             if created is not None and created.before(time() - _CATCHUP_MAX_AGE):
                 return "too_old"
-            handled = await self._process_lark_event(event)
+            if self._own_message(event):
+                event["_bot_outcome"] = "own_message"
+                handled = False
+            else:
+                handled = await self._process_lark_event(event)
+            if event.get("sender_type") in {"app", "bot"}:
+                logger.info("lark_bot_message chat=%s bot_id=%s message_id=%s outcome=%s",
+                            event.get("chat_id"), event.get("sender_id"), message_id,
+                            "handled" if handled else event.get("_bot_outcome", "ignored"))
             if self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT:
                 self._inbox.finish(message_id)
             return "handled" if handled else "ignored"
@@ -696,20 +772,31 @@ class LarkChannelAdapter(ChannelAdapter):
         admitted = event.get("admitted")
         decision = (self._resolve_chat(self.channel_id, chat_id)
                     if admitted is not False and self._resolve_chat is not None else None)
+        if not group and decision is not None:
+            decision = replace(decision, sender_policy=SenderPolicy.LISTED)
         chat_senders = decision.senders if decision is not None else frozenset()
-        if admitted is False:
+        bot = event.get("sender_type") in {"app", "bot"}
+        chat_policy = group and decision is not None and decision.explicit and decision.sender_policy == "chat"
+        log_refusal = True
+        if bot:
+            now = monotonic()
+            self._bot_refusals = {key: at for key, at in self._bot_refusals.items()
+                                  if now - at < _BOT_WINDOW_SECONDS}
+            log_refusal = (chat_id, str(sender_open_id)) not in self._bot_refusals
+        if admitted is False and log_refusal:
             logger.warning("%s: dropped a message from sender %r, refused by the stream prefilter",
                            self.channel_id, str(sender_open_id or "<unknown>")[:80])
-        if admitted is False or (admitted is not True and not self._allowlist.admits(
-                sender_open_id, chat_senders=chat_senders)):
+        if admitted is False or (admitted is not True and not chat_policy and not self._allowlist.admits(
+                sender_open_id, chat_senders=chat_senders, log_refusal=log_refusal)):
+            if bot:
+                event["_bot_outcome"] = "refused"
+                if log_refusal:
+                    self._bot_refusals[(chat_id, str(sender_open_id))] = monotonic()
             if self._on_rejected is not None and isinstance(sender_open_id, str) and sender_open_id:
                 try:
                     await self._on_rejected(sender_open_id, chat_id if group else None)
                 except Exception:
                     logger.warning("%s: could not record a rejected sender", self.channel_id, exc_info=True)
-            return
-
-        if event.get("sender_type") == "bot":
             return
 
         content = event.get("content")
@@ -724,6 +811,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 return
 
         message_id = event.get("message_id") or ""
+        if group and message_id and event.get("thread_id"):
+            self._thread_messages.add(message_id)
         manager_id, explicit = self._manager_id, False
         metadata = {"origin_channel_id": self.channel_id}
         if decision is not None:
@@ -738,9 +827,20 @@ class LarkChannelAdapter(ChannelAdapter):
                 return
         from ..tiers.manager import is_stop_command
 
+        if bot:
+            now = monotonic()
+            turns = self._bot_turns.setdefault(chat_id, deque())
+            while turns and now - turns[0] >= _BOT_WINDOW_SECONDS:
+                turns.popleft()
+            if len(turns) >= _BOT_TURNS_PER_HOUR:
+                logger.warning("%s: bot turn limit chat=%s count=%s", self.channel_id, chat_id, len(turns) + 1)
+                event["_bot_outcome"] = "limited"
+                return
         if await self._turned_off(chat_id, message_id if group else None, manager_id=manager_id,
                                   explicit=explicit, stop=is_stop_command(text)):
             return
+        if bot:
+            turns.append(now)
         log_route(logger, self.channel_id, chat_id, decision or RouteDecision(RouteAction.ADMIT, manager_id, explicit),
                   via_chat_senders=sender_open_id not in self._allowlist.ids)
         if inbound.kind is lark_content.ContentKind.UNSUPPORTED:
@@ -749,7 +849,7 @@ class LarkChannelAdapter(ChannelAdapter):
             reply = lark_content.UNSUPPORTED_REPLY.format(kind=message_type or "unknown")
             try:
                 if group:
-                    await self._transport.reply(message_id, text=reply)
+                    await self._reply(message_id, text=reply)
                 else:
                     await self._transport.send(chat_id=chat_id, text=reply)
             except LarkCliError:
@@ -762,7 +862,7 @@ class LarkChannelAdapter(ChannelAdapter):
             try:
                 reply = _not_received(attachments)
                 if group:
-                    await self._transport.reply(message_id, text=reply)
+                    await self._reply(message_id, text=reply)
                 else:
                     await self._transport.send(chat_id=chat_id, text=reply)
                 attachments = [replace(item, told=True) if item.state is not AttachmentState.SAVED else item
@@ -774,7 +874,7 @@ class LarkChannelAdapter(ChannelAdapter):
         context = {"chat_id": chat_id, "chat_type": "group" if group else "p2p", "sender_id": sender_open_id or "",
                    "message_id": message_id}
         # What the message replies to: the message it answers and the first of its thread (a gate's messages).
-        for key in ("reply_to", "root_id"):
+        for key in ("reply_to", "root_id", "thread_id"):
             if isinstance(ref := event.get(key), str) and ref:
                 context[key] = ref
         if group:

@@ -11,11 +11,12 @@ from ..ops import ErrorCode, OpError
 _ID = {"type": "string", "minLength": 1}
 _TIME = {"type": "string", "format": "date-time"}
 _COUNT = {"type": "integer", "minimum": 1}
+_SENDER_POLICY = {"type": "string", "enum": [policy.value for policy in storage.SenderPolicy]}
 BINDING = _object({
     "channel_id": _ID, "chat_id": _ID, "manager_id": _ID, "created_at": _TIME,
     "channel_type": {"type": "string", "enum": ["telegram", "lark", "lark_bot"]},
     "bot_name": _STR, "chat_name": _NULL_STR, "manager_name": _STR,
-    "manager_enabled": _BOOL, "manager_deleted": _BOOL, "allowed_senders": _array(_STR),
+    "manager_enabled": _BOOL, "manager_deleted": _BOOL, "allowed_senders": _array(_STR), "sender_policy": _SENDER_POLICY,
 }, closed=True)
 UNBOUND_CHAT = _object({"chat_id": _ID, "name": _NULL_STR, "count": _COUNT, "last_at": _TIME}, closed=True)
 SEEN_CHAT = _object({
@@ -30,7 +31,7 @@ SCHEMAS = {"Binding": BINDING, "SeenChat": SEEN_CHAT, "UnboundChat": UNBOUND_CHA
 
 def _op(name, summary, request, result, *, risk="read"):
     return Operation(name, "POST", "/api/v1/" + name.replace(".", "/"), summary, summary,
-                     request, result, risk=risk, operator_only=True)
+                     request, result, risk=risk, operator_only=True, confirms=name == "manager_chat_bindings.put")
 
 
 OPERATIONS = (
@@ -39,8 +40,10 @@ OPERATIONS = (
         _object({"bindings": _array(BINDING)}, closed=True)),
     _op("manager_chat_bindings.put", "Bind or rebind a native chat to a Manager.",
         _object({"channel_id": _ID, "chat_id": _ID, "manager_id": _ID,
+                 "sender_policy": {**_SENDER_POLICY, "description": "Lark only: listed admits the channel and chat sender lists; "
+                     "chat admits everyone posting in this bound chat. Omit to keep it, or reset to listed when rebinding."},
                  "allowed_senders": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 100,
-                     "description": "Senders admitted only in this chat besides the bot's allowlist: Lark open_ids (ou_…) "
+                     "description": "Senders admitted only in this chat besides the bot's allowlist: Lark open_ids or bot app ids, "
                          "or Telegram user IDs. Omit to keep them (cleared when the chat moves to another Manager); [] clears."}},
                 ["channel_id", "chat_id", "manager_id"], closed=True),
         _object({"binding": BINDING}, closed=True), risk="write"),
@@ -60,7 +63,7 @@ OPERATIONS = (
 RESULTS = {}
 
 _BINDINGS = """
-    SELECT b.channel_id, b.chat_id, b.manager_id, b.created_at, b.allowed_senders, c.channel_type,
+    SELECT b.channel_id, b.chat_id, b.manager_id, b.created_at, b.allowed_senders, b.sender_policy, c.channel_type,
            c.display_name AS bot_name, s.name AS chat_name, m.name AS manager_name,
            (m.enabled AND m.deleted_at IS NULL) AS manager_enabled,
            (m.deleted_at IS NOT NULL) AS manager_deleted
@@ -120,7 +123,36 @@ def validate_arguments(schema, arguments):
     return api_v1.validate_arguments(schema, arguments)
 
 
-async def run(server, operation, arguments, principal, headers):
+async def impact(server, operation, arguments, principal, headers, confirmation=None):
+    if operation.operation_id != "manager_chat_bindings.put":
+        return None
+    if server._channels is None:
+        raise OpError(ErrorCode.UNAVAILABLE, "live channel routing is not available")
+    if storage._kind(arguments["channel_id"]) == "telegram":
+        if arguments.get("sender_policy") == "chat":
+            raise OpError(ErrorCode.INVALID, "sender_policy: chat is only supported for Lark")
+        return None
+    storage._chat_id(arguments["channel_id"], arguments["chat_id"])
+    storage._manager_id(arguments["manager_id"])
+    async with get_pool().acquire() as conn:
+        manager = await conn.fetchrow("SELECT tools, revision FROM managers WHERE id = $1 AND deleted_at IS NULL",
+                                    arguments["manager_id"])
+        if manager is None:
+            raise OpError(ErrorCode.NOT_FOUND, "Manager not found")
+        if confirmation is not None:
+            confirmation["manager_revision"] = manager["revision"]
+        policy = arguments.get("sender_policy")
+        if policy is None:
+            policy = await conn.fetchval("SELECT sender_policy FROM manager_chat_bindings "
+                "WHERE channel_id = $1 AND chat_id = $2 AND manager_id = $3",
+                arguments["channel_id"], arguments["chat_id"], arguments["manager_id"])
+    if policy == "chat" and manager["tools"] == "all":
+        return ("Anyone in this chat, including bots, can then reach a Manager with all tools. "
+                "This Manager can run commands on this machine. Open this chat to everyone?")
+    return None
+
+
+async def run(server, operation, arguments, principal, headers, confirmation=None):
     if operation.risk == "write" and server._channels is None:
         raise OpError(ErrorCode.UNAVAILABLE, "live channel routing is not available")
     try:
@@ -137,7 +169,8 @@ async def run(server, operation, arguments, principal, headers):
             bindings = []
             async def readback(conn):
                 bindings.extend(await _bindings(conn, arguments["channel_id"], chat_ids=[arguments["chat_id"]]))
-            await chat_routing.bind_chat(**arguments, registry=server._channels, principal_kind=principal.kind, readback=readback)
+            await chat_routing.bind_chat(**arguments, registry=server._channels, principal_kind=principal.kind, readback=readback,
+                expected_manager_revision=(confirmation or {}).get("manager_revision"))
             return {"binding": bindings[0]}
         if name == "manager_chat_bindings.delete":
             deleted = await chat_routing.unbind_chat(**arguments, registry=server._channels, principal_kind=principal.kind)

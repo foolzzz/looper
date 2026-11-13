@@ -3,10 +3,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FormFooter, LABEL, Row, SELECT } from "@/components/registry-ui";
 import type { ManagerInfo } from "@/lib/api";
-import { deleteChatBinding, fetchChannelChats, fetchChatBindings, putChatBinding,
-  type Binding, type ChannelChats } from "@/lib/chat-bindings-api";
+import { ChatBindingConfirmation, confirmChatBinding, deleteChatBinding, fetchChannelChats, fetchChatBindings, putChatBinding,
+  type Binding, type ChannelChats, type SenderPolicy } from "@/lib/chat-bindings-api";
 import { errorText } from "@/lib/use-action";
-import { V1Error } from "@/lib/v1";
+import { V1Error, type V1PendingConfirmation } from "@/lib/v1";
 
 const bindingError = (err: unknown) => err instanceof V1Error ? `${err.code}: ${err.message}` : errorText(err);
 
@@ -104,7 +104,11 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
 }) {
   const id = useId();
   const senderId = useId();
+  const senderPolicyId = useId();
   const [target, setTarget] = useState(b.manager_id);
+  const [senderPolicy, setSenderPolicy] = useState<SenderPolicy>(b.sender_policy);
+  const [confirmation, setConfirmation] = useState<V1PendingConfirmation | null>(null);
+  useEffect(() => { setSenderPolicy(b.sender_policy); }, [b.sender_policy]);
   const [senders, setSenders] = useState(b.allowed_senders.join(", "));
   useEffect(() => { setSenders(b.allowed_senders.join(", ")); }, [b.allowed_senders]);
   const ids = senders.split(/[,\s]+/).map((value) => value.trim()).filter(Boolean);
@@ -124,11 +128,13 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
   const options = managers.filter((m) => !snapshot.deleted.has(m.id));
   const run = async (write: () => Promise<unknown>) => {
     setError("");
+    setConfirmation(null);
     try {
       await snapshot.mutate(write);
       onRemoved();
     } catch (err) {
-      if (active.current) setError(bindingError(err));
+      if (active.current && err instanceof ChatBindingConfirmation) setConfirmation(err.confirmation);
+      else if (active.current) setError(bindingError(err));
       if (err instanceof V1Error && err.code === "not_found") await reload();
     }
   };
@@ -153,7 +159,7 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
     below={<div className="space-y-2">
       <label htmlFor={id} className={LABEL}>Move to Manager</label>
       <select id={id} aria-label={`Move ${name} to Manager`} className={SELECT} value={target}
-        disabled={busy} onChange={(e) => setTarget(e.target.value)}>
+        disabled={busy} onChange={(e) => { setTarget(e.target.value); setConfirmation(null); }}>
         {!options.some((m) => m.id === target) && <option value={target} disabled>Unavailable Manager</option>}
         {options.map((m) => <option key={m.id} value={m.id}>{m.name}{!m.enabled ? " · Off" : ""}</option>)}
       </select>
@@ -165,14 +171,35 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
       <div className="space-y-2">
         <label htmlFor={senderId} className={LABEL}>Extra senders in this chat</label>
         <Input id={senderId} aria-label={`Extra senders for ${name}`} aria-describedby={`${senderId}-help`}
-          value={senders} disabled={busy} onChange={(event) => setSenders(event.target.value)}
+          value={senders} disabled={busy} onChange={(event) => { setSenders(event.target.value); setConfirmation(null); }}
           placeholder={b.channel_type === "telegram" ? "123456789, …" : "ou_…, ou_…"} />
         <p id={`${senderId}-help`} className="text-[11px] text-muted-foreground">
           Allowed here besides the bot's allowed senders, in this chat only: a direct message or another chat still refuses them.
           {b.channel_type === "telegram" ? " Telegram user IDs, comma-separated." : " Lark open_ids (ou_…), comma-separated."}
         </p>
-        <Button size="sm" variant="outline" disabled={busy || sendersUnchanged}
-          onClick={() => void run(() => putChatBinding(b.channel_id, b.chat_id, b.manager_id, ids))}>Save senders</Button>
+        {b.channel_type !== "telegram" && <>
+          <label htmlFor={senderPolicyId} className={LABEL}>Who can reach this Manager</label>
+          <select id={senderPolicyId} aria-label={`Sender policy for ${name}`} aria-describedby={`${senderPolicyId}-help`}
+            className={SELECT} value={senderPolicy} disabled={busy}
+            onChange={(event) => { setSenderPolicy(event.target.value as SenderPolicy); setConfirmation(null); }}>
+            <option value="listed">Listed senders</option>
+            <option value="chat">Everyone in this chat</option>
+          </select>
+          <p id={`${senderPolicyId}-help`} className="text-[11px] text-muted-foreground">
+            {senderPolicy === "chat"
+              ? "Anyone who can post in this chat, including other bots, can reach this Manager by mentioning the bot; the bot itself is excluded."
+              : "Only the bot's allowed senders and this chat's extra senders can reach this Manager."}
+          </p>
+        </>}
+        <Button size="sm" variant="outline" disabled={busy || (sendersUnchanged && senderPolicy === b.sender_policy)}
+          onClick={() => void run(() => b.channel_type === "telegram"
+            ? putChatBinding(b.channel_id, b.chat_id, b.manager_id, ids)
+            : putChatBinding(b.channel_id, b.chat_id, b.manager_id, ids, senderPolicy))}>Save senders</Button>
+        {confirmation && <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">{confirmation.impact}</p>
+          <FormFooter error="" busy={busy} submit="Confirm sender policy" onCancel={() => setConfirmation(null)}
+            onSubmit={() => void run(() => confirmChatBinding(confirmation))} />
+        </div>}
       </div>
       {policy && <div className="space-y-2">
         <p className="text-xs text-muted-foreground">{policy.bound_chats_only

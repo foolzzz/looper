@@ -24,7 +24,7 @@ function chat(chat_id = "42", name: string | null = "Sample chat"): SeenChat {
 function binding(channel_id: string, chat_id: string, manager_id: string): Binding {
   const manager = managers.find((m) => m.id === manager_id) ?? off;
   return { channel_id, chat_id, manager_id, created_at: stamp, channel_type: "telegram", bot_name: "Example bot",
-    chat_name: null, manager_name: manager.name, manager_enabled: manager.enabled, manager_deleted: false, allowed_senders: [] };
+    chat_name: null, manager_name: manager.name, manager_enabled: manager.enabled, manager_deleted: false, allowed_senders: [], sender_policy: "listed" };
 }
 let host: HTMLDivElement, root: Root;
 let managers: typeof owner[];

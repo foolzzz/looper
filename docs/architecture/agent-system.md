@@ -979,8 +979,9 @@ The Planner's recommended role prompt says it runs read-only and which
 commands it may run.
 
 Because the Manager can now run any command on this machine, Telegram and
-Lark pass on only the senders they list, and a channel without such a list
-does not start ([Channels](#channels)). The web dashboard stays local-only
+Lark default to listed senders; Lark groups may explicitly open a binding to
+every participant, with confirmation for an all-tools Manager. A channel without
+an allowlist does not start ([Channels](#channels)). The web dashboard stays local-only
 ([HTTP API](#http-api)).
 
 ### How an agent is stopped
@@ -5722,11 +5723,20 @@ routing key. An explicit binding may also carry extra senders
 (`allowed_senders`, the bot type's sender ids, at most 100), changed only through
 `manager_chat_bindings.put` (Settings → Managers, loopercli). A message in exactly
 that bot/chat pair is admitted when its sender is on the bot's allowlist or on that
-binding's extra senders; the adapter takes one decision from the committed snapshot
-for both admission and destination. Anywhere else, a direct message or another chat,
-an extra sender is refused like any unlisted sender, and Lark records the refusal.
+binding's extra senders (`sender_policy=listed`, the default). A Lark binding can
+instead use `sender_policy=chat`: everyone who can post in that group, including
+other bots, may reach its Manager by @-mentioning this bot. The adapter takes one
+decision from the committed snapshot for both admission and destination. This
+policy never opens another chat or a direct message. The API and
+`loopercli manager-chat-bindings put --sender-policy listed|chat` expose the policy;
+list reads it back, and Settings → Managers edits it beside extra senders. Opening
+a chat to a Manager with `tools=all` requires confirmation that anyone in that chat
+can reach a Manager able to run commands on this machine; `tools=tasks` applies
+directly. Unknown policies are rejected. Lark records refused senders as before.
 A put without `allowed_senders` keeps them for the same Manager and clears them when
-the chat moves to another Manager; unbinding or removing the bot drops them.
+the chat moves to another Manager. An omitted `sender_policy` likewise keeps the
+same Manager's policy and resets a moved chat to `listed`; unbinding or removing
+the bot drops both.
 Previous binaries ignore the column and refuse these senders. An explicit binding wins; without one the bot owner receives messages,
 unless `bound_chats_only` is true (default false). Then new unbound ingress, including
 Telegram local commands and native `/stop`, causes no turn, reply, reaction or
@@ -5754,8 +5764,9 @@ implementation supplies it and is retested.
 
 - **Sender allowlist** (`looper/agents/channels/allowlist.py`, RFC decision 8):
   the Manager runs any command it is asked to, so Telegram and Lark pass on
-  only the messages of the senders their configuration lists. A message from
-  anyone else (but a chat binding's extra senders, in that chat only) never reaches the Manager: the adapter logs one line with the
+  listed senders by default. A message from anyone else is refused unless a chat
+  binding lists them or explicitly opens that Lark group to all participants.
+  The adapter logs one line with the
   channel and the sender id (never the text) and sends no reply. An enabled
   channel whose list is empty or invalid does not start; the startup log and
   Settings → Channels (`start_problem`) say why. The list holds at most 100
@@ -5879,8 +5890,11 @@ implementation supplies it and is retested.
   Other types receive 「暂不支持这类飞书消息（<type>），请发文字、富文本、图片或文件。」
   as text, in reply to the message in a group or sent to the direct chat,
   after admission and routing; silent chats receive nothing, and a turned-off
-  Manager gets only the usual turned-off reply. Bots' messages, interactive
-  cards and empty messages are ignored. The bot-token channel renders posts
+  Manager gets only the usual turned-off reply. Other bots are admitted by the
+  same channel and binding sender lists as people, or by that group's `chat`
+  sender policy. History matches a bot's `sender.open_bot_id`, falling back to
+  its app id when no bot open id is available. Messages from this bot itself
+  (its own open id or app id), interactive cards and empty messages are ignored. The bot-token channel renders posts
   and resource markers into the same notation before the shared adapter reads
   them. All outgoing Lark, Telegram and dashboard chat text redacts stored
   attachment paths, including filenames with spaces and Unicode. Dashboard
@@ -5892,7 +5906,9 @@ implementation supplies it and is retested.
   status message and the answer reply to the message (`lark-cli im
   +messages-reply --as bot --message-id om_…`), while the task's progress
   and end notice go to the group (`--chat-id`): the bot posts in a group only
-  to answer an allowlisted @-mention and for the task it started. A consumer that
+  to answer an admitted @-mention and for the task it started. A reply to a
+  thread message uses `--reply-in-thread`, preserving the original thread.
+  A consumer that
   stops is started again after 10 s. The long connection does not replay
   messages sent while disconnected. On adapter startup, after the CLI emits
   `[event] ready event_key=im.message.receive_v1` (or its first live message),
@@ -5913,6 +5929,23 @@ implementation supplies it and is retested.
   prevent other chats or live input. A new, never-observed unbound chat cannot
   be discovered during downtime. The bot needs history and chat-info read
   permissions; no user-identity fallback is used.
+
+  Lark does not push one app's messages to another app's receive subscription.
+  For each explicitly bound group, the CLI adapter therefore polls every 30
+  seconds, from its last successful poll minus a 10-second overlap. It reuses
+  the catch-up history pagination, thread scans, event conversion and durable
+  receipts, with the same page bounds and 15-minute age bound. Only other apps'
+  messages that @-mention this bot enter intake; people remain on the live
+  consumer path. Admission, disabled Managers, attachments and replies use the
+  same handler. A failed chat poll warns and leaves its time unchanged while
+  other chats continue. Each handled bot message logs one INFO line with chat,
+  bot id, message id and outcome. Refused bots are recorded like people; refusal
+  warnings are limited to once per bot per chat per hour. A process-local rolling
+  hour permits at most 10 bot-triggered turns per chat across all bots; further
+  messages are skipped with a chat/count warning and no chat post. Restarting the
+  adapter resets this loop budget. Admission logs include `sender_policy=chat`
+  for an open binding. Telegram intake is unchanged: Telegram delivers bot
+  messages to bots only in limited cases.
 
   Each CLI channel keeps its boundary and the latest 20,000 handled message ids
   in SQLite under the runtime root's `.local/lark/<channel>/inbox.sqlite3`.

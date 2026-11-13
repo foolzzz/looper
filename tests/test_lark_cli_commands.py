@@ -58,6 +58,17 @@ def test_a_send_names_one_target_and_one_body(bad: dict[str, str]) -> None:
         send_command(**bad)
 
 
+def test_thread_reply_preserves_message_target_profile_and_idempotency_key() -> None:
+    command = reply_command("om_syntheticthreadreply", markdown="review received", profile="work",
+                            idempotency_key="synthetic-thread-reply", reply_in_thread=True)
+    assert command[:8] == ["lark-cli", "--profile", "work", "im", "+messages-reply", "--as", "bot", "--message-id"]
+    assert command[8] == "om_syntheticthreadreply"
+    assert command[command.index("--markdown") + 1] == "review received"
+    assert command[command.index("--idempotency-key") + 1] == "synthetic-thread-reply"
+    assert command.count("--reply-in-thread") == 1
+    assert "--reply-in-thread" not in reply_command("om_syntheticgroupreply", text="received")
+
+
 @pytest.mark.parametrize("raw", ["work; rm -rf /", "-x", " " * 3 + "a b"])
 def test_a_profile_is_a_name(raw: str) -> None:
     with pytest.raises(ValueError):
@@ -152,7 +163,8 @@ def test_rich_posts_and_unsupported_types_through_the_cli_event_stream(
          "content": '<file key="file_v3_b2" name="notes.txt"/>'},
         {**event, "message_id": "om_refused", "sender_id": OTHER,
          "message_type": "sticker", "content": "[Sticker]"},
-        {**event, "message_id": "om_bot", "sender_type": "bot", "message_type": "post", "content": post},
+        {**event, "message_id": "om_bot", "sender_type": "bot", "sender_id": BOT_OPEN_ID,
+         "message_type": "post", "content": post},
         {**event, "message_id": "om_unaddressed", "chat_type": "group", "message_type": "post", "content": post},
         {"schema": "2.0", "event": {"message": {"message_type": "interactive"}}},
     ]

@@ -1317,6 +1317,7 @@ CREATE TABLE IF NOT EXISTS manager_chat_bindings (
     manager_id TEXT NOT NULL REFERENCES managers(id) ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     allowed_senders TEXT[] NOT NULL DEFAULT '{}' CONSTRAINT manager_chat_bindings_allowed_senders_check CHECK (cardinality(allowed_senders) <= 100),
+    sender_policy TEXT NOT NULL DEFAULT 'listed' CHECK (sender_policy IN ('listed', 'chat')),
     PRIMARY KEY (channel_id, chat_id)
 );
 CREATE INDEX IF NOT EXISTS idx_manager_chat_bindings_manager

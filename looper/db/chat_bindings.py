@@ -12,6 +12,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, TypedDict
 
 import asyncpg
@@ -32,12 +33,18 @@ UNBOUND_KEPT = 20
 _Reader = asyncpg.Pool | asyncpg.Connection
 
 
+class SenderPolicy(StrEnum):
+    LISTED = "listed"
+    CHAT = "chat"
+
+
 class ChatBinding(TypedDict):
     channel_id: str
     chat_id: str
     manager_id: str
     created_at: datetime
     allowed_senders: list[str]
+    sender_policy: SenderPolicy
 
 
 class RoutingSnapshot(TypedDict):
@@ -104,7 +111,7 @@ async def list_bindings(channel_id: str | None = None, manager_id: str | None = 
         if not await reader.fetchval("SELECT deleted_at IS NULL FROM managers WHERE id = $1", manager_id):
             raise LookupError("Manager not found")
     rows = await reader.fetch(
-        "SELECT channel_id, chat_id, manager_id, created_at, allowed_senders FROM manager_chat_bindings "
+        "SELECT channel_id, chat_id, manager_id, created_at, allowed_senders, sender_policy FROM manager_chat_bindings "
         "WHERE ($1::text IS NULL OR channel_id = $1) AND ($2::text IS NULL OR manager_id = $2) "
         "ORDER BY channel_id, chat_id", channel_id, manager_id)
     return [ChatBinding(**dict(row)) for row in rows]
@@ -127,7 +134,9 @@ async def notification_targets(*, pool: _Reader | None = None) -> list[dict[str,
 
 async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,
                       conn: asyncpg.Connection, before_write: Callable[[], Awaitable[None]] | None = None,
-                      allowed_senders: Sequence[str] | None = None) -> ChatBinding:
+                      allowed_senders: Sequence[str] | None = None,
+                      sender_policy: SenderPolicy | str | None = None,
+                      expected_manager_revision: int | None = None) -> ChatBinding:
     """Bind even to the bot's own Manager; rebinding keeps the original creation time.
 
     KEY SHARE conflicts with Manager deletion's FOR UPDATE. Recheck deleted_at
@@ -138,23 +147,35 @@ async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,
             not isinstance(allowed_senders, list) or len(allowed_senders) > 100
             or any(not isinstance(sender, str) or not sender.strip() for sender in allowed_senders)):
         raise ValueError("allowed_senders must be a list of non-empty strings, at most 100")
+    policy = SenderPolicy(sender_policy) if sender_policy is not None else None
+    if policy is SenderPolicy.CHAT and _kind(channel_id) == "telegram":
+        raise ValueError("chat sender policy is only supported for Lark")
     _chat_id(channel_id, chat_id)
     _manager_id(manager_id)
     _transaction(conn)
-    live = await conn.fetchval("SELECT deleted_at IS NULL FROM managers WHERE id = $1 FOR KEY SHARE", manager_id)
-    if not live:
-        raise LookupError("Manager not found")
+    if expected_manager_revision is None:
+        live = await conn.fetchval("SELECT deleted_at IS NULL FROM managers WHERE id = $1 FOR KEY SHARE", manager_id)
+        if not live:
+            raise LookupError("Manager not found")
+    else:
+        manager = await conn.fetchrow("SELECT revision, deleted_at FROM managers WHERE id = $1 FOR SHARE", manager_id)
+        if manager is None or manager["deleted_at"] is not None:
+            raise LookupError("Manager not found")
+        if manager["revision"] != expected_manager_revision:
+            raise ValueError("Manager permissions changed; submit the binding again")
     await _channel(channel_id, conn, lock=True)
     if before_write is not None:
         await before_write()
     row = await conn.fetchrow(
-        "INSERT INTO manager_chat_bindings (channel_id, chat_id, manager_id, allowed_senders) "
-        "VALUES ($1, $2, $3, coalesce($4::text[], '{}')) "
+        "INSERT INTO manager_chat_bindings (channel_id, chat_id, manager_id, allowed_senders, sender_policy) "
+        "VALUES ($1, $2, $3, coalesce($4::text[], '{}'), coalesce($5::text, 'listed')) "
         "ON CONFLICT (channel_id, chat_id) DO UPDATE SET manager_id = EXCLUDED.manager_id, "
         "allowed_senders = CASE WHEN $4::text[] IS NOT NULL THEN $4::text[] "
         "WHEN manager_chat_bindings.manager_id = EXCLUDED.manager_id THEN manager_chat_bindings.allowed_senders "
-        "ELSE '{}' END RETURNING channel_id, chat_id, manager_id, created_at, allowed_senders",
-        channel_id, chat_id, manager_id, allowed_senders)
+        "ELSE '{}' END, sender_policy = CASE WHEN $5::text IS NOT NULL THEN $5::text "
+        "WHEN manager_chat_bindings.manager_id = EXCLUDED.manager_id THEN manager_chat_bindings.sender_policy "
+        "ELSE 'listed' END RETURNING channel_id, chat_id, manager_id, created_at, allowed_senders, sender_policy",
+        channel_id, chat_id, manager_id, allowed_senders, policy)
     return ChatBinding(**dict(row))
 
 
