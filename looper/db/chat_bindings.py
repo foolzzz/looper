@@ -235,6 +235,20 @@ async def record_seen(channel_id: str, chat_id: str, name: str | None = None, *,
         logger.exception("could not record chat metadata for bot %s", channel_id)
 
 
+async def catchup_chats(channel_id: str, limit: int, *, pool: _Reader | None = None) -> list[str]:
+    """Bound chats first, then the default Manager's chats observed in the last day."""
+    rows = await (pool or get_pool()).fetch(
+        "SELECT chat_id FROM ("
+        "SELECT chat_id, 0 AS priority FROM manager_chat_bindings WHERE channel_id = $1 UNION ALL "
+        "SELECT s.chat_id, 1 AS priority FROM channel_seen_chats s "
+        "JOIN channel_configs c ON c.channel_id = s.channel_id "
+        "WHERE s.channel_id = $1 AND NOT c.bound_chats_only "
+        "AND s.last_at >= clock_timestamp() - interval '24 hours' "
+        "AND NOT EXISTS (SELECT 1 FROM manager_chat_bindings b WHERE b.channel_id = $1 AND b.chat_id = s.chat_id)"
+        ") candidates ORDER BY priority, chat_id LIMIT $2", channel_id, limit)
+    return [row["chat_id"] for row in rows]
+
+
 async def list_channel_chats(channel_id: str, limit: int = 100, after: str | None = None, *,
                              pool: _Reader | None = None) -> list[ChannelChat]:
     """Page the full observed catalog plus explicit bindings, by chat_id ASC.

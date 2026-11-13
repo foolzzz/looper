@@ -43,25 +43,48 @@ async def _put(pool: Any, chat_id: str = "7", manager_id: str = TARGET, channel_
         return await store.put_binding(channel_id, chat_id, manager_id, conn=conn)
 
 
+def test_catchup_candidates_prioritize_bindings_and_recent_default_manager_chats():
+    from looper.db import chat_bindings as store
+
+    async def run(pool):
+        await _seed(pool)
+        channel = "channel-lark-203"
+        await _put(pool, "oc_bound", channel_id=channel)
+        await store.record_seen(channel, "oc_recent", None, suppressed=False, pool=pool)
+        await store.record_seen(channel, "oc_stale", None, suppressed=False, pool=pool)
+        await store.record_seen("channel-lark_bot-204", "oc_other", None, suppressed=False, pool=pool)
+        await pool.execute("UPDATE channel_seen_chats SET last_at = now() - interval '25 hours' "
+                           "WHERE channel_id = $1 AND chat_id = 'oc_stale'", channel)
+        assert await store.catchup_chats(channel, 100, pool=pool) == ["oc_bound", "oc_recent"]
+        assert await store.catchup_chats(channel, 1, pool=pool) == ["oc_bound"]
+        await pool.execute("UPDATE channel_configs SET bound_chats_only = true WHERE channel_id = $1", channel)
+        assert await store.catchup_chats(channel, 100, pool=pool) == ["oc_bound"]
+
+    run_db(run, timeout=15)
+
+
 def test_schema_upgrade_preserves_existing_bot_and_transcript(bridge_source):
     async def run():
         async with fresh_schema() as pool:
+            # The released bridge has its own 45 s process budget; fixture
+            # startup must not consume the upgrade verification's 30 s budget.
             await initialize_bridge(pool, bridge_source, seed=False)
-            await _seed(pool)
-            await chat.save_message(session_id="telegram-7", message_id="message-one", role="user",
-                                    content="Synthetic public example", channel="telegram", pool=pool)
-            before = dict(await pool.fetchrow("SELECT * FROM channel_configs WHERE channel_id = $1", BOT))
-            await connection.ensure_schema(pool)
-            after = dict(await pool.fetchrow("SELECT * FROM channel_configs WHERE channel_id = $1", BOT))
-            assert after["bound_chats_only"] is False
-            assert after == before
-            assert (await chat.list_messages("telegram-7", pool=pool))[0]["content"] == "Synthetic public example"
-            for table in ("channel_seen_chats", "channel_unbound_chats"):
-                await pool.execute(f"INSERT INTO {table} (channel_id, chat_id) VALUES ($1, '8')", OTHER_BOT)
-                assert await pool.fetchval(f"SELECT count(*) FROM {table} WHERE channel_id = $1", OTHER_BOT) == 1
-                assert await pool.fetchval(f"SELECT count(*) FROM {table} WHERE channel_id = $1", BOT) == 0
+            async with asyncio.timeout(30):
+                await _seed(pool)
+                await chat.save_message(session_id="telegram-7", message_id="message-one", role="user",
+                                        content="Synthetic public example", channel="telegram", pool=pool)
+                before = dict(await pool.fetchrow("SELECT * FROM channel_configs WHERE channel_id = $1", BOT))
+                await connection.ensure_schema(pool)
+                after = dict(await pool.fetchrow("SELECT * FROM channel_configs WHERE channel_id = $1", BOT))
+                assert after["bound_chats_only"] is False
+                assert after == before
+                assert (await chat.list_messages("telegram-7", pool=pool))[0]["content"] == "Synthetic public example"
+                for table in ("channel_seen_chats", "channel_unbound_chats"):
+                    await pool.execute(f"INSERT INTO {table} (channel_id, chat_id) VALUES ($1, '8')", OTHER_BOT)
+                    assert await pool.fetchval(f"SELECT count(*) FROM {table} WHERE channel_id = $1", OTHER_BOT) == 1
+                    assert await pool.fetchval(f"SELECT count(*) FROM {table} WHERE channel_id = $1", BOT) == 0
 
-    asyncio.run(asyncio.wait_for(run(), 30))
+    asyncio.run(run())
 
 
 def test_repeated_schema_ensure_preserves_bindings_policy_and_observations():

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import re
 import time
@@ -40,9 +41,10 @@ SINGLE_LOOKUPS_MAX = 20
 class LarkCliError(RuntimeError):
     """A lark-cli call that failed, with lark-cli's reason, and the Lark API's error code when it gave one."""
 
-    def __init__(self, message: str, *, code: int | None = None) -> None:
+    def __init__(self, message: str, *, code: int | None = None, error_type: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.error_type = error_type
 
 
 # The Lark API's code for a message that cannot be replied to because it is gone: 230011 "The message is recalled."
@@ -70,6 +72,38 @@ def _base(profile: str | None) -> list[str]:
 def consume_command(profile: str | None = None) -> list[str]:
     """The lark-cli argv that streams the messages the bot receives, one JSON object per line."""
     return [*_base(profile), "event", "consume", RECEIVE_EVENT, "--as", "bot"]
+
+
+def history_command(chat_id: str, *, start: float, end: float, page_token: str = "",
+                    profile: str | None = None) -> list[str]:
+    # Raw history keeps parent/root ids that the formatted shortcut discards.
+    params = {"container_id_type": "chat", "container_id": chat_id,
+              "start_time": str(int(start)), "end_time": str(math.ceil(end)),
+              "sort_type": "ByCreateTimeAsc", "page_size": 50}
+    if page_token:
+        params["page_token"] = page_token
+    return [*_base(profile), "api", "GET", "/open-apis/im/v1/messages", "--as", "bot",
+            "--params", json.dumps(params)]
+
+
+def thread_roots_command(chat_id: str, *, page_token: str = "", profile: str | None = None) -> list[str]:
+    # No start_time: a reply in the recovery window may belong to a much older root.
+    params = {"container_id_type": "chat", "container_id": chat_id,
+              "sort_type": "ByCreateTimeDesc", "page_size": 50}
+    if page_token:
+        params["page_token"] = page_token
+    return [*_base(profile), "api", "GET", "/open-apis/im/v1/messages", "--as", "bot",
+            "--params", json.dumps(params)]
+
+
+def thread_history_command(thread_id: str, *, page_token: str = "", profile: str | None = None) -> list[str]:
+    # Thread containers do not support time filters. Scan newest first and filter locally.
+    params = {"container_id_type": "thread", "container_id": thread_id,
+              "sort_type": "ByCreateTimeDesc", "page_size": 50}
+    if page_token:
+        params["page_token"] = page_token
+    return [*_base(profile), "api", "GET", "/open-apis/im/v1/messages", "--as", "bot",
+            "--params", json.dumps(params)]
 
 
 def send_command(*, chat_id: str | None = None, user_id: str | None = None, text: str | None = None,
@@ -221,8 +255,12 @@ async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS, cwd: Pa
         await process.wait()
         raise
     if process.returncode != 0:
+        try:
+            error_type = json.loads(stderr or b"{}").get("error", {}).get("type")
+        except (ValueError, AttributeError):
+            error_type = None
         raise LarkCliError(f"lark-cli exited {process.returncode}: {failure(stderr or b'')}",
-                           code=failure_code(stderr or b""))
+                           code=failure_code(stderr or b""), error_type=error_type)
     return stdout
 
 
@@ -236,7 +274,9 @@ async def run_json(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS,
     if not isinstance(data, dict):
         raise LarkCliError("lark-cli printed JSON that is not an object")
     if data.get("ok") is False:
-        raise LarkCliError(str((data.get("error") or {}).get("message") or "lark-cli answered ok: false"))
+        error = data.get("error") or {}
+        raise LarkCliError(failure(out) or "lark-cli answered ok: false",
+                           code=failure_code(out), error_type=error.get("type"))
     return data
 
 
