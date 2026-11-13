@@ -4560,9 +4560,24 @@ export async function createManager(body: ManagerFields): Promise<{ manager: Man
   return result;
 }
 
+export class ManagerUpdateConfirmation extends V1Error {
+  readonly confirmation: V1PendingConfirmation;
+
+  constructor(confirmation: V1PendingConfirmation) {
+    super(202, "needs_confirmation", confirmation.impact);
+    this.confirmation = confirmation;
+  }
+}
+
 export async function updateManager(id: string, body: ManagerFields): Promise<{ manager: ManagerView }> {
   const result = await callV1<{ manager: ManagerView }>("/api/v1/managers/update", { manager_id: id, fields: body });
-  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  if ("status" in result) throw new ManagerUpdateConfirmation(result);
+  return result;
+}
+
+export async function confirmManagerUpdate(confirmation: V1PendingConfirmation): Promise<{ manager: ManagerView }> {
+  const result = await confirmV1<{ manager: ManagerView }>(confirmation.confirmation_id, confirmation.session);
+  if ("status" in result) throw new ManagerUpdateConfirmation(result);
   return result;
 }
 

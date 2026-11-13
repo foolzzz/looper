@@ -71,7 +71,7 @@ OPERATIONS = (
 RESULTS = {}
 
 
-async def impact(server, operation, arguments, principal, headers):
+async def impact(server, operation, arguments, principal, headers, confirmation=None):
     name = operation.operation_id
     if name == "managers.create":
         return (f"Create Manager manager-{arguments['key']} with the supplied definition? "
@@ -85,6 +85,18 @@ async def impact(server, operation, arguments, principal, headers):
         fields = arguments["fields"]
         changes = ", ".join(f"{key}={fields[key]}" if key in ("tools", "task_scope", "task_policy", "enabled", "profile_id", "scope_project_ids")
                             else key for key in sorted(fields))
+        open_chats = []
+        if fields.get("tools") == "all":
+            open_chats = await managers_api.open_chats(manager_id)
+            if confirmation is not None:
+                confirmation["open_chats"] = open_chats
+        if open_chats:
+            chats = ", ".join(f"{channel}/{chat}" for channel, chat in open_chats)
+            return (f"{len(open_chats)} chats are open to everyone; anyone in them can then reach a Manager with all tools. "
+                    f"Open chats: {chats}. Change Manager {manager_id} fields: {changes}? "
+                    "This Manager can run commands on this machine.")
+        if principal.kind == "operator":
+            return None
         return (f"Change Manager {manager_id} fields: {changes}? "
                 "The supplied definition, tool/task permissions and enabled state apply to its runtime; "
                 "existing tasks and threads keep their attribution.")
@@ -97,7 +109,7 @@ async def impact(server, operation, arguments, principal, headers):
             "This changes its future task creation; tasks already created retain their saved configuration.")
 
 
-async def run(server, operation, arguments, principal, headers):
+async def run(server, operation, arguments, principal, headers, confirmation=None):
     name = operation.operation_id
     if name == "managers.list":
         return _plain(await answered(managers_api.managers_view(
@@ -106,7 +118,8 @@ async def run(server, operation, arguments, principal, headers):
         return await answered(managers_api.create_manager(arguments))
     manager_id = arguments["manager_id"]
     if name == "managers.update":
-        return await answered(managers_api.update_manager(manager_id, arguments["fields"]))
+        return await answered(managers_api.update_manager(manager_id, arguments["fields"],
+            expected_open_chats=(confirmation or {}).get("open_chats")))
     if name == "managers.delete":
         return await answered(managers_api.delete_manager(manager_id, fleet=server._managers))
     if name == "manager_templates.put":

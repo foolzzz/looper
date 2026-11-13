@@ -142,7 +142,7 @@ function ChatBindings({ channelId, botManagerId, botManagerName }: Props) {
       </div>
       <p className="text-xs text-muted-foreground">
         Chat observation starts after this upgrade; earlier chats may be missing. Bindings and Only bound chats apply immediately,
-        to future messages. Already admitted turns and tasks keep their Manager. Sender allowlists and Lark group @-mentions still apply.
+        to future messages. Already admitted turns and tasks keep their Manager. Sender allowlists apply unless the chat is open to everyone. Lark group @-mentions still apply.
       </p>
       {loading && <p role="status" className="text-xs text-muted-foreground">Loading chats…</p>}
       {loadError && <p role="alert" className="text-xs text-destructive">{loadError} Refresh chats to retry or confirm server state.</p>}
@@ -173,7 +173,7 @@ function ChatBindings({ channelId, botManagerId, botManagerName }: Props) {
               {chat.name && <p className="break-all font-mono text-xs text-muted-foreground">{chat.chat_id}</p>}
               <p className="text-xs text-muted-foreground">Seen: {chat.count ?? "Unknown"} · Last seen: {time(chat.last_at)}</p>
               {recent && <p className="text-xs text-muted-foreground">Recent suppressed: {recent.count} · Last suppressed: {time(recent.last_at)} (history)</p>}
-              <p className="text-xs text-muted-foreground">Effective Manager: {silent ? "None — silent" : `${target?.manager_name ?? chat.effective_manager_name}${deleted ? " (unavailable)" : off ? " (off)" : ""}`}{target && target.allowed_senders.length > 0 ? ` · ${target.allowed_senders.length} extra sender${target.allowed_senders.length === 1 ? "" : "s"}` : ""}</p>
+              <p className="text-xs text-muted-foreground">Effective Manager: {silent ? "None — silent" : `${target?.manager_name ?? chat.effective_manager_name}${deleted ? " (unavailable)" : off ? " (off)" : ""}`}{target && target.allowed_senders.length > 0 ? ` · ${target.allowed_senders.length} extra sender${target.allowed_senders.length === 1 ? "" : "s"}` : ""}{target?.sender_policy === "chat" ? " · Everyone in this chat" : ""}</p>
               {!silent && (deleted || off) && <p className="text-xs text-muted-foreground">{deleted ? "The bound Manager is unavailable." : "New messages get the existing turned-off response."} No fallback Manager is used.</p>}
               <label htmlFor={`${id}-${chat.chat_id}`} className={LABEL}>Bind {name} to</label>
               <select id={`${id}-${chat.chat_id}`} className={`${SELECT} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
@@ -186,7 +186,7 @@ function ChatBindings({ channelId, botManagerId, botManagerName }: Props) {
                 {target && !snapshot.managers.some((m) => m.id === target.manager_id) && <option value={target.manager_id} disabled>{target.manager_name} (unavailable)</option>}
                 {snapshot.managers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name}{manager.enabled ? "" : " (off)"}</option>)}
               </select>
-              {target && target.allowed_senders.length > 0 && <p className="text-xs text-muted-foreground">Binding this chat to another Manager clears its extra senders; edit them in Settings → Managers.</p>}
+              {target && <p className="text-xs text-muted-foreground">Binding this chat to another Manager clears its extra senders and resets its policy to listed senders; edit them in Settings → Managers.</p>}
               {policy && <p className="text-xs text-muted-foreground">Unbinding silences this chat while Only bound chats is on.</p>}
               {errors[key] && <p role="alert" className="text-xs text-destructive">{errors[key]}</p>}
             </li>;

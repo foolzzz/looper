@@ -15,6 +15,8 @@ import {
   SELECT,
 } from "@/components/registry-ui";
 import {
+  confirmManagerUpdate,
+  ManagerUpdateConfirmation,
   createManager,
   deleteManager,
   deleteManagerTemplate,
@@ -42,6 +44,7 @@ import { settingsHref } from "@/lib/settings-pages";
 import { errorText, useAction } from "@/lib/use-action";
 import { profileLabel, useRegistry } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
+import type { V1PendingConfirmation } from "@/lib/v1";
 
 const TEXTAREA =
   "w-full rounded-md border border-input bg-transparent p-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
@@ -108,6 +111,8 @@ function ManagerForm({
   const { registry } = useRegistry();
   const [draft, setDraft] = useState<ManagerDraft>(initial ?? draftOf(manager));
   const [keyError, setKeyError] = useState("");
+  const [confirmation, setConfirmation] = useState<V1PendingConfirmation | null>(null);
+  const draftRevision = useRef(0);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsError, setProjectsError] = useState("");
   useEffect(() => {
@@ -118,17 +123,24 @@ function ManagerForm({
   }, []);
   const action = useAction();
   const fixed = manager?.builtin ?? false;
-  const set = (patch: Partial<ManagerDraft>) => setDraft((d) => ({ ...d, ...patch }));
+  const set = (patch: Partial<ManagerDraft>) => {
+    draftRevision.current += 1;
+    setConfirmation(null);
+    setDraft((d) => ({ ...d, ...patch }));
+  };
   const profiles = (registry?.profiles ?? []).filter((p) => p.roles.includes("manager"));
 
   const save = async (e?: React.FormEvent) => {
     e?.preventDefault();
     setKeyError("");
+    setConfirmation(null);
+    const revision = draftRevision.current;
     const name = draft.name.trim();
     const description = draft.description.trim();
     if (manager && !draft.enabled && manager.enabled && manager.state.running
         && !confirm("Disabling stops this Manager now, also a reply under way.")) return;
     let keyRejected = false;
+    let awaitingConfirmation = false;
     const ok = await action.run(async () => {
       try {
         if (!fixed && draft.task_scope === "projects" && !draft.scope_project_ids.length
@@ -166,6 +178,11 @@ function ManagerForm({
           await updateManager(manager.id, changes);
         }
       } catch (err) {
+        if (err instanceof ManagerUpdateConfirmation) {
+          awaitingConfirmation = true;
+          if (revision === draftRevision.current) setConfirmation(err.confirmation);
+          return;
+        }
         // The Switch returns to off when the enabled limit refused it.
         if (draft.enabled && /enabled/i.test(errorText(err))) set({ enabled: false });
         if (!manager && /deleted manager/i.test(errorText(err))) {
@@ -176,7 +193,7 @@ function ManagerForm({
         throw err;
       }
     });
-    if (ok && !keyRejected) {
+    if (ok && !keyRejected && !awaitingConfirmation) {
       await reload();
       onDone();
     }
@@ -304,7 +321,18 @@ function ManagerForm({
           </label>
         </>
       )}
-      <FormFooter error={action.error} busy={action.busy} submit="Save" onCancel={onDone} />
+      {confirmation ? <>
+        <p className="text-xs text-warning">{confirmation.impact}</p>
+        <FormFooter error={action.error} busy={action.busy} submit="Confirm all tools"
+          onCancel={() => setConfirmation(null)} onSubmit={() => void (async () => {
+            const pending = confirmation;
+            setConfirmation(null);
+            if (await action.run(() => confirmManagerUpdate(pending))) {
+              await reload();
+              onDone();
+            }
+          })()} />
+      </> : <FormFooter error={action.error} busy={action.busy} submit="Save" onCancel={onDone} />}
     </form>
   );
 }

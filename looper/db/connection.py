@@ -113,6 +113,7 @@ _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
 _TASK_PROCESS_RECORD = "task_process_record"
 _CHAT_BINDING_SENDERS = "chat_binding_senders"
+_CHAT_BINDING_SENDER_POLICY = "chat_binding_sender_policy"
 _PROVIDER_ENABLED = "provider_enabled"
 _MANAGER_SCOPE_PROJECTS = "manager_scope_projects"
 _SCHEDULE_MISSED_SINCE = "schedule_missed_since"
@@ -469,6 +470,16 @@ async def _chat_binding_senders_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _chat_binding_sender_policy_pending(conn: asyncpg.Connection) -> bool:
+    """Unmarked bindings without a sender policy need the additive upgrade."""
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _CHAT_BINDING_SENDER_POLICY):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('manager_chat_bindings') AND attname = 'sender_policy' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
 async def _provider_enabled_pending(conn: asyncpg.Connection) -> bool:
     """Recorded upgrades never repair DDL; fresh schemas already contain the column."""
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROVIDER_ENABLED):
@@ -767,6 +778,10 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
                                "DEFAULT '{}' CONSTRAINT manager_chat_bindings_allowed_senders_check "
                                "CHECK (cardinality(allowed_senders) <= 100)")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CHAT_BINDING_SENDERS)
+        if await _chat_binding_sender_policy_pending(conn):
+            await conn.execute("ALTER TABLE manager_chat_bindings ADD COLUMN sender_policy TEXT NOT NULL "
+                               "DEFAULT 'listed' CHECK (sender_policy IN ('listed', 'chat'))")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CHAT_BINDING_SENDER_POLICY)
         if await _provider_enabled_pending(conn):
             await conn.execute("ALTER TABLE llm_providers ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT true")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROVIDER_ENABLED)
@@ -870,7 +885,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _project_activity_pending(conn) or await _llm_requests_pending(conn)
             or await _llm_requests_translation_pending(conn) or await _llm_models_chat_dialect_pending(conn)
             or await _llm_requests_stored_bytes_pending(conn)
-            or await _chat_binding_senders_pending(conn)
+            or await _chat_binding_senders_pending(conn) or await _chat_binding_sender_policy_pending(conn)
             or await _manager_scope_projects_pending(conn) or await _provider_enabled_pending(conn)
             or await _dependency_conditions_pending(conn) or await _workflows_pending(conn)
             or await _review_panel_pending(conn)

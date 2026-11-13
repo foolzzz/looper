@@ -96,7 +96,7 @@ class LarkInbox:
 def history_event(message: dict[str, Any], chat_id: str, chat_type: str) -> dict[str, Any]:
     """The transport normalizes raw history content and mentions like the live consumer."""
     sender = message.get("sender") or {}
-    sender_id = sender.get("id") or ""
+    sender_id = sender.get("open_bot_id") or sender.get("id") or ""
     if isinstance(sender_id, dict):
         sender_id = sender_id.get("open_id") or ""
     mentions = []
@@ -107,7 +107,8 @@ def history_event(message: dict[str, Any], chat_id: str, chat_type: str) -> dict
         mentions.append({"id": identity, "key": item.get("key") or "", "name": item.get("name") or ""})
     return {"type": RECEIVE_EVENT, "chat_id": chat_id, "chat_type": chat_type,
             "message_id": message["message_id"], "message_type": message["msg_type"],
-            "sender_id": sender_id, "sender_type": sender.get("sender_type") or sender.get("type") or "",
+            "sender_id": sender_id, "sender_app_id": sender.get("id") if isinstance(sender.get("id"), str) else "",
+            "sender_type": sender.get("sender_type") or sender.get("type") or "",
             "mentions": mentions, "content": message.get("content") or "",
             "reply_to": message.get("reply_to") or message.get("parent_id") or "",
             "root_id": message.get("root_id") or "", "thread_id": message.get("thread_id") or ""}

@@ -26,7 +26,7 @@ CASES = [
 BINDING = {"channel_id": "channel-telegram", "chat_id": "-10042", "manager_id": "manager",
            "created_at": "2026-10-25T12:00:00+00:00", "channel_type": "telegram", "bot_name": "Example bot",
            "chat_name": None, "manager_name": "Example Manager", "manager_enabled": False,
-           "manager_deleted": False, "allowed_senders": []}
+           "manager_deleted": False, "allowed_senders": [], "sender_policy": "listed"}
 SEEN = {"chat_id": "-10042", "name": None, "count": None, "last_at": None, "binding": BINDING,
         "effective_manager_id": "manager", "effective_manager_name": "Example Manager",
         "effective_manager_enabled": False, "effective_manager_deleted": False}
@@ -71,7 +71,8 @@ def test_operation_is_discovered_with_closed_operator_contract(operation_id, bod
     assert domain.__name__ == "looper.agents.v1_domains.chat_bindings"
     assert operation.operation_id == operation_id and operation.method == "POST"
     assert operation.operator_only and not operation.credential_write and not operation.hand
-    assert operation.risk == risk and operation.tool is None and not operation.confirms
+    assert operation.risk == risk and operation.tool is None
+    assert operation.confirms == (operation_id == "manager_chat_bindings.put")
     _closed_objects(operation.request)
     _closed_objects(operation.result)
     api_v1.validate_arguments(operation.request, body)
@@ -157,7 +158,7 @@ def test_operator_request_crosses_transport_to_domain(tmp_path, monkeypatch, ope
         async with _serving(tmp_path) as server:
             # Use the ordinary operation callback, without requiring a database audit fixture.
             async def call(principal, session, name, data, *, tool, validator):
-                return {"status": "ok", "result": await tool.run(SimpleNamespace(arguments=validator(tool.schema, data)))}
+                return {"status": "ok", "result": await tool.run(SimpleNamespace(arguments=validator(tool.schema, data), confirmation={}))}
 
             server._client_ops = SimpleNamespace()
             monkeypatch.setattr(server, "_call_v1", call)
@@ -174,6 +175,8 @@ def test_operator_request_crosses_transport_to_domain(tmp_path, monkeypatch, ope
     ("manager_chat_bindings.list", {"channel_id": ""}),
     ("manager_chat_bindings.list", {"manager_id": None}),
     ("manager_chat_bindings.put", {"channel_id": "channel-telegram", "chat_id": "1"}),
+    ("manager_chat_bindings.put", {"channel_id": "channel-lark", "chat_id": "oc_example",
+                                   "manager_id": "manager", "sender_policy": "unknown"}),
     ("manager_chat_bindings.delete", {"channel_id": "channel-telegram", "chat_id": 42}),
     ("channel_chats.list", {"channel_id": "channel-telegram", "limit": 0}),
     ("channel_chats.list", {"channel_id": "channel-telegram", "limit": 201}),
@@ -211,6 +214,12 @@ def test_mutation_without_live_registry_refuses_before_storage(monkeypatch, oper
 
 
 CLI_CASES = [
+    ("manager_chat_bindings.put", ["--channel-id", "channel-lark", "--chat-id", "oc_example",
+                                  "--manager-id", "manager", "--sender-policy", "listed"],
+     {"channel_id": "channel-lark", "chat_id": "oc_example", "manager_id": "manager", "sender_policy": "listed"}),
+    ("manager_chat_bindings.put", ["--channel-id", "channel-lark", "--chat-id", "oc_example",
+                                  "--manager-id", "manager", "--sender-policy", "chat"],
+     {"channel_id": "channel-lark", "chat_id": "oc_example", "manager_id": "manager", "sender_policy": "chat"}),
     ("manager_chat_bindings.list", ["--channel-id", "channel-telegram", "--manager-id", "manager"],
      {"channel_id": "channel-telegram", "manager_id": "manager"}),
     ("manager_chat_bindings.put", ["--channel-id", "channel-telegram", "--chat-id=-10042", "--manager-id", "manager"],

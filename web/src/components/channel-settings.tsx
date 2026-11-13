@@ -49,10 +49,10 @@ function channelIcon(type: string) {
 
 const LARK_ALLOWLIST = {
   field: "allowed_open_ids",
-  label: "Lark open_ids",
-  pattern: /^ou_[0-9A-Za-z]{8,64}$/,
-  placeholder: "ou_…",
-  hint: "Each sender's open_id for this bot's app, starting with ou_ (not a union_id or a user_id); open_ids differ per app. Direct messages to the bot are handled, and in a group only the messages that @-mention it.",
+  label: "Lark open_ids or bot app IDs",
+  pattern: /^(?:ou|cli)_[0-9A-Za-z]{8,64}$/,
+  placeholder: "ou_…, cli_…",
+  hint: "Lark user open_ids (ou_…) for this bot's app, or bot app IDs (cli_…); open_ids differ per app (not a union_id or a user_id). Direct messages to the bot are handled, and in a group only the messages that @-mention it.",
 };
 
 /** Each chat channel's sender allowlist, as the server checks it (looper/agents/channels/allowlist.py). */
@@ -172,7 +172,7 @@ function AllowlistEditor({
             Add sender
           </Button>
           <p className="text-xs text-muted-foreground">
-            {allowlist.hint} Only these senders reach the Manager, which runs any command on this machine without
+            {allowlist.hint} Only these senders reach the Manager unless the chat is open to everyone. The Manager runs any command on this machine without
             asking; messages from anyone else are dropped and logged, with no reply. With an empty list the channel
             does not start.
           </p>

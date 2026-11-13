@@ -63,6 +63,23 @@ describe("Lark bot-token settings", () => {
     expect(container.textContent).toContain("Only part of the directory was searched: use the person's email.");
   });
 
+  it.each([
+    ["ou_abcdefgh", true], ["cli_abcdefgh", true], ["cli_short", false],
+    ["cli_abc_defgh", false], ["cli_" + "a".repeat(65), false],
+  ])("checks sender id %s against the API's user and app id format", async (sender, valid) => {
+    await act(async () => root.render(<ChannelsSection />));
+    const input = container.querySelector('input[aria-label^="Allowed sender 1"]') as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, sender);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(input.getAttribute("aria-invalid")).toBe(String(!valid));
+    const save = [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Save")!;
+    expect(save.disabled).toBe(!valid);
+    expect(container.textContent).toContain("bot app IDs (cli_…)");
+    expect(container.textContent).toContain("unless the chat is open to everyone");
+  });
+
   it("explains when the platform rejects the app credentials", async () => {
     bot = null;
     await act(async () => root.render(<ChannelsSection />));

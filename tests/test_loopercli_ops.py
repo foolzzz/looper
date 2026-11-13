@@ -12,6 +12,50 @@ from looper.agents import api_v1
 from tests.test_loopercli import FakeLooper, Server, _send, write_client_file
 
 
+@pytest.mark.parametrize("source", ["file", "stdin"])
+def test_operator_confirm_keeps_the_request_principal_and_session(tmp_path, monkeypatch, capsys, source):
+    token = "transient-chat-policy-operator"
+    token_file = tmp_path / "operator-token"
+    token_file.write_text(token + "\n")
+    token_file.chmod(0o600)
+    pending = {}
+
+    def respond(handler, request):
+        _, path, headers, body = request
+        identity = (headers.get("authorization"), headers.get("x-looper-session"))
+        assert identity == (f"Bearer {token}", "chat-policy")
+        if path.endswith("openapi.json"):
+            _send(handler, 200, api_v1.document())
+        elif path.endswith("manager_chat_bindings/put"):
+            assert body["sender_policy"] == "chat"
+            pending[identity] = body
+            _send(handler, 202, {"status": "needs_confirmation", "confirmation_id": "cnf-chat-policy",
+                                 "impact": "Open this chat to everyone?", "expires_in_seconds": 300})
+        else:
+            assert path == "/api/v1/confirm" and body == {"confirmation_id": "cnf-chat-policy"}
+            _send(handler, 200, {"status": "ok", "result": {"binding": pending.pop(identity)}})
+
+    server = Server(respond)
+    try:
+        client_file = tmp_path / "client.json"
+        credentials = ["--url", server.url, "--operator-token-file", str(token_file) if source == "file" else "-"]
+        base = ["--client-file", str(client_file), "--session", "chat-policy", "--json"]
+        monkeypatch.setattr(sys, "stdin", io.StringIO(token + "\n"))
+        assert loopercli.main([*base, "manager-chat-bindings", "put", "--channel-id", "channel-lark",
+                               "--chat-id", "oc_example", "--manager-id", "manager", "--sender-policy", "chat",
+                               *credentials]) == 3
+        assert json.loads(capsys.readouterr().out)["status"] == "needs_confirmation"
+        monkeypatch.setattr(sys, "stdin", io.StringIO(token + "\n"))
+        before_confirm = len(server.requests)
+        assert loopercli.main([*base, "confirm", "cnf-chat-policy", *credentials]) == 0
+        answer = json.loads(capsys.readouterr().out)
+        assert answer["result"]["binding"]["sender_policy"] == "chat" and not pending
+        assert len(server.requests) == before_confirm + 1  # Confirmation stays usable without API discovery.
+        assert not client_file.exists()
+    finally:
+        server.close()
+
+
 @pytest.mark.parametrize("source", ["stdin", "file", "unsafe", "symlink"])
 @pytest.mark.parametrize("action", ["set-password", "clear-password"])
 def test_auth_operator_token_sources(tmp_path, monkeypatch, capsys, source, action):

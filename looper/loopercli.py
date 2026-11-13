@@ -460,6 +460,7 @@ def _login(args: argparse.Namespace, ctx: Context) -> int:
 
 def _confirm_arguments(parser: Parser) -> None:
     parser.add_argument("confirmation_id", metavar="ID", help="the id a call answered needs_confirmation with")
+    _operator_arguments(parser)
 
 
 def _confirm(args: argparse.Namespace, ctx: Context) -> int:
@@ -1591,7 +1592,7 @@ def _run(opts: argparse.Namespace, rest: list[str]) -> int:
     ctx = Context(client_file(opts.client_file), opts.session, opts.json)
     document = None
     needs_document = _needs_document(rest)
-    if needs_document or (rest and rest[0] == "config"):
+    if needs_document or (rest and rest[0] in ("config", "confirm")):
         # Discover generated operator commands with a transient token, before a client file is needed.
         # A bare --url may be an operation's request field, so only the credential flag selects this mode.
         if any(part == "--operator-token-file" or part.startswith("--operator-token-file=") for part in rest):

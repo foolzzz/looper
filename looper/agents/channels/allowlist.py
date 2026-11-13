@@ -9,7 +9,8 @@ senders their configuration lists:
   the Settings page: Telegram numeric user IDs (``allowed_user_ids``) and Lark
   ``open_id`` values (``allowed_open_ids``, the sender id the Lark adapter
   reads from each message event);
-- a message from anyone else, except a chat binding's extra senders in that chat only,
+- a message from anyone else, except a chat binding's extra senders or a Lark
+  binding explicitly open to everyone in that group,
   never reaches the Manager: the adapter logs one
   line with the channel and the sender id (never the text) and sends no reply;
 - a channel whose list is empty or invalid does not start (``start_problem``
@@ -63,9 +64,9 @@ SENDER_ID_FORMATS: dict[str, SenderIdFormat] = {
         label="Lark open_id",
         # The adapter matches the open_id Lark sends with each message
         # (event.sender.sender_id.open_id), stable for one user in one app.
-        pattern=re.compile(r"ou_[0-9A-Za-z]{8,64}"),
+        pattern=re.compile(r"(?:ou_[0-9A-Za-z]{8,64}|cli_[0-9A-Za-z]{8,64})"),
         hint="use the sender's open_id for this app, which starts with ou_ "
-             "(a union_id starts with on_, and a user_id has no prefix)",
+             "or a bot app id starting with cli_ when its open_id is unavailable",
     ),
 }
 SENDER_ID_FORMATS["lark_bot"] = SENDER_ID_FORMATS["lark"]
@@ -155,7 +156,8 @@ class SenderAllowlist:
     channel_id: str  # names the channel in log lines
     ids: frozenset[str]
 
-    def admits(self, sender_id: object, *, chat_senders: frozenset[str] = frozenset()) -> bool:
+    def admits(self, sender_id: object, *, chat_senders: frozenset[str] = frozenset(),
+               log_refusal: bool = True) -> bool:
         """Whether a message from ``sender_id`` may reach the Manager.
 
         A refused sender is logged as one line with the channel and the id,
@@ -164,8 +166,9 @@ class SenderAllowlist:
         sender = "" if sender_id is None else str(sender_id)
         if sender and (sender in self.ids or sender in chat_senders):
             return True
-        logger.warning("%s: dropped a message from sender %r, who is not on the sender allowlist",
-                       self.channel_id, sender[:80] or "<unknown>")
+        if log_refusal:
+            logger.warning("%s: dropped a message from sender %r, who is not on the sender allowlist",
+                           self.channel_id, sender[:80] or "<unknown>")
         return False
 
 

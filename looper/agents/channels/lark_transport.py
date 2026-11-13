@@ -24,7 +24,8 @@ class LarkTransport(Protocol):
                    text: str | None = None, markdown: str | None = None,
                    idempotency_key: str | None = None, return_id: bool = False) -> str | None: ...
     async def reply(self, message_id: str, *, text: str | None = None, markdown: str | None = None,
-                    idempotency_key: str | None = None, return_id: bool = False) -> str | None: ...
+                    idempotency_key: str | None = None, return_id: bool = False,
+                    reply_in_thread: bool = False) -> str | None: ...
     async def edit(self, message_id: str, *, text: str) -> None: ...
     async def react(self, message_id: str) -> None: ...
     async def download(self, message_id: str, ref: ResourceRef, part: Path, *, max_bytes: int) -> None: ...
@@ -143,9 +144,11 @@ class CliTransport:
             idempotency_key=idempotency_key), return_id=return_id, resolve_thread=chat_id is not None)
 
     async def reply(self, message_id: str, *, text: str | None = None, markdown: str | None = None,
-                    idempotency_key: str | None = None, return_id: bool = False) -> str | None:
+                    idempotency_key: str | None = None, return_id: bool = False,
+                    reply_in_thread: bool = False) -> str | None:
         return await self._message(lark_cli.reply_command(
-            message_id, text=text, markdown=markdown, profile=self._profile, idempotency_key=idempotency_key),
+            message_id, text=text, markdown=markdown, profile=self._profile,
+            idempotency_key=idempotency_key, reply_in_thread=reply_in_thread),
             return_id=return_id, resolve_thread=True)
 
     async def _message(self, argv: list[str], *, return_id: bool, resolve_thread: bool = False) -> str | None:

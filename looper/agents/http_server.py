@@ -550,8 +550,10 @@ class AgentHTTPServer:
 
     async def _call_v1(self, principal: api_v1.Principal, session: str, name: str, data: Any,
                        **kwargs: Any) -> dict[str, Any]:
+        # Opening chats or granting their Manager all tools also requires operator consent.
+        requires_consent = principal.kind == "client" or name in ("manager_chat_bindings.put", "managers.update")
         return await self._client_ops.call(principal, session, name, data,
-                                          require_confirmation=principal.kind == "client", **kwargs)
+                                          require_confirmation=requires_consent, **kwargs)
 
     async def _v1_domain(self, operation: api_v1.Operation, headers: Mapping[str, str], body: bytes,
                          principal: api_v1.Principal, *, writer: asyncio.StreamWriter | None = None
@@ -597,11 +599,16 @@ class AgentHTTPServer:
                 raise OpError(ErrorCode.UNAVAILABLE, "the API is not ready")
 
             async def run(call: Call) -> dict[str, Any]:
+                if operation.operation_id in ("manager_chat_bindings.put", "managers.update"):
+                    return await invoke(domain.run, call.arguments, call.confirmation)
                 return await invoke(domain.run, call.arguments)
 
             async def impact(call: Call) -> str | None:
-                result = await invoke(domain.impact, call.arguments)
-                if operation.risk == "high" and not isinstance(result, str):
+                result = (await invoke(domain.impact, call.arguments, call.confirmation)
+                          if operation.operation_id in ("manager_chat_bindings.put", "managers.update") else
+                          await invoke(domain.impact, call.arguments))
+                if (operation.risk == "high" and not isinstance(result, str)
+                        and not (principal.kind == "operator" and operation.operation_id == "managers.update")):
                     raise OpError(ErrorCode.UNAVAILABLE, "the operation has no confirmation impact")
                 return result
 

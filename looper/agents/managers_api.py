@@ -365,7 +365,15 @@ async def create_manager(data: Mapping[str, Any]) -> dict[str, Any]:
     return {"manager": await _one_view(manager_id)}
 
 
-async def update_manager(manager_id: str, data: Mapping[str, Any]) -> dict[str, Any]:
+async def open_chats(manager_id: str, *, conn: asyncpg.Connection | None = None) -> list[tuple[str, str]]:
+    rows = await (conn or db_connection.get_pool()).fetch(
+        "SELECT channel_id, chat_id FROM manager_chat_bindings "
+        "WHERE manager_id = $1 AND sender_policy = 'chat' ORDER BY channel_id, chat_id", manager_id)
+    return [(row["channel_id"], row["chat_id"]) for row in rows]
+
+
+async def update_manager(manager_id: str, data: Mapping[str, Any], *,
+                         expected_open_chats: list[tuple[str, str]] | None = None) -> dict[str, Any]:
     """Change the fields given of a Manager (404 when unknown or deleted). The default Manager takes ``name`` and
     ``description`` and ``idle_timeout_seconds: 0`` only. A write of ``enabled: true`` takes ``lock_managers`` and re-reads the row under
     ``FOR UPDATE``, whatever an earlier read said, before it counts the enabled Managers. Answers
@@ -392,6 +400,11 @@ async def update_manager(manager_id: str, data: Mapping[str, Any]) -> dict[str, 
             current = await db_managers.lock_for_update(manager_id, conn=conn)
             if current is None or current["deleted_at"] is not None:
                 raise _refuse(f"no Manager {manager_id!r}", HTTP_404)
+            # Binding writes take a share lock on this Manager before opening a chat.
+            # Recheck under FOR UPDATE so consent cannot silently cover more chats.
+            if (checked.get("tools") == "all" and expected_open_chats is not None
+                    and await open_chats(manager_id, conn=conn) != expected_open_chats):
+                raise _refuse("Open chats changed; submit the Manager update again", HTTP_409)
             values = dict(checked)
             scope, ids = final_scope(current, values)
             if values.get("enabled") is True and not current["enabled"]:
