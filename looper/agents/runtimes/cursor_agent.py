@@ -435,8 +435,8 @@ class CursorAgentRuntime(RuntimeAdapter):
         return None
 
     async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None,
-                            launcher: Launcher = Launcher.NATIVE) -> str | None:
-        return await cursor_login.launch_problem()
+                            launcher: Launcher = Launcher.NATIVE, wait: bool = True) -> str | None:
+        return await cursor_login.launch_problem(wait=wait)
 
     async def after_run(self, launch: Launch, command: list[str]) -> list[str]:
         # Resident commands have no TMPDIR: their session keeps it until reclamation.

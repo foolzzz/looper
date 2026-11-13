@@ -89,16 +89,18 @@ class CocoRuntime(CodexRuntime):
             raise RuntimeUnsupported("coco takes no effort level in Looper yet")
 
     async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None,
-                            launcher: Launcher = Launcher.NATIVE) -> str | None:
+                            launcher: Launcher = Launcher.NATIVE, wait: bool = True) -> str | None:
         command = native_executable(executable, launcher)
         if launcher is Launcher.TTADK:
-            problem = await ttadk.sign_in_problem(executable or "ttadk", "trae-cli")
+            problem = await ttadk.sign_in_problem(executable or "ttadk", "trae-cli", wait=wait)
             if problem and problem.blocks_launch:
                 return problem.message(self.type)
-        if problem := await coco_login.launch_problem(command):
+        if problem := await coco_login.launch_problem(command, wait=wait):
             return problem
         # Resolved profiles expose only the selected model in their binding catalog.
         if len(provider.catalog) == 1:
+            if not wait:
+                return _catalog_problem(provider.catalog[0].name, coco_login.cached_models(command))
             return await asyncio.to_thread(model_problem, provider.catalog[0].name,
                                            command)
         return None

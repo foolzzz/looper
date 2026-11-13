@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from typing import Any
 
 import pytest
 
-from looper.agents import profile_registry, session_profile
 from looper.agents.agent_settings import AgentSettings
 from looper.agents.profile_registry import (
     Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
 )
-from looper.agents.runtimes import ApiProtocol, AuthKind, VendorType, adapter
+from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, VendorType, adapter
 from looper.agents.session_profile import (
     Effect, ProfileChoice, ProfileCommand, ProfileCommandKind as Kind, ProfileRefError, choices, display_name,
     effect, format_list, parse_profile_command, resolve_ref,
@@ -95,30 +93,21 @@ def test_format_list():
     assert text[-1].startswith("发送 /profile <编号> 切换")
 
 
-def _view(profile: ResolvedAgentProfile, roles: list[str]) -> dict[str, Any]:
-    return {"profile_id": profile.id, "name": profile.name, "effort": profile.effort, "roles": roles,
-            "runtime_name": profile.runtime.name, "provider_name": profile.resolved_model.provider.name,
-            "model": {"name": profile.model}}
-
-
 def test_choices(monkeypatch):
     from looper.db import profile_registry as db
 
     zeta, alpha, worker_only = _profile("p1", name="zeta"), _profile("p2", name="alpha"), _profile("p3", name="w")
+    worker_only = replace(worker_only, runtime=replace(worker_only.runtime, capabilities=frozenset(
+        c for c in worker_only.runtime.capabilities if c is not Capability.RESIDENT_SESSION)))
     rows = {p.id: _row(p) for p in (zeta, alpha, worker_only)}
 
-    async def view(**_):
-        return {"profiles": [_view(zeta, ["manager", "worker"]), _view(alpha, ["manager"]),
-                             _view(worker_only, ["worker"])]}
-
-    async def get_profile(profile_id, **_):
-        return rows[profile_id]
+    async def list_profiles(**_):
+        return list(rows.values())
 
     async def no_key(*_, **__):
         return None
 
-    monkeypatch.setattr(profile_registry, "registry_view", view)
-    monkeypatch.setattr(db, "get_profile", get_profile)
+    monkeypatch.setattr(db, "list_profiles", list_profiles)
     monkeypatch.setattr(db, "get_api_key", no_key)
     listed = asyncio.run(choices(None, replace(AgentSettings(), profile=zeta)))
     assert [(c.number, c.name) for c in listed] == [(1, "alpha"), (2, "zeta")]

@@ -123,8 +123,10 @@ def _background_probe() -> None:
         _probe_lock.release()
 
 
-async def launch_problem() -> str | None:
-    status = await asyncio.to_thread(cached_probe)
+async def launch_problem(*, wait: bool = True) -> str | None:
+    status = await asyncio.to_thread(cached_probe) if wait else cached_status()
+    if status is None:
+        return None
     if status.state is LoginState.LOGGED_IN:
         return None
     if status.state is LoginState.NOT_LOGGED_IN:
@@ -133,19 +135,26 @@ async def launch_problem() -> str | None:
             "run `cursor-agent status` on this machine")
 
 
-async def login_view() -> dict[str, str | bool]:
-    """Return the last answer immediately and refresh it in one background probe when needed."""
+def cached_status() -> LoginStatus | None:
+    """Return the last answer without waiting; at most one thread refreshes stale state."""
     probed = _probed
     stale = probed is None or time.monotonic() - probed[0] > _PROBE_TTL_SEC
-    refreshing = stale or _probe_lock.locked()
     if stale and _probe_lock.acquire(blocking=False):
         try:
             threading.Thread(target=_background_probe, name="cursor-login-status", daemon=True).start()
         except BaseException:
             _probe_lock.release()
             raise
-    view: dict[str, str | bool] = ({"state": "checking", "detail": "checking the Cursor login"} if probed is None
-                                  else {"state": probed[1].state.value, "detail": probed[1].detail})
+    return probed[1] if probed else None
+
+
+async def login_view() -> dict[str, str | bool]:
+    """Return the last answer immediately and refresh it in one background probe when needed."""
+    probed = _probed
+    refreshing = probed is None or time.monotonic() - probed[0] > _PROBE_TTL_SEC or _probe_lock.locked()
+    status = cached_status()
+    view: dict[str, str | bool] = ({"state": "checking", "detail": "checking the Cursor login"} if status is None
+                                  else {"state": status.state.value, "detail": status.detail})
     if refreshing:
         view["refreshing"] = True
     return view

@@ -325,7 +325,7 @@ class GrokRuntime(RuntimeAdapter):
         return None
 
     async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None,
-                            launcher: Launcher = Launcher.NATIVE) -> str | None:
+                            launcher: Launcher = Launcher.NATIVE, wait: bool = True) -> str | None:
         """Why a run with Grok's own login cannot start now (``grok_login.launch_problem``)."""
         return await grok_login.launch_problem()
 
