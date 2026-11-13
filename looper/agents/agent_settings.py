@@ -723,14 +723,15 @@ async def load_task_limit(role: AgentType, task_id: str | None) -> int:
 async def load_agent_settings(
     role: AgentType | str, project_id: str | None = None, task_id: str | None = None, step_id: str | None = None,
     task_role: tuple[str, int] | None = None, manager_session: bool = True, manager_id: str = "manager",
-    *, profile_id: str | None = None,
+    *, profile_id: str | None = None, wait: bool = True,
 ) -> AgentSettings:
     """``role``'s settings in ``project_id`` (or outside any project) and, with ``task_id``, the profile that task
     and its Planner chose for it (with ``step_id``, the Planner's choice for that step too; with ``task_role``, a
     role's key and version, the profile of that role of the task), read now; the built-in defaults, with ``error``
     set, when the layers cannot be read. The Manager ``manager_id``'s settings include the profile of its definition and, unless
     ``manager_session`` is False, the profile chosen for its session. ``profile_id`` pins an existing run's
-    recorded profile when adopting it, ahead of the current selection."""
+    recorded profile when adopting it, ahead of the current selection. Views pass ``wait=False`` to use cached
+    login checks; launches wait for a current answer by default."""
     from ..db import agent_setting_layers, profile_registry
 
     extra: dict[str, Any] = {}
@@ -760,7 +761,7 @@ async def load_agent_settings(
             return replace(settings, profile=builtin_resolved_profile(),
                            profile_error=f"cannot read the built-in model binding ({type(exc).__name__})")
         settings = replace(settings, profile=profile)
-    return await _check_profile_settings(settings, AgentType(role))
+    return await _check_profile_settings(settings, AgentType(role), wait=wait)
 
 
 async def fallback_settings(settings: AgentSettings, role: AgentType) -> AgentSettings | None:
@@ -781,12 +782,12 @@ async def fallback_settings(settings: AgentSettings, role: AgentType) -> AgentSe
                                                  profile_error=None, pricing_catalog=()), role)
 
 
-async def _check_profile_settings(settings: AgentSettings, role: AgentType) -> AgentSettings:
+async def _check_profile_settings(settings: AgentSettings, role: AgentType, *, wait: bool = True) -> AgentSettings:
     problem = profile_problem(settings.profile, role)
     if problem is None and settings.profile.provider.auth is AuthKind.API_KEY:
         settings, problem = await _with_api_key(settings)
     elif problem is None:
-        problem = await _login_problem(settings.profile)
+        problem = await _login_problem(settings.profile, wait=wait)
     if (problem is None and isinstance(settings.profile, ResolvedAgentProfile)
             and Launch(settings).cost_source is CostSource.PROVIDER_PRICE):
         from ..db import profile_registry
@@ -805,7 +806,7 @@ async def _check_profile_settings(settings: AgentSettings, role: AgentType) -> A
     return replace(settings, profile_error=problem)
 
 
-async def profile_launch_problem(profile: AgentProfile, role: AgentType) -> str | None:
+async def profile_launch_problem(profile: AgentProfile, role: AgentType, *, wait: bool = True) -> str | None:
     """Why ``profile`` cannot launch ``role`` now: the checks ``load_agent_settings`` runs after resolving, in its
     order (``profile_problem``, then the API key or the runtime's own login); None when it can."""
     problem = profile_problem(profile, role)
@@ -813,24 +814,24 @@ async def profile_launch_problem(profile: AgentProfile, role: AgentType) -> str 
         return problem
     if profile.provider.auth is AuthKind.API_KEY:
         return (await _with_api_key(replace(BUILTIN_SETTINGS, profile=profile)))[1]
-    return await _login_problem(profile)
+    return await _login_problem(profile, wait=wait)
 
 
-async def _login_problem(profile: AgentProfile) -> str | None:
+async def _login_problem(profile: AgentProfile, *, wait: bool = True) -> str | None:
     """Why ``profile``'s runtime cannot run with its own login now (``RuntimeAdapter.login_problem``)."""
     from .runtimes import Launcher, adapter, ttadk
 
     runtime = adapter(profile.runtime.type)
     found = runtime.ttadk_problem() if profile.runtime.launcher is Launcher.TTADK else None
     problem = found.message(profile.runtime.type) if found else await runtime.login_problem(
-        profile.provider, executable=profile.runtime.executable, launcher=profile.runtime.launcher)
+        profile.provider, executable=profile.runtime.executable, launcher=profile.runtime.launcher, wait=wait)
     if not problem and profile.runtime.launcher is Launcher.TTADK:
         if runtime.ttadk_tool is None:
             problem = f"{runtime.label} cannot be launched through ttadk"
-        elif found := await ttadk.sign_in_problem(profile.runtime.executable or "ttadk", runtime.ttadk_tool):
+        elif found := await ttadk.sign_in_problem(profile.runtime.executable or "ttadk", runtime.ttadk_tool, wait=wait):
             if found.blocks_launch:
                 problem = found.message(profile.runtime.type)
-            elif found is ttadk.TtadkProblem.CHECK_FAILED:
+            elif wait and found is ttadk.TtadkProblem.CHECK_FAILED:
                 logger.warning("TTADK sign-in check could not finish (%s); starting run", found.value)
     return f"Agent Profile {profile.name!r} cannot run: {problem}" if problem else None
 

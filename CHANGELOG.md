@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.179] - 2026-11-13
+
+### Fixed
+
+- **Session profile reads and selection no longer wait for runtime sign-in probes.** ([#1334](https://github.com/foolzzz/looper/pull/1334))
+  - Behavior change: views and profile selection use cached TTADK, Cursor and Coco sign-in state with one background refresh; unknown state returns `problem: null` and an optional `checking` field, and selection accepts it but rejects a known blocking problem. Launches still wait for the login check.
+  - The HTTP server resolves its API route registry before listening, so the first session request no longer times out on cold route discovery.
+  - Not model-visible: no prompt or tool schema changed; the session profile choice result gains the optional `checking` field.
+
 ## [2.14.178] - 2026-11-13
 
 ### Changed

@@ -80,7 +80,11 @@ def test_provider_view_reports_and_clears_a_forked_coco_login(monkeypatch, tmp_p
             provider = next(p for p in listed['providers'] if p['provider_id'] == 'prov-coco-login')
             assert provider['login']['state'] == 'unavailable'
             cleared = await profile_registry.clear_login_problem('prov-coco-login')
-            assert cleared['provider']['login']['state'] == 'not_logged_in'
+            assert cleared['provider']['login']['state'] == 'checking'
+            await asyncio.to_thread(coco_login.cached_probe)
+            listed = await profile_registry.list_providers()
+            provider = next(p for p in listed['providers'] if p['provider_id'] == 'prov-coco-login')
+            assert provider['login']['state'] == 'not_logged_in'
             assert await coco_login.recorded_problem() is None
             check = await self_check.coco_login_check()
             assert check.status == self_check.SKIP
