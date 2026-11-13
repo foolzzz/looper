@@ -6,6 +6,7 @@ The compact client discovery tools keep their existing projections.
 """
 
 from .. import profile_registry
+from ..model_names import MODEL_NAME_SCHEMA
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL
 from ..ops.config import answered
 from ..runtimes import ApiFamily, ApiProtocol, AuthKind, VendorType as VendorKind, ROLE_CAPABILITIES
@@ -60,7 +61,7 @@ PROVIDER = _object({
 MODEL_PRICE = _object({"override": _NULL_NUMBER, "effective": _NULL_NUMBER,
     "source": {"type": "string", "enum": ["override", "builtin", "unknown"]}}, closed=True)
 MODEL = _object({
-    "model_id": _STR, "provider_id": _STR, "provider_name": _STR, "name": _STR,
+    "model_id": _STR, "provider_id": _STR, "provider_name": _STR, "name": MODEL_NAME_SCHEMA,
     "provider_enabled": _BOOL,
     "protocol": API_PROTOCOL, "context_window": _NULL_INT,
     **dict.fromkeys(profile_registry.PRICE_FIELDS, _NULL_NUMBER),

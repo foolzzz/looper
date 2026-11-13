@@ -24,6 +24,7 @@ from typing import Any, TypeVar
 from ...db import llm_records as db_llm_records, projects as db_projects, managers as db_managers
 from .. import catalog, profile_registry, projects
 from ..agent_settings import SettingsError, SettingsNotFound
+from ..model_names import MODEL_NAME_SCHEMA
 from ..projects import RequestError, project_name
 from ..llmrec.dialects import ChatDialect
 from ..runtimes import ApiProtocol, AuthKind, VendorType
@@ -638,14 +639,14 @@ _PROVIDER_ENDPOINT = {
 _MODEL_REFERENCE = {"oneOf": [
     {"type": "string", "minLength": 1, "pattern": "^model-[a-zA-Z0-9-]+$", "description": "Model id from list."},
     {"type": "object", "required": ["provider", "name", "protocol"], "additionalProperties": False,
-     "properties": {"provider": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1},
+     "properties": {"provider": {"type": "string", "minLength": 1}, "name": MODEL_NAME_SCHEMA,
                     "protocol": _PROTOCOL}},
 ]}
 _MODEL_SETTINGS = {
     "context_window": {"type": ["integer", "null"]},
     **{field: {"type": ["number", "null"]} for field in profile_registry.PRICE_FIELDS},
     "efforts": {"type": ["array", "null"], "items": {"type": "string"}},
-    "background_model": {"type": ["string", "null"]},
+    "background_model": {**MODEL_NAME_SCHEMA, "type": ["string", "null"]},
     "chat_dialect": {"type": ["string", "null"],
                      "enum": [None, *[dialect.value for dialect in ChatDialect]],
                      "description": "OpenAI Chat Completions dialect; null uses the provider vendor default. "
@@ -742,7 +743,7 @@ TOOLS: tuple[Tool, ...] = (
                 "action": {"type": "string", "enum": ["list", "create", "update", "delete"]},
                 "provider": {"type": "string", "minLength": 1, "description": "Account id or name (list, create)."},
                 "runtime": {"type": "string", "minLength": 1, "description": "Runtime id, name or type (list)."},
-                "name": {"type": "string", "minLength": 1, "description": "Exact model name (create)."},
+                "name": {**MODEL_NAME_SCHEMA, "description": "Exact model name (create)."},
                 "protocol": _PROTOCOL,
                 "model": _MODEL_REFERENCE,
                 **_MODEL_SETTINGS,

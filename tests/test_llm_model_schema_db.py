@@ -260,3 +260,29 @@ def test_chat_dialect_additive_upgrade_and_protocol_constraint():
         await connection.ensure_schema(conn)
         assert not await connection.schema_change_pending(conn)
     _run(test)
+
+
+@pytest.mark.parametrize('upgrade', [False, True], ids=['fresh', 'upgrade'])
+def test_model_name_constraints_share_parameter_grammar(upgrade):
+    async def test(conn):
+        if upgrade:
+            await conn.execute("ALTER TABLE llm_models DROP CONSTRAINT llm_models_name_check, "
+                               "DROP CONSTRAINT llm_models_background_model_check")
+            for field in ('name', 'background_model'):
+                await conn.execute(f"ALTER TABLE llm_models ADD CHECK (length({field}) BETWEEN 1 AND 200 "
+                                   f"AND {field} ~ '^[A-Za-z0-9][A-Za-z0-9._:/\\[\\]-]*$')")
+            await conn.execute("DELETE FROM schema_migrations WHERE name = 'model_name_parameters'")
+            assert await connection.schema_change_pending(conn)
+            await connection.ensure_schema(conn)
+        await _model(conn)
+        name = 'grok-4.7[context=500k,reasoning_effort=high,fast=true]'
+        await conn.execute("UPDATE llm_models SET name = $1, background_model = $1 WHERE id = 'model-test'", name)
+        row = await conn.fetchrow("SELECT name, background_model FROM llm_models WHERE id = 'model-test'")
+        assert tuple(row) == (name, name)
+        for field in ('name', 'background_model'):
+            for invalid in ('name[', 'name[]', 'name[a=b]x', 'name[a b=c]', 'name\n', '', 'a' * 201):
+                with pytest.raises(asyncpg.CheckViolationError):
+                    await conn.execute(f"UPDATE llm_models SET {field} = $1 WHERE id = 'model-test'", invalid)
+        await connection.ensure_schema(conn)
+        assert not await connection.schema_change_pending(conn)
+    _run(test)

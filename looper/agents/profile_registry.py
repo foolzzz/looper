@@ -617,7 +617,8 @@ def _models(raw: Any) -> list[dict[str, Any]]:
         if any(m["name"] == name for m in models):
             raise RegistryError(f"model {name!r} is listed twice")
         try:
-            background = model_name(entry.get("background_model"), field="background_model") or None
+            background_raw = entry.get("background_model")
+            background = model_name(None if background_raw == "" else background_raw, field="background_model") or None
         except SettingsError as exc:
             raise RegistryError(str(exc)) from None
         dialect = entry.get("chat_dialect")

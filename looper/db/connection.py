@@ -11,6 +11,8 @@ from pathlib import Path
 
 import asyncpg
 
+from looper.agents.model_names import MODEL_MAX_CHARS, MODEL_NAME_PATTERN
+
 logger = logging.getLogger(__name__)
 
 _pool: asyncpg.Pool | None = None
@@ -119,6 +121,7 @@ _PROJECT_ACTIVITY = "project_activity"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
+_MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 
 _LLM_REQUESTS_DDL = """
@@ -632,6 +635,11 @@ async def _classify_schema(conn: asyncpg.Connection, sql: str) -> str:
     return "bridge"
 
 
+async def _model_name_parameters_pending(conn: asyncpg.Connection) -> bool:
+    return not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                                   _MODEL_NAME_PARAMETERS)
+
+
 async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     from .bridge_upgrade import BASELINE, upgrade_from_bridge
 
@@ -644,6 +652,17 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute(sql)
         elif state == "bridge":
             await upgrade_from_bridge(conn)
+        if await _model_name_parameters_pending(conn):
+            # Use the application's grammar rather than maintaining a second
+            # regex in SQL. NOT VALID preserves historical malformed names on
+            # upgrade; all new inserts/updates still enforce the new grammar.
+            pattern = MODEL_NAME_PATTERN.replace("'", "''")
+            for field in ("name", "background_model"):
+                constraint = f"llm_models_{field}_check"
+                await conn.execute(f"ALTER TABLE llm_models DROP CONSTRAINT {constraint}, "
+                    f"ADD CONSTRAINT {constraint} CHECK (length({field}) BETWEEN 1 AND {MODEL_MAX_CHARS} "
+                    f"AND {field} ~ '{pattern}')" + (" NOT VALID" if state != "empty" else ""))
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MODEL_NAME_PARAMETERS)
         # One additive upgrade for a baseline that predates schedules.user_gates,
         # including the bridge. An empty database already has the column from
         # schema.sql and records only post_bridge_baseline. Once this marker is
@@ -817,6 +836,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         state = await _classify_schema(conn, sql)
         return state == "bridge" or (state == "current" and (
             await _schedule_user_gates_pending(conn) or await _cursor_login_pending(conn)
+            or await _model_name_parameters_pending(conn)
             or await _coco_login_pending(conn)
             or await _runtime_launcher_pending(conn) or await _profile_fallback_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
