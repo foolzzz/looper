@@ -18,6 +18,19 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.175] - 2026-11-13
+
+### Changed
+
+- **A Lark bound chat can be opened to everyone in it, and bots that @-mention the bot are answered.** ([#1318](https://github.com/foolzzz/looper/pull/1318))
+  - Each chat binding has a `sender_policy`: `listed` (default; the channel's allowlist plus the binding's extra senders) or `chat` (Lark only; everyone in that bound group chat, people and bots, except the channel's own bot). Existing bindings keep `listed`. A rebind to another Manager resets the policy to `listed`; omitting it on the same Manager keeps it. Direct messages always use `listed`.
+  - Behavior change (maintainer decision): the drop of messages from bot senders is removed. A bot passes the same admission as a person, so allowlisted bots (`allowed_senders` now also takes bot app ids `cli_…`) now get answers. The bot's own messages are ignored.
+  - Bound group chats are polled every 30 s for bot messages that @-mention the bot, which are handled once; at most 10 bot-triggered turns per chat per hour, then they are dropped with a warning. Replies to a message inside a thread are sent into that thread.
+  - Setting `chat` on a Manager with all tools needs a confirmation, as does giving a Manager all tools while chats are open to everyone (the confirmation lists them); the write is refused with a conflict if the Manager's permissions or the open chats changed in between. `looper confirm` now accepts the operator credential arguments.
+  - Settings page: Managers → chat bindings gain a "Who can reach this Manager" selector and the confirmation step.
+  - Schema: `manager_chat_bindings.sender_policy` (`listed`/`chat`, default `listed`), added on the first start (additive).
+  - Model-visible: bot messages now reach the Manager, and a thread message's `channel_context` carries `thread_id`.
+
 ## [2.14.174] - 2026-11-13
 
 ### Changed
