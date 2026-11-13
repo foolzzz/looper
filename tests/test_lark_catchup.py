@@ -103,10 +103,10 @@ def seed_boundary(root: Path, at: float) -> None:
         inbox.close()
 
 
-async def catchup_done(instance: LarkChannelAdapter, transport: HistoryTransport) -> None:
+async def catchup_done(instance: LarkChannelAdapter, transport: HistoryTransport, *, timeout: float = 3) -> None:
     await asyncio.wait_for(transport.consumer_started.wait(), 3)
     assert instance._catchup_task is not None
-    await asyncio.wait_for(instance._catchup_task, 3)
+    await asyncio.wait_for(instance._catchup_task, timeout)
 
 
 @pytest.fixture(autouse=True)
@@ -179,7 +179,7 @@ def test_minute_history_overlaps_restart_window_without_ending_thread_scan(
         tokens = []
 
         async def roots(chat_id, *, page_token=""):
-            return {"threads": ["omt_minute"], "has_more": False}
+            return {"roots": [{"thread_id": "omt_minute", "create_time": str(int(now * 1000))}], "has_more": False}
 
         async def replies(thread_id, *, page_token=""):
             tokens.append(page_token)
@@ -257,7 +257,7 @@ def test_thread_catchup_never_requests_search_scopes(tmp_path, monkeypatch, scop
                 items = [raw_message(history_message("om_reply", at=now - 5,
                                                      parent_id="om_gate", root_id="om_gate"))]
             else:
-                items = [{"thread_id": "omt_old"}] if "start_time" not in params else []
+                items = [{"thread_id": "omt_old", "create_time": str(int((now - 3600) * 1000))}] if "start_time" not in params else []
             return {"data": {"items": items, "has_more": False}}
 
         monkeypatch.setattr(lark_cli, "run_json", run_json)
@@ -310,7 +310,7 @@ def test_thread_reply_keeps_raw_references_for_gate_routing(
             elif "start_time" in params:
                 items = [raw_message({**reply, **raw})] if source == "chat" else []
             else:
-                items = [{"thread_id": "omt_gate"}]
+                items = [{"thread_id": "omt_gate", "create_time": str(int((now - 3600) * 1000))}]
             return {"data": {"items": items, "has_more": False}}
 
         posted = []
@@ -400,7 +400,8 @@ def test_restart_recovers_nested_and_old_thread_mentions(
                 return {"data": {"items": items, "has_more": False}}
             if params["container_id_type"] == "chat":
                 assert params["sort_type"] == "ByCreateTimeDesc"
-                return {"data": {"items": [{"thread_id": "omt_old" if token else "omt_recent"}],
+                return {"data": {"items": [{"thread_id": "omt_old" if token else "omt_recent",
+                                             "create_time": str(int((now - (3600 if token else 50)) * 1000))}],
                                  "has_more": not token, "page_token": "roots-next"}}
             assert params["container_id_type"] == "thread"
             assert params["sort_type"] == "ByCreateTimeDesc"
@@ -483,7 +484,8 @@ def test_busy_roots_do_not_hide_recent_replies_or_stall_next_restart(
                 if params["container_id_type"] == "chat":
                     page = int(params.get("page_token", "0"))
                     root_pages.append(page)
-                    return {"data": {"items": [{"thread_id": f"omt_new_{page}_{i}"} for i in range(50)],
+                    return {"data": {"items": [{"thread_id": f"omt_new_{page}_{i}",
+                                                "create_time": str(int((clock[0] - 3600) * 1000))} for i in range(50)],
                                      "has_more": True, "page_token": str(page + 1)}}
                 return {"data": {"items": [raw_message(reply)] if params["container_id"] == "omt_buried" else [],
                                  "has_more": False}}
@@ -503,7 +505,7 @@ def test_busy_roots_do_not_hide_recent_replies_or_stall_next_restart(
                 if restart:
                     expected.append("om_main_1")
                 assert ids == expected
-                assert instance._inbox.debts()
+                assert instance._inbox.debts() == {}
                 assert root_pages == list(range(5))
                 # Keep the consumer up beyond the original boundary's expiry, then stop cleanly.
                 clock[0] += 16 * 60
@@ -521,8 +523,8 @@ def test_busy_roots_do_not_hide_recent_replies_or_stall_next_restart(
     asyncio.run(asyncio.wait_for(run(), 8))
 
 
-@pytest.mark.parametrize("failure", ["root_error", "root_limit", "reply_error", "reply_limit", "reply_cursor"])
-def test_incomplete_thread_scan_preserves_debt_and_advances_live_boundary(
+@pytest.mark.parametrize("failure", ["root_error", "root_limit"])
+def test_only_root_discovery_errors_preserve_debt_while_live_boundary_advances(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
 ) -> None:
     from looper.agents.channels.lark_cli import LarkCliError
@@ -539,21 +541,14 @@ def test_incomplete_thread_scan_preserves_debt_and_advances_live_boundary(
         transport.pages["oc_synthetic_group"] = [{"messages": [], "chat_type": "group", "has_more": False}]
 
         async def list_threads(chat_id, *, page_token=""):
-            if failure.startswith("root"):
-                entered.set()
-                await release.wait()
-                if failure == "root_error":
-                    raise LarkCliError("synthetic root read failure")
-                return {"threads": [], "has_more": True, "page_token": "next"}
-            return {"threads": ["omt_old"], "has_more": False}
-
-        async def list_thread_messages(thread_id, *, page_token=""):
             entered.set()
             await release.wait()
-            if failure == "reply_error":
-                raise LarkCliError("synthetic reply read failure")
-            return {"messages": [], "chat_type": "group", "has_more": True,
-                    "page_token": "" if failure == "reply_cursor" else "next"}
+            if failure == "root_error":
+                raise LarkCliError("synthetic root read failure")
+            return {"roots": [], "has_more": True, "page_token": "next"}
+
+        async def list_thread_messages(thread_id, *, page_token=""):
+            raise AssertionError("there are no candidate threads")
 
         transport.list_threads = list_threads
         transport.list_thread_messages = list_thread_messages
@@ -574,14 +569,16 @@ def test_incomplete_thread_scan_preserves_debt_and_advances_live_boundary(
             await catchup_done(instance, transport)
             await asyncio.wait_for(saved.wait(), 1)
             assert instance._inbox.boundary > boundary
-            assert instance._inbox.debts()["oc_synthetic_group"][0] == boundary - 10
+            assert bool(instance._inbox.debts()) == (failure == "root_error")
+            if failure == "root_error":
+                assert instance._inbox.debts()["oc_synthetic_group"][0] == boundary - 10
         finally:
             await instance.stop()
             await bus.shutdown()
         inbox = LarkInbox(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
         try:
             assert inbox.boundary > boundary
-            assert "oc_synthetic_group" in inbox.debts()
+            assert ("oc_synthetic_group" in inbox.debts()) == (failure == "root_error")
         finally:
             inbox.close()
 
@@ -1135,5 +1132,250 @@ def test_owed_chat_is_retried_before_new_discovery_at_chat_limit(tmp_path, monke
         finally:
             await instance.stop()
             await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("recent_roots", [30, 600])
+def test_thread_discovery_bounds_busy_chats_by_age_and_listing_budget(
+    tmp_path, caplog, recent_roots,
+):
+    async def run():
+        now = time.time()
+        seed_boundary(tmp_path, now - 60)
+        transport = HistoryTransport()
+        transport.pages["oc_synthetic_group"] = [{"messages": [], "chat_type": "group", "has_more": False}]
+        root_calls, thread_calls = [], []
+        active, peak = 0, 0
+        four_started, release = asyncio.Event(), asyncio.Event()
+
+        async def roots(chat_id, *, page_token=""):
+            offset = int(page_token or "0")
+            root_calls.append(offset)
+            items = [{"thread_id": f"omt_synthetic_{i}", "create_time": str(int(
+                (now - 3600 if i < recent_roots else now - 2 * 86400) * 1000))}
+                     for i in range(offset, min(offset + 50, 600))]
+            return {"roots": items,
+                    "has_more": offset + 50 < 600, "page_token": str(offset + 50)}
+
+        async def replies(thread_id, *, page_token=""):
+            nonlocal active, peak
+            thread_calls.append(thread_id)
+            active += 1
+            peak = max(peak, active)
+            if active == 4:
+                four_started.set()
+            try:
+                await release.wait()
+                return {"messages": [history_message(f"om_reply_{thread_id}", at=now - 5),
+                                     history_message(f"om_old_{thread_id}", at=now - 120)],
+                        "chat_type": "group", "has_more": True, "page_token": "older"}
+            finally:
+                active -= 1
+
+        transport.list_threads, transport.list_thread_messages = roots, replies
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            with caplog.at_level("INFO", logger="looper.agents.channels.lark"):
+                await instance.start(bus)
+                await asyncio.wait_for(four_started.wait(), 3)
+                await asyncio.sleep(0)  # let every scheduled listing reach the transport barrier
+                assert active == 4
+                release.set()
+                await catchup_done(instance, transport, timeout=20)
+            count = min(recent_roots, 50)
+            assert len(thread_calls) == count and len(set(thread_calls)) == count
+            assert peak == 4
+            assert len(bus.journal.undelivered()) == count
+            assert instance._inbox.debts() == {}
+            assert root_calls == ([0] if recent_roots == 30 else [0, 50, 100, 150, 200])
+            summary = next(r.message for r in caplog.records if r.message.startswith("lark_catchup "))
+            assert f"threads_scanned={count}" in summary
+            assert f"thread_roots_capped={int(recent_roots == 600)}" in summary
+            assert "thread_failures=0" in summary and "failures=0" in summary
+            assert f"too_old={count}" in summary
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 30))
+
+
+@pytest.mark.parametrize("failure", ["page_error", "page_limit", "cursor"])
+def test_thread_listing_failure_keeps_read_replies_and_completes_chat(
+    tmp_path, caplog, failure,
+):
+    async def run():
+        now = time.time()
+        seed_boundary(tmp_path, now - 60)
+        transport = HistoryTransport()
+        transport.pages["oc_synthetic_group"] = [{"messages": [], "chat_type": "group", "has_more": False}]
+
+        async def roots(chat_id, *, page_token=""):
+            root = {"thread_id": "omt_synthetic_partial", "create_time": str(int((now - 3600) * 1000))}
+            return {"roots": [root], "has_more": False}
+
+        async def replies(thread_id, *, page_token=""):
+            if page_token and failure == "page_error":
+                raise RuntimeError("synthetic next-page failure")
+            return {"messages": [history_message(f"om_synthetic_{page_token or 'first'}", at=now - 5)],
+                    "chat_type": "group", "has_more": True,
+                    "page_token": "" if failure == "cursor" else page_token + "next"}
+
+        transport.list_threads, transport.list_thread_messages = roots, replies
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            with caplog.at_level("INFO", logger="looper.agents.channels.lark"):
+                await instance.start(bus)
+                await catchup_done(instance, transport)
+            ids = [m.payload["channel_context"]["message_id"] for m in bus.journal.undelivered()]
+            assert "om_synthetic_first" in ids
+            assert len(ids) == (5 if failure == "page_limit" else 1)
+            assert instance._inbox.debts() == {}
+            summary = next(r.message for r in caplog.records if r.message.startswith("lark_catchup "))
+            assert "thread_failures=1" in summary and " failures=0" in summary
+            assert any("thread=omt_synthetic_partial" in r.message for r in caplog.records if r.levelname == "WARNING")
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("activity", ["handled", "sent", "sent_readback", "sent_chat", "sent_chat_readback"])
+def test_recent_thread_activity_survives_restart_and_recovers_old_thread_once(
+    tmp_path, monkeypatch, activity,
+):
+    import json
+    from looper.agents.channels import lark_cli
+    from looper.agents.channels.lark_transport import CliTransport
+    from looper.agents.task_notice import NotifyTarget, TargetKind
+
+    async def run():
+        clock = [time.time()]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        listed = []
+
+        async def run_json(argv):
+            assert "--as" in argv and argv[argv.index("--as") + 1] == "bot"
+            metadata = {"chat_id": "oc_synthetic_group", "thread_id": "omt_synthetic_active"}
+            if "+messages-reply" in argv or "+messages-send" in argv:
+                return {"data": {"message_id": "om_synthetic_sent", **(
+                    metadata if activity in {"sent", "sent_chat"} else {})}}
+            if "/open-apis/im/v1/messages/om_synthetic_sent" in argv:
+                return {"data": {"items": [{"message_id": "om_synthetic_sent", **metadata}]}}
+            if "/open-apis/im/v1/chats/oc_synthetic_group" in argv:
+                return {"data": {"chat_mode": "group"}}
+            params = json.loads(argv[argv.index("--params") + 1])
+            if "start_time" in params:
+                messages = []
+            elif params["container_id_type"] == "chat":
+                # An old root without our activity must not be a candidate, even on a later page.
+                return {"data": {"items": [{"thread_id": "omt_synthetic_unrelated",
+                    "create_time": str(int((clock[0] - 8 * 86400) * 1000))}],
+                    "has_more": True, "page_token": "older"}}
+            else:
+                listed.append(params["container_id"])
+                messages = [history_message("om_synthetic_new_reply", at=clock[0] - 5,
+                                            thread_id="omt_synthetic_active")]
+            return {"data": {"items": [raw_message(message) for message in messages], "has_more": False}}
+
+        monkeypatch.setattr(lark_cli, "run_json", run_json)
+
+        def transport():
+            cli, stand_in = CliTransport("synthetic-profile"), HistoryTransport()
+            cli.available = lambda: True
+            cli.consumer_started = stand_in.consumer_started
+            cli.events, cli.names, cli.react = stand_in.events, stand_in.names, stand_in.react
+            return cli
+
+        bus = MessageBus(runtime_root=tmp_path)
+        first_transport = transport()
+        first = adapter(tmp_path, first_transport)
+        try:
+            await first.start(bus)
+            await catchup_done(first, first_transport)
+            if activity == "handled":
+                assert await first._handle_lark_event(_event(
+                    chat_id="oc_synthetic_group", chat_type="group", message_id="om_synthetic_handled",
+                    content="@HelperBot hello", mentions=[BOT_MENTION], thread_id="omt_synthetic_active")) == "handled"
+            else:
+                receipt = await first.post(NotifyTarget(TargetKind.CHAT, "oc_synthetic_group"),
+                                           "Synthetic reply", reply_to=(
+                                               None if activity.startswith("sent_chat") else "om_synthetic_old_root"))
+                assert receipt.success
+            assert first._inbox.recent_threads("oc_synthetic_group", clock[0]) == ["omt_synthetic_active"]
+        finally:
+            await first.stop()
+        clock[0] += 3 * 86400
+        seed_boundary(tmp_path, clock[0] - 60)
+        for _ in range(2):
+            current_transport = transport()
+            current = adapter(tmp_path, current_transport)
+            try:
+                await current.start(bus)
+                await catchup_done(current, current_transport)
+                assert current._inbox.debts() == {}
+            finally:
+                await current.stop()
+        try:
+            ids = [m.payload["channel_context"]["message_id"] for m in bus.journal.undelivered()]
+            assert ids.count("om_synthetic_new_reply") == 1
+            assert listed == ["omt_synthetic_active", "omt_synthetic_active"]
+        finally:
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+def test_thread_activity_is_durable_scoped_recent_and_bounded(tmp_path, monkeypatch):
+    from looper.agents.channels.lark_inbox import LarkInbox
+
+    monkeypatch.setattr("looper.agents.channels.lark_inbox.THREADS_KEPT", 2)
+    path, now = tmp_path / "inbox.sqlite3", time.time()
+    inbox = LarkInbox(path)
+    try:
+        inbox.remember_thread("chat-a", "expired", now - 8 * 86400)
+        assert inbox.recent_threads("chat-a", now) == []
+        inbox.remember_thread("chat-a", "active", now - 3 * 86400)
+        inbox.remember_thread("chat-b", "other", now - 2 * 86400)
+        inbox.remember_thread("chat-a", "active", now)  # refreshing does not consume another slot
+        inbox.remember_thread("chat-a", "new", now + 1)
+    finally:
+        inbox.close()
+    reopened = LarkInbox(path)
+    try:
+        assert reopened.recent_threads("chat-a", now + 1) == ["new", "active"]
+        assert reopened.recent_threads("chat-b", now + 1) == []
+        assert reopened.recent_threads("chat-a", now + 8 * 86400) == []
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("failure", ["metadata_read", "store"])
+def test_sent_thread_bookkeeping_failure_does_not_retry_successful_send(monkeypatch, failure):
+    from looper.agents.channels import lark_cli
+    from looper.agents.channels.lark_transport import CliTransport
+
+    async def run():
+        sends = []
+
+        async def run_json(argv):
+            if "+messages-reply" in argv:
+                sends.append(argv)
+                metadata = {"chat_id": "chat-synthetic", "thread_id": "thread-synthetic"} if failure == "store" else {}
+                return {"data": {"message_id": "message-synthetic", **metadata}}
+            raise lark_cli.LarkCliError("synthetic metadata read failure")
+
+        def remember(*args):
+            raise RuntimeError("synthetic store failure")
+
+        monkeypatch.setattr(lark_cli, "run_json", run_json)
+        cli = CliTransport()
+        cli.on_thread_activity = remember
+        assert await cli.reply("message-parent", text="Synthetic reply", return_id=True) == "message-synthetic"
+        assert len(sends) == 1
 
     asyncio.run(asyncio.wait_for(run(), 5))

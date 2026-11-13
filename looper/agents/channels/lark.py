@@ -56,6 +56,9 @@ _CATCHUP_MAX_AGE = 15 * 60
 _CATCHUP_OVERLAP = 10
 _CATCHUP_MAX_CHATS = 100
 _CATCHUP_MAX_PAGES = 5
+_CATCHUP_ROOT_MAX_AGE = 24 * 60 * 60
+_CATCHUP_MAX_THREADS = 50
+_CATCHUP_THREAD_CONCURRENCY = 4
 _HEARTBEAT_SECONDS = 5
 
 
@@ -189,6 +192,8 @@ class LarkChannelAdapter(ChannelAdapter):
 
         if self.channel_type == "lark":
             self._inbox = LarkInbox(bus.runtime_root / ".local" / "lark" / self.channel_id / "inbox.sqlite3")
+            if isinstance(self._transport, CliTransport):
+                self._transport.on_thread_activity = self._remember_thread
             boundary = self._inbox.boundary
             # Discovery itself can fail or be cancelled while live checkpoints advance.
             if boundary is not None and time() - boundary <= _CATCHUP_MAX_AGE:
@@ -221,6 +226,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 except asyncio.CancelledError:
                     pass
         await self._reactions.stop()
+        if isinstance(self._transport, CliTransport):
+            self._transport.on_thread_activity = None
         await self._transport.aclose()
         if self._inbox is not None:
             if clean:
@@ -470,10 +477,10 @@ class LarkChannelAdapter(ChannelAdapter):
             stats["messages_found"] += 1
             try:
                 created = _history_created(message)
-                if created.before(time() - _CATCHUP_MAX_AGE):
+                if created.before(start) or created.before(time() - _CATCHUP_MAX_AGE):
                     stats["too_old"] += 1
                     continue
-                if message.get("deleted") or created.at > end or created.before(start):
+                if message.get("deleted") or created.at > end:
                     continue
                 event = history_event(message, chat_id, page["chat_type"])
                 event["_catchup_created_at"] = created
@@ -488,42 +495,83 @@ class LarkChannelAdapter(ChannelAdapter):
                 stats["failures"] += 1
                 logger.warning("%s: catch-up message failed", self.channel_id, exc_info=True)
 
-    async def _catchup_threads(self, chat_id: str, *, start: float, end: float, stats: dict[str, int],
-                               seen: set[str]) -> None:
-        if not hasattr(self._transport, "list_threads"):
+    async def _catchup_threads(self, chat_id: str, *, start: float, end: float, stats: dict[str, int]) -> None:
+        if not hasattr(self._transport, "list_thread_messages"):
             return
-        async for roots in self._history_pages(
-            self._transport.list_threads, chat_id,  # type: ignore[attr-defined]
-        ):
-            for thread_id in roots["threads"]:
-                await self._catchup_thread(thread_id, chat_id, start=start, end=end, stats=stats, seen=seen)
+        assert self._inbox is not None
+        # Our recent activity takes precedence over new roots when the listing budget fills.
+        candidates = dict.fromkeys(self._inbox.recent_threads(chat_id, end))
+        if hasattr(self._transport, "list_threads"):
+            token, roots_scanned = "", 0
+            try:
+                for page_index in range(_CATCHUP_MAX_PAGES):
+                    page = await self._transport.list_threads(chat_id, page_token=token)  # type: ignore[attr-defined]
+                    old = False
+                    for root in page["roots"][:50]:
+                        roots_scanned += 1
+                        if _history_created(root).before(end - _CATCHUP_ROOT_MAX_AGE):
+                            old = True
+                            break
+                        if thread_id := root.get("thread_id"):
+                            candidates.setdefault(thread_id, None)
+                    if old or not page.get("has_more"):
+                        break
+                    if page_index + 1 == _CATCHUP_MAX_PAGES:
+                        stats["thread_roots_capped"] += 1
+                        logger.info("%s: catch-up roots capped chat=%s roots_scanned=%s "
+                                    "unscanned_root_pages_at_least=1", self.channel_id, chat_id, roots_scanned)
+                        break
+                    next_token = page.get("page_token")
+                    if not next_token or next_token == token:
+                        raise ValueError("history pagination did not advance")
+                    token = next_token
+            except Exception:
+                stats["failures"] += 1
+                logger.warning("%s: catch-up thread discovery failed chat=%s", self.channel_id, chat_id, exc_info=True)
+        skipped = len(candidates) - _CATCHUP_MAX_THREADS
+        if skipped > 0:
+            logger.info("%s: catch-up thread budget chat=%s threads_skipped=%s", self.channel_id, chat_id, skipped)
+        slots = asyncio.Semaphore(_CATCHUP_THREAD_CONCURRENCY)
+
+        async def scan(thread_id: str) -> None:
+            async with slots:
+                await self._catchup_thread(thread_id, chat_id, start=start, end=end, stats=stats)
+
+        # TaskGroup joins cancelled listings before the inbox/transport can close.
+        async with asyncio.TaskGroup() as group:
+            for thread_id in list(candidates)[:_CATCHUP_MAX_THREADS]:
+                group.create_task(scan(thread_id))
 
     async def _catchup_thread(self, thread_id: str, chat_id: str, *, start: float, end: float,
-                              stats: dict[str, int], seen: set[str]) -> None:
-        if thread_id in seen or not hasattr(self._transport, "list_thread_messages"):
-            return
-        seen.add(thread_id)
+                              stats: dict[str, int]) -> None:
+        stats["threads_scanned"] += 1
+        pages = []
         try:
-            pages = []
             async for page in self._history_pages(
                 self._transport.list_thread_messages, thread_id,  # type: ignore[attr-defined]
             ):
-                pages.append(page)
-                if any(_history_created(message).before(start) for message in page["messages"]):
-                    break
-            # Fetch newest first for a bounded scan, admit oldest first as on the chat path.
-            for page in reversed(pages):
-                await self._catchup_messages(
-                    {**page, "messages": list(reversed(page["messages"][:50]))}, chat_id,
-                    start=start, end=end, stats=stats)
+                pages.append({**page, "messages": page["messages"][:50]})
+                for index, message in enumerate(pages[-1]["messages"]):
+                    if _history_created(message).before(start):
+                        pages[-1]["messages"] = pages[-1]["messages"][:index + 1]
+                        break
+                else:
+                    continue
+                break
         except Exception:
-            stats["failures"] += 1
+            stats["thread_failures"] += 1
             logger.warning("%s: catch-up thread failed chat=%s thread=%s", self.channel_id, chat_id,
                            thread_id, exc_info=True)
+        # Admit already-read pages even when a later page fails, oldest first within the thread.
+        for page in reversed(pages):
+            await self._catchup_messages(
+                {**page, "messages": [{**message, "thread_id": thread_id}
+                                      for message in reversed(page["messages"])]}, chat_id,
+                start=start, end=end, stats=stats)
 
     async def _catch_up(self, boundary: float | None) -> None:
         stats = dict(chats_scanned=0, messages_found=0, handled=0, duplicates=0, too_old=0, failures=0,
-                     debt_windows_dropped=0)
+                     debt_windows_dropped=0, threads_scanned=0, thread_failures=0, thread_roots_capped=0)
         expired = boundary is not None and time() - boundary > _CATCHUP_MAX_AGE
         try:
             assert self._inbox is not None
@@ -575,16 +623,11 @@ class LarkChannelAdapter(ChannelAdapter):
                 stats["chats_scanned"] += 1
                 failures = stats["failures"]
                 try:
-                    seen: set[str] = set()
                     async for page in self._history_pages(
                         self._transport.list_messages, chat_id, start=start, end=end,  # type: ignore[attr-defined]
                     ):
                         await self._catchup_messages(page, chat_id, start=start, end=end, stats=stats)
-                        for message in _history_messages(page["messages"][:50]):
-                            if thread_id := message.get("thread_id"):
-                                await self._catchup_thread(thread_id, chat_id, start=start, end=end,
-                                                           stats=stats, seen=seen)
-                    await self._catchup_threads(chat_id, start=start, end=end, stats=stats, seen=seen)
+                    await self._catchup_threads(chat_id, start=start, end=end, stats=stats)
                     if failures == stats["failures"]:
                         self._inbox.complete(chat_id)
                 except Exception:
@@ -654,6 +697,10 @@ class LarkChannelAdapter(ChannelAdapter):
             if close := getattr(events, "aclose", None):
                 await close()
 
+    def _remember_thread(self, chat_id: str, thread_id: str) -> None:
+        if self._inbox is not None:
+            self._inbox.remember_thread(chat_id, thread_id, time())
+
     async def _handle_lark_event(self, event: dict[str, Any]) -> Literal["handled", "duplicate", "ignored", "too_old"]:
         async with self._ingress_lock:
             message_id = event.get("message_id")
@@ -664,7 +711,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 return "too_old"
             handled = await self._process_lark_event(event)
             if self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT:
-                self._inbox.finish(message_id)
+                self._inbox.finish(message_id, chat_id=event.get("chat_id") or "",
+                                   thread_id=(event.get("thread_id") or "") if handled else "", at=time())
             return "handled" if handled else "ignored"
 
     async def _process_lark_event(self, event: dict[str, Any]) -> bool | None:

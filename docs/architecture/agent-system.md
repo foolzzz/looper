@@ -5915,10 +5915,18 @@ implementation supplies it and is retested.
   bindings first, then unbound chats observed by `observe_chat` in the last
   24 hours when the default Manager accepts unbound chats. At most 100 chats,
   5 pages per chat and 50 messages per page are scanned. Embedded thread replies
-  use the same admission path. For groups and topics, a separate root scan without
-  a time filter discovers older threads (up to 5 pages of 50 roots). Each thread
-  is read newest first, up to 5 pages of 50 replies, stopping once replies predate
-  the recovery window; replies are admitted oldest first within that thread.
+  use the same admission path. For groups and topics, a separate root scan reads
+  newest first and stops at the first root older than 24 hours, up to 5 pages of
+  50 roots. Reaching this discovery cap logs an INFO count and completes the chat's
+  window. Candidates also include threads this channel handled or sent a message
+  in during the last 7 days, persisted in the inbox with their activity time
+  (at most 1,000 entries per channel). These active threads take priority over
+  new roots. At most 50 distinct threads per chat are listed, with at most 4
+  listings in flight. Each is read newest first, up to 5 pages of 50 replies,
+  stopping at the first reply older than the recovery window; replies are
+  admitted oldest first within that thread. A failed thread listing logs its
+  thread id and increments `thread_failures`; its already-read pages are still
+  admitted and it does not leave the chat's main window unfinished.
   Recovered messages use the live admission, group bot-mention, routing,
   attachment and disabled-chat
   checks. Known p2p chats participate only when bot identity can resolve their
@@ -5947,10 +5955,14 @@ implementation supplies it and is retested.
   15 minutes skips the whole window. Individual recovered messages older than
   15 minutes at handling time are also skipped. Each startup logs one INFO
   `lark_catchup` summary: boundary, expired-window flag, chats scanned, messages
-  found, handled, duplicate and too-old skips, and failures. Message counts cover
+  found, handled, duplicate and too-old skips, failures, `threads_scanned`,
+  `thread_failures` and `thread_roots_capped`. The too-old count covers messages
+  older than the recovery start in listed containers, including the first old
+  reply that stops a thread listing; root discovery does not count messages.
+  Message counts cover
   listed messages only; an expired window is not listed and its message count
   is unknown. A consumer that does not signal readiness within 60 seconds,
-  list failures and exhausted page limits warn without blocking
+  chat list failures and exhausted chat or thread reply page limits warn without blocking
   the consumer. This recovery applies to the CLI channel; the bot-token channel
   is unchanged.
 
