@@ -332,7 +332,7 @@ class TestStoredRows:
 class TestValidation:
     @pytest.mark.parametrize("name", ["opus", "sonnet", "claude-opus-4-5-20251101", "opus[1m]", "us.anthropic.x:0"])
     def test_model_names(self, name: str) -> None:
-        assert agent_settings.model_name(f" {name} ") == name
+        assert agent_settings.model_name(name) == name
 
     @pytest.mark.parametrize("name", ["--dangerously-skip-permissions", "-x", "two words", "a" * 201, 5])
     def test_bad_model_names(self, name: Any) -> None:

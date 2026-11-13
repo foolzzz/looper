@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.172] - 2026-11-12
+
+### Added
+
+- **Grok runs can turn off web search per Agent Profile.** ([#1313](https://github.com/foolzzz/looper/pull/1313))
+  - Agent Profiles gain `web_search` (default `true`, unchanged behavior); `false` adds `--disable-web-search` to headless and ACP Grok commands and is refused for other runtimes. It is not a network sandbox: shell commands still reach the network.
+  - The database gains `agent_profiles.web_search BOOLEAN NOT NULL DEFAULT true` on the next start; config export and import, the v1 API and the dashboard carry it.
+  - Model-visible: the Manager's profile tool takes a boolean `web_search` on create and update and lists it; a Grok run with it off has no web search or web fetch tools.
+
 ## [2.14.171] - 2026-11-12
 
 ### Changed

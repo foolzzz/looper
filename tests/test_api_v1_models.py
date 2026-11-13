@@ -102,3 +102,19 @@ args = loopercli.build_parser(json.load(open(sys.argv[1]))).parse_args(sys.argv[
 assert callable(args._run)
 assert not any(m.startswith(('looper.agents', 'asyncpg', 'httpx')) for m in sys.modules)
 """, str(source), family, action, *flags], check=True, timeout=10)
+
+
+@pytest.mark.parametrize("family,action,flags,body,path", [
+    ("models", "create", ["--provider", "Cursor login", "--name",
+                           "grok-4.7[context=500k,reasoning_effort=high,fast=true]", "--protocol", "openai-responses"],
+     {"provider": "Cursor login", "name": "grok-4.7[context=500k,reasoning_effort=high,fast=true]",
+      "protocol": "openai-responses"}, "/api/v1/ops/models/create"),
+    ("models", "update", ["--model", '"model-example"', "--background-model", '"grok-4.7[context=500k]"'],
+     {"model": "model-example", "background_model": "grok-4.7[context=500k]"}, "/api/v1/ops/models/update"),
+])
+def test_parameterized_model_cli_requests_are_preserved(family, action, flags, body, path):
+    args = loopercli.build_parser(api_v1.document()).parse_args([family, action, *flags])
+    calls = []
+    api = SimpleNamespace(call=lambda *parts: (calls.append(parts) or (200, {"status": "ok", "result": {}})))
+    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="models", operator=True)) == 0
+    assert calls == [("POST", path, body)]
