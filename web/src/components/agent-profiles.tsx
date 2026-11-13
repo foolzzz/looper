@@ -366,7 +366,7 @@ export function AgentProfileForm({
               <Switch checked={draft.web_search} onChange={(web_search) => set({ web_search })} label="Web search" />
               <span>Web search</span>
             </div>
-            <p className="text-[11px] text-muted-foreground">Turn off to disable web search and web fetch tools.</p>
+            <p className="text-[11px] text-muted-foreground">Turn off to remove Grok's web search and web fetch tools; shell commands can still reach the network.</p>
           </div>
         )}
         {teams && (
@@ -604,6 +604,7 @@ function AgentProfileRow({ profile, registry }: { profile: AgentProfile; registr
         {runtime ? runtimeTitle(runtime) : profile.runtime_name} · {profile.provider.name} · model{" "}
         <span className="font-mono text-foreground/80">{profile.model.name} / {profile.model.protocol}</span> · effort {profile.effort ?? "runtime default"}
         {profile.agent_teams && <> · <span className="text-foreground">agent teams on</span></>}
+        {profile.web_search === false && <> · <span className="text-foreground">web search off</span></>}
         {costBasisText(profile) && ` · ${costBasisText(profile)}`}
       </p>
       <p className="text-xs text-muted-foreground">

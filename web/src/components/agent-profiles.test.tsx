@@ -117,7 +117,7 @@ describe("Agent Profiles", () => {
     await show({ ...PROFILE, runtime_id: "rt-grok", runtime_type: "grok", agent_teams: false, web_search: webSearch });
     const switchButton = container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Web search"]')!;
     expect(switchButton.getAttribute("aria-checked")).toBe(String(webSearch));
-    expect(container.textContent).toContain("Turn off to disable web search and web fetch tools.");
+    expect(container.textContent).toContain("shell commands can still reach the network");
     await submit();
     expect(requests[0].body.web_search).toBe(webSearch);
     await act(async () => switchButton.click());

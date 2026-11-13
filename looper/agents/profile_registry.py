@@ -766,7 +766,8 @@ def check_web_search(runtime: RuntimeSpec, web_search: bool) -> None:
         raise RegistryError("web_search must be true or false", field="web_search")
     if not web_search and runtime.type != "grok":
         raise RegistryError(f"web_search: false is supported only by Grok (grok); runtime {runtime.type!r} "
-                            "cannot disable web search and web fetch", field="web_search")
+                            "cannot disable web search and web fetch; set web_search to true or choose a Grok runtime",
+                            field="web_search")
 
 
 def _agent_teams(raw: Any) -> bool:

@@ -1534,8 +1534,9 @@ Manager tools.
   streaming-messages-json --always-approve --trust` with Grok's own login
   only (the built-in provider `grok-login`, below). Agent Profiles default
   `web_search` to `true`. Setting it to `false` adds `--disable-web-search`
-  to headless and ACP commands, disabling both web search and web fetch tools;
-  the run's `metadata.command` records the flag. Fallbacks use the target
+  to headless and ACP commands, which removes Grok's web search and web fetch
+  tools (it is not a network sandbox: shell commands can still reach the
+  network); the run's `metadata.command` records the flag. Fallbacks use the target
   profile's own setting. Each process gets
   `GROK_HOME` and `HOME` both set to a home of Looper's own,
   `grok/runs/<sha256>`, named on its command line (`env GROK_HOME=...
@@ -4972,7 +4973,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `llm_models` | Exact `(provider_id, name, protocol)`, context, four price overrides, efforts, background model, catalog order and builtin flag; profile references restrict deletion |
 | `llm_model_migration_map` | Append-only legacy provider/name/protocol → provider/model id mapping; no secrets or foreign keys to deletable current objects |
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
-| `agent_profiles` | `name`, `runtime_id`, `model_id`, `effort`, `agent_teams`, `web_search` (default `true`; only Grok accepts `false` to disable web search and web fetch), `custom_prompt`, `builtin`; provider comes from the model; prompt mode remains in role/task settings |
+| `agent_profiles` | `name`, `runtime_id`, `model_id`, `effort`, `agent_teams`, `web_search` (default `true`; only Grok accepts `false`, which removes Grok's web search and web fetch tools; shell commands can still reach the network), `custom_prompt`, `builtin`; provider comes from the model; prompt mode remains in role/task settings |
 | `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
 | `task_system_prompt_modes` | A task's own system prompt mode per role (`planner`, `worker`, `reviewer`): `append` or `replace`, going with its task |
 | `task_concurrency_limits` | A task's own concurrency limit per role (`worker`, `reviewer`): `max_concurrency` (1–64), going with its task |
