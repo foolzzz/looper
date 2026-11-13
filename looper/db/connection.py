@@ -98,6 +98,7 @@ REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
 _RUNTIME_LAUNCHER = "runtime_launcher"
 _PROFILE_FALLBACK = "profile_fallback"
+_PROFILE_WEB_SEARCH = "profile_web_search"
 _CURSOR_LOGIN = "cursor_login"
 _COCO_LOGIN = "coco_login"
 _DEPENDENCY_CONDITIONS = "dependency_conditions"
@@ -345,6 +346,14 @@ async def _profile_fallback_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('agent_profiles') "
         "AND attname = 'fallback_profile_id' AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _profile_web_search_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROFILE_WEB_SEARCH):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('agent_profiles') "
+        "AND attname = 'web_search' AND attnum > 0 AND NOT attisdropped)")
 
 
 async def _schedule_user_gates_pending(conn: asyncpg.Connection) -> bool:
@@ -663,6 +672,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check "
                                + constraint)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROFILE_FALLBACK)
+        if await _profile_web_search_pending(conn):
+            await conn.execute("ALTER TABLE agent_profiles ADD COLUMN web_search BOOLEAN NOT NULL DEFAULT true")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROFILE_WEB_SEARCH)
         if await _cursor_login_pending(conn):
             await conn.execute(_CURSOR_LOGIN_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CURSOR_LOGIN)
@@ -819,6 +831,7 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             await _schedule_user_gates_pending(conn) or await _cursor_login_pending(conn)
             or await _coco_login_pending(conn)
             or await _runtime_launcher_pending(conn) or await _profile_fallback_pending(conn)
+            or await _profile_web_search_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
             or await _task_process_record_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)

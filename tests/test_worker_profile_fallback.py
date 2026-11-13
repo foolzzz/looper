@@ -95,7 +95,7 @@ def run_primary(agent_db, tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "fallback_settings", AsyncMock(return_value=backup))
 
     def run(runtime, launcher=Launcher.NATIVE, *, events=(), exit_code=1, wait=False, steer=False,
-            error=ERROR, startup=True, fallback=True, verify=False):
+            error=ERROR, startup=True, fallback=True, verify=False, web_search=True):
         transcript = "Launcher ready\n" + "\n".join(json.dumps(e) for e in [
             *(_launch_lines(runtime) if startup else []), *events])
         body = f'''
@@ -125,6 +125,7 @@ for line in sys.stdin:
 '''
         executable = fake_claude(tmp_path / 'primary', body)
         primary = _settings(runtime, executable, launcher=launcher, fallback="backup" if fallback else None)
+        primary = replace(primary, profile=replace(primary.profile, web_search=web_search))
         if steer:
             profile = primary.profile
             primary = replace(primary, profile=replace(profile, runtime=replace(
@@ -408,3 +409,15 @@ def test_whitespace_error_uses_exit_information(run_primary):
     result, records = run_primary("claude-code", error=" \n")
     assert result["status"] == "completed" and len(records) == 2
     assert result["fallback"][0]["reason"] == "exited before any model event: Claude Code exited with code 1"
+
+
+@pytest.mark.parametrize("web_search", [False, True])
+def test_grok_fallback_uses_each_profiles_web_search_setting(run_primary, monkeypatch, tmp_path, web_search):
+    executable = fake_claude(tmp_path / "grok-backup", f"import sys\nsys.stdin.read()\nprint({json.dumps(SUCCESS)!r})\n")
+    backup = _settings("grok", executable)
+    backup = replace(backup, profile=replace(backup.profile, id="backup", name="Backup", web_search=not web_search))
+    monkeypatch.setattr(worker, "fallback_settings", AsyncMock(return_value=backup))
+    result, records = run_primary("grok", web_search=web_search)
+    assert result["status"] == "completed"
+    assert [r["metadata"]["profile"]["id"] for r in records] == ["primary", "backup"]
+    assert ["--disable-web-search" in r["metadata"]["command"] for r in records] == [not web_search, web_search]

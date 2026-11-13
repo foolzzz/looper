@@ -25,6 +25,8 @@ from tests.test_prompt_preview import _dependencies
     ("update", {"profile_id": "agent-example", "fields": {}}),
     ("update", {"profile_id": "agent-example", "fields": {"custom_prompt": None}}),
     ("update", {"profile_id": "agent-example", "fields": {"agent_teams": "true"}}),
+    ("update", {"profile_id": "agent-example", "fields": {"web_search": "false"}}),
+    ("update", {"profile_id": "agent-example", "fields": {"web_search": 0}}),
     ("delete", {"profile_id": None}),
     ("prompt_preview", {"profile_id": "agent-example", "role": "Worker"}),
     ("prompt_preview", {"profile_id": "agent-example", "role": "worker", "project_id": None}),
@@ -89,3 +91,16 @@ args = loopercli.build_parser(json.load(open(sys.argv[1]))).parse_args(sys.argv[
 assert callable(args._run)
 assert not any(m.startswith(('looper.agents', 'asyncpg', 'httpx')) for m in sys.modules)
 """, str(source), "profiles", action, *flags], check=True, timeout=10)
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+@pytest.mark.parametrize("web_search", [False, True])
+def test_generated_agent_profiles_cli_round_trips_web_search(action, web_search):
+    flags = ["--runtime", "grok", "--model", json.dumps("model-grok"), "--name", "Grok"] if action == "create" else ["--profile", "profile-grok"]
+    args = loopercli.build_parser(api_v1.document()).parse_args([
+        "agent-profiles", action, *flags, "--web-search" if web_search else "--no-web-search"])
+    calls = []
+    api = SimpleNamespace(call=lambda *parts: (calls.append(parts) or (200, {"status": "ok", "result": {}})))
+    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="profiles")) == 0
+    assert calls[0][2]["web_search"] is web_search
+    api_v1.validate_arguments(api_v1.find("POST", calls[0][1]).request, calls[0][2])

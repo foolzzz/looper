@@ -100,7 +100,7 @@ const API_PROFILE: AgentProfile = {
   model_path: "direct",
   profile_id: "api-manager", name: "API Manager", model_id: "responses-model",
   model: { model_id: "responses-model", name: "model", protocol: "openai-responses", provider_id: "provider" },
-  effort: null, agent_teams: false, custom_prompt: "", runtime_id: "rt-api", runtime_type: "api", runtime_name: "Model API",
+  effort: null, agent_teams: false, web_search: true, custom_prompt: "", runtime_id: "rt-api", runtime_type: "api", runtime_name: "Model API",
   builtin: false, provider: { provider_id: "provider", name: "Provider", vendor_type: "custom", auth: "api_key", enabled: true },
   roles: ["manager"], used_by: { layers: [], task_count: 0, schedule_count: 0, allowed_in: [] }, warnings: [],
   cost: { source: "provider_price", equivalent: false, unpriced: [] },

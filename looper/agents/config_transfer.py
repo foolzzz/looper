@@ -255,7 +255,8 @@ def model_entry(row: Mapping[str, Any]) -> dict[str, Any]:
 def profile_entry(row: Mapping[str, Any]) -> dict[str, Any]:
     return {**{name: row[name] for name in ("name", "runtime", "effort", "agent_teams")},
             "model": {"provider": row["provider"], "name": row["model"], "protocol": row["protocol"]},
-            "custom_prompt": row.get("custom_prompt", ""), "fallback": row.get("fallback")}
+            "custom_prompt": row.get("custom_prompt", ""), "fallback": row.get("fallback"),
+            "web_search": row.get("web_search", True)}
 
 
 def _portable_layer_environment(raw: Any) -> Any:
@@ -1133,7 +1134,8 @@ class _Importer:
         for name, row in target.profiles.items():
             key = (row["provider"], row["model"], row["protocol"])
             self.profiles[name] = (row["id"], self._profile_spec(
-                row["id"], name, row["runtime"], key, row["effort"], row["agent_teams"], row.get("custom_prompt", "")))
+                row["id"], name, row["runtime"], key, row["effort"], row["agent_teams"], row.get("custom_prompt", ""),
+                web_search=row.get("web_search", True)))
         self.profile_fallbacks = {name: row.get("fallback") for name, row in target.profiles.items()}
         self.imported_profiles: set[str] = set()
         self.blocked_runtimes: set[str] = set()
@@ -1143,12 +1145,12 @@ class _Importer:
         self.seen_registry: dict[str, set[Any]] = defaultdict(set)
 
     def _profile_spec(self, profile_id: str, name: str, runtime: str, model_key: tuple[str, str, str],
-                      effort: str | None, agent_teams: bool, custom_prompt: str = "") -> Any:
+                      effort: str | None, agent_teams: bool, custom_prompt: str = "", *, web_search: bool = True) -> Any:
         from .profile_registry import ResolvedAgentProfile
 
         resolved = self.models[model_key]
         return ResolvedAgentProfile(profile_id, name, self.runtimes[runtime][1], resolved.model.id, effort,
-                                    agent_teams, custom_prompt, resolved_model=resolved)
+                                    agent_teams, custom_prompt, web_search=web_search, resolved_model=resolved)
 
     def _unique(self, section: str, key: Any) -> None:
         if key in self.seen_registry[section]:
@@ -1401,7 +1403,8 @@ class _Importer:
         label = str(entry.get("name")) if isinstance(entry, Mapping) else "None"
         try:
             entry = _mapping(entry, "an Agent Profile")
-            unknown = set(entry) - {"name", "runtime", "model", "effort", "agent_teams", "custom_prompt", "fallback"}
+            unknown = set(entry) - {"name", "runtime", "model", "effort", "agent_teams", "custom_prompt",
+                                    "fallback", "web_search"}
             if unknown:
                 raise _Skip(f"unknown field {sorted(unknown)[0]!r}")
             name = label = entry_name(entry.get("name"), "Agent Profile")
@@ -1421,13 +1424,13 @@ class _Importer:
                 raise _Skip("a built-in Agent Profile has this name here")
             spec = self._profile_spec(row["id"] if row else f"new:{name}", name, runtime, key,
                                       entry.get("effort"), entry.get("agent_teams", default_agent_teams(self.runtimes[runtime][1])),
-                                      entry.get("custom_prompt", ""))
+                                      entry.get("custom_prompt", ""), web_search=entry.get("web_search", True))
             check_profile_model(spec.resolved_model, self.profiles[name][1].model_id if row else None)
             spec.resolved_model.check_runtime(spec.runtime, spec.effort)
             values = {"runtime": spec.runtime.name, "provider": key[0], "model": key[1], "protocol": key[2],
                       "effort": spec.effort, "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt,
-                      "fallback": fallback}
-            current = {k: row.get(k) for k in values} if row else None
+                      "web_search": spec.web_search, "fallback": fallback}
+            current = {k: row.get(k, True if k == "web_search" else None) for k in values} if row else None
             action = self.outcome("profiles", name, current, _differs(values, current, values))
             profile_id = spec.id
             if self.apply and action in (Action.ADDED, Action.CHANGED):
@@ -1479,7 +1482,8 @@ class _Importer:
 
         return await db.write_profile(self.conn, profile_id, {
             "name": name, "runtime_id": spec.runtime.id, "model_id": spec.model_id,
-            "effort": spec.effort, "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt})
+            "effort": spec.effort, "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt,
+            "web_search": spec.web_search})
 
     async def _layer_profile(self, name: str | None, scope: str, role: str | None) -> str | None:
         """Resolve only a valid named profile; an omitted or invalid model never selects a default."""
