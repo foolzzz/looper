@@ -1,6 +1,7 @@
 """Command supervisors survive the event loop and are observed by files and pid identity."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -9,6 +10,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import threading
 import time
 
 import pytest
@@ -296,3 +298,70 @@ def test_inspect_batches_processes_and_rechecks_exit_race(tmp_path, monkeypatch)
     assert calls[0][0] == ["ps", "-o", "pid=,stat=,lstart=", "-p", ",".join(map(str, sorted({101, 102, os.getpid()})))]
     assert calls[0][1]["env"]["LC_ALL"] == "C"
     assert calls[0][1]["env"]["TZ"] == "UTC"
+
+
+def test_inspect_queries_on_dedicated_process_workers(tmp_path, monkeypatch):
+    threads = []
+
+    def snapshot(args, **kwargs):
+        threads.append(threading.current_thread().name)
+        return subprocess.CompletedProcess(args, 0, "101 S runner start\n", "")
+
+    monkeypatch.setattr(subprocess, "run", snapshot)
+    observed = CommandRuns(tmp_path).inspect([row(runner_pid=101, runner_started="runner start")], NOW)
+    assert observed["srun-test"] == Running(None, None, 101, "runner start")
+    assert len(threads) == 1 and threads[0].startswith("looper-ps")
+
+
+def test_concurrent_process_queries_do_not_nest_executor_jobs(tmp_path, monkeypatch):
+    barrier = threading.Barrier(4)
+
+    def snapshot(args, **kwargs):
+        barrier.wait(timeout=3)
+        return subprocess.CompletedProcess(args, 0, "101 S runner start\n", "")
+
+    monkeypatch.setattr(subprocess, "run", snapshot)
+    runs = CommandRuns(tmp_path)
+
+    async def scenario():
+        return await asyncio.wait_for(asyncio.gather(*(
+            proc_tree.run_ps(runs.inspect, [row(runner_pid=101, runner_started="runner start")], NOW)
+            for _ in range(4)
+        )), timeout=5)
+
+    assert asyncio.run(scenario()) == [{"srun-test": Running(None, None, 101, "runner start")}] * 4
+
+
+def test_scheduler_process_queries_leave_default_executor_available(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from looper.agents import scheduler
+
+    entered, release = threading.Event(), threading.Event()
+
+    def snapshot(args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=3)
+        return subprocess.CompletedProcess(args, 0, "101 S runner start\n", "")
+
+    monkeypatch.setattr(subprocess, "run", snapshot)
+    monkeypatch.setattr(scheduler.db_schedules, "running_runs", AsyncMock(return_value=[
+        row(kind="command", runner_pid=101, runner_started="runner start"),
+    ]))
+    service = scheduler.Scheduler(bus=None, runtime_root=tmp_path, day_zone="UTC")
+    service._settle_command = AsyncMock()
+
+    async def scenario():
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
+        settling = asyncio.create_task(service._settle_running(NOW))
+        try:
+            async with asyncio.timeout(1):
+                while not entered.is_set():
+                    await asyncio.sleep(0.01)
+            # A single default worker must still serve unrelated I/O while ps is blocked.
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "available"), 0.3) == "available"
+        finally:
+            release.set()
+            await settling
+
+    asyncio.run(scenario())
+    service._settle_command.assert_awaited_once()

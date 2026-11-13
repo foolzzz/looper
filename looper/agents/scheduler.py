@@ -67,7 +67,7 @@ from . import housekeeping
 
 from ..db import agent_setting_layers as db_layers, connection as db_connection, llm_records as db_llm_records
 from ..db import schedules as db_schedules, tasks as db_tasks
-from . import cron
+from . import cron, proc_tree
 from .command_runs import BACKSTOP_SLACK, CommandRuns, CommandSpec, Finished, Lost, Observation, Running, Starting, Unknown
 from .drain import DrainState
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
@@ -838,7 +838,7 @@ class Scheduler:
     async def _start_runner(self, schedule: Mapping[str, Any], spec: CommandSpec) -> None:
         assert self._commands is not None
         try:
-            pid, started = await asyncio.to_thread(self._commands.spawn, spec)
+            pid, started = await proc_tree.run_ps(self._commands.spawn, spec)
         except (OSError, RuntimeError) as exc:
             async with db_connection.transaction() as conn:
                 finished = await db_schedules.finish_command_run(
@@ -1148,7 +1148,7 @@ class Scheduler:
             self._commands.reap()
         rows = await db_schedules.running_runs()
         commands = [run for run in rows if run["kind"] == "command"]
-        observations = (await asyncio.to_thread(self._commands.inspect, commands, now)
+        observations = (await proc_tree.run_ps(self._commands.inspect, commands, now)
                         if self._commands is not None else
                         {run["id"]: Lost("this server cannot run commands") for run in commands})
         for run in rows:
@@ -1179,9 +1179,9 @@ class Scheduler:
             if timeout is None or obs.started_at is None \
                     or now <= obs.started_at + timedelta(seconds=timeout) + BACKSTOP_SLACK:
                 return
-            await asyncio.to_thread(self._commands.end_group, obs.child)
+            await proc_tree.run_ps(self._commands.end_group, obs.child)
             if obs.runner_pid:
-                await asyncio.to_thread(self._commands.kill_runner, obs.runner_pid, obs.runner_started)
+                await proc_tree.run_ps(self._commands.kill_runner, obs.runner_pid, obs.runner_started)
             status, at = "timed_out", now
             error = "the runner did not end the run at its timeout; Looper killed its process group"
             fields["started_at"] = obs.started_at
@@ -1194,7 +1194,7 @@ class Scheduler:
         else:
             assert isinstance(obs, Lost)
             if self._commands is not None:
-                await asyncio.to_thread(self._commands.end_group, obs.child)
+                await proc_tree.run_ps(self._commands.end_group, obs.child)
             status, at, error = "interrupted", now, obs.reason
         async with db_connection.transaction() as conn:
             finished = await db_schedules.finish_command_run(conn, run_id, status=status, at=at, error=error, **fields)

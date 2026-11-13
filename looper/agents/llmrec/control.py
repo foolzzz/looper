@@ -115,7 +115,7 @@ class ProxyControl:
         return state
 
     async def _running(self, state) -> bool:
-        return bool(state and await asyncio.to_thread(proc_tree._start_time, state["pid"]) == state["start_time"])
+        return bool(state and await proc_tree.run_ps(proc_tree._start_time, state["pid"]) == state["start_time"])
 
     async def _health(self, *, cached=False) -> dict | None:
         if cached and time.monotonic() - self._health_at < 5:

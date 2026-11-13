@@ -272,7 +272,14 @@ class PerTurnSession(ABC):
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         self._process = process
-        self._tree = tree = proc_tree.track(process, label=self._label)
+        try:
+            self._tree = tree = await proc_tree.track(process, label=self._label)
+        except BaseException:
+            try:
+                await proc_tree.end(process, label=self._label)
+            finally:
+                self._process, self._ended = None, True
+            raise
         if cancel.requested:  # the stop came while the process was being spawned: end it with the turn
             self._on_stop()
         else:
