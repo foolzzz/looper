@@ -39,6 +39,14 @@ for line in sys.stdin:
 """
 
 
+@pytest.fixture(scope='module', autouse=True)
+def kept_manifest():
+    from looper import components
+
+    # Hash the checkout before deadlines that measure keeper startup and process control.
+    return components.loaded_manifest()
+
+
 def exercise(coroutine) -> None:
     asyncio.run(asyncio.wait_for(coroutine, 35))
 
@@ -361,7 +369,7 @@ def test_error_output_reads_the_stderr_log(tmp_path: Path) -> None:
     exercise(run())
 
 
-def test_a_keeper_survives_the_kill_of_its_starters_process_group(tmp_path: Path) -> None:
+def test_a_keeper_survives_the_kill_of_its_starters_process_group(tmp_path: Path, kept_manifest) -> None:
     async def run() -> None:
         directory = short_directory()
         executable = fake_claude(tmp_path / 'claude', 'import time; time.sleep(60)')
@@ -369,10 +377,8 @@ def test_a_keeper_survives_the_kill_of_its_starters_process_group(tmp_path: Path
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import patch
 from looper.agents.kept_run import KeptRun
-from looper.agents.keeper.client import KeeperClient, KeeperGone
-from looper.agents.keeper.protocol import ErrorCode, KeeperError
 from looper.agents.runtimes import CLAUDE_CODE
 from tests.runtime_model_helpers import builtin_launch
 async def main():
@@ -382,29 +388,37 @@ async def main():
     await handle.launch()
     Path({str(tmp_path / 'ready')!r}).touch()
     await asyncio.sleep(60)
-asyncio.run(main())
+# Reuse the parent's real startup snapshot; this test measures process isolation, not checkout hashing.
+with patch('looper.components.loaded_manifest', return_value=SimpleNamespace(adoption={kept_manifest.adoption!r})):
+    Path({str(tmp_path / 'preloaded')!r}).touch()
+    asyncio.run(main())
 """
         starter = await asyncio.create_subprocess_exec(sys.executable, '-c', script, cwd=ROOT,
                                                        start_new_session=True, stdout=asyncio.subprocess.DEVNULL,
                                                        stderr=asyncio.subprocess.PIPE)
         try:
-            await eventually(lambda: (tmp_path / 'ready').exists())
-            state = keeper.read_json(directory / keeper.STATE)
-            assert os.getpgid(state['keeper_pid']) == state['keeper_pid']
-            assert os.getpgid(state['child_pid']) == state['child_pid']
-            assert os.getsid(state['keeper_pid']) == state['keeper_pid']
-            assert os.getsid(state['child_pid']) == state['child_pid']
-            os.killpg(starter.pid, signal.SIGKILL)
-            await starter.wait()
-            assert live(state['keeper_pid'])
-            assert live(state['child_pid'])
+            # Cold interpreter imports are setup; keep the keeper readiness budget at eight seconds.
+            await eventually(lambda: (tmp_path / 'preloaded').exists() or starter.returncode is not None, timeout=60)
+            assert starter.returncode is None, (await starter.stderr.read()).decode()
+            async with asyncio.timeout(35):
+                await eventually(lambda: (tmp_path / 'ready').exists() or starter.returncode is not None)
+                assert starter.returncode is None, (await starter.stderr.read()).decode()
+                state = keeper.read_json(directory / keeper.STATE)
+                assert os.getpgid(state['keeper_pid']) == state['keeper_pid']
+                assert os.getpgid(state['child_pid']) == state['child_pid']
+                assert os.getsid(state['keeper_pid']) == state['keeper_pid']
+                assert os.getsid(state['child_pid']) == state['child_pid']
+                os.killpg(starter.pid, signal.SIGKILL)
+                await starter.wait()
+                assert live(state['keeper_pid'])
+                assert live(state['child_pid'])
         finally:
             if starter.returncode is None:
                 os.killpg(starter.pid, signal.SIGKILL)
                 await starter.wait()
             await clean_directory(directory)
 
-    exercise(run())
+    asyncio.run(run())
 
 
 def test_kept_stream_buffers_partial_lines_and_reports_idle() -> None:

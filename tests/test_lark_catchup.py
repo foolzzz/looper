@@ -114,6 +114,9 @@ def isolate_observation(monkeypatch: pytest.MonkeyPatch) -> None:
     # serve loads the Manager before starting adapters. Keep that cold import
     # outside the scenarios' deadlock watchdog, as it is in the real service.
     importlib.import_module("looper.agents.tiers.manager")
+    # CLI history shares the stream renderer. Its first import loads websockets;
+    # module loading is setup, not part of the catch-up behavior under test.
+    importlib.import_module("looper.agents.channels.lark_stream")
 
     async def observe(*args: Any, **kwargs: Any) -> None:
         pass

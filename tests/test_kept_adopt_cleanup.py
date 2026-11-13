@@ -23,6 +23,14 @@ from looper.db import llm_records
 from tests.runtime_model_helpers import builtin_launch
 
 
+@pytest.fixture(scope='module', autouse=True)
+def kept_manifest():
+    from looper import components
+
+    # The checkout snapshot is startup setup, outside the replay and cleanup deadlines.
+    return components.loaded_manifest()
+
+
 @pytest.mark.parametrize('outcome', [AdoptOutcome.FAILED, AdoptOutcome.END_PENDING])
 def test_status_counts_failed_adoptions_after_start_without_counting_pending(tmp_path, monkeypatch, outcome):
     async def run():
