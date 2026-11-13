@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.180] - 2026-11-13
+
+### Added
+
+- **API latency observability.** ([#1332](https://github.com/foolzzz/looper/pull/1332))
+  - Behavior change: a non-stream API operation over 2 s logs `api slow` with total, database time, query count, `other_ms` and its await chain; every 600 s the server logs per-operation p50/p95/p99, maximum and counts over 2 s, plus loop stall statistics.
+  - An event-loop watchdog starts before startup work and logs the blocked loop's stack after 1 s, 5 s and 15 s, and process scheduling gaps separately.
+  - The `api client=...` line is now also written for failed or cancelled requests; streams add `first_byte_ms`. `stop()` of the HTTP server is idempotent and runs on failed startups.
+  - Not model-visible: server log lines only; no prompt, tool schema or API response changed.
+
 ## [2.14.179] - 2026-11-13
 
 ### Fixed
