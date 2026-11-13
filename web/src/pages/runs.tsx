@@ -8,7 +8,7 @@ import {
   fetchRoleConfigs,
   type AgentRole,
   type AgentSettings,
-  type LlmRecord,
+  type LlmRecordSummary,
   type RoleConfig,
 } from "@/lib/api";
 import { AGENT_PROFILE, settingsHref } from "@/lib/settings-pages";
@@ -116,7 +116,7 @@ const isRole = (role: string): role is AgentRole => (ROLES as readonly string[])
 // --- Runs Tab ---
 
 function RunsTab({ agentId }: { agentId: string }) {
-  const [runs, setRuns] = useState<LlmRecord[] | null>(null);
+  const [runs, setRuns] = useState<LlmRecordSummary[] | null>(null);
 
   useEffect(() => {
     setRuns(null);

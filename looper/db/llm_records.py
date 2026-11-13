@@ -454,7 +454,7 @@ async def list_records(
     offset: int = 0,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
-    """Records newest first, filtered by agent instance, task and/or role."""
+    """Record summaries newest first; full bodies and launch metadata are read with get_record."""
     pool = pool or get_pool()
 
     conditions = []
@@ -479,10 +479,26 @@ async def list_records(
     params.extend([limit, offset])
 
     rows = await pool.fetch(
-        f"SELECT * FROM llm_records {where} ORDER BY created_at DESC LIMIT ${idx} OFFSET ${idx + 1}",
+        f"""SELECT id, agent_id, task_id, session_id,
+            LEFT(COALESCE(input_text, input_summary), 200) AS input_summary,
+            LEFT(COALESCE(output_text, output_summary), 200) AS output_summary,
+            COALESCE(char_length(input_text), 0) AS input_chars,
+            COALESCE(char_length(output_text), 0) AS output_chars,
+            input_tokens, output_tokens, duration_ms, model, error, metadata, created_at, status,
+            cost_usd, finished_at, last_output_at, cache_read_tokens, cache_creation_tokens,
+            context_tokens, compactions, cost_source
+            FROM llm_records {where} ORDER BY created_at DESC LIMIT ${idx} OFFSET ${idx + 1}""",
         *params,
     )
-    return [_row_to_dict(r) for r in rows]
+    records = [_row_to_dict(r) for r in rows]
+    for record in records:
+        metadata = record["metadata"]
+        if isinstance(metadata, dict):
+            # Normalize first so historical inline commands still supply the evidenced prompt mode.
+            metadata.pop("system_prompt", None)
+            metadata.pop("command", None)
+            metadata["presentation"]["system_prompt"].pop("text", None)
+    return records
 
 
 async def get_record(

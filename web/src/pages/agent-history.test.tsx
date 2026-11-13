@@ -3,14 +3,15 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RunCard, sourceName } from "@/pages/agent-history";
-import { exportLlmRequests, runProfile, type LlmRecord, type LlmRequest } from "@/lib/api";
+import { AgentHistoryPage, RunCard, sourceName } from "@/pages/agent-history";
+import { exportLlmRequests, runProfile, type LlmRecord, type LlmRecordSummary, type LlmRequest } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 function render(mode?: "append" | "replace", metadata: object = {}, extra: object = {}) {
   const record = {
     id: 1, agent_id: "worker", status: "completed", created_at: "2026-10-18T10:00:00Z", duration_ms: 10,
+    input_text: null, output_text: null,
     metadata: { presentation: { system_prompt: { text: "Looper prompt", mode: mode ?? null, sha256: null } }, ...metadata }, ...extra,
   } as LlmRecord;
   return renderToStaticMarkup(<RunCard initial={record} defaultOpen />);
@@ -72,7 +73,7 @@ describe("run system prompt mode", () => {
   it("renders unknown library evidence and historical labels from the DTO", async () => {
     const host = document.createElement("div"), root = createRoot(host);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ status: "ok", result: { events: [] } })));
-    const record = { id: 1, status: "completed", created_at: "2026-10-18T10:00:00Z", metadata: {
+    const record = { id: 1, status: "completed", created_at: "2026-10-18T10:00:00Z", input_text: null, output_text: null, metadata: {
       profile: { source: "project" },
       presentation: { sources: { profile: { code: null, label: "Manager override" } },
         system_prompt: { text: "stored evidence", mode: null, sha256: null },
@@ -112,6 +113,156 @@ function capturedRequest(id = 1, extra: Partial<LlmRequest> = {}): LlmRequest {
   };
 }
 
+describe("run details on expand", () => {
+  let host: HTMLDivElement, root: Root;
+  let fetcher: ReturnType<typeof vi.fn<typeof fetch>>;
+  const summary = { id: 20, agent_id: "worker-example", status: "completed", created_at: "2026-11-01T10:00:00Z",
+    input_summary: "Prompt preview", output_summary: "Result preview", input_chars: 300, output_chars: 300,
+    metadata: null } as LlmRecordSummary;
+  const full = { ...summary, input_text: "Complete prompt beyond the preview", output_text: "Complete result beyond the preview" };
+  const detailsCalls = () => fetcher.mock.calls.filter(([url]) => String(url).endsWith("runs/get"));
+  const toggle = async () => act(async () => host.querySelector("button")!.click());
+
+  beforeEach(() => {
+    host = document.createElement("div");
+    root = createRoot(host);
+    fetcher = vi.fn<typeof fetch>(async (url) => Response.json({ status: "ok", result:
+      String(url).endsWith("runs/get") ? { record: full } : { events: [] } }));
+    vi.stubGlobal("fetch", fetcher);
+  });
+  afterEach(async () => { await act(async () => root.unmount()); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  it("shows previews without fetching and caches full text across collapse and re-expand", async () => {
+    await act(async () => root.render(<RunCard initial={summary} defaultOpen={false} />));
+    expect(host.textContent).toContain(summary.input_summary);
+    expect(host.textContent).toContain(summary.output_summary);
+    expect(fetcher).not.toHaveBeenCalled();
+    await toggle();
+    expect(host.textContent).toContain(full.input_text);
+    expect(host.textContent).toContain(full.output_text);
+    await toggle();
+    await toggle();
+    expect(detailsCalls()).toHaveLength(1);
+    expect(JSON.parse(String(detailsCalls()[0][1]?.body))).toEqual({ record_id: summary.id });
+    expect(host.textContent).toContain(full.output_text);
+  });
+
+  it("shows loading, keeps an in-flight fetch on re-expand, and offers retry after failure", async () => {
+    let reject!: (error: Error) => void;
+    fetcher.mockImplementationOnce(() => new Promise<Response>((_resolve, fail) => { reject = fail; }));
+    await act(async () => root.render(<RunCard initial={summary} defaultOpen={false} />));
+    // Start the detail request before the transcript request.
+    await toggle();
+    expect(host.textContent).toContain("Loading run");
+    await toggle();
+    await toggle();
+    expect(detailsCalls()).toHaveLength(1);
+    await act(async () => reject(new Error("Connection interrupted")));
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain("Could not load this run: Connection interrupted");
+    const retry = [...host.querySelectorAll("button")].find((button) => button.textContent === "Retry")!;
+    expect(retry).toBeTruthy();
+    await act(async () => retry.click());
+    expect(detailsCalls()).toHaveLength(2);
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(host.textContent).toContain(full.output_text);
+  });
+
+  it("advances a collapsed running run's clock and accepts fresh summaries", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(summary.created_at));
+    await act(async () => root.render(<RunCard initial={{ ...summary, status: "running" }} defaultOpen={false} />));
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(host.textContent).toContain("last output 2s ago");
+    expect(host.querySelector("button")?.textContent).toContain("2s");
+    await act(async () => root.render(<RunCard initial={{ ...summary, output_summary: "Finished result" }} defaultOpen={false} />));
+    expect(host.textContent).toContain("completed");
+    expect(host.textContent).not.toContain("running");
+    expect(host.textContent).toContain("Finished result");
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps loaded full text when the parent reads a new summary", async () => {
+    await act(async () => root.render(<RunCard initial={summary} defaultOpen />));
+    await act(async () => root.render(<RunCard initial={{ ...summary, output_summary: "Fresh preview" }} defaultOpen />));
+    expect(host.textContent).toContain(full.input_text);
+    expect(host.textContent).toContain(full.output_text);
+    expect(detailsCalls()).toHaveLength(1);
+  });
+
+  it("refreshes a previously loaded running body when a collapsed run ends", async () => {
+    let status: LlmRecord["status"] = "running";
+    fetcher.mockImplementation(async (url) => Response.json({ status: "ok", result:
+      String(url).endsWith("runs/get") ? { record: { ...full, status,
+        output_text: status === "running" ? "Partial output" : "Final output" } } : { events: [] } }));
+    await act(async () => root.render(<RunCard initial={{ ...summary, status }} defaultOpen />));
+    await toggle();
+    status = "completed";
+    await act(async () => root.render(<RunCard initial={{ ...summary, status }} defaultOpen />));
+    expect(host.textContent).toContain("completed");
+    await toggle();
+    expect(host.textContent).toContain("Final output");
+    expect(detailsCalls()).toHaveLength(2);
+  });
+
+  it("polls a running run only while expanded and stops when it completes", async () => {
+    vi.useFakeTimers();
+    let status: LlmRecord["status"] = "running";
+    fetcher.mockImplementation(async (url) => Response.json({ status: "ok", result:
+      String(url).endsWith("runs/get") ? { record: { ...full, status } } : { events: [] } }));
+    await act(async () => root.render(<RunCard initial={{ ...summary, status: "running" }} defaultOpen={false} />));
+    await act(async () => vi.advanceTimersByTimeAsync(2100));
+    expect(fetcher).not.toHaveBeenCalled();
+    await toggle();
+    await act(async () => vi.advanceTimersByTimeAsync(2100));
+    expect(detailsCalls()).toHaveLength(2);
+    await toggle();
+    await act(async () => vi.advanceTimersByTimeAsync(4100));
+    expect(detailsCalls()).toHaveLength(2);
+    status = "completed";
+    await toggle();
+    await act(async () => vi.advanceTimersByTimeAsync(2100));
+    expect(host.textContent).toContain("completed");
+    await act(async () => vi.advanceTimersByTimeAsync(4100));
+    expect(detailsCalls()).toHaveLength(3);
+  });
+});
+
+describe("agent history summary polling", () => {
+  it("refreshes collapsed running runs and stops polling once all listed runs end", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-01T10:00:00Z"));
+    const host = document.createElement("div"), root = createRoot(host);
+    let status: LlmRecord["status"] = "running";
+    const completed = { id: 21, agent_id: "worker-example", status: "completed", created_at: new Date().toISOString(),
+      metadata: null, input_summary: "Latest run", output_summary: "Done", input_chars: 0, output_chars: 0 };
+    const fetcher = vi.fn<typeof fetch>(async (url) => Response.json({ status: "ok", result:
+      String(url).endsWith("runs/list") ? { records: [completed, { ...completed, id: 20, status }] } :
+      String(url).endsWith("runs/get") ? { record: { ...completed, input_text: null, output_text: null } } :
+      { events: [], requests: [], enabled: false } }));
+    vi.stubGlobal("fetch", fetcher);
+    const listCalls = () => fetcher.mock.calls.filter(([url]) => String(url).endsWith("runs/list"));
+    try {
+      await act(async () => root.render(<AgentHistoryPage sub="worker-example" />));
+      expect(listCalls()).toHaveLength(1);
+      await act(async () => vi.advanceTimersByTimeAsync(2000));
+      expect(listCalls()).toHaveLength(2);
+      expect(host.textContent).toContain("last output 2s ago");
+      status = "completed";
+      await act(async () => vi.advanceTimersByTimeAsync(2000));
+      expect(listCalls()).toHaveLength(3);
+      expect(host.textContent).not.toContain("running");
+      await act(async () => vi.advanceTimersByTimeAsync(6000));
+      expect(listCalls()).toHaveLength(3);
+      expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith("runs/get"))).toHaveLength(1);
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe("recorded model requests", () => {
   let host: HTMLDivElement, root: Root;
   let fetcher: ReturnType<typeof vi.fn<typeof fetch>>;
@@ -119,6 +270,7 @@ describe("recorded model requests", () => {
   let latest: LlmRecord;
   const record = (metadata: object = { llmrec: { state: "recording" } }, status = "completed") => ({
     id: 7, agent_id: "worker", status, created_at: "2026-11-01T10:00:00Z", duration_ms: 120, metadata,
+    input_text: null, output_text: null,
   } as LlmRecord);
   const ok = (result: object) => Response.json({ status: "ok", result });
   const button = (text: string) => {

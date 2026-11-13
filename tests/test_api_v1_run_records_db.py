@@ -100,6 +100,78 @@ def test_record_get_preserves_historical_metadata_and_interrupted_status(tmp_pat
     run_db(run, monkeypatch, timeout=30)
 
 
+def test_list_summaries_bound_large_record_payload_and_get_keeps_full_text(tmp_path, monkeypatch):
+    async def run(pool):
+        prompt, output = "提示🙂" * 24_000, "Result " * 11_000
+        ids = await pool.fetch(
+            """INSERT INTO llm_records (agent_id, input_text, output_text, input_summary, output_summary, metadata)
+               SELECT 'worker-large', $1, $2, 'old input summary', 'old output summary', '{"step_id":"step-one"}'
+               FROM generate_series(1, 60) RETURNING id""", prompt, output)
+        async with _api(tmp_path, pool) as call:
+            listed = await call("list", {"agent_id": "worker-large", "limit": 500})
+            assert len(listed["records"]) == 60
+            assert len(json.dumps(listed, ensure_ascii=False).encode()) < 120_000
+            for row in listed["records"]:
+                assert not {"input_text", "output_text"} & row.keys()
+                assert (row["input_summary"], row["output_summary"]) == (prompt[:200], output[:200])
+                assert (row["input_chars"], row["output_chars"]) == (len(prompt), len(output))
+            full = (await call("get", {"record_id": ids[0]["id"]}))["record"]
+            summary = next(row for row in listed["records"] if row["id"] == full["id"])
+            assert full["input_text"] == prompt and full["output_text"] == output
+            assert full["metadata"]["presentation"]["system_prompt"].pop("text") is None
+            changed = {"input_text", "output_text", "input_summary", "output_summary"}
+            assert {key: value for key, value in full.items() if key not in changed} == {
+                key: value for key, value in summary.items() if key not in changed | {"input_chars", "output_chars"}}
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("inline_only", [False, True])
+def test_list_omits_system_prompt_and_command_but_get_preserves_them(tmp_path, monkeypatch, inline_only):
+    async def run(pool):
+        system_prompt = "System instructions " * 320  # More than 6 KB per run.
+        command = ["claude", "--append-system-prompt", system_prompt]
+        metadata = {"command": command, "step_id": "step-one", "system_prompt_sha256": "stored-hash",
+                    "presentation": {"system_prompt": {"text": system_prompt}}}
+        if not inline_only:
+            metadata.update(system_prompt=system_prompt, system_prompt_mode="replace")
+        ids = await pool.fetch(
+            """INSERT INTO llm_records (agent_id, input_text, output_text, metadata)
+               SELECT 'worker-prompts', 'Run input', 'Run output', $1::jsonb
+               FROM generate_series(1, 60) RETURNING id""", json.dumps(metadata))
+        async with _api(tmp_path, pool, client=False) as call:
+            listed = await call("list", {"agent_id": "worker-prompts", "limit": 60})
+            assert len(listed["records"]) == 60
+            assert len(json.dumps(listed).encode()) < 200_000
+            for row in listed["records"]:
+                brief = row["metadata"]
+                assert "system_prompt" not in brief and "command" not in brief
+                assert "text" not in brief["presentation"]["system_prompt"]
+                assert brief["presentation"]["system_prompt"]["mode"] == ("append" if inline_only else "replace")
+                assert system_prompt not in json.dumps(row)
+                assert brief["step_id"] == "step-one" and brief["system_prompt_sha256"] == "stored-hash"
+            full = (await call("get", {"record_id": ids[0]["id"]}))["record"]
+            assert full["metadata"] == llm_records.normalize_record_metadata(metadata)
+            assert full["metadata"]["command"] == command
+            assert full["metadata"]["presentation"]["system_prompt"]["text"] == system_prompt
+            if not inline_only:
+                assert full["metadata"]["system_prompt"] == system_prompt
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("text,stored", [(None, None), (None, "historical " * 30),
+                                       ("", None), ("short", None), ("x" * 200, None), ("x" * 201, None)])
+def test_list_summary_lengths_and_null_text(tmp_path, monkeypatch, text, stored):
+    async def run(pool):
+        await pool.execute("""INSERT INTO llm_records (agent_id, input_text, output_text, input_summary, output_summary)
+                              VALUES ('worker-short', $1, $1, $2, $2)""", text, stored)
+        async with _api(tmp_path, pool, client=False) as call:
+            (row,) = (await call("list", {"agent_id": "worker-short"}))["records"]
+            summary = text if text is not None else stored
+            assert row["input_summary"] == row["output_summary"] == (summary[:200] if summary is not None else None)
+            assert row["input_chars"] == row["output_chars"] == len(text or "")
+    run_db(run, monkeypatch, timeout=30)
+
+
 def test_event_cursor_keeps_every_nested_event_and_never_repeats_a_sequence(tmp_path, monkeypatch):
     async def run(pool):
         rid = await _record(pool)

@@ -2656,7 +2656,7 @@ export interface RoleConfig {
 export interface RecordSource { code: SettingSource | null; label: string | null }
 export interface RecordPresentation {
   sources: Record<"harness" | "profile" | "model" | "effort" | "run_budget_usd", RecordSource>;
-  system_prompt: { text: string | null; mode: SystemPromptMode | null; sha256: string | null };
+  system_prompt: { text?: string | null; mode: SystemPromptMode | null; sha256: string | null };
   library: RunLibrary;
 }
 /** The Agent Profile a run used and where it was selected. */
@@ -2759,6 +2759,12 @@ export interface LlmRecord {
   task_role?: RunRole;
 }
 
+/** List rows omit full bodies, metadata.system_prompt, presentation prompt text and metadata.command. */
+export type LlmRecordSummary = Omit<LlmRecord, "input_text" | "output_text"> & {
+  input_chars: number;
+  output_chars: number;
+};
+
 /** The canonical Agent Profile supplied by the record read boundary. */
 export function runProfile(record: Pick<LlmRecord, "metadata">): RunProfile | null {
   return record.metadata?.profile ?? null;
@@ -2838,8 +2844,8 @@ export async function fetchLlmRecords(params: {
   role?: string;
   limit?: number;
   offset?: number;
-}): Promise<LlmRecord[]> {
-  const result = await callV1<{ records: LlmRecord[] }>("/api/v1/runs/list", params);
+}): Promise<LlmRecordSummary[]> {
+  const result = await callV1<{ records: LlmRecordSummary[] }>("/api/v1/runs/list", params);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result.records;
 }
