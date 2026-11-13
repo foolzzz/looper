@@ -643,7 +643,9 @@ def run_task(
                 break
             time.sleep(poll)
         detail = api.post("/api/v1/tasks/detail", {"task_id": task_id})["result"]
-        records = sorted(records, key=lambda r: int(r["id"]))
+        # Lists contain summaries; scoring needs each turn's input and output.
+        records = [api.post("/api/v1/runs/get", {"record_id": int(r["id"])})["result"]["record"]
+                   for r in sorted(records, key=lambda r: int(r["id"]))]
         events = {int(r["id"]): _all_events(api, int(r["id"])) for r in records if metrics.role(r) != "other"}
         result = metrics.task_metrics(
             detail=detail,

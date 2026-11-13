@@ -240,6 +240,8 @@ print(json.dumps({'type': 'agent_settled', 'aborted': False}))
                 return {"status": "completed", "steps": [{"id": "s1"}]}
             if path == "/api/v1/runs/list":
                 return {"records": self.records}
+            if path == "/api/v1/runs/get":
+                return {"record": next(r for r in self.records if r["id"] == _["record_id"])}
             if path == "/api/v1/runs/events":
                 return {"events": self.events[_["record_id"]]}
             raise AssertionError(path)
@@ -1403,6 +1405,8 @@ def test_run_task_pushes_fixes_without_resuming_the_pr_wait(
             return next(details)
         if path == "/api/v1/runs/list":
             return {"records": records}
+        if path == "/api/v1/runs/get":
+            return {"record": next(r for r in records if r["id"] == _["record_id"])}
         if path == "/api/v1/runs/events":
             return {"events": events[_["record_id"]]}
         raise AssertionError(path)
