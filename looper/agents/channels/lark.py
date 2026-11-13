@@ -160,7 +160,6 @@ class LarkChannelAdapter(ChannelAdapter):
         self._outbound_task: asyncio.Task[Any] | None = None
         self._collector_task: asyncio.Task[Any] | None = None
         self._catchup_task: asyncio.Task[Any] | None = None
-        self._catchup_complete = False
         self._heartbeat_task: asyncio.Task[Any] | None = None
         self._inbox: LarkInbox | None = None
         self._ingress_lock = asyncio.Lock()
@@ -191,13 +190,15 @@ class LarkChannelAdapter(ChannelAdapter):
         if self.channel_type == "lark":
             self._inbox = LarkInbox(bus.runtime_root / ".local" / "lark" / self.channel_id / "inbox.sqlite3")
             boundary = self._inbox.boundary
-            # Keep an unfinished recovery window across another crash during startup.
+            # Discovery itself can fail or be cancelled while live checkpoints advance.
+            if boundary is not None and time() - boundary <= _CATCHUP_MAX_AGE:
+                self._inbox.defer_discovery(boundary - _CATCHUP_OVERLAP, time())
+            # Keep the live boundary until the consumer is healthy.
             self._inbox.checkpoint(boundary if boundary is not None else time())
         else:
             boundary = None
         self._bus = bus
         self._running = True
-        self._catchup_complete = False
         self._outbound_task = asyncio.create_task(self._outbound_loop())
         self._collector_task = asyncio.create_task(self._event_collector_loop())
         if self._inbox is not None:
@@ -208,7 +209,7 @@ class LarkChannelAdapter(ChannelAdapter):
     async def stop(self) -> None:
         # Cancellation during admission/download must not move the recovery boundary past that message.
         ready = getattr(self._transport, "consumer_started", None)
-        clean = (not self._ingress_lock.locked() and self._catchup_complete
+        clean = (not self._ingress_lock.locked()
                  and ready is not None and ready.is_set())
         stopped_at = time()
         self._running = False
@@ -450,8 +451,7 @@ class LarkChannelAdapter(ChannelAdapter):
         return await catchup_chats(self.channel_id, _CATCHUP_MAX_CHATS)
 
     async def _history_pages(self, fetch: Callable[..., Awaitable[dict[str, Any]]],
-                             container_id: str, *, allow_truncation: bool = False,
-                             **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+                             container_id: str, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
         token = ""
         for _ in range(_CATCHUP_MAX_PAGES):
             page = await fetch(container_id, page_token=token, **kwargs)
@@ -462,8 +462,7 @@ class LarkChannelAdapter(ChannelAdapter):
             if not next_token or next_token == token:
                 raise ValueError("history pagination did not advance")
             token = next_token
-        if not allow_truncation:
-            raise ValueError("catch-up page limit reached")
+        raise ValueError("catch-up page limit reached")
 
     async def _catchup_messages(self, page: dict[str, Any], chat_id: str, *, start: float, end: float,
                                 stats: dict[str, int]) -> None:
@@ -489,85 +488,108 @@ class LarkChannelAdapter(ChannelAdapter):
                 stats["failures"] += 1
                 logger.warning("%s: catch-up message failed", self.channel_id, exc_info=True)
 
-    async def _catchup_threads(self, chat_id: str, *, start: float, end: float, stats: dict[str, int]) -> None:
+    async def _catchup_threads(self, chat_id: str, *, start: float, end: float, stats: dict[str, int],
+                               seen: set[str]) -> None:
         if not hasattr(self._transport, "list_threads"):
             return
-        seen: set[str] = set()
+        async for roots in self._history_pages(
+            self._transport.list_threads, chat_id,  # type: ignore[attr-defined]
+        ):
+            for thread_id in roots["threads"]:
+                await self._catchup_thread(thread_id, chat_id, start=start, end=end, stats=stats, seen=seen)
 
-        async def threads() -> AsyncIterator[str]:
-            recent = getattr(self._transport, "list_recent_messages", None)
-            if recent is not None:
-                # Find replies by their own creation time, independently of root age/rank.
-                try:
-                    async for page in self._history_pages(recent, chat_id, start=start, end=end):
-                        await self._catchup_messages(page, chat_id, start=start, end=end, stats=stats)
-                        for message in _history_messages(page["messages"][:50]):
-                            if thread_id := message.get("thread_id"):
-                                yield thread_id
-                except LarkCliError as exc:
-                    if exc.code != 99991672 and exc.error_type != "authorization":
-                        raise
-                    # Search preflights scopes beyond history permissions, even with
-                    # --no-reactions. Degrade to roots without freezing live checkpoints.
-                    stats["search_unavailable"] += 1
-                    logger.warning("%s: catch-up search unavailable; scanning roots: %s", self.channel_id, exc)
-            # Supplement search with older roots, within its own budget. Missing
-            # search scopes degrade recovery rather than freezing live checkpoints.
-            async for roots in self._history_pages(
-                self._transport.list_threads, chat_id, allow_truncation=recent is not None,  # type: ignore[attr-defined]
+    async def _catchup_thread(self, thread_id: str, chat_id: str, *, start: float, end: float,
+                              stats: dict[str, int], seen: set[str]) -> None:
+        if thread_id in seen or not hasattr(self._transport, "list_thread_messages"):
+            return
+        seen.add(thread_id)
+        try:
+            pages = []
+            async for page in self._history_pages(
+                self._transport.list_thread_messages, thread_id,  # type: ignore[attr-defined]
             ):
-                for thread_id in roots["threads"]:
-                    yield thread_id
-
-        async for thread_id in threads():
-            if thread_id in seen:
-                continue
-            seen.add(thread_id)
-            try:
-                pages = []
-                async for page in self._history_pages(
-                    self._transport.list_thread_messages, thread_id,  # type: ignore[attr-defined]
-                ):
-                    pages.append(page)
-                    if any(_history_created(message).before(start) for message in page["messages"]):
-                        # Thread pages descend by creation time: the rest predates the window.
-                        break
-                # Fetch newest first for a bounded scan, admit oldest first as on the chat path.
-                for page in reversed(pages):
-                    await self._catchup_messages(
-                        {**page, "messages": list(reversed(page["messages"][:50]))}, chat_id,
-                        start=start, end=end, stats=stats)
-            except Exception:
-                stats["failures"] += 1
-                logger.warning("%s: catch-up thread failed", self.channel_id, exc_info=True)
+                pages.append(page)
+                if any(_history_created(message).before(start) for message in page["messages"]):
+                    break
+            # Fetch newest first for a bounded scan, admit oldest first as on the chat path.
+            for page in reversed(pages):
+                await self._catchup_messages(
+                    {**page, "messages": list(reversed(page["messages"][:50]))}, chat_id,
+                    start=start, end=end, stats=stats)
+        except Exception:
+            stats["failures"] += 1
+            logger.warning("%s: catch-up thread failed chat=%s thread=%s", self.channel_id, chat_id,
+                           thread_id, exc_info=True)
 
     async def _catch_up(self, boundary: float | None) -> None:
         stats = dict(chats_scanned=0, messages_found=0, handled=0, duplicates=0, too_old=0, failures=0,
-                     search_unavailable=0)
+                     debt_windows_dropped=0)
         expired = boundary is not None and time() - boundary > _CATCHUP_MAX_AGE
         try:
-            if boundary is None or expired or not hasattr(self._transport, "list_messages"):
-                self._catchup_complete = True
+            assert self._inbox is not None
+            debts = self._inbox.debts()
+            cutoff = time() - _CATCHUP_MAX_AGE
+            for chat_id, (start, end) in list(debts.items()):
+                if start < cutoff:
+                    stats["debt_windows_dropped"] += 1
+                    logger.warning("%s: catch-up debt expired chat=%s start=%s end=%s skipped_seconds=%s "
+                                   "debt_windows_dropped=1", self.channel_id, chat_id, start, min(end, cutoff),
+                                   min(end, cutoff) - start)
+                    if end <= cutoff:
+                        self._inbox.complete(chat_id)
+                        del debts[chat_id]
+                    else:
+                        debts[chat_id] = (cutoff, end)
+                        self._inbox.defer(chat_id, cutoff, end)
+            discovery = self._inbox.discovery()
+            live_start = boundary - _CATCHUP_OVERLAP if boundary is not None and not expired else None
+            if discovery is not None:
+                if discovery[1] <= cutoff:
+                    self._inbox.complete_discovery()
+                    logger.warning("%s: catch-up discovery expired skipped_windows=1", self.channel_id)
+                else:
+                    pending_start = max(discovery[0], cutoff)
+                    live_start = min(live_start, pending_start) if live_start is not None else pending_start
+            if (live_start is None and not debts) or not hasattr(self._transport, "list_messages"):
                 return
-            # Process spawn alone leaves a gap while CLI establishes its subscription.
+            chats = await self._catchup_chats()
+            # Persist all planned work before awaiting history: live checkpoints can
+            # advance independently, even if startup is cancelled halfway through.
+            windows: dict[str, float] = {}
+            for chat_id in dict.fromkeys([*debts, *chats]):
+                if live_start is None and chat_id not in debts:
+                    continue
+                owed = debts.get(chat_id)
+                start = min(live_start, owed[0]) if live_start is not None and owed else (
+                    live_start if live_start is not None else owed[0])
+                assert start is not None
+                windows[chat_id] = start
+                self._inbox.defer(chat_id, start, time())
             if ready := getattr(self._transport, "consumer_started", None):
                 await asyncio.wait_for(ready.wait(), timeout=60)
             end = time()
-            chats = await self._catchup_chats()
-            for chat_id in chats[:_CATCHUP_MAX_CHATS]:
+            for chat_id, start in windows.items():
+                self._inbox.defer(chat_id, start, end)
+            self._inbox.complete_discovery()
+            for chat_id, start in list(windows.items())[:_CATCHUP_MAX_CHATS]:
                 stats["chats_scanned"] += 1
+                failures = stats["failures"]
                 try:
+                    seen: set[str] = set()
                     async for page in self._history_pages(
-                        self._transport.list_messages, chat_id,  # type: ignore[attr-defined]
-                        start=boundary - _CATCHUP_OVERLAP, end=end,
+                        self._transport.list_messages, chat_id, start=start, end=end,  # type: ignore[attr-defined]
                     ):
-                        await self._catchup_messages(page, chat_id, start=boundary - _CATCHUP_OVERLAP,
-                                                     end=end, stats=stats)
-                    await self._catchup_threads(chat_id, start=boundary - _CATCHUP_OVERLAP, end=end, stats=stats)
+                        await self._catchup_messages(page, chat_id, start=start, end=end, stats=stats)
+                        for message in _history_messages(page["messages"][:50]):
+                            if thread_id := message.get("thread_id"):
+                                await self._catchup_thread(thread_id, chat_id, start=start, end=end,
+                                                           stats=stats, seen=seen)
+                    await self._catchup_threads(chat_id, start=start, end=end, stats=stats, seen=seen)
+                    if failures == stats["failures"]:
+                        self._inbox.complete(chat_id)
                 except Exception:
                     stats["failures"] += 1
-                    logger.warning("%s: catch-up chat failed", self.channel_id, exc_info=True)
-            self._catchup_complete = stats["failures"] == 0
+                    logger.warning("%s: catch-up chat failed chat=%s", self.channel_id, chat_id, exc_info=True)
         except Exception:
             stats["failures"] += 1
             logger.warning("%s: catch-up discovery failed", self.channel_id, exc_info=True)
@@ -579,7 +601,7 @@ class LarkChannelAdapter(ChannelAdapter):
         while self._running:
             await asyncio.sleep(_HEARTBEAT_SECONDS)
             ready = getattr(self._transport, "consumer_started", None)
-            if (self._inbox is not None and self._catchup_complete
+            if (self._inbox is not None
                     and not self._ingress_lock.locked() and ready is not None and ready.is_set()):
                 try:
                     self._inbox.checkpoint(time())

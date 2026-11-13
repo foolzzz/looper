@@ -5896,8 +5896,8 @@ implementation supplies it and is retested.
   stops is started again after 10 s. The long connection does not replay
   messages sent while disconnected. On adapter startup, after the CLI emits
   `[event] ready event_key=im.message.receive_v1` (or its first live message),
-  a background catch-up lists history with `lark-cli im
-  +chat-messages-list --as bot`, ascending, from the saved boundary minus
+  a background catch-up lists raw history with `lark-cli api GET
+  /open-apis/im/v1/messages --as bot` (chat containers), ascending, from the saved boundary minus
   10 seconds through the consumer's ready time. It scans explicit channel
   bindings first, then unbound chats observed by `observe_chat` in the last
   24 hours when the default Manager accepts unbound chats. At most 100 chats,
@@ -5918,12 +5918,17 @@ implementation supplies it and is retested.
   in SQLite under the runtime root's `.local/lark/<channel>/inbox.sqlite3`.
   Live and recovered messages share a lock and durable receipts, so overlapping
   history and live delivery are processed once. Receipts store ids, never message
-  content. Startup preserves the previous boundary until recovery finishes;
-  only after all chat and thread scans complete, while the consumer is ready
-  and no message is being handled, a heartbeat
-  saves the current time every 5 seconds. A clean stop saves its stop time;
-  an interrupted handler, disconnected consumer, failed scan or exhausted page
-  budget retains the earlier boundary.
+  content. While the live consumer is ready and no message is being handled,
+  a heartbeat saves the current time every 5 seconds, independently of catch-up
+  success. A clean stop saves its stop time; an interrupted handler or disconnected
+  consumer retains the earlier live boundary. Each chat's unfinished recovery
+  window is stored separately before scanning, retained on errors or cancellation,
+  and merged with that chat's next startup window. Discovery work is also durable
+  until its windows have been assigned to chats. Debt older than 15 minutes is
+  dropped (partially expired windows keep their recent portion), with skipped-window
+  and duration counts in the log. Thread containers use the same raw history API;
+  no message search or search scopes are required. Raw parent/root ids take the
+  same gate routing path as live replies.
   After a crash, that last heartbeat is the recovery boundary. A missing
   boundary initializes the state without replaying history; one older than
   15 minutes skips the whole window. Individual recovered messages older than

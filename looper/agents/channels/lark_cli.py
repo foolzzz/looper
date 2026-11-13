@@ -17,12 +17,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import re
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -76,11 +76,14 @@ def consume_command(profile: str | None = None) -> list[str]:
 
 def history_command(chat_id: str, *, start: float, end: float, page_token: str = "",
                     profile: str | None = None) -> list[str]:
-    return [*_base(profile), "im", "+chat-messages-list", "--as", "bot", "--chat-id", chat_id,
-            "--start", datetime.fromtimestamp(start, timezone.utc).isoformat(),
-            "--end", datetime.fromtimestamp(end, timezone.utc).isoformat(), "--order", "asc",
-            "--page-size", "50", "--no-reactions", "--format", "json",
-            *(["--page-token", page_token] if page_token else [])]
+    # Raw history keeps parent/root ids that the formatted shortcut discards.
+    params = {"container_id_type": "chat", "container_id": chat_id,
+              "start_time": str(int(start)), "end_time": str(math.ceil(end)),
+              "sort_type": "ByCreateTimeAsc", "page_size": 50}
+    if page_token:
+        params["page_token"] = page_token
+    return [*_base(profile), "api", "GET", "/open-apis/im/v1/messages", "--as", "bot",
+            "--params", json.dumps(params)]
 
 
 def thread_roots_command(chat_id: str, *, page_token: str = "", profile: str | None = None) -> list[str]:
@@ -93,21 +96,14 @@ def thread_roots_command(chat_id: str, *, page_token: str = "", profile: str | N
             "--params", json.dumps(params)]
 
 
-def recent_messages_command(chat_id: str, *, start: float, end: float, page_token: str = "",
-                            profile: str | None = None) -> list[str]:
-    # Search uses message creation time, including replies whose roots are outside chat history.
-    return [*_base(profile), "im", "+messages-search", "--as", "bot", "--chat-id", chat_id,
-            "--start", datetime.fromtimestamp(start, timezone.utc).isoformat(),
-            "--end", datetime.fromtimestamp(end, timezone.utc).isoformat(),
-            "--page-size", "50", "--no-reactions", "--format", "json",
-            *(["--page-token", page_token] if page_token else [])]
-
-
 def thread_history_command(thread_id: str, *, page_token: str = "", profile: str | None = None) -> list[str]:
     # Thread containers do not support time filters. Scan newest first and filter locally.
-    return [*_base(profile), "im", "+threads-messages-list", "--as", "bot", "--thread", thread_id,
-            "--order", "desc", "--page-size", "50", "--no-reactions", "--format", "json",
-            *(["--page-token", page_token] if page_token else [])]
+    params = {"container_id_type": "thread", "container_id": thread_id,
+              "sort_type": "ByCreateTimeDesc", "page_size": 50}
+    if page_token:
+        params["page_token"] = page_token
+    return [*_base(profile), "api", "GET", "/open-apis/im/v1/messages", "--as", "bot",
+            "--params", json.dumps(params)]
 
 
 def send_command(*, chat_id: str | None = None, user_id: str | None = None, text: str | None = None,

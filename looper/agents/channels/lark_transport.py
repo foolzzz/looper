@@ -9,7 +9,6 @@ from collections import deque
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import quote
 
 from . import lark_cli
 from .lark_content import ResourceRef
@@ -84,32 +83,39 @@ class CliTransport:
         chat_type = await self._history_chat_type(chat_id)
         result = await lark_cli.run_json(lark_cli.history_command(
             chat_id, start=start, end=end, page_token=page_token, profile=self._profile))
-        page = result.get("data", result)
-        if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
-            raise lark_cli.LarkCliError("history did not return a message page")
-        return {**page, "messages": await self._history_references(page["messages"]), "chat_type": chat_type}
+        return {**self._history_page(result), "chat_type": chat_type}
 
-    async def _history_references(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        enriched = []
-        for message in messages:
-            message = dict(message)
-            if message.get("thread_id") and not (
-                (message.get("reply_to") or message.get("parent_id")) and message.get("root_id")
-            ):
-                # Shortcuts discard parent/root ids. Read the exact message before
-                # admission so a recovered gate reply cannot become a Manager turn.
-                result = await lark_cli.run_json([
-                    *lark_cli._base(self._profile), "api", "GET",
-                    f"/open-apis/im/v1/messages/{quote(message['message_id'], safe='')}", "--as", "bot"])
-                items = (result.get("data") or {}).get("items") or []
-                raw = next((item for item in items if item.get("message_id") == message["message_id"]), None)
-                if raw is None:
-                    raise lark_cli.LarkCliError("history reply references are unavailable")
-                message.update(parent_id=raw.get("parent_id") or "", root_id=raw.get("root_id") or "")
-            if message.get("thread_replies"):
-                message["thread_replies"] = await self._history_references(message["thread_replies"])
-            enriched.append(message)
-        return enriched
+    @staticmethod
+    def _history_page(result: dict[str, Any]) -> dict[str, Any]:
+        page = result.get("data", result)
+        if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+            raise lark_cli.LarkCliError("history did not return a message page")
+        return {**page, "messages": [CliTransport._history_message(message) for message in page["items"]]}
+
+    @staticmethod
+    def _history_message(message: dict[str, Any]) -> dict[str, Any]:
+        # Use the live renderer while preserving the raw history routing fields.
+        from .lark_stream import _render
+
+        kind = message["msg_type"]
+        mentions = [{**mention, "key": mention.get("key") or "", "name": mention.get("name") or ""}
+                    for mention in message.get("mentions") or []]
+        content = (message.get("body") or {}).get("content") or ""
+        if kind == "text":
+            try:
+                body = json.loads(content) if content else {}
+            except (ValueError, TypeError):
+                body = {}
+            content = body.get("text") if isinstance(body, dict) else ""
+            content = content if isinstance(content, str) else ""
+            for mention in sorted(mentions, key=lambda item: len(item["key"]), reverse=True):
+                if mention["key"]:
+                    content = content.replace(mention["key"], "@" + mention["name"])
+        else:
+            content = _render(kind, content, mentions)
+        return {**message, "content": content, "mentions": mentions,
+                "thread_replies": [CliTransport._history_message(reply)
+                                   for reply in message.get("thread_replies") or []]}
 
     async def list_threads(self, chat_id: str, *, page_token: str = "") -> dict[str, Any]:
         if await self._history_chat_type(chat_id) == "p2p":
@@ -122,25 +128,10 @@ class CliTransport:
         return {**page, "threads": list(dict.fromkeys(item["thread_id"] for item in page["items"]
                                                     if item.get("thread_id")))}
 
-    async def list_recent_messages(self, chat_id: str, *, start: float, end: float,
-                                   page_token: str = "") -> dict[str, Any]:
-        chat_type = await self._history_chat_type(chat_id)
-        if chat_type == "p2p":
-            return {"messages": [], "chat_type": chat_type, "has_more": False}
-        result = await lark_cli.run_json(lark_cli.recent_messages_command(
-            chat_id, start=start, end=end, page_token=page_token, profile=self._profile))
-        page = result.get("data", result)
-        if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
-            raise lark_cli.LarkCliError("history search did not return a message page")
-        return {**page, "messages": await self._history_references(page["messages"]), "chat_type": chat_type}
-
     async def list_thread_messages(self, thread_id: str, *, page_token: str = "") -> dict[str, Any]:
         result = await lark_cli.run_json(lark_cli.thread_history_command(
             thread_id, page_token=page_token, profile=self._profile))
-        page = result.get("data", result)
-        if not isinstance(page, dict) or not isinstance(page.get("messages"), list):
-            raise lark_cli.LarkCliError("history did not return a thread message page")
-        return {**page, "messages": await self._history_references(page["messages"]), "chat_type": "group"}
+        return {**self._history_page(result), "chat_type": "group"}
 
     async def send(self, *, chat_id: str | None = None, user_id: str | None = None,
                    text: str | None = None, markdown: str | None = None,
