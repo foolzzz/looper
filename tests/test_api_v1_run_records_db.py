@@ -118,9 +118,43 @@ def test_list_summaries_bound_large_record_payload_and_get_keeps_full_text(tmp_p
             full = (await call("get", {"record_id": ids[0]["id"]}))["record"]
             summary = next(row for row in listed["records"] if row["id"] == full["id"])
             assert full["input_text"] == prompt and full["output_text"] == output
+            assert full["metadata"]["presentation"]["system_prompt"].pop("text") is None
             changed = {"input_text", "output_text", "input_summary", "output_summary"}
             assert {key: value for key, value in full.items() if key not in changed} == {
                 key: value for key, value in summary.items() if key not in changed | {"input_chars", "output_chars"}}
+    run_db(run, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("inline_only", [False, True])
+def test_list_omits_system_prompt_and_command_but_get_preserves_them(tmp_path, monkeypatch, inline_only):
+    async def run(pool):
+        system_prompt = "System instructions " * 320  # More than 6 KB per run.
+        command = ["claude", "--append-system-prompt", system_prompt]
+        metadata = {"command": command, "step_id": "step-one", "system_prompt_sha256": "stored-hash",
+                    "presentation": {"system_prompt": {"text": system_prompt}}}
+        if not inline_only:
+            metadata.update(system_prompt=system_prompt, system_prompt_mode="replace")
+        ids = await pool.fetch(
+            """INSERT INTO llm_records (agent_id, input_text, output_text, metadata)
+               SELECT 'worker-prompts', 'Run input', 'Run output', $1::jsonb
+               FROM generate_series(1, 60) RETURNING id""", json.dumps(metadata))
+        async with _api(tmp_path, pool, client=False) as call:
+            listed = await call("list", {"agent_id": "worker-prompts", "limit": 60})
+            assert len(listed["records"]) == 60
+            assert len(json.dumps(listed).encode()) < 200_000
+            for row in listed["records"]:
+                brief = row["metadata"]
+                assert "system_prompt" not in brief and "command" not in brief
+                assert "text" not in brief["presentation"]["system_prompt"]
+                assert brief["presentation"]["system_prompt"]["mode"] == ("append" if inline_only else "replace")
+                assert system_prompt not in json.dumps(row)
+                assert brief["step_id"] == "step-one" and brief["system_prompt_sha256"] == "stored-hash"
+            full = (await call("get", {"record_id": ids[0]["id"]}))["record"]
+            assert full["metadata"] == llm_records.normalize_record_metadata(metadata)
+            assert full["metadata"]["command"] == command
+            assert full["metadata"]["presentation"]["system_prompt"]["text"] == system_prompt
+            if not inline_only:
+                assert full["metadata"]["system_prompt"] == system_prompt
     run_db(run, monkeypatch, timeout=30)
 
 

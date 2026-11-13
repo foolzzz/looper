@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RunCard, sourceName } from "@/pages/agent-history";
+import { AgentHistoryPage, RunCard, sourceName } from "@/pages/agent-history";
 import { exportLlmRequests, runProfile, type LlmRecord, type LlmRecordSummary, type LlmRequest } from "@/lib/api";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -158,7 +158,7 @@ describe("run details on expand", () => {
     await toggle();
     expect(detailsCalls()).toHaveLength(1);
     await act(async () => reject(new Error("Connection interrupted")));
-    expect(host.querySelector('[role="alert"]')?.textContent).toContain("Connection interrupted");
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain("Could not load this run: Connection interrupted");
     const retry = [...host.querySelectorAll("button")].find((button) => button.textContent === "Retry")!;
     expect(retry).toBeTruthy();
     await act(async () => retry.click());
@@ -167,9 +167,47 @@ describe("run details on expand", () => {
     expect(host.textContent).toContain(full.output_text);
   });
 
+  it("advances a collapsed running run's clock and accepts fresh summaries", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(summary.created_at));
+    await act(async () => root.render(<RunCard initial={{ ...summary, status: "running" }} defaultOpen={false} />));
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    expect(host.textContent).toContain("last output 2s ago");
+    expect(host.querySelector("button")?.textContent).toContain("2s");
+    await act(async () => root.render(<RunCard initial={{ ...summary, output_summary: "Finished result" }} defaultOpen={false} />));
+    expect(host.textContent).toContain("completed");
+    expect(host.textContent).not.toContain("running");
+    expect(host.textContent).toContain("Finished result");
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps loaded full text when the parent reads a new summary", async () => {
+    await act(async () => root.render(<RunCard initial={summary} defaultOpen />));
+    await act(async () => root.render(<RunCard initial={{ ...summary, output_summary: "Fresh preview" }} defaultOpen />));
+    expect(host.textContent).toContain(full.input_text);
+    expect(host.textContent).toContain(full.output_text);
+    expect(detailsCalls()).toHaveLength(1);
+  });
+
+  it("refreshes a previously loaded running body when a collapsed run ends", async () => {
+    let status: LlmRecord["status"] = "running";
+    fetcher.mockImplementation(async (url) => Response.json({ status: "ok", result:
+      String(url).endsWith("runs/get") ? { record: { ...full, status,
+        output_text: status === "running" ? "Partial output" : "Final output" } } : { events: [] } }));
+    await act(async () => root.render(<RunCard initial={{ ...summary, status }} defaultOpen />));
+    await toggle();
+    status = "completed";
+    await act(async () => root.render(<RunCard initial={{ ...summary, status }} defaultOpen />));
+    expect(host.textContent).toContain("completed");
+    await toggle();
+    expect(host.textContent).toContain("Final output");
+    expect(detailsCalls()).toHaveLength(2);
+  });
+
   it("polls a running run only while expanded and stops when it completes", async () => {
     vi.useFakeTimers();
-    let status = "running";
+    let status: LlmRecord["status"] = "running";
     fetcher.mockImplementation(async (url) => Response.json({ status: "ok", result:
       String(url).endsWith("runs/get") ? { record: { ...full, status } } : { events: [] } }));
     await act(async () => root.render(<RunCard initial={{ ...summary, status: "running" }} defaultOpen={false} />));
@@ -187,6 +225,41 @@ describe("run details on expand", () => {
     expect(host.textContent).toContain("completed");
     await act(async () => vi.advanceTimersByTimeAsync(4100));
     expect(detailsCalls()).toHaveLength(3);
+  });
+});
+
+describe("agent history summary polling", () => {
+  it("refreshes collapsed running runs and stops polling once all listed runs end", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-01T10:00:00Z"));
+    const host = document.createElement("div"), root = createRoot(host);
+    let status: LlmRecord["status"] = "running";
+    const completed = { id: 21, agent_id: "worker-example", status: "completed", created_at: new Date().toISOString(),
+      metadata: null, input_summary: "Latest run", output_summary: "Done", input_chars: 0, output_chars: 0 };
+    const fetcher = vi.fn<typeof fetch>(async (url) => Response.json({ status: "ok", result:
+      String(url).endsWith("runs/list") ? { records: [completed, { ...completed, id: 20, status }] } :
+      String(url).endsWith("runs/get") ? { record: { ...completed, input_text: null, output_text: null } } :
+      { events: [], requests: [], enabled: false } }));
+    vi.stubGlobal("fetch", fetcher);
+    const listCalls = () => fetcher.mock.calls.filter(([url]) => String(url).endsWith("runs/list"));
+    try {
+      await act(async () => root.render(<AgentHistoryPage sub="worker-example" />));
+      expect(listCalls()).toHaveLength(1);
+      await act(async () => vi.advanceTimersByTimeAsync(2000));
+      expect(listCalls()).toHaveLength(2);
+      expect(host.textContent).toContain("last output 2s ago");
+      status = "completed";
+      await act(async () => vi.advanceTimersByTimeAsync(2000));
+      expect(listCalls()).toHaveLength(3);
+      expect(host.textContent).not.toContain("running");
+      await act(async () => vi.advanceTimersByTimeAsync(6000));
+      expect(listCalls()).toHaveLength(3);
+      expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith("runs/get"))).toHaveLength(1);
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 });
 

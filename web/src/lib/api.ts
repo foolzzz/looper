@@ -2656,7 +2656,7 @@ export interface RoleConfig {
 export interface RecordSource { code: SettingSource | null; label: string | null }
 export interface RecordPresentation {
   sources: Record<"harness" | "profile" | "model" | "effort" | "run_budget_usd", RecordSource>;
-  system_prompt: { text: string | null; mode: SystemPromptMode | null; sha256: string | null };
+  system_prompt: { text?: string | null; mode: SystemPromptMode | null; sha256: string | null };
   library: RunLibrary;
 }
 /** The Agent Profile a run used and where it was selected. */
@@ -2759,7 +2759,7 @@ export interface LlmRecord {
   task_role?: RunRole;
 }
 
-/** List rows omit full prompt/result bodies; runs.get supplies the full record. */
+/** List rows omit full bodies, metadata.system_prompt, presentation prompt text and metadata.command. */
 export type LlmRecordSummary = Omit<LlmRecord, "input_text" | "output_text"> & {
   input_chars: number;
   output_chars: number;

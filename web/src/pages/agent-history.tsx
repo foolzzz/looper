@@ -1059,12 +1059,22 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: RunRecord; defaultOp
       setRecord(latest);
       setDetails("loaded");
     } catch (error) {
-      setDetailError(error instanceof Error ? error.message : "Could not load this run.");
+      setDetailError(error instanceof Error ? error.message : String(error));
       setDetails("error");
     } finally {
       fetchingDetails.current = false;
     }
   }, [initial.id]);
+
+  const hasFullRecord = "input_text" in record && "output_text" in record;
+  useEffect(() => {
+    if (hasFullRecord) {
+      // A summary announcing completion must not leave a cached partial body behind.
+      if (record.status === "running" && initial.status !== "running") void loadDetails();
+    } else {
+      setRecord(initial);
+    }
+  }, [initial, hasFullRecord, record.status, loadDetails]);
 
   useEffect(() => {
     if (open && details === "idle") void loadDetails();
@@ -1087,11 +1097,17 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: RunRecord; defaultOp
     if (open) load();
   }, [open, load]);
 
-  // Follow a running agent: new events, status and heartbeat.
+  // Even collapsed runs keep their elapsed time and heartbeat age current.
+  useEffect(() => {
+    if (record.status !== "running") return;
+    const timer = setInterval(() => setNow(Date.now()), POLL_MS);
+    return () => clearInterval(timer);
+  }, [record.status]);
+
+  // Full records and events are fetched only while expanded; the page polls summaries.
   useEffect(() => {
     if (record.status !== "running" || !open || details !== "loaded") return;
     const timer = setInterval(async () => {
-      setNow(Date.now());
       const latest = await fetchLlmRecord(initial.id).catch(() => null);
       if (latest) setRecord(latest);
       if (open) await load();
@@ -1148,8 +1164,8 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: RunRecord; defaultOp
             <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> Loading run…
           </p>}
           {details === "error" && <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive">
-            <span>{detailError}</span>
-            <Button variant="outline" size="sm" onClick={() => void loadDetails()}>Retry</Button>
+            <span>Could not load this run: {detailError}</span>
+            <Button variant="outline" size="sm" className="min-h-11" onClick={() => void loadDetails()}>Retry</Button>
           </div>}
           {record.error && <p className="text-xs text-destructive">Error: {record.error}</p>}
           <LaunchCommand record={record} />
@@ -1219,11 +1235,27 @@ export function AgentHistoryPage({ sub }: { sub: string }) {
   const taskId = routeTaskId ?? runs?.find((r) => r.task_id)?.task_id ?? (agentId.startsWith("planner-") ? agentId.slice("planner-".length) : null);
   // A Worker or Reviewer that ran as a role its task's Planner defined is named by it.
   const runRole = runs?.find((r) => r.task_role)?.task_role;
+  const hasRunning = runs?.some((run) => run.status === "running") ?? false;
 
   useEffect(() => {
+    let active = true;
     setRuns(null);
-    fetchLlmRecords({ agent_id: agentId, limit: 50 }).then(setRuns).catch(() => setRuns([]));
+    fetchLlmRecords({ agent_id: agentId, limit: 50 })
+      .then((next) => { if (active) setRuns(next); })
+      .catch(() => { if (active) setRuns([]); });
+    return () => { active = false; };
   }, [agentId]);
+
+  useEffect(() => {
+    if (!hasRunning) return;
+    let active = true;
+    const timer = setInterval(() => {
+      fetchLlmRecords({ agent_id: agentId, limit: 50 })
+        .then((next) => { if (active) setRuns(next); })
+        .catch(() => {});
+    }, POLL_MS);
+    return () => { active = false; clearInterval(timer); };
+  }, [agentId, hasRunning]);
 
   useEffect(() => {
     if (!taskId) return;
