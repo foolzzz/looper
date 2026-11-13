@@ -1215,7 +1215,9 @@ class ManagerAgent:
                         response = await self._run_prepared(token, prepared)
                         break
                     except (TimeoutError, OSError, TurnFailed) as exc:
+                        # Hosted runners own their startup recovery; return their diagnostic after one budget.
                         if (attempt or token.cancel.prompt_sent or token.cancel.requested
+                                or (token.failed_step == "claude_start" and self._claude_runtime.hosts_runs)
                                 or token.failed_step not in {"claude_stop", "switch_session", "claude_start"}):
                             raise
                         logger.warning("%s: retrying before message delivery after %s failed: %s",
