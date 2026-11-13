@@ -58,6 +58,7 @@ from ..profile_registry import RegistryError, ResolvedAgentProfile, check_select
 from ..agent_settings import profile_launch_problem
 from ..claude_cli import (
     AUTONOMOUS_INPUT,
+    ResidentClaude,
     AutonomousHandler,
     USER_STOP,
     AutonomousRun,
@@ -1196,18 +1197,37 @@ class ManagerAgent:
         turn: Turn | None = None
         try:
             try:
-                prepared = await self._prepare_turn(token, envelope)
-                turn = prepared.turn
-                if prepared.action is not None:
-                    await prepared.action()
-                    return
-                if turn is None:
-                    return
-                if prepared.tools_problem is not None:
-                    await self._send_reply(envelope, tools_down_reply(prepared.tools_problem),
-                                           error=prepared.tools_problem)
-                    return
-                response = await self._run_prepared(token, prepared)
+                prepared = None
+                for attempt in range(2):
+                    try:
+                        if prepared is None:
+                            prepared = await self._prepare_turn(token, envelope, ask=token.prepared_ask)
+                        turn = prepared.turn
+                        if prepared.action is not None:
+                            await prepared.action()
+                            return
+                        if turn is None:
+                            return
+                        if prepared.tools_problem is not None:
+                            await self._send_reply(envelope, tools_down_reply(prepared.tools_problem),
+                                                   error=prepared.tools_problem)
+                            return
+                        response = await self._run_prepared(token, prepared)
+                        break
+                    except (TimeoutError, OSError, TurnFailed) as exc:
+                        # Hosted runners own their startup recovery; return their diagnostic after one budget.
+                        if (attempt or token.cancel.prompt_sent or token.cancel.requested
+                                or (token.failed_step == "claude_start" and self._claude_runtime.hosts_runs)
+                                or token.failed_step not in {"claude_stop", "switch_session", "claude_start"}):
+                            raise
+                        logger.warning("%s: retrying before message delivery after %s failed: %s",
+                                       self._log, token.failed_step, exc)
+                        await token.step("startup_retry_delay", asyncio.sleep(5))
+                        token.check()
+                        token.phase = TurnPhase.PREPARING
+                        token.failed_step = None
+                        if prepared is not None:
+                            prepared = replace(prepared, run=RunState())
             finally:
                 self._running_token = None
                 if self._lock_owner is token:
@@ -1335,6 +1355,7 @@ class ManagerAgent:
             self._lock_owner = token
             waiting = self.ops.begin_turn(turn, binding=token.binding) if self.ops is not None else ""
             ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn)
+        token.prepared_ask = ask
         await token.step("load_db_config", self._load_db_config())
         if self._turned_off:  # the fleet has not stopped this instance yet: it must not act as the Manager
             self._acting(token)
@@ -1434,6 +1455,12 @@ class ManagerAgent:
                 cause = (pi_runner if kind == "pi" else dsh_runner)._opt_out(cause)
             raise OSError(cause) from None
 
+    async def _stop_replaced_session(self) -> None:
+        if isinstance(self._claude, ResidentClaude):
+            await self._claude.stop(kill=True, wait_tree=False)
+        else:
+            await self._claude.stop(kill=True)
+
     async def _start_turn(self, token: TurnToken, prepared: Prepared) -> None:
         """The prepared turn gets its process: the session switch, the runtime swap and the stale process's stop,
         the resume brief, the record and Claude's start. ``prepared.run`` holds what the run needs afterwards."""
@@ -1449,10 +1476,10 @@ class ManagerAgent:
                              HANDOFF_TIMEOUT_SEC + 30)
         if launch.runtime is not self._claude_runtime:
             # Each runtime type keeps its resident sessions its own way (after the old one's handoff).
-            await token.keep("claude_stop", self._claude.stop(), 10)
+            await token.keep("claude_stop", self._stop_replaced_session(), 30)
             self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
         if self._claude.stale(signature):
-            await token.keep("claude_stop", self._claude.stop(), 10)
+            await token.keep("claude_stop", self._stop_replaced_session(), 30)
         command = self._claude.command if self._claude.started else self._claude_command(prepared.prompt_file, launch)
         # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
         # asked for a clean one.
