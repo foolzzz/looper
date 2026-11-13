@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.173] - 2026-11-13
+
+### Changed
+
+- **Model names may carry one bracketed parameter list.** ([#1312](https://github.com/foolzzz/looper/pull/1312))
+  - A model name may end in one bracket list of comma-separated `key=value` items (letters, digits, `.`, `_`, `-`), for example `grok-4.7[context=500k,reasoning_effort=high,fast=true]`; one shared rule (`looper/agents/model_names.py`) now checks names in settings, the catalog, the API, the Manager tools and the database. Looper passes the whole name unchanged as one command-line argument. Legacy suffixes such as `opus[1m]` stay valid.
+  - Narrower than before: brackets in the middle of a name, more than one bracket group, and leading or trailing whitespace are refused (the old rule allowed `[` and `]` anywhere and trimmed whitespace). Existing saved names are kept.
+  - On the next start the `llm_models.name` and `background_model` checks are replaced by the new grammar (migration `model_name_parameters`, added `NOT VALID` so old rows stay, validated when they all fit).
+  - Model-visible: the Manager's model tools declare the model `name` and `background_model` with the shared pattern and a 200-character limit; names with a parameter list are now accepted.
+
 ## [2.14.172] - 2026-11-12
 
 ### Added
