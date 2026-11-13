@@ -9,8 +9,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .sqlite_inbox import SQLiteInbox, inbox_thread
 
-class TelegramInbox(asyncio.Queue):
+
+class TelegramInbox(SQLiteInbox, asyncio.Queue):
     """SQLite commits precede Queue.put; processed ids survive journal compaction and restart.
 
     A planned stop drains Application's handlers. Pending rows additionally protect
@@ -20,6 +22,9 @@ class TelegramInbox(asyncio.Queue):
 
     def __init__(self, path: Path) -> None:
         super().__init__()
+        self._initialize(lambda: self._open(path))
+
+    def _open(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path)
         self._db.execute("PRAGMA synchronous = FULL")
@@ -35,6 +40,7 @@ class TelegramInbox(asyncio.Queue):
         self.polling_resumed_at: int | None = None
         self._stopping = False
 
+    @inbox_thread
     def polling_started(self, resumed_at: int | None = None) -> None:
         self.polling_resumed_at = int(time.time()) if resumed_at is None else resumed_at
         # Snapshot pending rows from an older inbox before the recovery boundary retires.
@@ -62,10 +68,12 @@ class TelegramInbox(asyncio.Queue):
         self._db.execute("INSERT OR IGNORE INTO updates (update_id, payload, age_at_stop) VALUES (?, ?, ?)",
                          (update_id, payload, self._recovery_age(payload)))
 
+    @inbox_thread
     def age_at_stop(self, update_id: int) -> float | None:
         row = self._db.execute("SELECT age_at_stop FROM updates WHERE update_id = ?", (update_id,)).fetchone()
         return row[0] if row else None
 
+    @inbox_thread
     def polling_received(self, updates: list[dict[str, Any]]) -> None:
         """Commit the response before PTB sees it; retire the old boundary after the last page."""
         with self._db:
@@ -76,6 +84,7 @@ class TelegramInbox(asyncio.Queue):
             if len(updates) < 100 and not self._stopping:
                 self._db.execute("DELETE FROM polling")
 
+    @inbox_thread
     def polling_stopped(self, stopped_at: int) -> None:
         self._stopping = True
         with self._db:
@@ -85,14 +94,20 @@ class TelegramInbox(asyncio.Queue):
     async def put(self, update: Any) -> None:
         # Application's private stop sentinel is not a Telegram update.
         if hasattr(update, "update_id"):
-            with self._db:
-                self._save(update.update_id, update.to_json())
+            await self.run(self._put_update, update.update_id, update.to_json())
         await super().put(update)
 
+    @inbox_thread
+    def _put_update(self, update_id: int, payload: str) -> None:
+        with self._db:
+            self._save(update_id, payload)
+
+    @inbox_thread
     def processed(self, update_id: int) -> bool:
         row = self._db.execute("SELECT processed FROM updates WHERE update_id = ?", (update_id,)).fetchone()
         return row is not None and bool(row[0])
 
+    @inbox_thread
     def finish(self, update_id: int) -> None:
         with self._db:
             # Keep only the dedupe key once delivered; no retained message contents.
@@ -102,8 +117,9 @@ class TelegramInbox(asyncio.Queue):
     async def replay(self, bot: Any) -> None:
         from telegram import Update
 
-        for (payload,) in self._db.execute("SELECT payload FROM updates WHERE processed = 0 ORDER BY update_id").fetchall():
+        for (payload,) in await self.run(self._pending):
             await super().put(Update.de_json(json.loads(payload), bot))
 
-    def close(self) -> None:
-        self._db.close()
+    @inbox_thread
+    def _pending(self) -> list[tuple[str]]:
+        return self._db.execute("SELECT payload FROM updates WHERE processed = 0 ORDER BY update_id").fetchall()

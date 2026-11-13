@@ -12,6 +12,9 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -791,8 +794,44 @@ class DshCatalog:
     skipped: tuple[dict[str, str], ...] = ()
 
 
+_catalog_clock = time.monotonic
+_catalog_lock = threading.Lock()
+_catalog_failures: OrderedDict[tuple[AgentLibrary, str], tuple[float, str]] = OrderedDict()
+
+
 @lru_cache(maxsize=64)
 def materialize(library: AgentLibrary, executable: str = "dsh") -> DshCatalog:
+    """Reuse validated bundles; retry a failed provider only after its 60-second cooldown."""
+    # Serialize uncached validation so concurrent launches share a failing provider's cooldown.
+    with _catalog_lock:
+        key = (library, executable)
+        if (failed := _catalog_failures.get(key)) is not None and _catalog_clock() < failed[0]:
+            raise RuntimeUnsupported(failed[1])
+        try:
+            result = _materialize(library, executable)
+        except RuntimeUnsupported as exc:
+            _catalog_failures[key] = (_catalog_clock() + 60, str(exc))
+            _catalog_failures.move_to_end(key)
+            if len(_catalog_failures) > 64:
+                _catalog_failures.popitem(last=False)
+            raise
+        _catalog_failures.pop(key, None)
+        return result
+
+
+_clear_catalog_successes = materialize.cache_clear
+
+
+def _clear_catalog_cache() -> None:
+    with _catalog_lock:
+        _clear_catalog_successes()
+        _catalog_failures.clear()
+
+
+materialize.cache_clear = _clear_catalog_cache
+
+
+def _materialize(library: AgentLibrary, executable: str) -> DshCatalog:
     """Validate with the installed provider, then copy only supported, installed skill bundles.
 
     No Claude plugin is mounted. The immutable copies live under the managed DSH root, so catalog GC cannot

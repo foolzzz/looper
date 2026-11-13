@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
@@ -68,7 +69,7 @@ class CliTransport:
         self._profile = profile
         self.consumer_started = asyncio.Event()
         self._history_chat_types: dict[str, str] = {}
-        self.on_thread_activity: Callable[[str, str], None] | None = None
+        self.on_thread_activity: Callable[[str, str], Awaitable[None] | None] | None = None
 
     async def _history_chat_type(self, chat_id: str) -> str:
         # History omits chat mode. Never infer p2p from a missing mention: that would admit group chatter.
@@ -167,7 +168,9 @@ class CliTransport:
                         items = result.get("data", result).get("items") or []
                         data = items[0] if items else {}
                     if data.get("chat_id") and data.get("thread_id"):
-                        self.on_thread_activity(data["chat_id"], data["thread_id"])
+                        activity = self.on_thread_activity(data["chat_id"], data["thread_id"])
+                        if inspect.isawaitable(activity):
+                            await activity
                 except Exception:
                     logger.warning("could not remember sent Lark thread", exc_info=True)
             return lark_cli.sent_message_id(answer) if return_id else None

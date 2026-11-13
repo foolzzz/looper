@@ -63,6 +63,10 @@ class ChannelRegistry:
         for adapter in self._channels.values():
             adapter.prepare_stop()
 
+    async def wait_prepared_stop_all(self) -> None:
+        for adapter in tuple(self._channels.values()):
+            await adapter.wait_prepared_stop()
+
     async def stop_all(self) -> None:
         for channel_id in list(self._channels):
             await self.unregister(channel_id)

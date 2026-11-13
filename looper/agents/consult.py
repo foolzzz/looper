@@ -402,7 +402,7 @@ class ConsultService:
                         session_dir=None, tools=None, limits=run_limits,
                         fork=Fork(str(record["session_id"]), session_dir, fork_dir))
                 else:
-                    command = runtime.consult_command(
+                    command = await asyncio.to_thread(runtime.consult_command,
                         launch.executable(self.claude_bin), cwd=cwd, prompt_file=prompt_file,
                         launch=launch, session_id=str(record["session_id"]), session_dir=session_dir,
                         fork_dir=fork_dir, max_turns=CONSULT_MAX_TURNS)

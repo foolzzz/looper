@@ -119,10 +119,25 @@ def test_invalid_rules_say_what_is_wrong(rule: str, error: str) -> None:
         cron.parse(rule)
 
 
-@pytest.mark.parametrize("name", ["Mars/Base", "america/los_angeles", "", "../etc/passwd"])
+@pytest.mark.parametrize("name", ["Mars/Base", "america/los_angeles", "", "../etc/passwd", "localtime",
+                                  "posix/UTC", "right/UTC"])
 def test_unknown_zones_are_refused(name: str) -> None:
     with pytest.raises(ValueError):
         cron.zone(name)
+
+
+def test_named_zone_does_not_scan_the_timezone_database(monkeypatch):
+    # Exercise a real lookup even when other tests have warmed either implementation's cache.
+    if cached := getattr(cron, "_known_zones", None):
+        cached.cache_clear()
+    if cached := getattr(cron, "_load_zone", None):
+        cached.cache_clear()
+
+    def no_scan():
+        raise AssertionError("validating one zone must not scan all timezone files")
+
+    monkeypatch.setattr(cron.zoneinfo, "available_timezones", no_scan)
+    assert cron.zone("America/Los_Angeles").key == "America/Los_Angeles"
 
 
 @pytest.mark.parametrize(("rule", "min_seconds", "close"), [

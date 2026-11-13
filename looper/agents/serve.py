@@ -752,7 +752,8 @@ async def _run_agent_system_owned(
             from .room import RUN_SESSIONS_KEPT_DAYS, sweep_run_sessions
             try:
                 from ..db import room as db_room
-                sweep_run_sessions(runtime_root, await db_room.tasks_keeping_sessions(days=RUN_SESSIONS_KEPT_DAYS))
+                keep_sessions = await db_room.tasks_keeping_sessions(days=RUN_SESSIONS_KEPT_DAYS)
+                await asyncio.to_thread(sweep_run_sessions, runtime_root, keep_sessions)
             except Exception:
                 logger.warning("could not remove the kept sessions of ended tasks", exc_info=True)
 
@@ -964,6 +965,9 @@ async def _run_agent_system_owned(
             proxy_checks.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await proxy_checks
+
+        # Flush channel restart boundaries before starting the agent drain deadline.
+        await registry.wait_prepared_stop_all()
 
         # --- Shutdown ---
 

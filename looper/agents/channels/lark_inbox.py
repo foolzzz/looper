@@ -7,14 +7,18 @@ from pathlib import Path
 from typing import Any
 
 from .lark_cli import RECEIVE_EVENT
+from .sqlite_inbox import SQLiteInbox, inbox_thread
 
 PROCESSED_KEPT = 20_000
 THREADS_KEPT = 1_000
 THREAD_MAX_AGE = 7 * 24 * 60 * 60
 
 
-class LarkInbox:
+class LarkInbox(SQLiteInbox):
     def __init__(self, path: Path) -> None:
+        self._initialize(lambda: self._open(path))
+
+    def _open(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path)
         self._db.execute("PRAGMA synchronous = FULL")
@@ -28,40 +32,49 @@ class LarkInbox:
         row = self._db.execute("SELECT at FROM boundary WHERE id = 1").fetchone()
         self.boundary: float | None = row[0] if row else None
 
+    @inbox_thread
     def checkpoint(self, at: float) -> None:
         with self._db:
             self._db.execute("INSERT INTO boundary VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET at = excluded.at", (at,))
         self.boundary = at
 
+    @inbox_thread
     def discovery(self) -> tuple[float, float] | None:
         return self._db.execute("SELECT start, end FROM discovery WHERE id = 1").fetchone()
 
+    @inbox_thread
     def defer_discovery(self, start: float, end: float) -> None:
         with self._db:
             self._db.execute("INSERT INTO discovery VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET "
                              "start = min(start, excluded.start), end = max(end, excluded.end)", (start, end))
 
+    @inbox_thread
     def complete_discovery(self) -> None:
         with self._db:
             self._db.execute("DELETE FROM discovery")
 
+    @inbox_thread
     def debts(self) -> dict[str, tuple[float, float]]:
         return {chat: (start, end) for chat, start, end in
                 self._db.execute("SELECT chat_id, start, end FROM catchup_debt ORDER BY start, end, chat_id")}
 
+    @inbox_thread
     def defer(self, chat_id: str, start: float, end: float) -> None:
         with self._db:
             self._db.execute(
                 "INSERT INTO catchup_debt VALUES (?, ?, ?) ON CONFLICT(chat_id) DO UPDATE SET "
                 "start = excluded.start, end = excluded.end", (chat_id, start, end))
 
+    @inbox_thread
     def complete(self, chat_id: str) -> None:
         with self._db:
             self._db.execute("DELETE FROM catchup_debt WHERE chat_id = ?", (chat_id,))
 
+    @inbox_thread
     def processed(self, message_id: str) -> bool:
         return self._db.execute("SELECT 1 FROM processed WHERE message_id = ?", (message_id,)).fetchone() is not None
 
+    @inbox_thread
     def finish(self, message_id: str, *, chat_id: str = "", thread_id: str = "", at: float | None = None) -> None:
         with self._db:
             self._db.execute("INSERT OR IGNORE INTO processed(message_id) VALUES (?)", (message_id,))
@@ -69,6 +82,7 @@ class LarkInbox:
             if chat_id and thread_id and at is not None:
                 self._store_thread(chat_id, thread_id, at)
 
+    @inbox_thread
     def remember_thread(self, chat_id: str, thread_id: str, at: float) -> None:
         with self._db:
             self._store_thread(chat_id, thread_id, at)
@@ -83,14 +97,12 @@ class LarkInbox:
         self._db.execute("DELETE FROM thread_activity WHERE rowid IN (SELECT rowid FROM thread_activity "
                          "ORDER BY at DESC, rowid DESC LIMIT -1 OFFSET ?)", (THREADS_KEPT,))
 
+    @inbox_thread
     def recent_threads(self, chat_id: str, at: float) -> list[str]:
         with self._db:
             self._prune_threads(at)
         return [row[0] for row in self._db.execute("SELECT thread_id FROM thread_activity WHERE chat_id = ? "
                                                  "ORDER BY at DESC, rowid DESC", (chat_id,))]
-
-    def close(self) -> None:
-        self._db.close()
 
 
 def history_event(message: dict[str, Any], chat_id: str, chat_type: str) -> dict[str, Any]:
