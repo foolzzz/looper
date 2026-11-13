@@ -12,6 +12,7 @@ import asyncio
 import html
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -26,6 +27,8 @@ from typing import TYPE_CHECKING, Any
 
 from .drain import DrainState
 from ..db import api_clients as db_api_clients
+from ..db.timing import ApiTiming, current_api_timing
+from .loop_watch import LoopWatch
 from ..ops_config import OpsConfig
 from . import (
     api_v1, config_imports, config_transfer, keeper, kept_dirs, knowledge,
@@ -56,6 +59,49 @@ if TYPE_CHECKING:
     from .. import components
 
 logger = logging.getLogger(__name__)
+
+API_SLOW_SECONDS = 2.0
+API_SUMMARY_SECONDS = 600
+API_LATENCY_SAMPLES = 20_000
+_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _snapshot_awaiting(task: asyncio.Task, timing: ApiTiming) -> None:
+    """Only inspect suspended requests that have reached the slow threshold."""
+    awaiting = task.get_coro()
+    locations: list[str] = []
+    while awaiting is not None:
+        frame = getattr(awaiting, "cr_frame", None) or getattr(awaiting, "gi_frame", None)
+        if frame is not None:
+            try:
+                file = Path(frame.f_code.co_filename).relative_to(_PACKAGE_ROOT)
+            except ValueError:
+                pass
+            else:
+                locations.append(f"looper/{file}:{frame.f_lineno} {frame.f_code.co_name}")
+        inner = getattr(awaiting, "cr_await", None) or getattr(awaiting, "gi_yieldfrom", None)
+        if inner is None:
+            break
+        awaiting = inner
+    timing.awaiting = " -> ".join([*locations[-6:], type(awaiting).__name__])
+
+
+class _FirstByteWriter:
+    """Observe the first write without buffering or changing stream backpressure."""
+
+    def __init__(self, writer: asyncio.StreamWriter, clock: Callable[[], float], started: float):
+        self._writer = writer
+        self._clock = clock
+        self._started = started
+        self.first_byte_ms: int | None = None
+
+    def write(self, data: bytes) -> None:
+        self._writer.write(data)
+        if data and self.first_byte_ms is None:
+            self.first_byte_ms = int((self._clock() - self._started) * 1000)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._writer, name)
 
 # A source checkout serves the dashboard it builds (web/dist); an installed
 # wheel serves the copy staged into the package (looper/web/dashboard).
@@ -172,7 +218,16 @@ class AgentHTTPServer:
         channels: ChannelRegistry | None = None,
         drain: DrainState | None = None,
         startup_steps: dict[str, float] | None = None,
+        loop_watch: LoopWatch | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        self._clock = clock
+        self._loop_watch = loop_watch
+        self._api_latencies: dict[str, list[int]] = {}
+        # n/over_2s/max include requests beyond the bounded percentile sample.
+        self._api_totals: dict[str, tuple[int, int, int]] = {}
+        self._summary_started = clock()
+        self._summary_task: asyncio.Task[None] | None = None
         self._drain = drain or DrainState()
         self._startup_steps = startup_steps
         self._started_at = datetime.now(timezone.utc)
@@ -237,15 +292,63 @@ class AgentHTTPServer:
         logger.info("HTTP server listening on %s:%d (%.3f s since process start)",
                     self._host, self._port, time.monotonic() - _PROCESS_STARTED_AT)
 
+        self._summary_started = self._clock()
+        self._summary_task = asyncio.create_task(self._api_summary_loop(), name="api-latency-summary")
+
+    def _record_api_latency(self, op: str, ms: int) -> None:
+        samples = self._api_latencies.setdefault(op, [])
+        n, over, maximum = self._api_totals.get(op, (0, 0, 0))
+        self._api_totals[op] = (n + 1, over + (ms > 2000), max(maximum, ms))
+        if len(samples) < API_LATENCY_SAMPLES:
+            samples.append(ms)
+
+    def _log_api_summary(self) -> None:
+        now = self._clock()
+        if now - self._summary_started < API_SUMMARY_SECONDS:
+            return
+        self._summary_started = now
+        rows = []
+        for op, samples in self._api_latencies.items():
+            if not samples:
+                continue
+            values = sorted(samples)
+            n, over, maximum = self._api_totals[op]
+            # Nearest-rank percentiles, including at the edges of small windows.
+            p50, p95, p99 = (values[math.ceil(len(values) * p) - 1] for p in (.50, .95, .99))
+            rows.append((op, n, p50, p95, p99, maximum, over, n - len(values)))
+        for op, n, p50, p95, p99, maximum, over, dropped in sorted(rows, key=lambda row: (-row[6], -row[3], row[0])):
+            logger.info("api summary window=600s op=%s n=%d p50=%d p95=%d p99=%d max=%d over_2s=%d",
+                        op, n, p50, p95, p99, maximum, over)
+            if dropped:
+                logger.info("api summary samples window=600s op=%s dropped=%d", op, dropped)
+        self._api_latencies.clear()
+        self._api_totals.clear()
+        summary = self._loop_watch.take_summary() if self._loop_watch is not None else None
+        if rows or (summary is not None and (summary.loop_stalls or summary.loop_max_stall_ms or summary.process_stalls)):
+            logger.info("loop summary window=600s stalls=%d max_stall_ms=%d process_stalls=%d",
+                        summary.loop_stalls if summary else 0,
+                        summary.loop_max_stall_ms if summary else 0,
+                        summary.process_stalls if summary else 0)
+
+    async def _api_summary_loop(self) -> None:
+        while True:
+            await asyncio.sleep(API_SUMMARY_SECONDS)
+            self._log_api_summary()
+
     def close_listener(self) -> None:
         """Stop accepting connections immediately, without shutting down services."""
         if self._server:
             self._server.close()
 
     async def stop(self) -> None:
+        if self._summary_task is not None:
+            self._summary_task.cancel()
+            await asyncio.gather(self._summary_task, return_exceptions=True)
+            self._summary_task = None
         if self._server:
             self._server.close()
             await self._server.wait_closed()
+            self._server = None
             logger.info("HTTP server stopped")
         if self._config_imports:
             self._config_imports.clear()
@@ -438,8 +541,51 @@ class AgentHTTPServer:
     async def _handle_v1(self, method: str, path: str, query: dict[str, str], headers: Mapping[str, str],
                          body: bytes, writer: asyncio.StreamWriter, principal: api_v1.Principal, *,
                          upload: tuple[asyncio.StreamReader, int] | None = None) -> None:
-        started = time.monotonic()
+        started = self._clock()
         operation = api_v1.find(method, path)
+        timing = ApiTiming()
+        token = current_api_timing.set(timing)
+        task = asyncio.current_task()
+        snapshot = asyncio.get_running_loop().call_later(API_SLOW_SECONDS, _snapshot_awaiting, task, timing)
+        stream = operation is not None and operation.stream
+        stream_writer = _FirstByteWriter(writer, self._clock, started) if stream else None
+        outcome = "error:internal"
+        try:
+            outcome = await self._respond_v1(method, path, query, headers, body,
+                                             stream_writer if stream_writer is not None else writer,
+                                             principal, operation=operation, upload=upload)
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        finally:
+            snapshot.cancel()
+            try:
+                # asyncpg's synchronous query loggers run via call_soon with this
+                # request's copied context and update the same mutable timing.
+                await asyncio.sleep(0)
+                elapsed_ms = (self._clock() - started) * 1000
+                ms = int(elapsed_ms)
+                if operation is not None:
+                    op = operation.operation_id
+                    if not stream:
+                        self._record_api_latency(op, ms)
+                    if op != "openapi":
+                        if stream_writer is not None:
+                            logger.info("api client=%s op=%s status=%s ms=%d first_byte_ms=%s",
+                                        principal.key, op, outcome, ms, stream_writer.first_byte_ms)
+                        else:
+                            logger.info("api client=%s op=%s status=%s ms=%d", principal.key, op, outcome, ms)
+                    if not stream and elapsed_ms > API_SLOW_SECONDS * 1000:
+                        logger.warning("api slow client=%s op=%s status=%s ms=%d db_ms=%d db_queries=%d other_ms=%d awaiting=%s",
+                                       principal.key, op, outcome, ms, timing.db_ms, timing.db_queries,
+                                       ms - timing.db_ms, timing.awaiting)
+            finally:
+                current_api_timing.reset(token)
+
+    async def _respond_v1(self, method: str, path: str, query: dict[str, str], headers: Mapping[str, str],
+                          body: bytes, writer: asyncio.StreamWriter, principal: api_v1.Principal, *,
+                          operation: api_v1.Operation | None,
+                          upload: tuple[asyncio.StreamReader, int] | None = None) -> str:
         refused: tuple[str, dict[str, Any]] | None = None
         json_started = False
 
@@ -484,17 +630,15 @@ class AgentHTTPServer:
             status, answer = await self._v1_online(operation, headers, body, principal, json_export=export_json)
         else:
             status, answer = await self._answer_v1(method, path, operation, headers, body, principal)
-        if operation is not None and operation.operation_id != "openapi":
-            outcome = (answer["status"] if answer.get("status") in ("ok", "needs_confirmation")
-                       else f"error:{answer['error']['code']}")
-            logger.info("api client=%s op=%s status=%s ms=%d", principal.key, operation.operation_id, outcome,
-                        (time.monotonic() - started) * 1000)
+        outcome = (answer["status"] if answer.get("status") in ("ok", "needs_confirmation")
+                   else f"error:{answer['error']['code']}" if "error" in answer else status)
         if json_started:
-            return  # errors after headers leave a visibly truncated JSON response, never a second response
+            return outcome  # A failed export stays visibly truncated; never send a second response.
         if operation is not None and operation.stream and refused is None and answer.get("status") == "ok":
-            return  # the stream is written
+            return outcome  # the stream is written
         writer.write(_json_response(status, answer, headers=V1_HEADERS))
         await writer.drain()
+        return outcome
 
     @staticmethod
     def _v1_body(body: bytes) -> dict[str, Any] | None:
