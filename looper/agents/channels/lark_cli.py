@@ -87,7 +87,7 @@ def history_command(chat_id: str, *, start: float, end: float, page_token: str =
 
 
 def thread_roots_command(chat_id: str, *, page_token: str = "", profile: str | None = None) -> list[str]:
-    # No start_time: a reply in the recovery window may belong to a much older root.
+    # The adapter stops at roots older than 24 hours; our older active threads are stored separately.
     params = {"container_id_type": "chat", "container_id": chat_id,
               "sort_type": "ByCreateTimeDesc", "page_size": 50}
     if page_token:
