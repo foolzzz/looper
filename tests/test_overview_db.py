@@ -106,6 +106,36 @@ def test_every_task_is_counted_by_group_and_the_tasks_page_lists_a_group(monkeyp
     run_db(test, monkeypatch)
 
 
+def test_enabled_manager_without_a_started_process_is_idle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents.bus import MessageBus
+    from looper.agents.managers import ManagerFleet
+    from looper.agents.ops.service import Platform
+    from looper.agents.supervisor import AgentSupervisor
+    from looper.agents.tiers.manager import ManagerConfig
+
+    async def test(pool: Any) -> None:
+        bus = MessageBus(tmp_path)
+        supervisor = AgentSupervisor(bus, tmp_path)
+        router = SimpleNamespace(running_planners=lambda: [])
+        fleet = ManagerFleet(platform=Platform(bus=bus, task_router=router), supervisor=supervisor,
+                             runtime_root=tmp_path, url="http://127.0.0.1:18768", config=ManagerConfig(),
+                             broadcaster=None)
+        try:
+            await fleet.load()
+            assert fleet.is_running("manager")
+            assert not fleet.default.process_started
+            assert not fleet.state("manager")["running"]
+            status, body = await _get(_server(task_router=router, manager=fleet.default, managers=fleet),
+                                      "/api/v1/system/overview")
+            assert status == 200
+            assert body["agents"]["manager"]["state"] == "idle"
+            assert body["agents"]["managers"] == [{"agent_id": "manager", "name": fleet.default.name, "state": "idle"}]
+        finally:
+            await fleet.stop()
+
+    run_db(test, monkeypatch, timeout=20)
+
+
 def test_the_agents_running_now_and_each_active_projects_load(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db import agent_setting_layers, projects
 

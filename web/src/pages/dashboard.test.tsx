@@ -89,6 +89,7 @@ describe("Dashboard waiting gates", () => {
     const agents = container.querySelector('section[aria-label="Agents running now"]')!;
     expect(agents.firstElementChild!.textContent).toContain("5 running · 1 waiting");
     const rows = agents.querySelector(".divide-y")!.children;
+    expect(rows[0].firstElementChild!.textContent).toBe("Managers");
     expect(rows[0].textContent).toContain("2 busy");
     expect(rows[1].textContent).toContain("Planners1");
     expect(rows[2].textContent).toContain("1 running · 1 waiting");
@@ -119,8 +120,38 @@ describe("Dashboard waiting gates", () => {
     expect(agents.firstElementChild!.textContent).toContain(`${state === "busy" ? 1 : 0} running`);
     expect(agents.firstElementChild!.textContent).not.toContain("waiting");
     const link = agents.querySelector('a[href="#history/manager"]');
+    expect(agents.querySelector(".divide-y")!.firstElementChild!.firstElementChild!.textContent).toBe("Manager");
     if (state) expect(link!.textContent).toBe(`Manager${state}`);
     else expect(link).toBeNull();
+  });
+
+  it.each(["Plan the parser", ""])("avoids repeating a Planner's requirement as its name: %s", async (name) => {
+    overview.agents.planners = [{ agent_id: "planner-a", task_id: "a", name,
+      requirement: "Plan the parser\nAdditional details", project_id: null, project_name: null }];
+    await show();
+    const agents = container.querySelector('section[aria-label="Agents running now"]')!;
+    expect(agents.querySelector('a[href="#tasks/a"]')!.textContent).toBe("Plan the parser");
+    expect(agents.querySelector('a[href="#history/planner-a?task=a"]')!.textContent).toBe("planning");
+  });
+
+  it("keeps the task name beside a long project name on a narrow screen", async () => {
+    vi.stubGlobal("innerWidth", 390);
+    const project = "A very long project name that would fill the entire row on a phone";
+    overview.agents.planners = [{ agent_id: "planner-a", task_id: "a", name: "Build parser",
+      requirement: "Plan the parser", project_id: "project-a", project_name: project }];
+    await show();
+    const link = container.querySelector('section[aria-label="Agents running now"] a[href="#tasks/a"]')!;
+    const projectSpan = link.querySelector(`span[title="${project}"]`)!;
+    const taskSpan = link.querySelector('span[title="Build parser"]')!;
+    expect(projectSpan.textContent).toBe(project);
+    expect(taskSpan.textContent).toBe("Build parser");
+    expect(projectSpan.className).toContain("max-w-[40%]");
+    expect(projectSpan.className).toContain("shrink-0");
+    expect(taskSpan.className).toContain("min-w-0");
+    expect(taskSpan.className).toContain("truncate");
+    expect(link.classList.contains("inline-block")).toBe(true);
+    expect(link.classList.contains("max-w-full")).toBe(true);
+    expect(link.classList.contains("block")).toBe(false);
   });
 
   it("treats an empty fleet as authoritative", async () => {

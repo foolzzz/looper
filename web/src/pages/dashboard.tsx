@@ -127,8 +127,11 @@ function AgentRow({ role, count, children }: { role: string; count?: React.React
 function AgentTask({ taskId, name, project }: { taskId: string; name: string; project: string | null }) {
   const label = project ? `${project} · ${name}` : name;
   return (
-    <a href={`#tasks/${encodeURIComponent(taskId)}`} title={label} className={cn("block truncate text-sm", linkClass)}>
-      {label}
+    <a href={`#tasks/${encodeURIComponent(taskId)}`} title={label} className={cn("inline-block max-w-full text-sm", linkClass)}>
+      <span className="flex min-w-0 items-baseline gap-1">
+        {project && <><span title={project} className="max-w-[40%] shrink-0 truncate text-muted-foreground">{project}</span>{" · "}</>}
+        <span title={name} className="min-w-0 truncate">{name}</span>
+      </span>
     </a>
   );
 }
@@ -174,7 +177,7 @@ function Agents({ agents }: { agents: Overview["agents"] }) {
   return (
     <Section title="Agents running now" meta={runCount([...workers, ...reviewers], busyManagers + planners.length)}>
       <div className="divide-y divide-border">
-        <AgentRow role="Manager" count={`${busyManagers} busy`}>
+        <AgentRow role={managers.length > 1 ? "Managers" : "Manager"} count={`${busyManagers} busy`}>
           {managers.map((m) => (
             <a key={m.agent_id} href={historyHref(m.agent_id)} className={cn("flex min-w-0 items-center gap-1.5 text-sm", linkClass)}>
               <span title={m.name} className="min-w-0 truncate">{m.name}</span>
@@ -193,7 +196,7 @@ function Agents({ agents }: { agents: Overview["agents"] }) {
                 title={p.requirement.split("\n")[0]}
                 className={cn("block truncate text-xs text-muted-foreground", linkClass)}
               >
-                {p.requirement.split("\n")[0]}
+                {p.name && p.name !== p.requirement.split("\n")[0] ? p.requirement.split("\n")[0] : "planning"}
               </a>
             </div>
           ))}

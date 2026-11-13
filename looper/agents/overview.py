@@ -72,7 +72,7 @@ async def _fleet_managers(fleet: Any) -> list[dict[str, Any]]:
     """Every Manager of the fleet and whether it is working, waiting or off."""
     out = []
     for agent in fleet.agents():
-        state = "busy" if agent.busy else "idle" if fleet.state(agent.agent_id)["running"] else "stopped"
+        state = "busy" if agent.busy else "idle" if fleet.is_running(agent.agent_id) else "stopped"
         out.append({"agent_id": agent.agent_id, "name": agent.name, "state": state})
     return out
 
