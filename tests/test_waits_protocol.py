@@ -664,7 +664,9 @@ def test_manager_wait_settings_read_confirmation_update_and_reset(
     from looper.agents.ops import Turn
     from looper.agents.ops import settings as ops_settings
     from looper.agents.ops.service import ManagerOps, Platform
+    from looper.agents.v1_domains import gateway
 
+    monkeypatch.setattr(gateway, "settings", AsyncMock(return_value={"enabled": False, "port": None, "aliases": []}))
     monkeypatch.setattr(ops_settings.db_profiles, "list_profiles", AsyncMock(return_value=[]))
     monkeypatch.setattr(ops_settings.db_roles, "list_configs", AsyncMock(return_value=[]))
     monkeypatch.setattr(ops_settings, "_read", AsyncMock(return_value={"system": {"values": {}}, "roles": {}}))
