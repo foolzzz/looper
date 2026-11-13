@@ -404,7 +404,7 @@ async def _llmrec_storage(conn=None, *, cached: bool = True):
 
 
 async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = "",
-                       proxy_status: dict | None = None, cached: bool = True) -> Check:
+                       proxy_status: dict | None = None, cached: bool = False) -> Check:
     """Request recording is advisory; forwarding and writer counters expose missing captures."""
     from .llmrec.control import controller
     from ..db import system_settings
@@ -466,7 +466,7 @@ async def _translated_profile_rows(*, pool=None):
 
 
 async def gateway_check(*, runtime_root: Path | None = None, database_url: str = "",
-                        proxy_status: dict | None = None, cached: bool = True) -> Check:
+                        proxy_status: dict | None = None, cached: bool = False) -> Check:
     """A translated profile requires a gateway that can start on demand, even with recording disabled."""
     from .llmrec.control import controller, ProxyControl
     from looper.db import system_settings

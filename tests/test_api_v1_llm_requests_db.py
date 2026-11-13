@@ -128,7 +128,7 @@ def test_recording_self_check_statuses(monkeypatch):
             self.value = {'enabled': enabled, 'proxy': {'state': state, 'dropped': dropped,
                                                       'write_errors': write_errors}}
 
-        async def status(self):
+        async def status(self, *, cached=False):
             return self.value
 
     from unittest.mock import AsyncMock
