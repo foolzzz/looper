@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.174] - 2026-11-13
+
+### Changed
+
+- **Lark catch-up reads a bounded set of threads, so busy chats no longer fail every start.** ([#1321](https://github.com/foolzzz/looper/pull/1321), fixes #1315)
+  - Per chat, startup catch-up lists threads from roots of the last 24 hours (newest first, stopping at the first older root, up to 5 pages of 50) plus threads this channel handled or sent a message in during the last 7 days, at most 50 threads per chat, 4 listings at a time; active threads come first. Reaching the root cap logs an INFO count and completes the chat's window.
+  - A thread that fails to list is logged and counted as `thread_failures` instead of failing the chat; its pages already read are still admitted, and the chat's window is completed. The `lark_catchup` summary gains `threads_scanned`, `thread_failures` and `thread_roots_capped`.
+  - Threads with our activity are remembered in the channel's local inbox (`thread_activity`, at most 1,000 entries, 7 days). After a send or reply whose output lacks thread metadata, the CLI transport makes one extra bot-identity `GET` of the sent message to read it.
+  - Behavior change (maintainer decision): older threads that are neither recent roots nor ones this channel was active in are no longer recovered. Not model-visible; no prompt or tool schema changes.
+
 ## [2.14.173] - 2026-11-13
 
 ### Changed
