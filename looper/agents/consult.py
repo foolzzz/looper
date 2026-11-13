@@ -521,7 +521,7 @@ class ConsultService:
             # A parent that exits re-parents its children and nothing then links them to it, so the tree is kept
             # current while it runs.
             while process.returncode is None:
-                known.update(await asyncio.to_thread(proc_tree.tree_of, process))
+                known.update(proc_tree._tree(process, await proc_tree.shared_snapshot(), {}))
                 await asyncio.sleep(TREE_WATCH_SEC)
 
         watching = asyncio.create_task(watch_tree())
@@ -531,7 +531,7 @@ class ConsultService:
             async for event in runtime.parse_process(process, model=launch.model, launch=launch):
                 if event.get("type") == "result":
                     # Read before the record is awaited, which a stop may cut short.
-                    known.update(proc_tree.tree_of(process))
+                    known.update(await proc_tree.run_ps(proc_tree.tree_of, process))
                 await recorder.record(event)
                 if (capped := recorder.cap_stop) is not None:
                     result = capped.result_event

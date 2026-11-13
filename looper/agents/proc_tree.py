@@ -35,9 +35,12 @@ import logging
 import os
 import signal
 import subprocess
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -69,10 +72,58 @@ Table = dict[int, tuple[int, int]]
 Tree = dict[int, int]
 
 
+_ps_worker = threading.local()
+
+
+def _init_ps_worker() -> None:
+    _ps_worker.active = True
+
+
+_ps_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="looper-ps", initializer=_init_ps_worker)
+
+
+def _run_ps(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Keep synchronous callers' ps queries in the same bounded pool, without nesting pool jobs."""
+    if getattr(_ps_worker, "active", False):
+        return func(*args, **kwargs)
+    return _ps_executor.submit(func, *args, **kwargs).result()
+
+
+async def run_ps(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Run process queries without occupying the loop or its default executor."""
+    return await asyncio.get_running_loop().run_in_executor(_ps_executor, partial(func, *args, **kwargs))
+
+
+_shared_snapshot_task: asyncio.Task[Table | None] | None = None
+_shared_snapshot_at = float("-inf")
+
+
+async def shared_snapshot(max_age: float = 0.5) -> Table | None:
+    """Coalesce periodic readers; a cancelled waiter never cancels the shared query.
+
+    Shutdown uses fresh queries instead. Failed observations are not cached, and a new event loop
+    starts its own observation rather than inheriting a task bound to a closed loop.
+    """
+    global _shared_snapshot_task
+    loop = asyncio.get_running_loop()
+    task = _shared_snapshot_task
+    if (task is None or task.get_loop() is not loop
+            or (task.done() and (task.cancelled() or task.exception() is not None or task.result() is None
+                                or time.monotonic() - _shared_snapshot_at >= max_age))):
+        async def read() -> Table | None:
+            global _shared_snapshot_at
+            table = await run_ps(_snapshot)
+            _shared_snapshot_at = time.monotonic()
+            return table
+
+        task = _shared_snapshot_task = loop.create_task(read())
+    return await asyncio.shield(task)
+
+
 def _snapshot() -> Table | None:
     """Every live process, from one ``ps``; None when ``ps`` fails."""
     try:
-        listed = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,stat="], capture_output=True, text=True,
+        listed = _run_ps(subprocess.run, ["ps", "-A", "-o", "pid=,ppid=,pgid=,stat="], capture_output=True, text=True,
                                 timeout=_PS_TIMEOUT_SEC, check=False, env=child_env.inherited())
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning("cannot list processes; ending only the tree already known: %s", exc)
@@ -186,7 +237,7 @@ def tree_of(process: asyncio.subprocess.Process) -> Tree:
 
 async def begin_end(process: asyncio.subprocess.Process) -> Tree:
     """Take and record the tree before asking the agent to exit; keep its record until ``end`` finishes."""
-    tree = tree_of(process)
+    tree = await run_ps(tree_of, process)
     if process.pid in _recorded:
         _ending.add(process.pid)
         await _record_tree(process.pid, tree)
@@ -195,7 +246,7 @@ async def begin_end(process: asyncio.subprocess.Process) -> Tree:
 
 async def _record_tree(pid: int, tree: Tree) -> None:
     path, started = _recorded[pid]
-    starts = await asyncio.to_thread(_start_times, tree)
+    starts = await run_ps(_start_times, tree)
     if starts is None:
         logger.warning("cannot read start times for agent pid %s; keeping its recorded tree", pid)
         return
@@ -252,54 +303,61 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
             return _tree(process, table, known, skip=exclude | {process.pid})
         return _tree(process, table, known, skip=exclude)
 
+    termed: set[int] = set()
+
     async def signal_tree(tree: Tree, sig: int) -> None:
         if process.returncode is not None:
-            table = await asyncio.to_thread(_snapshot)
+            table = await run_ps(_snapshot)
             # Never signal the reaped pid or its group directly. Confirm old group members when ps works;
             # on lookup failure retain the members observed before the stop, rather than abandoning them.
             tree = {pid: pgid for pid, pgid in tree.items() if pid != process.pid
                     and (table is None or pgid != process.pid or (pid in table and table[pid][1] == pgid))}
         _signal(process, tree, sig)
+        if sig == signal.SIGTERM:
+            termed.update(tree)
 
     seen = dict(known)
     alive = dict(seen)
     orphan_starts: dict[int, str] = {}
     try:
         # Bulk stops must not serialize blocking ps calls on the server's event loop.
-        seen = members(await asyncio.to_thread(_snapshot), known)
+        seen = members(await run_ps(_snapshot), known)
         alive = dict(seen)
         if recorded is not None and not (snapshot_failed and not seen):
             await _record_tree(process.pid, seen)
         if alive:
             if isinstance(process, _Orphan) and process.started is not None:
-                if await asyncio.to_thread(_start_time, process.pid) != process.started:
+                if await run_ps(_start_time, process.pid) != process.started:
                     logger.warning("%s: pid %s was reused; leaving it alone", label, process.pid)
                     alive = {}
                     return
-                orphan_starts.update(await asyncio.to_thread(_start_times, alive) or {})
+                orphan_starts.update(await run_ps(_start_times, alive) or {})
             await signal_tree(alive, signal.SIGTERM)
         deadline = time.monotonic() + TERM_GRACE_SEC
         while alive and time.monotonic() < deadline:
             await asyncio.sleep(_POLL_SEC)
-            alive = members(await asyncio.to_thread(_snapshot), seen)
+            alive = members(await run_ps(_snapshot), seen)
             if fresh := {pid: pgid for pid, pgid in alive.items() if pid not in seen}:
                 seen.update(fresh)
                 if isinstance(process, _Orphan) and process.started is not None:
-                    orphan_starts.update(await asyncio.to_thread(_start_times, fresh) or {})
+                    orphan_starts.update(await run_ps(_start_times, fresh) or {})
                 if recorded is not None:
                     await _record_tree(process.pid, seen)
                 await signal_tree(fresh, signal.SIGTERM)
     except BaseException:
-        alive = members(_snapshot(), seen)
+        # Cancellation can interrupt the very first observation too. Finish that read off-loop
+        # so cleanup still reaches the descendants, without blocking unrelated requests.
+        alive = members(await asyncio.shield(run_ps(_snapshot)), seen)
+        seen.update(alive)
         raise
     finally:
         if alive:
             if isinstance(process, _Orphan) and process.started is not None:
-                started_now = await asyncio.to_thread(_start_time, process.pid)
+                started_now = await run_ps(_start_time, process.pid)
                 if started_now is not None and started_now != process.started:
                     logger.warning("%s: pid %s was reused; leaving it alone", label, process.pid)
-                table = await asyncio.to_thread(_snapshot) or {}
-                current = await asyncio.to_thread(_start_times, alive) or {}
+                table = await run_ps(_snapshot) or {}
+                current = await run_ps(_start_times, alive) or {}
                 alive = {pid: pgid for pid, pgid in alive.items()
                          if pid in table and table[pid][1] == pgid == seen.get(pid) and pid in orphan_starts
                          and current.get(pid) == orphan_starts[pid]
@@ -307,15 +365,20 @@ async def _end(process: _Agent, *, label: str, known: Tree, exclude: frozenset[i
                 # The agent may be gone or reused. Kill confirmed survivors individually: a group
                 # signal could also hit an unrelated replacement or a member we never observed.
                 for pid in alive:
+                    if pid not in termed:
+                        _send(os.kill, pid, signal.SIGTERM)
                     _send(os.kill, pid, signal.SIGKILL)
             else:
+                # A cancelled record/identity read may have interrupted the first SIGTERM.
+                if unsignalled := {pid: pgid for pid, pgid in alive.items() if pid not in termed}:
+                    await signal_tree(unsignalled, signal.SIGTERM)
                 await signal_tree(alive, signal.SIGKILL)
             # SIGKILL being sent (or the agent being reaped) does not mean its descendants have exited.
             # Wait for the processes we signalled, without expanding the tree or signalling it again.
             pending = dict(alive)
             deadline = time.monotonic() + REAP_SEC
             while pending and time.monotonic() < deadline:
-                table = await asyncio.to_thread(_snapshot)
+                table = await run_ps(_snapshot)
                 if table is not None:
                     pending = {pid: pgid for pid, pgid in pending.items()
                                if pid in table and table[pid][1] == pgid}
@@ -389,7 +452,7 @@ async def end_owned(*, deadline: float) -> None:
 def _start_time(pid: int) -> str | None:
     """When ``pid`` started, as ``ps -o lstart=`` prints it in UTC; None when no such process runs."""
     try:
-        listed = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+        listed = _run_ps(subprocess.run, ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
                                 timeout=_PS_TIMEOUT_SEC, check=False, env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
     except (OSError, subprocess.SubprocessError):
         return None
@@ -402,7 +465,7 @@ def _start_times(pids: Iterable[int]) -> dict[int, str] | None:
     if not selected:
         return {}
     try:
-        listed = subprocess.run(["ps", "-o", "pid=,lstart=", "-p", selected], capture_output=True, text=True,
+        listed = _run_ps(subprocess.run, ["ps", "-o", "pid=,lstart=", "-p", selected], capture_output=True, text=True,
                                 timeout=_PS_TIMEOUT_SEC, check=False, env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
     except (OSError, subprocess.SubprocessError):
         return None
@@ -451,7 +514,7 @@ async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any)
         path, started = None, None
         try:
             if _records is not None and _server is not None:
-                if (started := _start_time(process.pid)) is None:
+                if (started := await run_ps(_start_time, process.pid)) is None:
                     logger.warning("cannot read the start time of agent pid %s; it is not recorded for the next sweep",
                                    process.pid)
                 else:
@@ -461,6 +524,11 @@ async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any)
                         logger.warning("cannot record agent pid %s for the next sweep: %s", process.pid, exc)
                     else:
                         _recorded[process.pid] = (path, started)
+        except BaseException:
+            # The handle has not reached the caller yet. Cancellation during the
+            # identity lookup must not leave a process with nobody to end it.
+            await end(process, label="interrupted process registration")
+            raise
         finally:
             forget = loop.create_task(_forget(process, path, started))
             _forgetting.add(forget)
@@ -518,7 +586,7 @@ async def sweep(runtime_root: Path) -> None:
     _owner_run_dir = None
     directory = runtime_root / RECORDS_DIR
     directory.mkdir(parents=True, exist_ok=True)
-    own_start = _start_time(os.getpid())
+    own_start = await run_ps(_start_time, os.getpid())
     _records, _server = (directory, (os.getpid(), own_start)) if own_start else (None, None)
     if own_start is None:
         logger.warning("cannot read this server's start time; its agents are not recorded for the next sweep")
@@ -526,6 +594,16 @@ async def sweep(runtime_root: Path) -> None:
     orphans: list[int] = []
     ends: dict[Path, list[tuple[_Orphan, str]]] = {}
     keep: set[Path] = set()
+
+    def record_start(pid: int, server: tuple[int, str]) -> str | None:
+        # Keep each record's identity checks together, without blocking the startup loop.
+        if server != _server:
+            if server not in servers:
+                servers[server] = _start_time(server[0]) == server[1]
+            if servers[server]:
+                return None
+        return _start_time(pid)
+
     for path in sorted(directory.glob("*.json")):
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -535,20 +613,18 @@ async def sweep(runtime_root: Path) -> None:
             logger.warning("removing the unreadable agent record %s", path.name)
             path.unlink(missing_ok=True)
             continue
-        if server != _server:
-            if server not in servers:
-                servers[server] = _start_time(server[0]) == server[1]
-            if servers[server]:
-                continue  # its server runs: the agent is that server's to end
+        current_start = await run_ps(record_start, pid, server)
+        if servers.get(server):
+            continue  # its server runs: the agent is that server's to end
         agents: list[tuple[_Orphan, str]] = []
-        if _start_time(pid) == started:
+        if current_start == started:
             orphans.append(pid)
             agents.append((_Orphan(pid, started), f"orphaned agent {pid}"))
         try:
             tree = {int(entry["pid"]): str(entry["started"]) for entry in record.get("tree", [])}
         except (ValueError, KeyError, TypeError):
             tree = {}
-        current = await asyncio.to_thread(_start_times, tree)
+        current = await run_ps(_start_times, tree)
         if current is None:
             logger.warning("cannot read start times for agent record %s; keeping it for the next sweep", path.name)
             keep.add(path)
@@ -593,10 +669,10 @@ class TurnTree:
         self._ticker: asyncio.Task[None] | None = None
 
     @classmethod
-    def track(cls, process: Any, *, label: str) -> TurnTree:
+    async def track(cls, process: Any, *, label: str) -> TurnTree:
         tree = cls(process, label)
-        tree._merge(_tree(process, _snapshot(), {}))
-        tree.seen.update(_start_times(tree.seen) or {})
+        tree._merge(_tree(process, await run_ps(_snapshot), {}))
+        tree.seen.update(await run_ps(_start_times, tree.seen) or {})
         return tree
 
     def _merge(self, tree: Tree) -> list[int]:
@@ -611,7 +687,7 @@ class TurnTree:
         async with self._lock:
             if not force and time.monotonic() - self._refreshed < _REFRESH_MIN_SEC:
                 return
-            table = await asyncio.to_thread(_snapshot)
+            table = await run_ps(_snapshot) if force else await shared_snapshot()
             if table is None:
                 return  # Keep the last observation for cleanup when ps is temporarily unavailable.
             skip = skip | await self._reused(table)
@@ -620,7 +696,7 @@ class TurnTree:
             observed = _tree(self.process, table, groups, skip=skip)
             unread = [pid for pid in self.seen.keys() | observed.keys()
                       if self.seen.get(pid) is None and pid not in skip]
-            starts = (await asyncio.to_thread(_start_times, unread) or {}) if unread else {}
+            starts = (await run_ps(_start_times, unread) or {}) if unread else {}
             # A stopped ticker can be cancelled at either lookup. Publish new pids with their identities
             # together, so a cancelled refresh cannot leave them permanently excluded as unknown.
             self._groups = groups
@@ -652,7 +728,7 @@ class TurnTree:
         """Reject reused identities durably, and unread identities for this observation. Never replace a
         missing initial identity with a later process's start time just because its pid is still present."""
         known = {pid: started for pid, started in self.seen.items() if started is not None}
-        current = await asyncio.to_thread(_start_times, known)
+        current = await run_ps(_start_times, known)
         if current is None:
             return frozenset(self.seen) | self._excluded | {self.process.pid}
         self._excluded.update(pid for pid, started in known.items() if pid in current and current[pid] != started)
@@ -660,7 +736,7 @@ class TurnTree:
         root = self.process.pid
         if root in known and self.process.returncode is not None and root not in current:
             if table is None:
-                table = await asyncio.to_thread(_snapshot)
+                table = await run_ps(_snapshot)
             if table is not None and root not in table:
                 # A reaped root still owns its surviving group; an unread live pid does not prove ownership.
                 missing.discard(root)
@@ -678,10 +754,10 @@ class TurnTree:
     async def _strays(self, exclude: frozenset[int]) -> list[_Orphan]:
         """The seen processes the tree no longer reaches (one that left its group, setsid, once its parent exited):
         each still running with the start time the snapshot read, so a reused pid is never among them."""
-        reached = _tree(self.process, await asyncio.to_thread(_snapshot), self._groups, skip=exclude)
+        reached = _tree(self.process, await run_ps(_snapshot), self._groups, skip=exclude)
         known = {pid: started for pid, started in self.seen.items()
                  if started is not None and pid not in reached and pid not in exclude and pid != self.process.pid}
-        current = await asyncio.to_thread(_start_times, known) or {}
+        current = await run_ps(_start_times, known) or {}
         return [_Orphan(pid, started) for pid, started in known.items() if current.get(pid) == started]
 
     async def _end_all(self, exclude: frozenset[int]) -> None:
@@ -733,6 +809,6 @@ class TurnTree:
             await _reap(self.process, self.label)
 
 
-def track(process: Any, *, label: str = "agent") -> TurnTree:
+async def track(process: Any, *, label: str = "agent") -> TurnTree:
     """Snapshot ``process``'s tree now, to follow while its turn runs and to end from."""
-    return TurnTree.track(process, label=label)
+    return await TurnTree.track(process, label=label)

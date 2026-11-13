@@ -29,7 +29,7 @@ from ..db import api_clients as db_api_clients
 from ..ops_config import OpsConfig
 from . import (
     api_v1, config_imports, config_transfer, keeper, kept_dirs, knowledge,
-    operator_auth, overview, projects, request_guard,
+    operator_auth, overview, proc_tree, projects, request_guard,
     self_check,
 )
 from .broadcast import Broadcaster
@@ -1022,7 +1022,7 @@ class AgentHTTPServer:
         if when - self._keeper_check_at >= 30:
             self._keeper_check_at = when
             try:
-                self._keeper_orphans = await asyncio.to_thread(self._orphaned_keepers, when)
+                self._keeper_orphans = await proc_tree.run_ps(self._orphaned_keepers, when)
             except OSError:
                 logger.exception("cannot check kept run controller liveness")
         if self._keeper_orphans:

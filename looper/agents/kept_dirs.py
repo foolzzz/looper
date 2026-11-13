@@ -159,7 +159,7 @@ class Reason(StrEnum):
 
 
 async def _running(pid: int, started: str) -> bool:
-    starts = await asyncio.to_thread(proc_tree._start_times, [pid])
+    starts = await proc_tree.run_ps(proc_tree._start_times, [pid])
     if starts is None:
         raise OSError("cannot read kept run start times")
     return starts.get(pid) == started
@@ -281,7 +281,7 @@ async def scan_at_start(runtime_root: Path, *, epoch: int | None = None,
     for path in bad_files:
         records[path] = _recover(path, runtime_root / proc_tree.RECORDS_DIR)
     # Finish the whole liveness preflight before ending keepers or deleting any directory.
-    alive = await asyncio.to_thread(live, {path.name: record for path, record in records.items()
+    alive = await proc_tree.run_ps(live, {path.name: record for path, record in records.items()
                                          if record is not None})
     manifests = {path: read_json(path / MANIFEST) for path in records} if epoch is not None else {}
     holds = await plans.run_holds([path.name for path in records], pool=pool) if epoch is not None else {}

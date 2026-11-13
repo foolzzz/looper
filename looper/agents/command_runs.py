@@ -247,7 +247,8 @@ class CommandRuns:
             try:
                 # A live control PID makes an empty result an observation failure, even if all runners ended.
                 query_pids = pids | {os.getpid()}
-                listed = subprocess.run(
+                listed = proc_tree._run_ps(
+                    subprocess.run,
                     ["ps", "-o", "pid=,stat=,lstart=", "-p", ",".join(map(str, sorted(query_pids)))],
                     capture_output=True, text=True, timeout=5, check=False,
                     env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"},

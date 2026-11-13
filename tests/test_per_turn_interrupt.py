@@ -289,6 +289,42 @@ async def _noop(event: dict[str, Any]) -> None:
     pass
 
 
+def test_task_cancellation_during_tracking_reaps_the_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session, command, env, _ = _codex(tmp_path)
+
+    async def run() -> None:
+        reached = asyncio.Event()
+        spawned: list[Any] = []
+
+        async def delayed_track(process: Any, *, label: str) -> Any:
+            spawned.append(process)
+            reached.set()
+            await asyncio.Event().wait()
+
+        await session.start(command, cwd=str(tmp_path), signature="s", env=env)
+        monkeypatch.setattr(session, "_turn_argv", lambda: ["sleep", "5"])
+        monkeypatch.setattr(proc_tree, "track", delayed_track)
+        running = asyncio.create_task(session.run_turn("hello", _noop))
+        try:
+            await asyncio.wait_for(reached.wait(), 5)
+            assert spawned[0].returncode is None
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(running, 5)
+            assert spawned[0].returncode is not None
+            assert session._process is None
+        finally:
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+            for process in spawned:
+                if process.returncode is None:
+                    process.kill()
+                await asyncio.wait_for(process.wait(), 5)
+            await session.stop()
+
+    asyncio.run(asyncio.wait_for(run(), 20))
+
+
 def test_a_cancel_requested_before_run_turn_spawns_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session, command, env, home = _omp(tmp_path)
     home.mkdir(parents=True, exist_ok=True)

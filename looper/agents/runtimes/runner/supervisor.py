@@ -338,7 +338,7 @@ class RunnerSupervisor:
                 cancelled = error
             generation = _Generation(kind, state, directory, process)
             generation.exited = _exit_signal(process)
-            generation.tree = proc_tree.track(process, label=f"runner {kind}")
+            generation.tree = await proc_tree.track(process, label=f"runner {kind}")
             generation.tree.start_ticker()
             generation.stderr = self._own(self._stderr(generation))
             if cancelled is not None:

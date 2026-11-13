@@ -985,7 +985,11 @@ class ResidentClaude:
         self._cwd = cwd
         self._totals, self._price = totals or Usage(), price
         self._output = _Output(self, process.stdout, autonomous)
-        self._tree = proc_tree.track(process, label=self._label)
+        try:
+            self._tree = await proc_tree.track(process, label=self._label)
+        except BaseException:
+            await self.stop(kill=True)
+            raise
         self._tree.start_ticker()
         logger.info("%s started Claude Code (pid=%s)", self._label, process.pid)
 

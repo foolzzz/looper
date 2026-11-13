@@ -1205,7 +1205,7 @@ def test_a_cancelled_end_reaps_the_agent_and_removes_its_record(
         assert await asyncio.wait_for(process.stdout.readline(), 3) == b"ready\n"
         record = runtime_root / proc_tree.RECORDS_DIR / f"{process.pid}.json"
         assert record.exists()
-        tree = proc_tree.track(process) if tracked else None
+        tree = await proc_tree.track(process) if tracked else None
         signalled = asyncio.Event()
         original_signal = proc_tree._signal
 
@@ -1242,7 +1242,7 @@ def test_cancelling_tree_preparation_removes_a_gracefully_exited_agents_record(
         await proc_tree.sweep(runtime_root)
         process = await proc_tree.spawn("/bin/cat", stdin=asyncio.subprocess.PIPE,
                                         stdout=asyncio.subprocess.DEVNULL)
-        tree = proc_tree.track(process)
+        tree = await proc_tree.track(process)
         record = runtime_root / proc_tree.RECORDS_DIR / f"{process.pid}.json"
         reached, release = asyncio.Event(), asyncio.Event()
         original = getattr(tree, preparation)
@@ -1317,7 +1317,7 @@ def test_turn_tree_follows_the_original_group_after_the_agent_exits(
         pids = {"agent": process.pid}
         trees.append(pids)
         try:
-            tree = proc_tree.track(process)
+            tree = await proc_tree.track(process)
             assert tree.seen[process.pid] is not None
             assert process.stdin is not None
             process.stdin.close()
@@ -1345,7 +1345,7 @@ def test_turn_tree_ends_a_detached_grandchild_whose_parent_is_gone(tmp_path: Pat
 
     async def _run() -> tuple[int, bool, list[int]]:
         process = await _spawn_python(tmp_path, code)
-        tree = proc_tree.TurnTree.track(process, label="turn")
+        tree = await proc_tree.TurnTree.track(process, label="turn")
         grandchild = int(await _wait_file(tmp_path / "grandchild.pid"))
         await tree.refresh(force=True)  # the middle child still runs
         seen = grandchild in tree.seen
@@ -1367,7 +1367,7 @@ def test_turn_tree_leaves_a_reused_pid_alone(tmp_path: Path) -> None:
     async def _run() -> list[int]:
         process = await _spawn_python(tmp_path, "import subprocess, time\n"
                                       "subprocess.Popen(['/bin/sleep', '60'], start_new_session=True)\nimport sys; sys.stdin.read()\n")
-        tree = proc_tree.TurnTree.track(process, label="turn")
+        tree = await proc_tree.TurnTree.track(process, label="turn")
         for _ in range(100):
             await tree.refresh(force=True)
             if len(tree.seen) > 1:
@@ -1410,7 +1410,7 @@ def test_turn_tree_leaves_a_reused_leaders_new_tree_alone(
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
 
     async def _run() -> proc_tree.TurnTree:
-        tree = proc_tree.TurnTree.track(Agent(), label="turn")
+        tree = await proc_tree.TurnTree.track(Agent(), label="turn")
         await tree.refresh(force=True)
         # The old leader exited; an unrelated leader now owns its pid and has a new child and group member.
         table.clear()
@@ -1485,7 +1485,7 @@ def test_turn_tree_checks_identity_before_expanding_an_observed_tree(
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
 
     async def _run() -> None:
-        tree = proc_tree.track(Agent())
+        tree = await proc_tree.track(Agent())
         await tree.refresh(force=True)
         # The observed child leaves its group; a new child and group member appear at the root.
         table.update({102: (1, 102), 103: (101, 103), 104: (1, 101)})
@@ -1530,7 +1530,7 @@ def test_turn_tree_follows_an_observed_member_after_its_group_leader_exits(
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
 
     async def _run() -> None:
-        tree = proc_tree.track(Agent())
+        tree = await proc_tree.track(Agent())
         # The non-root leader exits; its observed member survives with the same identity and group.
         table.pop(102)
         starts.pop(102)
@@ -1554,7 +1554,7 @@ def test_turn_tree_forgets_groups_missing_from_a_refresh(monkeypatch: pytest.Mon
     monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: "started" for pid in pids})
 
     async def _run() -> None:
-        tree = proc_tree.TurnTree.track(process, label="turn")
+        tree = await proc_tree.TurnTree.track(process, label="turn")
         table.pop(102)
         await tree.refresh(force=True)
         table.update({102: (1, 102), 103: (102, 102)})
@@ -1584,7 +1584,7 @@ def test_turn_tree_never_recovers_ownership_from_an_unread_initial_identity(
     monkeypatch.setattr(proc_tree, "TERM_GRACE_SEC", 0)
 
     async def _run() -> None:
-        tree = proc_tree.track(Agent())
+        tree = await proc_tree.track(Agent())
         # The first identity was never established. A later readable pid cannot prove ownership.
         table.update({102: (101, 102), 103: (1, 101)})
         monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: "replacement" for pid in pids})
@@ -1631,7 +1631,7 @@ def test_turn_tree_with_unavailable_identity_ends_only_its_live_handle(
 
     async def _run() -> None:
         agent = Agent()
-        tree = proc_tree.track(agent)
+        tree = await proc_tree.track(agent)
         await asyncio.wait_for(tree.end(), 1)
         assert agent.returncode is not None
 
@@ -1645,7 +1645,7 @@ def test_turn_tree_ticker_picks_up_a_child_started_between_events(tmp_path: Path
 
     async def _run() -> bool:
         process = await _spawn_python(tmp_path, code)
-        tree = proc_tree.TurnTree.track(process, label="turn")
+        tree = await proc_tree.TurnTree.track(process, label="turn")
         tree.start_ticker(interval=0.05)
         process.stdin.write(b"\n")  # type: ignore[union-attr]
         child = int(await _wait_file(tmp_path / "c.pid"))
@@ -1688,25 +1688,25 @@ def test_cancelling_a_refresh_does_not_lose_new_descendants(monkeypatch: pytest.
     monkeypatch.setattr(proc_tree.os, "killpg", killpg)
 
     async def _run() -> None:
-        tree = proc_tree.track(Agent())
+        tree = await proc_tree.track(Agent())
         table.update({102: (101, 102), 103: (102, 102)})
         reached = asyncio.Event()
-        to_thread = asyncio.to_thread
+        run_ps = proc_tree.run_ps
 
         async def paused(func: Any, *args: Any, **kwargs: Any) -> Any:
             if func is proc_tree._start_times and 102 in args[0]:
                 reached.set()
                 await asyncio.Event().wait()
-            return await to_thread(func, *args, **kwargs)
+            return await run_ps(func, *args, **kwargs)
 
-        monkeypatch.setattr(asyncio, "to_thread", paused)
+        monkeypatch.setattr(proc_tree, "run_ps", paused)
         refreshing = asyncio.create_task(tree.refresh(force=True))
         try:
             await asyncio.wait_for(reached.wait(), 3)
         finally:
             refreshing.cancel()
             await asyncio.gather(refreshing, return_exceptions=True)
-            monkeypatch.setattr(asyncio, "to_thread", to_thread)
+            monkeypatch.setattr(proc_tree, "run_ps", run_ps)
         await asyncio.wait_for(tree.end(), 3)
 
     asyncio.run(_run())
@@ -1729,7 +1729,7 @@ def test_turn_tree_end_returns_within_a_bound_when_the_agent_is_never_reaped() -
             return 0
 
     async def _run() -> float:
-        tree = proc_tree.TurnTree.track(_Stuck(), label="turn")
+        tree = await proc_tree.TurnTree.track(_Stuck(), label="turn")
         began = time.monotonic()
         await tree.end()
         return time.monotonic() - began
@@ -1773,7 +1773,7 @@ def test_turn_tree_end_ends_a_seen_child_that_left_the_group(tmp_path: Path) -> 
 
     async def _run() -> list[int]:
         process = await _spawn_python(tmp_path, code)
-        tree = proc_tree.TurnTree.track(process, label="turn")
+        tree = await proc_tree.TurnTree.track(process, label="turn")
         child = await _child_that_leaves_its_group(tmp_path, tree)
         try:
             await tree.end()

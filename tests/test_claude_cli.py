@@ -34,6 +34,37 @@ def _priced_launch() -> Any:
     return Launch(AgentSettings(profile=resolved_profile("agent-x", "claude-code/m-main", runtime, provider, "m-main")))
 
 
+def test_cancelling_start_during_tracking_reaps_the_process(tmp_path, monkeypatch):
+    from looper.agents import proc_tree
+    from looper.agents.claude_cli import ResidentClaude
+
+    async def run():
+        entered = asyncio.Event()
+        processes = []
+
+        async def tracking(process, **kwargs):
+            processes.append(process)
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(proc_tree, "track", tracking)
+        session = ResidentClaude(label="test")
+        starting = asyncio.create_task(session.start(["/bin/sleep", "5"], cwd=str(tmp_path), signature="s"))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            starting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await starting
+            assert processes[0].returncode is not None
+            assert session.pid is None
+        finally:
+            starting.cancel()
+            await asyncio.gather(starting, return_exceptions=True)
+            await session.stop(kill=True)
+
+    asyncio.run(run())
+
+
 def _builtin_launch(**fields: Any) -> Any:
     """A launch of the built-in profile with its resolved model binding."""
     from looper.agents.agent_settings import AgentSettings, Launch

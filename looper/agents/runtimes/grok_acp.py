@@ -503,7 +503,7 @@ class AcpGrok:
             *argv, cwd=self._cwd, env=self._env, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE)
         self._process, self._active = process, False
-        self._tree = proc_tree.track(process, label=self._label)
+        self._tree = await proc_tree.track(process, label=self._label)
         self._tree.start_ticker()
         assert process.stdout is not None
         inbox = self._inbox

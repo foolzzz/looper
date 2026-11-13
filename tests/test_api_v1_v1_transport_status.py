@@ -405,6 +405,7 @@ def test_keeper_adoption_checks_report_startup_gaps(tmp_path, status_data, candi
 
 
 def test_orphan_keeper_check_uses_live_identity_ownership_age_and_a_cache(tmp_path, status_data, monkeypatch):
+    import threading
     from looper.agents import http_server, keeper, proc_tree
     from looper.agents.kept_run import KeeperSettings
     from looper.agents.tiers.worker import WorkerConfig, WorkerPool
@@ -415,6 +416,7 @@ def test_orphan_keeper_check_uses_live_identity_ownership_age_and_a_cache(tmp_pa
     probes = []
 
     def start_times(pids):
+        assert threading.current_thread().name.startswith('looper-ps')
         probes.append(pids)
         return starts
 

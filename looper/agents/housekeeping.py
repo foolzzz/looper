@@ -15,7 +15,7 @@ import shutil
 from typing import Any
 
 from ..db import connection as db_connection, schedules as db_schedules, llm_requests
-from . import chat_attachments, scheduler_settings
+from . import chat_attachments, proc_tree, scheduler_settings
 from .command_runs import CommandRuns, Finished, Lost, LOGS_DIR, RUNNER_DIR, RUNS_DIR
 from .llmrec import ROUTES_DIR, RouteFile
 from .llmrec import settings as llmrec_settings
@@ -281,7 +281,7 @@ async def run_once(runtime_root: Path, now: datetime, *, current_runner: Path | 
             async with db_connection.transaction() as conn:
                 states = await db_schedules.run_states(conn, [run["id"] for run in runs])
             closed = [run for run in runs if states.get(run["id"]) not in db_schedules.OPEN_STATUSES]
-            report.run_dirs = await asyncio.to_thread(_prune_run_directories, commands, closed, now)
+            report.run_dirs = await proc_tree.run_ps(_prune_run_directories, commands, closed, now)
     with _step(report, "runner files"):
         report.runner_files = await asyncio.to_thread(prune_runner_files, runtime_root / RUNNER_DIR, current_runner, now)
     for name in ROTATED:
