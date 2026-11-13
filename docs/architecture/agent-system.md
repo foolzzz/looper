@@ -3637,9 +3637,18 @@ Clients authenticate with a separate local key stored at
 `<runtime-root>/.local/llmrec/gateway.key` with mode `0600`; the upstream
 provider key stays inside the proxy. Reveal or rotate the local key in the
 same Settings section. Rotation invalidates the old key, so existing clients
-must fetch the new one. Enablement, port and aliases are configured there or
-through `/api/v1/gateway/{update,alias_set,alias_delete}`; `loopercli` provides
-only `gateway-env` for this workflow, not gateway configuration commands.
+must fetch the new one. The Manager can read enablement, port and model alias
+bindings with `looper_settings` `view`, including from Lark and Telegram. Its
+`gateway` action changes enablement/port, sets an alias (`alias_set` with
+`alias` and `model_id`), or deletes one (`alias_delete` with its name), always
+showing the before → after summary and waiting for user confirmation first.
+Key reveal and rotation stay in the dashboard; the Manager receives neither
+keys nor client environment commands. Enablement, port and aliases can also
+be configured in Settings or through `/api/v1/gateway/{update,alias_set,alias_delete}`.
+The generated `loopercli settings gateway --gateway '{"port": 9000}'` command
+uses the same settings action, with confirmation for API clients and the
+existing direct-write behavior for authenticated operators. `loopercli gateway-env`
+provides the client environment for an existing alias.
 
 Run this before starting Claude Code (replace `NAME` with the configured alias):
 

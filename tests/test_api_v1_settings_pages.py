@@ -25,3 +25,12 @@ def test_generated_cli_sends_settings_page_requests(family, action, options, dat
     assert calls == [("POST", path, data)]
     op = api_v1.find("POST", path)
     assert op.tool is None and not op.hand and op.request["additionalProperties"] is False
+
+
+def test_generated_cli_sends_gateway_change_to_confirmed_settings_action():
+    args = loopercli.build_parser(api_v1.document()).parse_args(
+        ["settings", "gateway", "--gateway", '{"port": 32123}'])
+    calls = []
+    api = SimpleNamespace(call=lambda *parts: (calls.append(parts) or (202, {"status": "needs_confirmation"})))
+    assert args._run(args, SimpleNamespace(api=lambda: api, as_json=True, session="settings")) == 3
+    assert calls == [("POST", "/api/v1/ops/settings/gateway", {"gateway": {"port": 32123}})]

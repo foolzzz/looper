@@ -532,17 +532,17 @@ Once before a release, on the release candidate (`main` after every merge):
 - opus on the 24 Planner tasks: `run --mode real --model opus --reps 3
   --tasks planner --jobs 4 --max-budget-usd 3.0 --case-budget-usd 6.0
   --total-cap-usd 40` (the earlier baseline cost about $27.73);
-- haiku on all 61 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- haiku on all 62 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $HAIKU_DIALOG_CAP_USD`;
-- sonnet on all 61 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
+- sonnet on all 62 dialogs: `dialogs --mode real --model sonnet --reps 3 --jobs 4
   --max-budget-usd 1.0 --case-budget-usd 1.0 --total-cap-usd $SONNET_DIALOG_CAP_USD`, refreshing
   `baselines/dialogs-real-sonnet.json`;
-- the opus xhigh Manager on all 61 dialogs: `dialogs --mode real --reps 3 --jobs 4
+- the opus xhigh Manager on all 62 dialogs: `dialogs --mode real --reps 3 --jobs 4
   --manager-model opus --manager-effort xhigh --max-budget-usd 3.0
   --case-budget-usd 3.0 --total-cap-usd $OPUS_DIALOG_CAP_USD`.
 
 Omitting `--dialogs` selects every dialog in `dialogs.select(None)`: currently
-61, or 183 case/reps per three-rep tier. A complete 61-dialog cost measurement is blocked
+62, or 186 case/reps per three-rep tier. A complete 62-dialog cost measurement is blocked
 pending evaluation credentials, a fresh disposable database/runtime root and
 an authorized budget. Set the three `*_DIALOG_CAP_USD` variables to explicitly
 authorized candidate measurement ceilings before running these commands;
@@ -551,8 +551,8 @@ until each tier completes. Do not extrapolate from the committed 24-dialog
 reports: at clean commit `c9ac42d5c562306259203790cb23766d9abed34f`,
 `dialogs-real-haiku.json` covers 72 rows / $4.226970 and
 `dialogs-real-opus.json` covers 72 rows / $8.426588 (other roles on haiku).
-Neither measures the current 61-dialog selection; no Sonnet dialog report exists.
-After each full real candidate run, verify all 61 IDs at reps 1–3, no cap stop,
+Neither measures the current 62-dialog selection; no Sonnet dialog report exists.
+After each full real candidate run, verify all 62 IDs at reps 1–3, no cap stop,
 skipped or error rows, and reconcile row costs with the report total. Record
 the candidate commit, models/Manager effort, selected IDs/count, repetitions,
 row count and measured total here before deriving numeric caps with headroom.
@@ -819,6 +819,7 @@ database, a disposable `looper serve`, and fake or real mode.
 | `schedule_no_profiles` | the other direction: a schedule asked for with no word about profiles gets none (the project's apply) |
 | `schedule_enable_declined` | the same schedule created disabled; 「启用」 waits for a confirmation, and when the user then says to leave it, it stays disabled and no enable call runs |
 | `scheduler_settings` | the schedules' default run timeout (`looper_settings`, action `scheduler`) waits for the user's word in the next message, and 「确认。」 changes it to 1800 s |
+| `gateway_settings` | the local gateway is read with `looper_settings view`; a port change shows before → after and leaves the disabled gateway unchanged until 「确认。」 saves it; requests to reveal or rotate its key are directed to dashboard Settings, with no key operation or key in the reply |
 | `schedule_timeout` | a schedule created with a 20-minute run timeout the user names: it has 1200 s itself and the system default stays at the built-in value |
 | `schedule_timeout_unnamed` | the same schedule created with no timeout named: it follows the system default (`"default"`) |
 | `schedule_ask_project` | a schedule without a project: the Manager asks, and creates and changes nothing |
@@ -840,7 +841,7 @@ no reply within `--timeout` (`timeout`) or the eval itself failed (`harness`,
 such as the slow task not getting under way); after an error its remaining
 turns are not sent and the run goes on with the next dialog. Fake mode plays
 the Manager with the stand-in, which makes each message's scripted calls over
-MCP; it takes about two minutes. Real mode now selects all 61 dialogs by
+MCP; it takes about two minutes. Real mode now selects all 62 dialogs by
 default. The committed cost references cover only 24 dialogs (see the release
 tiers above), so neither they nor the default `--total-cap-usd` (0.50)
 establish a sufficient cap. Use an explicitly authorized measurement ceiling
@@ -856,7 +857,7 @@ uv run --extra test python -m evals.prompt_regression dialogs --mode real \
 Options: `--dialogs status,ask_project`, `--model`, `--agent`,
 `--manager-model opus --manager-effort xhigh` (the Manager alone on that
 model, the other roles on `--model`; the historical 24-dialog Opus report
-does not establish a cap for the current 54 dialogs; give it
+does not establish a cap for the current 62 dialogs; give it
 `--max-budget-usd 3.0`, `--case-budget-usd 3.0` with `--jobs 4` and a
 `--total-cap-usd "$OPUS_DIALOG_CAP_USD"` authorized for candidate measurement),
 `--switch-agent SPEC.json` (`session_profile_switch`: register that spec as the profile `eval/switch`, while the

@@ -271,6 +271,59 @@ async def _llmrec_set(call: Call) -> dict[str, Any]:
     return {"changes": [{"setting": name, "before": before[name], "after": after[name]} for name in values]}
 
 
+def _gateway_view(view: Mapping[str, Any]) -> dict[str, Any]:
+    # Only configuration belongs in chat, never credentials or client setup commands.
+    return {name: view[name] for name in ("enabled", "port", "aliases")}
+
+
+async def _gateway_change(call: Call) -> tuple[str, dict[str, Any]]:
+    from ..v1_domains import gateway
+
+    values = call.arguments.get("gateway")
+    if not isinstance(values, Mapping) or not values:
+        raise OpError(ErrorCode.INVALID, "gateway: to read the gateway use view; to change it give enabled/port, "
+                                         "alias_set {alias, model_id}, or alias_delete")
+    if call.platform.runtime_root is None:
+        raise OpError(ErrorCode.UNAVAILABLE, "local gateway runtime unavailable")
+    if set(values) <= {"enabled", "port"}:
+        action, arguments = "update", dict(values)
+        if "enabled" not in arguments:
+            arguments["enabled"] = (await gateway.settings(call.platform.runtime_root))["enabled"]
+    elif set(values) == {"alias_set"} and isinstance(values["alias_set"], Mapping):
+        action, arguments = "alias_set", dict(values["alias_set"])
+    elif set(values) == {"alias_delete"}:
+        action, arguments = "alias_delete", {"alias": values["alias_delete"]}
+    else:
+        raise OpError(ErrorCode.INVALID, "gateway: change enabled/port, one alias_set, or one alias_delete per call")
+    await gateway.check_change(action, arguments)
+    return action, arguments
+
+
+async def _gateway_confirming(call: Call) -> str:
+    from ..v1_domains import gateway
+
+    action, arguments = await _gateway_change(call)
+    before = _gateway_view(await gateway.settings(call.platform.runtime_root))
+    lines = ["要修改本地 LLM 网关设置吗？"]
+    if action == "update":
+        for name in call.arguments["gateway"]:
+            if before[name] != arguments[name]:
+                lines.append(f"- {name}：{before[name]} → {arguments[name]}")
+    else:
+        alias = arguments["alias"]
+        binding = next((row["model_id"] for row in before["aliases"] if row["alias"] == alias), "未设置")
+        after = arguments["model_id"] if action == "alias_set" else "未设置"
+        lines.append(f"- alias {alias}：{binding} → {after}")
+    return "\n".join(lines)
+
+
+async def _gateway_set(call: Call) -> dict[str, Any]:
+    from ..v1_domains import gateway
+
+    action, arguments = await _gateway_change(call)
+    return {"gateway": _gateway_view(await gateway.apply_change(call.platform.runtime_root, action, arguments))}
+
+
 async def _confirming(call: Call) -> str | None:
     """What a change of the vault, the shared defaults, a limit, or one raising a spend cap does, for the user to confirm;
     None for any other call (``write``), or another action."""
@@ -278,6 +331,8 @@ async def _confirming(call: Call) -> str | None:
         return await _scheduler_confirming(call)
     if call.arguments["action"] == "llmrec":
         return await _llmrec_confirming(call)
+    if call.arguments["action"] == "gateway":
+        return await _gateway_confirming(call)
     if call.arguments["action"] == "waits":
         return await _wait_confirming(call)
     if call.arguments["action"] == "knowledge_vault":
@@ -438,6 +493,8 @@ def _effective(view: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def _view(call: Call) -> dict[str, Any]:
+    from ..v1_domains import gateway
+
     profiles = {row["id"]: row["name"] for row in await db_profiles.list_profiles()}
     if call.arguments.get("project") is None:
         view = await _read(_Place(Layer.SYSTEM, None, None))
@@ -448,6 +505,7 @@ async def _view(call: Call) -> dict[str, Any]:
                                 for name, entry in scheduler.items()},
                 "waits": await waits.settings_view(),
                 "llmrec": await llmrec_settings.settings_view(),
+                "gateway": _gateway_view(await gateway.settings(call.platform.runtime_root)),
                 "shared_defaults": _layer_set(view["system"]["values"], profiles),
                 "roles": {role: {"set": _layer_set(entry["values"], profiles),
                                  "effective": _effective(entry["effective"]), "timeout_seconds": timeouts.get(role)}
@@ -502,6 +560,8 @@ async def _settings(call: Call) -> dict[str, Any]:
         return await _scheduler_set(call)
     if action == "llmrec":
         return await _llmrec_set(call)
+    if action == "gateway":
+        return await _gateway_set(call)
     if action == "waits":
         return await _wait_set(call)
     if action == "knowledge_vault":
@@ -513,11 +573,15 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         name="looper_settings",
         description="Settings agents inherit, a later layer winning: shared defaults → role → project → role in "
-                    "project. view (with project: its layers and allowed profiles); set values on one layer (no role "
+                    "project. view (with project: its layers and allowed profiles) includes the gateway "
+                    "(enabled, port, aliases; no key); set values on one layer (no role "
                     "nor project: shared defaults); allowed_profiles: add or remove the profiles a project's Planners "
                     "may choose (an empty list: they may choose any profile); scheduler: the schedules' system settings (the user "
                     "confirms them first); llmrec: recording retention_days (1–90, default 7) and "
                     "max_total_mb (256–65536 MiB, default 2048), read by view and changed after confirmation; "
+                    "gateway: change the local gateway (enabled, port, alias_set, alias_delete); "
+                    "each change needs the user's confirmation; to read it use view. "
+                    "Gateway key reveal and rotation are dashboard-only; "
                     "waits: system limits for wait steps (the user confirms first). "
                     "knowledge_vault: the notes folder agents read in projects that turn it on, and "
                     "the folders they may write (the user confirms first). The user confirms shared defaults, limits and "
@@ -527,7 +591,17 @@ TOOLS: tuple[Tool, ...] = (
             "type": "object", "required": ["action"], "additionalProperties": False,
             "properties": {
                 "action": {"type": "string", "enum": ["view", "set", "allowed_profiles", "scheduler", "waits",
-                                                      "knowledge_vault", "llmrec"]},
+                                                      "knowledge_vault", "llmrec", "gateway"]},
+                "gateway": {"type": "object", "additionalProperties": False,
+                            "description": "gateway: enabled and/or port, or one alias_set, or one alias_delete. "
+                                           "All writes require confirmation; no key operations.",
+                            "properties": {
+                                "enabled": {"type": "boolean"}, "port": {"type": "integer"},
+                                "alias_set": {"type": "object", "additionalProperties": False,
+                                              "required": ["alias", "model_id"],
+                                              "properties": {"alias": {"type": "string"},
+                                                             "model_id": {"type": "string"}}},
+                                "alias_delete": {"type": "string"}}},
                 "llmrec": {"type": "object", "additionalProperties": False,
                            "description": "llmrec: recording retention limits only; null restores the built-in.",
                            "properties": {"retention_days": {"type": ["integer", "null"], "minimum": 1, "maximum": 90},

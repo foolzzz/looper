@@ -301,6 +301,23 @@ def test_one_model_event_then_exit_never_falls_back(run_primary, runtime, launch
     assert len(records) == 1
 
 
+def test_model_event_before_prompt_delivery_never_falls_back(run_primary, monkeypatch):
+    spawn = worker.proc_tree.spawn
+
+    async def exited_process(*args, **kwargs):
+        process = await spawn(*args, **kwargs)
+        # Force the CLI to exit before start() writes, without relying on scheduling.
+        await asyncio.wait_for(process.wait(), 5)
+        return process
+
+    monkeypatch.setattr(worker.proc_tree, "spawn", exited_process)
+    event = {"type": "item.started", "item": {"id": "call", "type": "command_execution", "command": "pwd"}}
+    result, records = run_primary("codex", Launcher.TTADK, events=[event], exit_code=0)
+    assert result["status"] == "failed"
+    assert "fallback" not in result
+    assert len(records) == 1
+
+
 @pytest.mark.parametrize("runtime", ["codex", "coco"])
 @pytest.mark.parametrize("phase", ["started", "updated", "completed"])
 def test_incomplete_model_item_prevents_fallback(run_primary, runtime, phase):

@@ -6,6 +6,7 @@ from ..ops import Call, Turn
 from ..ops.config import answered
 from ..ops.settings import _confirming
 from .global_settings import _operation
+from .gateway import SETTINGS as GATEWAY_SETTINGS
 
 SCHEDULER_SETTING = _object({
     "value": {"type": ["integer", "null"]},
@@ -37,7 +38,10 @@ LLMREC_LIMITS = _object({name: LLMREC_LIMIT for name in ("retention_days", "max_
 
 _COMPACT_VAULT = _object({name: schema for name, schema in VAULT_SETTINGS["properties"].items()
                           if name != "git"}, closed=True)
+_COMPACT_GATEWAY = _object({name: GATEWAY_SETTINGS["properties"][name] for name in
+                           ("enabled", "port", "aliases")}, closed=True)
 RESULTS = {
+    "settings.gateway": _object({"gateway": _COMPACT_GATEWAY}, closed=True),
     "settings.scheduler": _object({"changes": _array(_object({
         "setting": _STR, "before": _STR, "after": _STR}, closed=True))}, closed=True),
     "settings.llmrec": _object({"changes": _array(_object({
@@ -47,9 +51,10 @@ RESULTS = {
     "settings.knowledge_vault": _object({"knowledge_vault": VAULT_SETTINGS}, closed=True),
     "settings.view": {"oneOf": [
         _object({"scheduler": {"type": "object", "additionalProperties": _STR}, "waits": WAIT_SETTINGS,
-                 "llmrec": LLMREC_LIMITS, "shared_defaults": _OBJ, "roles": _OBJ, "knowledge_vault": _COMPACT_VAULT,
+                 "llmrec": LLMREC_LIMITS, "gateway": _COMPACT_GATEWAY,
+                 "shared_defaults": _OBJ, "roles": _OBJ, "knowledge_vault": _COMPACT_VAULT,
                  "manager_session": _OBJ},
-                ["scheduler", "waits", "llmrec", "shared_defaults", "roles", "knowledge_vault"], closed=True),
+                ["scheduler", "waits", "llmrec", "gateway", "shared_defaults", "roles", "knowledge_vault"], closed=True),
         _object({"project": _STR, "project_layer": _OBJ, "roles": _OBJ,
                  "allowed_profiles": _array(_STR), "allowed_profiles_note": _NULL_STR}, closed=True),
     ]},
