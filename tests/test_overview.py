@@ -67,8 +67,8 @@ def test_live_runs_follow_the_tasks_current_project(monkeypatch, manager_id, pro
     rows = [{"project_id": project, "project_name": name, "status": "completed", "count": 1}
             for project, name in (("proj-a", "Alpha"), ("proj-b", "Beta"))]
     monkeypatch.setattr(overview.db_tasks, "status_counts", AsyncMock(return_value=rows))
-    monkeypatch.setattr(overview.db_tasks, "project_of", AsyncMock(return_value={
-        "moving": "proj-b", "foreign": "proj-b"}))
+    monkeypatch.setattr(overview.db_tasks, "names_and_projects_of", AsyncMock(return_value={
+        task: {"project_id": "proj-b", "name": f"Task {task}"} for task in ("moving", "foreign")}))
     monkeypatch.setattr(overview.db_tasks, "manager_of", AsyncMock(return_value={
         "moving": "manager-own", "foreign": "manager-other"}))
     monkeypatch.setattr(overview.db_llm_records, "spend_since", AsyncMock(return_value={}))

@@ -124,63 +124,78 @@ function AgentRow({ role, count, children }: { role: string; count?: React.React
   );
 }
 
-function StepRuns({ runs }: { runs: LiveStepRun[] }) {
-  return runs.map((run) => (
-    <p key={run.agent_id} className="flex min-w-0 items-baseline gap-2 text-xs">
-      {/* Listed under Workers or Reviewers, a run as a role its task's Planner defined shows the role's id. */}
-      {run.task_role && <span className="shrink-0 font-mono text-foreground">{run.task_role.id}</span>}
-      <a
-        href={historyHref(run.agent_id, run.task_id)}
-        title={[run.project_name, run.step].filter(Boolean).join(" · ") || undefined}
-        className={cn("min-w-0 truncate text-muted-foreground", linkClass)}
-      >
-        {run.instruction.split("\n")[0] || run.step || run.agent_id}
-      </a>
-      {run.state === "waiting" ? (
-        <Badge variant="warning" className="shrink-0">waiting</Badge>
-      ) : (
-        <span className="shrink-0 tabular-nums text-muted-foreground">{elapsed(run.elapsed_seconds)}</span>
-      )}
-    </p>
-  ));
+function AgentTask({ taskId, name, project }: { taskId: string; name: string; project: string | null }) {
+  const label = project ? `${project} · ${name}` : name;
+  return (
+    <a href={`#tasks/${encodeURIComponent(taskId)}`} title={label} className={cn("block truncate text-sm", linkClass)}>
+      {label}
+    </a>
+  );
 }
 
-function runCount(runs: LiveStepRun[]): string {
+function StepRuns({ runs }: { runs: LiveStepRun[] }) {
+  return runs.map((run) => {
+    const instruction = run.instruction.split("\n")[0] || run.step || run.agent_id;
+    return (
+      <div key={run.agent_id} className="min-w-0">
+        <AgentTask taskId={run.task_id} name={run.task_name || run.task_id} project={run.project_name} />
+        <p className="flex min-w-0 items-baseline gap-2 text-xs">
+          {/* A run as a role its task's Planner defined shows the role's id. */}
+          {run.task_role && <span title={run.task_role.id} className="max-w-20 truncate font-mono text-foreground">{run.task_role.id}</span>}
+          <a
+            href={historyHref(run.agent_id, run.task_id)}
+            title={instruction}
+            className={cn("min-w-0 truncate text-muted-foreground", linkClass)}
+          >
+            {instruction}
+          </a>
+          {run.state === "waiting" ? (
+            <Badge variant="warning" className="shrink-0">waiting</Badge>
+          ) : (
+            <span className="shrink-0 tabular-nums text-muted-foreground">{elapsed(run.elapsed_seconds)}</span>
+          )}
+        </p>
+      </div>
+    );
+  });
+}
+
+function runCount(runs: LiveStepRun[], extraRunning = 0): string {
+  const running = runs.filter((r) => r.state === "running").length + extraRunning;
   const waiting = runs.filter((r) => r.state === "waiting").length;
-  return `${runs.length - waiting}${waiting ? ` running · ${waiting} waiting` : ""}`;
+  return `${running} running${waiting ? ` · ${waiting} waiting` : ""}`;
 }
 
 function Agents({ agents }: { agents: Overview["agents"] }) {
   const { manager, planners, workers, reviewers } = agents;
+  const managers = (agents.managers ?? (manager ? [{ ...manager, name: "Manager" }] : []))
+    .filter((m) => m.state !== "stopped");
+  const busyManagers = managers.filter((m) => m.state === "busy").length;
   return (
-    <Section title="Agents running now">
+    <Section title="Agents running now" meta={runCount([...workers, ...reviewers], busyManagers + planners.length)}>
       <div className="divide-y divide-border">
-        <AgentRow role="Manager">
-          {manager ? (
-            <a href={historyHref(manager.agent_id)} className={cn("inline-flex items-center gap-1.5 text-sm", linkClass)}>
-              {manager.state === "busy" ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" aria-hidden="true" />
-                  busy
-                </>
-              ) : (
-                <span className="text-muted-foreground">idle</span>
-              )}
+        <AgentRow role="Manager" count={`${busyManagers} busy`}>
+          {managers.map((m) => (
+            <a key={m.agent_id} href={historyHref(m.agent_id)} className={cn("flex min-w-0 items-center gap-1.5 text-sm", linkClass)}>
+              <span title={m.name} className="min-w-0 truncate">{m.name}</span>
+              {m.state === "busy" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" aria-hidden="true" />}
+              <span className="shrink-0 text-xs text-muted-foreground">{m.state}</span>
             </a>
-          ) : (
-            <p className="text-sm text-muted-foreground">unknown</p>
-          )}
+          ))}
+          {managers.length === 0 && <p className="text-sm text-muted-foreground">{agents.managers ? "None" : "unknown"}</p>}
         </AgentRow>
         <AgentRow role="Planners" count={planners.length}>
           {planners.map((p) => (
-            <a
-              key={p.agent_id}
-              href={historyHref(p.agent_id, p.task_id)}
-              className={cn("block truncate text-xs text-muted-foreground", linkClass)}
-            >
-              {p.project_name ? `${p.project_name}: ` : ""}
-              {p.name || p.requirement.split("\n")[0]}
-            </a>
+            <div key={p.agent_id} className="min-w-0">
+              <AgentTask taskId={p.task_id} name={p.name || p.requirement.split("\n")[0]} project={p.project_name} />
+              <a
+                href={historyHref(p.agent_id, p.task_id)}
+                title={p.requirement.split("\n")[0]}
+                className={cn("block truncate text-xs text-muted-foreground", linkClass)}
+              >
+                {p.requirement.split("\n")[0]}
+              </a>
+            </div>
           ))}
         </AgentRow>
         <AgentRow role="Workers" count={runCount(workers)}>

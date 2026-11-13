@@ -110,7 +110,8 @@ async def build_overview(
     ]
     runs = sorted(worker_pool.runs() if worker_pool else [], key=lambda r: (r["state"] != "running", r["since"]))
     # A task can move while its Workers run; dispatch-time project IDs are no longer its scope.
-    current_projects = await db_tasks.project_of({r["task_id"] for r in runs})
+    current_tasks = await db_tasks.names_and_projects_of({r["task_id"] for r in runs})
+    current_projects = {task_id: task["project_id"] for task_id, task in current_tasks.items()}
     runs = [{**r, "project_id": current_projects.get(r["task_id"], r["project_id"])} for r in runs]
     if project_ids is not None:
         planners = [p for p in planners if p["project_id"] in project_ids]
@@ -122,7 +123,9 @@ async def build_overview(
         runs = [r for r in runs if r["task_id"] in own]
     step_runs = [
         {"agent_id": r["agent_id"], "role": r["role"], "task_id": r["task_id"], "project_id": r["project_id"],
-         "project_name": names.get(r["project_id"]), "step": r["step"], "instruction": r["instruction"],
+         "project_name": names.get(r["project_id"]),
+         "task_name": current_tasks.get(r["task_id"], {}).get("name", r["task_id"]),
+         "step": r["step"], "instruction": r["instruction"],
          "state": r["state"], "elapsed_seconds": max(0, int((now - r["since"]).total_seconds())),
          # The role its task's Planner defined that it runs as; a built-in role's run has none.
          **({"task_role": role} if (role := run_role(r.get("task_role"))) else {})}

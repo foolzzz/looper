@@ -501,27 +501,39 @@ def test_project_overview_moves_live_runs_with_the_tasks_current_project(monkeyp
     async def test(pool):
         a = await projects.create_project(name="A", pool=pool)
         b = await projects.create_project(name="B", pool=pool)
-        await tasks.create_task(task_id="moving-task", requirement="work", project_id=a["id"],
+        await tasks.create_task(task_id="moving-task", requirement="work", title="Build parser", project_id=a["id"],
                                 status="running", pool=pool)
         runs = [{"agent_id": f"{role}-moving", "task_id": "moving-task", "project_id": a["id"],
                  "role": role, "state": state, "since": datetime.now(timezone.utc),
                  "step": "work", "instruction": "work"}
                 for role, state in (("worker", "running"), ("reviewer", "waiting"))]
-        await tasks.set_task_project("moving-task", b["id"], pool=pool)
 
-        async def overview(project):
+        async def overview(project=None):
+            if project is None:
+                status, body = await _get(_server(
+                    task_router=SimpleNamespace(running_planners=lambda: []),
+                    worker_pool=SimpleNamespace(runs=lambda: runs)), "/api/v1/system/overview")
+                assert status == 200
+                return body
             return await build_overview(task_router=SimpleNamespace(running_planners=lambda: []),
                 worker_pool=SimpleNamespace(runs=lambda: runs), manager=None,
                 supervisor=SimpleNamespace(agent_status=lambda: {}), manager_id="manager",
                 project_ids=[project["id"]])
 
+        initial = await overview()
+        for role in ("workers", "reviewers"):
+            assert [(r["task_name"], r["project_name"]) for r in initial["agents"][role]] == [
+                ("Build parser", "A")]
+        await tasks.set_task_title("moving-task", "Check parser", pool=pool)
+        await tasks.set_task_project("moving-task", b["id"], pool=pool)
+
         old = await overview(a)
         assert old["agents"]["workers"] == [] and old["agents"]["reviewers"] == []
         assert old["projects"] == []
-        current = await overview(b)
+        current = await overview()
         for role in ("workers", "reviewers"):
-            assert [(r["task_id"], r["project_id"], r["project_name"]) for r in current["agents"][role]] == [
-                ("moving-task", b["id"], "B")]
+            assert [(r["task_id"], r["task_name"], r["project_id"], r["project_name"])
+                    for r in current["agents"][role]] == [("moving-task", "Check parser", b["id"], "B")]
         assert current["projects"][0]["workers"] == {"running": 1, "waiting": 0}
         assert current["projects"][0]["reviewers"] == {"running": 0, "waiting": 1}
         assert all(r["project_id"] == a["id"] for r in runs)  # the pool's cached records stay untouched

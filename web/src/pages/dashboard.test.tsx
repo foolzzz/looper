@@ -65,6 +65,73 @@ describe("Dashboard waiting gates", () => {
     return input;
   };
 
+  it("counts the fleet's busy agents separately from waiting runs and links their tasks", async () => {
+    overview.agents = {
+      manager: { agent_id: "manager", state: "busy" },
+      managers: [
+        { agent_id: "manager", name: "Manager", state: "busy" },
+        { agent_id: "manager-build", name: "Build manager", state: "busy" },
+        { agent_id: "manager-review", name: "Review manager", state: "idle" },
+        { agent_id: "manager-off", name: "Stopped manager", state: "stopped" },
+      ],
+      planners: [{ agent_id: "planner-a", task_id: "a", name: "Build parser", requirement: "Plan the parser",
+        project_id: "project-a", project_name: "Compiler" }],
+      workers: [{ agent_id: "worker-a", role: "worker", task_id: "a", task_name: "Build parser",
+        project_id: "project-a", project_name: "Compiler", step: "parse", instruction: "Implement parsing\nMore detail",
+        state: "running", elapsed_seconds: 120, task_role: { id: "developer", kind: "work", version: 1 } },
+      { agent_id: "worker-b", role: "worker", task_id: "b", task_name: "Add tests",
+        project_id: null, project_name: null, step: "test", instruction: "", state: "waiting", elapsed_seconds: 0 }],
+      reviewers: [{ agent_id: "reviewer-a", role: "reviewer", task_id: "a", task_name: "Build parser",
+        project_id: "project-a", project_name: "Compiler", step: "review", instruction: "Review parsing",
+        state: "running", elapsed_seconds: 30 }],
+    };
+    await show();
+    const agents = container.querySelector('section[aria-label="Agents running now"]')!;
+    expect(agents.firstElementChild!.textContent).toContain("5 running · 1 waiting");
+    const rows = agents.querySelector(".divide-y")!.children;
+    expect(rows[0].textContent).toContain("2 busy");
+    expect(rows[1].textContent).toContain("Planners1");
+    expect(rows[2].textContent).toContain("1 running · 1 waiting");
+    expect(rows[3].textContent).toContain("1 running");
+    const managers = [...rows[0].querySelectorAll("a")];
+    expect(managers.map((a) => a.textContent)).toEqual(["Managerbusy", "Build managerbusy", "Review manageridle"]);
+    expect(managers.map((a) => a.getAttribute("href"))).toEqual([
+      "#history/manager", "#history/manager-build", "#history/manager-review",
+    ]);
+    for (const row of [rows[1], rows[2], rows[3]]) {
+      const link = row.querySelector('a[href="#tasks/a"]')!;
+      expect(link.textContent).toBe("Compiler · Build parser");
+      expect(link.getAttribute("title")).toBe("Compiler · Build parser");
+    }
+    expect(rows[1].textContent).toContain("Plan the parser");
+    expect(rows[2].textContent).toContain("developer");
+    expect(rows[2].textContent).toContain("Implement parsing");
+    expect(rows[2].textContent).not.toContain("More detail");
+    expect(rows[2].textContent).toContain("2 min");
+    expect(rows[2].querySelector('a[href="#tasks/b"]')!.textContent).toBe("Add tests");
+    expect(rows[2].textContent).toContain("testwaiting");
+  });
+
+  it.each(["busy", "idle", null] as const)("falls back to the single Manager: %s", async (state) => {
+    overview.agents.manager = state ? { agent_id: "manager", state } : null;
+    await show();
+    const agents = container.querySelector('section[aria-label="Agents running now"]')!;
+    expect(agents.firstElementChild!.textContent).toContain(`${state === "busy" ? 1 : 0} running`);
+    expect(agents.firstElementChild!.textContent).not.toContain("waiting");
+    const link = agents.querySelector('a[href="#history/manager"]');
+    if (state) expect(link!.textContent).toBe(`Manager${state}`);
+    else expect(link).toBeNull();
+  });
+
+  it("treats an empty fleet as authoritative", async () => {
+    overview.agents.manager = { agent_id: "manager", state: "busy" };
+    overview.agents.managers = [];
+    await show();
+    const agents = container.querySelector('section[aria-label="Agents running now"]')!;
+    expect(agents.firstElementChild!.textContent).toContain("0 running");
+    expect(agents.querySelector('a[href="#history/manager"]')).toBeNull();
+  });
+
   it.each([false, true])("keeps the overlap warning distinct and hides absent alerts: %s", async (alert) => {
     overview.schedules = { total: 1, enabled: 1, next: [], skipped_today: {}, failing: alert ? [{
       schedule_id: "schedule", name: "Check", project_id: "project", project_name: "Example", timezone: "UTC",
