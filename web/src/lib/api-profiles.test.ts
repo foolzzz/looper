@@ -6,14 +6,14 @@ import { resetSessionGuard } from "@/lib/session";
 
 afterEach(() => { resetSessionGuard(); vi.unstubAllGlobals(); });
 const id = "profile /?&中文";
-const fields = { name: "Profile", runtime_id: "rt-codex", model_id: "model-one" };
+const fields = { name: "Profile", runtime_id: "rt-grok", model_id: "model-one", web_search: false };
 
 it.each([
   [() => createAgentProfile(fields), "create", fields],
-  [() => updateAgentProfile(id, { effort: null }), "update", { profile_id: id, fields: { effort: null } }],
+  [() => updateAgentProfile(id, { effort: null, web_search: true }), "update", { profile_id: id, fields: { effort: null, web_search: true } }],
   [() => deleteAgentProfile(id), "delete", { profile_id: id }],
 ] as const)("preserves results and refreshes profile selectors for %s", async (call, action, body) => {
-  const result = action === "delete" ? { deleted: id } : { profile: { profile_id: id }, warnings: ["Missing login"] };
+  const result = action === "delete" ? { deleted: id } : { profile: { profile_id: id, web_search: false }, warnings: ["Missing login"] };
   const fetcher = vi.fn(async () => Response.json({ status: "ok", result }));
   vi.stubGlobal("fetch", fetcher);
   const changed = vi.fn();

@@ -27,7 +27,7 @@ _PROVIDER_JSON = (
 )
 PROFILE_JSON = (
     "json_build_object('id', a.id, 'name', a.name, 'model_id', a.model_id, 'effort', a.effort, "
-    "'builtin', a.builtin, 'agent_teams', a.agent_teams, 'custom_prompt', a.custom_prompt, "
+    "'builtin', a.builtin, 'agent_teams', a.agent_teams, 'web_search', a.web_search, 'custom_prompt', a.custom_prompt, "
     "'fallback_profile_id', a.fallback_profile_id, "
     "'runtime_id', r.id, 'runtime_name', r.name, 'runtime_type', r.type, 'runtime_executable', r.executable, "
     "'runtime_launcher', r.launcher, 'runtime_version', r.version, "
@@ -344,17 +344,20 @@ async def insert_profile(fields: Mapping[str, Any], *, pool: asyncpg.Pool | asyn
     async with _connection(pool) as conn, conn.transaction():
         await lock_model(conn, fields["model_id"])
         await conn.execute(
-            "INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, agent_teams, custom_prompt, fallback_profile_id) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            "INSERT INTO agent_profiles (id, name, runtime_id, model_id, effort, agent_teams, custom_prompt, "
+            "fallback_profile_id, web_search) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             profile_id, fields["name"], fields["runtime_id"], fields["model_id"], fields["effort"],
-            fields["agent_teams"], fields.get("custom_prompt", ""), fields.get("fallback_profile_id"))
+            fields["agent_teams"], fields.get("custom_prompt", ""), fields.get("fallback_profile_id"),
+            fields.get("web_search", True))
     return profile_id
 
 
 async def update_profile(profile_id: str, fields: Mapping[str, Any], *,
                          pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     pool = pool or get_pool()
-    columns = [c for c in ("name", "runtime_id", "model_id", "effort", "agent_teams", "custom_prompt", "fallback_profile_id")
+    columns = [c for c in ("name", "runtime_id", "model_id", "effort", "agent_teams", "custom_prompt",
+                          "fallback_profile_id", "web_search")
                if c in fields]
     sets = [f"{c} = ${i}" for i, c in enumerate(columns, start=2)]
     await pool.execute(f"UPDATE agent_profiles SET {', '.join([*sets, 'updated_at = now()'])} WHERE id = $1",

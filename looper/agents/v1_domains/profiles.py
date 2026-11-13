@@ -7,13 +7,13 @@ from .global_settings import ROLE
 from .registry import AGENT_PROFILE, PROFILE_MODEL, PROFILE_PROVIDER, RUNTIME_TYPE
 
 _FIELDS = {"name": _STR, "runtime_id": _STR, "model_id": _STR, "effort": _NULL_STR,
-           "agent_teams": _BOOL, "custom_prompt": _STR, "fallback_profile_id": _NULL_STR}
+           "agent_teams": _BOOL, "web_search": _BOOL, "custom_prompt": _STR, "fallback_profile_id": _NULL_STR}
 PROFILE_PATCH = {**_object(_FIELDS, [], closed=True), "minProperties": 1,
                  "anyOf": [{"required": [name]} for name in _FIELDS]}
 PROFILE_RESULT = _object({"profile": AGENT_PROFILE, "warnings": _array(_STR)}, closed=True)
 COMPACT_PROFILE = _object({
     "profile_id": _STR, "name": _STR, "runtime": _STR, "provider": PROFILE_PROVIDER,
-    "model_id": _STR, "model": PROFILE_MODEL, "effort": _NULL_STR, "agent_teams": _BOOL,
+    "model_id": _STR, "model": PROFILE_MODEL, "effort": _NULL_STR, "agent_teams": _BOOL, "web_search": _BOOL,
     "model_path": AGENT_PROFILE["properties"]["model_path"],
     "custom_prompt": _STR, "roles": _array(ROLE), "builtin": _BOOL, "used_by": _NULL_STR,
     "fallback_profile_id": _NULL_STR, "fallback_profile_name": _NULL_STR,

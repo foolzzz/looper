@@ -14,7 +14,7 @@ import { fetchPromptPreview, REGISTRY_CHANGED_EVENT, type AgentProfile, type Reg
 const REFUSAL = "the Stand-in runtime cannot replace its default system prompt";
 const PROFILE: AgentProfile = {
   model_path: "direct", profile_id: "p", name: "Profile", model_id: "model-messages",
-  model: { model_id: "model-messages", name: "model", protocol: "anthropic-messages", provider_id: "provider" }, effort: null, agent_teams: true,
+  model: { model_id: "model-messages", name: "model", protocol: "anthropic-messages", provider_id: "provider" }, effort: null, agent_teams: true, web_search: true,
   custom_prompt: "", runtime_id: "rt-claude-code", runtime_type: "claude-code",
   runtime_name: "Claude Code", builtin: false,
   provider: { provider_id: "provider", name: "Provider", vendor_type: "custom", auth: "api_key", enabled: true },
@@ -110,6 +110,46 @@ describe("Agent Profiles", () => {
   };
 
   const CODEX: AgentProfile = { ...PROFILE, model_id: "model-responses", model: { ...PROFILE.model, model_id: "model-responses", protocol: "openai-responses" }, runtime_id: "rt-codex", runtime_type: "codex", agent_teams: false };
+
+  it.each([true, false])("shows and saves the Grok web search setting %s", async (webSearch) => {
+    registry.runtime_types.push({ ...registry.runtime_types[0], type: "grok", runtime_id: "rt-grok", label: "Grok" });
+    registry.runtimes.push({ ...registry.runtimes[0], type: "grok", runtime_id: "rt-grok", name: "Grok" });
+    await show({ ...PROFILE, runtime_id: "rt-grok", runtime_type: "grok", agent_teams: false, web_search: webSearch });
+    const switchButton = container.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Web search"]')!;
+    expect(switchButton.getAttribute("aria-checked")).toBe(String(webSearch));
+    expect(container.textContent).toContain("Turn off to disable web search and web fetch tools.");
+    await submit();
+    expect(requests[0].body.web_search).toBe(webSearch);
+    await act(async () => switchButton.click());
+    await submit();
+    expect(requests[1].body.web_search).toBe(!webSearch);
+    await choose("Runtime", "rt-claude-code");
+    expect(container.querySelector('[role="switch"][aria-label="Web search"]')).toBeNull();
+    await submit();
+    expect(requests[2].body.web_search).toBe(true);
+    await choose("Runtime", "rt-grok");
+    expect(container.querySelector('[role="switch"][aria-label="Web search"]')!.getAttribute("aria-checked"))
+      .toBe(String(webSearch));
+  });
+
+  it.each(["claude-code", "codex", "stand-in"])("hides web search on %s", async (runtimeType) => {
+    await show(runtimeType === "codex" ? CODEX : { ...PROFILE, runtime_id: `rt-${runtimeType}`, runtime_type: runtimeType });
+    expect(container.querySelector('[role="switch"][aria-label="Web search"]')).toBeNull();
+  });
+
+  it("enables web search by default for a new Grok profile", async () => {
+    registry.runtime_types.push({ ...registry.runtime_types[0], type: "grok", runtime_id: "rt-grok", label: "Grok" });
+    registry.runtimes.push({ ...registry.runtimes[0], type: "grok", runtime_id: "rt-grok", name: "Grok" });
+    await show(null);
+    await input("Name *", "Grok profile");
+    await input("Model *", "model");
+    await choose("Protocol *", "anthropic-messages");
+    await choose("Provider *", "provider");
+    await choose("Runtime", "rt-grok");
+    expect(container.querySelector('[role="switch"][aria-label="Web search"]')!.getAttribute("aria-checked")).toBe("true");
+    await submit();
+    expect(requests[0].body.web_search).toBe(true);
+  });
 
   it("selects Coco's login models and shows a server catalog refusal at the model field", async () => {
     registry.runtime_types.push({ ...registry.runtime_types[1], type: "coco", label: "Coco (TRAE CLI)",
@@ -617,7 +657,7 @@ describe("Agent Profiles", () => {
     await choose("Effort", "high");
     await submit();
     expect(requests[0].body).toEqual({ name: "New profile", runtime_id: "rt-claude-code", model_id: "model-messages",
-      effort: "high", agent_teams: true, custom_prompt: "", fallback_profile_id: null });
+      effort: "high", agent_teams: true, web_search: true, custom_prompt: "", fallback_profile_id: null });
   });
 
   it("switches an incompatible runtime with the reason and applies its effort and teams defaults", async () => {

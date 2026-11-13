@@ -3,6 +3,7 @@ import { AlertTriangle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   EDIT_BOX,
   EditDelete,
@@ -161,6 +162,7 @@ export function AgentProfileForm({
       model_id: profile?.model_id ?? "",
       effort: profile?.effort ?? "",
       agent_teams: profile?.agent_teams ?? defaultTeams(registry, runtime),
+      web_search: profile?.web_search ?? true,
       custom_prompt: profile?.custom_prompt ?? "",
       fallback_profile_id: profile?.fallback_profile_id ?? "",
     };
@@ -201,9 +203,11 @@ export function AgentProfileForm({
     // Another runtime type takes its default (on for Claude Code); back on the profile's own type, its saved setting.
     const agentTeams = nextType === type?.type ? draft.agent_teams
       : profile && profile.runtime_type === nextType ? profile.agent_teams : defaultTeams(registry, next);
+    const webSearch = nextType === type?.type ? draft.web_search
+      : profile && profile.runtime_type === nextType ? profile.web_search : true;
     set({ runtime_id: next.runtime_id,
           effort: nextEfforts.includes(draft.effort) ? draft.effort : "",
-          agent_teams: agentTeams });
+          agent_teams: agentTeams, web_search: webSearch });
   };
   const selectModel = (nextModel: Model | undefined) => {
     setModelError("");
@@ -242,7 +246,8 @@ export function AgentProfileForm({
     const body = { name: draft.name.trim(), runtime_id: draft.runtime_id, model_id: model.model_id,
                    custom_prompt: draft.custom_prompt, effort: draft.effort || null,
                    fallback_profile_id: draft.fallback_profile_id || null,
-                   agent_teams: teams && draft.agent_teams };
+                   agent_teams: teams && draft.agent_teams,
+                   web_search: type?.type === "grok" ? draft.web_search : true };
     let answer: { profile: AgentProfile; warnings: string[] } | null = null;
     const done = await action.run(async () => {
       try {
@@ -355,6 +360,15 @@ export function AgentProfileForm({
           The system prompt mode (append to the runtime&apos;s default or replace it) is set per role in Settings → Roles.
           {type?.replace_system_prompt_refusal && <> {type.replace_system_prompt_refusal}.</>}
         </p>
+        {type?.type === "grok" && (
+          <div className="space-y-1 sm:col-span-2">
+            <div className="flex items-center gap-2 text-xs">
+              <Switch checked={draft.web_search} onChange={(web_search) => set({ web_search })} label="Web search" />
+              <span>Web search</span>
+            </div>
+            <p className="text-[11px] text-muted-foreground">Turn off to disable web search and web fetch tools.</p>
+          </div>
+        )}
         {teams && (
           <div className="space-y-1 sm:col-span-2">
             <label className="flex items-center gap-1.5 text-xs">

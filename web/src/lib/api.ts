@@ -3292,6 +3292,7 @@ export interface AgentProfile {
   model: Pick<Model, "model_id" | "name" | "protocol" | "provider_id">;
   effort: string | null;
   agent_teams: boolean;
+  web_search: boolean;
   custom_prompt: string;
   runtime_id: string;
   runtime_name: string;
@@ -3334,6 +3335,7 @@ export interface ProfileFields {
   model_id?: string;
   effort?: string | null;
   agent_teams?: boolean;
+  web_search?: boolean;
   custom_prompt?: string;
 }
 

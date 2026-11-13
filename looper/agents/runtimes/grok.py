@@ -196,6 +196,7 @@ class GrokRuntime(RuntimeAdapter):
         return [
             "--prompt-file", PROMPT_FILE, "--output-format", "streaming-messages-json",
             "--always-approve", "--trust", "--no-auto-update",
+            *(["--disable-web-search"] if not launch.profile.web_search else []),
             *(["--tools", READ_ONLY_TOOLS] if launch.read_only else []),
             *binding.args,
         ]

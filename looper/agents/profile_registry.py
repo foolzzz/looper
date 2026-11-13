@@ -5,7 +5,7 @@ and concurrency limit. ``Endpoint`` holds one account/protocol URL; ``ModelSpec`
 holds an immutable provider/name/protocol identity and its model settings.
 ``ResolvedModel`` joins that model to its exact endpoint and account and checks
 runtime compatibility. ``AgentProfile`` references a model id and runtime,
-with effort, agent teams and custom prompt as its only runtime options.
+with effort, agent teams, web search and custom prompt as runtime options.
 
 Registry reads and account/profile writes use the normalized account,
 endpoint and model tables. ``ResolvedAgentProfile`` snapshots that explicit
@@ -399,6 +399,7 @@ class AgentProfile:
     agent_teams: bool = False
     custom_prompt: str = ""
     fallback_profile_id: str | None = None
+    web_search: bool = field(default=True, kw_only=True)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "name", entry_name(self.name, "Agent Profile"))
@@ -410,6 +411,7 @@ class AgentProfile:
             raise RegistryError("fallback_profile_id must be a registered profile id or null")
         _agent_teams(self.agent_teams)
         check_agent_teams(self.runtime, self.agent_teams)
+        check_web_search(self.runtime, self.web_search)
         object.__setattr__(self, "custom_prompt", _custom_prompt(self.custom_prompt))
 
     @classmethod
@@ -424,7 +426,8 @@ class AgentProfile:
                               frozenset(Capability(c) for c in row.get("runtime_capabilities") or () if c in known),
                               Launcher(row.get("runtime_launcher") or "native"), row.get("runtime_version"))
         return cls(row["id"], row["name"], runtime, row.get("model_id"), row.get("effort"),
-                   row.get("agent_teams", False), row.get("custom_prompt", ""), row.get("fallback_profile_id"))
+                   row.get("agent_teams", False), row.get("custom_prompt", ""), row.get("fallback_profile_id"),
+                   web_search=row.get("web_search", True))
 
     def record(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "model_id": self.model_id, "custom_prompt": self.custom_prompt,
@@ -450,7 +453,8 @@ class ResolvedAgentProfile(AgentProfile):
         model = ModelSpec.from_entry({name: row["model"][name] for name in ModelSpec.__dataclass_fields__})
         resolved = ResolvedModel(model, provider_spec(row["provider"]), Endpoint.from_entry(row["endpoint"]))
         return cls(profile.id, profile.name, profile.runtime, profile.model_id, profile.effort,
-                   profile.agent_teams, profile.custom_prompt, profile.fallback_profile_id, resolved_model=resolved)
+                   profile.agent_teams, profile.custom_prompt, profile.fallback_profile_id,
+                   web_search=profile.web_search, resolved_model=resolved)
 
     @property
     def model(self) -> str:
@@ -754,6 +758,15 @@ def check_agent_teams(runtime: RuntimeSpec, agent_teams: bool) -> None:
     if agent_teams and runtime.type != runtimes.CLAUDE_CODE.type:
         raise RegistryError(f"agent teams are a Claude Code feature: runtime {runtime.name!r} is of type "
                             f"{runtime.type!r}; turn agent_teams off or choose a Claude Code runtime")
+
+
+def check_web_search(runtime: RuntimeSpec, web_search: bool) -> None:
+    """Only Grok can disable its web search and web fetch tools."""
+    if not isinstance(web_search, bool):
+        raise RegistryError("web_search must be true or false", field="web_search")
+    if not web_search and runtime.type != "grok":
+        raise RegistryError(f"web_search: false is supported only by Grok (grok); runtime {runtime.type!r} "
+                            "cannot disable web search and web fetch", field="web_search")
 
 
 def _agent_teams(raw: Any) -> bool:
@@ -1134,7 +1147,7 @@ def profile_view(row: Mapping[str, Any], used_by: Mapping[str, Any] = NOT_USED,
         "provider": {"provider_id": provider["id"], "name": provider["name"],
                      "vendor_type": provider["vendor_type"], "auth": provider["auth"],
                      "enabled": provider.get("enabled", True)},
-        "agent_teams": spec.agent_teams, "custom_prompt": spec.custom_prompt,
+        "agent_teams": spec.agent_teams, "web_search": spec.web_search, "custom_prompt": spec.custom_prompt,
         "fallback_profile_id": spec.fallback_profile_id,
         "roles": servable_roles(spec.runtime.capabilities, spec.runtime.type), "used_by": dict(used_by),
         "cost": cost_basis(cost_profile), "warnings": profile_warnings(cost_profile),
@@ -1756,7 +1769,7 @@ async def delete_model(model_id: str) -> dict[str, Any]:
 
 # --- Agent Profiles ---
 
-_PROFILE_FIELDS = ("name", "runtime_id", "model_id", "effort", "agent_teams", "custom_prompt", "fallback_profile_id")
+_PROFILE_FIELDS = ("name", "runtime_id", "model_id", "effort", "agent_teams", "web_search", "custom_prompt", "fallback_profile_id")
 
 
 async def _existing_profile(profile_id: str, conn: Any = None) -> dict[str, Any]:
@@ -1816,6 +1829,7 @@ async def create_profile(data: Any, *, manager_id: str | None = None) -> dict[st
     fields = {"name": entry_name(data.get("name"), "profile"), "runtime_id": data.get("runtime_id"),
               "model_id": data.get("model_id"),
               "effort": _effort(data.get("effort")),
+              "web_search": data.get("web_search", True),
               "custom_prompt": _custom_prompt(data.get("custom_prompt", "")),
               "fallback_profile_id": data.get("fallback_profile_id")}
     try:
@@ -1827,7 +1841,8 @@ async def create_profile(data: Any, *, manager_id: str | None = None) -> dict[st
                                      else default_agent_teams(runtime))
             await model.check_available_runtime(runtime, fields["effort"])
             checked = AgentProfile("draft", fields["name"], runtime, model.model.id, fields["effort"],
-                                   fields["agent_teams"], fields["custom_prompt"], fields["fallback_profile_id"])
+                                   fields["agent_teams"], fields["custom_prompt"], fields["fallback_profile_id"],
+                                   web_search=fields["web_search"])
             await _check_fallbacks(conn, checked)
             profile_id = await db.insert_profile(fields, pool=conn)
     except asyncpg.UniqueViolationError:
@@ -1874,6 +1889,8 @@ async def update_profile(profile_id: str, data: Any, *, manager_id: str | None =
         fields["effort"] = _effort(data["effort"])
     if "agent_teams" in data:
         fields["agent_teams"] = _agent_teams(data["agent_teams"])
+    if "web_search" in data:
+        fields["web_search"] = data["web_search"]
     if "custom_prompt" in data:
         fields["custom_prompt"] = _custom_prompt(data["custom_prompt"])
     for name in ("runtime_id", "model_id", "fallback_profile_id"):
@@ -1897,7 +1914,8 @@ async def update_profile(profile_id: str, data: Any, *, manager_id: str | None =
                                    model.model.id, fields.get("effort", current["effort"]),
                                    fields.get("agent_teams", current["agent_teams"]),
                                    fields.get("custom_prompt", current["custom_prompt"]),
-                                   fields.get("fallback_profile_id", current.get("fallback_profile_id")))
+                                   fields.get("fallback_profile_id", current.get("fallback_profile_id")),
+                                   web_search=fields.get("web_search", current.get("web_search", True)))
             await _check_fallbacks(conn, checked)
             check_roles(checked, await _selected_roles(profile_id, conn))
             await db.update_profile(profile_id, fields, pool=conn)
