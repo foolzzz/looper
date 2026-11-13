@@ -42,15 +42,16 @@ def test_the_seeded_channels_have_empty_allowlists_and_say_why_they_do_not_start
 
 
 @pytest.mark.usefixtures("lark_cli_stand_in")
-def test_an_allowlist_round_trips_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("sender_id", [OPEN_ID, "cli_syntheticbot12"])
+def test_an_allowlist_round_trips_validated(monkeypatch: pytest.MonkeyPatch, sender_id: str) -> None:
     async def _test(pool: Any) -> None:
         status, lark = await _call("PUT", "channel-lark", {
             "enabled": True,
-            "config": {"profile": "", "allowed_open_ids": [f" {OPEN_ID} ", OPEN_ID, ""]},
+            "config": {"profile": "", "allowed_open_ids": [f" {sender_id} ", sender_id, ""]},
         })
         assert status == 200
         assert lark["enabled"] is True
-        assert lark["config"]["allowed_open_ids"] == [OPEN_ID]
+        assert lark["config"]["allowed_open_ids"] == [sender_id]
         assert lark["start_problem"] is None
         # A Telegram list written the way it was stored before comes back as a list.
         status, telegram = await _call("PUT", "channel-telegram", {
@@ -59,7 +60,7 @@ def test_an_allowlist_round_trips_validated(monkeypatch: pytest.MonkeyPatch) -> 
         assert status == 200 and telegram["config"]["allowed_user_ids"] == ["7", "8"]
 
         status, again = await _call("GET", "channel-lark")
-        assert status == 200 and again["config"]["allowed_open_ids"] == [OPEN_ID] and again["start_problem"] is None
+        assert status == 200 and again["config"]["allowed_open_ids"] == [sender_id] and again["start_problem"] is None
         stored = await pool.fetchval("SELECT config FROM channel_configs WHERE channel_id = 'channel-telegram'")
         assert json.loads(stored)["allowed_user_ids"] == ["7", "8"]
 
@@ -78,7 +79,7 @@ def test_a_bad_id_is_refused_and_nothing_changes(monkeypatch: pytest.MonkeyPatch
                                    {"config": {"allowed_open_ids": ["on_7dab8a3d3cdcc9da365777c7ad535d62"]}})
         assert status == 400 and body["error"] == (
             "invalid sender allowlist: use the sender's open_id for this app, which starts with ou_ "
-            "(a union_id starts with on_, and a user_id has no prefix)"
+            "or a bot app id starting with cli_ when its open_id is unavailable"
         )
         _, telegram = await _call("GET", "channel-telegram")
         assert telegram["enabled"] is False and telegram["config"] == {"allowed_user_ids": ["7"]}

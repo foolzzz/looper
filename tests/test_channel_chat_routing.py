@@ -176,7 +176,7 @@ def lark_observations(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
 @pytest.mark.parametrize("event", [
     _lark_event(OTHER_ID), _lark_event(OPEN_ID, chat_type="group"),
-    _lark_event(OPEN_ID, sender_type="bot"),
+    _lark_event(OTHER_ID, sender_type="bot"),
     _lark_event(OPEN_ID, " "),
 ], ids=["allowlist", "group-without-mention", "bot", "empty"])
 def test_lark_binding_cannot_bypass_native_eligibility(
@@ -198,8 +198,9 @@ def test_lark_binding_cannot_bypass_native_eligibility(
 
 
 @pytest.mark.parametrize("group", [False, True])
+@pytest.mark.parametrize("sender_type", ["user", "bot", "app"])
 def test_lark_bound_only_is_silent_before_names_reactions_or_control(
-    tmp_path: Path, lark_observations: list[Any], group: bool,
+    tmp_path: Path, lark_observations: list[Any], group: bool, sender_type: str,
 ) -> None:
     async def main() -> None:
         bus, transport = MessageBus(runtime_root=tmp_path), StubTransport()
@@ -208,7 +209,7 @@ def test_lark_bound_only_is_silent_before_names_reactions_or_control(
         for text in ["hello", "/stop"]:
             await adapter._handle_lark_event(_lark_event(
                 OPEN_ID, f"@bot {text}" if group else text, chat_type="group" if group else "p2p",
-                mentions=[{"id": BOT_ID, "name": "bot"}] if group else []))
+                mentions=[{"id": BOT_ID, "name": "bot"}] if group else [], sender_type=sender_type))
         assert len(lark_observations) == 2 and all(item[2] == {"suppressed": True} for item in lark_observations)
         assert transport.calls == [] and adapter._correlation_chat == {} and adapter._group_message == {}
         assert bus.journal.undelivered() == [] and not adapter._reactions._pending
@@ -217,8 +218,9 @@ def test_lark_bound_only_is_silent_before_names_reactions_or_control(
 
 
 @pytest.mark.parametrize("availability", [False, "error"])
+@pytest.mark.parametrize("sender_type", ["user", "bot", "app"])
 def test_lark_explicit_unavailable_target_never_falls_back(
-    tmp_path: Path, lark_observations: list[Any], availability: Any,
+    tmp_path: Path, lark_observations: list[Any], availability: Any, sender_type: str,
 ) -> None:
     async def main() -> None:
         def running(manager: str) -> bool:
@@ -228,15 +230,16 @@ def test_lark_explicit_unavailable_target_never_falls_back(
         bus, transport = MessageBus(runtime_root=tmp_path), StubTransport()
         adapter = _lark(tmp_path, bus, transport, manager_running=running,
                         resolve_chat=lambda *_: RouteDecision(RouteAction.ADMIT, "manager-bound", True))
-        await adapter._handle_lark_event(_lark_event(OPEN_ID))
+        await adapter._handle_lark_event(_lark_event(OPEN_ID, sender_type=sender_type))
         assert transport.calls == [("send", {"chat_id": "oc_1", "text": TURNED_OFF_REPLY})]
         assert bus.journal.undelivered() == [] and adapter._correlation_chat == {} and not adapter._reactions._pending
         await adapter.stop()
     asyncio.run(main())
 
 
+@pytest.mark.parametrize("sender_type", ["user", "bot", "app"])
 def test_lark_pins_route_before_sender_lookup_and_keeps_old_reply(
-    tmp_path: Path, lark_observations: list[Any],
+    tmp_path: Path, lark_observations: list[Any], sender_type: str,
 ) -> None:
     async def main() -> None:
         bus, transport = MessageBus(runtime_root=tmp_path), StubTransport()
@@ -250,7 +253,8 @@ def test_lark_pins_route_before_sender_lookup_and_keeps_old_reply(
         adapter = _lark(tmp_path, bus, transport, manager_id="manager-owner",
                         manager_running=lambda manager: manager != "manager-owner",
                         resolve_chat=lambda *_: RouteDecision(RouteAction.ADMIT, selected, True))
-        event = _lark_event(OPEN_ID, "@bot hi", chat_type="group", mentions=[{"id": BOT_ID, "name": "bot"}])
+        event = _lark_event(OPEN_ID, "@bot hi", chat_type="group", mentions=[{"id": BOT_ID, "name": "bot"}],
+                            sender_type=sender_type)
         first = asyncio.create_task(adapter._handle_lark_event(event))
         await asyncio.wait_for(looked_up.wait(), 2)
         selected = "manager-beta"

@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
+import shutil
+from zoneinfo import TZPATH
 
 import pytest
 
@@ -217,10 +219,12 @@ def test_manager_binding_controls_have_keyboard_focus_without_horizontal_overflo
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-def test_real_serve_managers_readback_matches_typed_binding_writes(tmp_path, dashboard_url):
+def test_real_serve_managers_readback_matches_typed_binding_writes(tmp_path, dashboard_url, monkeypatch):
     from playwright.sync_api import expect, sync_playwright
 
+    from evals.prompt_regression import runner
     from evals.prompt_regression.runner import running_server
+    from looper import components
     from tests.db_support import fresh_database_without_recording
     from tests.fake_claude import fake_claude
 
@@ -250,13 +254,26 @@ def test_real_serve_managers_readback_matches_typed_binding_writes(tmp_path, das
     for directory in (bin_dir, runtime, home, notes):
         directory.mkdir()
     fake_claude(bin_dir / "claude", "import sys\nsys.exit(0)\n")
+    # This test needs only UTC. Keep scheduler startup from scanning the host's
+    # entire timezone database, which can exceed the server readiness deadline.
+    zones = tmp_path / "zoneinfo"
+    zones.mkdir()
+    utc = next(Path(root) / "UTC" for root in TZPATH if (Path(root) / "UTC").is_file())
+    shutil.copyfile(utc, zones / "UTC")
+    # Hash this installation before readiness is timed, then give the child
+    # the same snapshot without rescanning every source file during startup.
+    manifest = components.loaded_manifest().to_dict()
+    monkeypatch.setattr(runner, "_SERVE",
+        "from looper import components\n"
+        f"components.loaded_manifest = lambda: components.Manifest.from_dict({manifest!r})\n" + runner._SERVE)
     # Binding readback needs neither the detached recorder nor installed agent
     # CLIs. Keep their startup/probes out of this isolated server's readiness.
     with fresh_database_without_recording(str(DSN)) as (database_url, _):
         asyncio.run(seed(database_url))
         with running_server(database_url=database_url, runtime_root=runtime, bin_dir=bin_dir, home=home,
                             notes_root=notes, log_path=tmp_path / "serve.log", startup_timeout=60,
-                            env={"PATH": os.pathsep.join((str(bin_dir), os.defpath))}) as api:
+                            env={"PATH": os.pathsep.join((str(bin_dir), os.defpath)),
+                                 "TZ": "UTC", "PYTHONTZPATH": str(zones)}) as api:
             body = {"channel_id": "channel-telegram-201", "chat_id": "42", "manager_id": "manager"}
             assert api.post("/api/v1/manager_chat_bindings/put", body)["result"]["binding"]["manager_id"] == "manager"
             with sync_playwright() as driver:

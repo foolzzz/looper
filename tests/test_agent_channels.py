@@ -718,6 +718,7 @@ class TestLarkAllowlist:
 
         return asyncio.run(_main())
 
+    @pytest.mark.parametrize("sender_type", ["user", "bot", "app"])
     @pytest.mark.parametrize(("text", "mentions", "seen"), [
         ("@HelperBot build it", [BOT_MENTION], "build it"),
         ("@_user_1 build it", [BOT_MENTION], "build it"),  # the placeholder, where lark-cli left it
@@ -726,8 +727,9 @@ class TestLarkAllowlist:
         ("mail me at ada@example.test", [], "mail me at ada@example.test"),
     ])
     def test_a_listed_sender_reaches_the_manager(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str,
-                                                 mentions: list[dict[str, str]], seen: str) -> None:
-        got = self._run(tmp_path, monkeypatch, _lark_event(OPEN_ID, text, mentions=mentions), OPEN_ID)
+                                                 mentions: list[dict[str, str]], seen: str, sender_type: str) -> None:
+        got = self._run(tmp_path, monkeypatch,
+                        _lark_event(OPEN_ID, text, mentions=mentions, sender_type=sender_type), OPEN_ID)
         (message,) = got.messages
         assert message.payload["text"] == seen
         assert message.payload["channel_context"]["sender_id"] == OPEN_ID
@@ -749,12 +751,15 @@ class TestLarkAllowlist:
         assert self._run(tmp_path, monkeypatch, _lark_event(None), OPEN_ID).messages == []
         assert self._run(tmp_path, monkeypatch, _lark_event(OTHER_OPEN_ID), "5d9bdxxx").messages == []
 
-    @pytest.mark.parametrize("fields", [{"sender_type": "bot"},
-                                        {"type": "im.message.reaction.created_v1"}, {"content": "  "}])
+    @pytest.mark.parametrize(("sender", "fields"), [
+        (OTHER_OPEN_ID, {"sender_type": "bot"}),
+        (OPEN_ID, {"type": "im.message.reaction.created_v1"}), (OPEN_ID, {"content": "  "}),
+    ], ids=["fields0", "fields1", "fields2"])
     def test_bots_other_events_and_empty_messages_do_not_reach_the_manager(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fields: dict[str, Any],
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sender: str, fields: dict[str, Any],
     ) -> None:
-        assert self._run(tmp_path, monkeypatch, _lark_event(OPEN_ID, **fields), OPEN_ID).messages == []
+        got = self._run(tmp_path, monkeypatch, _lark_event(sender, **fields), OPEN_ID)
+        assert got.messages == [] and got.sent == [] and got.conversations == {} and got.reacted == []
 
     @pytest.mark.parametrize("sender", [OPEN_ID, OTHER_OPEN_ID])
     @pytest.mark.parametrize(("text", "mentions", "bot_open_id"), [

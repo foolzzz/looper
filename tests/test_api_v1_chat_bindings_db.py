@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import asyncpg
 import pytest
 
+from looper import components
 from looper.agents import api_v1
 from looper.agents.bus import MessageBus
 from looper.agents.channels import chat_routing as routing
@@ -43,6 +44,10 @@ async def _seed(pool):
 
 
 def _run(test, monkeypatch):
+    # Installation fingerprints and API discovery are setup, outside the
+    # database and HTTP deadlines that cover these routing contracts.
+    components.loaded_manifest()
+    api_v1.find("POST", "/api/v1/manager_chat_bindings/put")
     run_db(test, monkeypatch, setup=_seed, timeout=30)
 
 
