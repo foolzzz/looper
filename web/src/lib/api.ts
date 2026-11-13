@@ -2759,6 +2759,12 @@ export interface LlmRecord {
   task_role?: RunRole;
 }
 
+/** List rows omit full prompt/result bodies; runs.get supplies the full record. */
+export type LlmRecordSummary = Omit<LlmRecord, "input_text" | "output_text"> & {
+  input_chars: number;
+  output_chars: number;
+};
+
 /** The canonical Agent Profile supplied by the record read boundary. */
 export function runProfile(record: Pick<LlmRecord, "metadata">): RunProfile | null {
   return record.metadata?.profile ?? null;
@@ -2838,8 +2844,8 @@ export async function fetchLlmRecords(params: {
   role?: string;
   limit?: number;
   offset?: number;
-}): Promise<LlmRecord[]> {
-  const result = await callV1<{ records: LlmRecord[] }>("/api/v1/runs/list", params);
+}): Promise<LlmRecordSummary[]> {
+  const result = await callV1<{ records: LlmRecordSummary[] }>("/api/v1/runs/list", params);
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result.records;
 }

@@ -31,6 +31,10 @@ _RECORD_FIELDS = {
     "task_role": {"type": "object"}}
 LLM_RECORD = _object(_RECORD_FIELDS, [key for key in _RECORD_FIELDS if key not in ("cost_source", "task_role")],
                      closed=True)
+_SUMMARY_FIELDS = {key: value for key, value in _RECORD_FIELDS.items() if key not in ("input_text", "output_text")}
+_SUMMARY_FIELDS.update(input_chars=_INT, output_chars=_INT)
+LLM_RECORD_SUMMARY = _object(_SUMMARY_FIELDS,
+                            [key for key in _SUMMARY_FIELDS if key not in ("cost_source", "task_role")], closed=True)
 LLM_RECORD_EVENT = _object({"seq": _INT, "event": {"type": "object"}, "created_at": _STR}, closed=True)
 AGENT_TURN = _object({"id": _INT, "created_at": _STR, "status": _STATUS, "session_id": _NULL_STR,
                       "cost_usd": _NULL_NUMBER, "context_tokens": _NULL_INT, "compactions": _COMPACTIONS}, closed=True)
@@ -42,7 +46,8 @@ AGENT_USAGE = _object({
                                    "first_at": _STR, "last_at": _STR}, closed=True)),
     "by_day": _array(_object({"day": _STR, "cost_usd": {"type": "number"}, "runs": _INT}, closed=True)),
     "turns": _array(AGENT_TURN), "latest_context_tokens": _NULL_INT}, closed=True)
-SCHEMAS = {"TaskRunRow": TASK_RUN_ROW, "LlmRecord": LLM_RECORD, "LlmRecordEvent": LLM_RECORD_EVENT,
+SCHEMAS = {"TaskRunRow": TASK_RUN_ROW, "LlmRecord": LLM_RECORD, "LlmRecordSummary": LLM_RECORD_SUMMARY,
+           "LlmRecordEvent": LLM_RECORD_EVENT,
            "AgentTurn": AGENT_TURN, "AgentUsage": AGENT_USAGE}
 RESULTS = {}
 
@@ -58,7 +63,7 @@ _LIMIT = {"type": "integer", "minimum": 1, "maximum": 500}
 OPERATIONS = (
     _op("for_task", {"task_id": _STR}, _object({"runs": _array(TASK_RUN_ROW)})),
     _op("list", {"agent_id": _STR, "task_id": _STR, "role": _STR, "limit": _LIMIT,
-                 "offset": {"type": "integer", "minimum": 0}}, _object({"records": _array(LLM_RECORD)}), []),
+                 "offset": {"type": "integer", "minimum": 0}}, _object({"records": _array(LLM_RECORD_SUMMARY)}), []),
     _op("get", _ID, _object({"record": LLM_RECORD})),
     _op("events", {**_ID, "after": {"type": "integer", "minimum": 0}, "limit": {**_LIMIT, "maximum": 5000}},
         _object({"events": _array(LLM_RECORD_EVENT)}), ["record_id"]),

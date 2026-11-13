@@ -42,7 +42,7 @@ import {
   type ChatSession,
   type ChatTurn,
   type DbChatMessage,
-  type LlmRecord,
+  type LlmRecordSummary,
   type UserGate,
   type ManagerSessionView,
   sessionProfileLabel,
@@ -171,7 +171,7 @@ function AgentRunsView({
   pollMs?: number;
   reloadKey?: unknown;
 }) {
-  const [runs, setRuns] = useState<LlmRecord[] | null>(null);
+  const [runs, setRuns] = useState<LlmRecordSummary[] | null>(null);
   const [open, setOpen] = useState(!title);
 
   useEffect(() => {

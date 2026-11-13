@@ -5449,7 +5449,9 @@ The OpenAPI document is authoritative for fields, authentication and errors. Pro
 | `/api/v1/provider_accounts/{list,create,update,delete,clear_login_problem,fetch_models}` | POST | `provider_accounts.{list,create,update,delete,clear_login_problem,fetch_models}` |
 | `/api/v1/registry/view` | POST | `registry.view` |
 | `/api/v1/runtimes/probe` | POST | `runtimes.probe` |
-| `/api/v1/runs/{for_task,list,get,events,usage}` | POST | `runs.{for_task,list,get,events,usage}` |
+| `/api/v1/runs/{for_task,events,usage}` | POST | `runs.{for_task,events,usage}` |
+| `/api/v1/runs/list` | POST | `runs.list`: newest-first summaries, filtered by `agent_id`, `task_id` and/or `role`, with `offset` and `limit` (default 100, maximum 500). `input_summary` / `output_summary` contain the first 200 characters of each body (falling back to the stored summary for historical rows without a body); `input_chars` / `output_chars` count the full text's characters (0 for null). No `input_text` / `output_text`; every other field stays. |
+| `/api/v1/runs/get` | POST | `runs.get {record_id}`: the full row, including `input_text` / `output_text`; an unknown id returns `not_found`. Both list and get require operator authorization. The dashboard fetches details on expand, caches each opened run while mounted, shows loading and offers retry on failure; an expanded running run continues polling. |
 | `/api/v1/scheduler_settings/{get,update}` | POST | `scheduler_settings.{get,update}` |
 | `/api/v1/wait_settings/{get,update}` | POST | `wait_settings.{get,update}` |
 | `/api/v1/knowledge_vault/{get,update}` | POST | `knowledge_vault.{get,update}` |

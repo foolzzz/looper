@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { ContextUsagePanel } from "@/components/context-usage";
 import { LlmRequestExport } from "@/components/llm-request-export";
 import { cacheHit, formatHit, cacheHitTitle, CACHE_HIT_TITLE } from "@/lib/cache-hit";
@@ -40,6 +41,7 @@ import {
   type Compaction,
   type DbChatMessage,
   type LlmRecord,
+  type LlmRecordSummary,
   type LlmRecordEvent,
   type LlmRequest,
   type LlmRequestRow,
@@ -147,6 +149,7 @@ function Collapsible({
       <button
         type="button"
         onClick={() => setOpen(!open)}
+        aria-expanded={open}
         className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent/40"
       >
         {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
@@ -290,7 +293,7 @@ function RequestRow({ row, selected, onSelect }: { row: LlmRequestRow; selected:
 }
 
 /** Mounted only inside an open run; fetch every route and stop polling as soon as the run ends. */
-function ModelRequests({ record }: { record: LlmRecord }) {
+function ModelRequests({ record }: { record: RunRecord }) {
   const [rows, setRows] = useState<LlmRequestRow[]>([]);
   const [between, setBetween] = useState<LlmRequestRow[]>([]);
   const [open, setOpen] = useState(false);
@@ -360,7 +363,7 @@ function ModelRequests({ record }: { record: LlmRecord }) {
   </section>;
 }
 
-function LaunchCommand({ record }: { record: LlmRecord }) {
+function LaunchCommand({ record }: { record: RunRecord }) {
   const command = record.metadata?.command ?? [];
   const cwd = record.metadata?.cwd ?? "";
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -523,7 +526,7 @@ function PromptLayerSummary({ layers, metadata }: { layers: PromptLayers; metada
 }
 
 /** The system prompt Looper supplied to the runtime for this run. */
-function SystemPrompt({ record }: { record: LlmRecord }) {
+function SystemPrompt({ record }: { record: RunRecord }) {
   const metadata = record.metadata;
   const prompt = metadata?.presentation?.system_prompt;
   const text = prompt?.text;
@@ -579,7 +582,7 @@ function SystemPrompt({ record }: { record: LlmRecord }) {
 }
 
 /** The normalized evidence of plugins and skills this run loaded. */
-function LoadedLibrary({ record }: { record: LlmRecord }) {
+function LoadedLibrary({ record }: { record: RunRecord }) {
   const library = record.metadata?.presentation?.library;
   if (!library || (!library.items.length && !library.sha256 && !library.error && !library.project_error)) return null;
   const items = library.items;
@@ -935,7 +938,7 @@ function EventView({ item, startedAt, live }: { item: LlmRecordEvent; startedAt?
 }
 
 /** The run's own tokens (cache included), its context at the end, its compactions and its own cost. */
-function RunUsage({ record }: { record: LlmRecord }) {
+function RunUsage({ record }: { record: RunRecord }) {
   const hit = cacheHit(record.input_tokens, record.cache_read_tokens, record.cache_creation_tokens);
   const tokens: [string, number | null | undefined, string][] = [
     ["in", record.input_tokens, "Uncached input tokens"],
@@ -1002,7 +1005,9 @@ function RunUsage({ record }: { record: LlmRecord }) {
   );
 }
 
-export function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOpen: boolean }) {
+type RunRecord = LlmRecord | LlmRecordSummary;
+
+export function RunCard({ initial, defaultOpen }: { initial: RunRecord; defaultOpen: boolean }) {
   return initial.metadata?.session_reset ? (
     <SessionResetCard record={initial} />
   ) : (
@@ -1011,7 +1016,7 @@ export function RunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultO
 }
 
 /** A /new: the Manager dropped its session here, so its next turn started a new one; no Claude ran. */
-function SessionResetCard({ record }: { record: LlmRecord }) {
+function SessionResetCard({ record }: { record: RunRecord }) {
   const reset = record.metadata?.session_reset;
   const origin = [
     reset?.channel,
@@ -1033,12 +1038,37 @@ function SessionResetCard({ record }: { record: LlmRecord }) {
   );
 }
 
-function ClaudeRunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOpen: boolean }) {
+function ClaudeRunCard({ initial, defaultOpen }: { initial: RunRecord; defaultOpen: boolean }) {
   const [record, setRecord] = useState(initial);
   const [events, setEvents] = useState<LlmRecordEvent[]>([]);
   const [open, setOpen] = useState(defaultOpen);
   const [now, setNow] = useState(Date.now());
   const lastSeq = useRef(0);
+  const [details, setDetails] = useState<"idle" | "loading" | "loaded" | "error">(
+    "input_text" in initial && "output_text" in initial ? "loaded" : "idle",
+  );
+  const [detailError, setDetailError] = useState("");
+  const fetchingDetails = useRef(false);
+  const loadDetails = useCallback(async () => {
+    if (fetchingDetails.current) return;
+    fetchingDetails.current = true;
+    setDetails("loading");
+    setDetailError("");
+    try {
+      const latest = await fetchLlmRecord(initial.id);
+      setRecord(latest);
+      setDetails("loaded");
+    } catch (error) {
+      setDetailError(error instanceof Error ? error.message : "Could not load this run.");
+      setDetails("error");
+    } finally {
+      fetchingDetails.current = false;
+    }
+  }, [initial.id]);
+
+  useEffect(() => {
+    if (open && details === "idle") void loadDetails();
+  }, [open, details, loadDetails]);
 
   const load = useCallback(async () => {
     // Re-read the last row too: thinking progress is updated in place.
@@ -1059,7 +1089,7 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOp
 
   // Follow a running agent: new events, status and heartbeat.
   useEffect(() => {
-    if (record.status !== "running") return;
+    if (record.status !== "running" || !open || details !== "loaded") return;
     const timer = setInterval(async () => {
       setNow(Date.now());
       const latest = await fetchLlmRecord(initial.id).catch(() => null);
@@ -1067,7 +1097,7 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOp
       if (open) await load();
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [record.status, open, load, initial.id]);
+  }, [record.status, open, details, load, initial.id]);
 
   const started = new Date(record.created_at).getTime();
   const duration = record.duration_ms ?? now - started;
@@ -1083,6 +1113,7 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOp
       <button
         type="button"
         onClick={() => setOpen(!open)}
+        aria-expanded={open}
         className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-left text-xs hover:bg-accent/30"
       >
         {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
@@ -1106,10 +1137,20 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOp
             <Brain className="h-3.5 w-3.5" /> thinking · ~{thinkingTokens(lastShown.item.event)} tokens
           </span>
         )}
-        <span className="ml-auto min-w-0 truncate text-muted-foreground">{record.input_summary}</span>
+        <span className="w-full min-w-0 text-muted-foreground sm:ml-auto sm:w-auto sm:flex-1">
+          <span className="block truncate">{initial.input_summary}</span>
+          {initial.output_summary && <span className="block truncate">{initial.output_summary}</span>}
+        </span>
       </button>
       {open && (
         <div className="space-y-3 border-t border-border px-4 py-3">
+          {(details === "idle" || details === "loading") && <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> Loading run…
+          </p>}
+          {details === "error" && <div role="alert" className="flex flex-wrap items-center gap-2 text-xs text-destructive">
+            <span>{detailError}</span>
+            <Button variant="outline" size="sm" onClick={() => void loadDetails()}>Retry</Button>
+          </div>}
           {record.error && <p className="text-xs text-destructive">Error: {record.error}</p>}
           <LaunchCommand record={record} />
           <SystemPrompt record={record} />
@@ -1119,7 +1160,7 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOp
             TTADK sign-in check before this run started: {record.metadata.ttadk_check}
           </p>}
           <ModelRequests record={record} />
-          {record.input_text && (
+          {"input_text" in record && record.input_text && (
             <Collapsible icon={<User className="h-3 w-3" />} title={`Input · ${record.input_text.length} chars`} defaultOpen={record.input_text.length < 400}>
               <Pre text={record.input_text} />
             </Collapsible>
@@ -1142,7 +1183,7 @@ function ClaudeRunCard({ initial, defaultOpen }: { initial: LlmRecord; defaultOp
                   ? "Waiting for the first event…"
                   : "No transcript for this run: it was recorded before full transcripts existed."}
               </p>
-              {record.output_text && <Pre text={record.output_text} />}
+              {"output_text" in record && record.output_text && <Pre text={record.output_text} />}
             </div>
           )}
         </div>
@@ -1171,7 +1212,7 @@ function ActivityList({ events }: { events: ActivityEvent[] }) {
 export function AgentHistoryPage({ sub }: { sub: string }) {
   const { agentId, taskId: routeTaskId } = useMemo(() => parseHistoryRoute(sub), [sub]);
   const role = agentRole(agentId);
-  const [runs, setRuns] = useState<LlmRecord[] | null>(null);
+  const [runs, setRuns] = useState<LlmRecordSummary[] | null>(null);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
   const [chat, setChat] = useState<DbChatMessage[]>([]);
 
