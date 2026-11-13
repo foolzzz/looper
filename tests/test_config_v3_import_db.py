@@ -385,3 +385,50 @@ async def test_current_lark_channel_refuses_old_app_keys(monkeypatch, field):
             "display_name": "Lark", "enabled": False, "config": {field: "RETIRED_APP"}}]}
     with pytest.raises(transfer.ConfigFileError, match=field):
         await preview(monkeypatch, data)
+
+
+@pytest.mark.parametrize("web_search", [False, True, None], ids=["disabled", "enabled", "omitted"])
+@pytest.mark.skipif(not DSN, reason="requires disposable LOOPER_TEST_DATABASE_URL")
+async def test_grok_web_search_survives_config_import_export_and_update(web_search):
+    from looper.db import profile_registry as db
+
+    async with _installation() as (pool, _):
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO agent_runtimes (id, name, type, capabilities)
+                  VALUES ('rt-grok', 'grok', 'grok', '{run,resume,resident_session}');
+                INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type)
+                  VALUES ('prov-grok', 'Grok login', 'grok-login', 'oauth', 'grok');
+                INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url, use_runtime_default)
+                  VALUES ('prov-grok', 'openai-responses', '', false);
+                INSERT INTO llm_models (id, provider_id, name, protocol)
+                  VALUES ('model-grok', 'prov-grok', 'grok-4.7', 'openai-responses');
+            """)
+            entry = {"name": "Grok review", "runtime": "grok", "model": {
+                "provider": "Grok login", "name": "grok-4.7", "protocol": "openai-responses"}}
+            if web_search is not None:
+                entry["web_search"] = web_search
+            data = {"format": transfer.FORMAT, "profiles": [entry]}
+            plan = await transfer.run_import(conn, data, apply=True)
+            change = next(c for c in plan.changes if c.section == "profiles")
+            assert change.action == transfer.Action.ADDED, change.reason
+            profile_id = await conn.fetchval("SELECT id FROM agent_profiles WHERE name = 'Grok review'")
+            expected = web_search is not False
+            assert (await db.get_profile(profile_id, pool=conn))["web_search"] is expected
+            exported = json.loads("".join([chunk async for chunk in transfer.export_chunks(
+                conn, include_projects=False, include_secrets=False)]))
+            assert exported["profiles"][0]["web_search"] is expected
+            assert (await transfer.run_import(conn, exported, apply=True)).writes == 0
+            entry["web_search"] = not expected
+            updated = await transfer.run_import(conn, data, apply=True)
+            assert next(c for c in updated.changes if c.section == "profiles").action == transfer.Action.CHANGED
+            assert (await db.get_profile(profile_id, pool=conn))["web_search"] is not expected
+
+
+async def test_config_import_refuses_disabled_web_search_for_non_grok(monkeypatch):
+    data = v3()
+    data["profiles"][0]["web_search"] = False
+    plan = await preview(monkeypatch, data)
+    change = next(c for c in plan.changes if c.section == "profiles")
+    assert change.action == transfer.Action.SKIPPED
+    assert "Grok" in change.reason

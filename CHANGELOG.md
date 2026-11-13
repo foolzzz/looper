@@ -18,6 +18,44 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.174] - 2026-11-13
+
+### Changed
+
+- **Lark catch-up reads a bounded set of threads, so busy chats no longer fail every start.** ([#1321](https://github.com/foolzzz/looper/pull/1321), fixes #1315)
+  - Per chat, startup catch-up lists threads from roots of the last 24 hours (newest first, stopping at the first older root, up to 5 pages of 50) plus threads this channel handled or sent a message in during the last 7 days, at most 50 threads per chat, 4 listings at a time; active threads come first. Reaching the root cap logs an INFO count and completes the chat's window.
+  - A thread that fails to list is logged and counted as `thread_failures` instead of failing the chat; its pages already read are still admitted, and the chat's window is completed. The `lark_catchup` summary gains `threads_scanned`, `thread_failures` and `thread_roots_capped`.
+  - Threads with our activity are remembered in the channel's local inbox (`thread_activity`, at most 1,000 entries, 7 days). After a send or reply whose output lacks thread metadata, the CLI transport makes one extra bot-identity `GET` of the sent message to read it.
+  - Behavior change (maintainer decision): older threads that are neither recent roots nor ones this channel was active in are no longer recovered. Not model-visible; no prompt or tool schema changes.
+
+## [2.14.173] - 2026-11-13
+
+### Changed
+
+- **Model names may carry one bracketed parameter list.** ([#1312](https://github.com/foolzzz/looper/pull/1312))
+  - A model name may end in one bracket list of comma-separated `key=value` items (letters, digits, `.`, `_`, `-`), for example `grok-4.7[context=500k,reasoning_effort=high,fast=true]`; one shared rule (`looper/agents/model_names.py`) now checks names in settings, the catalog, the API, the Manager tools and the database. Looper passes the whole name unchanged as one command-line argument. Legacy suffixes such as `opus[1m]` stay valid.
+  - Narrower than before: brackets in the middle of a name, more than one bracket group, and leading or trailing whitespace are refused (the old rule allowed `[` and `]` anywhere and trimmed whitespace). Existing saved names are kept.
+  - On the next start the `llm_models.name` and `background_model` checks are replaced by the new grammar (migration `model_name_parameters`, added `NOT VALID` so old rows stay, validated when they all fit).
+  - Model-visible: the Manager's model tools declare the model `name` and `background_model` with the shared pattern and a 200-character limit; names with a parameter list are now accepted.
+
+## [2.14.172] - 2026-11-12
+
+### Added
+
+- **Grok runs can turn off web search per Agent Profile.** ([#1313](https://github.com/foolzzz/looper/pull/1313))
+  - Agent Profiles gain `web_search` (default `true`, unchanged behavior); `false` adds `--disable-web-search` to headless and ACP Grok commands and is refused for other runtimes. It is not a network sandbox: shell commands still reach the network.
+  - The database gains `agent_profiles.web_search BOOLEAN NOT NULL DEFAULT true` on the next start; config export and import, the v1 API and the dashboard carry it.
+  - Model-visible: the Manager's profile tool takes a boolean `web_search` on create and update and lists it; a Grok run with it off has no web search or web fetch tools.
+
+## [2.14.171] - 2026-11-12
+
+### Changed
+
+- **Manager: a slow stop of the old session does not fail the user's message.** ([#1314](https://github.com/foolzzz/looper/pull/1314))
+  - An idle stale or replaced resident session is stopped with kill and the turn waits only for its main process (the `claude_stop` budget is 30 s, was 10 s); the descendant sweep runs in the background, and a replacement does not resume while the old main process lives.
+  - A turn that fails with a timeout, `OSError` or `TurnFailed` before the model got the message is retried once after 5 s, reusing the admitted message; hosted runners' start failures are not retried.
+  - Model-visible: none.
+
 ## [2.14.170] - 2026-11-12
 
 ### Changed

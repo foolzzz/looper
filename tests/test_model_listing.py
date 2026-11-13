@@ -178,6 +178,7 @@ def _provider(monkeypatch, *, row=None, key="fake-private-model-listing-key", mo
 
 def test_fetch_groups_protocols_reports_registered_invalid_names_and_never_exposes_key(monkeypatch, caplog):
     key = "fake-private-model-listing-key"
+    parameterized = "grok-4.7[context=500k,reasoning_effort=high,fast=true]"
     builtin = next(iter(BUILTIN_PRICES))
     _provider(monkeypatch, key=key, models=[{"name": builtin, "protocol": "openai-chat"}])
     requests = []
@@ -186,7 +187,7 @@ def test_fetch_groups_protocols_reports_registered_invalid_names_and_never_expos
         requests.append(request)
         assert request.headers["authorization"] == f"Bearer {key}"
         return httpx.Response(200, json={"data": [{"id": builtin}, {"id": "unknown-model"},
-                                                   {"id": "invalid@name"}, {"id": "  "}]})
+                                                   {"id": "invalid@name"}, {"id": "  "}, {"id": parameterized}]})
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
@@ -199,9 +200,11 @@ def test_fetch_groups_protocols_reports_registered_invalid_names_and_never_expos
     assert served["protocols"] == ["openai-responses", "openai-chat"]
     models = {item["name"]: item for item in served["models"]}
     assert models[builtin]["registered"] == ["openai-chat"] and models[builtin]["builtin_price"]
+    assert models[parameterized]["name"] == parameterized and models[parameterized]["addable"]
+    assert models[parameterized]["problem"] is None
     assert not models["unknown-model"]["builtin_price"]
     assert not models["invalid@name"]["addable"] and models["invalid@name"]["problem"]
-    assert not models["  "]["addable"] and models["  "]["problem"] == "a model needs a name"
+    assert not models["  "]["addable"] and "is not a model name" in models["  "]["problem"]
     assert key not in json.dumps(result) and key not in caplog.text
 
 

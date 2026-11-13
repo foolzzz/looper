@@ -118,12 +118,13 @@ class AcpLaunch:
     tools: str | None = None  # the reading tools of a read-only session
     agent: str | None = None  # the agent definition that replaces Grok's prompt
     max_turns: int = 0
+    web_search: bool = True
 
 
 # The flags of the headless command that ACP has no use for (the prompt and the output format of a headless run),
 # those that are the same on `agent`, and those it takes at the root.
 _DROPPED = frozenset({"--prompt-file", "--output-format"})
-_BOOLEAN = frozenset({"--always-approve", "--trust", "--no-auto-update"})
+_BOOLEAN = frozenset({"--always-approve", "--trust", "--no-auto-update", "--disable-web-search"})
 _VALUED = frozenset({"-m", "--effort", "--tools", "--agent", "--max-turns"})
 
 
@@ -148,13 +149,14 @@ def parse_command(base: list[str]) -> AcpLaunch:
     except ValueError:
         raise AcpUnavailable(f"--max-turns {values['--max-turns']!r} is not a number") from None
     return AcpLaunch(base[3], values.get("-m"), values.get("--effort"), values.get("--tools"), values.get("--agent"),
-                     max_turns)
+                     max_turns, web_search="--disable-web-search" not in args)
 
 
 def acp_argv(launch: AcpLaunch, home: Path, profile: Path | None) -> list[str]:
     """The ACP process's command: root flags (the project trusted, no update) before ``agent``, the agent's own
     flags (every tool without asking, the model, the effort, the profile) after it, then ``stdio``."""
     return ["env", f"GROK_HOME={home}", f"HOME={home}", launch.executable, "--trust", "--no-auto-update",
+            *(["--disable-web-search"] if not launch.web_search else []),
             "agent", "--always-approve",
             *(["--agent-profile", str(profile)] if profile is not None else []),
             *(["-m", launch.model] if launch.model else []), *(["--effort", launch.effort] if launch.effort else []),

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import asyncpg
 
+from looper.agents.model_names import MODEL_MAX_CHARS, MODEL_NAME_PATTERN
+
 logger = logging.getLogger(__name__)
 
 _pool: asyncpg.Pool | None = None
@@ -98,6 +100,7 @@ REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
 _RUNTIME_LAUNCHER = "runtime_launcher"
 _PROFILE_FALLBACK = "profile_fallback"
+_PROFILE_WEB_SEARCH = "profile_web_search"
 _CURSOR_LOGIN = "cursor_login"
 _COCO_LOGIN = "coco_login"
 _DEPENDENCY_CONDITIONS = "dependency_conditions"
@@ -120,6 +123,7 @@ _PROJECT_ACTIVITY = "project_activity"
 _LLM_REQUESTS = "llm_requests"
 _LLM_REQUESTS_TRANSLATION = "llm_requests_translation"
 _LLM_MODELS_CHAT_DIALECT = "llm_models_chat_dialect"
+_MODEL_NAME_PARAMETERS = "model_name_parameters"
 _LLM_REQUESTS_STORED_BYTES = "llm_requests_stored_bytes"
 
 _LLM_REQUESTS_DDL = """
@@ -346,6 +350,14 @@ async def _profile_fallback_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('agent_profiles') "
         "AND attname = 'fallback_profile_id' AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _profile_web_search_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _PROFILE_WEB_SEARCH):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('agent_profiles') "
+        "AND attname = 'web_search' AND attnum > 0 AND NOT attisdropped)")
 
 
 async def _schedule_user_gates_pending(conn: asyncpg.Connection) -> bool:
@@ -643,6 +655,17 @@ async def _classify_schema(conn: asyncpg.Connection, sql: str) -> str:
     return "bridge"
 
 
+async def _model_name_parameters_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _MODEL_NAME_PARAMETERS):
+        return False
+    # Fresh baselines already install the shared grammar and record only BASELINE.
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('llm_models') "
+        "AND conname IN ('llm_models_name_check', 'llm_models_background_model_check') "
+        "AND strpos(pg_get_constraintdef(oid), $1) = 0)", MODEL_NAME_PATTERN)
+
+
 async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
     from .bridge_upgrade import BASELINE, upgrade_from_bridge
 
@@ -655,6 +678,23 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute(sql)
         elif state == "bridge":
             await upgrade_from_bridge(conn)
+        if await _model_name_parameters_pending(conn):
+            # Use the application's grammar rather than maintaining a second
+            # regex in SQL. NOT VALID preserves historical malformed names on
+            # upgrade; all new inserts/updates still enforce the new grammar.
+            pattern = MODEL_NAME_PATTERN.replace("'", "''")
+            for field in ("name", "background_model"):
+                constraint = f"llm_models_{field}_check"
+                check = f"length({field}) BETWEEN 1 AND {MODEL_MAX_CHARS} AND {field} ~ '{pattern}'"
+                await conn.execute(f"ALTER TABLE llm_models DROP CONSTRAINT {constraint}, "
+                    f"ADD CONSTRAINT {constraint} CHECK ({check}) NOT VALID")
+                # Clean upgrades must have the same validated catalog as fresh databases.
+                if state == "empty" or not await conn.fetchval(
+                    f"SELECT EXISTS (SELECT 1 FROM llm_models WHERE NOT ({check}))"
+                ):
+                    await conn.execute(f"ALTER TABLE llm_models VALIDATE CONSTRAINT {constraint}")
+            if state != "empty":
+                await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MODEL_NAME_PARAMETERS)
         # One additive upgrade for a baseline that predates schedules.user_gates,
         # including the bridge. An empty database already has the column from
         # schema.sql and records only post_bridge_baseline. Once this marker is
@@ -674,6 +714,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE task_journal ADD CONSTRAINT task_journal_kind_check "
                                + constraint)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROFILE_FALLBACK)
+        if await _profile_web_search_pending(conn):
+            await conn.execute("ALTER TABLE agent_profiles ADD COLUMN web_search BOOLEAN NOT NULL DEFAULT true")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _PROFILE_WEB_SEARCH)
         if await _cursor_login_pending(conn):
             await conn.execute(_CURSOR_LOGIN_DDL)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _CURSOR_LOGIN)
@@ -832,8 +875,10 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         state = await _classify_schema(conn, sql)
         return state == "bridge" or (state == "current" and (
             await _schedule_user_gates_pending(conn) or await _cursor_login_pending(conn)
+            or await _model_name_parameters_pending(conn)
             or await _coco_login_pending(conn)
             or await _runtime_launcher_pending(conn) or await _profile_fallback_pending(conn)
+            or await _profile_web_search_pending(conn)
             or await _command_schedules_pending(conn) or await _task_reply_route_pending(conn)
             or await _task_process_record_pending(conn)
             or await _schedule_missed_since_pending(conn) or await _schedule_deferred_by_drain_pending(conn)

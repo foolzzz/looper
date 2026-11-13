@@ -1,12 +1,13 @@
 """Full model results for existing ops and ordinary model lookup."""
 
 from .. import profile_registry
+from ..model_names import MODEL_NAME_SCHEMA
 from ..api_v1 import Operation, _array, _object, _STR
 from ..ops.config import answered, _MODEL_SETTINGS
 from .registry import API_PROTOCOL, MODEL
 
 MODEL_RESULT = _object({"model": MODEL, "warnings": _array(_STR)}, closed=True)
-ADD_ENTRY = _object({"name": _STR, "protocol": API_PROTOCOL, **_MODEL_SETTINGS}, ["name", "protocol"], closed=True)
+ADD_ENTRY = _object({"name": MODEL_NAME_SCHEMA, "protocol": API_PROTOCOL, **_MODEL_SETTINGS}, ["name", "protocol"], closed=True)
 ADD_RESULT = _object({"models": _array(MODEL), "skipped": _array(_object({
     "name": _STR, "protocol": API_PROTOCOL, "reason": _STR}, closed=True)), "warnings": _array(_STR)}, closed=True)
 RESULTS = {

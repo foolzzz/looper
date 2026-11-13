@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from .llmrec import LlmrecRoute, LlmrecSkip, SkipReason
+from .model_names import MODEL_MAX_CHARS, MODEL_NAME
 
 from .profile_registry import (
     BUILTIN_PROFILE, PRICE_FIELDS, AgentProfile, ModelSpec, ResolvedAgentProfile, ResolvedModel,
@@ -130,7 +131,6 @@ EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 HARNESS_MAX_CHARS = 20_000
 ENV_MAX_ENTRIES = 50
 ENV_VALUE_MAX_CHARS = 4_000
-MODEL_MAX_CHARS = 200
 BUDGET_MAX_USD = 100_000
 CONCURRENCY_MAX = 64
 
@@ -202,8 +202,6 @@ def sha256_text(text: str) -> str:
 # --- Validation: each raises SettingsError ---
 
 _LEADING_BLANK_LINES = re.compile(r"\A(?:[ \t\r\f\v]*\n)+")
-# An alias ("opus") or a full name ("claude-opus-4-5", "opus[1m]"); never a flag.
-_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*")
 _ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*")
 # Settings hold non-secret configuration and are shown on the dashboard and in
 # run records, so a name that reads like a credential is refused. This is a
@@ -230,13 +228,13 @@ def boundaries_text(raw: Any) -> str:
 
 
 def model_name(raw: Any, *, field: str = "model") -> str:
-    """A model alias or full name, trimmed; ``''`` (or None) for none."""
+    """An exact model alias or full name; None means no optional model."""
     if raw is None:
         return ""
     if not isinstance(raw, str):
         raise SettingsError(f"{field} must be a string")
-    name = raw.strip()
-    if name and (len(name) > MODEL_MAX_CHARS or not _MODEL.fullmatch(name)):
+    name = raw
+    if len(name) > MODEL_MAX_CHARS or not MODEL_NAME.fullmatch(name):
         raise SettingsError(
             f"{field} {name[:40]!r} is not a model name: use an alias such as opus or sonnet, or a full model name"
         )
@@ -1031,7 +1029,7 @@ class Launch:
         # Internal comparison only: never record or log this secret-sensitive digest.
         return sha256_text(json.dumps([
             self.profile.runtime.type, self.profile.provider.id, self.model, self.effort,
-            self.system_prompt_mode.value, self.agent_teams, self.profile.custom_prompt, effective,
+            self.system_prompt_mode.value, self.agent_teams, getattr(self.profile, "web_search", True), self.profile.custom_prompt, effective,
             list(binding.args), sorted(binding.env), list(binding.unset),
         ], ensure_ascii=False, separators=(",", ":")))
 

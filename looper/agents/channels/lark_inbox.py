@@ -9,6 +9,8 @@ from typing import Any
 from .lark_cli import RECEIVE_EVENT
 
 PROCESSED_KEPT = 20_000
+THREADS_KEPT = 1_000
+THREAD_MAX_AGE = 7 * 24 * 60 * 60
 
 
 class LarkInbox:
@@ -20,6 +22,8 @@ class LarkInbox:
         self._db.execute("CREATE TABLE IF NOT EXISTS processed (seq INTEGER PRIMARY KEY, message_id TEXT UNIQUE NOT NULL)")
         self._db.execute("CREATE TABLE IF NOT EXISTS catchup_debt (chat_id TEXT PRIMARY KEY, start REAL NOT NULL, end REAL NOT NULL)")
         self._db.execute("CREATE TABLE IF NOT EXISTS discovery (id INTEGER PRIMARY KEY CHECK (id = 1), start REAL NOT NULL, end REAL NOT NULL)")
+        self._db.execute("CREATE TABLE IF NOT EXISTS thread_activity (chat_id TEXT NOT NULL, thread_id TEXT NOT NULL, "
+                         "at REAL NOT NULL, PRIMARY KEY (chat_id, thread_id))")
         self._db.commit()
         row = self._db.execute("SELECT at FROM boundary WHERE id = 1").fetchone()
         self.boundary: float | None = row[0] if row else None
@@ -58,10 +62,32 @@ class LarkInbox:
     def processed(self, message_id: str) -> bool:
         return self._db.execute("SELECT 1 FROM processed WHERE message_id = ?", (message_id,)).fetchone() is not None
 
-    def finish(self, message_id: str) -> None:
+    def finish(self, message_id: str, *, chat_id: str = "", thread_id: str = "", at: float | None = None) -> None:
         with self._db:
             self._db.execute("INSERT OR IGNORE INTO processed(message_id) VALUES (?)", (message_id,))
             self._db.execute("DELETE FROM processed WHERE seq <= (SELECT max(seq) FROM processed) - ?", (PROCESSED_KEPT,))
+            if chat_id and thread_id and at is not None:
+                self._store_thread(chat_id, thread_id, at)
+
+    def remember_thread(self, chat_id: str, thread_id: str, at: float) -> None:
+        with self._db:
+            self._store_thread(chat_id, thread_id, at)
+
+    def _store_thread(self, chat_id: str, thread_id: str, at: float) -> None:
+        self._db.execute("INSERT INTO thread_activity VALUES (?, ?, ?) ON CONFLICT(chat_id, thread_id) "
+                         "DO UPDATE SET at = max(at, excluded.at)", (chat_id, thread_id, at))
+        self._prune_threads(at)
+
+    def _prune_threads(self, at: float) -> None:
+        self._db.execute("DELETE FROM thread_activity WHERE at < ?", (at - THREAD_MAX_AGE,))
+        self._db.execute("DELETE FROM thread_activity WHERE rowid IN (SELECT rowid FROM thread_activity "
+                         "ORDER BY at DESC, rowid DESC LIMIT -1 OFFSET ?)", (THREADS_KEPT,))
+
+    def recent_threads(self, chat_id: str, at: float) -> list[str]:
+        with self._db:
+            self._prune_threads(at)
+        return [row[0] for row in self._db.execute("SELECT thread_id FROM thread_activity WHERE chat_id = ? "
+                                                 "ORDER BY at DESC, rowid DESC", (chat_id,))]
 
     def close(self) -> None:
         self._db.close()

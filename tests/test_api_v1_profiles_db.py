@@ -109,7 +109,7 @@ def test_full_and_compact_profiles_preserve_usage_shapes_and_warning_results(tmp
             compact = compact["result"]["profile"]
             assert isinstance(compact["used_by"], str) and "session" in compact["used_by"]
             assert set(compact) == {"profile_id", "name", "runtime", "provider", "model_id", "model", "effort",
-                                    "agent_teams", "custom_prompt", "roles", "builtin", "used_by", "model_path",
+                                    "agent_teams", "web_search", "custom_prompt", "roles", "builtin", "used_by", "model_path",
                                     "fallback_profile_id", "fallback_profile_name"}
             listing = (await call("agent_profiles.list"))[1]["result"]["profiles"]
             assert next(p for p in listing if p["profile_id"] == pid) == compact
@@ -270,4 +270,58 @@ def test_retired_profile_routes_have_authenticated_v1_positive_controls(tmp_path
             assert status == 200 and answer["result"], answer
             if action == "delete":
                 assert await db.get_profile(pid) is None
+    run_with_models(run, monkeypatch)
+
+
+@pytest.mark.parametrize("web_search", [False, True])
+def test_profiles_web_search_round_trip_and_runtime_boundary(tmp_path, monkeypatch, web_search):
+    async def run(pool):
+        await pool.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
+                           "VALUES ('rt-grok', 'grok', 'grok', 'grok', $1)",
+                           [c.value for c in runtimes.adapter("grok").capabilities])
+        await pool.execute("""
+            INSERT INTO llm_providers (id, name, vendor_type, auth, oauth_runtime_type)
+              VALUES ('prov-grok-search', 'Grok search login', 'grok-login', 'oauth', 'grok');
+            INSERT INTO llm_provider_endpoints (provider_id, protocol, base_url, use_runtime_default)
+              VALUES ('prov-grok-search', 'openai-responses', '', false);
+            INSERT INTO llm_models (id, provider_id, name, protocol)
+              VALUES ('model-grok-search', 'prov-grok-search', 'grok-4.7', 'openai-responses');
+        """)
+        async with _api(tmp_path, pool) as call:
+            old = await _create(call)
+            assert old["web_search"] is True
+            status, answer = await call("profiles.create", {"name": "Grok search", "runtime_id": "rt-grok",
+                "model_id": "model-grok-search", "web_search": web_search})
+            assert status == 200, answer
+            profile = answer["result"]["profile"]
+            pid = profile["profile_id"]
+            assert profile["web_search"] is web_search
+            assert (await db.get_profile(pid))["web_search"] is web_search
+            status, answer = await call("profiles.update", {"profile_id": pid, "fields": {"web_search": not web_search}})
+            assert status == 200 and answer["result"]["profile"]["web_search"] is (not web_search), answer
+            status, listing = await call("agent_profiles.list")
+            assert status == 200
+            assert next(p for p in listing["result"]["profiles"] if p["profile_id"] == pid)["web_search"] is (not web_search)
+            for operation, body in [
+                ("profiles.create", {"name": "Unsupported search", "runtime_id": old["runtime_id"],
+                                     "model_id": old["model_id"], "web_search": False}),
+                ("profiles.update", {"profile_id": old["profile_id"], "fields": {"web_search": False}}),
+                ("profiles.update", {"profile_id": pid, "fields": {"runtime_id": old["runtime_id"],
+                    "model_id": old["model_id"], "web_search": False}}),
+            ]:
+                status, answer = await call(operation, body)
+                assert status == 400 and "Grok" in answer["error"]["message"], answer
+            assert (await db.get_profile(old["profile_id"]))["web_search"] is True
+            from unittest.mock import AsyncMock
+            from looper.agents.agent_settings import AgentSettings, AgentType, fallback_settings
+
+            status, source = await call("profiles.create", {"name": "Grok primary", "runtime_id": "rt-grok",
+                "model_id": "model-grok-search", "web_search": web_search, "fallback_profile_id": pid})
+            assert status == 200, source
+            source_row = await db.get_profile(source["result"]["profile"]["profile_id"])
+            primary = AgentSettings(profile=profile_registry.ResolvedAgentProfile.from_row(source_row))
+            monkeypatch.setattr(type(runtimes.adapter("grok")), "login_problem", AsyncMock(return_value=None))
+            fallback = await fallback_settings(primary, AgentType.REVIEWER)
+            assert fallback.profile.id == pid and fallback.profile.web_search is (not web_search)
+            assert primary.profile.web_search is web_search
     run_with_models(run, monkeypatch)

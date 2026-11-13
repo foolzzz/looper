@@ -10,6 +10,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -61,19 +62,19 @@ def cursor_tmpdirs(monkeypatch: pytest.MonkeyPatch):
 
 def _launch(*, executable: str = "cursor-agent", library: AgentLibrary | None = None,
             env: tuple[tuple[str, str], ...] = (), provider_env: tuple[tuple[str, str], ...] = (),
-            effort: str = "") -> Launch:
+            effort: str = "", model_name: str = MODEL) -> Launch:
     provider = ProviderSpec("prov-cursor-login", "Cursor login", VendorType.CURSOR_LOGIN,
                             AuthKind.OAUTH, "cursor-agent")
-    model = ModelSpec("model-cursor", provider.id, MODEL, ApiProtocol.OPENAI_RESPONSES)
+    model = ModelSpec("model-cursor", provider.id, model_name, ApiProtocol.OPENAI_RESPONSES)
     resolved = ResolvedModel(model, provider, Endpoint(provider.id, model.protocol, ""))
-    profile = ResolvedAgentProfile("agent-cursor", f"cursor-agent/{MODEL}",
+    profile = ResolvedAgentProfile("agent-cursor", f"cursor-agent/{model_name}",
                                    RuntimeSpec("rt-cursor", "Cursor Agent", "cursor-agent", executable,
                                                CURSOR.capabilities), model.id, effort or None,
                                    resolved_model=resolved)
     if provider_env:
         # Adapter inputs can predate the registry's credential validation; its launch gate must still refuse them.
         profile = LegacyAgentProfile(profile.id, profile.name, profile.runtime,
-                                     dataclasses.replace(resolved.binding_provider(), env=provider_env), MODEL)
+                                     dataclasses.replace(resolved.binding_provider(), env=provider_env), model_name)
     return Launch(AgentSettings(profile=profile, env=env), library or AgentLibrary(), AgentKnowledge())
 
 
@@ -934,3 +935,19 @@ def test_mcp_results_use_event_server_and_preserve_failure(server_field: str, su
     assert _blocks(events, "tool_use")[0]["name"] == "mcp__plugin-looper-plugin-looper__looper_room_inbox"
     result = _blocks(events, "tool_result")[0]
     assert result["content"] == "first\nsecond" and result["is_error"] is not success
+
+
+@pytest.mark.parametrize("method", ["run_command", "resident_command"])
+def test_cursor_parameterized_model_reaches_process_as_one_exact_argument(tmp_path, method):
+    name = "grok-4.7[context=500k,reasoning_effort=high,fast=true]"
+    executable = tmp_path / "cursor-argv"
+    executable.write_text(f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+    executable.chmod(0o700)
+    launch = _launch(executable=str(executable), model_name=name)
+    command = getattr(CURSOR, method)(str(executable), cwd=tmp_path,
+        prompt_file=_prompt(tmp_path / "runtime"), launch=launch)
+    assert command[command.index("--model") + 1] == name
+    done = subprocess.run(command, capture_output=True, text=True, check=True, timeout=30)
+    argv = json.loads(done.stdout)
+    assert argv.count("--model") == 1
+    assert argv[argv.index("--model") + 1].encode() == launch.profile.model.encode() == name.encode()

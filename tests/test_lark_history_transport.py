@@ -76,7 +76,7 @@ def test_history_uses_bot_profile_bounded_raw_page_and_flat_event(monkeypatch, m
         assert len(calls) == 2  # No search or per-message reference lookup.
         if mode == "p2p":
             before = len(calls)
-            assert await transport.list_threads("oc_example") == {"threads": [], "has_more": False}
+            assert await transport.list_threads("oc_example") == {"roots": [], "has_more": False}
             assert len(calls) == before
         await transport.aclose()
 

@@ -24,6 +24,7 @@ from typing import Any, TypeVar
 from ...db import llm_records as db_llm_records, projects as db_projects, managers as db_managers
 from .. import catalog, profile_registry, projects
 from ..agent_settings import SettingsError, SettingsNotFound
+from ..model_names import MODEL_NAME_SCHEMA
 from ..projects import RequestError, project_name
 from ..llmrec.dialects import ChatDialect
 from ..runtimes import ApiProtocol, AuthKind, VendorType
@@ -261,7 +262,7 @@ def _profile_listed(view: Mapping[str, Any], profiles: Iterable[Mapping[str, Any
     return {"profile_id": view["profile_id"], "name": view["name"], "runtime": view["runtime_name"],
             "provider": view["provider"], "model_id": view["model_id"], "model": view["model"],
             "effort": view["effort"], "model_path": view["model_path"],
-            "agent_teams": view["agent_teams"],
+            "agent_teams": view["agent_teams"], "web_search": view.get("web_search", True),
             "custom_prompt": view.get("custom_prompt", ""),
             "fallback_profile_id": fallback_id,
             "fallback_profile_name": next((p["name"] for p in profiles if p["profile_id"] == fallback_id), None),
@@ -331,7 +332,7 @@ async def _profiles(call: Call) -> dict[str, Any]:
         _required(arguments, action, "profile")
         profile = _profile(registry, arguments["profile"])
     if action in ("create", "update"):
-        fields = {**_given(arguments, ("name", "effort", "agent_teams", "custom_prompt", "fallback_profile_id"),
+        fields = {**_given(arguments, ("name", "effort", "agent_teams", "web_search", "custom_prompt", "fallback_profile_id"),
                           clears=("effort", "fallback_profile_id")),
                   **await _profile_parts(registry, arguments)}
         manager_id = call.manager_id if call.scoped else None
@@ -638,14 +639,14 @@ _PROVIDER_ENDPOINT = {
 _MODEL_REFERENCE = {"oneOf": [
     {"type": "string", "minLength": 1, "pattern": "^model-[a-zA-Z0-9-]+$", "description": "Model id from list."},
     {"type": "object", "required": ["provider", "name", "protocol"], "additionalProperties": False,
-     "properties": {"provider": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1},
+     "properties": {"provider": {"type": "string", "minLength": 1}, "name": MODEL_NAME_SCHEMA,
                     "protocol": _PROTOCOL}},
 ]}
 _MODEL_SETTINGS = {
     "context_window": {"type": ["integer", "null"]},
     **{field: {"type": ["number", "null"]} for field in profile_registry.PRICE_FIELDS},
     "efforts": {"type": ["array", "null"], "items": {"type": "string"}},
-    "background_model": {"type": ["string", "null"]},
+    "background_model": {**MODEL_NAME_SCHEMA, "type": ["string", "null"]},
     "chat_dialect": {"type": ["string", "null"],
                      "enum": [None, *[dialect.value for dialect in ChatDialect]],
                      "description": "OpenAI Chat Completions dialect; null uses the provider vendor default. "
@@ -697,6 +698,8 @@ TOOLS: tuple[Tool, ...] = (
                                           "when null, shared levels are low, medium, high, xhigh, max. "
                                           "A null effort uses the runtime's default."},
                 "agent_teams": {"type": "boolean", "description": "Claude Code only."},
+                "web_search": {"type": "boolean", "description": "Default true. Only Grok supports false; "
+                               "false disables web search and web fetch tools."},
                 "custom_prompt": {"type": "string", "description": "Text placed first in this profile's system "
                                   "prompt, before the harness; empty adds nothing."},
                 "fallback_profile_id": {"type": ["string", "null"],
@@ -742,7 +745,7 @@ TOOLS: tuple[Tool, ...] = (
                 "action": {"type": "string", "enum": ["list", "create", "update", "delete"]},
                 "provider": {"type": "string", "minLength": 1, "description": "Account id or name (list, create)."},
                 "runtime": {"type": "string", "minLength": 1, "description": "Runtime id, name or type (list)."},
-                "name": {"type": "string", "minLength": 1, "description": "Exact model name (create)."},
+                "name": {**MODEL_NAME_SCHEMA, "description": "Exact model name (create)."},
                 "protocol": _PROTOCOL,
                 "model": _MODEL_REFERENCE,
                 **_MODEL_SETTINGS,

@@ -6,9 +6,10 @@ import asyncio
 import json
 import logging
 from collections import deque
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import quote
 
 from . import lark_cli
 from .lark_content import ResourceRef
@@ -67,6 +68,7 @@ class CliTransport:
         self._profile = profile
         self.consumer_started = asyncio.Event()
         self._history_chat_types: dict[str, str] = {}
+        self.on_thread_activity: Callable[[str, str], None] | None = None
 
     async def _history_chat_type(self, chat_id: str) -> str:
         # History omits chat mode. Never infer p2p from a missing mention: that would admit group chatter.
@@ -120,14 +122,14 @@ class CliTransport:
 
     async def list_threads(self, chat_id: str, *, page_token: str = "") -> dict[str, Any]:
         if await self._history_chat_type(chat_id) == "p2p":
-            return {"threads": [], "has_more": False}
+            return {"roots": [], "has_more": False}
         result = await lark_cli.run_json(lark_cli.thread_roots_command(
             chat_id, page_token=page_token, profile=self._profile))
         page = result.get("data", result)
         if not isinstance(page, dict) or not isinstance(page.get("items"), list):
             raise lark_cli.LarkCliError("history did not return a thread root page")
-        return {**page, "threads": list(dict.fromkeys(item["thread_id"] for item in page["items"]
-                                                    if item.get("thread_id")))}
+        # Keep every root's time, including roots without a thread, for the age cutoff.
+        return {**page, "roots": page["items"][:50]}
 
     async def list_thread_messages(self, thread_id: str, *, page_token: str = "") -> dict[str, Any]:
         result = await lark_cli.run_json(lark_cli.thread_history_command(
@@ -139,19 +141,36 @@ class CliTransport:
                    idempotency_key: str | None = None, return_id: bool = False) -> str | None:
         return await self._message(lark_cli.send_command(
             chat_id=chat_id, user_id=user_id, text=text, markdown=markdown, profile=self._profile,
-            idempotency_key=idempotency_key), return_id=return_id)
+            idempotency_key=idempotency_key), return_id=return_id, resolve_thread=chat_id is not None)
 
     async def reply(self, message_id: str, *, text: str | None = None, markdown: str | None = None,
                     idempotency_key: str | None = None, return_id: bool = False,
                     reply_in_thread: bool = False) -> str | None:
         return await self._message(lark_cli.reply_command(
-            message_id, text=text, markdown=markdown, profile=self._profile, idempotency_key=idempotency_key, reply_in_thread=reply_in_thread),
-            return_id=return_id)
+            message_id, text=text, markdown=markdown, profile=self._profile,
+            idempotency_key=idempotency_key, reply_in_thread=reply_in_thread),
+            return_id=return_id, resolve_thread=True)
 
-    async def _message(self, argv: list[str], *, return_id: bool) -> str | None:
-        """Only posts and status messages read the id from successful CLI output."""
-        if return_id:
-            return lark_cli.sent_message_id(await lark_cli.run_json(argv))
+    async def _message(self, argv: list[str], *, return_id: bool, resolve_thread: bool = False) -> str | None:
+        """Remember successful thread sends without turning a bookkeeping error into a send retry."""
+        if return_id or self.on_thread_activity is not None:
+            answer = await lark_cli.run_json(argv)
+            if self.on_thread_activity is not None:
+                try:
+                    data = answer.get("data", answer)
+                    # Some shortcut versions return only the sent id and chat, omitting thread metadata.
+                    if (resolve_thread and not (data.get("thread_id") and data.get("chat_id"))
+                            and (sent_id := lark_cli.sent_message_id(answer))):
+                        result = await lark_cli.run_json([
+                            *lark_cli._base(self._profile), "api", "GET",
+                            f"/open-apis/im/v1/messages/{quote(sent_id, safe='')}", "--as", "bot"])
+                        items = result.get("data", result).get("items") or []
+                        data = items[0] if items else {}
+                    if data.get("chat_id") and data.get("thread_id"):
+                        self.on_thread_activity(data["chat_id"], data["thread_id"])
+                except Exception:
+                    logger.warning("could not remember sent Lark thread", exc_info=True)
+            return lark_cli.sent_message_id(answer) if return_id else None
         await lark_cli.run(argv)
         return None
 

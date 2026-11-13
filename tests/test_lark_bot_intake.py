@@ -294,6 +294,46 @@ def test_history_converter_prefers_bot_open_id_and_preserves_app_fallback() -> N
     assert fallback["sender_id"] == OTHER_APP
 
 
+@pytest.mark.parametrize("later_page_fails", [False, True])
+def test_bot_poll_combines_thread_discovery_activity_and_partial_page_recovery(
+    tmp_path: Path, later_page_fails: bool,
+) -> None:
+    async def run() -> None:
+        async with _channel(tmp_path) as (instance, transport, bus):
+            thread = "omt_syntheticlisted"
+            active = "omt_syntheticactive"
+            root = _message("om_syntheticroot", sender_type="user", sender=OPEN_ID, thread_id=thread)
+            transport.pages[CHAT] = _page(root)
+            instance._inbox.remember_thread(CHAT, active, time.time() - 3 * 86400)
+            reads: list[tuple[str, str]] = []
+
+            async def roots(chat_id: str, *, page_token: str = "") -> dict[str, Any]:
+                return {"roots": [root], "has_more": False}
+
+            async def replies(thread_id: str, *, page_token: str = "") -> dict[str, Any]:
+                reads.append((thread_id, page_token))
+                if page_token:
+                    raise ConnectionError("stand-in later page unavailable")
+                return {**_page(
+                    _message(f"om_syntheticown{thread_id}", sender=BOT_ID, create_time=root["create_time"]),
+                    _message(f"om_syntheticperson{thread_id}", sender_type="user", sender=OPEN_ID,
+                             create_time=root["create_time"]),
+                    _message(f"om_syntheticbot{thread_id}", create_time=root["create_time"]),
+                ), "has_more": later_page_fails, "page_token": "next"}
+
+            transport.list_threads, transport.list_thread_messages = roots, replies
+            last_poll: dict[str, float] = {}
+            await instance._poll_bot_chats(last_poll)
+            turns = bus.journal.undelivered()
+            assert {turn.payload["channel_context"]["message_id"] for turn in turns} == {
+                f"om_syntheticbot{thread}", f"om_syntheticbot{active}"}
+            assert {turn.payload["channel_context"]["thread_id"] for turn in turns} == {thread, active}
+            assert reads.count((thread, "")) == reads.count((active, "")) == 1
+            assert (CHAT in last_poll) is not later_page_fails
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
 def test_app_id_fallback_can_be_allowlisted(tmp_path: Path) -> None:
     async def run() -> None:
         async with _channel(tmp_path, allowed=frozenset(sender_ids("lark", [OPEN_ID, OTHER_APP]))) as (instance, transport, bus):
