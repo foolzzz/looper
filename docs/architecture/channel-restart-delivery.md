@@ -33,6 +33,10 @@ redelivery but cannot establish the real platform's reconnect behavior.
 
 Neither the bot long connection nor `lark-cli event consume` supplies a durable
 resume cursor in Looper. The stand-ins do not establish a production guarantee
-that Lark replays events missed while disconnected. v0 leaves both transports
-unchanged; operators should treat Lark messages sent during the restart gap as
-potentially lost until a platform replay guarantee is independently verified.
+that Lark replays events missed while disconnected, and in practice it does
+not. The `lark-cli` channel therefore catches up after a start: it lists the
+history of the chats that can reach a Manager since its live boundary (and any
+window a chat still owes from a failed listing), within a bounded age, and
+hands each message to the same handler as a live event, once (see the Lark
+section of `agent-system.md`). The bot long-connection transport has no
+catch-up; messages sent to it during the restart gap can still be lost.

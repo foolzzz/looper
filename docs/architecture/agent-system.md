@@ -5853,7 +5853,7 @@ implementation supplies it and is retested.
   handles direct messages (`chat_type` `p2p`) and, in a group chat (`group`),
   only a message that @-mentions the bot: one whose `mentions` hold the bot's
   own open_id (from the bot's info at startup; never a match on names).
-  Every other group message is ignored entirely: no reaction, nothing stored,
+  Every other group message is ignored entirely: no reaction, no transcript,
   no Manager turn, no record of who wrote. The bot's mention is taken out of
   the text (`@name` as lark-cli shows it, else its `@_user_N` placeholder;
   rich posts also handle `@@name` and `<at>` tags),
@@ -5893,7 +5893,55 @@ implementation supplies it and is retested.
   +messages-reply --as bot --message-id om_…`), while the task's progress
   and end notice go to the group (`--chat-id`): the bot posts in a group only
   to answer an allowlisted @-mention and for the task it started. A consumer that
-  stops is started again after 10 s. At startup the channel runs `lark-cli
+  stops is started again after 10 s. The long connection does not replay
+  messages sent while disconnected. On adapter startup, after the CLI emits
+  `[event] ready event_key=im.message.receive_v1` (or its first live message),
+  a background catch-up lists raw history with `lark-cli api GET
+  /open-apis/im/v1/messages --as bot` (chat containers), ascending, from the saved boundary minus
+  10 seconds through the consumer's ready time. It scans explicit channel
+  bindings first, then unbound chats observed by `observe_chat` in the last
+  24 hours when the default Manager accepts unbound chats. At most 100 chats,
+  5 pages per chat and 50 messages per page are scanned. Embedded thread replies
+  use the same admission path. For groups and topics, a separate root scan without
+  a time filter discovers older threads (up to 5 pages of 50 roots). Each thread
+  is read newest first, up to 5 pages of 50 replies, stopping once replies predate
+  the recovery window; replies are admitted oldest first within that thread.
+  Recovered messages use the live admission, group bot-mention, routing,
+  attachment and disabled-chat
+  checks. Known p2p chats participate only when bot identity can resolve their
+  chat mode and list their history; permission failures are warnings and do not
+  prevent other chats or live input. A new, never-observed unbound chat cannot
+  be discovered during downtime. The bot needs history and chat-info read
+  permissions; no user-identity fallback is used.
+
+  Each CLI channel keeps its boundary and the latest 20,000 handled message ids
+  in SQLite under the runtime root's `.local/lark/<channel>/inbox.sqlite3`.
+  Live and recovered messages share a lock and durable receipts, so overlapping
+  history and live delivery are processed once. Receipts store ids, never message
+  content. While the live consumer is ready and no message is being handled,
+  a heartbeat saves the current time every 5 seconds, independently of catch-up
+  success. A clean stop saves its stop time; an interrupted handler or disconnected
+  consumer retains the earlier live boundary. Each chat's unfinished recovery
+  window is stored separately before scanning, retained on errors or cancellation,
+  and merged with that chat's next startup window. Discovery work is also durable
+  until its windows have been assigned to chats. Debt older than 15 minutes is
+  dropped (partially expired windows keep their recent portion), with skipped-window
+  and duration counts in the log. Thread containers use the same raw history API;
+  no message search or search scopes are required. Raw parent/root ids take the
+  same gate routing path as live replies.
+  After a crash, that last heartbeat is the recovery boundary. A missing
+  boundary initializes the state without replaying history; one older than
+  15 minutes skips the whole window. Individual recovered messages older than
+  15 minutes at handling time are also skipped. Each startup logs one INFO
+  `lark_catchup` summary: boundary, expired-window flag, chats scanned, messages
+  found, handled, duplicate and too-old skips, and failures. Message counts cover
+  listed messages only; an expired window is not listed and its message count
+  is unknown. A consumer that does not signal readiness within 60 seconds,
+  list failures and exhausted page limits warn without blocking
+  the consumer. This recovery applies to the CLI channel; the bot-token channel
+  is unchanged.
+
+  At startup the channel runs `lark-cli
   whoami` and `lark-cli api GET /open-apis/bot/v3/info --as bot` with its
   profile and does not start when lark-cli is missing, the profile is
   unknown, it is not signed in or the app has no bot; it logs the bot
