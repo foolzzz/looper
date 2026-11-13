@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.178] - 2026-11-13
+
+### Changed
+
+- **The Manager can view the local gateway and change it with confirmation.** ([#1329](https://github.com/foolzzz/looper/pull/1329), fixes #1163)
+  - Behavior change (maintainer decision): `looper_settings` `view` includes the gateway's `enabled`, `port` and `aliases` (no key), and a new `gateway` action sets enabled/port, `alias_set` or `alias_delete`, always after the user confirms a before → after summary. Key reveal and rotation stay dashboard-only.
+  - Model-visible: the `looper_settings` description and schema gain the `gateway` action and argument; the global view result gains `gateway`.
+  - A runtime that closed stdin before the first prompt now raises `BrokenPipeError` instead of falling back.
+
 ## [2.14.177] - 2026-11-13
 
 ### Changed
