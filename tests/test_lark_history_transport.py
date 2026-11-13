@@ -1,6 +1,7 @@
 """CLI history and readiness contracts, without contacting Lark."""
 
 import asyncio
+import json
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -9,6 +10,47 @@ import pytest
 from looper.agents.channels import lark_cli
 from looper.agents.channels.lark_inbox import history_event
 from looper.agents.channels.lark_transport import CliTransport
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_search_preflight_preserves_authorization_type_without_api_code(monkeypatch, exit_code):
+    async def run():
+        payload = json.dumps({"ok": False, "error": {
+            "type": "authorization", "subtype": "missing_scope", "message": "access denied",
+            "missing_scopes": ["search:message", "im:message.reactions:read"]}}).encode()
+
+        async def communicate():
+            return (payload, b"") if not exit_code else (b"", payload)
+
+        async def spawn(*args, **kwargs):
+            return SimpleNamespace(returncode=exit_code, communicate=communicate)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        with pytest.raises(lark_cli.LarkCliError) as caught:
+            await lark_cli.run_json(["lark-cli", "im", "+messages-search"])
+        assert caught.value.error_type == "authorization"
+        assert caught.value.code is None
+        assert "search:message" in str(caught.value)
+        assert "im:message.reactions:read" in str(caught.value)
+
+    asyncio.run(asyncio.wait_for(run(), 3))
+
+
+def test_missing_raw_thread_message_is_not_admitted_as_a_manager_message(monkeypatch):
+    async def run_json(argv):
+        if "+threads-messages-list" in argv:
+            return {"messages": [{"message_id": "om_answer", "thread_id": "omt_gate", "msg_type": "text"}],
+                    "has_more": False}
+        return {"data": {"items": []}}
+
+    monkeypatch.setattr(lark_cli, "run_json", run_json)
+
+    async def run():
+        transport = CliTransport()
+        with pytest.raises(lark_cli.LarkCliError, match="reply references"):
+            await transport.list_thread_messages("omt_gate")
+
+    asyncio.run(asyncio.wait_for(run(), 3))
 
 
 @pytest.mark.parametrize("mode", ["group", "p2p"])

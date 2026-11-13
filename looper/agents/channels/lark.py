@@ -13,7 +13,7 @@ import logging
 import math
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from random import uniform as _reconnect_jitter
@@ -65,7 +65,17 @@ def _history_messages(messages: list[dict[str, Any]]) -> Iterator[dict[str, Any]
         yield from _history_messages(message.get("thread_replies") or [])
 
 
-def _history_created(message: dict[str, Any]) -> float:
+@dataclass(frozen=True)
+class _HistoryTime:
+    at: float
+    minute: bool = False
+
+    def before(self, cutoff: float) -> bool:
+        # FormatTime's local minute denotes [at, at + 60), not an exact :00.
+        return self.at + 60 <= cutoff if self.minute else self.at < cutoff
+
+
+def _history_created(message: dict[str, Any]) -> _HistoryTime:
     raw_time = message["create_time"]
     try:
         created = float(raw_time)
@@ -75,7 +85,8 @@ def _history_created(message: dict[str, Any]) -> float:
         created = datetime.fromisoformat(raw_time.replace("Z", "+00:00")).timestamp()
     if not math.isfinite(created):
         raise ValueError("history creation time is not finite")
-    return created
+    return _HistoryTime(created, isinstance(raw_time, str) and bool(
+        re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", raw_time)))
 
 
 def _not_received(attachments: list[Attachment]) -> str:
@@ -460,10 +471,10 @@ class LarkChannelAdapter(ChannelAdapter):
             stats["messages_found"] += 1
             try:
                 created = _history_created(message)
-                if created < time() - _CATCHUP_MAX_AGE:
+                if created.before(time() - _CATCHUP_MAX_AGE):
                     stats["too_old"] += 1
                     continue
-                if message.get("deleted") or created > end or created < start:
+                if message.get("deleted") or created.at > end or created.before(start):
                     continue
                 event = history_event(message, chat_id, page["chat_type"])
                 event["_catchup_created_at"] = created
@@ -487,13 +498,21 @@ class LarkChannelAdapter(ChannelAdapter):
             recent = getattr(self._transport, "list_recent_messages", None)
             if recent is not None:
                 # Find replies by their own creation time, independently of root age/rank.
-                async for page in self._history_pages(recent, chat_id, start=start, end=end):
-                    await self._catchup_messages(page, chat_id, start=start, end=end, stats=stats)
-                    for message in _history_messages(page["messages"][:50]):
-                        if thread_id := message.get("thread_id"):
-                            yield thread_id
-            # Supplement the window search with older roots. Once that search completes,
-            # history beyond this budget is not an unfinished scan of the recovery window.
+                try:
+                    async for page in self._history_pages(recent, chat_id, start=start, end=end):
+                        await self._catchup_messages(page, chat_id, start=start, end=end, stats=stats)
+                        for message in _history_messages(page["messages"][:50]):
+                            if thread_id := message.get("thread_id"):
+                                yield thread_id
+                except LarkCliError as exc:
+                    if exc.code != 99991672 and exc.error_type != "authorization":
+                        raise
+                    # Search preflights scopes beyond history permissions, even with
+                    # --no-reactions. Degrade to roots without freezing live checkpoints.
+                    stats["search_unavailable"] += 1
+                    logger.warning("%s: catch-up search unavailable; scanning roots: %s", self.channel_id, exc)
+            # Supplement search with older roots, within its own budget. Missing
+            # search scopes degrade recovery rather than freezing live checkpoints.
             async for roots in self._history_pages(
                 self._transport.list_threads, chat_id, allow_truncation=recent is not None,  # type: ignore[attr-defined]
             ):
@@ -510,7 +529,7 @@ class LarkChannelAdapter(ChannelAdapter):
                     self._transport.list_thread_messages, thread_id,  # type: ignore[attr-defined]
                 ):
                     pages.append(page)
-                    if any(_history_created(message) < start for message in page["messages"]):
+                    if any(_history_created(message).before(start) for message in page["messages"]):
                         # Thread pages descend by creation time: the rest predates the window.
                         break
                 # Fetch newest first for a bounded scan, admit oldest first as on the chat path.
@@ -523,7 +542,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 logger.warning("%s: catch-up thread failed", self.channel_id, exc_info=True)
 
     async def _catch_up(self, boundary: float | None) -> None:
-        stats = dict(chats_scanned=0, messages_found=0, handled=0, duplicates=0, too_old=0, failures=0)
+        stats = dict(chats_scanned=0, messages_found=0, handled=0, duplicates=0, too_old=0, failures=0,
+                     search_unavailable=0)
         expired = boundary is not None and time() - boundary > _CATCHUP_MAX_AGE
         try:
             if boundary is None or expired or not hasattr(self._transport, "list_messages"):
@@ -617,7 +637,8 @@ class LarkChannelAdapter(ChannelAdapter):
             message_id = event.get("message_id")
             if self._inbox is not None and message_id and self._inbox.processed(message_id):
                 return "duplicate"
-            if event.get("_catchup_created_at", time()) < time() - _CATCHUP_MAX_AGE:
+            created = event.get("_catchup_created_at")
+            if created is not None and created.before(time() - _CATCHUP_MAX_AGE):
                 return "too_old"
             handled = await self._process_lark_event(event)
             if self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT:

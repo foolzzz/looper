@@ -152,6 +152,225 @@ def test_gap_group_mention_reaches_bound_manager_once_after_start(tmp_path: Path
     asyncio.run(asyncio.wait_for(run(), 5))
 
 
+@pytest.mark.parametrize("thread", [False, True])
+@pytest.mark.parametrize("boundary_offset", [20, 0])
+def test_minute_history_overlaps_restart_window_without_ending_thread_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, thread: bool, boundary_offset: int,
+) -> None:
+    from datetime import datetime
+
+    async def run() -> None:
+        now = datetime(2026, 11, 12, 18, 31, 10).timestamp()
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
+        seed_boundary(tmp_path, now - boundary_offset)  # Starts at 18:30:40 or exactly 18:31:00.
+        messages = [history_message(f"om_minute_{minute}", at=now,
+                                   create_time=f"2026-11-12 18:{minute}")
+                    for minute in ("29", "30", "31", "32")]
+        transport = HistoryTransport()
+        transport.pages["oc_synthetic_group"] = [{
+            "messages": [] if thread else messages, "chat_type": "group", "has_more": False}]
+        tokens = []
+
+        async def roots(chat_id, *, page_token=""):
+            return {"threads": ["omt_minute"], "has_more": False}
+
+        async def replies(thread_id, *, page_token=""):
+            tokens.append(page_token)
+            # A page in the start minute must not hide another in-window reply.
+            return {"messages": [messages[1]] if not page_token else [
+                history_message("om_same_minute_next_page", at=now, create_time="2026-11-12 18:30"),
+                messages[0]], "chat_type": "group", "has_more": not page_token, "page_token": "next"}
+
+        if thread:
+            transport.list_threads, transport.list_thread_messages = roots, replies
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            ids = {m.payload["channel_context"]["message_id"] for m in bus.journal.undelivered()}
+            expected = ({"om_minute_30", "om_same_minute_next_page"} if thread else {
+                "om_minute_30", "om_minute_31"}) if boundary_offset else (set() if thread else {"om_minute_31"})
+            assert ids == expected
+            if thread:
+                assert tokens == (["", "next"] if boundary_offset else [""])
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+def test_minute_history_overlaps_age_limit_but_excludes_previous_minute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import datetime
+
+    async def run() -> None:
+        now = datetime(2026, 11, 12, 18, 31, 10).timestamp()
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
+        seed_boundary(tmp_path, now - 900)
+        transport = HistoryTransport()
+        transport.pages["oc_synthetic_group"] = [{"messages": [
+            history_message("om_cutoff", at=now, create_time="2026-11-12 18:16"),
+            history_message("om_before_cutoff", at=now, create_time="2026-11-12 18:15")],
+            "chat_type": "group", "has_more": False}]
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            assert [m.payload["channel_context"]["message_id"] for m in bus.journal.undelivered()] == ["om_cutoff"]
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("scope", ["search:message", "im:message.reactions:read"])
+def test_search_scope_failure_still_scans_roots_and_checkpoints_live_consumer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, scope: str,
+) -> None:
+    from looper.agents.channels import lark_cli
+    from looper.agents.channels.lark_inbox import LarkInbox
+    from looper.agents.channels.lark_transport import CliTransport
+
+    monkeypatch.setattr("looper.agents.channels.lark._HEARTBEAT_SECONDS", 0.01)
+
+    async def run() -> None:
+        clock = [time.time()]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        seed_boundary(tmp_path, clock[0] - 60)
+        bus = MessageBus(runtime_root=tmp_path)
+        root_calls = []
+
+        async def run_json(argv):
+            if "/open-apis/im/v1/chats/oc_synthetic_group" in argv:
+                return {"data": {"chat_mode": "group"}}
+            if "+chat-messages-list" in argv:
+                return {"messages": [history_message(f"om_main_{len(root_calls)}", at=clock[0] - 5)],
+                        "has_more": False}
+            if "+messages-search" in argv:
+                raise lark_cli.LarkCliError(
+                    f"missing scope: {scope}", code=99991672 if scope == "search:message" else None,
+                    error_type="authorization" if scope != "search:message" else None)
+            if "/open-apis/im/v1/messages" in argv:
+                root_calls.append(argv)
+                return {"data": {"items": [{"thread_id": "omt_old"}], "has_more": False}}
+            return {"messages": [history_message("om_root_reply", at=clock[0] - 10,
+                                                 parent_id="om_gate", root_id="om_gate")], "has_more": False}
+
+        monkeypatch.setattr(lark_cli, "run_json", run_json)
+        try:
+            for restart in range(2):
+                transport = HistoryTransport()
+                cli = CliTransport()
+                for name in ("list_messages", "list_recent_messages", "list_threads", "list_thread_messages"):
+                    setattr(transport, name, getattr(cli, name))
+                instance = adapter(tmp_path, transport)
+                try:
+                    with caplog.at_level("INFO", logger="looper.agents.channels.lark"):
+                        await instance.start(bus)
+                        await catchup_done(instance, transport)
+                    assert len(root_calls) == restart + 1
+                    assert instance._catchup_complete
+                    saved = asyncio.Event()
+                    checkpoint = instance._inbox.checkpoint
+
+                    def save(at):
+                        checkpoint(at)
+                        saved.set()
+
+                    monkeypatch.setattr(instance._inbox, "checkpoint", save)
+                    clock[0] += 16 * 60
+                    await asyncio.wait_for(saved.wait(), 1)
+                    assert instance._inbox.boundary == clock[0]
+                finally:
+                    await instance.stop()
+                inbox = LarkInbox(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
+                try:
+                    assert inbox.boundary == clock[0]
+                finally:
+                    inbox.close()
+                clock[0] += 30
+            assert [m.payload["channel_context"]["message_id"] for m in bus.journal.undelivered()] == [
+                "om_main_0", "om_root_reply", "om_main_1"]
+            assert any(r.levelname == "WARNING" and scope in r.message for r in caplog.records)
+        finally:
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("source", ["chat", "search", "thread"])
+def test_shortcut_thread_reply_keeps_raw_references_for_gate_routing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str,
+) -> None:
+    from looper.agents import gate_routing
+    from looper.agents.channels import lark_cli
+    from looper.agents.channels.lark_transport import CliTransport
+    from looper.agents.message import manager_address
+
+    async def run() -> None:
+        now = time.time()
+        seed_boundary(tmp_path, now - 60)
+        reply = history_message("om_answer", at=now - 5, thread_id="omt_gate")
+        raw = {"message_id": "om_answer", "parent_id": "om_gate_question", "root_id": "om_thread_root"}
+
+        async def run_json(argv):
+            if "/open-apis/im/v1/chats/oc_synthetic_group" in argv:
+                return {"data": {"chat_mode": "group"}}
+            if "/open-apis/im/v1/messages/om_answer" in argv:
+                return {"data": {"items": [raw]}}
+            if "/open-apis/im/v1/messages" in argv:
+                return {"data": {"items": [{"thread_id": "omt_gate"}], "has_more": False}}
+            kind = ("chat" if "+chat-messages-list" in argv else
+                    "search" if "+messages-search" in argv else "thread")
+            return {"messages": [reply] if kind == source else [], "has_more": False}
+
+        posted = []
+
+        async def find_reference(channel, chat, refs, **kwargs):
+            assert refs == ["om_gate_question"]
+            return {"task_id": "task-synthetic", "step_key": "g1", "state": "open"}
+
+        async def post_message(*args, **kwargs):
+            posted.append((args, kwargs))
+            return {"delivered": "delivered"}
+
+        async def task_name(task_id):
+            return "Synthetic task"
+
+        monkeypatch.setattr(lark_cli, "run_json", run_json)
+        monkeypatch.setattr(gate_routing.db_user_gates, "find_reference", find_reference)
+        monkeypatch.setattr(gate_routing, "post_message", post_message)
+        monkeypatch.setattr(gate_routing, "task_name", task_name)
+        transport = HistoryTransport()
+        cli = CliTransport()
+        for name in ("list_messages", "list_recent_messages", "list_threads", "list_thread_messages"):
+            setattr(transport, name, getattr(cli, name))
+        instance = adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            await instance.start(bus)
+            await catchup_done(instance, transport)
+            (message,) = bus.journal.undelivered()
+            assert message.payload["channel_context"]["reply_to"] == raw["parent_id"]
+            assert message.payload["channel_context"]["root_id"] == raw["root_id"]
+            routed = await gate_routing.route(message, has_planner=lambda _: True, bus=bus,
+                                             source=manager_address("manager-helper"))
+            assert routed.kind is gate_routing.RouteKind.DELIVERED
+            assert posted[0][0] == ("task-synthetic", "g1", {"text": "hello"})
+            assert posted[0][1]["has_planner"] is True
+            assert posted[0][1]["origin"]["external_id"] == "om_answer"
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
 @pytest.mark.parametrize("mode", ["group", "topic"])
 def test_restart_recovers_nested_and_old_thread_mentions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
