@@ -56,6 +56,7 @@ async def _stop_consumer(process: asyncio.subprocess.Process) -> None:
         process.kill()
     except ProcessLookupError:
         pass
+    await process.wait()
 
 
 class CliTransport:
@@ -63,6 +64,74 @@ class CliTransport:
 
     def __init__(self, profile: str = "") -> None:
         self._profile = profile
+        self.consumer_started = asyncio.Event()
+        self._history_chat_types: dict[str, str] = {}
+
+    async def _history_chat_type(self, chat_id: str) -> str:
+        # History omits chat mode. Never infer p2p from a missing mention: that would admit group chatter.
+        if chat_id not in self._history_chat_types:
+            info = await lark_cli.run_json([
+                *lark_cli._base(self._profile), "api", "GET", f"/open-apis/im/v1/chats/{chat_id}", "--as", "bot"])
+            mode = (info.get("data") or {}).get("chat_mode")
+            if mode not in {"group", "p2p", "topic"}:
+                raise lark_cli.LarkCliError("history chat mode is unavailable to the bot")
+            self._history_chat_types[chat_id] = "p2p" if mode == "p2p" else "group"
+        return self._history_chat_types[chat_id]
+
+    async def list_messages(self, chat_id: str, *, start: float, end: float,
+                            page_token: str = "") -> dict[str, Any]:
+        chat_type = await self._history_chat_type(chat_id)
+        result = await lark_cli.run_json(lark_cli.history_command(
+            chat_id, start=start, end=end, page_token=page_token, profile=self._profile))
+        return {**self._history_page(result), "chat_type": chat_type}
+
+    @staticmethod
+    def _history_page(result: dict[str, Any]) -> dict[str, Any]:
+        page = result.get("data", result)
+        if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+            raise lark_cli.LarkCliError("history did not return a message page")
+        return {**page, "messages": [CliTransport._history_message(message) for message in page["items"]]}
+
+    @staticmethod
+    def _history_message(message: dict[str, Any]) -> dict[str, Any]:
+        # Use the live renderer while preserving the raw history routing fields.
+        from .lark_stream import _render
+
+        kind = message["msg_type"]
+        mentions = [{**mention, "key": mention.get("key") or "", "name": mention.get("name") or ""}
+                    for mention in message.get("mentions") or []]
+        content = (message.get("body") or {}).get("content") or ""
+        if kind == "text":
+            try:
+                body = json.loads(content) if content else {}
+            except (ValueError, TypeError):
+                body = {}
+            content = body.get("text") if isinstance(body, dict) else ""
+            content = content if isinstance(content, str) else ""
+            for mention in sorted(mentions, key=lambda item: len(item["key"]), reverse=True):
+                if mention["key"]:
+                    content = content.replace(mention["key"], "@" + mention["name"])
+        else:
+            content = _render(kind, content, mentions)
+        return {**message, "content": content, "mentions": mentions,
+                "thread_replies": [CliTransport._history_message(reply)
+                                   for reply in message.get("thread_replies") or []]}
+
+    async def list_threads(self, chat_id: str, *, page_token: str = "") -> dict[str, Any]:
+        if await self._history_chat_type(chat_id) == "p2p":
+            return {"threads": [], "has_more": False}
+        result = await lark_cli.run_json(lark_cli.thread_roots_command(
+            chat_id, page_token=page_token, profile=self._profile))
+        page = result.get("data", result)
+        if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+            raise lark_cli.LarkCliError("history did not return a thread root page")
+        return {**page, "threads": list(dict.fromkeys(item["thread_id"] for item in page["items"]
+                                                    if item.get("thread_id")))}
+
+    async def list_thread_messages(self, thread_id: str, *, page_token: str = "") -> dict[str, Any]:
+        result = await lark_cli.run_json(lark_cli.thread_history_command(
+            thread_id, page_token=page_token, profile=self._profile))
+        return {**self._history_page(result), "chat_type": "group"}
 
     async def send(self, *, chat_id: str | None = None, user_id: str | None = None,
                    text: str | None = None, markdown: str | None = None,
@@ -112,10 +181,11 @@ class CliTransport:
         return _check_lark_cli_available()
 
     async def aclose(self) -> None:
-        pass
+        self._history_chat_types.clear()
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         """Keep stdin open until cancellation, then let lark-cli end its subscription."""
+        self.consumer_started.clear()
         process = await asyncio.create_subprocess_exec(
             *lark_cli.consume_command(self._profile), env=lark_cli.environment(),
             stdin=asyncio.subprocess.PIPE,
@@ -130,6 +200,8 @@ class CliTransport:
             async for raw in process.stderr:
                 text = raw.decode("utf-8", errors="replace").strip()
                 if text:
+                    if text == f"[event] ready event_key={lark_cli.RECEIVE_EVENT}":
+                        self.consumer_started.set()
                     stderr_tail.append(text[:300])
 
         stderr_task = asyncio.create_task(_read_stderr())
@@ -141,6 +213,9 @@ class CliTransport:
                     continue
                 try:
                     event = json.loads(line)
+                    # Older CLIs may omit the ready marker; a live event also proves subscription.
+                    if isinstance(event, dict) and event.get("type") == lark_cli.RECEIVE_EVENT:
+                        self.consumer_started.set()
                     yield event
                 except Exception:
                     logger.debug("skipping non-JSON lark event line")
@@ -148,6 +223,7 @@ class CliTransport:
             stopped = True
             raise
         finally:
+            self.consumer_started.clear()
             await _stop_consumer(process)
             stderr_task.cancel()
             try:
