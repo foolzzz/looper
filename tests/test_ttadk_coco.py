@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -136,6 +137,20 @@ def test_coco_wrapper_preflight_uses_ttadk_then_native_login_and_model(stand_ins
     invocations = [json.loads(line) for line in calls.read_text().splitlines()]
     assert invocations == [["ttadk", "models", "-t", "trae-cli", "-f", "json"],
                            ["traex", "login", "status"], ["traex", "models", "--json"]]
+
+
+@pytest.mark.parametrize("catalog", [None, {"gpt-5.5": "GPT-5.5"}, {"other": "Other"}])
+def test_coco_view_uses_only_the_cached_model_catalog(stand_ins, monkeypatch, catalog):
+    executable, calls, _ = stand_ins
+    now = time.monotonic()
+    monkeypatch.setitem(ttadk._probed, (executable, "trae-cli"), (now, None))
+    monkeypatch.setitem(coco_login._probed, "traex", (
+        now, coco_login.LoginStatus(coco_login.LoginState.LOGGED_IN, "logged in")))
+    if catalog is not None:
+        monkeypatch.setitem(coco_login._models, "traex", (now, catalog))
+    problem = asyncio.run(agent_settings._login_problem(_launch(executable).profile, wait=False))
+    assert bool(problem) is (catalog is not None and "gpt-5.5" not in catalog)
+    assert not calls.exists(), "a view started a subprocess"
 
 
 def test_coco_wrapper_pairing_refuses_api_key_without_gateway_claim(stand_ins):

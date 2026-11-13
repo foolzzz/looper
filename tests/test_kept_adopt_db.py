@@ -157,7 +157,7 @@ async def _pools(db, tmp_path, monkeypatch, *, timeout=0, cap=None, rooms=False,
                          "FROM llm_models WHERE provider_id = 'prov-claude-subscription' AND name = 'sonnet'")
         await db.execute("INSERT INTO agent_setting_layers (scope, role, profile_id) VALUES "
                          "('role', $1, 'profile-primary')", 'reviewer' if review else 'worker')
-        monkeypatch.setattr(agent_settings, '_login_problem', AsyncMock(side_effect=lambda profile:
+        monkeypatch.setattr(agent_settings, '_login_problem', AsyncMock(side_effect=lambda profile, *, wait=True:
                             'profile cannot start' if profile.id in ('profile-primary', 'profile-middle') else None))
         load = agent_settings.load_agent_settings
     monkeypatch.setattr(worker, 'KeptRun', ShortKeptRun)
