@@ -37,6 +37,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -221,18 +222,46 @@ _PROBE_TTL_SEC = 30.0
 _probed: tuple[float, LoginStatus] | None = None
 
 
-def cached_probe() -> LoginStatus:
-    """``probe_login``, at most once per ``_PROBE_TTL_SEC`` (the dashboard asks every few seconds)."""
+_probe_lock = threading.Lock()
+
+
+def _refresh_probe() -> LoginStatus:
     global _probed
-    now = time.monotonic()
-    if _probed is None or now - _probed[0] > _PROBE_TTL_SEC:
-        _probed = (now, probe_login())
+    if _probed is None or time.monotonic() - _probed[0] > _PROBE_TTL_SEC:
+        status = probe_login()
+        _probed = (time.monotonic(), status)
     return _probed[1]
+
+
+def cached_probe() -> LoginStatus:
+    """Wait for a current answer, sharing the background status probe."""
+    with _probe_lock:
+        return _refresh_probe()
+
+
+def _background_probe() -> None:
+    try:
+        _refresh_probe()
+    finally:
+        _probe_lock.release()
+
+
+def cached_status() -> LoginStatus | None:
+    """Return the last answer immediately; refresh stale state in one daemon thread."""
+    probed = _probed
+    if (probed is None or time.monotonic() - probed[0] > _PROBE_TTL_SEC) and _probe_lock.acquire(blocking=False):
+        try:
+            threading.Thread(target=_background_probe, name="codex-login-status", daemon=True).start()
+        except BaseException:
+            _probe_lock.release()
+            raise
+    return probed[1] if probed is not None else None
 
 
 def forget_probe() -> None:
     global _probed
-    _probed = None
+    with _probe_lock:
+        _probed = None
 
 
 async def login_view() -> dict[str, str]:

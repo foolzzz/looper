@@ -34,6 +34,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -182,7 +183,7 @@ def _check_login(path: str) -> Check:
     return Check("claude_login", "Claude login", FAIL, "not logged in", CLAUDE_LOGIN_FIX)
 
 
-def check_codex_login(profiles: int | None, problem: dict[str, str] | None, probe: Callable[[], LoginStatus]) -> Check:
+def check_codex_login(profiles: int | None, problem: dict[str, str] | None, probe: Callable[[], LoginStatus | None]) -> Check:
     """Can the Agent Profiles that use Codex's own login run? ``profiles``: how many there are (``None``:
     unknown); ``problem``: the forked login a run recorded; ``probe`` reads ``codex login status``."""
     from .runtimes.codex_login import PROBLEM_FIX, LoginState
@@ -196,6 +197,8 @@ def check_codex_login(profiles: int | None, problem: dict[str, str] | None, prob
         return Check("codex_login", "Codex login", FAIL,
                      f"unavailable since {problem.get('at') or '?'}: {problem.get('detail')}", PROBLEM_FIX)
     status = probe()
+    if status is None:
+        return Check("codex_login", "Codex login", PENDING, "checking")
     if status.state is LoginState.CHATGPT:
         return Check("codex_login", "Codex login", OK, status.detail)
     if status.state is LoginState.UNKNOWN:
@@ -215,11 +218,11 @@ async def codex_login_check() -> Check:
     except Exception:
         logger.warning("cannot read whether an Agent Profile uses the Codex login", exc_info=True)
         profiles, problem = None, None
-    return await asyncio.to_thread(check_codex_login, profiles, problem, codex_login.cached_probe)
+    return check_codex_login(profiles, problem, codex_login.cached_status)
 
 
 def check_coco_login(profiles: int | None, problem: dict[str, str] | None,
-                     probe: Callable[[], coco_login.LoginStatus]) -> Check:
+                     probe: Callable[[], coco_login.LoginStatus | None]) -> Check:
     """Check coco's machine login only when an Agent Profile uses it."""
     from .runtimes.coco_login import PROBLEM_FIX, LoginState
 
@@ -232,6 +235,8 @@ def check_coco_login(profiles: int | None, problem: dict[str, str] | None,
         return Check("coco_login", "coco login", FAIL,
                      f"unavailable since {problem.get('at') or '?'}: {problem.get('detail')}", PROBLEM_FIX)
     status = probe()
+    if status is None:
+        return Check("coco_login", "coco login", PENDING, "checking")
     if status.state is LoginState.LOGGED_IN:
         return Check("coco_login", "coco login", OK, status.detail)
     if status.state is LoginState.UNKNOWN:
@@ -250,7 +255,7 @@ async def coco_login_check() -> Check:
     except Exception:
         logger.warning("cannot read whether an Agent Profile uses the coco login", exc_info=True)
         profiles, problem = None, None
-    return await asyncio.to_thread(check_coco_login, profiles, problem, coco_login.cached_probe)
+    return check_coco_login(profiles, problem, coco_login.cached_status)
 
 
 def check_grok_login(profiles: int | None, problem: dict[str, str] | None,
@@ -287,7 +292,7 @@ async def grok_login_check() -> Check:
     return await asyncio.to_thread(check_grok_login, profiles, problem, grok_login.cached_probe)
 
 
-def check_cursor_login(profiles: int | None, probe: Callable[[], cursor_login.LoginStatus]) -> Check:
+def check_cursor_login(profiles: int | None, probe: Callable[[], cursor_login.LoginStatus | None]) -> Check:
     """Check Cursor's existing login only when an Agent Profile uses it."""
     from .runtimes.cursor_login import LoginState
 
@@ -297,6 +302,8 @@ def check_cursor_login(profiles: int | None, probe: Callable[[], cursor_login.Lo
     if not profiles:
         return Check("cursor_login", "Cursor login", SKIP, "not checked: no Agent Profile uses the Cursor login")
     status = probe()
+    if status is None:
+        return Check("cursor_login", "Cursor login", PENDING, "checking")
     if status.state is LoginState.LOGGED_IN:
         return Check("cursor_login", "Cursor login", OK, status.detail)
     if status.state is LoginState.UNKNOWN:
@@ -315,7 +322,7 @@ async def cursor_login_check() -> Check:
     except Exception:
         logger.warning("cannot read whether an Agent Profile uses the Cursor login", exc_info=True)
         profiles = None
-    return await asyncio.to_thread(check_cursor_login, profiles, cursor_login.cached_probe)
+    return check_cursor_login(profiles, cursor_login.cached_status)
 
 
 async def _ttadk_runtime_rows(*, pool: Any = None) -> list[dict[str, Any]]:
@@ -366,15 +373,38 @@ async def ttadk_check() -> Check:
     return await check_ttadk(runtimes, wait=False)
 
 
-async def _llmrec_storage(conn=None):
+_storage_cache: tuple[Any, float, tuple[int, float]] | None = None
+_storage_refresh: tuple[Any, asyncio.Task] | None = None
+
+
+async def _llmrec_storage(conn=None, *, cached: bool = True):
     from .llmrec import settings
     from ..db import llm_requests
     from ..db.connection import get_pool
 
-    return await llm_requests.logical_bytes(conn if conn is not None else get_pool()), await settings.max_total_mb(conn)
+    global _storage_cache, _storage_refresh
+    source = conn if conn is not None else get_pool()
+    if cached and _storage_cache is not None and _storage_cache[0] is source:
+        if time.monotonic() - _storage_cache[1] < 60:
+            return _storage_cache[2]
+
+    async def read():
+        global _storage_cache
+        result = await llm_requests.logical_bytes(source), await settings.max_total_mb(conn)
+        if cached:
+            _storage_cache = (source, time.monotonic(), result)
+        return result
+
+    if not cached:
+        return await read()
+    # Share cold scans across polls; a request timeout must not cancel the scan.
+    if _storage_refresh is None or _storage_refresh[0] is not source or _storage_refresh[1].done():
+        _storage_refresh = (source, asyncio.create_task(read()))
+    return await asyncio.shield(_storage_refresh[1])
 
 
-async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = "") -> Check:
+async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = "",
+                       proxy_status: dict | None = None, cached: bool = True) -> Check:
     """Request recording is advisory; forwarding and writer counters expose missing captures."""
     from .llmrec.control import controller
     from ..db import system_settings
@@ -382,14 +412,16 @@ async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = 
     control = controller()
     try:
         storage = None
-        if control is None:
+        if proxy_status is not None:
+            enabled, proxy = proxy_status.get("enabled", False), proxy_status.get("proxy", {"state": "unavailable"})
+        elif control is None:
             if database_url:
                 import asyncpg
 
                 conn = await asyncpg.connect(database_url, timeout=_DATABASE_TIMEOUT_SECONDS)
                 try:
                     values = await system_settings.get_settings(["llmrec.enabled"], pool=conn)
-                    storage = await _llmrec_storage(conn)
+                    storage = await _llmrec_storage(conn, cached=False)
                 finally:
                     await conn.close()
             else:
@@ -399,9 +431,9 @@ async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = 
             if enabled and runtime_root is not None:
                 from .llmrec.control import ProxyControl
 
-                proxy = (await ProxyControl(runtime_root, "", enabled=True).status())["proxy"]
+                proxy = (await ProxyControl(runtime_root, "", enabled=True).status(cached=cached))["proxy"]
         else:
-            status = await control.status()
+            status = await control.status(cached=cached)
             enabled, proxy = status["enabled"], status["proxy"]
         if enabled and proxy["state"] in ("unavailable", "stopped"):
             errors = f"; write_errors={proxy['write_errors']} since proxy startup" if proxy.get("write_errors") else ""
@@ -414,7 +446,7 @@ async def llmrec_check(*, runtime_root: Path | None = None, database_url: str = 
             warnings.append(f"{proxy['state']}; dropped={proxy.get('dropped', 0)}, "
                             f"write_errors={proxy.get('write_errors', 0)}, gaps={proxy.get('gaps', 0)} "
                             f"since proxy startup, most_common_gap={common}")
-        stored, cap = storage if storage is not None else await _llmrec_storage()
+        stored, cap = storage if storage is not None else await _llmrec_storage(cached=cached)
         usage = f"recorded requests use {stored / (1024 * 1024):.1f} MiB of {cap:g} MiB cap"
         if warnings or stored > 0.9 * cap * 1024 * 1024:
             return Check("llmrec", "Model request recording", WARN, "; ".join([*warnings, usage]))
@@ -433,7 +465,8 @@ async def _translated_profile_rows(*, pool=None):
         JOIN llm_models m ON m.id = p.model_id""")
 
 
-async def gateway_check(*, runtime_root: Path | None = None, database_url: str = "") -> Check:
+async def gateway_check(*, runtime_root: Path | None = None, database_url: str = "",
+                        proxy_status: dict | None = None, cached: bool = True) -> Check:
     """A translated profile requires a gateway that can start on demand, even with recording disabled."""
     from .llmrec.control import controller, ProxyControl
     from looper.db import system_settings
@@ -459,7 +492,8 @@ async def gateway_check(*, runtime_root: Path | None = None, database_url: str =
         control = controller()
         if control is None and runtime_root is not None:
             control = ProxyControl(runtime_root, "", enabled=False)
-        status = await control.status() if control is not None else {}
+        status = proxy_status if proxy_status is not None else (
+            await control.status(cached=cached) if control is not None else {})
         proxy = status.get("proxy", {})
         if proxy.get("state") is None:
             return Check("gateway", "Local gateway", WARN, "gateway status unavailable")
@@ -723,8 +757,8 @@ async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Chec
     pg_dump, _ = await asyncio.to_thread(check_pg_dump, facts.server_version_num, facts.schema_change_pending, ops)
     git = await asyncio.to_thread(check_git)
     return [database, *claude, codex, grok, cursor, coco, await check_ttadk(facts.ttadk_runtimes),
-            await llmrec_check(runtime_root=ops.runtime_root, database_url=ops.database_url),
-            await gateway_check(runtime_root=ops.runtime_root, database_url=ops.database_url),
+            await llmrec_check(runtime_root=ops.runtime_root, database_url=ops.database_url, cached=False),
+            await gateway_check(runtime_root=ops.runtime_root, database_url=ops.database_url, cached=False),
             check_lark_cli(facts.lark_enabled),
             pg_dump, git, check_projects_root(ops.projects_root),
             await check_step_worktrees(facts.worktree_projects)]

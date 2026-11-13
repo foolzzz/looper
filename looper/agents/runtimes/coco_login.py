@@ -25,6 +25,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -172,17 +173,44 @@ def probe_login(executable: str = "coco", target: Path | None = None) -> LoginSt
 _probed: dict[str, tuple[float, LoginStatus]] = {}
 
 
-def cached_probe(executable: str = "coco") -> LoginStatus:
-    now = time.monotonic()
+_probe_lock = threading.Lock()
+
+
+def _refresh_probe(executable: str) -> LoginStatus:
     cached = _probed.get(executable)
-    if cached is None or now - cached[0] > _PROBE_TTL_SEC:
-        cached = (now, probe_login(executable))
-        _probed[executable] = cached
+    if cached is None or time.monotonic() - cached[0] > _PROBE_TTL_SEC:
+        status = probe_login(executable)
+        cached = _probed[executable] = (time.monotonic(), status)
     return cached[1]
 
 
+def cached_probe(executable: str = "coco") -> LoginStatus:
+    with _probe_lock:
+        return _refresh_probe(executable)
+
+
+def _background_probe(executable: str) -> None:
+    try:
+        _refresh_probe(executable)
+    finally:
+        _probe_lock.release()
+
+
+def cached_status(executable: str = "coco") -> LoginStatus | None:
+    """Return the last answer without waiting; share refresh with launch-time probes."""
+    probed = _probed.get(executable)
+    if (probed is None or time.monotonic() - probed[0] > _PROBE_TTL_SEC) and _probe_lock.acquire(blocking=False):
+        try:
+            threading.Thread(target=_background_probe, args=(executable,), name="coco-login-status", daemon=True).start()
+        except BaseException:
+            _probe_lock.release()
+            raise
+    return probed[1] if probed is not None else None
+
+
 def forget_probe() -> None:
-    _probed.clear()
+    with _probe_lock:
+        _probed.clear()
 
 
 async def login_view() -> dict[str, str]:

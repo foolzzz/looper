@@ -188,7 +188,7 @@ def test_cursor_doctor_check(profiles, state, expected, monkeypatch):
 
     monkeypatch.setattr(db_registry, "login_profile_count", count)
     monkeypatch.setattr(cursor_login, "probe_login", probe)
-    monkeypatch.setattr(cursor_login, "cached_probe", probe)
+    monkeypatch.setattr(cursor_login, "cached_status", probe)
     check = asyncio.run(self_check.LOGIN_CHECKS["cursor_login"]())
     assert (check.id, check.label, check.status) == ("cursor_login", "Cursor login", expected)
     assert len(calls) == (1 if profiles else 0)

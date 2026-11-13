@@ -200,6 +200,8 @@ class AgentHTTPServer:
         self._password_error: operator_auth.OperatorTokenError | None = None
         # The startup self-check (self_check.Check.to_dict), reported on /api/v1/system/status.
         self._self_checks = self_checks or []
+        self._check_tasks: dict[str, asyncio.Task] = {}
+        self._check_results: dict[str, dict[str, str]] = {}
         self._keeper_check_at = 0.0
         self._keeper_orphans = 0
         self._ops_config = ops_config
@@ -1004,10 +1006,57 @@ class AgentHTTPServer:
 
     async def _checks_now(self) -> list[dict[str, str]]:
         """The startup self-check, with the runtimes' own logins read now: a run may have found one forked since."""
-        now = {check.get("id"): (await self_check.LOGIN_CHECKS[check["id"]]()).to_dict()
-               for check in self._self_checks if check.get("id") in self_check.LOGIN_CHECKS
-               and not (check.get("status") == self_check.PENDING
-                        and check.get("detail") == "Startup check in progress")}
+        # Keep shielded tasks alive across polls, including a poll whose client disconnects.
+        if not hasattr(self, "_check_tasks"):
+            self._check_tasks = {}
+            self._check_results = {}
+        proxy_task = None
+
+        async def proxy_status():
+            from .llmrec.control import controller
+
+            control = controller()
+            return await control.status(cached=True) if control is not None else None
+
+        async def refresh(check_id):
+            nonlocal proxy_task
+            if check_id in ("llmrec", "gateway"):
+                if proxy_task is None:
+                    proxy_task = asyncio.create_task(proxy_status())
+                return await self_check.LOGIN_CHECKS[check_id](
+                    proxy_status=await asyncio.shield(proxy_task), cached=True)
+            return await self_check.LOGIN_CHECKS[check_id]()
+
+        def finished(check_id, task):
+            self._check_tasks.pop(check_id, None)
+            try:
+                self._check_results[check_id] = task.result().to_dict()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("status check failed: %s", check_id)
+
+        async def current(check):
+            check_id = check.get("id")
+            task = self._check_tasks.get(check_id)
+            if task is None:
+                task = self._check_tasks[check_id] = asyncio.create_task(refresh(check_id))
+                task.add_done_callback(lambda done: finished(check_id, done))
+            try:
+                return (await asyncio.wait_for(asyncio.shield(task), timeout=1.0)).to_dict()
+            except TimeoutError:
+                logger.warning("status check still running after 1s: %s", check_id)
+                previous = self._check_results.get(check_id, check)
+                return {**previous, "detail": previous.get("detail", "") + " (still checking)"}
+            except Exception:
+                return self._check_results.get(check_id, check)
+
+        refreshable = [check for check in self._self_checks if check.get("id") in self_check.LOGIN_CHECKS
+                       and not (check.get("status") == self_check.PENDING
+                                and check.get("detail") == "Startup check in progress")]
+        # A startup snapshot needs no work. Return it without yielding to blocking startup imports.
+        now = dict(zip((check["id"] for check in refreshable),
+                       await asyncio.gather(*(current(check) for check in refreshable)))) if refreshable else {}
         checks = [now.get(check.get("id"), check) for check in self._self_checks]
         pool = self._worker_pool
         if pool is None or not (status := pool.keeper_status()):
