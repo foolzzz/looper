@@ -7,6 +7,10 @@ import re
 from .connection import get_pool
 
 ALIAS = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+_TARGET = """SELECT m.id FROM llm_models m JOIN llm_providers p ON p.id=m.provider_id
+    JOIN llm_provider_secrets s ON s.provider_id=p.id
+    WHERE m.id=$2 AND m.protocol='openai-chat' AND p.auth='api_key' AND p.enabled AND s.api_key<>''"""
+_TARGET_ERROR = "target must be an openai-chat model on an enabled API-key provider with a saved key"
 
 
 def check_alias(alias):
@@ -28,16 +32,22 @@ async def set_alias(alias, model_id, *, pool=None):
     pool = pool if pool is not None else get_pool()
     # Validate in the write itself so a concurrent account change cannot slip between reads.
     result = await pool.execute(
-        """INSERT INTO gateway_aliases(alias,model_id)
-        SELECT $1,m.id FROM llm_models m JOIN llm_providers p ON p.id=m.provider_id
-        JOIN llm_provider_secrets s ON s.provider_id=p.id
-        WHERE m.id=$2 AND m.protocol='openai-chat' AND p.auth='api_key' AND p.enabled AND s.api_key<>''
+        f"""INSERT INTO gateway_aliases(alias,model_id)
+        SELECT $1,target.id FROM ({_TARGET}) target
         ON CONFLICT(alias) DO UPDATE SET model_id=EXCLUDED.model_id,updated_at=now()""",
         alias,
         model_id,
     )
     if result == "INSERT 0 0":
-        raise ValueError("target must be an openai-chat model on an enabled API-key provider with a saved key")
+        raise ValueError(_TARGET_ERROR)
+
+
+async def check_binding(alias, model_id, *, pool=None):
+    """Read-only confirmation preflight; set_alias rechecks the target atomically when writing."""
+    check_alias(alias)
+    target = _TARGET.replace("$2", "$1")
+    if not await (pool if pool is not None else get_pool()).fetchval(f"SELECT EXISTS({target})", model_id):
+        raise ValueError(_TARGET_ERROR)
 
 
 async def delete_alias(alias, *, pool=None):

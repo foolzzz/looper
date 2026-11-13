@@ -819,6 +819,7 @@ database, a disposable `looper serve`, and fake or real mode.
 | `schedule_no_profiles` | the other direction: a schedule asked for with no word about profiles gets none (the project's apply) |
 | `schedule_enable_declined` | the same schedule created disabled; 「启用」 waits for a confirmation, and when the user then says to leave it, it stays disabled and no enable call runs |
 | `scheduler_settings` | the schedules' default run timeout (`looper_settings`, action `scheduler`) waits for the user's word in the next message, and 「确认。」 changes it to 1800 s |
+| `gateway_settings` | the local gateway is read with `looper_settings view`; a port change shows before → after and leaves the disabled gateway unchanged until 「确认。」 saves it; requests to reveal or rotate its key are directed to dashboard Settings, with no key operation or key in the reply |
 | `schedule_timeout` | a schedule created with a 20-minute run timeout the user names: it has 1200 s itself and the system default stays at the built-in value |
 | `schedule_timeout_unnamed` | the same schedule created with no timeout named: it follows the system default (`"default"`) |
 | `schedule_ask_project` | a schedule without a project: the Manager asks, and creates and changes nothing |

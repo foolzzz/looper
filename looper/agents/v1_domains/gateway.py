@@ -2,7 +2,7 @@
 
 from looper.db import gateway as db, system_settings
 from looper.gateway_env import gateway_environment
-from ..api_v1 import Operation, _array, _object, _STR, _INT
+from ..api_v1 import Operation, _array, _object, _STR, _INT, validate_arguments
 from ..llmrec.control import controller
 from ..llmrec.gateway import GatewayKey
 from ..ops import ErrorCode, OpError, PublicOpError
@@ -83,7 +83,7 @@ async def settings(root):
         "enabled": values.get("gateway.enabled") == "true",
         "port": port,
         "url": url,
-        "key_exists": GatewayKey(root).exists(),
+        "key_exists": root is not None and GatewayKey(root).exists(),
         "aliases": aliases,
         "client_environment": {row["alias"]: gateway_environment(url, row["alias"]) for row in aliases} if url else {},
         "proxy": proxy,
@@ -93,23 +93,30 @@ async def settings(root):
     }
 
 
-async def run(server, operation, arguments, principal, headers):
-    root = server._runtime_root
+async def check_change(action, arguments):
+    """Validate a non-credential change without saving it, including alias targets."""
+    operation = next((op for op in OPERATIONS if op.operation_id == "gateway." + action
+                      and action in ("update", "alias_set", "alias_delete")), None)
+    if operation is None:
+        raise OpError(ErrorCode.INVALID, "unsupported local gateway change")
+    validate_arguments(operation.request, arguments)
+    try:
+        if action == "alias_set":
+            await db.check_binding(arguments["alias"], arguments["model_id"])
+    except ValueError as error:
+        raise OpError(ErrorCode.INVALID, str(error)) from None
+
+
+async def apply_change(root, action, arguments):
+    """The dashboard and confirmed Manager writes share validation and storage; no key operations."""
     if root is None:
         raise OpError(ErrorCode.UNAVAILABLE, "local gateway runtime unavailable")
-    action = operation.operation_id.rsplit(".", 1)[1]
+    await check_change(action, arguments)
     try:
         if action == "alias_set":
             await db.set_alias(arguments["alias"], arguments["model_id"])
         elif action == "alias_delete":
             await db.delete_alias(arguments["alias"])
-        elif action in ("key_reveal", "key_rotate"):
-            key = GatewayKey(root)
-            if action == "key_rotate":
-                return {"key": key.rotate()}
-            if not key.exists():
-                raise PublicOpError(ErrorCode.NOT_FOUND, "enable the local gateway to create its key")
-            return {"key": key.reveal()}
         elif action == "update":
             control = controller()
             if control is None:
@@ -120,3 +127,23 @@ async def run(server, operation, arguments, principal, headers):
     except OSError:
         raise OpError(ErrorCode.UNAVAILABLE, "local gateway configuration unavailable") from None
     return await settings(root)
+
+
+async def run(server, operation, arguments, principal, headers):
+    root = server._runtime_root
+    if root is None:
+        raise OpError(ErrorCode.UNAVAILABLE, "local gateway runtime unavailable")
+    action = operation.operation_id.rsplit(".", 1)[1]
+    if action in ("key_reveal", "key_rotate"):
+        try:
+            key = GatewayKey(root)
+            if action == "key_rotate":
+                return {"key": key.rotate()}
+            if not key.exists():
+                raise PublicOpError(ErrorCode.NOT_FOUND, "enable the local gateway to create its key")
+            return {"key": key.reveal()}
+        except OSError:
+            raise OpError(ErrorCode.UNAVAILABLE, "local gateway configuration unavailable") from None
+    if action == "get":
+        return await settings(root)
+    return await apply_change(root, action, arguments)
