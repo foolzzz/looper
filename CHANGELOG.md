@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.177] - 2026-11-13
+
+### Changed
+
+- **`runs.list` returns summaries; the full prompt and result load on expand.** ([#1327](https://github.com/foolzzz/looper/pull/1327))
+  - Behavior change for direct callers: list rows carry 200-character `input_summary` / `output_summary` and `input_chars` / `output_chars`, and no `input_text`, `output_text`, `metadata.system_prompt`, `metadata.command` or `metadata.presentation.system_prompt.text`. Read them with `runs.get`, which returns the full record.
+  - The dashboard polls summaries while a run is running, keeps collapsed running cards' clocks current, loads the full run on expand, and shows `Could not load this run: <message>` with Retry on failure.
+  - The task eval runner fetches full records with `runs.get` after polling.
+
 ## [2.14.176] - 2026-11-13
 
 ### Changed
