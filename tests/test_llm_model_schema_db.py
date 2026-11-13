@@ -262,9 +262,12 @@ def test_chat_dialect_additive_upgrade_and_protocol_constraint():
     _run(test)
 
 
-@pytest.mark.parametrize('upgrade', [False, True], ids=['fresh', 'upgrade'])
-def test_model_name_constraints_share_parameter_grammar(upgrade):
+@pytest.mark.parametrize('upgrade,legacy_field', [
+    (False, None), (True, None), (True, 'name'), (True, 'background_model'),
+], ids=['fresh', 'upgrade', 'legacy-name', 'legacy-background-model'])
+def test_model_name_constraints_share_parameter_grammar(upgrade, legacy_field):
     async def test(conn):
+        await _model(conn)
         if upgrade:
             await conn.execute("ALTER TABLE llm_models DROP CONSTRAINT llm_models_name_check, "
                                "DROP CONSTRAINT llm_models_background_model_check")
@@ -272,9 +275,20 @@ def test_model_name_constraints_share_parameter_grammar(upgrade):
                 await conn.execute(f"ALTER TABLE llm_models ADD CHECK (length({field}) BETWEEN 1 AND 200 "
                                    f"AND {field} ~ '^[A-Za-z0-9][A-Za-z0-9._:/\\[\\]-]*$')")
             await conn.execute("DELETE FROM schema_migrations WHERE name = 'model_name_parameters'")
+            if legacy_field:
+                await conn.execute(f"UPDATE llm_models SET {legacy_field} = 'legacy[' WHERE id = 'model-test'")
+            before = await conn.fetchrow("SELECT * FROM llm_models WHERE id = 'model-test'")
             assert await connection.schema_change_pending(conn)
             await connection.ensure_schema(conn)
-        await _model(conn)
+            assert await conn.fetchrow("SELECT * FROM llm_models WHERE id = 'model-test'") == before
+        checks = await conn.fetch("SELECT conname, convalidated FROM pg_constraint "
+                                  "WHERE conrelid = 'llm_models'::regclass "
+                                  "AND conname IN ('llm_models_name_check', 'llm_models_background_model_check')")
+        assert {r['conname']: r['convalidated'] for r in checks} == {
+            f'llm_models_{field}_check': field != legacy_field for field in ('name', 'background_model')}
+        marker = await conn.fetchrow("SELECT * FROM schema_migrations WHERE name = 'model_name_parameters'")
+        assert bool(marker) == upgrade
+        assert not await connection.schema_change_pending(conn)
         name = 'grok-4.7[context=500k,reasoning_effort=high,fast=true]'
         await conn.execute("UPDATE llm_models SET name = $1, background_model = $1 WHERE id = 'model-test'", name)
         row = await conn.fetchrow("SELECT name, background_model FROM llm_models WHERE id = 'model-test'")
@@ -283,6 +297,12 @@ def test_model_name_constraints_share_parameter_grammar(upgrade):
             for invalid in ('name[', 'name[]', 'name[a=b]x', 'name[a b=c]', 'name\n', '', 'a' * 201):
                 with pytest.raises(asyncpg.CheckViolationError):
                     await conn.execute(f"UPDATE llm_models SET {field} = $1 WHERE id = 'model-test'", invalid)
-        await connection.ensure_schema(conn)
+        before = await conn.fetchrow("SELECT * FROM llm_models WHERE id = 'model-test'")
+        queries = []
+        with conn.query_logger(lambda q: queries.append(q.query)):
+            await connection.ensure_schema(conn)
+        assert not any('ALTER TABLE' in query.upper() for query in queries)
+        assert await conn.fetchrow("SELECT * FROM llm_models WHERE id = 'model-test'") == before
+        assert await conn.fetchrow("SELECT * FROM schema_migrations WHERE name = 'model_name_parameters'") == marker
         assert not await connection.schema_change_pending(conn)
     _run(test)

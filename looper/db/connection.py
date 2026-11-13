@@ -636,8 +636,14 @@ async def _classify_schema(conn: asyncpg.Connection, sql: str) -> str:
 
 
 async def _model_name_parameters_pending(conn: asyncpg.Connection) -> bool:
-    return not await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
-                                   _MODEL_NAME_PARAMETERS)
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _MODEL_NAME_PARAMETERS):
+        return False
+    # Fresh baselines already install the shared grammar and record only BASELINE.
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('llm_models') "
+        "AND conname IN ('llm_models_name_check', 'llm_models_background_model_check') "
+        "AND strpos(pg_get_constraintdef(oid), $1) = 0)", MODEL_NAME_PATTERN)
 
 
 async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -> None:
@@ -659,10 +665,16 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             pattern = MODEL_NAME_PATTERN.replace("'", "''")
             for field in ("name", "background_model"):
                 constraint = f"llm_models_{field}_check"
+                check = f"length({field}) BETWEEN 1 AND {MODEL_MAX_CHARS} AND {field} ~ '{pattern}'"
                 await conn.execute(f"ALTER TABLE llm_models DROP CONSTRAINT {constraint}, "
-                    f"ADD CONSTRAINT {constraint} CHECK (length({field}) BETWEEN 1 AND {MODEL_MAX_CHARS} "
-                    f"AND {field} ~ '{pattern}')" + (" NOT VALID" if state != "empty" else ""))
-            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MODEL_NAME_PARAMETERS)
+                    f"ADD CONSTRAINT {constraint} CHECK ({check}) NOT VALID")
+                # Clean upgrades must have the same validated catalog as fresh databases.
+                if state == "empty" or not await conn.fetchval(
+                    f"SELECT EXISTS (SELECT 1 FROM llm_models WHERE NOT ({check}))"
+                ):
+                    await conn.execute(f"ALTER TABLE llm_models VALIDATE CONSTRAINT {constraint}")
+            if state != "empty":
+                await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _MODEL_NAME_PARAMETERS)
         # One additive upgrade for a baseline that predates schedules.user_gates,
         # including the bridge. An empty database already has the column from
         # schema.sql and records only post_bridge_baseline. Once this marker is
