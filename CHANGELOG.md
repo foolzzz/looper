@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.170] - 2026-11-12
+
+### Changed
+
+- **Dashboard home: agents running now.** ([#1311](https://github.com/foolzzz/looper/pull/1311))
+  - The "Agents running now" section shows a total (busy Managers, Planners and running Workers and Reviewers; waiting runs are counted separately) and lists every Manager that is not stopped, with its state.
+  - Each Planner, Worker and Reviewer line shows its project and task name and links to the task; the Planner's requirement line sits under it.
+  - The overview's step runs gain `task_name` (the task's current name, read together with its current project).
+  - Model-visible: none.
+
 ## [2.14.169] - 2026-11-12
 
 ### Fixed
