@@ -166,16 +166,16 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="outline" disabled={busy || target === b.manager_id || !options.some((m) => m.id === target)}
           onClick={() => void run(() => putChatBinding(b.channel_id, b.chat_id, target))}>Move</Button>
-        {target !== b.manager_id && b.allowed_senders.length > 0 && <p className="text-xs text-muted-foreground">Moving clears this chat's extra senders.</p>}
+        {target !== b.manager_id && <p className="text-xs text-muted-foreground">Moving clears this chat's extra senders and resets its policy to listed senders.</p>}
       </div>
       <div className="space-y-2">
         <label htmlFor={senderId} className={LABEL}>Extra senders in this chat</label>
         <Input id={senderId} aria-label={`Extra senders for ${name}`} aria-describedby={`${senderId}-help`}
           value={senders} disabled={busy} onChange={(event) => { setSenders(event.target.value); setConfirmation(null); }}
-          placeholder={b.channel_type === "telegram" ? "123456789, …" : "ou_…, ou_…"} />
+          placeholder={b.channel_type === "telegram" ? "123456789, …" : "ou_…, cli_…"} />
         <p id={`${senderId}-help`} className="text-[11px] text-muted-foreground">
           Allowed here besides the bot's allowed senders, in this chat only: a direct message or another chat still refuses them.
-          {b.channel_type === "telegram" ? " Telegram user IDs, comma-separated." : " Lark open_ids (ou_…), comma-separated."}
+          {b.channel_type === "telegram" ? " Telegram user IDs, comma-separated." : " Lark user open_ids (ou_…) or bot app IDs (cli_…), comma-separated."}
         </p>
         {b.channel_type !== "telegram" && <>
           <label htmlFor={senderPolicyId} className={LABEL}>Who can reach this Manager</label>
@@ -194,10 +194,10 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
         <Button size="sm" variant="outline" disabled={busy || (sendersUnchanged && senderPolicy === b.sender_policy)}
           onClick={() => void run(() => b.channel_type === "telegram"
             ? putChatBinding(b.channel_id, b.chat_id, b.manager_id, ids)
-            : putChatBinding(b.channel_id, b.chat_id, b.manager_id, ids, senderPolicy))}>Save senders</Button>
+            : putChatBinding(b.channel_id, b.chat_id, b.manager_id, ids, senderPolicy))}>Save</Button>
         {confirmation && <div className="space-y-2">
-          <p className="text-xs text-muted-foreground">{confirmation.impact}</p>
-          <FormFooter error="" busy={busy} submit="Confirm sender policy" onCancel={() => setConfirmation(null)}
+          <p className="text-xs text-warning">{confirmation.impact}</p>
+          <FormFooter error="" busy={busy} submit="Open to everyone" onCancel={() => setConfirmation(null)}
             onSubmit={() => void run(() => confirmChatBinding(confirmation))} />
         </div>}
       </div>
@@ -213,6 +213,6 @@ function ChatBindingRow({ binding: b, managers, snapshot, reload, onRemoved }: {
     <p className="break-all text-xs text-muted-foreground">
       {{ telegram: "Telegram", lark: "Lark", lark_bot: "Lark Bot" }[b.channel_type]} · {b.bot_name} · {b.channel_id}
     </p>
-    <p className="break-all text-xs text-muted-foreground">Chat ID: {b.chat_id} · Bound to {b.manager_name}{b.manager_deleted ? " · Deleted" : !b.manager_enabled ? " · Off" : ""}{b.allowed_senders.length > 0 ? ` · ${b.allowed_senders.length} extra sender${b.allowed_senders.length === 1 ? "" : "s"}` : ""}</p>
+    <p className="break-all text-xs text-muted-foreground">Chat ID: {b.chat_id} · Bound to {b.manager_name}{b.manager_deleted ? " · Deleted" : !b.manager_enabled ? " · Off" : ""}{b.allowed_senders.length > 0 ? ` · ${b.allowed_senders.length} extra sender${b.allowed_senders.length === 1 ? "" : "s"}` : ""}{b.sender_policy === "chat" ? " · Everyone in this chat" : ""}</p>
   </Row>;
 }

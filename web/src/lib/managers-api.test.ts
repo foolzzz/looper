@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { createManager, deleteManager, deleteManagerTemplate, fetchManagers, putManagerTemplate, updateManager } from "./api";
+import { confirmManagerUpdate, ManagerUpdateConfirmation, createManager, deleteManager, deleteManagerTemplate, fetchManagers, putManagerTemplate, updateManager } from "./api";
 
 const manager = { id: "manager-review", name: "Review", idle_timeout_seconds: 1800 };
 const snapshot = { managers: [manager], max_enabled: 8 };
@@ -36,4 +36,25 @@ it("does not treat a pending manager write as complete or confirm it automatical
   vi.stubGlobal("fetch", fetch);
   await expect(deleteManager(manager.id)).rejects.toMatchObject({ status: 202, message: "Retire Review" });
   expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+
+it("preserves an all-tools update confirmation and explicitly confirms in the same session", async () => {
+  const calls: { url: string; init: RequestInit }[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url, init) => {
+    calls.push({ url, init });
+    return url.endsWith("/confirm") ? Response.json({ status: "ok", result: { manager } })
+      : Response.json({ status: "needs_confirmation", confirmation_id: "open-chats", impact: "2 chats are open to everyone",
+        expires_in_seconds: 600 }, { status: 202 });
+  }));
+  let pending: ManagerUpdateConfirmation | undefined;
+  try { await updateManager(manager.id, { tools: "all" }); }
+  catch (error) { expect(error).toBeInstanceOf(ManagerUpdateConfirmation); pending = error as ManagerUpdateConfirmation; }
+  expect(calls).toHaveLength(1);
+  expect(pending?.confirmation.confirmation_id).toBe("open-chats");
+  expect(await confirmManagerUpdate(pending!.confirmation)).toEqual({ manager });
+  expect(calls[1].url).toBe("/api/v1/confirm");
+  expect(JSON.parse(String(calls[1].init.body))).toEqual({ confirmation_id: "open-chats" });
+  expect((calls[1].init.headers as Record<string, string>)["X-Looper-Session"])
+    .toBe((calls[0].init.headers as Record<string, string>)["X-Looper-Session"]);
 });

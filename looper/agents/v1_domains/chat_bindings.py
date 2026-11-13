@@ -191,5 +191,7 @@ async def run(server, operation, arguments, principal, headers, confirmation=Non
         raise OpError(ErrorCode.NOT_FOUND, "channel or Manager not found") from None
     except AllowlistError as exc:
         raise OpError(ErrorCode.INVALID, f"allowed_senders: {exc}") from None
+    except storage.ManagerPermissionsChanged as exc:
+        raise OpError(ErrorCode.CONFLICT, str(exc)) from None
     except ValueError:
         raise OpError(ErrorCode.INVALID, "invalid native chat routing request") from None

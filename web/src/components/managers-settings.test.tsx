@@ -13,6 +13,7 @@ vi.mock("@/lib/api", async (importOriginal) => ({
   fetchManagers: vi.fn(),
   createManager: vi.fn(),
   updateManager: vi.fn(),
+  confirmManagerUpdate: vi.fn(),
   deleteManager: vi.fn(),
   putManagerTemplate: vi.fn(),
   deleteManagerTemplate: vi.fn(),
@@ -129,6 +130,70 @@ describe("Managers settings", () => {
     await click(button("Save"));
     expect(m.updateManager).toHaveBeenCalledWith("manager-review", { task_scope: "all" });
     expect(container.textContent).not.toContain("own tasks");
+  });
+
+  const pending = { status: "needs_confirmation" as const, confirmation_id: "open-chats", session: "manager-edit",
+    expires_in_seconds: 600, impact: "2 chats are open to everyone; anyone in them can then reach a Manager with all tools" };
+
+  it("keeps an all-tools update pending until explicit confirmation, then reloads and closes", async () => {
+    m.fetchManagers.mockResolvedValue([DEFAULT, manager()]);
+    m.updateManager.mockRejectedValueOnce(new api.ManagerUpdateConfirmation(pending));
+    m.confirmManagerUpdate.mockResolvedValueOnce({ manager: manager({ tools: "all" }) });
+    await render();
+    await click(find('[aria-label="Edit Manager Review"]'));
+    await type(field("Tools"), "all");
+    await click(button("Save"));
+    expect(m.confirmManagerUpdate).not.toHaveBeenCalled();
+    expect(m.fetchManagers).toHaveBeenCalledTimes(1);
+    expect(container.querySelector("form")).not.toBeNull();
+    expect([...container.querySelectorAll("p")].find((p) => p.textContent === pending.impact)?.classList.contains("text-warning")).toBe(true);
+    await click(button("Confirm all tools"));
+    expect(m.confirmManagerUpdate).toHaveBeenCalledWith(pending);
+    expect(m.fetchManagers).toHaveBeenCalledTimes(2);
+    expect(container.querySelector("form")).toBeNull();
+  });
+
+  it.each(["cancel", "edit"])("discards the pending all-tools update on %s without applying it", async (action) => {
+    m.fetchManagers.mockResolvedValue([DEFAULT, manager()]);
+    m.updateManager.mockRejectedValueOnce(new api.ManagerUpdateConfirmation(pending));
+    await render();
+    await click(find('[aria-label="Edit Manager Review"]'));
+    await type(field("Tools"), "all");
+    await click(button("Save"));
+    if (action === "cancel") await click(button("Cancel"));
+    else await type(field("Name"), "Renamed");
+    expect(button("Confirm all tools")).toBeUndefined();
+    expect(m.confirmManagerUpdate).not.toHaveBeenCalled();
+    expect(container.querySelector("form")).not.toBeNull();
+  });
+
+  it("does not restore stale confirmation after the draft changes during save", async () => {
+    m.fetchManagers.mockResolvedValue([DEFAULT, manager()]);
+    let reject!: (error: Error) => void;
+    m.updateManager.mockReturnValueOnce(new Promise((_resolve, no) => { reject = no; }));
+    await render();
+    await click(find('[aria-label="Edit Manager Review"]'));
+    await type(field("Tools"), "all");
+    await click(button("Save"));
+    await type(field("Name"), "Renamed");
+    await act(async () => reject(new api.ManagerUpdateConfirmation(pending)));
+    expect(button("Confirm all tools")).toBeUndefined();
+    expect(field<HTMLInputElement>("Name").value).toBe("Renamed");
+    expect(m.fetchManagers).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the draft and server conflict visible when confirmation is refused", async () => {
+    m.fetchManagers.mockResolvedValue([DEFAULT, manager()]);
+    m.updateManager.mockRejectedValueOnce(new api.ManagerUpdateConfirmation(pending));
+    m.confirmManagerUpdate.mockRejectedValueOnce(new Error("Open chats changed; save again"));
+    await render();
+    await click(find('[aria-label="Edit Manager Review"]'));
+    await type(field("Tools"), "all");
+    await click(button("Save"));
+    await click(button("Confirm all tools"));
+    expect(container.textContent).toContain("Open chats changed; save again");
+    expect(field<HTMLSelectElement>("Tools").value).toBe("all");
+    expect(m.fetchManagers).toHaveBeenCalledTimes(1);
   });
 
   it("chosen projects forces Tasks only and requires a project before saving both scope fields", async () => {

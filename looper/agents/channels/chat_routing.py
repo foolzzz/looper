@@ -189,6 +189,11 @@ async def _mutate(channel_id: str, change: Callable[..., Awaitable[Any]],
             values = ({"old_manager_id": before.bindings.get(chat_id), "new_manager_id": snapshot.bindings.get(chat_id)}
                       if chat_id is not None else
                       {"old_bound_chats_only": before.bound_only, "new_bound_chats_only": snapshot.bound_only})
+            if chat_id is not None:
+                old_policy = before.sender_policies.get(chat_id, SenderPolicy.LISTED)
+                new_policy = snapshot.sender_policies.get(chat_id, SenderPolicy.LISTED)
+                if old_policy != new_policy:
+                    values.update(old_sender_policy=old_policy.value, new_sender_policy=new_policy.value)
             if action == "manager_chat_bindings.put":
                 old_count, new_count = len(before.senders.get(chat_id, ())), len(snapshot.senders.get(chat_id, ()))
                 if old_count or new_count:

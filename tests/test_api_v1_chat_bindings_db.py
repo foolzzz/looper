@@ -638,7 +638,8 @@ def _policy_binding(manager=TARGET, policy="chat"):
             "sender_policy": policy}
 
 
-def test_tasks_chat_policy_roundtrips_and_is_scoped_to_exact_binding(tmp_path, monkeypatch):
+def test_tasks_chat_policy_roundtrips_and_is_scoped_to_exact_binding(tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="looper.agents.channels.chat_routing")
     async def run(pool):
         async with _api(tmp_path, pool) as (call, registry, _):
             registry.bindings_changed("channel-lark", await routing.load_snapshot("channel-lark"))
@@ -656,6 +657,9 @@ def test_tasks_chat_policy_roundtrips_and_is_scoped_to_exact_binding(tmp_path, m
             request["manager_id"] = OTHER
             moved = (await call("manager_chat_bindings.put", request))[1]["result"]["binding"]
             assert moved["sender_policy"] == "listed"
+            changes = [(r.old_sender_policy, r.new_sender_policy) for r in caplog.records
+                       if hasattr(r, "old_sender_policy")]
+            assert changes == [("listed", "chat"), ("chat", "listed")]
             assert registry.resolve_chat("channel-lark", "oc_example").sender_policy is routing.SenderPolicy.LISTED
     _run(run, monkeypatch)
 
@@ -683,7 +687,8 @@ def test_confirmation_refuses_changed_manager_permissions(tmp_path, monkeypatch)
             assert status == 202, pending
             await pool.execute("UPDATE managers SET tools = 'tasks', revision = revision + 1 WHERE id = $1", TARGET)
             status, refused = await call("confirm", {"confirmation_id": pending["confirmation_id"]})
-            assert status == 400 and refused["status"] == "error"
+            assert status == 409 and refused["error"]["code"] == "conflict"
+            assert refused["error"]["message"] == "Manager permissions changed; submit the binding again"
             assert await pool.fetchval("SELECT count(*) FROM manager_chat_bindings") == 0
     _run(run, monkeypatch)
 
@@ -726,3 +731,85 @@ def test_sender_policy_upgrade_defaults_existing_bindings_and_is_idempotent():
                 await conn.execute("UPDATE manager_chat_bindings SET sender_policy = 'unknown'")
             await connection.ensure_schema(conn)
     asyncio.run(asyncio.wait_for(run(), 20))
+
+
+@pytest.mark.parametrize("open_chats", [0, 2])
+def test_tools_upgrade_confirms_open_chats_before_changing_manager(tmp_path, monkeypatch, open_chats):
+    async def run(pool):
+        async with _api(tmp_path, pool) as (call, _, _):
+            for index in range(open_chats):
+                status, answer = await call("manager_chat_bindings.put", {
+                    **_policy_binding(), "chat_id": f"oc_room{index}"})
+                assert status == 200, answer
+            request = {"manager_id": TARGET, "fields": {"tools": "all"}}
+            before = await pool.fetchrow("SELECT * FROM managers WHERE id = $1", TARGET)
+            status, answer = await call("managers.update", request)
+            if open_chats:
+                assert status == 202 and answer["status"] == "needs_confirmation", answer
+                assert "2 chats are open to everyone; anyone in them can then reach a Manager with all tools" in answer["impact"]
+                assert "oc_room0" in answer["impact"] and "oc_room1" in answer["impact"]
+                assert await pool.fetchrow("SELECT * FROM managers WHERE id = $1", TARGET) == before
+                status, answer = await call("confirm", {"confirmation_id": answer["confirmation_id"]})
+            assert status == 200 and answer["result"]["manager"]["tools"] == "all", answer
+            assert await pool.fetchval("SELECT tools FROM managers WHERE id = $1", TARGET) == "all"
+    _run(run, monkeypatch)
+
+
+def test_cli_operator_can_confirm_open_chat_from_same_session(tmp_path, monkeypatch, capsys):
+    from looper import loopercli
+
+    # The CLI blocks on HTTP, so run it in a thread while the async server handles requests.
+    async def exercise(pool):
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            async with _serving(tmp_path, listen=True) as server:
+                server._channels = ChannelRegistry(bus)
+                server._client_ops = ClientOps(Platform(bus=bus, task_router=server._task_router, runtime_root=tmp_path))
+                token_file = tmp_path / "operator-token"
+                token_file.write_text(TOKEN)
+                token_file.chmod(0o600)
+                options = ["--url", f"http://127.0.0.1:{server._port}", "--operator-token-file", str(token_file),
+                           "--session", "cli-routing", "--client-file", str(tmp_path / "absent-client.json"), "--json"]
+                code = await asyncio.to_thread(loopercli.main, ["manager-chat-bindings", "put", *options,
+                    "--channel-id", "channel-lark", "--chat-id", "oc_example", "--manager-id", "manager",
+                    "--sender-policy", "chat"])
+                assert code == loopercli.EXIT_CONFIRM
+                pending = json.loads(capsys.readouterr().out)
+                assert await pool.fetchval("SELECT count(*) FROM manager_chat_bindings") == 0
+                code = await asyncio.to_thread(loopercli.main, ["confirm", pending["confirmation_id"], *options])
+                output = capsys.readouterr()
+                assert code == loopercli.EXIT_OK, output.err
+                assert json.loads(output.out)["result"]["binding"]["sender_policy"] == "chat"
+                assert server._channels.resolve_chat("channel-lark", "oc_example").sender_policy is routing.SenderPolicy.CHAT
+        finally:
+            await bus.shutdown()
+    _run(exercise, monkeypatch)
+
+
+@pytest.mark.parametrize("rebind", [False, True])
+def test_all_tools_explicit_chat_policy_requires_confirmation_on_bind_or_rebind(tmp_path, monkeypatch, rebind):
+    async def run(pool):
+        async with _api(tmp_path, pool) as (call, _, _):
+            assert (await call("managers.update", {"manager_id": TARGET, "fields": {"tools": "all"}}))[0] == 200
+            if rebind:
+                assert (await call("manager_chat_bindings.put", _policy_binding(manager=OTHER)))[0] == 200
+            before = await chat_bindings.list_bindings()
+            status, pending = await call("manager_chat_bindings.put", _policy_binding())
+            assert status == 202, pending
+            assert await chat_bindings.list_bindings() == before
+            status, answer = await call("confirm", {"confirmation_id": pending["confirmation_id"]})
+            assert status == 200 and answer["result"]["binding"]["sender_policy"] == "chat", answer
+    _run(run, monkeypatch)
+
+
+def test_tools_upgrade_rechecks_open_chats_when_confirmed(tmp_path, monkeypatch):
+    async def run(pool):
+        async with _api(tmp_path, pool) as (call, _, _):
+            assert (await call("manager_chat_bindings.put", _policy_binding()))[0] == 200
+            status, pending = await call("managers.update", {"manager_id": TARGET, "fields": {"tools": "all"}})
+            assert status == 202, pending
+            assert (await call("manager_chat_bindings.put", {**_policy_binding(), "chat_id": "oc_another"}))[0] == 200
+            status, refused = await call("confirm", {"confirmation_id": pending["confirmation_id"]})
+            assert status == 409 and refused["error"]["code"] == "conflict", refused
+            assert await pool.fetchval("SELECT tools FROM managers WHERE id = $1", TARGET) == "tasks"
+    _run(run, monkeypatch)

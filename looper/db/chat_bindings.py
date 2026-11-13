@@ -38,6 +38,10 @@ class SenderPolicy(StrEnum):
     CHAT = "chat"
 
 
+class ManagerPermissionsChanged(ValueError):
+    """A binding's permission snapshot no longer matches its destination."""
+
+
 class ChatBinding(TypedDict):
     channel_id: str
     chat_id: str
@@ -162,7 +166,7 @@ async def put_binding(channel_id: str, chat_id: str, manager_id: str, *,
         if manager is None or manager["deleted_at"] is not None:
             raise LookupError("Manager not found")
         if manager["revision"] != expected_manager_revision:
-            raise ValueError("Manager permissions changed; submit the binding again")
+            raise ManagerPermissionsChanged("Manager permissions changed; submit the binding again")
     await _channel(channel_id, conn, lock=True)
     if before_write is not None:
         await before_write()
