@@ -16,6 +16,7 @@ from ..runtimes.cancel import TurnCancel, TurnCancelled, abandon
 if TYPE_CHECKING:
     from ..message import MessageEnvelope
     from ..ops import Turn
+    from .manager import Ask
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -70,6 +71,8 @@ class TurnToken:
     chat: str
     received_at: datetime
     channel_id: str | None = None
+    prepared_ask: Ask | None = field(default=None, repr=False)  # reuse the admitted message and lock on startup retry
+    failed_step: str | None = None
     partial: str = ""  # top-level text already sent to the chat, independent of event persistence
     binding: str = field(default_factory=lambda: secrets.token_urlsafe(18))
     phase: TurnPhase = TurnPhase.RECEIVED
@@ -152,6 +155,7 @@ class TurnToken:
             async with asyncio.timeout(timeout):
                 result = await asyncio.shield(task)
         except BaseException:
+            self.failed_step = name
             await abandon(task, undo)
             raise
         self.check()

@@ -13,10 +13,10 @@ _PLANNER = _object({"agent_id": _STR, "task_id": _STR, "project_id": _NULL_STR,
                     "project_name": _NULL_STR, "requirement": _STR, "name": _STR})
 _RUN = _object({
     "agent_id": _STR, "role": {"type": "string", "enum": ["worker", "reviewer"]}, "task_id": _STR,
-    "project_id": _NULL_STR, "project_name": _NULL_STR, "step": _STR, "instruction": _STR,
+    "project_id": _NULL_STR, "project_name": _NULL_STR, "task_name": _STR, "step": _STR, "instruction": _STR,
     "state": {"type": "string", "enum": ["running", "waiting"]}, "elapsed_seconds": _NUM,
     "task_role": _object({"id": _STR, "kind": {"type": "string", "enum": ["work", "review"]}, "version": _INT})},
-    ["agent_id", "role", "task_id", "project_id", "project_name", "step", "instruction", "state", "elapsed_seconds"])
+    ["agent_id", "role", "task_id", "task_name", "project_id", "project_name", "step", "instruction", "state", "elapsed_seconds"])
 _SCHEDULE = {"schedule_id": _STR, "name": _STR, "project_id": _STR, "project_name": _STR}
 _OVERVIEW = _object({
     "version": _STR,
