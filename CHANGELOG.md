@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.176] - 2026-11-13
+
+### Changed
+
+- **Plan only: two maintainer decisions from the follow-up triage.** ([#1326](https://github.com/foolzzz/looper/pull/1326))
+  - The long-horizon plan gains a non-core todo: request recording for the Codex, OMP, Pi and DSH runtimes, which show `not_covered` today (moved from #1144).
+  - The keeper default-on todo now also closes #1067 and names its remaining checks (keeper runs surviving a restart under Linux systemd, a real PostgreSQL cluster restart).
+  - Docs only; no behavior change.
+
 ## [2.14.175] - 2026-11-13
 
 ### Changed
