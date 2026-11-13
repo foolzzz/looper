@@ -94,16 +94,15 @@ CREATE TABLE IF NOT EXISTS llm_models (
     id                        TEXT PRIMARY KEY CHECK (id LIKE 'model-%' AND length(id) > 6),
     provider_id               TEXT NOT NULL,
     protocol                  TEXT NOT NULL CHECK (protocol IN ('anthropic-messages', 'openai-responses', 'openai-chat')),
-    name                      TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 200
-                                  AND name ~ '^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$'),
+    -- ensure_schema installs the shared model_names grammar on both names.
+    name                      TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 200),
     context_window            INTEGER CHECK (context_window BETWEEN 1 AND 100000000),
     input_usd_per_mtok        DOUBLE PRECISION CHECK (input_usd_per_mtok BETWEEN 0 AND 10000),
     output_usd_per_mtok       DOUBLE PRECISION CHECK (output_usd_per_mtok BETWEEN 0 AND 10000),
     cache_read_usd_per_mtok   DOUBLE PRECISION CHECK (cache_read_usd_per_mtok BETWEEN 0 AND 10000),
     cache_write_usd_per_mtok  DOUBLE PRECISION CHECK (cache_write_usd_per_mtok BETWEEN 0 AND 10000),
     efforts                   TEXT[] CHECK (llm_model_efforts_valid(efforts)),
-    background_model          TEXT CHECK (length(background_model) BETWEEN 1 AND 200
-                                  AND background_model ~ '^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$'),
+    background_model          TEXT CHECK (length(background_model) BETWEEN 1 AND 200),
     chat_dialect              TEXT CHECK (chat_dialect IS NULL OR protocol = 'openai-chat'),
     catalog_order             INTEGER NOT NULL DEFAULT 0 CHECK (catalog_order >= 0),
     builtin                   BOOLEAN NOT NULL DEFAULT false,

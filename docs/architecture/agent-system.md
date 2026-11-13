@@ -1947,6 +1947,13 @@ Manager tools.
   `context_window`, `input_usd_per_mtok`, `output_usd_per_mtok`,
   `cache_read_usd_per_mtok`, `cache_write_usd_per_mtok`, `efforts` and
   `background_model`; `catalog_order` preserves legacy pricing order.
+  Exact names may carry one trailing bracket parameter list, with comma-separated
+  `key=value` items using letters, digits, `.`, `_` and `-`, for example Cursor's
+  `grok-4.7[context=500k,reasoning_effort=high,fast=true]`. Looper passes the
+  complete name unchanged as one command-line argument; Cursor runs use temporary
+  configuration directories, so saved Cursor `modelParameters` are not loaded.
+  Legacy context suffixes such as `opus[1m]` remain valid. Names are at most
+  200 characters and cannot contain whitespace or shell syntax.
   A provider may have no models, but a profile must select a saved model:
   an empty catalog no longer accepts arbitrary names. The same name over two
   protocols is two entries; the protocol is never guessed from the name.

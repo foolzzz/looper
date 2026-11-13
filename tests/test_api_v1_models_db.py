@@ -173,3 +173,24 @@ def test_old_model_routes_are_404_with_matching_v1_positive_controls(tmp_path, m
             status, answer = await call("models." + action, {} if action == "list" else body)
             assert status == 200 and answer["result"], answer
     run_with_models(run, monkeypatch)
+
+
+def test_parameterized_model_api_registration_and_background_update_roundtrip(tmp_path, monkeypatch):
+    name = "grok-4.7[context=500k,reasoning_effort=high,fast=true]"
+
+    async def run(pool):
+        async with _api(tmp_path, pool) as call:
+            model = await _create(call, name=name)
+            assert model["name"] == name
+            assert (await db.get_model(model["model_id"]))["name"] == name
+            status, answer = await call("models.update", {"model": model["model_id"], "background_model": name})
+            assert status == 200, answer
+            assert answer["result"]["model"]["background_model"] == name
+            status, answer = await call("/api/v1/models/add_many", {"provider_id": "prov-test", "models": [
+                {"name": "other[context=500k]", "protocol": "anthropic-messages"}]})
+            assert status == 200 and answer["result"]["models"][0]["name"] == "other[context=500k]", answer
+            for invalid in ("name[]", "name[a=b]x", "name[a b=c]", "name\n", ""):
+                status, answer = await call("models.create", {**CREATE, "name": invalid})
+                assert status == 400 and answer["error"]["code"] == "invalid", answer
+            assert len(await db.list_models(provider_id="prov-test")) == 2
+    run_with_models(run, monkeypatch)
