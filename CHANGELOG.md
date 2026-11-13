@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.169] - 2026-11-12
+
+### Fixed
+
+- **Lark messages sent during a restart.** ([#1310](https://github.com/foolzzz/looper/pull/1310))
+  - The `lark-cli` channel saves a restart boundary and the latest 20,000 handled message IDs (no message bodies) under the runtime root, and after a start answers eligible messages sent while the service was down.
+  - Catch-up scans explicit bindings and chats observed in the last 24 hours, at most 100 chats, 5 pages per chat and 50 messages per page, skipping messages older than 15 minutes; it uses the normal admission, mention, routing, attachment and disabled-chat checks.
+  - Live and recovered messages share durable deduplication; a failed chat does not block other chats or live input. The bot long-connection transport is unchanged.
+  - Model-visible: none.
+
 ## [2.14.168] - 2026-11-12
 
 ### Fixed
