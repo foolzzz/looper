@@ -1532,7 +1532,12 @@ Manager tools.
   against Grok 1.0.62 in the [Grok runtime RFC](rfcs/grok-runtime-v0.zh-CN.md))
   runs headless `grok --prompt-file /dev/stdin --output-format
   streaming-messages-json --always-approve --trust` with Grok's own login
-  only (the built-in provider `grok-login`, below). Each process gets
+  only (the built-in provider `grok-login`, below). Agent Profiles default
+  `web_search` to `true`. Setting it to `false` adds `--disable-web-search`
+  to headless and ACP commands, which removes Grok's web search and web fetch
+  tools (it is not a network sandbox: shell commands can still reach the
+  network); the run's `metadata.command` records the flag. Fallbacks use the target
+  profile's own setting. Each process gets
   `GROK_HOME` and `HOME` both set to a home of Looper's own,
   `grok/runs/<sha256>`, named on its command line (`env GROK_HOME=...
   HOME=... grok ...`): the generated `config.toml` (Claude Code and Cursor
@@ -1977,7 +1982,8 @@ Manager tools.
   captures model identity and pricing; historical rows and totals are not rewritten.
 - **Agent Profiles** (`agent_profiles`) save `runtime_id`, `model_id`,
   `effort` (null: the runtime's), `agent_teams` (Claude Code only, on by
-  default there), `custom_prompt` and optional `fallback_profile_id`. Fallback
+  default there), `web_search` (default `true`; only Grok accepts `false`,
+  disabling web search and web fetch), `custom_prompt` and optional `fallback_profile_id`. Fallback
   chains are acyclic, allow at most three hops and preserve every supported
   role; edits also validate incoming chains. Referenced targets cannot be deleted.
   Planner follows the chain only for a profile configuration error. Worker and
@@ -3377,7 +3383,7 @@ and an API key before any run. Its unknown model prices are deliberately null.
   "profiles": [{
     "name": "Example profile", "runtime": "claude-code",
     "model": {"provider": "Example account", "name": "example-model", "protocol": "anthropic-messages"},
-    "effort": null, "agent_teams": false, "custom_prompt": ""
+    "effort": null, "agent_teams": false, "web_search": true, "custom_prompt": ""
   }]
 }
 ```
@@ -3966,7 +3972,7 @@ contract 4.9 KB (4,865 bytes of `TOOLS_CONTRACT`).
 | `looper_task_update` | Change a task: its `title` in any task (one line, at most 60 characters; a label, so an ended task can be renamed; recorded in the task's history as a delivered supplement `via` `manager:<channel>`), its `requirement` while it has not ended (a new version, as on the task page), its `work_dir` (a task not started only), its `profiles` in any task but a completed one (a profile per role, `null` to drop the task's choice, checked and written as `PUT /api/tasks/:id/agents` does; a Worker or Reviewer uses it from its next step, the Planner at its next turn after a handoff; a stopped, failed or cancelled task's restart runs with it), and its `system_prompt_modes` (`append` or `replace` per role, `null` to drop the task's choice; the same write as `profiles`, in the same call) | write |
 | `looper_concurrency` | Change one task's (`task_id`) own `worker` and `reviewer` limits, `limits` per role (1–64, `null` clears one to the default), in any task but a completed one; `planner` is refused. There are no project limits: the description tells the Manager to say so, and a call naming `project` is refused (`invalid`, an unknown argument) and changes nothing. Then the WorkerPool checks again. The answer gives each role's limit before and after with its source, the task's own and the default, and says that lowering stops nothing that runs | write |
 | `looper_projects` | `list` (name, default directory, task, active task and schedule counts, background cut to 200 characters), `get` one (as `GET /api/projects` lists it), `create` (`name`, `work_dir`, `background`), `update` its `name`, `work_dir` or `background` (`projects.create_project`, `update_project`); a `work_dir` change that moves enabled or queued command schedules without their own `work_dir` asks first, listing each one's name, state, command and old → new directory, and is refused (`conflict`) when they or the directory changed before the answer, or, for a scoped Manager, when one belongs to another Manager; `delete` one with its tasks and schedules, stopping its running tasks first (the user confirms first). Template use and another Manager's tasks or schedules are refused before confirmation. The confirmation lists schedule, running-task and task counts; settings, allowed list, installs, knowledge and own skills go with it, while result branches and the project directory's files stay | list and get read; write; delete, and such a `work_dir` change, are high |
-| `looper_agent_profiles` | `list`, `create`, `update`, `delete`; create selects `runtime` and `model` (model id or exact `{provider, name, protocol}`), plus `name`, `effort`, `agent_teams`, `custom_prompt`; no profile system-prompt mode. Returns derived account/model information; selected profiles cannot be deleted | list reads; write; delete is high |
+| `looper_agent_profiles` | `list`, `create`, `update`, `delete`; create selects `runtime` and `model` (model id or exact `{provider, name, protocol}`), plus `name`, `effort`, `agent_teams`, `web_search`, `custom_prompt`; no profile system-prompt mode. Returns derived account/model information; selected profiles cannot be deleted | list reads; write; delete is high |
 | `looper_providers` | `list` accounts and vendor suggestions; `register` an API-key account with `name`, `vendor_type`, `endpoints`, `env`, `max_concurrency`, without a key. The user enters the key in Settings | list reads; write |
 | `looper_models` | `list` (optional provider/runtime filter), `create` an exact provider/name/protocol entry, `update` its settings, `delete` an unused model; no key arguments | list reads; write; delete is high |
 | `looper_catalog` | `list` the items (kind, qualified name, description, `manager_install_count`) with their installs, or with `project` the installs that reach it (`catalog.project_view`); `install` an item (by id or qualified name) globally or in a project for `roles`, `update` an install's `roles` or `enabled`, `uninstall` (`catalog.install`, `update_install`, `uninstall`) | list reads; write |
@@ -4974,7 +4980,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `llm_models` | Exact `(provider_id, name, protocol)`, context, four price overrides, efforts, background model, catalog order and builtin flag; profile references restrict deletion |
 | `llm_model_migration_map` | Append-only legacy provider/name/protocol → provider/model id mapping; no secrets or foreign keys to deletable current objects |
 | `llm_provider_secrets` | A provider's API key, apart from the provider; read only by the launch that will use it |
-| `agent_profiles` | `name`, `runtime_id`, `model_id`, `effort`, `agent_teams`, `custom_prompt`, `builtin`; provider comes from the model; prompt mode remains in role/task settings |
+| `agent_profiles` | `name`, `runtime_id`, `model_id`, `effort`, `agent_teams`, `web_search` (default `true`; only Grok accepts `false`, which removes Grok's web search and web fetch tools; shell commands can still reach the network), `custom_prompt`, `builtin`; provider comes from the model; prompt mode remains in role/task settings |
 | `task_profile_overrides` | A task's Agent Profile per role (`planner`, `worker`, `reviewer`): `profile_id`, going with its task; a profile a task chose is not deleted |
 | `task_system_prompt_modes` | A task's own system prompt mode per role (`planner`, `worker`, `reviewer`): `append` or `replace`, going with its task |
 | `task_concurrency_limits` | A task's own concurrency limit per role (`worker`, `reviewer`): `max_concurrency` (1–64), going with its task |

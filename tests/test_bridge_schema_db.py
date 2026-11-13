@@ -107,7 +107,8 @@ def test_bridge_normalization_preserves_evidence_and_matches_fresh(bridge_source
                 elif table == "agent_runtimes":
                     assert after[table] == [{**r, "launcher": "native"} for r in before[table]]
                 elif table == "agent_profiles":
-                    assert after[table] == [{**r, "fallback_profile_id": None} for r in before[table]]
+                    assert after[table] == [{**r, "fallback_profile_id": None, "web_search": True}
+                                            for r in before[table]]
                 elif table == "task_user_gates":
                     # Existing gates retain their discussion purpose and every historical field.
                     assert after[table] == [{**r, "purpose": "discussion"} for r in before[table]]

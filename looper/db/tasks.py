@@ -293,6 +293,20 @@ async def project_of(task_ids: Collection[str], *, pool: asyncpg.Pool | asyncpg.
     return {row["id"]: row["project_id"] for row in rows}
 
 
+async def names_and_projects_of(
+    task_ids: Collection[str], *, pool: asyncpg.Pool | asyncpg.Connection | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Current names and projects in one read; missing tasks are left out."""
+    if not task_ids:
+        return {}
+    pool = pool or get_pool()
+    rows = await pool.fetch(
+        "SELECT id, project_id, title, goal_id, requirement FROM tasks WHERE id = ANY($1::text[])", list(task_ids))
+    return {row["id"]: {"project_id": row["project_id"],
+                        "name": task_name(title=row["title"], goal_id=row["goal_id"],
+                                          requirement=row["requirement"], task_id=row["id"])} for row in rows}
+
+
 async def update_task_status(
     task_id: str,
     status: str,

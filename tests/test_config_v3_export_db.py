@@ -162,10 +162,10 @@ def test_models_have_natural_keys_and_preserve_price_metadata():
         assert data["profiles"] == [
             {"name": "Chat profile", "runtime": "claude-code",
              "model": {"provider": "Account", "name": "same-name", "protocol": "openai-chat"},
-             "effort": "high", "agent_teams": True, "custom_prompt": "Be precise.", "fallback": None},
+             "effort": "high", "agent_teams": True, "web_search": True, "custom_prompt": "Be precise.", "fallback": None},
             {"name": "Messages profile", "runtime": "claude-code",
              "model": {"provider": "Account", "name": "same-name", "protocol": "anthropic-messages"},
-             "effort": None, "agent_teams": False, "custom_prompt": "", "fallback": None},
+             "effort": None, "agent_teams": False, "web_search": True, "custom_prompt": "", "fallback": None},
         ]
         assert summary.counts["models"] == 3 and summary.counts["providers"] == 2
         assert summary.secrets == 1

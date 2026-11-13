@@ -1029,7 +1029,7 @@ class Launch:
         # Internal comparison only: never record or log this secret-sensitive digest.
         return sha256_text(json.dumps([
             self.profile.runtime.type, self.profile.provider.id, self.model, self.effort,
-            self.system_prompt_mode.value, self.agent_teams, self.profile.custom_prompt, effective,
+            self.system_prompt_mode.value, self.agent_teams, getattr(self.profile, "web_search", True), self.profile.custom_prompt, effective,
             list(binding.args), sorted(binding.env), list(binding.unset),
         ], ensure_ascii=False, separators=(",", ":")))
 

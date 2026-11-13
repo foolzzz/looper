@@ -18,6 +18,25 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.171] - 2026-11-12
+
+### Changed
+
+- **Manager: a slow stop of the old session does not fail the user's message.** ([#1314](https://github.com/foolzzz/looper/pull/1314))
+  - An idle stale or replaced resident session is stopped with kill and the turn waits only for its main process (the `claude_stop` budget is 30 s, was 10 s); the descendant sweep runs in the background, and a replacement does not resume while the old main process lives.
+  - A turn that fails with a timeout, `OSError` or `TurnFailed` before the model got the message is retried once after 5 s, reusing the admitted message; hosted runners' start failures are not retried.
+  - Model-visible: none.
+
+## [2.14.170] - 2026-11-12
+
+### Changed
+
+- **Dashboard home: agents running now.** ([#1311](https://github.com/foolzzz/looper/pull/1311))
+  - The "Agents running now" section shows a total (busy Managers, Planners and running Workers and Reviewers; waiting runs are counted separately) and lists every Manager that is not stopped, with its state.
+  - Each Planner, Worker and Reviewer line shows its project and task name and links to the task; the Planner's requirement line sits under it.
+  - The overview's step runs gain `task_name` (the task's current name, read together with its current project).
+  - Model-visible: none.
+
 ## [2.14.169] - 2026-11-12
 
 ### Fixed

@@ -4,6 +4,7 @@ stand-in ``grok`` of ``test_grok_runtime`` and no mocked ``run_command``."""
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 import tempfile
 from pathlib import Path
@@ -19,13 +20,15 @@ from test_grok_runtime import _FAKE_GROK, _launch, _operator
 
 
 @pytest.mark.parametrize("verify", [False, True])
+@pytest.mark.parametrize("web_search", [False, True])
 def test_a_grok_worker_and_reviewer_launch_through_the_worker_tier(
-    verify: bool, agent_db: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    verify: bool, web_search: bool, agent_db: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _operator(tmp_path, monkeypatch)
     _worker_row(monkeypatch, {"system_prompt": "ROLE", "timeout_seconds": 0, "max_turns": 0})
     grok = fake_claude(tmp_path / "grok", _FAKE_GROK)
     settings = _launch(executable=grok).settings
+    settings = replace(settings, profile=replace(settings.profile, web_search=web_search))
 
     async def load(*args: Any, **kwargs: Any) -> Any:
         return settings
@@ -40,5 +43,8 @@ def test_a_grok_worker_and_reviewer_launch_through_the_worker_tier(
     result = asyncio.run(_run())
     assert "session_dir" not in json.dumps(result, default=str)
     runs = (tmp_path / "runtime" / ".local" / "grok" / "argv.jsonl").read_text().splitlines()
+    recorded = agent_db.start_record.await_args.kwargs["metadata"]["command"]
+    assert ("--disable-web-search" in recorded) is (not web_search)
+    assert json.loads(runs[0])["args"].count("--disable-web-search") == int(not web_search)
     assert len(runs) == 1  # the stand-in ran: the launch got past building its command
 

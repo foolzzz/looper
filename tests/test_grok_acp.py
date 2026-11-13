@@ -74,6 +74,18 @@ def test_the_acp_command_is_the_resident_command_in_acp_flags(tmp_path: Path) ->
     assert "--prompt-file" not in acp_argv(launch, home, None) and "stream" not in " ".join(acp_argv(launch, home, None))
 
 
+@pytest.mark.parametrize("web_search", [False, True])
+def test_acp_keeps_the_profiles_web_search_setting(tmp_path: Path, web_search: bool) -> None:
+    launch = _launch()
+    launch = dataclasses.replace(launch, settings=dataclasses.replace(
+        launch.settings, profile=dataclasses.replace(launch.profile, web_search=web_search)))
+    command = GROK.resident_command("grok", cwd=tmp_path, prompt_file=_prompt_file(tmp_path), launch=launch)
+    acp = parse_command(command)
+    assert acp.web_search is web_search
+    assert acp_argv(acp, tmp_path, None).count("--disable-web-search") == int(not web_search)
+    assert (launch.binding_sha256 == _launch().binding_sha256) is web_search
+
+
 def test_a_read_only_and_a_capped_command_carry_their_limits_to_the_acp_launch(tmp_path: Path) -> None:
     launch = parse_command(_command(tmp_path, "grok", read_only=True, max_turns=7))
     assert (launch.tools, launch.max_turns) == ("read_file,grep,list_dir", 7)

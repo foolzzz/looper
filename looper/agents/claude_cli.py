@@ -910,6 +910,8 @@ class ResidentClaude:
         self._tree: proc_tree.TurnTree | None = None  # the process's tree, followed while it runs
         # Cleanup owners and the signal that skips their remaining stdin-close grace.
         self._ending: dict[asyncio.Task[None], asyncio.Event] = {}
+        self._ending_processes: dict[asyncio.Task[None], asyncio.subprocess.Process] = {}
+        self._background_ending: set[asyncio.Task[None]] = set()
         self._price: Price | None = None  # prices the totals at the provider's prices, if Looper prices them
         self._idle_stopping = False
         self._cwd = ""
@@ -947,6 +949,9 @@ class ResidentClaude:
     def stale(self, signature: Any) -> bool:
         """True when a process was started but has exited, its output ended, or it was started with another
         ``signature``."""
+        if any(p.returncode is None for task, p in self._ending_processes.items()
+               if task in self._background_ending):
+            return True  # a timed-out replacement must not resume beside its old main pid
         process = self._process
         return process is not None and (
             process.returncode is not None or self._signature != signature
@@ -1048,8 +1053,8 @@ class ResidentClaude:
                 await proc_tree.end(process, label=self._label)
             result_event = await turn.done
             # A stop resolves the turn first; the turn is over only once its process tree is gone.
-            while self._ending:
-                await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._ending)))
+            while pending := set(self._ending) - self._background_ending:
+                await asyncio.gather(*(asyncio.shield(task) for task in pending))
             method = await self._stopped_by_user()
         except BaseException as exc:
             self._user_turn, self._cancel, self._interrupting = None, None, None
@@ -1194,7 +1199,7 @@ class ResidentClaude:
             self._idle_stopping = False
         return True
 
-    async def stop(self, *, kill: bool = False) -> None:
+    async def stop(self, *, kill: bool = False, wait_tree: bool = True) -> None:
         """End the process, if any, and forget it.
 
         Its stdin is closed, which ends a healthy Claude; then Claude, if it
@@ -1204,20 +1209,38 @@ class ResidentClaude:
         Claude's own that ends then is handled; one that does not is closed
         without a result. A turn waiting on the stop returns only after that
         reading is over.
+        With ``kill=True, wait_tree=False``, only the main pid exiting is awaited;
+        its descendant cleanup stays tracked, and a later default stop joins it.
         Cleanup has its own tracked task: cancelling a caller skips the stdin grace and waits for cleanup before
         propagating. A later stop joins it even after the process was forgotten; ``kill`` skips its grace too.
         """
+        if not wait_tree and not kill:
+            raise ValueError("a replacement stop requires kill=True")
         process, output, tree = self._process, self._output, self._tree
         self._process, self._output, self._command, self._signature, self._tree = None, None, [], None, None
         if process is not None:
             hurry = asyncio.Event()
+            if kill:
+                hurry.set()
             task = asyncio.create_task(self._stop_process(process, output, tree, hurry=hurry))
             self._ending[task] = hurry
+            self._ending_processes[task] = process
             task.add_done_callback(self._process_ended)
         ending = dict(self._ending)
         if kill:
             for hurry in ending.values():
                 hurry.set()
+        if not wait_tree:
+            self._background_ending.update(ending)
+            if process is not None and process.returncode is None:
+                # Signal the owned main pid before any process-tree inspection.
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+            # returncode is set by asyncio's child watcher, without ps. Process.wait()
+            # can also wait for inherited output pipes held open by descendants.
+            while any(p.returncode is None for p in self._ending_processes.values()):
+                await asyncio.sleep(0.01)
+            return
         cancelled = False
         while any(not task.done() for task in ending):
             try:
@@ -1233,6 +1256,10 @@ class ResidentClaude:
 
     def _process_ended(self, task: asyncio.Task[None]) -> None:
         self._ending.pop(task, None)
+        process = self._ending_processes.get(task)
+        if process is None or process.returncode is not None:
+            self._ending_processes.pop(task, None)
+            self._background_ending.discard(task)
         if not task.cancelled() and (problem := task.exception()) is not None:
             if self._idle_stopping:
                 logger.error("%s: idle resident cleanup failed (%s)", self._label, type(problem).__name__)

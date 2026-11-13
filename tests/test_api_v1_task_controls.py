@@ -22,8 +22,8 @@ def test_overview_keeps_running_waiting_spend_health_and_fleet(tmp_path, monkeyp
     async def counts(**kwargs):
         return [{"project_id": "project-a", "project_name": "Demo", "status": "waiting_user", "count": 1}]
 
-    async def projects(task_ids):
-        return {"task-a": "project-a"}
+    async def names_and_projects(task_ids):
+        return {"task-a": {"project_id": "project-a", "name": "Build demo"}}
 
     async def spend(*args, **kwargs):
         return {"provider_priced_usd": 1.25, "equivalent_usd": 2.5, "runs": 3, "running": 1,
@@ -46,7 +46,7 @@ def test_overview_keeps_running_waiting_spend_health_and_fleet(tmp_path, monkeyp
         return [{"task_id": "task-a"}]
 
     monkeypatch.setattr(overview.db_tasks, "status_counts", counts)
-    monkeypatch.setattr(overview.db_tasks, "project_of", projects)
+    monkeypatch.setattr(overview.db_tasks, "names_and_projects_of", names_and_projects)
     monkeypatch.setattr(overview.db_llm_records, "spend_since", spend)
     monkeypatch.setattr(overview, "schedule_overview", schedules)
     monkeypatch.setattr(task_ops.db_layers, "task_concurrency", concurrency)
@@ -80,6 +80,9 @@ def test_overview_keeps_running_waiting_spend_health_and_fleet(tmp_path, monkeyp
             assert result["agents"]["planners"][0]["name"] == "Demo"
             assert result["agents"]["workers"][0]["elapsed_seconds"] >= 10
             assert result["agents"]["reviewers"][0]["state"] == "waiting"
+            for role in ("workers", "reviewers"):
+                assert [(r["task_name"], r["project_id"]) for r in result["agents"][role]] == [
+                    ("Build demo", "project-a")]
             assert result["agents"]["manager"] == {"agent_id": "manager", "state": "busy"}
             assert result["agents"]["managers"][0]["name"] == "Manager"
             assert result["spend_today"]["provider_priced_usd"] == 1.25

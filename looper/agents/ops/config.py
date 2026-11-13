@@ -262,7 +262,7 @@ def _profile_listed(view: Mapping[str, Any], profiles: Iterable[Mapping[str, Any
     return {"profile_id": view["profile_id"], "name": view["name"], "runtime": view["runtime_name"],
             "provider": view["provider"], "model_id": view["model_id"], "model": view["model"],
             "effort": view["effort"], "model_path": view["model_path"],
-            "agent_teams": view["agent_teams"],
+            "agent_teams": view["agent_teams"], "web_search": view.get("web_search", True),
             "custom_prompt": view.get("custom_prompt", ""),
             "fallback_profile_id": fallback_id,
             "fallback_profile_name": next((p["name"] for p in profiles if p["profile_id"] == fallback_id), None),
@@ -332,7 +332,7 @@ async def _profiles(call: Call) -> dict[str, Any]:
         _required(arguments, action, "profile")
         profile = _profile(registry, arguments["profile"])
     if action in ("create", "update"):
-        fields = {**_given(arguments, ("name", "effort", "agent_teams", "custom_prompt", "fallback_profile_id"),
+        fields = {**_given(arguments, ("name", "effort", "agent_teams", "web_search", "custom_prompt", "fallback_profile_id"),
                           clears=("effort", "fallback_profile_id")),
                   **await _profile_parts(registry, arguments)}
         manager_id = call.manager_id if call.scoped else None
@@ -698,6 +698,8 @@ TOOLS: tuple[Tool, ...] = (
                                           "when null, shared levels are low, medium, high, xhigh, max. "
                                           "A null effort uses the runtime's default."},
                 "agent_teams": {"type": "boolean", "description": "Claude Code only."},
+                "web_search": {"type": "boolean", "description": "Default true. Only Grok supports false; "
+                               "false disables web search and web fetch tools."},
                 "custom_prompt": {"type": "string", "description": "Text placed first in this profile's system "
                                   "prompt, before the harness; empty adds nothing."},
                 "fallback_profile_id": {"type": ["string", "null"],

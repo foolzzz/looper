@@ -259,6 +259,8 @@ export interface LivePlanner {
 /** A Worker or Reviewer run now, running or waiting for room under its task's limit. */
 export interface LiveStepRun {
   agent_id: string;
+  /** The task's current display name. */
+  task_name: string;
   role: "worker" | "reviewer";
   task_id: string;
   project_id: string | null;
@@ -302,6 +304,8 @@ export interface Overview {
   agents: {
     /** null when the server has no Manager to ask. */
     manager: { agent_id: string; state: "busy" | "idle" } | null;
+    /** All fleet Managers; absent on older servers. */
+    managers?: { agent_id: string; name: string; state: "busy" | "idle" | "stopped" }[];
     planners: LivePlanner[];
     workers: LiveStepRun[];
     reviewers: LiveStepRun[];
@@ -3292,6 +3296,7 @@ export interface AgentProfile {
   model: Pick<Model, "model_id" | "name" | "protocol" | "provider_id">;
   effort: string | null;
   agent_teams: boolean;
+  web_search: boolean;
   custom_prompt: string;
   runtime_id: string;
   runtime_name: string;
@@ -3334,6 +3339,7 @@ export interface ProfileFields {
   model_id?: string;
   effort?: string | null;
   agent_teams?: boolean;
+  web_search?: boolean;
   custom_prompt?: string;
 }
 

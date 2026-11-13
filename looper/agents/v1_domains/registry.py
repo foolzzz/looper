@@ -98,7 +98,7 @@ PROFILE_PROVIDER = _object({name: PROVIDER["properties"][name]
 AGENT_PROFILE = _object({
     "profile_id": _STR, "name": _STR, "model_id": _STR, "model": PROFILE_MODEL,
     "model_path": {"type": "string", "enum": ["direct", "translated"]},
-    "effort": _NULL_STR, "agent_teams": _BOOL, "custom_prompt": _STR, "fallback_profile_id": _NULL_STR,
+    "effort": _NULL_STR, "agent_teams": _BOOL, "web_search": _BOOL, "custom_prompt": _STR, "fallback_profile_id": _NULL_STR,
     "runtime_id": _STR, "runtime_name": _STR, "runtime_type": _STR,
     "provider_id": _STR, "provider_name": _STR, "provider": PROFILE_PROVIDER,
     "builtin": _BOOL, "roles": _array(ROLE), "used_by": PROFILE_USED_BY,

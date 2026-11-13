@@ -76,7 +76,7 @@ _PROFILE = _object({"profile_id": _STR, "name": _STR, "model_id": _STR, "effort"
     "model": _object({"model_id": _STR, "name": _STR, "protocol": _STR, "provider_id": _STR}),
     **dict.fromkeys(("runtime_id", "runtime_name", "runtime_type", "provider_id", "provider_name"), _STR),
     "builtin": _BOOL, "provider": _object(dict.fromkeys(("provider_id", "name", "vendor_type", "auth"), _STR)),
-    "agent_teams": _BOOL, "custom_prompt": _NULL_STR, "roles": _array(_STR), "used_by": _OBJ,
+    "agent_teams": _BOOL, "web_search": _BOOL, "custom_prompt": _NULL_STR, "roles": _array(_STR), "used_by": _OBJ,
     "cost": _OBJ, "warnings": _array(_STR)})
 TASK_DETAIL = _object({
     **TASK_INFO["properties"], "title": _STR, "updated_at": _STR,

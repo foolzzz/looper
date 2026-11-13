@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     agent_teams BOOLEAN NOT NULL DEFAULT false,
+    web_search BOOLEAN NOT NULL DEFAULT true,
     custom_prompt TEXT NOT NULL DEFAULT '',
     fallback_profile_id TEXT REFERENCES agent_profiles(id) ON DELETE RESTRICT,
     model_id TEXT NOT NULL REFERENCES llm_models(id) ON DELETE RESTRICT
