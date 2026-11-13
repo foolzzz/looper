@@ -135,6 +135,84 @@ def test_allowed_bot_poll_overlap_handles_once_and_replies_to_its_thread_message
     asyncio.run(asyncio.wait_for(run(), 5))
 
 
+@pytest.mark.parametrize("slow_stage", ["history", "thread"])
+def test_slow_bot_poll_keeps_each_chats_queried_watermark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slow_stage: str,
+) -> None:
+    async def run() -> None:
+        now = time.time()
+        clock = [now]
+        chats = [CHAT, "oc_syntheticsecond"]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+
+        async def bound(self: LarkChannelAdapter) -> list[str]:
+            return chats
+
+        monkeypatch.setattr(LarkChannelAdapter, "_bound_chats", bound)
+        async with _channel(tmp_path) as (instance, transport, bus):
+            messages = {chat: _message(f"om_syntheticduring{index}",
+                                      create_time=str(int((now + 5 + index * 10) * 1000)))
+                        for index, chat in enumerate(chats)}
+            original_list = transport.list_messages
+
+            async def history(chat_id: str, **kwargs: Any) -> dict[str, Any]:
+                await original_list(chat_id, **kwargs)
+                if slow_stage == "history":
+                    clock[0] += 60
+                    message = messages[chat_id]
+                    return _page(*([message] if kwargs["start"] <= float(message["create_time"]) / 1000
+                                   <= kwargs["end"] else []))
+                return _page()
+
+            async def roots(chat_id: str, *, page_token: str = "") -> dict[str, Any]:
+                return {"roots": [{"thread_id": f"omt_{chat_id}", "create_time": str(int(now * 1000))}],
+                        "has_more": False}
+
+            async def replies(thread_id: str, *, page_token: str = "") -> dict[str, Any]:
+                clock[0] += 60
+                return _page(messages[thread_id.removeprefix("omt_")])
+
+            transport.list_messages = history
+            if slow_stage == "thread":
+                transport.list_threads, transport.list_thread_messages = roots, replies
+            last_poll: dict[str, float] = {}
+            await instance._poll_bot_chats(last_poll)
+            (turn,) = bus.journal.undelivered()
+            assert turn.payload["channel_context"]["message_id"] == messages[chats[1]]["message_id"]
+            assert last_poll == {CHAT: now, chats[1]: now + 60}
+            clock[0] += 30
+            await instance._poll_bot_chats(last_poll)
+            assert {turn.payload["channel_context"]["message_id"] for turn in bus.journal.undelivered()} == {
+                message["message_id"] for message in messages.values()}
+            for first, second in zip(transport.list_calls[:2], transport.list_calls[2:]):
+                assert second["start"] == first["end"] - 10
+                assert last_poll[second["chat_id"]] == second["end"]
+            clock[0] += 30
+            await instance._poll_bot_chats(last_poll)
+            assert len(bus.journal.undelivered()) == 2
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("watermark_age,lookback", [(120, 130), (1800, 900)])
+def test_bot_poll_recovers_from_watermark_with_only_max_age_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, watermark_age: int, lookback: int,
+) -> None:
+    async def run() -> None:
+        now = time.time()
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
+        async with _channel(tmp_path) as (instance, transport, bus):
+            transport.pages[CHAT] = _page(_message(
+                "om_syntheticdelayed", create_time=str(int((now - lookback + 1) * 1000))))
+            last_poll = {CHAT: now - watermark_age}
+            await instance._poll_bot_chats(last_poll)
+            assert len(bus.journal.undelivered()) == 1
+            assert transport.list_calls[0]["start"] == now - lookback
+            assert last_poll[CHAT] == transport.list_calls[0]["end"] == now
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
 def test_unlisted_bot_is_recorded_but_warns_once_per_chat_per_hour(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:

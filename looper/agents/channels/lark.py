@@ -678,23 +678,26 @@ class LarkChannelAdapter(ChannelAdapter):
         for removed in last_poll.keys() - set(chats):
             del last_poll[removed]
         for chat_id in chats:
-            start = max(last_poll.get(chat_id, now - _BOT_POLL_SECONDS), now - _CATCHUP_MAX_AGE) - _CATCHUP_OVERLAP
+            end = time()
+            # Resume from this chat's queried boundary, regardless of how long other listings took.
+            start = max(last_poll.get(chat_id, now - _BOT_POLL_SECONDS) - _CATCHUP_OVERLAP,
+                        end - _CATCHUP_MAX_AGE)
             stats = dict(messages_found=0, handled=0, duplicates=0, too_old=0, failures=0,
                          threads_scanned=0, thread_failures=0, thread_roots_capped=0)
             try:
                 seen: set[str] = set()
                 async for page in self._history_pages(
-                    self._transport.list_messages, chat_id, start=start, end=now,  # type: ignore[attr-defined]
+                    self._transport.list_messages, chat_id, start=start, end=end,  # type: ignore[attr-defined]
                 ):
-                    await self._catchup_messages(page, chat_id, start=start, end=now, stats=stats, bots_only=True)
+                    await self._catchup_messages(page, chat_id, start=start, end=end, stats=stats, bots_only=True)
                     if page["chat_type"] == "group":
                         for message in _history_messages(page["messages"][:50]):
                             if thread_id := message.get("thread_id"):
-                                await self._catchup_thread(thread_id, chat_id, start=start, end=now,
+                                await self._catchup_thread(thread_id, chat_id, start=start, end=end,
                                                            stats=stats, seen=seen, bots_only=True)
-                await self._catchup_threads(chat_id, start=start, end=now, stats=stats, seen=seen, bots_only=True)
+                await self._catchup_threads(chat_id, start=start, end=end, stats=stats, seen=seen, bots_only=True)
                 if not stats["failures"] and not stats["thread_failures"]:
-                    last_poll[chat_id] = now
+                    last_poll[chat_id] = end
                 else:
                     logger.warning("%s: bot poll failed chat=%s failures=%s thread_failures=%s",
                                    self.channel_id, chat_id, stats["failures"], stats["thread_failures"])
