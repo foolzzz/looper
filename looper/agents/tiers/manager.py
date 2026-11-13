@@ -1804,11 +1804,11 @@ class ManagerAgent:
         elif event == "recovered":
             logger.info("agent %s is stable again after crash-looping", agent_id)
 
-    async def _load_agent_settings(self, *, fallback: bool = True) -> AgentSettings:
+    async def _load_agent_settings(self, *, fallback: bool = True, wait: bool = True) -> AgentSettings:
         """The Manager's agent settings (system and role layers), read now; the last ones read when they
         cannot be read (the built-in defaults before any). Without ``fallback`` the read error stays, so a turn
         never runs on a profile the user did not choose."""
-        agent_settings = await load_agent_settings(AgentType.MANAGER, manager_id=self.agent_id)
+        agent_settings = await load_agent_settings(AgentType.MANAGER, manager_id=self.agent_id, wait=wait)
         if agent_settings.error is not None:
             return (self._agent_settings or agent_settings) if fallback else agent_settings
         self._agent_settings = agent_settings
@@ -2239,7 +2239,8 @@ class ManagerAgent:
     async def settings_profile_name(self) -> str:
         """The display name of the profile the role and system layers give the Manager (the session's choice left
         out)."""
-        profile = (await load_agent_settings(AgentType.MANAGER, manager_session=False, manager_id=self.agent_id)).profile
+        profile = (await load_agent_settings(AgentType.MANAGER, manager_session=False,
+                                             manager_id=self.agent_id, wait=False)).profile
         return display_name({"name": profile.name, "effort": profile.effort})
 
     async def _handle_profile_command(self, envelope: MessageEnvelope, command: Any) -> None:
@@ -2249,7 +2250,7 @@ class ManagerAgent:
         try:
             saved = await db_agent_sessions.get_session(self.agent_id) or {}
             selected = saved.get("selected_profile_id")
-            listed = await profile_choices(saved or None, await self._load_agent_settings())
+            listed = await profile_choices(saved or None, await self._load_agent_settings(wait=False))
             menu = format_list(listed, settings_name=await self.settings_profile_name(), selected=selected)
         except Exception as exc:
             logger.exception("%s: could not list its Agent Profiles", self._log)
@@ -2277,7 +2278,7 @@ class ManagerAgent:
         if not self._session_loaded:
             await self._load_session_state()
         saved = await db_agent_sessions.get_session(self.agent_id) or {}
-        effective = await self._load_agent_settings()
+        effective = await self._load_agent_settings(wait=False)
         listed = await profile_choices(saved or None, effective)
         selected_id = saved.get("selected_profile_id")
         selected = None
@@ -2285,7 +2286,8 @@ class ManagerAgent:
             name = next((c.name for c in listed if c.profile_id == selected_id), selected_id)
             selected = {"profile_id": selected_id, "name": name}
         profile = effective.view()["profile"]
-        settings = await load_agent_settings(AgentType.MANAGER, manager_session=False, manager_id=self.agent_id)
+        settings = await load_agent_settings(AgentType.MANAGER, manager_session=False,
+                                             manager_id=self.agent_id, wait=False)
         follow = None if settings.error or settings.profile_error else {
             "name": display_name({"name": settings.profile.name, "effort": settings.profile.effort}),
             "effect": profile_effect(saved or None, "", settings.profile).value}
@@ -2310,7 +2312,8 @@ class ManagerAgent:
         saved = await db_agent_sessions.get_session(self.agent_id) or {}
         previous = saved.get("selected_profile_id")
         if profile_id is None:
-            settings = await load_agent_settings(AgentType.MANAGER, manager_session=False, manager_id=self.agent_id)
+            settings = await load_agent_settings(AgentType.MANAGER, manager_session=False,
+                                                 manager_id=self.agent_id, wait=False)
             if settings.profile_error or settings.error:
                 raise RegistryError(settings.profile_error or settings.error or "cannot read the settings")
             candidate = settings.profile
@@ -2344,7 +2347,7 @@ class ManagerAgent:
             candidate = ResolvedAgentProfile.from_row(row)
         except Exception as exc:
             raise RegistryError(f"Agent Profile {profile_id!r} has no valid model binding ({exc})") from None
-        problem = await profile_launch_problem(candidate, AgentType.MANAGER)
+        problem = await profile_launch_problem(candidate, AgentType.MANAGER, wait=False)
         if problem:
             raise RegistryError(problem)
         return candidate
@@ -2354,7 +2357,7 @@ class ManagerAgent:
         """The choice as one of the Manager's runs; a database error is only logged."""
         try:
             launch = self._process.launch if self._process is not None else Launch(
-                await self._load_agent_settings(), role=AgentType.MANAGER)
+                await self._load_agent_settings(wait=False), role=AgentType.MANAGER)
             record_id = await db_llm_records.start_record(
                 agent_id=self.agent_id, session_id=self._session_id, input_text=input_text,
                 metadata={**await asyncio.to_thread(launch.record), "session_profile": {

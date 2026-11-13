@@ -17,7 +17,6 @@ import pytest
 
 from agent_fixtures import profile_json
 from fake_claude import fake_claude
-from looper.agents import profile_registry
 from looper.agents.bus import MessageBus
 from looper.agents.message import MessageType
 from looper.agents.tiers.manager import (
@@ -49,8 +48,8 @@ def _chat(monkeypatch: pytest.MonkeyPatch, agent_db: Any, tmp_path: Path, messag
     rows = {row["id"]: row for row in (_codex_profile(codex), profile_json("haiku"))}
     store = agent_db.store
 
-    async def _view(**_: Any) -> dict[str, Any]:
-        return {"profiles": [profile_registry.profile_view(row) for row in rows.values()]}
+    async def _profiles(**_: Any) -> list[dict[str, Any]]:
+        return list(rows.values())
 
     async def _list_layers(*_: Any, manager_id: str | None = None, **__: Any) -> list[dict[str, Any]]:
         chosen = store.selected_profile_id.get(manager_id or "")
@@ -58,7 +57,7 @@ def _chat(monkeypatch: pytest.MonkeyPatch, agent_db: Any, tmp_path: Path, messag
             return [{"scope": "session", "role": "manager", "profile_id": chosen, "profile": rows[chosen]}]
         return []
 
-    monkeypatch.setattr(profile_registry, "registry_view", _view)
+    monkeypatch.setattr(db_registry, "list_profiles", _profiles)
     monkeypatch.setattr(db_registry, "get_profile", AsyncMock(side_effect=lambda pid, *, pool=None: rows.get(pid)))
     monkeypatch.setattr(db_registry, "get_api_key", AsyncMock(return_value="sk-test" if key else None))
     monkeypatch.setattr(db_registry, "list_models", AsyncMock(return_value=[]))

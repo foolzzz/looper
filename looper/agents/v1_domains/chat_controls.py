@@ -15,7 +15,9 @@ SOURCE = {"type": "string", "enum": ["builtin", "system", "role", "project", "ro
 PROFILE_SUMMARY = _object({"profile_id": _STR, "name": _STR, "runtime": _STR, "provider": _STR,
                            "model": _STR, "effort": _NULL_STR})
 PROFILE_CHOICE = _object({"number": _INT, "profile_id": _STR, "name": _STR, "runtime": _STR,
-                          "provider": _STR, "model": _STR, "effect": EFFECT, "problem": _NULL_STR})
+                          "provider": _STR, "model": _STR, "effect": EFFECT, "problem": _NULL_STR,
+                          "checking": _BOOL},
+                         required=["number", "profile_id", "name", "runtime", "provider", "model", "effect", "problem"])
 SESSION_VIEW = _object({
     "session": _object({"active": _BOOL, "runtime": _NULL_STR, "profile_id": _NULL_STR}),
     "selected": _nullable(_object({"profile_id": _STR, "name": _STR})),

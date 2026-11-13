@@ -7,6 +7,7 @@ resumes the session; any other starts a new one, with a handoff. Looper answers 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from typing import Any
 from . import profile_registry
 from .agent_settings import AgentSettings, AgentType, profile_launch_problem
 from .profile_registry import AgentProfile, ResolvedAgentProfile
-from .runtimes import RuntimeUnsupported, adapter, can_resume
+from .runtimes import AuthKind, Launcher, RuntimeUnsupported, adapter, can_resume
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,7 @@ class ProfileChoice:
     effect: Effect
     problem: str | None
     raw_name: str = ""
+    checking: bool = False
 
 
 class ProfileRefError(ValueError):
@@ -108,26 +110,47 @@ class ProfileRefError(ValueError):
 
 async def choices(session: Mapping[str, Any] | None, effective: AgentSettings) -> list[ProfileChoice]:
     """The profiles that can serve the Manager, by display name, numbered from 1."""
-    view = await profile_registry.registry_view()
     from ..db import profile_registry as db
 
-    listed = sorted((p for p in view["profiles"] if AgentType.MANAGER.value in p.get("roles", ())),
-                    key=display_name)
-    result: list[ProfileChoice] = []
-    for number, item in enumerate(listed, 1):
+    candidates = []
+    for row in await db.list_profiles():
         try:
-            row = await db.get_profile(item["profile_id"])
-            candidate = ResolvedAgentProfile.from_row(row) if row else None
+            item = profile_registry.profile_view(row)
+            if AgentType.MANAGER.value not in item["roles"]:
+                continue
+            candidates.append((item, ResolvedAgentProfile.from_row(row)))
         except Exception:
-            logger.warning("cannot read Agent Profile %s", item["profile_id"], exc_info=True)
-            candidate = None
-        if candidate is None:
-            continue
-        result.append(ProfileChoice(
-            len(result) + 1, item["profile_id"], display_name(item), item["runtime_name"], item["provider_name"],
+            logger.warning("cannot read Agent Profile %s", row["id"], exc_info=True)
+    candidates.sort(key=lambda pair: display_name(pair[0]))
+
+    async def choice(number: int, item: dict[str, Any], candidate: ResolvedAgentProfile) -> ProfileChoice:
+        problem = await profile_launch_problem(candidate, AgentType.MANAGER, wait=False)
+        return ProfileChoice(
+            number, item["profile_id"], display_name(item), item["runtime_name"], item["provider_name"],
             item["model"]["name"], effect(session, effective.profile.id, candidate),
-            await profile_launch_problem(candidate, AgentType.MANAGER), item["name"]))
-    return result
+            problem, item["name"], checking=not problem and await _login_checking(candidate))
+
+    return list(await asyncio.gather(*(choice(number, item, candidate)
+                                      for number, (item, candidate) in enumerate(candidates, 1))))
+
+
+async def _login_checking(profile: ResolvedAgentProfile) -> bool:
+    """Unknown probe state is informational in a choice; only a launch waits for its answer."""
+    from .runtimes import coco, coco_login, cursor_login, ttadk
+
+    if profile.provider.auth is not AuthKind.OAUTH:
+        return False
+    runtime = adapter(profile.runtime.type)
+    if profile.runtime.launcher is Launcher.TTADK and runtime.ttadk_tool:
+        status = await ttadk.sign_in_problem(profile.runtime.executable or "ttadk", runtime.ttadk_tool, wait=False)
+        if status is ttadk.TtadkProblem.CHECKING:
+            return True
+    if profile.runtime.type == "cursor-agent":
+        return cursor_login.cached_status() is None
+    if profile.runtime.type == "coco":
+        executable = coco.native_executable(profile.runtime.executable, profile.runtime.launcher)
+        return coco_login.cached_status(executable) is None or coco_login.cached_models(executable) is None
+    return False
 
 
 def _menu(listed: list[ProfileChoice]) -> str:
