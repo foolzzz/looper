@@ -197,7 +197,9 @@ def test_profile_references_model_id_and_has_only_runtime_options():
                            effort="high", custom_prompt="instructions")
     assert profile.model_id == "model-test"
     assert {f.name for f in fields(AgentProfile)} == {
-        "id", "name", "runtime", "model_id", "effort", "agent_teams", "custom_prompt", "fallback_profile_id"}
+        "id", "name", "runtime", "model_id", "effort", "agent_teams", "custom_prompt", "fallback_profile_id",
+        "web_search"}
+    assert profile.web_search is True
     assert profile.record()["model_id"] == "model-test"
 
 
