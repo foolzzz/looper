@@ -106,6 +106,36 @@ def test_every_task_is_counted_by_group_and_the_tasks_page_lists_a_group(monkeyp
     run_db(test, monkeypatch)
 
 
+def test_enabled_manager_without_a_started_process_is_idle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from looper.agents.bus import MessageBus
+    from looper.agents.managers import ManagerFleet
+    from looper.agents.ops.service import Platform
+    from looper.agents.supervisor import AgentSupervisor
+    from looper.agents.tiers.manager import ManagerConfig
+
+    async def test(pool: Any) -> None:
+        bus = MessageBus(tmp_path)
+        supervisor = AgentSupervisor(bus, tmp_path)
+        router = SimpleNamespace(running_planners=lambda: [])
+        fleet = ManagerFleet(platform=Platform(bus=bus, task_router=router), supervisor=supervisor,
+                             runtime_root=tmp_path, url="http://127.0.0.1:18768", config=ManagerConfig(),
+                             broadcaster=None)
+        try:
+            await fleet.load()
+            assert fleet.is_running("manager")
+            assert not fleet.default.process_started
+            assert not fleet.state("manager")["running"]
+            status, body = await _get(_server(task_router=router, manager=fleet.default, managers=fleet),
+                                      "/api/v1/system/overview")
+            assert status == 200
+            assert body["agents"]["manager"]["state"] == "idle"
+            assert body["agents"]["managers"] == [{"agent_id": "manager", "name": fleet.default.name, "state": "idle"}]
+        finally:
+            await fleet.stop()
+
+    run_db(test, monkeypatch, timeout=20)
+
+
 def test_the_agents_running_now_and_each_active_projects_load(monkeypatch: pytest.MonkeyPatch) -> None:
     from looper.db import agent_setting_layers, projects
 
@@ -501,27 +531,39 @@ def test_project_overview_moves_live_runs_with_the_tasks_current_project(monkeyp
     async def test(pool):
         a = await projects.create_project(name="A", pool=pool)
         b = await projects.create_project(name="B", pool=pool)
-        await tasks.create_task(task_id="moving-task", requirement="work", project_id=a["id"],
+        await tasks.create_task(task_id="moving-task", requirement="work", title="Build parser", project_id=a["id"],
                                 status="running", pool=pool)
         runs = [{"agent_id": f"{role}-moving", "task_id": "moving-task", "project_id": a["id"],
                  "role": role, "state": state, "since": datetime.now(timezone.utc),
                  "step": "work", "instruction": "work"}
                 for role, state in (("worker", "running"), ("reviewer", "waiting"))]
-        await tasks.set_task_project("moving-task", b["id"], pool=pool)
 
-        async def overview(project):
+        async def overview(project=None):
+            if project is None:
+                status, body = await _get(_server(
+                    task_router=SimpleNamespace(running_planners=lambda: []),
+                    worker_pool=SimpleNamespace(runs=lambda: runs)), "/api/v1/system/overview")
+                assert status == 200
+                return body
             return await build_overview(task_router=SimpleNamespace(running_planners=lambda: []),
                 worker_pool=SimpleNamespace(runs=lambda: runs), manager=None,
                 supervisor=SimpleNamespace(agent_status=lambda: {}), manager_id="manager",
                 project_ids=[project["id"]])
 
+        initial = await overview()
+        for role in ("workers", "reviewers"):
+            assert [(r["task_name"], r["project_name"]) for r in initial["agents"][role]] == [
+                ("Build parser", "A")]
+        await tasks.set_task_title("moving-task", "Check parser", pool=pool)
+        await tasks.set_task_project("moving-task", b["id"], pool=pool)
+
         old = await overview(a)
         assert old["agents"]["workers"] == [] and old["agents"]["reviewers"] == []
         assert old["projects"] == []
-        current = await overview(b)
+        current = await overview()
         for role in ("workers", "reviewers"):
-            assert [(r["task_id"], r["project_id"], r["project_name"]) for r in current["agents"][role]] == [
-                ("moving-task", b["id"], "B")]
+            assert [(r["task_id"], r["task_name"], r["project_id"], r["project_name"])
+                    for r in current["agents"][role]] == [("moving-task", "Check parser", b["id"], "B")]
         assert current["projects"][0]["workers"] == {"running": 1, "waiting": 0}
         assert current["projects"][0]["reviewers"] == {"running": 0, "waiting": 1}
         assert all(r["project_id"] == a["id"] for r in runs)  # the pool's cached records stay untouched
