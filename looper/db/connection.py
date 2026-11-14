@@ -13,6 +13,8 @@ import asyncpg
 
 from looper.agents.model_names import MODEL_MAX_CHARS, MODEL_NAME_PATTERN
 
+from .timing import record_query
+
 logger = logging.getLogger(__name__)
 
 _pool: asyncpg.Pool | None = None
@@ -30,12 +32,17 @@ async def _check_connection_fence(conn: asyncpg.Connection) -> None:
         raise RuntimeError(_FENCED_MESSAGE)
 
 
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    conn.add_query_logger(record_query)
+
+
 async def init_pool(dsn: str, *, min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
     """The pool for ``dsn``, the ops file's ``database.url`` (``looper.ops_config``)."""
     global _pool
     if _fenced:
         raise RuntimeError(_FENCED_MESSAGE)
-    pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size, setup=_check_connection_fence)
+    pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size,
+                                     init=_init_connection, setup=_check_connection_fence)
     # Loss can happen while create_pool is connecting, before _pool exists.
     if _fenced:
         pool.terminate()
