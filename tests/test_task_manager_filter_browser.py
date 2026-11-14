@@ -65,6 +65,7 @@ def dashboard(dashboard_url):  # noqa: F811
                 counts = {"failed": len(selected)} if selected else {}
                 if body.get("before"):
                     selected = selected[1:]
+                    counts = {}
                 fulfill(route, selected[:1], cursor=selected[0]["task_id"] if len(selected) > 1 else None,
                         counts=counts)
                 return
@@ -87,7 +88,7 @@ def dashboard(dashboard_url):  # noqa: F811
             browser.close()
 
 
-def test_manager_filter_composes_and_survives_refresh_pagination_and_back(dashboard):
+def test_manager_filter_composes_and_survives_refresh_pagination_and_back(dashboard, tmp_path):
     from playwright.sync_api import expect
 
     page, base, state = dashboard
@@ -102,6 +103,8 @@ def test_manager_filter_composes_and_survives_refresh_pagination_and_back(dashbo
     page.get_by_role("button", name="Load more", exact=False).click()
     expect(page.get_by_text("Synthetic scenario-old", exact=True)).to_be_visible()
     assert ("tasks/page", {**filters, "before": "scenario-new"}) in state["calls"]
+    expect(page.get_by_text("2 tasks · Needs attention", exact=True)).to_be_visible()
+    page.screenshot(path=str(tmp_path / "tasks-pagination.png"))
     page.get_by_role("button", name="Refresh", exact=True).click()
     expect(page.get_by_text("Synthetic scenario-old", exact=True)).to_be_visible()
     original = page.url

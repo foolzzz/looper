@@ -5,6 +5,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 import pytest
+import httpx
 
 from looper.agents import api_v1, projects
 from looper.agents.ops import OpError
@@ -13,7 +14,7 @@ from looper.agents.ops.service import _plain
 from looper.agents.user_gates import AgendaItem, AgendaStatus, Gate, GateState, GateSummary
 from looper.db import journal, task_changes, task_worktrees, step_workspaces, user_gates
 from tests.db_support import DSN, run_db
-from tests.test_api_v1_auth import _bearer, _send, _serving
+from tests.test_api_v1_auth import CLIENT_TOKEN, _bearer, _send, _serving
 from tests.test_api_v1_auth import clients as clients
 from tests.test_api_v1_task_configuration_db import _configured, _post
 from tests.test_manager_schedule_tools_db import _schedule
@@ -24,6 +25,22 @@ from tests.test_task_manager_attribution_db import TEMPLATE
 from tests.test_usage_api_db import _run_record
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
+
+PAGE_KEYS = {"tasks", "counts", "next_before"}
+TASK_KEYS = {"task_id", "requirement", "name", "goal_id", "project_id", "project_name", "work_dir",
+             "manager_id", "manager_name", "template", "workflow", "status", "group", "phase", "planner_id",
+             "correlation_id", "created_at", "completed_at", "schedule_id", "schedule_name",
+             "continues_schedule_session", "cost"}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _startup_snapshot():
+    from looper import components
+
+    # Installation fingerprints and route discovery precede serving requests;
+    # keep this cold startup work outside the DB/HTTP contract deadline.
+    components.loaded_manifest()
+    api_v1.operations()
 
 
 @pytest.mark.parametrize("filter_name", ["project_id", "schedule_id", "status", "group", "query"])
@@ -45,11 +62,19 @@ def test_page_filters_counts_and_cursor_keep_full_page_semantics(tmp_path, monke
                 first = api_v1.validate_arguments(api_v1.find("POST", "/api/v1/tasks/page").result, body["result"])
                 assert [t["task_id"] for t in first["tasks"]] == ["task-b"]
                 assert first["counts"] == expected_counts and first["next_before"] == "task-b"
-                status, body = await _post(server, "tasks/page", {**filters, "before": first["next_before"]},
-                                           operator=operator)
+                assert set(first) == PAGE_KEYS and set(first["tasks"][0]) == TASK_KEYS
+
+                async def unexpected_count(**_):
+                    pytest.fail("older pages must not recount task statuses")
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(projects.db_tasks, "count_by_status", unexpected_count)
+                    status, body = await _post(server, "tasks/page", {**filters, "before": first["next_before"]},
+                                               operator=operator)
                 assert status == 200 and body["result"]["next_before"] is None
                 assert [t["task_id"] for t in body["result"]["tasks"]] == ["task-a"]
-                assert body["result"]["counts"] == expected_counts
+                assert body["result"]["counts"] == {}
+                assert set(body["result"]) == PAGE_KEYS and set(body["result"]["tasks"][0]) == TASK_KEYS
                 assert first["tasks"][0]["schedule_name"] == "Nightly"
     run_db(run, monkeypatch, timeout=30)
 
@@ -105,16 +130,24 @@ def test_full_detail_retains_history_ownership_workspaces_and_saved_core_fields(
             # Listen on an ephemeral loopback port: read the real HTTP envelope and DB projection.
             await server.start()
             try:
-                status, _, document = await _send(server, "GET /api/v1/openapi.json", _bearer(TOKEN))
-                assert status == 200
-                assert document["components"]["schemas"]["TaskDetail"] == schema
-                envelope_schema = document["components"]["schemas"]["OpOk"]
-                for operator in (False, True):
-                    status, answer = await _post(server, "tasks/detail", {"task_id": "task-a"}, operator=operator)
-                    assert status == 200 and answer["status"] == "ok", answer
-                    api_v1.validate_arguments(envelope_schema, answer)
-                    views.append(api_v1.validate_arguments(schema, answer["result"]))
-                status, compact = await _post(server, "ops/tasks/get", {"task_id": "task-a"})
+                # This is a full-detail contract read, not the auth helper's two-second socket smoke.
+                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{server._port}", timeout=10,
+                                             headers={"X-Looper-Session": "one"}) as transport:
+                    response = await transport.get("/api/v1/openapi.json", headers=_bearer(TOKEN))
+                    assert response.status_code == 200
+                    document = response.json()
+                    assert document["components"]["schemas"]["TaskDetail"] == schema
+                    envelope_schema = document["components"]["schemas"]["OpOk"]
+                    for operator in (False, True):
+                        response = await transport.post("/api/v1/tasks/detail", json={"task_id": "task-a"},
+                            headers=_bearer(TOKEN if operator else CLIENT_TOKEN))
+                        answer = response.json()
+                        assert response.status_code == 200 and answer["status"] == "ok", answer
+                        api_v1.validate_arguments(envelope_schema, answer)
+                        views.append(api_v1.validate_arguments(schema, answer["result"]))
+                    response = await transport.post("/api/v1/ops/tasks/get", json={"task_id": "task-a"},
+                                                    headers=_bearer(CLIENT_TOKEN))
+                    status, compact = response.status_code, response.json()
             finally:
                 await server.stop()
             detail = views[0]
