@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.192] - 2026-11-13
+
+### Changed
+
+- **DSH materialize, directory removal and knowledge hashing run off the event loop.** ([#1354](https://github.com/foolzzz/looper/pull/1354))
+  - Directory removals (step worktrees, run sessions, kept-run logs, Cursor temp dirs), the kept-session sweep, knowledge-document hash checks, launch and command construction run on worker threads. The DSH catalog is materialized once per library and executable (successes cached, concurrent callers share one validation), and unchanged knowledge copies are not re-read. Behavior otherwise unchanged (the PR states latency as the only difference).
+  - Not model-visible: no prompt, tool description or tool schema changed.
+
 ## [2.14.191] - 2026-11-13
 
 ### Changed
