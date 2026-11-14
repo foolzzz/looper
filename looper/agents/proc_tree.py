@@ -187,9 +187,11 @@ def tree_of(process: asyncio.subprocess.Process) -> Tree:
 
 async def begin_end(process: asyncio.subprocess.Process) -> Tree:
     """Take and record the tree before asking the agent to exit; keep its record until ``end`` finishes."""
-    tree = tree_of(process)
+    # The reaper may run while the process table is read off the loop.
     if process.pid in _recorded:
         _ending.add(process.pid)
+    tree = await asyncio.to_thread(tree_of, process)
+    if process.pid in _recorded:
         await _record_tree(process.pid, tree)
     return tree
 
@@ -460,7 +462,7 @@ async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any)
         path, started = None, None
         try:
             if _records is not None and _server is not None:
-                if (started := _start_time(process.pid)) is None:
+                if (started := await asyncio.to_thread(_start_time, process.pid)) is None:
                     logger.warning("cannot read the start time of agent pid %s; it is not recorded for the next sweep",
                                    process.pid)
                 else:
@@ -470,6 +472,10 @@ async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any)
                         logger.warning("cannot record agent pid %s for the next sweep: %s", process.pid, exc)
                     else:
                         _recorded[process.pid] = (path, started)
+        except asyncio.CancelledError:
+            # The caller has not received the handle yet and cannot clean it up.
+            await end(process, label="cancelled agent spawn")
+            raise
         finally:
             forget = loop.create_task(_forget(process, path, started))
             _forgetting.add(forget)
