@@ -212,9 +212,11 @@ def _get_index(port: int, token: str, *, address: str = "127.0.0.1", timeout: fl
 
 
 def _pid_alive(pid: int) -> bool:
+    """Whether the service process we started (same user) still runs. A pid we may not signal belongs to
+    another user's process: ours exited and the pid was reused, which is common on a busy machine."""
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         return False
     return True
 
