@@ -212,7 +212,8 @@ def test_full_detail_retains_history_ownership_workspaces_and_saved_core_fields(
             assert status == 200 and compact["result"] == _plain(await projects.task_detail("task-a", compact=True))
             assert "config" not in compact["result"] and "task_workspace" not in compact["result"]
             assert len(compact["result"]["supplements"][0]["text"]) < len(detail["supplements"][0]["text"])
-    run_db(run, monkeypatch, timeout=30)
+    # Includes cold schema creation; individual HTTP reads retain their own deadline.
+    run_db(run, monkeypatch, timeout=120)
 
 
 @pytest.mark.parametrize("action,arguments,legacy,code", [

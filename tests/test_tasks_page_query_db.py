@@ -41,7 +41,8 @@ def test_default_task_list_uses_creation_order_index():
         assert any(node["Node Type"] == "Index Scan" and node.get("Index Name") == "idx_tasks_created"
                    for node in nodes(plan)), plan
 
-    run_db(run, timeout=30)
+    # Includes cold schema creation; EXPLAIN asserts the plan rather than wall time.
+    run_db(run, timeout=120)
 
 
 @pytest.mark.parametrize("upgrade", [False, True])
@@ -65,4 +66,4 @@ def test_task_list_index_installs_on_fresh_and_existing_databases(upgrade):
             await connection.ensure_schema(conn)
             assert await conn.fetchval("SELECT pg_get_indexdef(to_regclass('idx_tasks_created'))") == definition
 
-    asyncio.run(asyncio.wait_for(run(), 30))
+    asyncio.run(asyncio.wait_for(run(), 120))
