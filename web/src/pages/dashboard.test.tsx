@@ -3,13 +3,18 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DashboardPage } from "@/pages/dashboard";
-import { fetchOverview, fetchTasks, fetchTaskDetail, postGateMessage, GATE_MESSAGE_MAX_CHARS,
-  type Overview, type TaskDetail, type UserGate, type GatePosted } from "@/lib/api";
+import { Sidebar } from "@/components/sidebar";
+import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
+import { fetchGates, fetchOverview, fetchProjectsList, fetchTasks, fetchTaskDetail, postGateMessage, GATE_MESSAGE_MAX_CHARS,
+  type GateList, type Overview, type TaskDetail, type UserGate, type GatePosted } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
   fetchOverview: vi.fn(), fetchTasks: vi.fn(), fetchTaskDetail: vi.fn(), postGateMessage: vi.fn(),
+  fetchGates: vi.fn(), fetchProjectsList: vi.fn(),
 }));
+vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
+vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => null }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const gate = (step: string, extra: Partial<UserGate> = {}): UserGate => ({
@@ -30,11 +35,14 @@ describe("Dashboard waiting gates", () => {
   let root: Root;
   let details: TaskDetail[];
   let overview: Overview;
+  let waitingGates: number;
   beforeEach(() => {
     vi.useFakeTimers();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     vi.setSystemTime(new Date("2026-10-20T10:12:00Z"));
     vi.resetAllMocks();
     details = [];
+    waitingGates = 1;
     overview = {
       tasks: { needs_you: 1, other_statuses: {} }, agents: { manager: null, planners: [], workers: [], reviewers: [] },
       projects: [], idle_projects: 0, health: { unhealthy: [] },
@@ -42,6 +50,8 @@ describe("Dashboard waiting gates", () => {
       spend_today: { since: "", provider_priced_usd: 0, equivalent_usd: 0, runs: 0, running: 0, unpriced_runs: 0 },
     } as unknown as Overview;
     vi.mocked(fetchOverview).mockImplementation(async () => ({ ...overview }));
+    vi.mocked(fetchGates).mockImplementation(async () => ({ counts: { waiting_user: waitingGates } } as GateList));
+    vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
     vi.mocked(fetchTasks).mockImplementation(async () => ({ tasks: details.slice(0, 10), next_before: details.length > 10 ? "next-page" : null, counts: { waiting_user: details.length } }));
     vi.mocked(fetchTaskDetail).mockImplementation(async (id) => details.find((t) => t.task_id === id)!);
     container = document.createElement("div");
@@ -54,7 +64,11 @@ describe("Dashboard waiting gates", () => {
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
-  const show = async () => { await act(async () => root.render(<DashboardPage />)); };
+  const show = async (withSidebar = false) => { await act(async () => root.render(<WaitingGatesProvider>
+    {withSidebar && <Sidebar activePage="dashboard" activeSettingsPage={null} activeProjectId={null}
+      onNavigate={vi.fn()} onOpenProject={vi.fn()} onOpenSettings={vi.fn()} open onClose={vi.fn()} />}
+    <DashboardPage />
+  </WaitingGatesProvider>)); };
   const section = () => container.querySelector('section[aria-label="Waiting for you"]');
   const answer = async (text: string) => {
     const input = section()!.querySelector("textarea")!;
@@ -269,14 +283,151 @@ describe("Dashboard waiting gates", () => {
     expect(section()).toBeNull();
   });
 
-  it("refreshes waiting gates on the dashboard poll without losing a draft", async () => {
+  it.each(["opened", "answered"])("rereads once when a gate is %s without changing the needs-you task count", async (change) => {
+    details = [task("a", change === "opened" ? [gate("g1")] : [gate("g1"), gate("g2")])];
+    waitingGates = details[0].gates.length;
+    await show(true);
+    expect(fetchGates).toHaveBeenCalledTimes(1);
+    expect(fetchGates).toHaveBeenCalledWith({ state: "open", waitingOn: "user", limit: 1 });
+    expect(fetchTasks).toHaveBeenCalledTimes(1);
+    expect(section()!.querySelectorAll("article")).toHaveLength(waitingGates);
+
+    details = [task("a", change === "opened" ? [gate("g1"), gate("g2")] : [gate("g1")])];
+    waitingGates = details[0].gates.length;
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(fetchGates).toHaveBeenCalledTimes(2);
+    expect(fetchTasks).toHaveBeenCalledTimes(2);
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(2);
+    expect(section()!.querySelectorAll("article")).toHaveLength(waitingGates);
+    expect(container.querySelector(`[aria-label="${waitingGates} ${waitingGates === 1 ? "gate" : "gates"} waiting for you"]`))
+      .toBeTruthy();
+
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(fetchGates).toHaveBeenCalledTimes(3);
+    expect(fetchTasks).toHaveBeenCalledTimes(2);
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not reread waiting gates for unchanged task and gate counts", async () => {
+    details = [task("a", [gate("g1")])];
+    await show(true);
+    const input = await answer("Draft");
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(fetchOverview).toHaveBeenCalledTimes(8); // The sidebar also reads the version once.
+    expect(fetchGates).toHaveBeenCalledTimes(4);
+    expect(fetchTasks).toHaveBeenCalledTimes(1);
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(1);
+    overview.tasks.needs_you = 2;
+    details.push(task("b", [gate("g2")]));
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(fetchTasks).toHaveBeenCalledTimes(2);
+    expect(section()!.querySelectorAll("article")).toHaveLength(2);
+    expect(input.value).toBe("Draft");
+  });
+
+  it("falls back to a full read only every 30 s when the waiting-gate count is unavailable", async () => {
+    vi.mocked(fetchGates).mockRejectedValue(new Error("Offline"));
+    details = [task("a", [gate("g1")])];
+    await show(true);
+    details[0].gates.push(gate("g2"));
+    await act(async () => vi.advanceTimersByTimeAsync(25_000));
+    expect(fetchTasks).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(fetchTasks).toHaveBeenCalledTimes(2);
+    expect(section()!.querySelectorAll("article")).toHaveLength(2);
+    await act(async () => vi.advanceTimersByTimeAsync(25_000));
+    expect(fetchTasks).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(fetchTasks).toHaveBeenCalledTimes(3);
+    overview.tasks.needs_you = 0;
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(fetchTasks).toHaveBeenCalledTimes(3);
+    expect(section()).toBeNull();
+  });
+
+  it("keeps a fallback error visible until the next 30 s read succeeds", async () => {
+    vi.mocked(fetchGates).mockRejectedValue(new Error("Count unavailable"));
     details = [task("a", [gate("g1")])];
     await show();
-    const input = await answer("Draft");
-    details = [task("a", [gate("g1", { topic: "New topic" })])];
+    vi.mocked(fetchTasks).mockRejectedValueOnce(new Error("Offline"));
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(fetchTasks).toHaveBeenCalledTimes(2);
+    expect(section()!.querySelector('[role="alert"]')?.textContent).toContain("Offline");
+    await act(async () => vi.advanceTimersByTimeAsync(25_000));
+    expect(fetchTasks).toHaveBeenCalledTimes(2);
+    expect(section()!.querySelector('[role="alert"]')?.textContent).toContain("Offline");
     await act(async () => vi.advanceTimersByTimeAsync(5000));
-    expect(section()!.textContent).toContain("New topic");
-    expect(input.value).toBe("Draft");
+    expect(fetchTasks).toHaveBeenCalledTimes(3);
+    expect(section()!.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it.each(["list", "detail"])("retries a failed $read read after only the waiting-gate count changes", async (read) => {
+    details = [task("a", [gate("g1")])];
+    await show();
+    details[0].gates.push(gate("g2"));
+    waitingGates++;
+    if (read === "list") vi.mocked(fetchTasks).mockRejectedValueOnce(new Error("Offline"));
+    else vi.mocked(fetchTaskDetail).mockRejectedValueOnce(new Error("Offline"));
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(fetchTasks).toHaveBeenCalledTimes(2);
+    expect(section()!.querySelector('[role="alert"]')?.textContent).toContain("Offline");
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(fetchTasks).toHaveBeenCalledTimes(3);
+    expect(section()!.querySelectorAll("article")).toHaveLength(2);
+    expect(section()!.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(fetchTasks).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    { read: "list", previouslyLoaded: false },
+    { read: "detail", previouslyLoaded: false },
+    { read: "list", previouslyLoaded: true },
+    { read: "detail", previouslyLoaded: true },
+  ])("retries a failed $read read on the next overview poll (previously loaded: $previouslyLoaded)", async ({ read, previouslyLoaded }) => {
+    if (previouslyLoaded) {
+      details = [task("a", [gate("g1")])];
+      await show();
+      overview.tasks.needs_you = 2;
+    }
+    details.push(task("b", [gate("g2")]));
+    if (read === "list") vi.mocked(fetchTasks).mockRejectedValueOnce(new Error("Offline"));
+    else vi.mocked(fetchTaskDetail).mockRejectedValueOnce(new Error("Offline"));
+    if (previouslyLoaded) await act(async () => vi.advanceTimersByTimeAsync(5000));
+    else await show();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Offline");
+    const listCalls = vi.mocked(fetchTasks).mock.calls.length;
+    const detailCalls = vi.mocked(fetchTaskDetail).mock.calls.length;
+
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(fetchTasks).toHaveBeenCalledTimes(listCalls + 1);
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(detailCalls + details.length);
+    expect(section()!.querySelectorAll("article")).toHaveLength(details.length);
+    for (const detail of details) expect(section()!.textContent).toContain(detail.gates[0].topic);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(fetchTasks).toHaveBeenCalledTimes(listCalls + 1);
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(detailCalls + details.length);
+  });
+
+  it("pauses overview reads while hidden and refreshes once on visibility", async () => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    await show();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(fetchOverview).not.toHaveBeenCalled();
+    await act(async () => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(fetchOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not overlap a slow overview request", async () => {
+    vi.mocked(fetchOverview).mockImplementation(() => new Promise(() => {}));
+    await show();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(fetchOverview).toHaveBeenCalledTimes(1);
   });
 
   it.each(["deleted", "attention", "cancelled", "completed", "ready", "other"] as const)(
@@ -290,6 +441,7 @@ describe("Dashboard waiting gates", () => {
       await act(async () => input.form!.requestSubmit());
       expect(section()!.textContent).toContain("You replied: My answer");
 
+      overview.tasks.needs_you++;
       details = [task("b", [gate("g2", { topic: "Updated other gate" })])];
       const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 404 })));
@@ -303,6 +455,7 @@ describe("Dashboard waiting gates", () => {
       expect(container.querySelector('[role="alert"]')).toBeNull();
 
       vi.mocked(fetchTaskDetail).mockClear();
+      overview.tasks.needs_you++;
       details = [task("b", [gate("g2", { topic: "Next other gate" })])];
       await act(async () => vi.advanceTimersByTimeAsync(5000));
       expect(section()!.textContent).toContain("Next other gate");
@@ -318,6 +471,7 @@ describe("Dashboard waiting gates", () => {
     vi.mocked(postGateMessage).mockResolvedValue({ gate: details[0].gates[0] } as GatePosted);
     await act(async () => input.form!.requestSubmit());
 
+    overview.tasks.needs_you++;
     details = [task("b", [gate("g2", { topic: "Updated other gate" })])];
     const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
     const fetch = vi.fn();
@@ -409,14 +563,15 @@ describe("Dashboard waiting gates", () => {
     }
     await act(async () => releases[0](task("a", [gate("g1", { topic: "Slow result" })])));
     expect(section()!.textContent).toContain("Slow result");
-    expect(fetchTaskDetail).toHaveBeenCalledTimes(2);
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(1);
+    overview.tasks.needs_you++;
     for (let poll = 0; poll < 2; poll++) {
       await act(async () => vi.advanceTimersByTimeAsync(5000));
       expect(fetchTaskDetail).toHaveBeenCalledTimes(2);
     }
     await act(async () => releases[1](task("a", [gate("g1", { topic: "Next result" })])));
     expect(section()!.textContent).toContain("Next result");
-    expect(fetchTaskDetail).toHaveBeenCalledTimes(3);
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(2);
   });
 
   it("keeps a reply sent while the Planner is answering after that turn raises the count", async () => {
@@ -493,6 +648,7 @@ describe("Dashboard waiting gates", () => {
     const input = await answer("Answer");
     const stale = task("a", [gate("g1", { topic: "Stale topic" })]);
     let release!: (task: TaskDetail) => void;
+    overview.tasks.needs_you++;
     vi.mocked(fetchTaskDetail).mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
     await act(async () => vi.advanceTimersByTimeAsync(5000));
     details = [task("a", [gate("g1", { topic: "Fresh topic" })])];

@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "@/components/sidebar";
+import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
 import { fetchGates, fetchOverview, fetchProjectsList, type GateList } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
@@ -27,8 +28,10 @@ let activePage: "gates" | "dashboard" = "gates";
 async function render() {
   await act(async () => {
     root.render(
-      <Sidebar activePage={activePage} activeSettingsPage={null} activeProjectId={null} onNavigate={onNavigate}
-        onOpenProject={vi.fn()} onOpenSettings={vi.fn()} open onClose={vi.fn()} />,
+      <WaitingGatesProvider>
+        <Sidebar activePage={activePage} activeSettingsPage={null} activeProjectId={null} onNavigate={onNavigate}
+          onOpenProject={vi.fn()} onOpenSettings={vi.fn()} open onClose={vi.fn()} />
+      </WaitingGatesProvider>,
     );
   });
 }

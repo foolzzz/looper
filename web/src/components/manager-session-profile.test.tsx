@@ -1,6 +1,10 @@
+// @vitest-environment happy-dom
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  ManagerSessionProfile,
   ManagerSessionProfileView,
   confirmText,
   sourceText,
@@ -64,5 +68,71 @@ describe("manager session profile", () => {
     expect(fetch.mock.calls[0][0]).toBe("/api/v1/manager_session/select_profile");
     expect(fetch.mock.calls[0][1].method).toBe("POST");
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ profile_id: null });
+  });
+});
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+describe("manager session focus refresh", () => {
+  it("coalesces repeated focus while a read is pending", async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    const fetcher = vi.fn(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", fetcher);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<ManagerSessionProfile />));
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+      for (let i = 0; i < 5; i++) {
+        await act(async () => {
+          window.dispatchEvent(new Event("focus"));
+          await vi.advanceTimersByTimeAsync(2000);
+        });
+      }
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    } finally {
+      act(() => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])("throttles focus reads after a failed read=%s and ignores inactive or hidden chat", async (failFirst) => {
+    vi.useFakeTimers();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+    const fetcher = vi.fn(async () => Response.json({ status: "ok", result: view() }));
+    vi.stubGlobal("fetch", fetcher);
+    if (failFirst) fetcher.mockRejectedValueOnce(new Error("Offline"));
+    const root = createRoot(document.createElement("div"));
+    try {
+      await act(async () => root.render(<ManagerSessionProfile active={false} />));
+      await act(async () => window.dispatchEvent(new Event("focus")));
+      expect(fetcher).not.toHaveBeenCalled();
+      await act(async () => root.render(<ManagerSessionProfile active />));
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(29_999);
+        window.dispatchEvent(new Event("focus"));
+      });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+        window.dispatchEvent(new Event("focus"));
+      });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+        window.dispatchEvent(new Event("focus"));
+      });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      await act(async () => root.render(<ManagerSessionProfile active={false} />));
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      await act(async () => window.dispatchEvent(new Event("focus")));
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      act(() => root.unmount());
+      vi.useRealTimers();
+    }
   });
 });
