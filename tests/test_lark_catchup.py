@@ -18,6 +18,11 @@ from looper.agents.channels.lark import LarkChannelAdapter
 from looper.agents.message import MessageType
 from test_lark_transport import BOT_ID, BOT_MENTION, OPEN_ID, StubTransport, _event
 
+# These are deadlock guards for complete scenarios, including multiple FULL
+# SQLite commits and journal fsyncs. Loop responsiveness has separate heartbeat tests.
+_SCENARIO_TIMEOUT = 30
+_CATCHUP_TIMEOUT = 15
+
 
 class HistoryTransport(StubTransport):
     """Keep live ingress open while tests release a deterministic history page."""
@@ -103,7 +108,7 @@ def seed_boundary(root: Path, at: float) -> None:
         inbox.close()
 
 
-async def catchup_done(instance: LarkChannelAdapter, transport: HistoryTransport, *, timeout: float = 3) -> None:
+async def catchup_done(instance: LarkChannelAdapter, transport: HistoryTransport, *, timeout: float = _CATCHUP_TIMEOUT) -> None:
     await asyncio.wait_for(transport.consumer_started.wait(), 3)
     assert instance._catchup_task is not None
     await asyncio.wait_for(instance._catchup_task, timeout)
@@ -159,7 +164,7 @@ def test_gap_group_mention_reaches_bound_manager_once_after_start(tmp_path: Path
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("thread", [False, True])
@@ -208,7 +213,7 @@ def test_minute_history_overlaps_restart_window_without_ending_thread_scan(
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_minute_history_overlaps_age_limit_but_excludes_previous_minute(
@@ -235,7 +240,7 @@ def test_minute_history_overlaps_age_limit_but_excludes_previous_minute(
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("scope", ["search:message", "im:message.reactions:read"])
@@ -281,7 +286,7 @@ def test_thread_catchup_never_requests_search_scopes(tmp_path, monkeypatch, scop
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("source", ["chat", "thread", "live"])
@@ -370,7 +375,7 @@ def test_thread_reply_keeps_raw_references_for_gate_routing(
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("mode", ["group", "topic"])
@@ -450,7 +455,7 @@ def test_restart_recovers_nested_and_old_thread_mentions(
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("mode", ["group", "topic"])
@@ -523,7 +528,7 @@ def test_busy_roots_do_not_hide_recent_replies_or_stall_next_restart(
             clock[0] += 30
         await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 8))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("failure", ["root_error", "root_limit"])
@@ -585,7 +590,7 @@ def test_only_root_discovery_errors_preserve_debt_while_live_boundary_advances(
         finally:
             inbox.close()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("live_first", [True, False])
@@ -637,7 +642,7 @@ def test_live_event_racing_history_is_published_once(
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_gap_group_without_bot_mention_is_not_answered(tmp_path: Path) -> None:
@@ -658,7 +663,7 @@ def test_gap_group_without_bot_mention_is_not_answered(tmp_path: Path) -> None:
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_history_message_older_than_cap_is_not_answered_and_counted(
@@ -687,7 +692,7 @@ def test_history_message_older_than_cap_is_not_answered_and_counted(
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_one_chat_list_failure_does_not_block_other_chats(
@@ -723,7 +728,7 @@ def test_one_chat_list_failure_does_not_block_other_chats(
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_boundary_and_live_receipts_survive_a_new_adapter_object(
@@ -772,7 +777,7 @@ def test_boundary_and_live_receipts_survive_a_new_adapter_object(
                 await second.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_expired_boundary_skips_history_entirely(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -794,7 +799,7 @@ def test_expired_boundary_skips_history_entirely(tmp_path: Path, caplog: pytest.
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_catchup_pages_and_chats_are_bounded(
@@ -829,7 +834,7 @@ def test_catchup_pages_and_chats_are_bounded(
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_listable_p2p_chat_is_recovered_without_a_mention(tmp_path: Path) -> None:
@@ -851,7 +856,7 @@ def test_listable_p2p_chat_is_recovered_without_a_mention(tmp_path: Path) -> Non
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_durable_message_receipts_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -904,7 +909,7 @@ def test_stopping_a_disconnected_consumer_preserves_the_last_checkpoint(tmp_path
                 await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_idle_heartbeat_persists_while_catchup_is_pending(
@@ -952,7 +957,7 @@ def test_idle_heartbeat_persists_while_catchup_is_pending(
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("elapsed", [120, 16 * 60])
@@ -1029,7 +1034,7 @@ def test_failed_chat_debt_survives_live_progress_and_restart(
             await second.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("failure", ["error", "cancel"])
@@ -1074,7 +1079,7 @@ def test_discovery_window_survives_live_checkpoint(tmp_path, monkeypatch, failur
             await resumed.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_partly_expired_chat_debt_keeps_recent_portion(tmp_path, monkeypatch, caplog):
@@ -1106,7 +1111,7 @@ def test_partly_expired_chat_debt_keeps_recent_portion(tmp_path, monkeypatch, ca
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_owed_chat_is_retried_before_new_discovery_at_chat_limit(tmp_path, monkeypatch):
@@ -1136,7 +1141,7 @@ def test_owed_chat_is_retried_before_new_discovery_at_chat_limit(tmp_path, monke
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("recent_roots", [30, 600])
@@ -1202,7 +1207,7 @@ def test_thread_discovery_bounds_busy_chats_by_age_and_listing_budget(
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 30))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("failure", ["page_error", "page_limit", "cursor"])
@@ -1244,7 +1249,7 @@ def test_thread_listing_failure_keeps_read_replies_and_completes_chat(
             await instance.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("activity", ["handled", "sent", "sent_readback", "sent_chat", "sent_chat_readback"])
@@ -1330,7 +1335,7 @@ def test_recent_thread_activity_survives_restart_and_recovers_old_thread_once(
         finally:
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_thread_activity_is_durable_scoped_recent_and_bounded(tmp_path, monkeypatch):
@@ -1381,4 +1386,4 @@ def test_sent_thread_bookkeeping_failure_does_not_retry_successful_send(monkeypa
         assert await cli.reply("message-parent", text="Synthetic reply", return_id=True) == "message-synthetic"
         assert len(sends) == 1
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))

@@ -19,6 +19,10 @@ from looper.agents.channels.lark_inbox import LarkInbox, history_event
 from looper.agents.message import MessageEnvelope, MessageType, channel_address, manager_address
 from test_lark_transport import BOT_ID, BOT_MENTION, OPEN_ID, StubTransport, _event
 
+# These are deadlock guards for complete scenarios, including multiple FULL
+# SQLite commits and journal fsyncs. Loop responsiveness has separate heartbeat tests.
+_SCENARIO_TIMEOUT = 30
+
 OTHER_BOT = "ou_syntheticbot12"
 OTHER_APP = "cli_syntheticbot12"
 OWN_APP = "cli_syntheticself12"
@@ -132,7 +136,7 @@ def test_allowed_bot_poll_overlap_handles_once_and_replies_to_its_thread_message
             assert len(handled) == 1
             assert CHAT in handled[0] and OTHER_BOT in handled[0]
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("slow_stage", ["history", "thread"])
@@ -191,7 +195,7 @@ def test_slow_bot_poll_keeps_each_chats_queried_watermark(
             await instance._poll_bot_chats(last_poll)
             assert len(bus.journal.undelivered()) == 2
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("watermark_age,lookback", [(120, 130), (1800, 900)])
@@ -210,7 +214,7 @@ def test_bot_poll_recovers_from_watermark_with_only_max_age_cap(
             assert transport.list_calls[0]["start"] == now - lookback
             assert last_poll[CHAT] == transport.list_calls[0]["end"] == now
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_unlisted_bot_is_recorded_but_warns_once_per_chat_per_hour(
@@ -242,7 +246,7 @@ def test_unlisted_bot_is_recorded_but_warns_once_per_chat_per_hour(
             assert len([record for record in caplog.records if "not on the sender allowlist" in record.message]) == 2
             assert not any(kind in {"send", "reply", "react"} for kind, _ in transport.calls)
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("fields", [
@@ -256,7 +260,7 @@ def test_polls_ignore_own_bot_and_messages_without_our_mention(tmp_path: Path, f
             assert bus.journal.undelivered() == []
             assert not any(kind in {"send", "reply", "react"} for kind, _ in transport.calls)
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 @pytest.mark.parametrize("sender_id,sender_app_id", [(BOT_ID, ""), ("ou_syntheticother", OWN_APP)])
@@ -272,7 +276,7 @@ def test_live_own_bot_message_is_ignored_before_chat_admission(
             assert bus.journal.undelivered() == []
             assert not any(kind in {"send", "reply", "react"} for kind, _ in transport.calls)
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_eleventh_bot_turn_is_silent_and_rolling_hour_expires(
@@ -299,7 +303,7 @@ def test_eleventh_bot_turn_is_silent_and_rolling_hour_expires(
             await instance._poll_bot_chats({})
             assert len(bus.journal.undelivered()) == 11
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_people_stay_on_live_consumer_and_share_receipts_with_history(tmp_path: Path) -> None:
@@ -315,7 +319,7 @@ def test_people_stay_on_live_consumer_and_share_receipts_with_history(tmp_path: 
             assert await instance._handle_lark_event(event) == "duplicate"
             assert len(bus.journal.undelivered()) == 1
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_chat_policy_admits_unlisted_people_and_bots_only_in_that_group(
@@ -341,7 +345,7 @@ def test_chat_policy_admits_unlisted_people_and_bots_only_in_that_group(
             assert len([record for record in caplog.records if "chat_route " in record.message
                         and "sender_policy=chat" in record.message]) == 2
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_poll_failure_keeps_other_bound_chats_running(
@@ -361,7 +365,7 @@ def test_poll_failure_keeps_other_bound_chats_running(
             assert any(record.levelname == "WARNING" and "oc_syntheticfailure" in record.message
                        for record in caplog.records)
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_history_converter_prefers_bot_open_id_and_preserves_app_fallback() -> None:
@@ -409,7 +413,7 @@ def test_bot_poll_combines_thread_discovery_activity_and_partial_page_recovery(
             assert reads.count((thread, "")) == reads.count((active, "")) == 1
             assert (CHAT in last_poll) is not later_page_fails
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_app_id_fallback_can_be_allowlisted(tmp_path: Path) -> None:
@@ -420,7 +424,7 @@ def test_app_id_fallback_can_be_allowlisted(tmp_path: Path) -> None:
             (turn,) = bus.journal.undelivered()
             assert turn.payload["channel_context"]["sender_id"] == OTHER_APP
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_polled_bot_attachment_failure_keeps_payload_and_replies_to_original_message(tmp_path: Path) -> None:
@@ -443,7 +447,7 @@ def test_polled_bot_attachment_failure_keeps_payload_and_replies_to_original_mes
             assert replies[0]["message_id"] == "om_syntheticattachment"
             assert replies[0]["text"].startswith("有 1 个附件没有收下：")
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
 
 
 def test_polled_bot_obeys_disabled_manager_route(tmp_path: Path) -> None:
@@ -456,4 +460,4 @@ def test_polled_bot_obeys_disabled_manager_route(tmp_path: Path) -> None:
             assert bus.journal.undelivered() == []
             assert transport.calls == [("reply", {"message_id": "om_syntheticdisabled", "text": TURNED_OFF_REPLY})]
 
-    asyncio.run(asyncio.wait_for(run(), 5))
+    asyncio.run(asyncio.wait_for(run(), _SCENARIO_TIMEOUT))
