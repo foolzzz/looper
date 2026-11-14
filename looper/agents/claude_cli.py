@@ -126,13 +126,24 @@ def _outside_memory(cwd: Path) -> list[str]:
     return patterns
 
 
+def clear_private_settings(runtime_root: Path) -> int:
+    """Discard regenerated settings, including old versions that persisted upstream credentials."""
+    directory = runtime_root / '.local/prompts/claude-settings'
+    removed = 0
+    for path in directory.iterdir() if directory.exists() else ():
+        if path.is_file() or path.is_symlink():
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
 def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = None,
                    settings_dir: Path | None = None) -> list[str]:
     """The flags that keep the operator's personal Claude Code configuration out of an agent run in ``cwd``.
 
     Every agent's command carries them, so the agents cannot diverge.
     The explicit ``env`` pins runtime-owned variables over project settings;
-    it requires a private file so credentials never enter argv or run records.
+    it carries only a local route token, never an upstream provider credential.
     The result depends only on those values, ``cwd`` and where the operator's
     configuration lives, so a resident agent's command stays the same between turns.
     """
@@ -1829,6 +1840,15 @@ class ClaudeRunRecorder:
     async def _write_end(self, fields: dict[str, Any]) -> None:
         """``finish_record``, tried once more after a database error."""
         from ..db import llm_records
+        from .llmrec import LlmrecRoute, RouteKind
+        from .llmrec.control import controller
+
+        route = self._launch.llmrec if self._launch is not None else None
+        owner = controller()
+        if isinstance(route, LlmrecRoute) and route.kind == RouteKind.TRANSLATE and owner is not None:
+            if await owner.cache_reported(route.id, self._record_id) is False:
+                # Claude Code synthesizes zero cache counts even when upstream omitted them.
+                fields.update(cache_read_tokens=None, cache_creation_tokens=None)
 
         try:
             await llm_records.finish_record(self._record_id, **fields)

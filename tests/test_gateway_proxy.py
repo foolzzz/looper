@@ -62,14 +62,24 @@ async def gateway(tmp_path, *, stream=False, record=True, status=200, headers=No
     server = await asyncio.start_server(upstream, '127.0.0.1', 0)
     sink = Sink()
     route = RouteFile(id='g' * 22, kind='translate', record=record,
+                      local_token='local-route-token', provider_id='test-provider',
                       upstream=f'http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1',
                       api='openai-chat', dialect='openai', models={'client': 'upstream'},
                       created_at='2026-01-01T00:00:00+00:00', agent_id='test')
     route.write(tmp_path / ROUTES_DIR / f'{route.id}.json')
+    class Registry:
+        target = dict(base_url=route.upstream, api_key='upstream-secret', enabled=True, auth='api_key')
+
+        async def fetchrow(self, query, provider_id):
+            assert provider_id == route.provider_id
+            return self.target
+
+    sink.pool = Registry()
     proxy = Proxy(tmp_path, sink=sink, read_idle_s=2)
     await proxy.start()
     try:
-        async with httpx.AsyncClient(trust_env=False, timeout=5) as client:
+        async with httpx.AsyncClient(trust_env=False, timeout=5,
+                                     headers={'authorization': 'Bearer local-route-token'}) as client:
             yield client, f'http://127.0.0.1:{proxy.port}/r/{route.id}', proxy, sink, received
     finally:
         await proxy.close(grace_s=0)
@@ -83,12 +93,67 @@ def run(check):
 
 
 @pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('record', [False, True])
+@pytest.mark.parametrize('cached', [(None, None), (None, 0), (40, None)])
+def test_translated_run_cache_counts_follow_proxy_usage(tmp_path, monkeypatch, agent_db, stream, record, cached):
+    from looper.agents.claude_cli import ClaudeRunRecorder
+    from looper.agents.llmrec import LlmrecRoute, RouteKind
+    from looper.agents.llmrec import control
+    from tests.runtime_model_helpers import builtin_launch
+
+    async def check():
+        upstream_usage = {'prompt_tokens': 100, 'completion_tokens': 7}
+        async with gateway(tmp_path, stream=stream, record=record, usage=upstream_usage) as (
+                client, base, proxy, sink, received):
+            owner = control.ProxyControl(tmp_path, '', enabled=record)
+            monkeypatch.setattr(owner, '_state', lambda: {'port': proxy.port, 'instance': proxy.instance})
+            monkeypatch.setattr(control, '_control', owner)
+            route = LlmrecRoute('g' * 22, base, 'http://upstream.invalid/v1', RouteKind.TRANSLATE, record)
+            launch = replace(builtin_launch(), llmrec=route)
+            # Reuse the route for a second run with no cache reporting, even after a cache-aware run.
+            for record_id, counts in enumerate((cached, (None,)), 1):
+                agent_db.start_record.return_value = record_id
+                recorder = ClaudeRunRecorder(agent_id='test', task_id=None, command=['claude'],
+                                            cwd='.', input_text='hi', launch=launch)
+                await recorder.start()
+                for count in counts:
+                    upstream_usage.pop('prompt_tokens_details', None)
+                    if count is not None:
+                        upstream_usage['prompt_tokens_details'] = {
+                            'cached_tokens': count, 'cache_write_tokens': 10 if count else 0}
+                    response = await client.post(base + '/v1/messages', json={
+                        'model': 'client', 'messages': [], 'stream': stream})
+                    assert response.status_code == 200
+                    # Assistant snapshots omit cache fields regardless of upstream reporting.
+                    await recorder.record({'type': 'assistant', 'message': {
+                        'id': f'msg-{len(received)}', 'usage': {'input_tokens': 100, 'output_tokens': 7}}})
+                read = sum(count or 0 for count in counts)
+                written = sum(10 for count in counts if count)
+                tokens = {'inputTokens': 100 * len(counts) - read - written, 'outputTokens': 7 * len(counts),
+                          'cacheReadInputTokens': read, 'cacheCreationInputTokens': written}
+                result = {'type': 'result', 'subtype': 'success', 'total_cost_usd': 0.01,
+                          'modelUsage': {'client': tokens}, 'usage': {
+                              'input_tokens': tokens['inputTokens'], 'output_tokens': tokens['outputTokens'],
+                              'cache_read_input_tokens': read, 'cache_creation_input_tokens': written}}
+                await recorder.finish(output_text='ok', result_event=result)
+                stored = agent_db.finish_record.await_args.kwargs
+                reported = any(count is not None for count in counts)
+                assert (stored['cache_read_tokens'], stored['cache_creation_tokens']) == (
+                    read if reported else None, written if reported else None)
+                assert (stored['input_tokens'], stored['output_tokens'], stored['cost_usd']) == (
+                    tokens['inputTokens'], tokens['outputTokens'], 0.01)
+            assert bool(sink.items) is record
+    run(check)
+
+
+@pytest.mark.parametrize('stream', [False, True])
 def test_upstream_query_follows_chat_completions_path(tmp_path, stream):
     async def check():
         async with gateway(tmp_path, stream=stream) as (client, base, proxy, sink, received):
             route_path = tmp_path / ROUTES_DIR / ('g' * 22 + '.json')
             route = RouteFile.read(route_path)
             replace(route, upstream=route.upstream + '/?api-version=2025-01-01').write(route_path)
+            sink.pool.target['base_url'] += '/?api-version=2025-01-01'
             response = await client.post(base + '/v1/messages', json={
                 'model': 'client', 'messages': [], 'stream': stream})
             assert response.status_code == 200
@@ -131,7 +196,7 @@ def test_translated_exchange_and_client_side_capture(tmp_path, stream, record):
         async with gateway(tmp_path, stream=stream, record=record) as (client, base, proxy, sink, received):
             result = await client.post(base + '/v1/messages', json={'model': 'client', 'messages': [
                 {'role': 'user', 'content': 'hi'}], 'max_tokens': 100, 'stream': stream}, headers={
-                'authorization': 'Bearer test-secret', 'x-api-key': 'do-not-forward',
+                'authorization': 'Bearer local-route-token', 'x-api-key': 'do-not-forward',
                 'anthropic-version': '2023-06-01', 'x-stainless-lang': 'python'})
             assert result.status_code == 200
             if stream:
@@ -144,7 +209,8 @@ def test_translated_exchange_and_client_side_capture(tmp_path, stream, record):
                 assert result.json()['usage']['input_tokens'] == 50
             head, body = received[0]
             assert head.startswith(b'POST /v1/chat/completions HTTP/1.1')
-            assert b'authorization: Bearer test-secret' in head
+            assert b'authorization: Bearer upstream-secret' in head
+            assert b'local-route-token' not in head
             assert b'x-api-key' not in head and b'anthropic-' not in head and b'x-stainless' not in head
             assert body['model'] == 'upstream'
             async with asyncio.timeout(2):
@@ -560,3 +626,67 @@ def test_broken_client_write_is_recorded_without_another_write(tmp_path, monkeyp
             assert not writes_after_disconnect
             assert proxy.stats['translate']['stream_errors'] == 0
     run(check)
+
+
+@pytest.mark.parametrize('token', [None, 'incorrect', 'upstream-secret'])
+def test_route_rejects_invalid_local_token(tmp_path, token):
+    async def check():
+        async with gateway(tmp_path) as (client, base, proxy, sink, received):
+            client.headers.pop('authorization')
+            headers = {'authorization': 'Bearer ' + token} if token else {}
+            response = await client.post(base + '/v1/messages', headers=headers, json={
+                'model': 'client', 'messages': []})
+            assert response.status_code == 401
+            assert proxy.stats['auth_failures'] == 1
+            # Positive control proves the route and upstream are usable with their distinct credentials.
+            response = await client.post(base + '/v1/messages', json={'model': 'client', 'messages': []},
+                headers={'authorization': 'Bearer local-route-token'})
+            assert response.status_code == 200
+            assert len(received) == 1
+            assert b'authorization: Bearer upstream-secret' in received[0][0]
+    run(check)
+
+
+@pytest.mark.parametrize('failure,status', [('missing', 403), ('disabled', 403), ('endpoint', 403),
+                                          ('key', 403), ('database', 503)])
+def test_route_credentials_fail_closed(tmp_path, failure, status):
+    async def check():
+        async with gateway(tmp_path) as (client, base, proxy, sink, received):
+            if failure == 'missing':
+                sink.pool.target = None
+            elif failure == 'database':
+                sink.pool = None
+            elif failure == 'disabled':
+                sink.pool.target['enabled'] = False
+            elif failure == 'endpoint':
+                sink.pool.target['base_url'] = 'https://changed.invalid/v1'
+            else:
+                sink.pool.target['api_key'] = ''
+            response = await client.post(base + '/v1/messages', json={'model': 'client', 'messages': []})
+            assert response.status_code == status
+            assert received == []
+            assert 'upstream-secret' not in response.text
+    run(check)
+
+
+@pytest.mark.skipif(not DSN, reason='requires disposable LOOPER_TEST_DATABASE_URL')
+def test_route_reads_current_upstream_credentials_from_registry(tmp_path):
+    async def check(pool):
+        async with gateway(tmp_path) as (client, base, proxy, sink, received):
+            await pool.execute("""INSERT INTO llm_providers(id,name,vendor_type,auth)
+                VALUES ('test-provider','Test account','custom','api_key')""")
+            await pool.execute("INSERT INTO llm_provider_secrets VALUES ('test-provider','registry-secret')")
+            await pool.execute("""INSERT INTO llm_provider_endpoints(provider_id,protocol,base_url)
+                VALUES ('test-provider','openai-chat',$1)""", sink.pool.target['base_url'])
+            sink.pool = pool
+            for key in ('registry-secret', 'rotated-registry-secret'):
+                await pool.execute("UPDATE llm_provider_secrets SET api_key=$1 WHERE provider_id='test-provider'", key)
+                response = await client.post(base + '/v1/messages', json={'model': 'client', 'messages': []})
+                assert response.status_code == 200
+                assert ('authorization: Bearer ' + key).encode() in received[-1][0]
+                assert b'local-route-token' not in received[-1][0]
+                assert all(key.encode() not in path.read_bytes() for path in tmp_path.rglob('*') if path.is_file())
+            await pool.execute("UPDATE llm_providers SET enabled=false WHERE id='test-provider'")
+            response = await client.post(base + '/v1/messages', json={'model': 'client', 'messages': []})
+            assert response.status_code == 403 and len(received) == 2
+    run_db(check, timeout=15)

@@ -32,6 +32,7 @@ describe("GatesPage", () => {
   let root: Root;
   beforeEach(() => {
     vi.useFakeTimers();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     vi.setSystemTime(new Date("2026-10-20T10:12:00Z"));
     vi.resetAllMocks();
     vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
@@ -52,6 +53,20 @@ describe("GatesPage", () => {
   };
   const button = (text: string) => [...container.querySelectorAll("button")].find((b) => b.textContent?.startsWith(text))!;
   const click = async (el: Element) => { await act(async () => { el.dispatchEvent(new MouseEvent("click", { bubbles: true })); }); };
+
+  it("pauses gate and project reads while hidden and resumes once", async () => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    await show();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(fetchGates).not.toHaveBeenCalled();
+    expect(fetchProjectsList).not.toHaveBeenCalled();
+    await act(async () => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(fetchGates).toHaveBeenCalledTimes(1);
+    expect(fetchProjectsList).toHaveBeenCalledTimes(1);
+  });
 
   it("gives the header and every row the same fixed columns, so they line up", async () => {
     vi.mocked(fetchGates).mockResolvedValue(list([

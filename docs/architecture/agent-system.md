@@ -3624,7 +3624,19 @@ Responses models are not supported by this path.
 Translation works with request recording off: Looper starts the loopback
 proxy on demand and attaches a translation route with recording disabled.
 When recording is on, translated requests use the existing capture pipeline.
-Claude Code receives only that route's URL; it never falls back to a direct
+Each agent route has a separate random local token, checked by the proxy. Claude
+Code receives only this token in its process environment and private settings;
+the upstream provider key stays in the proxy, read from the provider registry
+through its database connection into memory. The proxy supplies that key to the
+upstream itself and never forwards the client's Authorization header. It never
+writes the upstream key to route or settings files. Unavailable credentials or a
+changed registry endpoint refuse forwarding. At service startup, existing
+private Claude settings files are deleted and the removed count is logged;
+settings are regenerated for each run with the local route token only.
+Translated launches allow up to 15 seconds for a cold proxy start. A translated
+request waits for the registry connection within its three-second credential
+lookup budget; an unavailable registry still refuses forwarding.
+Claude Code is bound to that route's URL; it never falls back to a direct
 upstream connection. A missing, unavailable or outdated gateway, or an
 upstream URL containing credentials, refuses the run with a specific reason.
 Startup checks report gateway availability and warn when upstream usage is
@@ -3673,20 +3685,26 @@ through the proxy, including Looper's agents and local clients, since proxy
 startup; they are not limited to the external `/gw` endpoint.
 
 Context sizes during translated streams are estimates: `message_start` puts
-the estimate in `input_tokens`, with both cache counts zero. The gateway uses
+the estimate in `input_tokens` and omits both cache counts. The gateway uses
 the previous request's exact total prompt tokens on the same route (input +
 cache read + cache write), plus appended message bytes at four UTF-8 bytes per
 token, rounded up. A route without a usage anchor, or a changed prompt prefix,
-uses the whole translated request's JSON byte size instead. Anchors live only
-in proxy memory (up to 1,024 routes); a restart or eviction loses them. This
-lets Claude Code account for context and Looper apply its context-full switch.
+uses the whole translated request's JSON byte size instead. This first-request
+estimate without an anchor is a byte-based approximation that can run about
+15–20% high. Anchors live only in proxy memory (up to 1,024 routes); a restart
+or eviction loses them. The estimate drives Claude Code's own auto-compact.
+Looper's context-full session switch applies to runtimes that report context
+(the API runtime).
 Billing still uses the upstream's exact cumulative `message_delta` usage.
 Captures identify the initial estimate in `translation.start_usage_estimated`
 and `translation.start_input_tokens`.
 
 Run cards, per-model task costs and recorded request rows show cache hit as
 `cache_read / (input + cache_read + cache_write)`; missing counts or an empty
-prompt have no percentage. Translated request rows also show **prefix reuse**:
+prompt have no percentage. For translated runs, the proxy tracks whether any
+upstream request reported cache fields, independently of request recording.
+If none did, the run stores null cache counts instead of Claude Code's
+synthesized zeros. Translated request rows also show **prefix reuse**:
 the unchanged prefix of the previous prompt divided by that previous prompt's
 total, estimated at four UTF-8 bytes per token. The proxy compares system,
 tools, then whole messages, stopping at the first change, independently of JSON

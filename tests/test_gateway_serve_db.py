@@ -77,6 +77,9 @@ def test_serve_translated_manager_works_without_recording(short_root, cli_entry)
         "        req.add_header('x-api-key', os.environ['ANTHROPIC_API_KEY'])\n"
         "    with urllib.request.urlopen(req, timeout=10) as response:")
     executable.write_text(script)
+    stale_settings = runtime / '.local/prompts/claude-settings/stale.json'
+    stale_settings.parent.mkdir(parents=True)
+    stale_settings.write_text('obsolete credential')
     project_settings = runtime / '.claude' / 'settings.json'
     project_settings.parent.mkdir(parents=True)
     project_settings.write_text(json.dumps({'env': {'ANTHROPIC_AUTH_TOKEN': 'project-token',
@@ -88,6 +91,7 @@ def test_serve_translated_manager_works_without_recording(short_root, cli_entry)
         try:
             with running_server(database_url=url, runtime_root=runtime, bin_dir=bin_dir, home=home,
                     notes_root=home / 'notes', log_path=root / 'gateway.log', env=environment) as api:
+                assert not stale_settings.exists()
                 assert not api.post('/api/v1/llmrec_settings/get', {})['result']['enabled']
                 provider = api.post('/api/v1/provider_accounts/create', {'name': 'Chat account',
                     'vendor_type': 'custom', 'api_key': 'synthetic-key',
@@ -107,6 +111,15 @@ def test_serve_translated_manager_works_without_recording(short_root, cli_entry)
                 routes = [row['metadata']['llmrec'] for row in records]
                 assert all(row['state'] == 'translating' and not row['recording'] for row in routes)
                 assert routes[0]['route'] == routes[1]['route']
+                route_file = runtime / '.local/llmrec/routes' / (routes[0]['route'] + '.json')
+                local_token = json.loads(route_file.read_text())['local_token']
+                assert local_token and local_token != 'synthetic-key'
+                settings_files = list((runtime / '.local/prompts/claude-settings').glob('*.json'))
+                assert settings_files
+                assert all(json.loads(path.read_text())['env']['ANTHROPIC_AUTH_TOKEN'] == local_token
+                           for path in settings_files)
+                assert all(b'synthetic-key' not in path.read_bytes()
+                           for path in runtime.rglob('*') if path.is_file())
                 assert len(requests) == 2 and all(path == '/v1/chat/completions' for path, _, _ in requests)
                 assert all(body['model'] == 'haiku' for _, body, _ in requests)
                 assert all(headers.get('authorization') == 'Bearer synthetic-key' for _, _, headers in requests)

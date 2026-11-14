@@ -18,6 +18,35 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.187] - 2026-11-13
+
+### Security
+
+- **Upstream credentials stay out of translated Claude settings.** ([#1350](https://github.com/foolzzz/looper/pull/1350))
+  - Behavior change (translated routes only): each route has a random local token; Claude Code gets only that token (process environment and private settings), and the proxy rejects a missing or wrong token with 401. The proxy reads the provider key from the registry through its own database connection per request, sets the upstream Authorization itself and never forwards the client's credential; missing credentials, a disabled provider or a changed endpoint refuse forwarding (403), an unreachable registry returns 503. Route format 4 becomes 5; formats 3 and 4 are still read for lifecycle ownership only.
+  - At service startup the private Claude settings files are deleted (the removed count is logged) and regenerated per run. Direct runs keep their process-environment credential path.
+  - Fixed two startup failures: translated launches allow a 15-second cold proxy start, and the first translated request waits for the registry connection within the 3-second credential lookup budget.
+  - Also in the diff: serve clears the managers change listener on shutdown.
+  - Not model-visible: no prompt, tool description or tool schema changed; the Claude Code process environment carries a local token instead of the provider key.
+
+## [2.14.186] - 2026-11-13
+
+### Changed
+
+- **Dashboard polling hygiene.** ([#1337](https://github.com/foolzzz/looper/pull/1337))
+  - Behavior change (dashboard only): polling now goes through the shared `startPolling` helper (the next read starts after the previous one settled, none while the tab is hidden, aborted on leaving) on the Tasks, Gates, Chat and Dashboard pages and in the project list and waiting-gates hooks. The waiting-gates count is read once by a `WaitingGatesProvider` and shared. The dashboard's needs-you list is re-read only when the needs-you or waiting-gate count changes (or every 30 s while the gate count is unknown), not on every overview poll. The Manager session profile reads only while the chat is the active page and the tab is visible, and a focus read is skipped within 30 s of the last one. The Tasks list stops polling while a task is open.
+  - Test change: `tests/test_db_backup.py` keeps its serve port reserved until startup.
+  - Not model-visible: no prompt, tool description or tool schema changed; no server code changed.
+
+## [2.14.185] - 2026-11-13
+
+### Fixed
+
+- **Translated runs without upstream cache usage show a dash, not 0%.** ([#1347](https://github.com/foolzzz/looper/pull/1347), fixes [#1161](https://github.com/foolzzz/looper/issues/1161) and [#1155](https://github.com/foolzzz/looper/issues/1155))
+  - Behavior change: the proxy records per run whether any upstream request reported cache fields (kept in memory, up to 1,024 runs, independent of request recording) and answers it at `GET /llmrec/cache-usage/<route>/<record>`. When a translated run ends and the answer is `false`, `cache_read_tokens` and `cache_creation_tokens` are stored as null instead of Claude Code's synthesized zeros, so the dashboard shows a dash. Unknown evidence (proxy unavailable, restarted or evicted) keeps the counts as before; recorded runs are not changed.
+  - Documentation: the gateway section of the agent-system architecture is corrected (translated `message_start` omits cache counts; byte-based first-request estimate can run about 15-20% high; the context-full switch applies to runtimes that report context).
+  - Not model-visible: no prompt, tool description or tool schema changed.
+
 ## [2.14.184] - 2026-11-13
 
 ### Fixed

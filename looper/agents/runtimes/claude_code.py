@@ -201,7 +201,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         # Project settings load after process env; pin the attached route and all translation safeguards here too.
         env = None
         if launch is not None and translated(launch):
-            env = {**dict(TRANSLATED_ENV), AUTH_TOKEN: launch.profile.provider.api_key, API_KEY: ""}
+            env = {**dict(TRANSLATED_ENV), AUTH_TOKEN: "", API_KEY: ""}
             binding = self.bind_provider(launch.profile.provider, launch.model, launch.effort)
             process_env = dict((*launch.env, *binding.env))
             env.update({name: process_env[name] for name in ("ANTHROPIC_MODEL", *MAIN_MODEL_VARS,
@@ -209,6 +209,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # Commands are built before Runs records; environment() refuses missing routes at process startup.
             if isinstance(launch.llmrec, LlmrecRoute) and launch.llmrec.kind is RouteKind.TRANSLATE:
                 env[BASE_URL] = launch.llmrec.url
+                env[AUTH_TOKEN] = launch.llmrec.local_token
         return claude_cli.isolation_args(cwd, env=env, settings_dir=settings_dir)
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
@@ -262,7 +263,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             raise RuntimeUnsupported("Claude Code requires one resolved model matching the launch model")
         background = provider.catalog[0].background_model or model
         return ProviderBinding(
-            env=((AUTH_TOKEN, provider.api_key), ("ANTHROPIC_MODEL", model),
+            env=(("ANTHROPIC_MODEL", model),
                  *((name, model) for name in MAIN_MODEL_VARS),
                  *((name, background) for name in BACKGROUND_MODEL_VARS), *provider.env),
             unset=(API_KEY, BASE_URL))
@@ -308,11 +309,12 @@ class ClaudeCodeRuntime(RuntimeAdapter):
 
         if translated(launch):
             route = launch.llmrec
-            if not (isinstance(route, LlmrecRoute) and route.kind is RouteKind.TRANSLATE):
+            if not (isinstance(route, LlmrecRoute) and route.kind is RouteKind.TRANSLATE and route.local_token):
                 raise RuntimeUnsupported(gateway_refusal(route, launch.model))
             # Settings cannot reintroduce the direct Anthropic credential or override gateway safeguards.
             env.pop(API_KEY, None)
             env[BASE_URL] = route.url
+            env[AUTH_TOKEN] = route.local_token
             env.update(TRANSLATED_ENV)
             no_proxy(env)
             return env
