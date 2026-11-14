@@ -12,6 +12,7 @@ from pathlib import Path
 import secrets
 import signal
 import sys
+import threading
 import time
 from urllib.parse import parse_qsl, urlsplit
 
@@ -26,6 +27,8 @@ from ..keeper import read_json
 
 logger = logging.getLogger(__name__)
 _control: ProxyControl | None = None
+_code_hash: str | None = None
+_code_hash_lock = threading.Lock()
 _SECRET_MARKERS = ("token", "secret", "key", "auth", "cookie")
 # Stable explanations for run metadata and the recording viewer.
 NOT_COVERED_DETAILS = {
@@ -52,6 +55,20 @@ def controller() -> ProxyControl | None:
 
 def config_sha256(code: str, dsn: str) -> str:
     return hashlib.sha256((code + "\0" + dsn).encode()).hexdigest()
+
+
+def _load_code_hash() -> str:
+    global _code_hash
+    # Controllers share the server process's startup fingerprint, even across loops.
+    with _code_hash_lock:
+        if _code_hash is None:
+            _code_hash = code_sha256()
+        return _code_hash
+
+
+async def _server_code_hash() -> str:
+    # at_start warms this before serving; standalone controllers also stay off the loop.
+    return _code_hash if _code_hash is not None else await asyncio.to_thread(_load_code_hash)
 
 
 def _now() -> str:
@@ -144,7 +161,7 @@ class ProxyControl:
                 pass
         self._health_cache, self._health_at = result, time.monotonic()
         if result is not None:
-            self._outdated = (result.get("code_sha256") != code_sha256()
+            self._outdated = (result.get("code_sha256") != await _server_code_hash()
                               or result.get("route_format") != ROUTE_FORMAT
                               or result.get("features", {}).get("translate", 0) < 1)
         return result
@@ -251,6 +268,7 @@ class ProxyControl:
             return False
 
     async def at_start(self, kept_record_ids) -> None:
+        current = await _server_code_hash()
         from looper.db import system_settings
         from .gateway import GatewayConfig, GatewayKey
 
@@ -272,7 +290,6 @@ class ProxyControl:
                 health = await self._health()
                 state = self._state()
         if health:
-            current = code_sha256()
             mismatch = (state.get("code_sha256") != current
                         or health.get("code_sha256") != current
                         or state.get("config_sha256") != config_sha256(current, self.dsn))

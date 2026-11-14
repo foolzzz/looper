@@ -3820,8 +3820,12 @@ before a settings change keep their existing route.
   `127.0.0.1`. Private route files and process identity live under the runtime
   root's `.local/llmrec`; the log is `logs/llmrec-proxy.log`. The process can
   survive a control-plane restart and is adopted or replaced when safe;
-  `serve` checks its health every five seconds. Forwarding does not wait for
-  database writes: a bounded asynchronous sink retries writes and reports
+  `serve` checks its health every five seconds. The server computes its code
+  fingerprint once at startup in a background thread and reuses it for proxy
+  compatibility checks. Checkout changes take effect at the next server restart,
+  as performed by upgrades; each proxy still fingerprints its code at startup.
+  Forwarding does not wait for database writes: a bounded asynchronous sink
+  retries writes and reports
   dropped requests or write errors in proxy status. Complete recordings and
   gaps have separate counters; self-check warns about gaps since proxy startup,
   including their count and most common reason. Upstream TLS uses the OS
