@@ -667,6 +667,10 @@ async def _run_agent_system_watched(
                     'use a shorter --runtime-root, or set [agent_host] keeper = "off"')
         with startup.measure("pool"):
             pool = await init_pool(dsn)
+        with startup.measure("claude_settings_cleanup"):
+            from .claude_cli import clear_private_settings
+            removed = await asyncio.to_thread(clear_private_settings, runtime_root)
+            logger.info("Removed %d private Claude settings files", removed)
         with startup.measure("schema"):
             await _back_up_before_schema_change(pool, ops, runtime_root, skip_backup=skip_backup)
             await ensure_schema(pool)

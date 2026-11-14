@@ -67,3 +67,12 @@ async def resolve_alias(alias, *, pool=None):
         alias,
     )
     return dict(row) if row else None
+
+
+async def resolve_route(provider_id, *, pool):
+    """Read a translated route's credentials from the registry, only inside the proxy."""
+    row = await pool.fetchrow(
+        """SELECT e.base_url,s.api_key,p.enabled,p.auth FROM llm_providers p
+        JOIN llm_provider_endpoints e ON e.provider_id=p.id AND e.protocol='openai-chat'
+        LEFT JOIN llm_provider_secrets s ON s.provider_id=p.id WHERE p.id=$1""", provider_id)
+    return dict(row) if row else None

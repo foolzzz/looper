@@ -195,7 +195,7 @@ class ProxyControl:
         if not preserve_state:
             self._failed_health = None
 
-    async def _start(self, *, port=None) -> bool:
+    async def _start(self, *, port=None, startup_timeout_s=3) -> bool:
         async with self._start_lock:
             if port is None and self.gateway_enabled:
                 port = self.gateway_port
@@ -238,7 +238,7 @@ class ProxyControl:
                 await process.stdin.wait_closed()
             except (BrokenPipeError, ConnectionResetError):
                 pass
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + startup_timeout_s
             while time.monotonic() < deadline:
                 state = self._state()
                 if state and state["pid"] == process.pid and await self._health():
@@ -451,7 +451,8 @@ class ProxyControl:
             return replace(launch, llmrec=LlmrecSkip(SkipReason.CREDENTIALS_IN_URL))
         health = await self._health(cached=not reuse)
         if not health:
-            if not await self._start():
+            # Translation requires this proxy; allow its cold boot beyond the best-effort recorder budget.
+            if not await self._start(startup_timeout_s=15):
                 return await _gateway_unavailable(launch, agent_id=agent_id, task_id=task_id)
             health = await self._health()
         if not health:
@@ -490,12 +491,13 @@ class ProxyControl:
                     replace(previous, proxy_env=proxy_env, tls_env=tls_env, record=self.enabled).write(path)
                 return replace(launch, llmrec=LlmrecRoute(previous.id,
                     f"http://127.0.0.1:{state['port']}/r/{previous.id}", upstream,
-                    kind=RouteKind.TRANSLATE, record=self.enabled))
+                    kind=RouteKind.TRANSLATE, record=self.enabled, local_token=previous.local_token))
             if previous is not None:
                 replace(previous, ended_at=previous.ended_at or _now()).write(path)
         identifier = secrets.token_urlsafe(16)
         route = RouteFile(id=identifier, upstream=upstream, protocol="openai-chat", api="openai-chat",
                           kind=RouteKind.TRANSLATE, record=self.enabled, dialect=dialect, models=models,
+                          local_token=secrets.token_urlsafe(32),
                           runtime_type=runtime_type, provider_id=provider.id, model=launch.model,
                           agent_id=agent_id, task_id=task_id, step_id=step_id,
                           role=getattr(launch.role, "value", launch.role), created_at=_now(),
@@ -505,7 +507,7 @@ class ProxyControl:
             self._resident[agent_id] = route
         return replace(launch, llmrec=LlmrecRoute(identifier,
             f"http://127.0.0.1:{state['port']}/r/{identifier}", upstream,
-            kind=RouteKind.TRANSLATE, record=self.enabled))
+            kind=RouteKind.TRANSLATE, record=self.enabled, local_token=route.local_token))
 
     def bind(self, route_id, record_id):
         if not ROUTE_ID.fullmatch(route_id):
