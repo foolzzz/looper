@@ -13,11 +13,11 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
-from time import monotonic as _clock
 from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import uuid4
 
@@ -797,8 +797,7 @@ class DshCatalog:
 class _CatalogMaterialization:
     lock: Lock = field(default_factory=Lock)
     catalog: DshCatalog | None = None
-    error: str | None = None
-    retry_at: float = 0.0
+    future: Future[DshCatalog] | None = None
 
 
 @lru_cache(maxsize=64)
@@ -807,21 +806,29 @@ def _catalog_materialization(library: AgentLibrary, executable: str) -> _Catalog
 
 
 def materialize(library: AgentLibrary, executable: str = "dsh") -> DshCatalog:
-    """Materialize a catalog, backing off failed validation for sixty seconds."""
-    # Serialize only identical launches, including failures, so concurrent callers cannot stampede Node.
+    """Cache successful catalogs and share only in-flight validation, allowing immediate retries."""
     state = _catalog_materialization(library, executable)
     with state.lock:
         if state.catalog is not None:
             return state.catalog
-        if state.error is not None and _clock() < state.retry_at:
-            raise RuntimeUnsupported(state.error)
-        try:
-            state.catalog = _materialize(library, executable)
-        except RuntimeUnsupported as exc:
-            # Keep only the public error, not a traceback holding launch inputs alive.
-            state.error, state.retry_at = str(exc), _clock() + 60
-            raise
-        return state.catalog
+        future = state.future
+        owner = future is None
+        if future is None:
+            state.future = future = Future()
+    if not owner:
+        return future.result()
+    try:
+        catalog = _materialize(library, executable)
+    except BaseException as exc:
+        # Release every waiter even on interruption; later launches must validate again.
+        with state.lock:
+            state.future = None
+        future.set_exception(exc)
+        raise
+    with state.lock:
+        state.catalog, state.future = catalog, None
+    future.set_result(catalog)
+    return catalog
 
 
 def _materialize(library: AgentLibrary, executable: str) -> DshCatalog:

@@ -1,8 +1,8 @@
-"""Failed DSH catalog validation backs off without hiding later recovery."""
+"""DSH catalog validation shares in-flight work and permits immediate recovery."""
 
 import subprocess
-import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -24,9 +24,8 @@ def library(tmp_path):
 @pytest.mark.parametrize("failure", [OSError("unavailable"), subprocess.TimeoutExpired("node", 20),
                                     SimpleNamespace(returncode=1, stdout=""),
                                     SimpleNamespace(returncode=0, stdout="invalid JSON")])
-def test_catalog_failure_is_cached_for_sixty_seconds_then_recovers(library, monkeypatch, failure):
-    now, calls = [100.0], []
-    monkeypatch.setattr(dsh, "_clock", lambda: now[0], raising=False)
+def test_catalog_failure_recovers_on_immediate_retry(library, monkeypatch, failure):
+    calls = []
 
     def validate(*args, **kwargs):
         calls.append(args)
@@ -37,15 +36,11 @@ def test_catalog_failure_is_cached_for_sixty_seconds_then_recovers(library, monk
         return SimpleNamespace(returncode=0, stdout="[]")
 
     monkeypatch.setattr(dsh.subprocess, "run", validate)
-    for elapsed in (0, 59.9):
-        now[0] = 100.0 + elapsed
-        with pytest.raises(RuntimeUnsupported, match="cannot validate DSH catalog"):
-            dsh.materialize(library)
+    with pytest.raises(RuntimeUnsupported, match="cannot validate DSH catalog"):
+        dsh.materialize(library)
     assert len(calls) == 1
-    now[0] = 160.0
-    catalog = dsh.materialize(library)
+    catalog = dsh.materialize(AgentLibrary(items=library.items, plugin_dirs=library.plugin_dirs))
     assert not catalog.loaded
-    now[0] = 300.0
     assert dsh.materialize(library) is catalog
     assert len(calls) == 2
 
@@ -61,22 +56,46 @@ def test_catalog_failure_does_not_block_a_different_executable(library, monkeypa
     for executable in ("missing-dsh", "other-dsh", "missing-dsh"):
         with pytest.raises(RuntimeUnsupported):
             dsh.materialize(library, executable)
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
-def test_concurrent_catalog_failures_share_one_validation(library, monkeypatch):
-    calls = []
+@pytest.mark.parametrize("fails", [False, True])
+def test_concurrent_catalog_calls_share_one_validation(library, monkeypatch, fails):
+    calls, entered, joined, release = [], Event(), Event(), Event()
+
+    class ObservedFuture(Future):
+        def result(self, timeout=None):
+            joined.set()
+            return super().result(timeout)
 
     def validate(*args, **kwargs):
         calls.append(args)
-        time.sleep(0.05)
-        raise OSError("unavailable")
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+            if fails:
+                raise OSError("unavailable")
+        return SimpleNamespace(returncode=0, stdout="[]")
 
     def launch():
-        with pytest.raises(RuntimeUnsupported):
-            dsh.materialize(library)
+        if fails:
+            with pytest.raises(RuntimeUnsupported, match="cannot validate DSH catalog"):
+                dsh.materialize(library)
+        else:
+            return dsh.materialize(library)
 
     monkeypatch.setattr(dsh.subprocess, "run", validate)
+    monkeypatch.setattr(dsh, "Future", ObservedFuture)
     with ThreadPoolExecutor(max_workers=2) as executor:
-        list(executor.map(lambda _: launch(), range(2)))
+        first = executor.submit(launch)
+        try:
+            assert entered.wait(5)
+            second = executor.submit(launch)
+            assert joined.wait(5)
+        finally:
+            release.set()
+        assert first.result(timeout=5) is second.result(timeout=5)
     assert len(calls) == 1
+    catalog = dsh.materialize(library)
+    assert dsh.materialize(library) is catalog
+    assert len(calls) == (2 if fails else 1)
