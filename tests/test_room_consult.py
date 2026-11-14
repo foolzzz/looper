@@ -32,9 +32,9 @@ def test_the_server_listens_before_recovering_consults_and_starting_agents_or_ta
     import looper.agents.serve as serve
 
     tree = ast.parse(Path(serve.__file__).read_text())
-    # The entry point owns cleanup; the owned startup performs recovery and starts the services.
+    # The owned entry point manages the loop watch; the watched startup recovers and starts services.
     run = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
-               and node.name == "_run_agent_system_owned")
+               and node.name == "_run_agent_system_watched")
     # Cleanup guards and timing contexts preserve startup order; exception handlers are not startup.
     def startup_body(body: list[ast.stmt]) -> list[ast.stmt]:
         return [statement for node in body

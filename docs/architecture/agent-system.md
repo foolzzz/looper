@@ -5306,6 +5306,24 @@ restarts, and the drain does not wait for them.
 
 ## HTTP API
 
+API latency diagnostics use the existing logger. Non-stream operations taking
+more than 2 s emit `api slow` with total time, accumulated asyncpg query time
+(`db_ms`, including connection reset queries), query count, `other_ms` and the
+request's await chain captured at 2 s. `other_ms` is total minus accumulated DB
+time; concurrent queries can make it negative. Streams retain their INFO
+completion line with `first_byte_ms` (the first response write, or `None` if no
+bytes were written), and do not enter slow warnings or latency summaries.
+
+Every nonempty 600 s window emits per-operation counts, nearest-rank p50/p95/p99,
+maximum and counts above 2 s, followed by loop stall statistics. Percentiles use
+at most the first 20,000 samples per operation; counts and maxima include all
+requests, and a separate line reports dropped samples. The watchdog starts
+before startup work: it records blocked-loop stacks after 1 s, then changed
+innermost frames at 5 and 15 s, and logs recovery. Its independent observer
+separately reports process scheduling gaps; system sleep remains the suspend
+detector's responsibility. Neither diagnostic changes API responses or the
+Telegram/Lark channel protocols, and the dashboard and CLI need no new controls.
+
 The HTTP server has five route classes: the exact paths `/login` and `/logout`
 handle sign-in and sign-out; other paths outside `/api/` serve dashboard
 pages and public assets; `/api/agent/v1/`, including `OPTIONS`, requires each agent's own token; `/api/v1/` answers the operator or an API client (a token
