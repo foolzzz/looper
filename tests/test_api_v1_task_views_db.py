@@ -33,13 +33,13 @@ TASK_KEYS = {"task_id", "requirement", "name", "goal_id", "project_id", "project
              "continues_schedule_session", "cost"}
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _startup_snapshot():
+@pytest.fixture(autouse=True)
+def _startup_snapshot(monkeypatch):
     from looper import components
 
-    # Installation fingerprints and route discovery precede serving requests;
-    # keep this cold startup work outside the DB/HTTP contract deadline.
-    components.loaded_manifest()
+    # Task projections do not use installation fingerprints. Avoid scanning the
+    # source tree, and discover routes before the DB/HTTP contract deadline.
+    monkeypatch.setattr(components, "loaded_manifest", lambda: None)
     api_v1.operations()
 
 
