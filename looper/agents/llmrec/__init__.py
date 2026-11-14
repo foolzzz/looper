@@ -9,7 +9,10 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import tempfile
+
+from ... import child_env
 
 ROUTE_FORMAT = 5
 PROXY_ENV = frozenset(('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
@@ -29,6 +32,7 @@ TRANSLATED_BACKEND_ENV = (
 STATE_DIR = Path('.local') / 'llmrec'
 ROUTES_DIR = STATE_DIR / 'routes'
 STATE_FILE = STATE_DIR / 'proxy.json'
+OWNER_FILE = STATE_DIR / 'owner.json'
 LOCK_FILE = STATE_DIR / 'proxy.lock'
 LOG_FILE = Path('logs') / 'llmrec-proxy.log'
 ROUTE_ID = re.compile(r'^[A-Za-z0-9_-]{22}$')
@@ -37,6 +41,38 @@ BOOT = 'import sys; sys.path.insert(0, sys.argv[1]); from looper.agents.llmrec._
 
 def boot_argv(executable, package_root, runtime_root, port) -> list[str]:
     return [executable, '-I', '-c', BOOT, str(package_root), '--runtime-root', str(runtime_root), '--port', str(port)]
+
+
+class OwnerMode(StrEnum):
+    OWNED = 'owned'
+    HANDOVER = 'handover'
+
+
+def process_alive(pid: int, start_time: str) -> bool | None:
+    """Match a live process's birth time; None means its identity could not be checked."""
+    if type(pid) is not int or pid <= 0 or not isinstance(start_time, str) or not start_time:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # ps may still be able to identify it.
+    except OSError:
+        return None
+    try:
+        # Keep lstart last, as when proc_tree._start_time records the identity.
+        result = subprocess.run(["ps", "-o", "stat=,lstart=", "-p", str(pid)], capture_output=True,
+            text=True, timeout=2, check=False, env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    fields = result.stdout.split()
+    started = " ".join(fields[1:])
+    if not re.fullmatch(r'[A-Za-z]{3} [A-Za-z]{3} \d{1,2} \d{2}:\d{2}:\d{2} \d{4}', started):
+        return None
+    return not fields[0].startswith("Z") and started == " ".join(start_time.split())
 
 
 class SkipReason(StrEnum):

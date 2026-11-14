@@ -954,9 +954,15 @@ class RoomService:
                 started_after = read
             # Keep this wait's starting point even if an echo confirms a push while it sleeps.
             rows = await db_room.messages(task_id, after=started_after if wait else read)
+            if (wait and seat.run and self.worker_pool is not None and hasattr(self.worker_pool, "remind")
+                    and any(r["sender_seat"] != seat.key and visible(r, seat) and _ends_wait(r, seat) for r in rows)):
+                # INSERT is visible before stdin delivery finishes. Join the run's serialized reminder
+                # send before deciding whether these rows still belong in its pull inbox.
+                await self.worker_pool.remind(seat.run)
             through = self._in_flight(seat)  # A delivery may finish during the query.
             delivered = [r["id"] for r in rows if wait and r["id"] <= through
                          and r["sender_seat"] != seat.key and visible(r, seat) and _ends_wait(r, seat)]
+            waited = waited or bool(delivered)
             rows = [r for r in rows if r["id"] > max(read, through)]
             unread = [r for r in rows if r["sender_seat"] != seat.key and visible(r, seat)]
             remaining = deadline - loop.time()
