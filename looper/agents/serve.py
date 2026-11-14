@@ -653,7 +653,7 @@ async def _run_agent_system_watched(
     if ops.keeper_mode is KeeperMode.ON:
         with startup.measure("lease"):
             try:
-                lease = await ControlPlaneLease.acquire(dsn, on_lost=fence.lost)
+                lease = await ControlPlaneLease.acquire(dsn, on_lost=fence.lost, loop_watch=loop_watch)
             except LockHeld as exc:
                 raise StartupCheckFailed(
                     f"another looper serve already runs on this database: {exc.holder.describe()}. "

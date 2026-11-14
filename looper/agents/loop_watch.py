@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import traceback
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import FrameType
@@ -33,6 +34,7 @@ class LoopWatch:
                  frames: Callable[[], Mapping[int, FrameType]] = sys._current_frames,
                  log: Callable[..., None] = logger.warning) -> None:
         self._clock, self._frames, self._log = clock, frames, log
+        self._stalls: deque[tuple[float, float]] = deque(maxlen=128)
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -66,7 +68,11 @@ class LoopWatch:
 
     async def _heartbeat(self) -> None:
         while True:
-            self._beat = self._clock()
+            now = self._clock()
+            if now - self._beat > 1.0:
+                with self._lock:
+                    self._stalls.append((self._beat, now))
+            self._beat = now
             await asyncio.sleep(self._INTERVAL)
 
     def _watch(self) -> None:
@@ -81,6 +87,7 @@ class LoopWatch:
         if oversleep > 1.0:
             with self._lock:
                 self._process_stalls += 1
+                self._stalls.append((now - oversleep, now))
             self._log("the server process was not scheduled for %.1f s "
                       "(machine overloaded or swapping); not an event-loop block", oversleep)
             # A stale heartbeat cannot identify which thread was blocked while
@@ -130,6 +137,17 @@ class LoopWatch:
     def _record_max(self, duration: float) -> None:
         with self._lock:
             self._loop_max_stall_ms = max(self._loop_max_stall_ms, int(duration * 1000))
+
+    def stall_seconds_between(self, started: float, ended: float) -> float:
+        """Largest overlapping stall, independent of summary consumption.
+
+        Include stale heartbeats/observer wakes: a query can resume before
+        either watchdog callback after the whole process was suspended.
+        """
+        with self._lock:
+            intervals = [*self._stalls, (self._beat, ended), (self._last_wake, ended)]
+        return max((max(0.0, min(end, ended) - max(begin, started))
+                    for begin, end in intervals if end - begin > 1.0), default=0.0)
 
     def take_summary(self) -> LoopSummary:
         with self._lock:
