@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.182] - 2026-11-13
+
+### Fixed
+
+- **Lease health check: a timeout is uncertain, not an immediate loss.** ([#1342](https://github.com/foolzzz/looper/pull/1342))
+  - Behavior change: a health query that times out after 5 s, or overlaps a loop/process stall reported by the watchdog, makes ownership uncertain. New agent spawns are refused (`proc_tree.spawn` raises "the control plane lock is uncertain; no new agents") while the HTTP listener stays open, and the lease is rechecked at once with a 15 s query timeout for at most 30 s. A clean held-lock reply lifts the temporary fence; a missing lock, a connection failure or an exhausted window still takes the terminal exit path (code 75). Before, one timeout lost the lock at once.
+  - Not model-visible: no prompt, tool schema or API response changed.
+
 ## [2.14.181] - 2026-11-13
 
 ### Fixed
