@@ -246,7 +246,8 @@ def test_failed_recovery_then_restart_keeps_original_offline_boundary(tmp_path, 
                 await adapter.stop()
             await bus.shutdown()
 
-    asyncio.run(asyncio.wait_for(run(), 10))
+    # One hundred durable deliveries now let the loop enforce this watchdog.
+    asyncio.run(asyncio.wait_for(run(), 30 if received_before_failure else 10))
 
 
 @pytest.mark.parametrize("relative_date, delivered", [(-1, True), (0, False), (1, False)])
@@ -335,7 +336,9 @@ def test_restart_ages_pre_stop_updates_at_stop(tmp_path, monkeypatch, source, ag
 
         async def request(transport, **kwargs):
             result = await api.request(**kwargs)
-            if kwargs["url"].endswith("/getUpdates"):
+            data = kwargs.get("request_data")
+            if kwargs["url"].endswith("/getUpdates") and (
+                    source == "pending" or data.parameters.get("offset", 0) == 102):
                 acknowledged.set()
             return result
 
@@ -470,6 +473,7 @@ def test_shutdown_saves_offline_boundary_before_agent_drain(tmp_path, monkeypatc
             handler = stop_signal_handler(asyncio.Event(), prepare_stop=registry.prepare_stop_all)
             before = int(time.time())
             handler()
+            await registry.wait_prepared_stop_all()
             with sqlite3.connect(path) as db:
                 boundary = db.execute("SELECT stopped_at FROM polling").fetchone()
             assert boundary is not None and before <= boundary[0] <= int(time.time())

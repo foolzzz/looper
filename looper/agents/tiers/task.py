@@ -710,7 +710,7 @@ class TaskRouter:
                 except Exception:
                     logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
                 # And the sessions its runs kept for the room (its room goes with the steps).
-                remove_run_sessions(self._runtime_root, task_id)
+                await asyncio.to_thread(remove_run_sessions, self._runtime_root, task_id)
             try:
                 if not await db_tasks.reset_task_for_restart(task_id, keep_steps=not start_over):
                     return

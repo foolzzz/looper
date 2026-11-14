@@ -77,7 +77,10 @@ class ChannelAdapter(ABC):
         ...
 
     def prepare_stop(self) -> None:
-        """Persist shutdown state before any agent or channel drain can block."""
+        """Capture and queue shutdown state before any agent or channel drain can block."""
+
+    async def wait_prepared_stop(self) -> None:
+        """Wait for queued shutdown state to become durable before the agent drain."""
 
     @abstractmethod
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:

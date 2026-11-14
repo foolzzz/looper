@@ -24,6 +24,7 @@ import zoneinfo
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
+from importlib.resources import files
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -107,23 +108,41 @@ def _number(text: str, name: str, item: str) -> int:
     return int(text)
 
 
-@lru_cache(maxsize=1)
-def _known_zones() -> frozenset[str]:
-    return frozenset(zoneinfo.available_timezones())
-
-
 def zone(name: str) -> ZoneInfo:
     """The IANA time zone ``name`` (``America/Los_Angeles``, ``UTC``); raises ``ValueError`` for another name."""
     if not isinstance(name, str) or not name.strip():
         raise ValueError("a time zone is an IANA name such as 'America/Los_Angeles' or 'UTC'")
-    known = _known_zones()
-    if known and name not in known:
-        raise ValueError(f"unknown time zone {name!r}: use an IANA name such as 'America/Los_Angeles' or 'UTC'")
     try:
-        return ZoneInfo(name)
+        return _load_zone(name)
     except (zoneinfo.ZoneInfoNotFoundError, ValueError):
         raise ValueError(f"unknown time zone {name!r}: use an IANA name such as 'America/Los_Angeles' or "
                          "'UTC'") from None
+
+
+@lru_cache(maxsize=256)
+def _load_zone(name: str) -> ZoneInfo:
+    # These system tzdb entries are deliberately excluded from IANA's available zone names.
+    if name.split("/", 1)[0] in {"posix", "right", "localtime", "posixrules"}:
+        raise ValueError("not an IANA time zone name")
+    result = ZoneInfo(name)
+    # ZoneInfo accepts incorrect case on case-insensitive filesystems. Inspect only the named path,
+    # rather than walking every zone file, to retain exact IANA names on those systems too.
+    roots = [Path(root) for root in zoneinfo.TZPATH]
+    try:
+        roots.append(files("tzdata.zoneinfo"))
+    except ModuleNotFoundError:
+        pass
+    for root in roots:
+        path = root
+        for part in name.split("/"):
+            try:
+                path = next(child for child in path.iterdir() if child.name == part)
+            except (OSError, StopIteration):
+                break
+        else:
+            if path.is_file():
+                return result
+    raise ValueError("time zone name has incorrect case")
 
 
 def local_zone_name() -> str:

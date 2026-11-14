@@ -1391,9 +1391,9 @@ class WorkerPool:
                     record_id, f"the run could not be adopted after a restart: {failure.value}")
             await self._end_room_run(run_dir.name)
             if handle is not None:
-                handle.release()
+                await asyncio.to_thread(handle.release)
             else:
-                shutil.rmtree(run_dir, ignore_errors=True)
+                await asyncio.to_thread(shutil.rmtree, run_dir, ignore_errors=True)
             return True
         except Exception:
             # Preserve the detach marker and identity until expiry confirms all cleanup succeeded.
@@ -1947,7 +1947,7 @@ class WorkerPool:
         finally:
             # _execute has waited for or ended the run before its logs can be released.
             if isinstance(wp.handle, KeptRun) and wp.handle.state is not KeptRunState.DETACHED:
-                wp.handle.release()
+                await asyncio.to_thread(wp.handle.release)
 
     @contextlib.asynccontextmanager
     async def _record_run(self, worker_id: str, recorder: ClaudeRunRecorder) -> AsyncIterator[None]:
@@ -2215,7 +2215,7 @@ class WorkerPool:
                     tools=RoomTurnTools(self.room_ops, token) if token else None,
                     limits=self._run_limits(launch, project, parent_task_id))
             else:
-                command = run_command(launch.executable(self._config.claude_bin), cwd=work_dir,
+                command = await asyncio.to_thread(run_command, launch.executable(self._config.claude_bin), cwd=work_dir,
                                       prompt_file=prompt_file, launch=launch, max_turns=max_turns,
                                       session_dir=session_dir)
                 if kept:
@@ -2331,7 +2331,7 @@ class WorkerPool:
                     result = _verify_failed(str(timeout)) if is_verify else _work_failed(str(timeout))
                 break
             if isinstance(ctx.handle, KeptRun):
-                ctx.handle.release()
+                await asyncio.to_thread(ctx.handle.release)
             if ctx.handle is not None:
                 missed_input.extend(ctx.handle.dropped_input())
             self._drop_reminders(ctx.worker_id)

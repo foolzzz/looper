@@ -464,7 +464,7 @@ class KeptRun:
                 state = keeper.read_json(self.run_dir / keeper.STATE) or {}
                 message = state.get("error") or message
             if created:
-                self.release()
+                await asyncio.to_thread(self.release)
             if isinstance(exc, (OSError, KeeperError, KeeperGone, TimeoutError)):
                 raise RunStartError(message) from exc
             raise

@@ -795,7 +795,7 @@ async def remove(workspace: StepWorkspace, *, keep_branch: bool = False) -> Step
         if not keep_branch:
             await _git(workspace.repo_dir, "branch", "-D", workspace.branch, check=False)
     if path.exists():
-        shutil.rmtree(path, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, path, ignore_errors=True)
     _remove_empty(path.parent)
     return workspace if keep_branch else replace(workspace, removed_at=now())
 
@@ -867,7 +867,7 @@ async def forget_worktree(repo: str, path: Path) -> None:
     directories are missing."""
     await _git(repo, "worktree", "remove", "--force", str(path), check=False)
     if path.exists():  # git could not remove it: delete it, then the record it leaves
-        shutil.rmtree(path, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, path, ignore_errors=True)
         await _git(repo, "worktree", "remove", "--force", str(path), check=False)
 
 
@@ -890,7 +890,7 @@ async def remove_orphan(path: Path, *, keep_branch: bool = False) -> None:
             if not keep_branch and branch.returncode == 0 and branch.text.startswith("refs/heads/looper/"):
                 await _git(repo, "branch", "-D", short_branch(branch.text), check=False)
     if path.exists():
-        shutil.rmtree(path, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, path, ignore_errors=True)
     _remove_empty(path.parent)
 
 

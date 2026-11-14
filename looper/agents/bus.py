@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
@@ -168,6 +169,9 @@ class MessageBus:
         self._topic_subscribers: dict[str, list[Callable[[MessageEnvelope], Any]]] = {}
         self._topic_consumers: dict[str, list[Callable[[MessageEnvelope], bool]]] = {}
         self._journal = MessageJournal(runtime_root / ".local" / "agent-bus")
+        # Serialize writes, including a write whose publisher was cancelled, before compaction.
+        self._journal_io = ThreadPoolExecutor(max_workers=1, thread_name_prefix="message-journal")
+        self._journal_lock = asyncio.Lock()
         self._reply_futures: dict[str, asyncio.Future[MessageEnvelope]] = {}
         self._started = False
         self._queued_before_start: set[str] = set()
@@ -181,6 +185,13 @@ class MessageBus:
         self._journal.mark_delivered(message_id)
 
     async def start(self) -> None:
+        """Replay undelivered messages, serialized with any early publishers."""
+        # Channels can publish before replay. Do not replay a write still awaiting fsync and deliver it twice.
+        async with self._journal_lock:
+            await asyncio.get_running_loop().run_in_executor(self._journal_io, lambda: None)
+            await self._replay()
+
+    async def _replay(self) -> None:
         """Replay undelivered messages from the journal, then compact it.
 
         Messages for per-task agents are dropped instead: replaying them would
@@ -213,7 +224,8 @@ class MessageBus:
         """Publish a message. Journaled before delivery for crash recovery (a status is not: ``_TRANSIENT``)."""
         journaled = _journaled(envelope)
         if journaled:
-            self._journal.append(envelope)
+            async with self._journal_lock:
+                await asyncio.get_running_loop().run_in_executor(self._journal_io, self._journal.append, envelope)
         await self._deliver(envelope, journaled=journaled)
 
     async def _deliver(self, envelope: MessageEnvelope, *, journaled: bool = False) -> None:
@@ -343,6 +355,11 @@ class MessageBus:
 
     async def shutdown(self) -> None:
         """Graceful shutdown: compact journal."""
-        if self._started:
-            self._journal.compact()
-        self._started = False
+        async with self._journal_lock:
+            # Wait for cancelled publishers' writes as well, before touching the journal.
+            await asyncio.to_thread(self._journal_io.shutdown, wait=True)
+            try:
+                if self._started:
+                    self._journal.compact()
+            finally:
+                self._started = False
