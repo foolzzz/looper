@@ -1,15 +1,20 @@
 import { startPolling } from "@/lib/polling";
-import { useEffect, useRef, useState } from "react";
+import { createContext, createElement, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { fetchGates, GATES_CHANGED_EVENT } from "@/lib/api";
 
 const REFRESH_MS = 10_000;
+const WaitingGatesContext = createContext<number | null>(null);
+
+export function useWaitingGates(): number | null {
+  return useContext(WaitingGatesContext);
+}
 
 /**
- * How many gates wait for the user, refreshed every 10 s and at once when this dashboard
+ * Share how many gates wait for the user, refreshed every 10 s and at once when this dashboard
  * changes a gate. null until the first load succeeds; an error never turns it into 0, it keeps
  * the last known count (or null).
  */
-export function useWaitingGates(): number | null {
+export function WaitingGatesProvider({ children }: { children: ReactNode }) {
   const [count, setCount] = useState<number | null>(null);
   const latest = useRef(0);
 
@@ -35,5 +40,5 @@ export function useWaitingGates(): number | null {
     };
   }, []);
 
-  return count;
+  return createElement(WaitingGatesContext.Provider, { value: count }, children);
 }

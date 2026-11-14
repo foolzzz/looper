@@ -1,4 +1,5 @@
 import { startPolling } from "@/lib/polling";
+import { useWaitingGates } from "@/lib/use-waiting-gates";
 import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -408,6 +409,7 @@ function Spend({ spend }: { spend: Overview["spend_today"] }) {
 }
 
 export function DashboardPage() {
+  const waitingGates = useWaitingGates();
   const [overview, setOverview] = useState<Overview | null>(null);
   const [error, setError] = useState("");
 
@@ -460,7 +462,7 @@ export function DashboardPage() {
         <Health unhealthy={overview.health.unhealthy} />
       </div>
       <TaskCounts tasks={overview.tasks} />
-      <DashboardGates needsYou={overview.tasks.needs_you} revision={overview} />
+      <DashboardGates needsYou={overview.tasks.needs_you} waitingGates={waitingGates} revision={overview} />
       <Agents agents={overview.agents} />
       <Concurrency projects={overview.projects} idle={overview.idle_projects} />
       {overview.schedules.total > 0 && <Schedules schedules={overview.schedules} />}

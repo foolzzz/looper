@@ -4,6 +4,10 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import App from "./App";
 
+vi.mock("@/lib/api", async (original) => ({
+  ...await original<typeof import("@/lib/api")>(),
+  fetchGates: vi.fn().mockResolvedValue({ counts: { waiting_user: 0 } }),
+}));
 vi.mock("@/components/sidebar", () => ({ Sidebar: () => null, SIDEBAR_ID: "sidebar" }));
 vi.mock("@/components/claude-check-banner", () => ({ ClaudeCheckBanner: () => null }));
 vi.mock("@/components/drain-banner", () => ({ DrainBanner: () => null }));

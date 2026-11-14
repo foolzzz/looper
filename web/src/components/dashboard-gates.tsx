@@ -10,6 +10,7 @@ import { gateAnchor, gateWaitsOn, isGateWaiting, sinceText } from "@/lib/gates";
 import { errorText, useAction } from "@/lib/use-action";
 
 const LIMIT = 10;
+const FALLBACK_REFRESH_MS = 30_000;
 const linkClass = "rounded-sm text-primary hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 type Reply = { taskId: string; stepId: string; text: string };
 const gateKey = (taskId: string, stepId: string) => `${taskId}/${stepId}`;
@@ -68,8 +69,10 @@ export function GateReply({ task, gate, reply, onChanged }: {
   );
 }
 
-/** A bounded read when the needs-you count changes; sent replies keep following their Planner. */
-export function DashboardGates({ needsYou, revision }: { needsYou: number; revision: object }) {
+/** A bounded read when task or gate counts change; sent replies keep following their Planner. */
+export function DashboardGates({ needsYou, waitingGates, revision }: {
+  needsYou: number; waitingGates: number | null; revision: object;
+}) {
   const [tasks, setTasks] = useState<TaskDetail[]>([]);
   const [moreTasks, setMoreTasks] = useState(0);
   const [error, setError] = useState("");
@@ -77,10 +80,13 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
   const latest = useRef(0);
   const [replies, setReplies] = useState<Reply[]>([]);
   const pendingReplies = useRef<Reply[]>([]);
-  const loaded = useRef<{ needsYou: number; refresh: number } | null>(null);
-  // Keep retrying failed full reads on overview polls until this count and refresh are loaded.
-  const pendingRevision = replies.length || !loaded.current || loaded.current.needsYou !== needsYou
-    || loaded.current.refresh !== refresh ? revision : null;
+  const loaded = useRef<{ needsYou: number; waitingGates: number | null; refresh: number } | null>(null);
+  const lastFullRead = useRef(0);
+  const needsFullRead = () => !loaded.current || loaded.current.needsYou !== needsYou
+    || loaded.current.waitingGates !== waitingGates || loaded.current.refresh !== refresh
+    || (waitingGates === null && needsYou > 0 && Date.now() - lastFullRead.current >= FALLBACK_REFRESH_MS);
+  // Keep retrying failed full reads on overview polls until these counts and refresh are loaded.
+  const pendingRevision = replies.length || needsFullRead() ? revision : null;
   const loading = useRef(false);
   const queued = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => () => {
@@ -92,7 +98,9 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
     queued.current = async () => {
       const request = latest.current;
       try {
-        const fullRead = !loaded.current || loaded.current.needsYou !== needsYou || loaded.current.refresh !== refresh;
+        const fullRead = needsFullRead();
+        if (!fullRead && !pendingReplies.current.length) return;
+        if (fullRead) lastFullRead.current = Date.now();
         const page = fullRead && needsYou ? await fetchTasks({ group: "needs_you", limit: LIMIT })
           : { tasks: [], counts: {} };
         const pageIds = page.tasks.slice(0, LIMIT).map((task) => task.task_id);
@@ -130,7 +138,7 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
           !pageIds.includes(task.task_id) && task.group === "needs_you").length;
         if (fullRead) {
           setMoreTasks(Math.max(0, Object.values(page.counts).reduce((sum, n) => sum + n, 0) - readTasks));
-          if (!errors.length) loaded.current = { needsYou, refresh };
+          if (!errors.length) loaded.current = { needsYou, waitingGates, refresh };
         }
         setError(errors[0] ?? "");
       } catch (err) {
@@ -151,7 +159,7 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
       }
     };
     void drain();
-  }, [needsYou, pendingRevision, refresh]);
+  }, [needsYou, waitingGates, pendingRevision, refresh]);
 
   const waiting = tasks.flatMap((task) => !isActiveTask(task) ? [] : task.gates
     .filter((gate) => isGateWaiting(gate) && (gateWaitsOn(gate, isActiveTask(task)) === "user"
