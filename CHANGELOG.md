@@ -18,6 +18,20 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.190] - 2026-11-13
+
+### Changed
+
+- **Lark bot-mention poll: frequent only where bots post.** ([#1357](https://github.com/foolzzz/looper/pull/1357))
+  - Behavior change (maintainer decision, intended): a bound chat is polled every 30 seconds only if a bot message was seen in it within 7 days or its route's sender policy is `chat`; other chats every 5 minutes. Quiet chats skip the thread scan unless the inbox or history shows thread activity.
+  - The Lark inbox (local SQLite file) gains a `bot_activity` table, created automatically; the cadence is logged at most hourly per channel (`lark_bot_poll_cadence`).
+  - Not model-visible: no prompt, tool description or tool schema changed.
+
+### Fixed
+
+- **The code manifest is computed off the event loop at startup.** ([#1359](https://github.com/foolzzz/looper/pull/1359))
+  - `components.prepare_loaded_manifest()` reads it once in a worker thread in a new `code_manifest` startup step before the kept-run scan; the result is unchanged. Not model-visible.
+
 ## [2.14.189] - 2026-11-13
 
 ### Changed
