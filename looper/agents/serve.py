@@ -1019,8 +1019,10 @@ async def _run_agent_system_watched(
         await shut_down_within(shut_down(), exit_now=fence.exit)
 
     finally:
+        from . import managers_api
         from .llmrec.control import install
 
+        managers_api.set_change_listener(None)
         install(None)
         if advisory_checks is not None:
             advisory_checks.cancel()

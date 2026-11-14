@@ -260,7 +260,7 @@ def test_worker_translated_profile_records_gateway_state(monkeypatch, tmp_path, 
                     return None if case == "unavailable" else {"route_format": ROUTE_FORMAT,
                         "features": {"translate": 1}, **proxy.stats}
 
-                async def _start(self, *, port=None):
+                async def _start(self, *, port=None, startup_timeout_s=3):
                     return False
 
             control.install(LocalControl(tmp_path / "runtime", "", enabled=case == "recording"))
