@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.184] - 2026-11-13
+
+### Fixed
+
+- **`system.status` answers from cached check state, so every API operation stays under 2 s.** ([#1333](https://github.com/foolzzz/looper/pull/1333))
+  - Behavior change: the Codex login check reads the last probe result immediately (`codex_login.cached_status`) and refreshes a stale one in one daemon thread; before, the poll waited for `codex login status`. The Codex, coco and Cursor login checks report `pending` ("checking") until a first probe result exists. Each check's refresh runs as a shielded task shared across polls, so a client disconnect does not cancel it. A check that has not finished within 1 s returns its previous result with " (still checking)" appended to the detail. A check that raises keeps its last result and is logged.
+  - Behavior change: the model request recording and gateway checks read the local proxy status once per poll from its cached health (`ProxyControl.status(cached=True)`, valid for 15 s, never probing processes or HTTP; older than that it reports no health). The recorded-request storage size is cached for 60 s and one scan is shared across polls. The startup check (`run_checks`) still reads live state.
+  - Not model-visible: no prompt, tool description or tool schema changed; the only API difference is the `system.status` check results described above.
+
 ## [2.14.183] - 2026-11-13
 
 ### Fixed
