@@ -57,6 +57,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -397,9 +398,18 @@ def materialize(target: Path, row: Mapping[str, Any], content: str) -> Path:
     return target
 
 
+@lru_cache(maxsize=1024)
+def _materialized_sha256(path: Path, metadata: tuple[int, ...]) -> str:
+    # The metadata keys the cache; unchanged copies do not need another read.
+    return _sha256(path.read_bytes())
+
+
 def _is_materialized(path: Path, sha256: str) -> bool:
     try:
-        return _sha256(path.read_bytes()) == sha256
+        info = path.stat()
+        # ctime and inode also invalidate replacements that preserve size and mtime.
+        metadata = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_dev, info.st_ino)
+        return _materialized_sha256(path, metadata) == sha256
     except OSError:
         return False
 
@@ -477,7 +487,7 @@ async def _load_documents(runtime_root: Path, project: Mapping[str, Any] | None,
             if (name := stored.names.get(str(row["id"]))) is None:
                 continue
             target = stored.directory / name
-            if not _is_materialized(target, str(row["sha256"])):
+            if not await asyncio.to_thread(_is_materialized, target, str(row["sha256"])):
                 content = await db_documents.get_content(str(row["id"]))
                 if content is None:
                     raise KnowledgeError(f"document {row['id']} has no content")

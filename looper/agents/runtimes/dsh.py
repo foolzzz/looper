@@ -13,9 +13,11 @@ import stat
 import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import uuid4
 
@@ -791,8 +793,45 @@ class DshCatalog:
     skipped: tuple[dict[str, str], ...] = ()
 
 
+@dataclass
+class _CatalogMaterialization:
+    lock: Lock = field(default_factory=Lock)
+    catalog: DshCatalog | None = None
+    future: Future[DshCatalog] | None = None
+
+
 @lru_cache(maxsize=64)
+def _catalog_materialization(library: AgentLibrary, executable: str) -> _CatalogMaterialization:
+    return _CatalogMaterialization()
+
+
 def materialize(library: AgentLibrary, executable: str = "dsh") -> DshCatalog:
+    """Cache successful catalogs and share only in-flight validation, allowing immediate retries."""
+    state = _catalog_materialization(library, executable)
+    with state.lock:
+        if state.catalog is not None:
+            return state.catalog
+        future = state.future
+        owner = future is None
+        if future is None:
+            state.future = future = Future()
+    if not owner:
+        return future.result()
+    try:
+        catalog = _materialize(library, executable)
+    except BaseException as exc:
+        # Release every waiter even on interruption; later launches must validate again.
+        with state.lock:
+            state.future = None
+        future.set_exception(exc)
+        raise
+    with state.lock:
+        state.catalog, state.future = catalog, None
+    future.set_result(catalog)
+    return catalog
+
+
+def _materialize(library: AgentLibrary, executable: str) -> DshCatalog:
     """Validate with the installed provider, then copy only supported, installed skill bundles.
 
     No Claude plugin is mounted. The immutable copies live under the managed DSH root, so catalog GC cannot

@@ -1529,7 +1529,7 @@ class ClaudeRunRecorder:
                     # What Looper appended (its file holds the same text); Claude Code's own prompt is not included.
                     **(self._system_prompt.record() if self._system_prompt is not None else {}),
                     # The model asked for and where it came from; the variables' names, not their values.
-                    **(self._launch.record() if self._launch is not None else {}),
+                    **(await asyncio.to_thread(self._launch.record) if self._launch is not None else {}),
                     # The repository's own CLAUDE.md and AGENTS.md the runtime was given, and how.
                     **({"project_instructions": instructions_record(
                         self._launch.runtime.instruction_files(self._cwd), self._cwd)}

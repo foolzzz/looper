@@ -4013,7 +4013,7 @@ class PlannerAgent:
 
             if translated(launch):
                 launch.environment()
-            base = self._claude_command(prompt_file, settings, launch, plan.work_dir)
+            base = await asyncio.to_thread(self._claude_command, prompt_file, settings, launch, plan.work_dir)
         except (OSError, RuntimeUnsupported) as exc:
             error = f"cannot start {launch.runtime.label}: {exc}"
             # A rejected launch has no command yet, but still belongs in this task's run history.

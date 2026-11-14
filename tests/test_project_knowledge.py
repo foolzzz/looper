@@ -15,6 +15,7 @@ import base64
 import hashlib
 import os
 import stat
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -502,6 +503,88 @@ class TestLoad:
         state["content_reads"].clear()
         assert _load(tmp_path, {"id": "proj-1", "work_dir": str(project_dir)}, str(project_dir)) == loaded
         assert state["content_reads"] == []
+
+    def test_checking_stored_content_keeps_the_loop_responsive(
+        self, tmp_path: Path, documents: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        content = "MARKER-ALPHA"
+        row = _row("text", "Glossary", "Terms", content)
+        documents(row, contents={row["id"]: content})
+        project = {"id": "proj-1", "work_dir": ""}
+        _load(tmp_path, project, str(tmp_path))
+        original_hash = knowledge._sha256
+        hashes = 0
+
+        def slow_hash(data: bytes) -> str:
+            nonlocal hashes
+            if data == content.encode():
+                hashes += 1
+                time.sleep(0.5)
+            return original_hash(data)
+
+        monkeypatch.setattr(knowledge, "_sha256", slow_hash)
+
+        async def run() -> None:
+            gaps = []
+            finished = asyncio.Event()
+
+            async def tick() -> None:
+                previous = time.monotonic()
+                while not finished.is_set():
+                    await asyncio.sleep(0.01)
+                    now = time.monotonic()
+                    gaps.append(now - previous)
+                    previous = now
+
+            ticker = asyncio.create_task(tick())
+            await asyncio.sleep(0)
+            try:
+                loaded = await load_knowledge(tmp_path, project, str(tmp_path))
+                assert loaded.error is None and loaded.documents == 1
+            finally:
+                finished.set()
+                await ticker
+            assert hashes == 1
+            assert max(gaps) < 0.2
+
+        asyncio.run(run())
+
+    def test_unchanged_copies_skip_hashing_but_metadata_changes_are_checked(
+        self, tmp_path: Path, documents: Any, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        content = "MARKER-ALPHA"
+        row = _row("text", "Glossary", "Terms", content)
+        state = documents(row, contents={row["id"]: content})
+        project = {"id": "proj-1", "work_dir": ""}
+        _load(tmp_path, project, str(tmp_path))
+        # Verify the materialized file once before measuring cache reuse.
+        _load(tmp_path, project, str(tmp_path))
+        copy = _set_dir(tmp_path) / "Glossary.md"
+        original_hash = knowledge._sha256
+        hashes = []
+
+        def tracked_hash(data: bytes) -> str:
+            hashes.append(data)
+            return original_hash(data)
+
+        monkeypatch.setattr(knowledge, "_sha256", tracked_hash)
+        assert _load(tmp_path, project, str(tmp_path)).error is None
+        assert content.encode() not in hashes
+        assert state["content_reads"] == [row["id"]]
+        before = copy.stat()
+        os.utime(copy, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000))
+        assert _load(tmp_path, project, str(tmp_path)).error is None
+        assert hashes.count(content.encode()) == 1
+        assert state["content_reads"] == [row["id"]]
+        os.chmod(copy, 0o644)
+        copy.write_text("X" * len(content))
+        assert _load(tmp_path, project, str(tmp_path)).error is None
+        assert copy.read_text() == content
+        assert state["content_reads"] == [row["id"], row["id"]]
+        copy.unlink()
+        assert _load(tmp_path, project, str(tmp_path)).error is None
+        assert copy.read_text() == content
+        assert state["content_reads"] == [row["id"], row["id"], row["id"]]
 
     def test_a_damaged_copy_is_written_again(self, tmp_path: Path, documents: Any) -> None:
         documents(_row("text", "Glossary", "Terms", "MARKER-ALPHA"), contents={"doc-000000000001": "MARKER-ALPHA"})
