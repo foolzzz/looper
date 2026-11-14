@@ -208,8 +208,10 @@ def test_startup_session_sweep_keeps_loop_responsive(tmp_path, monkeypatch):
         # Recording is unrelated to reclaiming sessions and must not launch a recorder.
         await pool.execute("INSERT INTO system_settings (key, value) VALUES ('llmrec.enabled', 'false') "
                            "ON CONFLICT (key) DO UPDATE SET value = 'false'")
+        # Session cleanup needs no SDK runners; enabling them replaces the shared runtime adapters.
         ops = ops_config.OpsConfig(runtime_root=tmp_path, path=tmp_path / "ops.toml", database_url=DSN,
-                                   port=0, operator_notes_root=str(tmp_path), keeper_mode=ops_config.KeeperMode.OFF)
+                                   port=0, operator_notes_root=str(tmp_path), keeper_mode=ops_config.KeeperMode.OFF,
+                                   pi_runtime="cli", dsh_runtime="cli")
         try:
             with pytest.raises(Swept):
                 await serve._run_agent_system(ops=ops, runtime_root=tmp_path, work_dir=tmp_path, skip_backup=True)
