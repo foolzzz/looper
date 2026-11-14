@@ -443,7 +443,7 @@ class CursorAgentRuntime(RuntimeAdapter):
         if len(command) > 3 and command[3].startswith("TMPDIR="):
             directory = Path(command[1].partition("=")[2]).parent
             if command[3] == f"TMPDIR={run_tmpdir(directory)}":
-                shutil.rmtree(run_tmpdir(directory), ignore_errors=True)
+                await asyncio.to_thread(shutil.rmtree, run_tmpdir(directory), ignore_errors=True)
         return []
 
     def result_notes(self, result_event: dict[str, Any] | None) -> dict[str, Any]:

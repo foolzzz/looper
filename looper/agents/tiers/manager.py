@@ -1389,7 +1389,8 @@ class ManagerAgent:
         # by their hashes. The recording URL lives in the environment: toggles, bypass and port
         # changes must restart the resident, while a reused route keeps its process.
         signature = (
-            tuple(self._claude_command(prompt_file, launch, resume=False)), system_prompt.sha256, launch.env_sha256,
+            tuple(await asyncio.to_thread(self._claude_command, prompt_file, launch, resume=False)),
+            system_prompt.sha256, launch.env_sha256,
             launch.library.sha256, launch.binding_sha256,
             launch.llmrec.url if isinstance(launch.llmrec, LlmrecRoute) else None,
         )
@@ -1407,7 +1408,7 @@ class ManagerAgent:
             # its old instruction copy until a replacement starts, even though this command names the new one.
             await token.keep("claude_stop", self._claude.stop(), 10)
             self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
-            command = self._claude_command(prompt_file, launch)
+            command = await asyncio.to_thread(self._claude_command, prompt_file, launch)
             await token.keep("claude_start", self._claude.start(
                 command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
                 totals=self._session_totals, price=launch.price), 10, undo=lambda: self._claude.stop(kill=True))
@@ -1417,7 +1418,7 @@ class ManagerAgent:
             # Restore the API session's saved context before deciding whether it needs a handoff.
             await token.keep("claude_stop", self._claude.stop(), 10)
             self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
-            command = self._claude_command(prompt_file, launch)
+            command = await asyncio.to_thread(self._claude_command, prompt_file, launch)
             with self._runtime_start_budget(launch) as seconds:
                 await token.keep("claude_start", self._claude.start(
                     command, cwd=str(self._config.work_dir), signature=signature, env=launch.environment(),
@@ -1480,7 +1481,8 @@ class ManagerAgent:
             self._claude, self._claude_runtime = launch.runtime.resident_session(self.agent_id), launch.runtime
         if self._claude.stale(signature):
             await token.keep("claude_stop", self._stop_replaced_session(), 30)
-        command = self._claude.command if self._claude.started else self._claude_command(prepared.prompt_file, launch)
+        command = self._claude.command if self._claude.started else await asyncio.to_thread(
+            self._claude_command, prepared.prompt_file, launch)
         # A new session's first turn starts with the resume brief ('' when it has nothing to say), unless the user
         # asked for a clean one.
         brief = "" if (self._claude.started or self._session_id or self._clean_start) and not self._pending_handoff \
@@ -2224,7 +2226,7 @@ class ManagerAgent:
                 await self._load_agent_settings(), role=AgentType.MANAGER)
             record_id = await db_llm_records.start_record(
                 agent_id=self.agent_id, session_id=previous, input_text=str(envelope.payload.get("text", "")),
-                metadata={**launch.record(), "session_reset": {
+                metadata={**(await asyncio.to_thread(launch.record)), "session_reset": {
                     **_recorded_origin(origin), "previous_session_id": previous, "selected_profile_id": chosen}},
             )
             await db_llm_records.finish_record(record_id, status="completed", output_text=NEW_SESSION_REPLY,
@@ -2358,7 +2360,7 @@ class ManagerAgent:
                 await self._load_agent_settings(wait=False), role=AgentType.MANAGER)
             record_id = await db_llm_records.start_record(
                 agent_id=self.agent_id, session_id=self._session_id, input_text=input_text,
-                metadata={**launch.record(), "session_profile": {
+                metadata={**(await asyncio.to_thread(launch.record)), "session_profile": {
                     "from": previous, "to": profile_id, "effect": change.value, **_recorded_origin(origin), "via": via}},
             )
             await db_llm_records.finish_record(record_id, status="completed", output_text=text,

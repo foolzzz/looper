@@ -502,10 +502,10 @@ async def delete_task(task_id: str, runtime_root: Path | None, *,
             logger.warning("could not remove the step worktrees of task %s", task_id, exc_info=True)
         # Steps belong to the task checkout. Commit what the task left to its result branch, which stays.
         await task_workspaces.finish(task_id, deleted=True, pool=conn)
-        if runtime_root is not None:
-            from .room import remove_run_sessions
-            remove_run_sessions(runtime_root, task_id)
         await db_tasks.delete_task(task_id, pool=conn)
+    if runtime_root is not None:
+        from .room import remove_run_sessions
+        await asyncio.to_thread(remove_run_sessions, runtime_root, task_id)
     if task_router is not None:
         task_router.forget_task(task_id)
     return {"deleted": task_id}
