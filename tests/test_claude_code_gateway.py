@@ -35,11 +35,13 @@ def test_translated_environment_enforces_gateway_and_preserves_model_binding(tra
     monkeypatch.setattr(child_env, 'inherited', lambda: {API_KEY: 'inherited-key', BASE_URL: 'https://wrong.invalid',
                                                         'NO_PROXY': 'example.invalid'})
     route = LlmrecRoute('abcdefghijklmnopqrstuv', 'http://127.0.0.1:12345/r/abcdefghijklmnopqrstuv',
-                        'https://chat.example.invalid/v1', kind=RouteKind.TRANSLATE, record=False)
+                        'https://chat.example.invalid/v1', kind=RouteKind.TRANSLATE, record=False,
+                        local_token='local-route-token')
     routed = replace(translated_launch, llmrec=route)
     env = routed.environment()
     assert env[BASE_URL] == route.url
-    assert env[AUTH_TOKEN] == 'synthetic-key'
+    assert env[AUTH_TOKEN] == route.local_token
+    assert 'synthetic-key' not in json.dumps(env)
     assert API_KEY not in env
     assert all(env[name] == value for name, value in TRANSLATED_ENV)
     assert all(env[name] == 'chat-main' for name in MAIN_MODEL_VARS)
@@ -55,6 +57,7 @@ def test_translated_environment_enforces_gateway_and_preserves_model_binding(tra
     assert record['llmrec'] == {'state': 'translating', 'route': route.id, 'recording': False,
         'upstream_host': 'chat.example.invalid', 'dialect': 'generic'}
     assert 'synthetic-key' not in json.dumps(record)
+    assert route.local_token not in json.dumps(record)
 
 
 @pytest.mark.parametrize('source', ['inherited', 'shared', 'provider'])
@@ -74,7 +77,8 @@ def test_translated_environment_disables_other_backends(translated_launch, monke
         profile = replace(settings.profile, resolved_model=replace(resolved, provider=provider))
         settings = replace(settings, profile=profile)
     route = LlmrecRoute('abcdefghijklmnopqrstuv', 'http://127.0.0.1:12345/r/abcdefghijklmnopqrstuv',
-                        'https://chat.example.invalid/v1', kind=RouteKind.TRANSLATE, record=False)
+                        'https://chat.example.invalid/v1', kind=RouteKind.TRANSLATE, record=False,
+                        local_token='local-route-token')
     env = replace(translated_launch, settings=settings, llmrec=route).environment()
     assert env[BASE_URL] == route.url
     assert {name: env.get(name) for name in selectors} == dict.fromkeys(selectors, '0')
@@ -84,7 +88,8 @@ def test_translated_environment_disables_other_backends(translated_launch, monke
 @pytest.mark.parametrize('translated', [False, True])
 def test_backend_selection_settings_are_forced_only_for_translation(translated_launch, tmp_path, resident, translated):
     route = LlmrecRoute('abcdefghijklmnopqrstuv', 'http://127.0.0.1:12345/r/abcdefghijklmnopqrstuv',
-                        'https://chat.example.invalid/v1', kind=RouteKind.TRANSLATE, record=False)
+                        'https://chat.example.invalid/v1', kind=RouteKind.TRANSLATE, record=False,
+                        local_token='local-route-token')
     launch = replace(translated_launch, llmrec=route) if translated else builtin_launch()
     command = launch.runtime.resident_command if resident else launch.runtime.run_command
     args = command('claude', cwd=tmp_path, prompt_file=tmp_path / 'prompt.md', launch=launch)
@@ -94,6 +99,7 @@ def test_backend_selection_settings_are_forced_only_for_translation(translated_l
         settings_file = Path(settings_arg)
         assert settings_file.is_absolute()
         assert stat.S_IMODE(settings_file.stat().st_mode) == 0o600
+        assert 'synthetic-key' not in settings_file.read_text()
         settings = json.loads(settings_file.read_text())
         # These explicit values win even when the CLI loads project env after process env.
         assert settings['env'] == {
@@ -101,7 +107,7 @@ def test_backend_selection_settings_are_forced_only_for_translation(translated_l
             **dict.fromkeys(MAIN_MODEL_VARS, 'chat-main'),
             **dict.fromkeys(BACKGROUND_MODEL_VARS, 'chat-small'),
             BASE_URL: route.url,
-            AUTH_TOKEN: 'synthetic-key',
+            AUTH_TOKEN: route.local_token,
             API_KEY: '',
             'CLAUDE_CODE_USE_BEDROCK': '0',
             'CLAUDE_CODE_USE_VERTEX': '0',
@@ -135,7 +141,8 @@ def test_translated_private_settings_pin_models_over_project_settings(translated
     project.mkdir()
     (project / 'settings.json').write_text(json.dumps({'env': {'ANTHROPIC_DEFAULT_HAIKU_MODEL': 'unrouted'}}))
     route = LlmrecRoute('abcdefghijklmnopqrstuv', 'http://127.0.0.1:12345/r/abcdefghijklmnopqrstuv',
-                        'https://chat.example.invalid/v1', kind=RouteKind.TRANSLATE, record=False)
+                        'https://chat.example.invalid/v1', kind=RouteKind.TRANSLATE, record=False,
+                        local_token='local-route-token')
     launch = replace(translated_launch, llmrec=route)
     command = launch.runtime.resident_command if resident else launch.runtime.run_command
     args = command('claude', cwd=tmp_path, prompt_file=tmp_path / 'prompt.md', launch=launch)
@@ -150,6 +157,8 @@ def test_translated_private_settings_pin_models_over_project_settings(translated
 
 @pytest.mark.parametrize('route,diagnostic', [
     (None, 'not installed in this process'),
+    (LlmrecRoute('a' * 22, 'http://127.0.0.1:12345/r/test', 'https://chat.example.invalid',
+                 kind=RouteKind.TRANSLATE), 'not installed in this process'),
     (LlmrecSkip(SkipReason.GATEWAY_UNAVAILABLE, 'startup failed'), 'could not start: startup failed'),
     (LlmrecSkip(SkipReason.PROXY_OUTDATED), 'older version kept alive'),
     (LlmrecSkip(SkipReason.CREDENTIALS_IN_URL), 'URL contains credentials'),
@@ -171,7 +180,7 @@ def test_gateway_refusal_is_deferred_until_process_environment(translated_launch
     # Tiers construct commands before creating the Runs record; validation belongs at process startup.
     args = command('claude', cwd=tmp_path, prompt_file=tmp_path / 'prompt.md', launch=launch)
     settings = json.loads(Path(args[args.index('--settings') + 1]).read_text())
-    assert settings['env'] == {**dict(TRANSLATED_ENV), AUTH_TOKEN: 'synthetic-key', API_KEY: '',
+    assert settings['env'] == {**dict(TRANSLATED_ENV), AUTH_TOKEN: '', API_KEY: '',
         'ANTHROPIC_MODEL': 'chat-main', **dict.fromkeys(MAIN_MODEL_VARS, 'chat-main'),
         **dict.fromkeys(BACKGROUND_MODEL_VARS, 'chat-small')}
     assert launch.record()['llmrec']['state'] == 'refused'
@@ -200,7 +209,7 @@ def test_translated_launch_refuses_empty_upstream_before_starting_route(translat
 
 
 @pytest.mark.parametrize('official', [True, False])
-def test_direct_environment_is_byte_stable(official, monkeypatch):
+def test_direct_environment_is_byte_stable(official, monkeypatch, tmp_path):
     monkeypatch.setattr(child_env, 'inherited', lambda: {'PATH': '/synthetic/bin', API_KEY: 'old',
         AUTH_TOKEN: 'old-token', BASE_URL: 'https://old.invalid', 'ENABLE_TOOL_SEARCH': 'false'})
     provider = LegacyProviderSpec('test-provider', 'Test provider', AuthKind.API_KEY,
@@ -216,6 +225,10 @@ def test_direct_environment_is_byte_stable(official, monkeypatch):
         expected.update({BASE_URL: provider.base_url, AUTH_TOKEN: 'synthetic-key',
                          **dict.fromkeys((*MAIN_MODEL_VARS, *BACKGROUND_MODEL_VARS), 'haiku')})
     assert json.dumps(launch.environment(), sort_keys=True) == json.dumps(expected, sort_keys=True)
+    for command in (launch.runtime.run_command, launch.runtime.resident_command):
+        args = command('claude', cwd=tmp_path, prompt_file=tmp_path / 'prompt.md', launch=launch)
+        assert 'synthetic-key' not in json.dumps([args, launch.record()])
+    assert all(b'synthetic-key' not in path.read_bytes() for path in tmp_path.rglob('*') if path.is_file())
 
 
 def test_default_legacy_launch_keeps_its_direct_environment(monkeypatch):

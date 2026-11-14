@@ -71,7 +71,7 @@ export function ManagerSessionProfileView({
   );
 }
 
-export function ManagerSessionProfile({ refreshKey = 0, managerId = "manager" }: { refreshKey?: number; managerId?: string }) {
+export function ManagerSessionProfile({ refreshKey = 0, managerId = "manager", active = true }: { refreshKey?: number; managerId?: string; active?: boolean }) {
   const [view, setView] = useState<SessionView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -80,8 +80,12 @@ export function ManagerSessionProfile({ refreshKey = 0, managerId = "manager" }:
   const managerRef = useRef(managerId);
   managerRef.current = managerId;
 
+  const pending = useRef(new Map<string, number>());
+  const lastRead = useRef(new Map<string, number>());
   const load = useCallback(async () => {
     const requested = managerId;
+    pending.current.set(requested, (pending.current.get(requested) ?? 0) + 1);
+    lastRead.current.set(requested, Date.now());
     try {
       const next = await fetchManagerSession(requested);
       if (managerRef.current !== requested) return;
@@ -90,6 +94,8 @@ export function ManagerSessionProfile({ refreshKey = 0, managerId = "manager" }:
     } catch (e) {
       if (managerRef.current !== requested) return;
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      pending.current.set(requested, (pending.current.get(requested) ?? 1) - 1);
     }
   }, [managerId]);
 
@@ -99,15 +105,23 @@ export function ManagerSessionProfile({ refreshKey = 0, managerId = "manager" }:
   }, [managerId]);
 
   useEffect(() => {
-    load();
-  }, [load, refreshKey]);
+    if (active && document.visibilityState !== "hidden") void load();
+  }, [load, refreshKey, active]);
 
   // A switch from another channel (Lark, Telegram, the API) shows when the window is looked at again.
   useEffect(() => {
-    const onFocus = () => void load();
+    if (!active) return;
+    const onFocus = () => {
+      if (document.visibilityState === "hidden" || pending.current.get(managerId) || Date.now() - (lastRead.current.get(managerId) ?? -Infinity) < 30_000) return;
+      void load();
+    };
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, [load]);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [load, active, managerId]);
 
   const select = async (profileId: string | null) => {
     const choice = profileId === null ? view?.follow_settings : view?.choices.find((c) => c.profile_id === profileId);

@@ -1101,7 +1101,8 @@ class Launch:
             record["library"] = library
         if self.max_budget_usd is not None:
             record["max_budget_usd"] = self.max_budget_usd
-        if is_translated and not (isinstance(self.llmrec, LlmrecRoute) and self.llmrec.kind is RouteKind.TRANSLATE):
+        if is_translated and not (isinstance(self.llmrec, LlmrecRoute)
+                                  and self.llmrec.kind is RouteKind.TRANSLATE and self.llmrec.local_token):
             record["llmrec"] = {"state": "refused",
                 "reason": self.llmrec.reason.value if isinstance(self.llmrec, LlmrecSkip) else "gateway_unavailable",
                 "detail": gateway_refusal(self.llmrec, self.model)}

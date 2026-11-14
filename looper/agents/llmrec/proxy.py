@@ -31,7 +31,7 @@ from looper import __version__
 from . import ROUTE_FORMAT, ROUTE_ID, ROUTES_DIR, TLS_ENV, RouteFile, code_sha256
 from .capture import MIB, build_capture, kind_of, redact_headers, redact_query
 from .dialects import DIALECTS, ChatDialect
-from .gateway import GatewayKey, GatewayConfig, AliasResolver, Unavailable, request_guard
+from .gateway import check_route_token, route_api_key, GatewayKey, GatewayConfig, AliasResolver, Unavailable, request_guard
 from .translate import Rejection, RejectionCode, to_chat, from_chat, local_response, error_response, anthropic_usage, resolve_session_id
 from .translate_stream import StreamTranslator, sse_events
 
@@ -398,6 +398,11 @@ class Proxy:
             return b''
         rest = '/' + prefix[3] if len(prefix) == 4 else ''
         if route.kind == 'translate':
+            if not check_route_token(request.headers, route.local_token):
+                self._auth_failures += 1
+                await self._json(connection, writer, 401, {'type': 'error', 'error': {
+                    'type': 'authentication_error', 'message': 'Invalid route token'}})
+                return b''
             return await self._translated(connection, reader, writer, request, body, stamped, rest)
         upstream = urlsplit(route.upstream)
         # Redirect targets already include the complete path and query at the upstream origin.
@@ -699,10 +704,14 @@ class Proxy:
                 headers = {'content-type': 'application/json',
                     'accept': 'text/event-stream' if chat.stream else 'application/json',
                     'accept-encoding': 'gzip, deflate', 'user-agent': 'looper-gateway/' + __version__}
-                if upstream_auth is not None:
-                    headers['authorization'] = upstream_auth
-                elif authorization := request_headers.get(b'authorization'):
-                    headers['authorization'] = authorization.decode('latin-1')
+                # Client credentials authorize only the local route; upstream credentials come from the registry.
+                auth = upstream_auth
+                if auth is None:
+                    try:
+                        auth = 'Bearer ' + await route_api_key(route, self.sink)
+                    except Unavailable:
+                        raise Rejection(503, 'api_error', 'Route provider credentials unavailable')
+                headers['authorization'] = auth
                 upstream_request = self._client.build_request('POST', url, headers=headers, content=chat.body,
                     timeout=httpx.Timeout(self.read_idle_s if self.read_idle_s is not None else 600,
                                           connect=self.connect_s, write=60, pool=10),

@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 class DbSink:
     def __init__(self, pool: asyncpg.Pool | None, *, max_pending_bytes: int = 256 * 1024 * 1024):
         self.pool = pool
+        self.pool_ready = asyncio.Event()
+        if pool is not None:
+            self.pool_ready.set()
         self.max_pending_bytes = max_pending_bytes
         self.pending = 0
         self.recorded = 0

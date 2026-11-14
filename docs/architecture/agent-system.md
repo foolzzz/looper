@@ -3624,7 +3624,19 @@ Responses models are not supported by this path.
 Translation works with request recording off: Looper starts the loopback
 proxy on demand and attaches a translation route with recording disabled.
 When recording is on, translated requests use the existing capture pipeline.
-Claude Code receives only that route's URL; it never falls back to a direct
+Each agent route has a separate random local token, checked by the proxy. Claude
+Code receives only this token in its process environment and private settings;
+the upstream provider key stays in the proxy, read from the provider registry
+through its database connection into memory. The proxy supplies that key to the
+upstream itself and never forwards the client's Authorization header. It never
+writes the upstream key to route or settings files. Unavailable credentials or a
+changed registry endpoint refuse forwarding. At service startup, existing
+private Claude settings files are deleted and the removed count is logged;
+settings are regenerated for each run with the local route token only.
+Translated launches allow up to 15 seconds for a cold proxy start. A translated
+request waits for the registry connection within its three-second credential
+lookup budget; an unavailable registry still refuses forwarding.
+Claude Code is bound to that route's URL; it never falls back to a direct
 upstream connection. A missing, unavailable or outdated gateway, or an
 upstream URL containing credentials, refuses the run with a specific reason.
 Startup checks report gateway availability and warn when upstream usage is
@@ -3820,8 +3832,12 @@ before a settings change keep their existing route.
   `127.0.0.1`. Private route files and process identity live under the runtime
   root's `.local/llmrec`; the log is `logs/llmrec-proxy.log`. The process can
   survive a control-plane restart and is adopted or replaced when safe;
-  `serve` checks its health every five seconds. Forwarding does not wait for
-  database writes: a bounded asynchronous sink retries writes and reports
+  `serve` checks its health every five seconds. The server computes its code
+  fingerprint once at startup in a background thread and reuses it for proxy
+  compatibility checks. Checkout changes take effect at the next server restart,
+  as performed by upgrades; each proxy still fingerprints its code at startup.
+  Forwarding does not wait for database writes: a bounded asynchronous sink
+  retries writes and reports
   dropped requests or write errors in proxy status. Complete recordings and
   gaps have separate counters; self-check warns about gaps since proxy startup,
   including their count and most common reason. Upstream TLS uses the OS

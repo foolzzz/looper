@@ -375,7 +375,7 @@ def test_resident_gateway_refusal_records_failure_and_reaches_manager_chat(monke
             async def _health(self, *, cached=False):
                 return None
 
-            async def _start(self, *, port=None):
+            async def _start(self, *, port=None, startup_timeout_s=3):
                 return False
 
         control.install(UnavailableControl(root, "", enabled=False))

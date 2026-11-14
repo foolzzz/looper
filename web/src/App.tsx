@@ -5,6 +5,7 @@ import { ClaudeCheckBanner } from "@/components/claude-check-banner";
 import { DrainBanner } from "@/components/drain-banner";
 import { SessionEndedBanner } from "@/components/session-ended-banner";
 import { useSessionEnded } from "@/lib/session";
+import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
 import { DashboardPage } from "@/pages/dashboard";
 import { ChatPage } from "@/pages/chat";
 import { TasksPage } from "@/pages/tasks";
@@ -90,6 +91,7 @@ function App() {
   }
 
   return (
+    <WaitingGatesProvider>
     <div className="flex h-screen w-screen overflow-hidden bg-background">
       <Sidebar
         activePage={route.page}
@@ -138,6 +140,7 @@ function App() {
         <main className="min-h-0 flex-1 overflow-hidden">
           <div className={route.page === "chat" ? "h-full" : "hidden"}>
             <ChatPage
+              active={route.page === "chat"}
               query={route.page === "chat" ? route.query : undefined}
               onQuery={(q, replace, from) => navigateSub("chat", "", q, replace, from)}
             />
@@ -198,6 +201,7 @@ function App() {
         </main>
       </div>
     </div>
+    </WaitingGatesProvider>
   );
 }
 

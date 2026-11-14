@@ -1,3 +1,4 @@
+import { startPolling } from "@/lib/polling";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Square,
@@ -312,7 +313,7 @@ function chatQuery(targetId: string, conversationId = ""): string {
 /** `#chat?target=<agent id>&conversation=<session id>`: the agent open (the Manager when left out or unknown) and, with the
  * Manager, a Lark or Telegram conversation read-only. `query` is undefined while another page is shown: the chat stays
  * mounted, and keeps what it last read. */
-export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query: string, replace?: boolean, from?: string) => void }) {
+export function ChatPage({ query, onQuery, active = true }: { active?: boolean; query?: string; onQuery?: (query: string, replace?: boolean, from?: string) => void }) {
   const seenQuery = useRef("");
   if (query !== undefined) seenQuery.current = query;
   const urlParams = new URLSearchParams(seenQuery.current);
@@ -439,7 +440,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     target.kind !== "manager" || (ownedThread?.managerId === target.id && ownedThread.sessionId === sessionId);
 
   const refreshConversations = useCallback((managerId: string, signal?: AbortSignal) => {
-    fetchChatSessions(managerId, signal)
+    return fetchChatSessions(managerId, signal)
       .then((rows) => {
         if (signal?.aborted || managerId !== currentRef.current.managerId) return;
         setConversations({ managerId, rows });
@@ -453,7 +454,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
   }, []);
 
   const refreshTargets = useCallback(() => {
-    fetchChatTargets().then((rows) => {
+    return fetchChatTargets().then((rows) => {
       setTargets(rows);
       setTargetsLoaded(true);
     }).catch(() => {});
@@ -461,10 +462,8 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
 
   useEffect(() => {
     fetchRoleConfigs().then(setRoleConfigs).catch(() => {});
-    refreshTargets();
     // Keeps statuses current, and stops input once a viewed Planner ends.
-    const timer = setInterval(refreshTargets, TARGETS_POLL_MS);
-    return () => clearInterval(timer);
+    return startPolling(refreshTargets, TARGETS_POLL_MS);
   }, [refreshTargets]);
 
   const managers = useMemo(() => {
@@ -532,11 +531,10 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
     if (target.kind !== "manager" || sending) return;
     const controller = new AbortController();
     const refresh = () => refreshConversations(currentManagerId, controller.signal);
-    refresh();
-    const timer = setInterval(refresh, TARGETS_POLL_MS);
+    const stop = startPolling(refresh, TARGETS_POLL_MS);
     return () => {
       controller.abort();
-      clearInterval(timer);
+      stop();
     };
   }, [target.kind, currentManagerId, sending, refreshConversations]);
   const shownConversations = conversations?.managerId === currentManagerId ? conversations.rows : null;
@@ -583,12 +581,11 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
             error: err instanceof Error ? err.message : String(err),
           })),
       );
-    load();
-    const timer = setInterval(load, TARGETS_POLL_MS);
+    const stop = startPolling(load, TARGETS_POLL_MS);
     return () => {
       alive = false;
       controller.abort();
-      clearInterval(timer);
+      stop();
     };
   }, [target.kind, currentManagerId, wantConversation, targetSettled]);
   const openedHere = opened?.id === wantConversation && opened.managerId === currentManagerId ? opened : null;
@@ -1280,7 +1277,7 @@ export function ChatPage({ query, onQuery }: { query?: string; onQuery?: (query:
             {!viewing && sessionId && (
               <span className="hidden font-mono text-[11px] text-muted-foreground sm:inline">{sessionId}</span>
             )}
-            {target.kind === "manager" && !viewing && <ManagerSessionProfile refreshKey={profileRefresh} managerId={target.id} />}
+            {target.kind === "manager" && !viewing && <ManagerSessionProfile active={active} refreshKey={profileRefresh} managerId={target.id} />}
             {target.kind === "manager" && !viewing && (
               <button
                 type="button"

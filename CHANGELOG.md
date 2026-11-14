@@ -18,6 +18,35 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.188] - 2026-11-13
+
+### Fixed
+
+- **The request-recording code hash is not recomputed on the event loop.** ([#1356](https://github.com/foolzzz/looper/pull/1356))
+  - The code fingerprint (`code_sha256`) is computed once per server process in a background thread and reused by the outdated-proxy check and service startup; the PR presents latency as the only intended change.
+  - Visible consequence: checkout changes are noticed at the next server restart (as performed by upgrades), not at each health check; each proxy still fingerprints its code at startup. The PR text mentions an optional 60-second refresh that the diff does not contain.
+  - Not model-visible: no prompt, tool description, tool schema or agent environment changed.
+
+## [2.14.187] - 2026-11-13
+
+### Security
+
+- **Upstream credentials stay out of translated Claude settings.** ([#1350](https://github.com/foolzzz/looper/pull/1350))
+  - Behavior change (translated routes only): each route has a random local token; Claude Code gets only that token (process environment and private settings), and the proxy rejects a missing or wrong token with 401. The proxy reads the provider key from the registry through its own database connection per request, sets the upstream Authorization itself and never forwards the client's credential; missing credentials, a disabled provider or a changed endpoint refuse forwarding (403), an unreachable registry returns 503. Route format 4 becomes 5; formats 3 and 4 are still read for lifecycle ownership only.
+  - At service startup the private Claude settings files are deleted (the removed count is logged) and regenerated per run. Direct runs keep their process-environment credential path.
+  - Fixed two startup failures: translated launches allow a 15-second cold proxy start, and the first translated request waits for the registry connection within the 3-second credential lookup budget.
+  - Also in the diff: serve clears the managers change listener on shutdown.
+  - Not model-visible: no prompt, tool description or tool schema changed; the Claude Code process environment carries a local token instead of the provider key.
+
+## [2.14.186] - 2026-11-13
+
+### Changed
+
+- **Dashboard polling hygiene.** ([#1337](https://github.com/foolzzz/looper/pull/1337))
+  - Behavior change (dashboard only): polling now goes through the shared `startPolling` helper (the next read starts after the previous one settled, none while the tab is hidden, aborted on leaving) on the Tasks, Gates, Chat and Dashboard pages and in the project list and waiting-gates hooks. The waiting-gates count is read once by a `WaitingGatesProvider` and shared. The dashboard's needs-you list is re-read only when the needs-you or waiting-gate count changes (or every 30 s while the gate count is unknown), not on every overview poll. The Manager session profile reads only while the chat is the active page and the tab is visible, and a focus read is skipped within 30 s of the last one. The Tasks list stops polling while a task is open.
+  - Test change: `tests/test_db_backup.py` keeps its serve port reserved until startup.
+  - Not model-visible: no prompt, tool description or tool schema changed; no server code changed.
+
 ## [2.14.185] - 2026-11-13
 
 ### Fixed
