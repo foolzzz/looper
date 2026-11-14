@@ -425,7 +425,7 @@ def test_missing_bus_ack_is_unknown_and_late_acceptance_is_not_replayed(
     monkeypatch.setattr(planner_module, "WORKER_INPUT_TIMEOUT", .01)
 
     async def run() -> None:
-        async with delivery(tmp_path) as (_, planner, plan, step, channel, ready, acks):
+        async with delivery(tmp_path) as (pool, planner, plan, step, channel, ready, acks):
             channel.send_timeout = .1
             ready.set()
             await planner._save(plan, step)
@@ -435,7 +435,8 @@ def test_missing_bus_ack_is_unknown_and_late_acceptance_is_not_replayed(
                 assert "未确认" in answer and "Passing it on" not in answer
             channel.release.set()
             await channel.settled.wait()
-            await asyncio.sleep(0)
+            # Channel settlement precedes the durable bus acknowledgement.
+            await asyncio.gather(*pool._input_deliveries)
             assert [ack.payload for ack in acks] == [{"delivered": True}]
             assert len(channel.written) == 1 and channel.sent == channel.written
             assert agent_db.store.steps["t1"]["s1"]["missed_messages"] == []
