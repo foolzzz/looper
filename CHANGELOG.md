@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.181] - 2026-11-13
+
+### Fixed
+
+- **Upgrade no longer fails when the old service's pid was reused.** ([#1339](https://github.com/foolzzz/looper/pull/1339))
+  - Behavior change: `_pid_alive` treats `PermissionError` like `ProcessLookupError`, so a pid we may not signal (another user's process that took the pid) counts as "our old service has exited" and the upgrade continues instead of failing with `[Errno 1] Operation not permitted`.
+  - Not model-visible: no prompt, tool schema or API response changed.
+
 ## [2.14.180] - 2026-11-13
 
 ### Added
