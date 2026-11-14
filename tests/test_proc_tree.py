@@ -1669,6 +1669,10 @@ def test_cancelling_a_refresh_does_not_lose_new_descendants(monkeypatch: pytest.
         pid = 101
         returncode = None
 
+        def send_signal(self, sig: int) -> None:
+            # Once the table no longer has the agent, its group is unknown and it is signalled directly.
+            signalled.add(self.pid)
+
         async def wait(self) -> int:
             return 0
 
@@ -1691,8 +1695,6 @@ def test_cancelling_a_refresh_does_not_lose_new_descendants(monkeypatch: pytest.
                     agent.returncode = -sig
 
     monkeypatch.setattr(proc_tree.os, "killpg", killpg)
-    # The fake pids are small; on a CI runner the test's own process group can be one of them.
-    monkeypatch.setattr(proc_tree.os, "getpgrp", lambda: 1)
 
     async def _run() -> None:
         tree = proc_tree.track(agent)

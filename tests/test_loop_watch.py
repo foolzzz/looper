@@ -116,3 +116,24 @@ def test_escalations_only_log_changed_innermost_frames_and_reset_summary(monkeyp
             await watch.stop()
 
     asyncio.run(run())
+
+
+def test_query_stall_reading_survives_heartbeat_and_summary_reset(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(threading.Thread, "start", lambda self: None)
+
+    async def run():
+        watch = LoopWatch(clock=lambda: now[0], log=lambda *args: None)
+        watch.start()
+        try:
+            now[0] = 106.0
+            # The lease callback can run before the watchdog resumes.
+            assert watch.stall_seconds_between(100.0, 106.0) == 6.0
+            watch._check()
+            await asyncio.sleep(0)  # Update the heartbeat after resuming.
+            watch.take_summary()
+            assert watch.stall_seconds_between(100.0, 106.0) >= 5.0
+            assert watch.stall_seconds_between(106.0, 106.5) == 0.0
+        finally:
+            await watch.stop()
+    asyncio.run(run())

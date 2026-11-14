@@ -60,6 +60,7 @@ _recorded: dict[int, tuple[Path, str]] = {}
 _ending: set[int] = set()
 _forgetting: set[asyncio.Task[None]] = set()
 _spawns_fenced = False
+_lease_uncertain = False
 _spawning: set[asyncio.Future[None]] = set()
 _owned: set[asyncio.subprocess.Process] = set()  # also retains agents whose durable record could not be written
 
@@ -342,9 +343,15 @@ def fence_spawns() -> None:
     _spawns_fenced = True
 
 
+def set_lease_uncertain(uncertain: bool) -> None:
+    """Temporarily refuse agents without changing the terminal ownership fence."""
+    global _lease_uncertain
+    _lease_uncertain = uncertain
+
+
 def spawns_fenced() -> bool:
-    """Whether this control plane has lost permission to start agents."""
-    return _spawns_fenced
+    """Whether ownership is lost or uncertain, preventing new agents."""
+    return _spawns_fenced or _lease_uncertain
 
 
 async def end_owned(*, deadline: float) -> None:
@@ -441,6 +448,8 @@ async def spawn(*argv: str, env: Mapping[str, str] | None = None, **kwargs: Any)
     until it is reaped (once ``sweep`` has run). Without ``env``, start with ``child_env.inherited()``."""
     if _spawns_fenced:
         raise RuntimeError("the control plane lost its lock; no new agents")
+    if _lease_uncertain:
+        raise RuntimeError("the control plane lock is uncertain; no new agents")
     loop = asyncio.get_running_loop()
     spawning = loop.create_future()
     _spawning.add(spawning)  # No await between the fence check and registering this spawn.
