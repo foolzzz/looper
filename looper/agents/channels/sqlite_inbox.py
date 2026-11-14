@@ -50,6 +50,14 @@ class SQLiteInbox:
         finally:
             self._executor.shutdown(wait=False)
 
+    def flush(self) -> None:
+        """Wait for queued commits from a synchronous shutdown-signal hook.
+
+        SQLite still runs on its owning thread. Async shutdown must await the
+        writes instead, so only the synchronous hook needs this blocking fence.
+        """
+        self._executor.submit(lambda: None).result()
+
     def _close(self) -> None:
         if db := getattr(self, "_db", None):
             db.close()

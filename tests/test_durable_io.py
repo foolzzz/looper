@@ -5,11 +5,16 @@ import os
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from looper.agents.bus import MessageBus
 from looper.agents.channels.lark_inbox import LarkInbox
+from looper.agents.channels.allowlist import SenderAllowlist
+from looper.agents.channels.lark import LarkChannelAdapter
+from looper.agents.channels.telegram import TelegramChannelAdapter
 from looper.agents.channels.telegram_inbox import TelegramInbox
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 
@@ -122,6 +127,102 @@ def test_inbox_commit_keeps_loop_ticking(tmp_path, monkeypatch, kind):
             await inbox.close()
         assert len(set(threads)) == 1
         assert threading.get_ident() not in threads
+
+    asyncio.run(run())
+
+
+def test_prepare_stop_waits_for_pending_updates_and_boundary_commit(tmp_path, monkeypatch):
+    real_connect = sqlite3.connect
+    threads = []
+
+    class SlowConnection(sqlite3.Connection):
+        def __exit__(self, *args):
+            threads.append(threading.get_ident())
+            time.sleep(.05)
+            return super().__exit__(*args)
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs:
+                        real_connect(*args, factory=SlowConnection, **kwargs))
+
+    async def run():
+        path = tmp_path / "inbox.sqlite3"
+        inbox = await TelegramInbox.open(path)
+        adapter = TelegramChannelAdapter(allowlist=SenderAllowlist("channel-telegram", frozenset({"7"})))
+        adapter._inbox = inbox
+        adapter._app = SimpleNamespace(updater=SimpleNamespace(running=True))
+        pending = inbox.polling_received([{"update_id": 1}])
+        try:
+            before = int(time.time())
+            adapter.prepare_stop()
+            # Independent readback before yielding: the signal hook releases the
+            # drain immediately on return, even if the loop has not run again.
+            with real_connect(path) as db:
+                boundary = db.execute("SELECT stopped_at FROM polling").fetchone()
+                assert boundary is not None and before <= boundary[0] <= int(time.time())
+                assert db.execute("SELECT update_id FROM updates WHERE processed = 0").fetchall() == [(1,)]
+            assert set(threads) and threading.get_ident() not in threads
+        finally:
+            await pending
+            if adapter._stop_boundary is not None:
+                await adapter._stop_boundary
+            await inbox.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["lark", "telegram"])
+def test_async_stop_waits_for_inbox_commits_before_cleanup(tmp_path, monkeypatch, kind):
+    real_connect = sqlite3.connect
+
+    class SlowConnection(sqlite3.Connection):
+        def __exit__(self, *args):
+            time.sleep(.5)
+            return super().__exit__(*args)
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs:
+                        real_connect(*args, factory=SlowConnection, **kwargs))
+
+    async def run():
+        path = tmp_path / "inbox.sqlite3"
+        inbox = await (LarkInbox if kind == "lark" else TelegramInbox).open(path)
+        ready = asyncio.Event()
+        ready.set()
+        allowlist = SenderAllowlist(f"channel-{kind}", frozenset({"7"}))
+        if kind == "lark":
+            adapter = LarkChannelAdapter(allowlist=allowlist, runtime_root=tmp_path,
+                                        transport=SimpleNamespace(consumer_started=ready, aclose=AsyncMock()))
+            pending = inbox.finish("om_pending")
+        else:
+            adapter = TelegramChannelAdapter(allowlist=allowlist)
+            adapter._app = SimpleNamespace(running=False, shutdown=AsyncMock(),
+                                           updater=SimpleNamespace(running=True, stop=AsyncMock()))
+            pending = inbox.polling_received([{"update_id": 1}])
+        adapter._inbox = inbox
+        before = time.time()
+        close = inbox.close
+
+        async def check_committed():
+            with real_connect(path) as db:
+                table, column = ("boundary", "at") if kind == "lark" else ("polling", "stopped_at")
+                boundary = db.execute(f"SELECT {column} FROM {table}").fetchone()
+                assert boundary is not None and int(before) <= boundary[0] <= time.time()
+                table = "processed" if kind == "lark" else "updates"
+                assert db.execute(f"SELECT count(*) FROM {table}").fetchone() == (1,)
+
+        async def checked_close():
+            await check_committed()
+            await close()
+
+        monkeypatch.setattr(inbox, "close", checked_close)
+        if kind == "telegram":
+            adapter._app.updater.stop.side_effect = check_committed
+        try:
+            await _ticks_during(adapter.stop)
+            await pending
+            assert adapter._inbox is None
+        finally:
+            await pending
+            await close()
 
     asyncio.run(run())
 

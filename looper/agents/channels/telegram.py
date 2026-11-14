@@ -221,6 +221,12 @@ class TelegramChannelAdapter(ChannelAdapter):
         logger.info("telegram channel adapter started")
 
     def prepare_stop(self) -> None:
+        self._queue_stop_boundary()
+        if self._inbox is not None and self._stop_boundary is not None:
+            # The signal hook must not release the agent drain before commit.
+            self._inbox.flush()
+
+    def _queue_stop_boundary(self) -> None:
         if self._inbox is not None and self._app is not None and self._stop_boundary is None:
             updater = self._app.updater
             if updater is not None and updater.running:
@@ -231,7 +237,7 @@ class TelegramChannelAdapter(ChannelAdapter):
                                    self._channel_id, exc_info=True)
 
     async def stop(self) -> None:
-        self.prepare_stop()
+        self._queue_stop_boundary()
         if self._stop_boundary is not None:
             try:
                 await self._stop_boundary
