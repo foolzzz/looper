@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.186] - 2026-11-13
+
+### Changed
+
+- **Dashboard polling hygiene.** ([#1337](https://github.com/foolzzz/looper/pull/1337))
+  - Behavior change (dashboard only): polling now goes through the shared `startPolling` helper (the next read starts after the previous one settled, none while the tab is hidden, aborted on leaving) on the Tasks, Gates, Chat and Dashboard pages and in the project list and waiting-gates hooks. The waiting-gates count is read once by a `WaitingGatesProvider` and shared. The dashboard's needs-you list is re-read only when the needs-you or waiting-gate count changes (or every 30 s while the gate count is unknown), not on every overview poll. The Manager session profile reads only while the chat is the active page and the tab is visible, and a focus read is skipped within 30 s of the last one. The Tasks list stops polling while a task is open.
+  - Test change: `tests/test_db_backup.py` keeps its serve port reserved until startup.
+  - Not model-visible: no prompt, tool description or tool schema changed; no server code changed.
+
 ## [2.14.185] - 2026-11-13
 
 ### Fixed
