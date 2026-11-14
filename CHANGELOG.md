@@ -18,6 +18,24 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.184] - 2026-11-13
+
+### Fixed
+
+- **`system.status` answers from cached check state, so every API operation stays under 2 s.** ([#1333](https://github.com/foolzzz/looper/pull/1333))
+  - Behavior change: the Codex login check reads the last probe result immediately (`codex_login.cached_status`) and refreshes a stale one in one daemon thread; before, the poll waited for `codex login status`. The Codex, coco and Cursor login checks report `pending` ("checking") until a first probe result exists. Each check's refresh runs as a shielded task shared across polls, so a client disconnect does not cancel it. A check that has not finished within 1 s returns its previous result with " (still checking)" appended to the detail. A check that raises keeps its last result and is logged.
+  - Behavior change: the model request recording and gateway checks read the local proxy status once per poll from its cached health (`ProxyControl.status(cached=True)`, valid for 15 s, never probing processes or HTTP; older than that it reports no health). The recorded-request storage size is cached for 60 s and one scan is shared across polls. The startup check (`run_checks`) still reads live state.
+  - Not model-visible: no prompt, tool description or tool schema changed; the only API difference is the `system.status` check results described above.
+
+## [2.14.183] - 2026-11-13
+
+### Fixed
+
+- **Startup no longer blocks the event loop while time zone names are checked.** ([#1343](https://github.com/foolzzz/looper/pull/1343))
+  - Behavior change: `cron._known_zones` lists the zone directories (`zoneinfo.TZPATH`, names only) plus the `tzdata` package's zone list instead of calling `zoneinfo.available_timezones()`, so no zone file is opened (the watchdog had logged a 142 s stall in `Scheduler.__init__`). `cron.zone` loads only the named zone, cached per name, and an `OSError` while loading is reported as an unknown time zone. The same names are accepted and refused; exact-case names are still required.
+  - The code was merged before v2.14.182 was tagged, so that tag already contains it; the v2.14.182 notes did not list it.
+  - Not model-visible: no prompt, tool schema or API response changed.
+
 ## [2.14.182] - 2026-11-13
 
 ### Fixed
