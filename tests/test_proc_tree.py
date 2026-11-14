@@ -1676,23 +1676,28 @@ def test_cancelling_a_refresh_does_not_lose_new_descendants(monkeypatch: pytest.
         async def wait(self) -> int:
             return 0
 
+    agent = Agent()
     table = {101: (1, 101)}
     starts = {101: "agent", 102: "command", 103: "grandchild"}
     signalled: set[int] = set()
     monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
     monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids})
     monkeypatch.setattr(proc_tree, "_start_time", lambda pid: starts.get(pid))
+    # A real process may have the same pid as this synthetic agent, especially on Linux.
+    monkeypatch.setattr(proc_tree.os, "getpgid", lambda pid: pytest.fail("must not probe a synthetic pid"))
 
     def killpg(group: int, sig: int) -> None:
         for pid, (_, pgid) in list(table.items()):
             if pgid == group:
                 signalled.add(pid)
                 table.pop(pid)
+                if pid == agent.pid:
+                    agent.returncode = -sig
 
     monkeypatch.setattr(proc_tree.os, "killpg", killpg)
 
     async def _run() -> None:
-        tree = proc_tree.track(Agent())
+        tree = proc_tree.track(agent)
         table.update({102: (101, 102), 103: (102, 102)})
         reached = asyncio.Event()
         to_thread = asyncio.to_thread
