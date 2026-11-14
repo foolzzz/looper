@@ -11,6 +11,7 @@ from .lark_cli import RECEIVE_EVENT
 PROCESSED_KEPT = 20_000
 THREADS_KEPT = 1_000
 THREAD_MAX_AGE = 7 * 24 * 60 * 60
+BOT_ACTIVITY_MAX_AGE = 7 * 24 * 60 * 60
 
 
 class LarkInbox:
@@ -24,6 +25,7 @@ class LarkInbox:
         self._db.execute("CREATE TABLE IF NOT EXISTS discovery (id INTEGER PRIMARY KEY CHECK (id = 1), start REAL NOT NULL, end REAL NOT NULL)")
         self._db.execute("CREATE TABLE IF NOT EXISTS thread_activity (chat_id TEXT NOT NULL, thread_id TEXT NOT NULL, "
                          "at REAL NOT NULL, PRIMARY KEY (chat_id, thread_id))")
+        self._db.execute("CREATE TABLE IF NOT EXISTS bot_activity (chat_id TEXT PRIMARY KEY, at REAL NOT NULL)")
         self._db.commit()
         row = self._db.execute("SELECT at FROM boundary WHERE id = 1").fetchone()
         self.boundary: float | None = row[0] if row else None
@@ -88,6 +90,20 @@ class LarkInbox:
             self._prune_threads(at)
         return [row[0] for row in self._db.execute("SELECT thread_id FROM thread_activity WHERE chat_id = ? "
                                                  "ORDER BY at DESC, rowid DESC", (chat_id,))]
+
+    def has_thread_activity(self, chat_id: str, since: float) -> bool:
+        return self._db.execute("SELECT 1 FROM thread_activity WHERE chat_id = ? AND at >= ? LIMIT 1",
+                                (chat_id, since)).fetchone() is not None
+
+    def remember_bot(self, chat_id: str, at: float) -> None:
+        with self._db:
+            self._db.execute("INSERT INTO bot_activity VALUES (?, ?) ON CONFLICT(chat_id) "
+                             "DO UPDATE SET at = max(at, excluded.at)", (chat_id, at))
+
+    def recent_bot_chats(self, at: float) -> set[str]:
+        with self._db:
+            self._db.execute("DELETE FROM bot_activity WHERE at < ?", (at - BOT_ACTIVITY_MAX_AGE,))
+        return {row[0] for row in self._db.execute("SELECT chat_id FROM bot_activity")}
 
     def close(self) -> None:
         self._db.close()

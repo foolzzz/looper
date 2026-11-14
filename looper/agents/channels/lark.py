@@ -62,6 +62,8 @@ _CATCHUP_MAX_THREADS = 50
 _CATCHUP_THREAD_CONCURRENCY = 4
 _HEARTBEAT_SECONDS = 5
 _BOT_POLL_SECONDS = 30
+_BOT_SLOW_POLL_SECONDS = 5 * 60
+_BOT_POLL_LOG_SECONDS = 60 * 60
 _BOT_TURNS_PER_HOUR = 10
 _BOT_WINDOW_SECONDS = 60 * 60
 
@@ -173,6 +175,7 @@ class LarkChannelAdapter(ChannelAdapter):
         self._catchup_task: asyncio.Task[Any] | None = None
         self._heartbeat_task: asyncio.Task[Any] | None = None
         self._bot_poll_task: asyncio.Task[Any] | None = None
+        self._bot_poll_logged_at: float | None = None
         self._inbox: LarkInbox | None = None
         self._ingress_lock = asyncio.Lock()
         self._running = False
@@ -493,6 +496,11 @@ class LarkChannelAdapter(ChannelAdapter):
             stats["messages_found"] += 1
             try:
                 created = _history_created(message)
+                # Observe all app senders, even old, unmentioned or unlisted messages.
+                sender = message.get("sender") or {}
+                if (self._inbox is not None and (sender.get("sender_type") or sender.get("type")) in {"app", "bot"}
+                        and not message.get("deleted") and created.at <= end):
+                    self._inbox.remember_bot(chat_id, created.at)
                 if created.before(start) or created.before(time() - _CATCHUP_MAX_AGE):
                     stats["too_old"] += 1
                     continue
@@ -675,17 +683,33 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _poll_bot_chats(self, last_poll: dict[str, float]) -> None:
         now = time()
         chats = await self._bound_chats()
+        assert self._inbox is not None
+        recent_bots = self._inbox.recent_bot_chats(now)
+        fast = recent_bots.intersection(chats)
+        if self._resolve_chat is not None:
+            fast.update(chat_id for chat_id in chats
+                        if (route := self._resolve_chat(self.channel_id, chat_id)).explicit
+                        and route.sender_policy == SenderPolicy.CHAT)
+        logged_at = monotonic()
+        if self._bot_poll_logged_at is None or logged_at - self._bot_poll_logged_at >= _BOT_POLL_LOG_SECONDS:
+            logger.info("lark_bot_poll_cadence channel=%s fast=%s slow=%s", self.channel_id,
+                        len(fast), len(chats) - len(fast))
+            self._bot_poll_logged_at = logged_at
         for removed in last_poll.keys() - set(chats):
             del last_poll[removed]
         for chat_id in chats:
             end = time()
+            interval = _BOT_POLL_SECONDS if chat_id in fast else _BOT_SLOW_POLL_SECONDS
+            if chat_id in last_poll and end - last_poll[chat_id] < interval:
+                continue
             # Resume from this chat's queried boundary, regardless of how long other listings took.
-            start = max(last_poll.get(chat_id, now - _BOT_POLL_SECONDS) - _CATCHUP_OVERLAP,
+            start = max(last_poll.get(chat_id, now - interval) - _CATCHUP_OVERLAP,
                         end - _CATCHUP_MAX_AGE)
             stats = dict(messages_found=0, handled=0, duplicates=0, too_old=0, failures=0,
                          threads_scanned=0, thread_failures=0, thread_roots_capped=0)
             try:
                 seen: set[str] = set()
+                thread_activity = self._inbox.has_thread_activity(chat_id, end - _CATCHUP_ROOT_MAX_AGE)
                 async for page in self._history_pages(
                     self._transport.list_messages, chat_id, start=start, end=end,  # type: ignore[attr-defined]
                 ):
@@ -693,9 +717,11 @@ class LarkChannelAdapter(ChannelAdapter):
                     if page["chat_type"] == "group":
                         for message in _history_messages(page["messages"][:50]):
                             if thread_id := message.get("thread_id"):
+                                thread_activity = True
                                 await self._catchup_thread(thread_id, chat_id, start=start, end=end,
                                                            stats=stats, seen=seen, bots_only=True)
-                await self._catchup_threads(chat_id, start=start, end=end, stats=stats, seen=seen, bots_only=True)
+                if thread_activity:
+                    await self._catchup_threads(chat_id, start=start, end=end, stats=stats, seen=seen, bots_only=True)
                 if not stats["failures"] and not stats["thread_failures"]:
                     last_poll[chat_id] = end
                 else:
@@ -789,6 +815,9 @@ class LarkChannelAdapter(ChannelAdapter):
             created = event.get("_catchup_created_at")
             if created is not None and created.before(time() - _CATCHUP_MAX_AGE):
                 return "too_old"
+            if (self._inbox is not None and event.get("type") == RECEIVE_EVENT
+                    and created is None and event.get("sender_type") in {"app", "bot"} and event.get("chat_id")):
+                self._inbox.remember_bot(event["chat_id"], time())
             if self._own_message(event):
                 event["_bot_outcome"] = "own_message"
                 handled = False
