@@ -48,17 +48,31 @@ class OwnerMode(StrEnum):
     HANDOVER = 'handover'
 
 
-def process_alive(pid: int, start_time: str) -> bool:
-    """Match a live process's birth time; an unreaped zombie has already exited."""
-    if type(pid) is not int or pid <= 0 or not start_time:
-        return False
+def process_alive(pid: int, start_time: str) -> bool | None:
+    """Match a live process's birth time; None means its identity could not be checked."""
+    if type(pid) is not int or pid <= 0 or not isinstance(start_time, str) or not start_time:
+        return None
     try:
-        result = subprocess.run(["ps", "-o", "lstart=,stat=", "-p", str(pid)], capture_output=True,
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # ps may still be able to identify it.
+    except OSError:
+        return None
+    try:
+        # Keep lstart last, as when proc_tree._start_time records the identity.
+        result = subprocess.run(["ps", "-o", "stat=,lstart=", "-p", str(pid)], capture_output=True,
             text=True, timeout=2, check=False, env={**child_env.inherited(), "LC_ALL": "C", "TZ": "UTC"})
     except (OSError, subprocess.SubprocessError):
-        return False
+        return None
+    if result.returncode != 0:
+        return None
     fields = result.stdout.split()
-    return bool(fields and not fields[-1].startswith("Z") and " ".join(fields[:-1]) == start_time)
+    started = " ".join(fields[1:])
+    if not re.fullmatch(r'[A-Za-z]{3} [A-Za-z]{3} \d{1,2} \d{2}:\d{2}:\d{2} \d{4}', started):
+        return None
+    return not fields[0].startswith("Z") and started == " ".join(start_time.split())
 
 
 class SkipReason(StrEnum):

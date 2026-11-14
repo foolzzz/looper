@@ -16,6 +16,57 @@ from looper.agents.llmrec import STATE_FILE, process_alive
 from looper.agents.llmrec.control import ProxyControl
 
 
+@pytest.mark.parametrize('status,started,expected', [
+    ('S', 'Fri Nov 13 04:05:06 2026', True),
+    ('Sl', 'Fri Nov  6 04:05:06 2026', True),
+    ('Z', 'Fri Nov 13 04:05:06 2026', False),
+    ('S', 'Fri Nov 13 04:05:07 2026', False),
+])
+def test_process_identity_uses_the_recorded_start_time_format(monkeypatch, status, started, expected):
+    from looper.agents import llmrec
+
+    recorded = ' '.join(started.split()) if expected else 'Fri Nov 13 04:05:06 2026'
+    calls = []
+
+    def listed(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, f'{status} {started}\n', '')
+
+    monkeypatch.setattr(os, 'kill', lambda pid, sig: None)
+    monkeypatch.setattr(subprocess, 'run', listed)
+    assert llmrec.process_alive(1234, recorded) is expected
+    argv, options = calls[0]
+    assert argv == ['ps', '-o', 'stat=,lstart=', '-p', '1234']
+    assert options['env']['LC_ALL'] == 'C' and options['env']['TZ'] == 'UTC'
+
+
+@pytest.mark.parametrize('failure', [
+    FileNotFoundError('ps'), subprocess.TimeoutExpired('ps', 2),
+    subprocess.CompletedProcess('ps', 1, '', ''),
+    subprocess.CompletedProcess('ps', 2, 'S Fri Nov 13 04:05:06 2026', 'ps failed'),
+    subprocess.CompletedProcess('ps', 0, '', ''),
+    subprocess.CompletedProcess('ps', 0, 'unparseable', ''),
+    subprocess.CompletedProcess('ps', 0, 'S Fri Nov 13 04:05:06', ''),
+])
+def test_an_unavailable_process_listing_leaves_liveness_unknown(monkeypatch, failure):
+    def listed(*args, **kwargs):
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    monkeypatch.setattr(os, 'kill', lambda pid, sig: None)
+    monkeypatch.setattr(subprocess, 'run', listed)
+    assert process_alive(1234, 'Fri Nov 13 04:05:06 2026') is None
+
+
+def test_a_missing_pid_is_dead_even_without_ps(monkeypatch):
+    def missing(pid, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(os, 'kill', missing)
+    assert process_alive(1234, 'Fri Nov 13 04:05:06 2026') is False
+
+
 # A serve stand-in uses the real controller and proxy, without a database or agents.
 STAND_IN = '''
 import asyncio, signal, sys
@@ -32,6 +83,9 @@ def isolated_boot(*args):
     if sys.argv[2] == 'blocked_shutdown':
         argv[3] = argv[3].replace('process.init_pool =',
             'process.proxy.Proxy.close = lambda self, **kw: process.asyncio.Event().wait(); process.init_pool =')
+    if sys.argv[2] == 'unknown_owner':
+        argv[3] = argv[3].replace('process.init_pool =',
+            'process.process_alive = lambda *args: None; process.init_pool =')
     return argv
 control.boot_argv = isolated_boot
 async def run():
@@ -121,6 +175,15 @@ def test_planned_handover_preserves_proxy_until_new_owner_stops_it(stand_in, sig
     code = replacement.wait(timeout=8)
     assert code == (-signal.SIGKILL if sig == signal.SIGKILL else 0)
     _wait_gone(state)
+
+
+def test_unknown_owner_liveness_keeps_proxy_until_parent_exits(stand_in):
+    parent, state = stand_in('unknown_owner')
+    time.sleep(1.5)  # Cross an owner-watch interval with an inconclusive listing.
+    assert process_alive(state['pid'], state['start_time'])
+    parent.kill()
+    _wait_gone(state)  # Reparenting also detects an unreaped owner without ps.
+    parent.wait(timeout=5)
 
 
 def test_close_reaps_child_that_never_published_state(tmp_path, caplog):

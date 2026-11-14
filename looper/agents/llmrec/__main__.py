@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 async def _serve(args, dsn):
     root = args.runtime_root
+    parent = os.getppid()  # Capture before startup can yield to a dying parent.
     state_path = root / STATE_FILE
     sink = writer.DbSink(None)
     instance = secrets.token_urlsafe(16)
@@ -43,11 +44,15 @@ async def _serve(args, dsn):
                            "route_format": ROUTE_FORMAT, "started_at": datetime.now(timezone.utc).isoformat()})
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
+
+    def stop_signal(sig):
+        logger.info("request recording proxy stopping: signal=%s", sig.name)
+        stopped.set()
+
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stopped.set)
+        loop.add_signal_handler(sig, lambda sig=sig: stop_signal(sig))
 
     async def watch_owner():
-        parent = os.getppid()
         owner_seen = False
         while not stopped.is_set():
             owner = read_json(root / OWNER_FILE)
@@ -55,14 +60,21 @@ async def _serve(args, dsn):
             if owner and owner.get("mode") == OwnerMode.HANDOVER:
                 alive = True  # Kept runs pin this endpoint until the next controller adopts it.
             elif owner and owner.get("mode") == OwnerMode.OWNED:
-                alive = await asyncio.to_thread(process_alive, owner.get("pid"), owner.get("start_time"))
+                if owner.get("pid") == parent and os.getppid() != parent:
+                    alive = False  # Reparenting proves death even without ps or reaping the owner.
+                else:
+                    alive = (await asyncio.to_thread(process_alive, owner.get("pid"),
+                                                     owner.get("start_time"))) is not False
             else:
                 # Direct CLI boots without an owner file still follow their original parent.
                 alive = not owner_seen and parent != 1 and os.getppid() == parent
             if not alive:
                 if read_json(root / OWNER_FILE) != owner:
                     continue  # Adoption or a planned handover won the liveness check.
-                logger.info("request recording owner disappeared; stopping proxy")
+                logger.info("request recording proxy stopping: owner disappeared "
+                            "mode=%s owner_pid=%s original_parent=%s current_parent=%s",
+                            owner.get("mode") if owner else None, owner.get("pid") if owner else None,
+                            parent, os.getppid())
                 stopped.set()
                 return
             try:
@@ -97,11 +109,13 @@ async def _serve(args, dsn):
                 pass
             state = read_json(state_path)
             if not state or state.get("instance") != instance:
+                logger.info("request recording proxy stopping: state removed or replaced")
                 stopped.set()
             requests = server.stats["requests"]
             if requests != count:
                 last_request, count = time.monotonic(), requests
             if time.monotonic() - last_request >= 24 * 60 * 60:
+                logger.info("request recording proxy stopping: idle for 24 hours")
                 stopped.set()
 
     connection_task = asyncio.create_task(connect())
