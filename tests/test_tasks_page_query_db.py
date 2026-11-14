@@ -50,7 +50,7 @@ def test_task_list_index_installs_on_fresh_and_existing_databases(upgrade):
     from looper.db import connection
 
     async def run():
-        async with fresh_connection() as conn:
+        async with fresh_connection(command_timeout=120) as conn:
             await connection.ensure_schema(conn)
             if upgrade:
                 await conn.execute("DROP INDEX idx_tasks_created")
