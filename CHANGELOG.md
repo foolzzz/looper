@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.188] - 2026-11-13
+
+### Fixed
+
+- **The request-recording code hash is not recomputed on the event loop.** ([#1356](https://github.com/foolzzz/looper/pull/1356))
+  - The code fingerprint (`code_sha256`) is computed once per server process in a background thread and reused by the outdated-proxy check and service startup; the PR presents latency as the only intended change.
+  - Visible consequence: checkout changes are noticed at the next server restart (as performed by upgrades), not at each health check; each proxy still fingerprints its code at startup. The PR text mentions an optional 60-second refresh that the diff does not contain.
+  - Not model-visible: no prompt, tool description, tool schema or agent environment changed.
+
 ## [2.14.187] - 2026-11-13
 
 ### Security
