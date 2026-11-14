@@ -2,15 +2,90 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import stat
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from fake_claude import fake_claude
 from looper.agents.runtimes import coco_login
+
+
+@pytest.mark.parametrize("stale", [False, True], ids=["cold", "stale"])
+def test_cached_status_and_view_share_one_nonblocking_refresh(stale, monkeypatch):
+    coco_login.forget_probe()
+    release = threading.Event()
+    calls = []
+    old = coco_login.LoginStatus(coco_login.LoginState.NOT_LOGGED_IN, "not logged in")
+    if stale:
+        monkeypatch.setitem(coco_login._probed, "coco", (time.monotonic() - 60, old))
+
+    def probe(executable):
+        calls.append(executable)
+        assert release.wait(3)
+        return coco_login.LoginStatus(coco_login.LoginState.LOGGED_IN, "logged in")
+
+    async def no_executor(*args, **kwargs):
+        pytest.fail("a status view used the default executor")
+
+    monkeypatch.setattr(coco_login, "probe_login", probe)
+    monkeypatch.setattr(coco_login, "recorded_problem", AsyncMock(return_value=None))
+    monkeypatch.setattr(asyncio, "to_thread", no_executor)
+    try:
+        started = time.monotonic()
+        for _ in range(2):
+            assert coco_login.cached_status() == (old if stale else None)
+            view = asyncio.run(coco_login.login_view())
+            assert view["state"] == ("not_logged_in" if stale else "checking")
+            assert view["refreshing"] is True
+            assert coco_login.cached_status("other-coco") is None
+        assert time.monotonic() - started < 1
+        release.set()
+        assert coco_login.cached_probe().state is coco_login.LoginState.LOGGED_IN
+        assert coco_login.cached_probe("other-coco").state is coco_login.LoginState.LOGGED_IN
+        assert sorted(calls) == ["coco", "other-coco"]
+        assert asyncio.run(coco_login.login_view()) == {"state": "logged_in", "detail": "logged in"}
+    finally:
+        release.set()
+        for lock in list(coco_login._probe_locks.values()):
+            with lock:
+                pass
+        coco_login.forget_probe()
+
+
+def test_clearing_login_state_does_not_wait_or_restore_an_old_probe(monkeypatch):
+    coco_login.forget_probe()
+    release = threading.Event()
+    started = threading.Event()
+
+    def probe(executable):
+        started.set()
+        assert release.wait(3)
+        return coco_login.LoginStatus(coco_login.LoginState.NOT_LOGGED_IN, "not logged in")
+
+    monkeypatch.setattr(coco_login, "probe_login", probe)
+    monkeypatch.setattr(coco_login.linked_login, "clear_problem", AsyncMock())
+    try:
+        assert coco_login.cached_status() is None
+        assert started.wait(1)
+        before = time.monotonic()
+        asyncio.run(coco_login.clear_problem())
+        assert time.monotonic() - before < 1
+        release.set()
+        with coco_login._probe_locks["coco"]:
+            assert "coco" not in coco_login._probed
+    finally:
+        release.set()
+        for lock in list(coco_login._probe_locks.values()):
+            with lock:
+                pass
+        coco_login.forget_probe()
 
 
 @pytest.mark.parametrize(("returncode", "output", "state", "detail"), [

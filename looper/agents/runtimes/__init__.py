@@ -643,7 +643,7 @@ class RuntimeAdapter(ABC):
     login_models: ClassVar[tuple[str, ...]] = ()
 
     async def login_problem(self, provider: ProviderSpec, *, executable: str | None = None,
-                            launcher: Launcher = Launcher.NATIVE) -> str | None:
+                            launcher: Launcher = Launcher.NATIVE, wait: bool = True) -> str | None:
         """Why a run with ``provider`` (the runtime's own login) cannot start now; None when it can, or when the
         adapter cannot tell."""
         return None

@@ -18,6 +18,33 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.181] - 2026-11-13
+
+### Fixed
+
+- **Upgrade no longer fails when the old service's pid was reused.** ([#1339](https://github.com/foolzzz/looper/pull/1339))
+  - Behavior change: `_pid_alive` treats `PermissionError` like `ProcessLookupError`, so a pid we may not signal (another user's process that took the pid) counts as "our old service has exited" and the upgrade continues instead of failing with `[Errno 1] Operation not permitted`.
+  - Not model-visible: no prompt, tool schema or API response changed.
+
+## [2.14.180] - 2026-11-13
+
+### Added
+
+- **API latency observability.** ([#1332](https://github.com/foolzzz/looper/pull/1332))
+  - Behavior change: a non-stream API operation over 2 s logs `api slow` with total, database time, query count, `other_ms` and its await chain; every 600 s the server logs per-operation p50/p95/p99, maximum and counts over 2 s, plus loop stall statistics.
+  - An event-loop watchdog starts before startup work and logs the blocked loop's stack after 1 s, 5 s and 15 s, and process scheduling gaps separately.
+  - The `api client=...` line is now also written for failed or cancelled requests; streams add `first_byte_ms`. `stop()` of the HTTP server is idempotent and runs on failed startups.
+  - Not model-visible: server log lines only; no prompt, tool schema or API response changed.
+
+## [2.14.179] - 2026-11-13
+
+### Fixed
+
+- **Session profile reads and selection no longer wait for runtime sign-in probes.** ([#1334](https://github.com/foolzzz/looper/pull/1334))
+  - Behavior change: views and profile selection use cached TTADK, Cursor and Coco sign-in state with one background refresh; unknown state returns `problem: null` and an optional `checking` field, and selection accepts it but rejects a known blocking problem. Launches still wait for the login check.
+  - The HTTP server resolves its API route registry before listening, so the first session request no longer times out on cold route discovery.
+  - Not model-visible: no prompt or tool schema changed; the session profile choice result gains the optional `checking` field.
+
 ## [2.14.178] - 2026-11-13
 
 ### Changed

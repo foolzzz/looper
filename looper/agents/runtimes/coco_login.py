@@ -107,7 +107,7 @@ async def clear_problem() -> None:
     forget_probe()
 
 
-async def launch_problem(executable: str = "coco") -> str | None:
+async def launch_problem(executable: str = "coco", *, wait: bool = True) -> str | None:
     try:
         problem = await recorded_problem()
     except Exception as exc:
@@ -115,7 +115,9 @@ async def launch_problem(executable: str = "coco") -> str | None:
     if problem is not None:
         return (f"the coco login is unavailable since {problem.get('at') or '?'}: {problem.get('detail')}. "
                 f"To fix: {PROBLEM_FIX}")
-    status = await asyncio.to_thread(cached_probe, executable)
+    status = await asyncio.to_thread(cached_probe, executable) if wait else cached_status(executable)
+    if status is None:
+        return None
     if status.state is LoginState.LOGGED_IN:
         return None
     if status.state is LoginState.NOT_LOGGED_IN:
@@ -171,57 +173,69 @@ def probe_login(executable: str = "coco", target: Path | None = None) -> LoginSt
 
 
 _probed: dict[str, tuple[float, LoginStatus]] = {}
-
-
-_probe_lock = threading.Lock()
+_probe_locks: dict[str, threading.Lock] = {}
 
 
 def _refresh_probe(executable: str) -> LoginStatus:
-    cached = _probed.get(executable)
-    if cached is None or time.monotonic() - cached[0] > _PROBE_TTL_SEC:
+    now = time.monotonic()
+    probed = _probed
+    cached = probed.get(executable)
+    if cached is None or now - cached[0] > _PROBE_TTL_SEC:
         status = probe_login(executable)
-        cached = _probed[executable] = (time.monotonic(), status)
+        cached = (time.monotonic(), status)
+        probed[executable] = cached
     return cached[1]
 
 
 def cached_probe(executable: str = "coco") -> LoginStatus:
-    with _probe_lock:
+    """Launches share one current probe per executable, including a refresh begun by a view."""
+    with _probe_locks.setdefault(executable, threading.Lock()):
         return _refresh_probe(executable)
 
 
-def _background_probe(executable: str) -> None:
+def _background_probe(executable: str, lock: threading.Lock) -> None:
     try:
         _refresh_probe(executable)
     finally:
-        _probe_lock.release()
+        lock.release()
 
 
 def cached_status(executable: str = "coco") -> LoginStatus | None:
-    """Return the last answer without waiting; share refresh with launch-time probes."""
-    probed = _probed.get(executable)
-    if (probed is None or time.monotonic() - probed[0] > _PROBE_TTL_SEC) and _probe_lock.acquire(blocking=False):
+    """Read cached state immediately and refresh it without occupying an executor thread."""
+    cached = _probed.get(executable)
+    lock = _probe_locks.setdefault(executable, threading.Lock())
+    if (cached is None or time.monotonic() - cached[0] > _PROBE_TTL_SEC) and lock.acquire(blocking=False):
         try:
-            threading.Thread(target=_background_probe, args=(executable,), name="coco-login-status", daemon=True).start()
+            threading.Thread(target=_background_probe, args=(executable, lock),
+                             name="coco-login-status", daemon=True).start()
         except BaseException:
-            _probe_lock.release()
+            lock.release()
             raise
-    return probed[1] if probed is not None else None
+    return cached[1] if cached else None
 
 
 def forget_probe() -> None:
-    with _probe_lock:
-        _probed.clear()
+    global _probed
+    # In-flight refreshes retain their old mapping and cannot repopulate this cache.
+    # Invalidating login state from an async operation must never wait for a CLI.
+    _probed = {}
 
 
-async def login_view() -> dict[str, str]:
+async def login_view() -> dict[str, str | bool]:
     try:
         problem = await recorded_problem()
     except Exception as exc:
         return {"state": LoginState.UNKNOWN.value, "detail": f"cannot be read ({type(exc).__name__})"}
     if problem is not None:
         return {"state": "unavailable", "detail": f"since {problem.get('at') or '?'}: {problem.get('detail')}"}
-    status = await asyncio.to_thread(cached_probe)
-    return {"state": status.state.value, "detail": status.detail}
+    cached = _probed.get("coco")
+    refreshing = cached is None or time.monotonic() - cached[0] > _PROBE_TTL_SEC
+    status = cached_status()
+    view: dict[str, str | bool] = ({"state": "checking", "detail": "checking the coco login"} if status is None
+                                  else {"state": status.state.value, "detail": status.detail})
+    if refreshing:
+        view["refreshing"] = True
+    return view
 
 
 _models: dict[str, tuple[float, dict[str, str] | None]] = {}

@@ -1691,6 +1691,8 @@ def test_cancelling_a_refresh_does_not_lose_new_descendants(monkeypatch: pytest.
                     agent.returncode = -sig
 
     monkeypatch.setattr(proc_tree.os, "killpg", killpg)
+    # The fake pids are small; on a CI runner the test's own process group can be one of them.
+    monkeypatch.setattr(proc_tree.os, "getpgrp", lambda: 1)
 
     async def _run() -> None:
         tree = proc_tree.track(agent)

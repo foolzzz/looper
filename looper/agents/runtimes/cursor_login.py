@@ -123,8 +123,10 @@ def _background_probe() -> None:
         _probe_lock.release()
 
 
-async def launch_problem() -> str | None:
-    status = await asyncio.to_thread(cached_probe)
+async def launch_problem(*, wait: bool = True) -> str | None:
+    status = await asyncio.to_thread(cached_probe) if wait else cached_status()
+    if status is None:
+        return None
     if status.state is LoginState.LOGGED_IN:
         return None
     if status.state is LoginState.NOT_LOGGED_IN:
@@ -134,7 +136,7 @@ async def launch_problem() -> str | None:
 
 
 def cached_status() -> LoginStatus | None:
-    """Return the cached login and schedule one refresh without waiting for the probe lock."""
+    """Return the last answer without waiting; at most one thread refreshes stale state."""
     probed = _probed
     stale = probed is None or time.monotonic() - probed[0] > _PROBE_TTL_SEC
     if stale and _probe_lock.acquire(blocking=False):
@@ -143,7 +145,7 @@ def cached_status() -> LoginStatus | None:
         except BaseException:
             _probe_lock.release()
             raise
-    return probed[1] if probed is not None else None
+    return probed[1] if probed else None
 
 
 async def login_view() -> dict[str, str | bool]:
