@@ -302,6 +302,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     chat_kind TEXT CHECK (chat_kind IN ('user', 'chat'))
 );
 
+CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks (created_at DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS activity (
     seq              BIGSERIAL PRIMARY KEY,
     task_id          TEXT NOT NULL REFERENCES tasks(id),

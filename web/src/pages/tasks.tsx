@@ -394,7 +394,6 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         });
         filterRequest.before = page.next_before;
         setNextBefore(page.next_before);
-        setCounts(page.counts);
         setError("");
       })
       .catch((e) => canAppend() && setError(e.message))
