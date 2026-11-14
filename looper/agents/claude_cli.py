@@ -126,13 +126,24 @@ def _outside_memory(cwd: Path) -> list[str]:
     return patterns
 
 
+def clear_private_settings(runtime_root: Path) -> int:
+    """Discard regenerated settings, including old versions that persisted upstream credentials."""
+    directory = runtime_root / '.local/prompts/claude-settings'
+    removed = 0
+    for path in directory.iterdir() if directory.exists() else ():
+        if path.is_file() or path.is_symlink():
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
 def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = None,
                    settings_dir: Path | None = None) -> list[str]:
     """The flags that keep the operator's personal Claude Code configuration out of an agent run in ``cwd``.
 
     Every agent's command carries them, so the agents cannot diverge.
     The explicit ``env`` pins runtime-owned variables over project settings;
-    it requires a private file so credentials never enter argv or run records.
+    it carries only a local route token, never an upstream provider credential.
     The result depends only on those values, ``cwd`` and where the operator's
     configuration lives, so a resident agent's command stays the same between turns.
     """

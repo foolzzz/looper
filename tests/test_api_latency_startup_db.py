@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper import db, ops_config
-from looper.agents import profile_registry, serve
+from looper.agents import managers_api, profile_registry, serve
 from tests.db_support import DSN, run_db
 
 
@@ -51,6 +51,7 @@ def test_scheduler_start_failure_closes_listener_and_latency_observers(monkeypat
             assert not observed["summary"].done()
             assert not observed["heartbeat"].done()
             assert observed["thread"].is_alive()
+            assert managers_api._listener is not None
             observed["scheduler_failed"] = True
             raise StartupFailed("scheduler startup failed")
 
@@ -64,6 +65,7 @@ def test_scheduler_start_failure_closes_listener_and_latency_observers(monkeypat
                 await serve._run_agent_system_owned(ops=ops, runtime_root=tmp_path, work_dir=tmp_path,
                                                      skip_backup=True, ownership=ownership)
             assert observed["scheduler_failed"]
+            assert managers_api._listener is None
             assert observed["summary"].done()
             assert observed["heartbeat"].done()
             assert not observed["thread"].is_alive()

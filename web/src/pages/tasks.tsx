@@ -1,3 +1,4 @@
+import { startPolling } from "@/lib/polling";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowRight,
@@ -324,13 +325,13 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   };
 
   /** Read the newest page again; older pages loaded for this list stay below it. */
-  const load = () => {
+  const load = (signal?: AbortSignal) => {
     const requested = listKey;
     const filterRequest = currentFilter.current;
     if (filterRequest?.key !== requested) return;
     const refresh = ++latestRefresh.current;
     // A newer request still in flight must not starve a usable response.
-    const isCurrent = () => filterRequest === currentFilter.current && refresh >= appliedRefresh.current;
+    const isCurrent = () => !signal?.aborted && filterRequest === currentFilter.current && refresh >= appliedRefresh.current;
     return fetchTasks(filters)
       .then((page) => {
         if (!isCurrent()) return;
@@ -362,18 +363,12 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     setLoadingMore(false);
     setError("");
     older.current = { key: listKey, loaded: false };
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const poll = async () => {
-      await load();
-      if (!stopped) timer = setTimeout(poll, 3000);
-    };
-    void poll();
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
   }, [listKey]);
+
+  useEffect(() => {
+    if (selectedTaskId) return;
+    return startPolling(async (signal) => { await load(signal); }, 3000);
+  }, [listKey, selectedTaskId]);
 
   const loadMore = () => {
     if (!nextBefore || loadingMore || loading) return;
@@ -575,7 +570,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
           </button>
           <button
             type="button"
-            onClick={load}
+            onClick={() => void load()}
             className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
           >
             <RefreshCw className="h-4 w-4" />

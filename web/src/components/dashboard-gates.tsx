@@ -10,6 +10,7 @@ import { gateAnchor, gateWaitsOn, isGateWaiting, sinceText } from "@/lib/gates";
 import { errorText, useAction } from "@/lib/use-action";
 
 const LIMIT = 10;
+const FALLBACK_REFRESH_MS = 30_000;
 const linkClass = "rounded-sm text-primary hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 type Reply = { taskId: string; stepId: string; text: string };
 const gateKey = (taskId: string, stepId: string) => `${taskId}/${stepId}`;
@@ -68,8 +69,10 @@ export function GateReply({ task, gate, reply, onChanged }: {
   );
 }
 
-/** A bounded read of needs-you tasks; the dashboard's overview poll triggers another read. */
-export function DashboardGates({ needsYou, revision }: { needsYou: number; revision: object }) {
+/** A bounded read when task or gate counts change; sent replies keep following their Planner. */
+export function DashboardGates({ needsYou, waitingGates, revision }: {
+  needsYou: number; waitingGates: number | null; revision: object;
+}) {
   const [tasks, setTasks] = useState<TaskDetail[]>([]);
   const [moreTasks, setMoreTasks] = useState(0);
   const [error, setError] = useState("");
@@ -77,6 +80,13 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
   const latest = useRef(0);
   const [replies, setReplies] = useState<Reply[]>([]);
   const pendingReplies = useRef<Reply[]>([]);
+  const loaded = useRef<{ needsYou: number; waitingGates: number | null; refresh: number } | null>(null);
+  const lastFullRead = useRef(0);
+  const needsFullRead = () => !loaded.current || loaded.current.needsYou !== needsYou
+    || loaded.current.waitingGates !== waitingGates || loaded.current.refresh !== refresh
+    || (waitingGates === null && needsYou > 0 && Date.now() - lastFullRead.current >= FALLBACK_REFRESH_MS);
+  // Keep retrying failed full reads on overview polls until these counts and refresh are loaded.
+  const pendingRevision = replies.length || needsFullRead() ? revision : null;
   const loading = useRef(false);
   const queued = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => () => {
@@ -88,7 +98,10 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
     queued.current = async () => {
       const request = latest.current;
       try {
-        const page = needsYou ? await fetchTasks({ group: "needs_you", limit: LIMIT })
+        const fullRead = needsFullRead();
+        if (!fullRead && !pendingReplies.current.length) return;
+        if (fullRead) lastFullRead.current = Date.now();
+        const page = fullRead && needsYou ? await fetchTasks({ group: "needs_you", limit: LIMIT })
           : { tasks: [], counts: {} };
         const pageIds = page.tasks.slice(0, LIMIT).map((task) => task.task_id);
         // A sent reply stays visible even when its task leaves the first page (or Needs you).
@@ -116,11 +129,17 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
             && (gate.waiting_on === "planner" || gate.not_delivered > 0);
         });
         setReplies(pendingReplies.current);
-        setTasks((current) => [...found, ...current.filter((task) => failedIds.has(task.task_id))]);
+        setTasks((current) => [
+          ...found,
+          ...current.filter((task) => failedIds.has(task.task_id) || (!fullRead && !ids.includes(task.task_id))),
+        ]);
         // Needs-you counts tasks, including those waiting for the Planner, not user gates.
         const readTasks = pageIds.length + found.filter((task) =>
           !pageIds.includes(task.task_id) && task.group === "needs_you").length;
-        setMoreTasks(Math.max(0, Object.values(page.counts).reduce((sum, n) => sum + n, 0) - readTasks));
+        if (fullRead) {
+          setMoreTasks(Math.max(0, Object.values(page.counts).reduce((sum, n) => sum + n, 0) - readTasks));
+          if (!errors.length) loaded.current = { needsYou, waitingGates, refresh };
+        }
         setError(errors[0] ?? "");
       } catch (err) {
         if (request === latest.current) setError(errorText(err));
@@ -140,7 +159,7 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
       }
     };
     void drain();
-  }, [needsYou, revision, refresh]);
+  }, [needsYou, waitingGates, pendingRevision, refresh]);
 
   const waiting = tasks.flatMap((task) => !isActiveTask(task) ? [] : task.gates
     .filter((gate) => isGateWaiting(gate) && (gateWaitsOn(gate, isActiveTask(task)) === "user"
