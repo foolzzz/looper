@@ -5119,9 +5119,15 @@ client address and backend start time; unavailable fields are reported as
 unknown. The serve process id is in `application_name`, not `backend_pid`.
 Each successful start increments
 the `control_plane_epoch` key in `system_settings` after the schema check. If the connection
-closes or a health check finds the lock lost (within 10 seconds), the server
+closes or a health check finds the lock lost, the server
 fences its database pool, closes the HTTP listener, ends its own agents and exits
-with code 75, without updating run records or detaching runs. Kept runs are
+with code 75, without updating run records or detaching runs. A health query
+that times out after 5 seconds, or overlaps a loop/process stall reported by
+the watchdog, instead makes ownership uncertain: new agent spawns are fenced
+while the HTTP listener stays open. The lease is rechecked immediately with
+a 15-second query timeout for at most 30 seconds. A clean held-lock reply
+removes only the temporary fence; a missing lock, connection failure, or
+exhausted recheck window takes the terminal exit path. Kept runs are
 fenced synchronously before any owned agent cleanup: their sockets close
 without sending a request or touching their files. Command schedule runners
 are also left running: they deliberately start outside `proc_tree.spawn`,

@@ -395,3 +395,65 @@ def test_a_database_restart_is_a_lost_lock(
                 if extra is not None:
                     await extra.close()
     asyncio.run(asyncio.wait_for(test(), 90))
+
+
+def test_uncertain_lease_keeps_http_open_and_recovers_spawns(monkeypatch, tmp_path):
+    from looper.agents import cron
+
+    # Time-zone discovery is unrelated to lease recovery.
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setattr(cron, "_known_zones", lambda: frozenset({"UTC"}))
+
+    async def test():
+        armed, rechecking, resume = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        real_acquire = control_plane.ControlPlaneLease.acquire
+        leases = []
+
+        class DelayedConnection:
+            def __init__(self, conn):
+                self.conn, self.checks = conn, 0
+
+            def __getattr__(self, name):
+                return getattr(self.conn, name)
+
+            async def fetchval(self, sql, *args):
+                if sql == control_plane._HEALTH and armed.is_set():
+                    self.checks += 1
+                    if self.checks == 1:
+                        await asyncio.sleep(6)
+                    if self.checks == 2:
+                        rechecking.set()
+                        await resume.wait()
+                return await self.conn.fetchval(sql, *args)
+
+        async def acquire(*args, **kwargs):
+            lease = await real_acquire(*args, **kwargs)
+            lease._conn = DelayedConnection(lease._conn)
+            leases.append(lease)
+            return lease
+
+        monkeypatch.setattr(control_plane.ControlPlaneLease, "acquire", acquire)
+        monkeypatch.setattr(control_plane, "HEALTH_INTERVAL_SECONDS", 0.1)
+        monkeypatch.setattr(control_plane, "HEALTH_TIMEOUT_SECONDS", 0.1)
+        monkeypatch.setattr(control_plane, "RECHECK_TIMEOUT_SECONDS", 10)
+        monkeypatch.setattr(proc_tree, "_lease_uncertain", False)
+        async with fresh_schema() as pool:
+            async with _running(pool, monkeypatch, tmp_path, keeper=KeeperMode.ON) as system:
+                try:
+                    armed.set()
+                    await asyncio.wait_for(rechecking.wait(), 10)
+                    assert leases[0].state is control_plane.LeaseState.UNCERTAIN
+                    assert system.server._server.is_serving()
+                    assert system.exits == []
+                    with pytest.raises(RuntimeError, match="uncertain"):
+                        await proc_tree.spawn("must-not-start")
+                    resume.set()
+                    await until(lambda: leases[0].state is control_plane.LeaseState.HELD,
+                                "the recovered lease")
+                    assert not proc_tree.spawns_fenced()
+                    assert system.server._server.is_serving()
+                    assert system.exits == []
+                    assert await pool.fetchval("SELECT 1") == 1
+                finally:
+                    resume.set()
+    asyncio.run(asyncio.wait_for(test(), 90))
