@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.191] - 2026-11-13
+
+### Changed
+
+- **Message journal and channel inboxes write off the event loop.** ([#1353](https://github.com/foolzzz/looper/pull/1353))
+  - The message bus journal appends (with fsync) and compacts on a single worker thread; the Lark and Telegram inbox SQLite files each get one connection and one serial I/O thread. Behavior otherwise unchanged (the PR states latency as the only difference).
+  - Not model-visible: no prompt, tool description or tool schema changed.
+
 ## [2.14.190] - 2026-11-13
 
 ### Changed
