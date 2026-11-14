@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 import httpx
 
-from looper.agents.agent_settings import AgentType, load_agent_settings
+from looper.agents.agent_settings import AgentType, Launch, load_agent_settings
 from looper.agents import profile_registry
 from looper.agents.http_server import AgentHTTPServer
 from looper.agents.ops.clients import ClientOps
@@ -62,6 +62,16 @@ def test_session_reads_and_selection_do_not_wait_for_probes(runtime, launcher, m
         async def no_executor(*args, **kwargs):
             pytest.fail("a session view or selection used the default executor")
 
+        to_thread = asyncio.to_thread
+        recordings = []
+
+        async def recording_only(function, *args, **kwargs):
+            # Recording may materialize a runtime catalog off-loop; authentication must use its own probe.
+            assert isinstance(getattr(function, "__self__", None), Launch)
+            assert function.__func__ is Launch.record and not args and not kwargs
+            recordings.append(function)
+            return await to_thread(function)
+
         with monkeypatch.context() as read_patch:
             read_patch.setattr(asyncio, "to_thread", no_executor)
             started = time.monotonic()
@@ -69,9 +79,13 @@ def test_session_reads_and_selection_do_not_wait_for_probes(runtime, launcher, m
             elapsed = time.monotonic() - started
             # Saving and recording a new choice must not re-enter a blocking launch check.
             await agent_sessions.select_profile("manager", None)
+            read_patch.setattr(asyncio, "to_thread", recording_only)
             started_select = time.monotonic()
             await asyncio.wait_for(manager.select_session_profile("profile-view", origin={}, via="test"), 1)
             assert time.monotonic() - started_select < 1
+        assert len(recordings) == 1
+        assert await pool.fetchval("SELECT count(*) FROM llm_records WHERE agent_id='manager' "
+                                   "AND status='completed' AND metadata->'session_profile'->>'to'='profile-view'") == 1
         for view in views:
             choice = next(c for c in view["choices"] if c["profile_id"] == "profile-view")
             assert choice["problem"] is None and choice["checking"] is True

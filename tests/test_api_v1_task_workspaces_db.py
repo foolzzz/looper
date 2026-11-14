@@ -11,7 +11,7 @@ from looper.agents import api_v1, operator_notes, room, step_workspaces as ws, t
 from looper.agents.bus import MessageBus
 from looper.agents.ops.clients import ClientOps
 from looper.agents.ops.service import Platform
-from looper.db import api_clients, projects, step_workspaces, task_worktrees, tasks
+from looper.db import api_clients, connection, projects, step_workspaces, task_worktrees, tasks
 from tests.db_support import DSN, run_db
 from tests.test_api_v1_auth import _bearer, _send, _serving
 from tests.test_operator_auth import TOKEN
@@ -155,6 +155,15 @@ def test_operator_delete_removes_owned_state_in_original_order_and_retires_legac
         (checkout / "wip.txt").write_text("saved on branch\n")
         events = []
         remove_steps, finish, remove_sessions, delete = ws.remove_task, tw.finish, room.remove_run_sessions, tasks.delete_task
+        transaction = connection.transaction
+
+        @asynccontextmanager
+        async def observed_transaction():
+            async with transaction() as conn:
+                yield conn
+                assert events == ["steps", "checkout", "database"] and session.exists()
+            assert await tasks.get_task("task-a") is None
+            events.append("commit")
 
         async def observed_steps(task_id, **kwargs):
             assert checkout.exists() and session.exists() and await tasks.get_task(task_id)
@@ -169,16 +178,17 @@ def test_operator_delete_removes_owned_state_in_original_order_and_retires_legac
             return result
 
         def observed_sessions(root, task_id):
-            assert events == ["steps", "checkout"] and not checkout.exists()
+            assert events == ["steps", "checkout", "database", "commit"] and not checkout.exists()
             remove_sessions(root, task_id)
             events.append("session")
 
         async def observed_delete(task_id, **kwargs):
-            assert events == ["steps", "checkout", "session"] and not session.exists()
+            assert events == ["steps", "checkout"] and session.exists() and not checkout.exists()
             result = await delete(task_id, **kwargs)
             events.append("database")
             return result
 
+        monkeypatch.setattr(connection, "transaction", observed_transaction)
         monkeypatch.setattr(ws, "remove_task", observed_steps)
         monkeypatch.setattr(tw, "finish", observed_finish)
         monkeypatch.setattr(room, "remove_run_sessions", observed_sessions)
@@ -187,7 +197,7 @@ def test_operator_delete_removes_owned_state_in_original_order_and_retires_legac
             assert (await _send(server, "POST /api/tasks/delete", _bearer(TOKEN), '{"task_id":"task-a"}'))[0] == 404
             status, answer = await post("tasks/delete", {"task_id": " task-a "})
             assert status == 200 and answer["result"] == {"deleted": "task-a"}, answer
-        assert events == ["steps", "checkout", "session", "database"]
+        assert events == ["steps", "checkout", "database", "commit", "session"]
         assert await tasks.get_task("task-a") is None and await task_worktrees.get("task-a") is None
         assert await step_workspaces.get(workspace.id) is None
         assert git(repo, "show", f"{tw.task_branch('task-a')}:wip.txt") == "saved on branch"
