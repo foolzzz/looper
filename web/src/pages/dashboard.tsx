@@ -1,3 +1,5 @@
+import { startPolling } from "@/lib/polling";
+import { useWaitingGates } from "@/lib/use-waiting-gates";
 import { useEffect, useState } from "react";
 import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -407,20 +409,20 @@ function Spend({ spend }: { spend: Overview["spend_today"] }) {
 }
 
 export function DashboardPage() {
+  const waitingGates = useWaitingGates();
   const [overview, setOverview] = useState<Overview | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const load = () =>
-      fetchOverview()
+    return startPolling(async (signal) => {
+      await fetchOverview()
         .then((o) => {
+          if (signal.aborted) return;
           setOverview(o);
           setError("");
         })
-        .catch((e) => setError(e.message));
-    load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
+        .catch((e) => { if (!signal.aborted) setError(e.message); });
+    }, 5000);
   }, []);
 
   if (error && !overview) {
@@ -460,7 +462,7 @@ export function DashboardPage() {
         <Health unhealthy={overview.health.unhealthy} />
       </div>
       <TaskCounts tasks={overview.tasks} />
-      <DashboardGates needsYou={overview.tasks.needs_you} revision={overview} />
+      <DashboardGates needsYou={overview.tasks.needs_you} waitingGates={waitingGates} revision={overview} />
       <Agents agents={overview.agents} />
       <Concurrency projects={overview.projects} idle={overview.idle_projects} />
       {overview.schedules.total > 0 && <Schedules schedules={overview.schedules} />}

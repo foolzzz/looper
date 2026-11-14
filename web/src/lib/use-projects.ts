@@ -1,3 +1,4 @@
+import { startPolling } from "@/lib/polling";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchProjectsList, PROJECTS_CHANGED_EVENT, type Project } from "@/lib/api";
 
@@ -31,11 +32,11 @@ export function useProjects() {
   }, []);
 
   useEffect(() => {
-    reload();
-    const timer = setInterval(reload, REFRESH_MS);
+    const stop = startPolling(reload, REFRESH_MS);
     window.addEventListener(PROJECTS_CHANGED_EVENT, reload);
     return () => {
-      clearInterval(timer);
+      stop();
+      latest.current++;
       window.removeEventListener(PROJECTS_CHANGED_EVENT, reload);
     };
   }, [reload]);

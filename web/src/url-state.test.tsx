@@ -56,6 +56,7 @@ describe("the dashboard keeps its place in the URL", () => {
   let root: Root;
 
   beforeEach(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     chatReads = [];
     window.location.hash = "";
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -69,11 +70,15 @@ describe("the dashboard keeps its place in the URL", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
   const settle = async () => {
-    for (let i = 0; i < 5; i++) await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    for (let i = 0; i < 5; i++) await act(async () => {
+      if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0);
+      else await new Promise((resolve) => setTimeout(resolve, 0));
+    });
   };
   const open = async (hash: string) => {
     window.location.hash = hash;
@@ -96,6 +101,29 @@ describe("the dashboard keeps its place in the URL", () => {
   };
   const selectedTab = () => container.querySelector('[role="tab"][aria-selected="true"]')?.textContent?.trim();
   const hash = () => window.location.hash;
+
+  it("pauses app-wide project, gate and chat timers in a hidden tab", async () => {
+    vi.useFakeTimers();
+    await open("#tasks");
+    const fetcher = vi.mocked(fetch);
+    const audited = ["project_admin/list", "ops/gates/list", "operator_chat/targets", "operator_chat/sessions", "tasks/page"];
+    for (const path of audited) {
+      expect(fetcher.mock.calls.some(([url]) => String(url).endsWith(path)), path).toBe(true);
+    }
+    fetcher.mockClear();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(fetcher.mock.calls.filter(([url]) => audited.some((path) => String(url).endsWith(path)))).toHaveLength(0);
+    await act(async () => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("focus"));
+    });
+    for (const path of audited) {
+      expect(fetcher.mock.calls.some(([url]) => String(url).endsWith(path)), path).toBe(true);
+    }
+    expect(fetcher.mock.calls.some(([url]) => String(url).endsWith("manager_session/get"))).toBe(false);
+  });
 
   describe("a task's page", () => {
     it.each(["Pipeline", "Room", "Agents", "Sessions", "Conversation"])("opens the %s tab from the hash", async (label) => {

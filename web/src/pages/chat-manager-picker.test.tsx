@@ -63,7 +63,10 @@ describe("chat Manager picker", () => {
   let container: HTMLDivElement;
   let root: Root;
 
-  const flush = () => act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  const flush = () => act(async () => {
+    if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(1);
+    else await new Promise((r) => setTimeout(r, 0));
+  });
   const input = () => container.querySelector("textarea") as HTMLTextAreaElement;
   const say = async (text: string) => {
     act(() => {
@@ -94,6 +97,7 @@ describe("chat Manager picker", () => {
   }
 
   beforeEach(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     localStorage.clear();
     sessionStorage.clear();
     localStorage.setItem("looper-chat-session-id", SID);
@@ -119,6 +123,34 @@ describe("chat Manager picker", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.useRealTimers();
+  });
+
+  it("pauses target and conversation timers while hidden and resumes once", async () => {
+    vi.useFakeTimers();
+    await mount();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    api.fetchChatTargets.mockClear();
+    api.fetchChatSessions.mockClear();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(api.fetchChatTargets).not.toHaveBeenCalled();
+    expect(api.fetchChatSessions).not.toHaveBeenCalled();
+    await act(async () => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(api.fetchChatTargets).toHaveBeenCalledTimes(1);
+    expect(api.fetchChatSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not overlap slow target and conversation polls", async () => {
+    vi.useFakeTimers();
+    await mount();
+    api.fetchChatTargets.mockClear().mockImplementation(() => new Promise(() => {}));
+    api.fetchChatSessions.mockClear().mockImplementation(() => new Promise(() => {}));
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(api.fetchChatTargets).toHaveBeenCalledTimes(1);
+    expect(api.fetchChatSessions).toHaveBeenCalledTimes(1);
   });
 
   it.each([false, true])("uses current cache only, with current messages present=%s", async (current) => {

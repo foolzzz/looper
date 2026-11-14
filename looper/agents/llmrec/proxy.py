@@ -240,6 +240,8 @@ class Proxy:
         self._gap_reasons = Counter()
         self._prefix_history = _PrefixHistory()
         self._prompt_history = _PromptHistory()
+        # Cache-field evidence belongs to the run, including when request recording is off.
+        self._run_cache_usage: OrderedDict[tuple[str, int], bool] = OrderedDict()
         self._translate_stats = dict(requests=0, errors_by_type=Counter(), stream_errors=0,
             pings=0, usage_missing=0, cache_fields_missing=0, tool_args_invalid=0,
             dropped=Counter(), degraded=Counter(), clamped=Counter(), input_tokens=0,
@@ -374,6 +376,13 @@ class Proxy:
             await self._json(connection, writer, 200 if healthy else 503,
                 dict(instance=self.instance, pid=os.getpid(), port=self.port, writer_healthy=healthy,
                 code_sha256=self._code_sha256, route_format=ROUTE_FORMAT, features={'translate': 1}, **self.stats))
+            return b''
+        if request.method == b'GET' and path.path.startswith('/llmrec/cache-usage/'):
+            parts = path.path.split('/')
+            key = (parts[3], int(parts[4])) if (len(parts) == 5 and ROUTE_ID.fullmatch(parts[3])
+                                             and parts[4].isdigit()) else None
+            await self._json(connection, writer, 200, dict(instance=self.instance,
+                cache_reported=self._run_cache_usage.get(key)))
             return b''
         if path.path.startswith('/gw/'):
             return await self._gateway_request(connection, reader, writer, request, body, path.path[3:])
@@ -810,11 +819,17 @@ class Proxy:
             finally:
                 if translator is not None:
                     translation.update(upstream_usage=translator.usage, finish_reason=translator.finish_reason)
+                raw_usage = translation['upstream_usage']
+                usage, cache_reported = anthropic_usage(raw_usage, dialect)
+                if route.record_id is not None and translation['upstream_request_bytes'] is not None:
+                    key = (route.id, route.record_id)
+                    reported = self._run_cache_usage.pop(key, False) or cache_reported
+                    self._run_cache_usage[key] = reported
+                    while len(self._run_cache_usage) > 1024:
+                        self._run_cache_usage.popitem(last=False)
                 if response is not None and 200 <= response.status_code < 300:
-                    raw_usage = translation['upstream_usage']
                     translation['usage_missing'] = not isinstance(raw_usage, dict) or not raw_usage
                     stats['usage_missing'] += int(translation['usage_missing'])
-                    usage, cache_reported = anthropic_usage(raw_usage, dialect)
                     if isinstance(raw_usage, dict) and 'prompt_tokens' in raw_usage and not cache_reported:
                         stats['cache_fields_missing'] += 1
                     prompt_tokens = raw_usage.get('prompt_tokens') if isinstance(raw_usage, dict) else None

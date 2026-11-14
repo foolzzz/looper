@@ -7,6 +7,7 @@ import json
 import os
 import signal
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -16,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
-from evals.prompt_regression.runner import fresh_database, free_port
+from evals.prompt_regression.runner import fresh_database
 from looper import ops_config
 from looper.agents import db_backup, operator_auth
 from tests.db_support import DSN
@@ -93,7 +94,6 @@ def _env(**extra: str) -> dict[str, str]:
 
 def _serve(tmp_path: Path, database_url: str, *flags: str, backup: dict | None = None, **extra_env: str) -> tuple[int | None, str]:
     """Start ``looper serve`` with PATH = tmp_path/bin: its exit code, or None when it came up (then stopped); its log."""
-    port = free_port()
     for name in ("runtime", "work", "home"):
         (tmp_path / name).mkdir(exist_ok=True)
     log_path = tmp_path / "serve.log"
@@ -102,7 +102,12 @@ def _serve(tmp_path: Path, database_url: str, *flags: str, backup: dict | None =
     ops_config.write_private(tmp_path / "runtime" / ops_config.FILE, body)
     env = _env(PATH=str(tmp_path / "bin"), HOME=str(tmp_path / "home"),
                PYTHONPATH=str(REPO_ROOT), **extra_env)
-    with log_path.open("w") as log:
+    with log_path.open("w") as log, socket.socket() as reservation:
+        # Keep the port reserved through startup. A reusable wildcard bind lets
+        # asyncio's loopback listener bind without releasing the reservation.
+        reservation.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        reservation.bind(("", 0))
+        port = reservation.getsockname()[1]
         process = subprocess.Popen(
             [sys.executable, "-m", "looper.cli", "serve", "--port", str(port),
              "--runtime-root", str(tmp_path / "runtime"), *flags],
