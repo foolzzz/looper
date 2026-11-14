@@ -590,6 +590,24 @@ class ProxyControl:
             elif route and self._pending_record_ids.get(route.id) == record_id:
                 self._pending_record_ids.pop(route.id)
 
+    async def cache_reported(self, route_id: str, record_id: int) -> bool | None:
+        """Proxy evidence for this run; unavailable or evicted evidence stays unknown."""
+        state = self._state()
+        if state is None:
+            return None
+        try:
+            async with httpx.AsyncClient(trust_env=False, timeout=2) as client:
+                response = await client.get(
+                    f"http://127.0.0.1:{state['port']}/llmrec/cache-usage/{route_id}/{record_id}")
+                response.raise_for_status()
+                data = response.json()
+                if isinstance(data, dict) and data.get('instance') == state['instance']:
+                    reported = data.get('cache_reported')
+                    return reported if isinstance(reported, bool) else None
+        except (httpx.HTTPError, ValueError):
+            logger.warning('could not read translated run cache usage')
+        return None
+
 
 async def attach(launch, **kwargs):
     from ..profile_registry import RegistryError

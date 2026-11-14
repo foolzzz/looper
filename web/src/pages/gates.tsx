@@ -1,3 +1,4 @@
+import { startPolling } from "@/lib/polling";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -181,10 +182,9 @@ export function GatesPage({ query, onQuery }: { query: string; onQuery: (query: 
     cursor.current = null;
     setView({ rows: [], answering: "", cursor: null });
     setData(null);
-    void read("refresh", true);
-    const timer = setInterval(() => void read("refresh", false), REFRESH_MS);
+    const stop = startPolling(() => read("refresh", false), REFRESH_MS);
     return () => {
-      clearInterval(timer);
+      stop();
       latest.current++;
       loading.current = false;
     };

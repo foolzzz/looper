@@ -27,7 +27,8 @@ describe("run system prompt mode", () => {
     });
 
   it.each([
-    [100, 80, 20, "40%"], [100, 0, 0, "0%"], [0, 0, 0, "–"], [100, null, 20, "–"], [100, undefined, undefined, "–"],
+    [100, 80, 20, "40%"], [100, 0, 0, "0%"], [0, 0, 0, "–"], [100, null, 20, "–"],
+    [100, null, null, "–"], [100, undefined, undefined, "–"],
   ])("shows run cache hits from recorded prompt tokens", (input_tokens, cache_read_tokens, cache_creation_tokens, hit) => {
     const html = render(undefined, {}, { input_tokens, cache_read_tokens, cache_creation_tokens });
     expect(html).toContain(`cache hit ${hit}`);

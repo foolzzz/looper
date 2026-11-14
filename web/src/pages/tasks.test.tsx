@@ -9,6 +9,7 @@ vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
   fetchWorkflows: vi.fn(async () => []), previewWorkflow: vi.fn(), fetchTasks: vi.fn(), fetchProjectsList: vi.fn(), fetchManagers: vi.fn(async () => []),
 }));
+vi.mock("@/pages/task-detail", () => ({ TaskDetailRoute: () => <div>Task detail</div> }));
 vi.mock("@/components/agent-profiles", () => ({ AgentProfileSelect: ({ id, value, disabled }: { id: string; value: string; disabled?: boolean }) => <select id={id} value={value} disabled={disabled} onChange={() => {}}><option value={value}>{value}</option></select> }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -41,6 +42,7 @@ describe("task list polling and pagination", () => {
       "- 评审面板：必需席位：review_a、review_b；建议席位：suggest；验收：全部通过",
       "- verify_staging：Verification（codex/model）；验证：只读，最多 2 轮"]);
     vi.useFakeTimers();
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
     requests = [];
     vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
     vi.mocked(fetchTasks).mockImplementation((filters) => new Promise((resolve, reject) => {
@@ -72,6 +74,29 @@ describe("task list polling and pagination", () => {
     await act(async () => el!.click());
   };
   const rows = () => [...container.querySelectorAll(".divide-y p.truncate")].map((el) => el.textContent);
+
+  it("does not read the hidden list and refreshes once when visible", async () => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+    await show();
+    await tick(30_000);
+    expect(requests).toHaveLength(0);
+    await act(async () => {
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(requests).toHaveLength(1);
+  });
+
+  it("pauses the list in detail and reloads once on return", async () => {
+    await show();
+    await finish(0, page([first]));
+    await act(async () => root.render(<TasksPage sub="first" />));
+    vi.mocked(fetchTasks).mockClear();
+    await tick(30_000);
+    expect(fetchTasks).not.toHaveBeenCalled();
+    await show();
+    expect(fetchTasks).toHaveBeenCalledTimes(1);
+  });
 
   it.each([
     { rows: [], defaultKey: null, expected: null },
