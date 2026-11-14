@@ -83,6 +83,60 @@ def run(check):
 
 
 @pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('record', [False, True])
+@pytest.mark.parametrize('cached', [(None, None), (None, 0), (40, None)])
+def test_translated_run_cache_counts_follow_proxy_usage(tmp_path, monkeypatch, agent_db, stream, record, cached):
+    from looper.agents.claude_cli import ClaudeRunRecorder
+    from looper.agents.llmrec import LlmrecRoute, RouteKind
+    from looper.agents.llmrec import control
+    from tests.runtime_model_helpers import builtin_launch
+
+    async def check():
+        upstream_usage = {'prompt_tokens': 100, 'completion_tokens': 7}
+        async with gateway(tmp_path, stream=stream, record=record, usage=upstream_usage) as (
+                client, base, proxy, sink, received):
+            owner = control.ProxyControl(tmp_path, '', enabled=record)
+            monkeypatch.setattr(owner, '_state', lambda: {'port': proxy.port, 'instance': proxy.instance})
+            monkeypatch.setattr(control, '_control', owner)
+            route = LlmrecRoute('g' * 22, base, 'http://upstream.invalid/v1', RouteKind.TRANSLATE, record)
+            launch = replace(builtin_launch(), llmrec=route)
+            # Reuse the route for a second run with no cache reporting, even after a cache-aware run.
+            for record_id, counts in enumerate((cached, (None,)), 1):
+                agent_db.start_record.return_value = record_id
+                recorder = ClaudeRunRecorder(agent_id='test', task_id=None, command=['claude'],
+                                            cwd='.', input_text='hi', launch=launch)
+                await recorder.start()
+                for count in counts:
+                    upstream_usage.pop('prompt_tokens_details', None)
+                    if count is not None:
+                        upstream_usage['prompt_tokens_details'] = {
+                            'cached_tokens': count, 'cache_write_tokens': 10 if count else 0}
+                    response = await client.post(base + '/v1/messages', json={
+                        'model': 'client', 'messages': [], 'stream': stream})
+                    assert response.status_code == 200
+                    # Assistant snapshots omit cache fields regardless of upstream reporting.
+                    await recorder.record({'type': 'assistant', 'message': {
+                        'id': f'msg-{len(received)}', 'usage': {'input_tokens': 100, 'output_tokens': 7}}})
+                read = sum(count or 0 for count in counts)
+                written = sum(10 for count in counts if count)
+                tokens = {'inputTokens': 100 * len(counts) - read - written, 'outputTokens': 7 * len(counts),
+                          'cacheReadInputTokens': read, 'cacheCreationInputTokens': written}
+                result = {'type': 'result', 'subtype': 'success', 'total_cost_usd': 0.01,
+                          'modelUsage': {'client': tokens}, 'usage': {
+                              'input_tokens': tokens['inputTokens'], 'output_tokens': tokens['outputTokens'],
+                              'cache_read_input_tokens': read, 'cache_creation_input_tokens': written}}
+                await recorder.finish(output_text='ok', result_event=result)
+                stored = agent_db.finish_record.await_args.kwargs
+                reported = any(count is not None for count in counts)
+                assert (stored['cache_read_tokens'], stored['cache_creation_tokens']) == (
+                    read if reported else None, written if reported else None)
+                assert (stored['input_tokens'], stored['output_tokens'], stored['cost_usd']) == (
+                    tokens['inputTokens'], tokens['outputTokens'], 0.01)
+            assert bool(sink.items) is record
+    run(check)
+
+
+@pytest.mark.parametrize('stream', [False, True])
 def test_upstream_query_follows_chat_completions_path(tmp_path, stream):
     async def check():
         async with gateway(tmp_path, stream=stream) as (client, base, proxy, sink, received):

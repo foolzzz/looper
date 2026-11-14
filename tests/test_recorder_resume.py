@@ -10,11 +10,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from looper.agents.claude_cli import ClaudeRunRecorder, RecordNotResumable
-from looper.agents.profile_registry import BUILTIN_PROVIDER
 from looper.agents.run_usage import Usage
 from looper.agents.runtimes import CLAUDE_CODE
 from looper.agents.runtimes.pricing import usage_event
 from looper.db import llm_records
+from tests.runtime_model_helpers import builtin_launch
 
 
 def test_resume_keeps_the_record_sequence_and_original_duration(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -25,8 +25,7 @@ def test_resume_keeps_the_record_sequence_and_original_duration(monkeypatch: pyt
                         ("touch_record", None), ("finish_record", None)):
         mocks[name] = AsyncMock(return_value=value)
         monkeypatch.setattr(llm_records, name, mocks[name])
-    launch = SimpleNamespace(price=None, model="m", max_budget_usd=None, runtime=CLAUDE_CODE, consult=False,
-                             profile=SimpleNamespace(provider=BUILTIN_PROVIDER))
+    launch = builtin_launch()
 
     async def run() -> None:
         recorder = await ClaudeRunRecorder.resume(41, agent_id="worker-kept", task_id="task-kept",

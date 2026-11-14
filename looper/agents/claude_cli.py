@@ -1829,6 +1829,15 @@ class ClaudeRunRecorder:
     async def _write_end(self, fields: dict[str, Any]) -> None:
         """``finish_record``, tried once more after a database error."""
         from ..db import llm_records
+        from .llmrec import LlmrecRoute, RouteKind
+        from .llmrec.control import controller
+
+        route = self._launch.llmrec if self._launch is not None else None
+        owner = controller()
+        if isinstance(route, LlmrecRoute) and route.kind == RouteKind.TRANSLATE and owner is not None:
+            if await owner.cache_reported(route.id, self._record_id) is False:
+                # Claude Code synthesizes zero cache counts even when upstream omitted them.
+                fields.update(cache_read_tokens=None, cache_creation_tokens=None)
 
         try:
             await llm_records.finish_record(self._record_id, **fields)
