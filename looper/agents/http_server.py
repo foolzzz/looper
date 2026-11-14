@@ -282,7 +282,7 @@ class AgentHTTPServer:
         from .. import components
 
         # Snapshot the loaded installation once, before accepting requests.
-        self._components = components.loaded_manifest()
+        self._components = await components.prepare_loaded_manifest()
         # Resolve lazy route discovery before accepting the first request.
         api_v1.find("GET", f"{api_v1.PREFIX}/openapi.json")
         if self._config_imports:

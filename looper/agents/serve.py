@@ -720,6 +720,11 @@ async def _run_agent_system_watched(
             except Exception:
                 logger.exception("could not sweep the agents a previous server left running")
 
+        # Warm the interpreter's snapshot before kept adoption or HTTP startup can need it.
+        with startup.measure("code_manifest"):
+            from .. import components
+            await components.prepare_loaded_manifest()
+
         # The tasks the previous server was running: they carry on once the agents are up, or are stopped now.
         with startup.measure("kept_scan"):
             left_running = await tasks_left_running(pool)
