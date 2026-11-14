@@ -76,7 +76,8 @@ def test_cursor_ties_keep_owner_rows_and_counts_across_pages(monkeypatch):
         last = await projects.list_tasks_page(manager_id=OWNER, limit=1, before=second["next_before"])
         assert [row["task_id"] for row in last["tasks"]] == ["task-a"]
         assert last["next_before"] is None
-        assert first["counts"] == second["counts"] == last["counts"] == {"init": 3}
+        assert first["counts"] == {"init": 3}
+        assert second["counts"] == last["counts"] == {}
     run_db(test, monkeypatch, timeout=30)
 
 

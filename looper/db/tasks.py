@@ -648,7 +648,7 @@ async def list_tasks(
     query: str = "",
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
-    """The newest tasks (by creation, then id), each with its ``project_name`` and ``schedule_name``; only one
+    """The newest tasks' list fields (by creation, then id), with ``project_name`` and ``schedule_name``; only one
     project's when ``project_id`` is given, one schedule's when ``schedule_id`` is, only those covered by the
     ``status`` filter (unknown filters match exactly), or in
     ``group``, when it is, only those older than the task ``before`` when it is, and only ``manager_id``'s when given.
@@ -657,7 +657,11 @@ async def list_tasks(
     statuses, inside = _group_filter(group)
     rows = await pool.fetch(
         f"""
-        {_WITH_PROJECT}
+        SELECT t.id, t.title, t.requirement, t.goal_id, t.project_id, t.work_dir, t.manager_id,
+               t.template, t.workflow, t.status, t.phase, t.planner_id, t.correlation_id,
+               t.created_at, t.completed_at, t.schedule_id, t.continues_schedule_session,
+               p.name AS project_name, s.name AS schedule_name
+        FROM tasks t JOIN projects p ON p.id = t.project_id LEFT JOIN schedules s ON s.id = t.schedule_id
         WHERE {_FILTERS}
           AND ($6::text IS NULL OR (t.created_at, t.id) < (SELECT b.created_at, b.id FROM tasks b WHERE b.id = $6))
           AND ($9::text IS NULL OR t.manager_id = $9)

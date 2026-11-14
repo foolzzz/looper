@@ -122,7 +122,8 @@ OPERATIONS = (
             "limit": {"type": "integer", "minimum": 1, "maximum": projects.TASKS_PAGE_MAX}, "query": _STR},
             [], closed=True),
         _object({"tasks": _array(TASK_INFO), "counts": {"type": "object", "additionalProperties": _INT,
-                 "description": "Counts by status filter; each task counted once. Unknown statuses keep their keys."},
+                 "description": "First-page counts by status filter; empty on before pages. "
+                                "Each task counted once. Unknown statuses keep their keys."},
                  "next_before": _NULL_STR}), risk="read"),
     Operation("tasks.detail", "POST", "/api/v1/tasks/detail", "Read a task's full detail.",
         "Read a task's full detail. Includes configuration, history, workspaces and cost.",

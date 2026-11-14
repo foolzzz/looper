@@ -761,7 +761,7 @@ async def list_tasks_page(
         return {"tasks": [task_listed(task) for task in page[:limit]], "more": len(page) > limit}
 
     tasks = page[:limit]
-    counts = await db_tasks.count_by_status(**filters, **search)
+    counts = await db_tasks.count_by_status(**filters, **search) if before is None else {}
     costs = await task_costs([t["id"] for t in tasks])
     manager_names = {m["id"]: m["name"] for m in await db_managers.list_managers(include_deleted=True)}
     result = []

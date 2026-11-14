@@ -241,8 +241,10 @@ describe("task list polling and pagination", () => {
     await click("Load more");
     await tick(3000);
     await finish(2, page([newest, first, boundary], "boundary"));
-    await finish(1, page([boundary, oldest]));
+    await finish(1, { ...page([boundary, oldest]), counts: {} });
     expect(rows()).toEqual(["newest", "first", "boundary", "oldest"]);
+    expect(button("All5")).toBeDefined();
+    expect(button("Completed5")).toBeDefined();
     await tick(3000);
     await finish(3, page([newest, first], "first"));
     expect(rows()).toEqual(["newest", "first", "boundary", "oldest"]);

@@ -119,6 +119,7 @@ _VERIFICATION_PATHS = "verification_paths"
 _COMMAND_SCHEDULES = "command_schedules"
 _TASK_REPLY_ROUTE = "task_reply_route"
 _TASK_PROCESS_RECORD = "task_process_record"
+_TASKS_CREATED_INDEX = "tasks_created_index"
 _CHAT_BINDING_SENDERS = "chat_binding_senders"
 _CHAT_BINDING_SENDER_POLICY = "chat_binding_sender_policy"
 _PROVIDER_ENABLED = "provider_enabled"
@@ -571,6 +572,12 @@ async def _gate_purpose_pending(conn: asyncpg.Connection) -> bool:
         "AND attnum > 0 AND NOT attisdropped)")
 
 
+async def _tasks_created_index_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _TASKS_CREATED_INDEX):
+        return False
+    return not await conn.fetchval("SELECT to_regclass('idx_tasks_created') IS NOT NULL")
+
+
 async def _verification_paths_pending(conn: asyncpg.Connection) -> bool:
     if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)", _VERIFICATION_PATHS):
         return False
@@ -846,6 +853,9 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             await conn.execute("ALTER TABLE task_user_gates ADD COLUMN purpose TEXT NOT NULL DEFAULT 'discussion' "
                                "CHECK (purpose IN ('discussion', 'exhaustion', 'verification_exhaustion'))")
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _GATE_PURPOSE)
+        if await _tasks_created_index_pending(conn):
+            await conn.execute("CREATE INDEX idx_tasks_created ON tasks (created_at DESC, id DESC)")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _TASKS_CREATED_INDEX)
         if await _verification_paths_pending(conn):
             await conn.execute("ALTER TABLE projects ADD COLUMN verification_paths TEXT[] "
                                "CHECK (cardinality(verification_paths) <= 20)")
@@ -897,4 +907,4 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
             or await _dependency_conditions_pending(conn) or await _workflows_pending(conn)
             or await _review_panel_pending(conn)
             or await _workflow_rules_pending(conn) or await _gate_purpose_pending(conn)
-            or await _verification_paths_pending(conn)))
+            or await _tasks_created_index_pending(conn) or await _verification_paths_pending(conn)))

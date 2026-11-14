@@ -480,6 +480,6 @@ def test_task_config_is_written_and_read_as_an_object() -> None:
 
         assert (await tasks.get_task("task-1", pool=pool))["config"] == {"a": 2}
         assert (await tasks.get_task_with_steps("task-1", pool=pool))["config"] == {"a": 2}
-        assert [t["config"] for t in await tasks.list_tasks(pool=pool)] == [{"a": 2}]
+        assert "config" not in (await tasks.list_tasks(pool=pool))[0]
 
     _run(_test)
