@@ -10,12 +10,15 @@ import asyncio
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, TypeVar
 
 from .message import BOT_CHANNEL_TYPES, MessageEnvelope, MessageType
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 # Planners and Workers exist per task and never survive a restart; the server
 # stops their tasks at startup, so their journaled messages are not replayed.
@@ -170,6 +173,8 @@ class MessageBus:
         self._journal = MessageJournal(runtime_root / ".local" / "agent-bus")
         self._reply_futures: dict[str, asyncio.Future[MessageEnvelope]] = {}
         self._started = False
+        self._journal_executor: ThreadPoolExecutor | None = None
+        self._journal_lock = asyncio.Lock()
         self._queued_before_start: set[str] = set()
 
     @property
@@ -180,7 +185,18 @@ class MessageBus:
         """Mark a message delivered although it is still queued (the user stopped it): a restart does not replay it."""
         self._journal.mark_delivered(message_id)
 
+    async def _journal_io(self, operation: Callable[..., _T], *args: Any) -> _T:
+        if self._journal_executor is None:
+            self._journal_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="message-journal")
+        return await asyncio.get_running_loop().run_in_executor(self._journal_executor, operation, *args)
+
     async def start(self) -> None:
+        async with self._journal_lock:
+            # Finish any pre-start or cancelled append before reading/replacing it.
+            await self._journal_io(lambda: None)
+            await self._start()
+
+    async def _start(self) -> None:
         """Replay undelivered messages from the journal, then compact it.
 
         Messages for per-task agents are dropped instead: replaying them would
@@ -213,8 +229,13 @@ class MessageBus:
         """Publish a message. Journaled before delivery for crash recovery (a status is not: ``_TRANSIENT``)."""
         journaled = _journaled(envelope)
         if journaled:
-            self._journal.append(envelope)
-        await self._deliver(envelope, journaled=journaled)
+            # The lock also keeps replay/compaction from racing a write, including
+            # a write whose publisher was cancelled while fsync was in flight.
+            async with self._journal_lock:
+                await self._journal_io(self._journal.append, envelope)
+                await self._deliver(envelope, journaled=True)
+        else:
+            await self._deliver(envelope)
 
     async def _deliver(self, envelope: MessageEnvelope, *, journaled: bool = False) -> None:
         msg_type = envelope.message_type.value if isinstance(envelope.message_type, MessageType) else envelope.message_type
@@ -343,6 +364,15 @@ class MessageBus:
 
     async def shutdown(self) -> None:
         """Graceful shutdown: compact journal."""
-        if self._started:
-            self._journal.compact()
-        self._started = False
+        async with self._journal_lock:
+            try:
+                # A barrier is required even before start: channels can publish
+                # during startup, and cancelled publishers may still be writing.
+                await self._journal_io(lambda: None)
+                if self._started:
+                    self._journal.compact()
+                self._started = False
+            finally:
+                if self._journal_executor is not None:
+                    self._journal_executor.shutdown(wait=False)
+                    self._journal_executor = None

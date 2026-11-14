@@ -204,15 +204,15 @@ class LarkChannelAdapter(ChannelAdapter):
             return
 
         if self.channel_type == "lark":
-            self._inbox = LarkInbox(bus.runtime_root / ".local" / "lark" / self.channel_id / "inbox.sqlite3")
+            self._inbox = await LarkInbox.open(bus.runtime_root / ".local" / "lark" / self.channel_id / "inbox.sqlite3")
             if isinstance(self._transport, CliTransport):
                 self._transport.on_thread_activity = self._remember_thread
             boundary = self._inbox.boundary
             # Discovery itself can fail or be cancelled while live checkpoints advance.
             if boundary is not None and time() - boundary <= _CATCHUP_MAX_AGE:
-                self._inbox.defer_discovery(boundary - _CATCHUP_OVERLAP, time())
+                await self._inbox.defer_discovery(boundary - _CATCHUP_OVERLAP, time())
             # Keep the live boundary until the consumer is healthy.
-            self._inbox.checkpoint(boundary if boundary is not None else time())
+            await self._inbox.checkpoint(boundary if boundary is not None else time())
         else:
             boundary = None
         self._bus = bus
@@ -245,8 +245,8 @@ class LarkChannelAdapter(ChannelAdapter):
         await self._transport.aclose()
         if self._inbox is not None:
             if clean:
-                self._inbox.checkpoint(stopped_at)
-            self._inbox.close()
+                await self._inbox.checkpoint(stopped_at)
+            await self._inbox.close()
             self._inbox = None
         logger.info("%s adapter stopped", self.channel_id)
 
@@ -500,7 +500,7 @@ class LarkChannelAdapter(ChannelAdapter):
                 sender = message.get("sender") or {}
                 if (self._inbox is not None and (sender.get("sender_type") or sender.get("type")) in {"app", "bot"}
                         and not message.get("deleted") and created.at <= end):
-                    self._inbox.remember_bot(chat_id, created.at)
+                    await self._inbox.remember_bot(chat_id, created.at)
                 if created.before(start) or created.before(time() - _CATCHUP_MAX_AGE):
                     stats["too_old"] += 1
                     continue
@@ -529,7 +529,7 @@ class LarkChannelAdapter(ChannelAdapter):
             return
         assert self._inbox is not None
         # Our recent activity takes precedence over new roots when the listing budget fills.
-        candidates = dict.fromkeys(self._inbox.recent_threads(chat_id, end))
+        candidates = dict.fromkeys(await self._inbox.recent_threads(chat_id, end))
         if hasattr(self._transport, "list_threads"):
             token, roots_scanned = "", 0
             try:
@@ -610,7 +610,7 @@ class LarkChannelAdapter(ChannelAdapter):
         expired = boundary is not None and time() - boundary > _CATCHUP_MAX_AGE
         try:
             assert self._inbox is not None
-            debts = self._inbox.debts()
+            debts = await self._inbox.debts()
             cutoff = time() - _CATCHUP_MAX_AGE
             for chat_id, (start, end) in list(debts.items()):
                 if start < cutoff:
@@ -619,16 +619,16 @@ class LarkChannelAdapter(ChannelAdapter):
                                    "debt_windows_dropped=1", self.channel_id, chat_id, start, min(end, cutoff),
                                    min(end, cutoff) - start)
                     if end <= cutoff:
-                        self._inbox.complete(chat_id)
+                        await self._inbox.complete(chat_id)
                         del debts[chat_id]
                     else:
                         debts[chat_id] = (cutoff, end)
-                        self._inbox.defer(chat_id, cutoff, end)
-            discovery = self._inbox.discovery()
+                        await self._inbox.defer(chat_id, cutoff, end)
+            discovery = await self._inbox.discovery()
             live_start = boundary - _CATCHUP_OVERLAP if boundary is not None and not expired else None
             if discovery is not None:
                 if discovery[1] <= cutoff:
-                    self._inbox.complete_discovery()
+                    await self._inbox.complete_discovery()
                     logger.warning("%s: catch-up discovery expired skipped_windows=1", self.channel_id)
                 else:
                     pending_start = max(discovery[0], cutoff)
@@ -647,13 +647,13 @@ class LarkChannelAdapter(ChannelAdapter):
                     live_start if live_start is not None else owed[0])
                 assert start is not None
                 windows[chat_id] = start
-                self._inbox.defer(chat_id, start, time())
+                await self._inbox.defer(chat_id, start, time())
             if ready := getattr(self._transport, "consumer_started", None):
                 await asyncio.wait_for(ready.wait(), timeout=60)
             end = time()
             for chat_id, start in windows.items():
-                self._inbox.defer(chat_id, start, end)
-            self._inbox.complete_discovery()
+                await self._inbox.defer(chat_id, start, end)
+            await self._inbox.complete_discovery()
             for chat_id, start in list(windows.items())[:_CATCHUP_MAX_CHATS]:
                 stats["chats_scanned"] += 1
                 failures = stats["failures"]
@@ -664,7 +664,7 @@ class LarkChannelAdapter(ChannelAdapter):
                         await self._catchup_messages(page, chat_id, start=start, end=end, stats=stats)
                     await self._catchup_threads(chat_id, start=start, end=end, stats=stats)
                     if failures == stats["failures"]:
-                        self._inbox.complete(chat_id)
+                        await self._inbox.complete(chat_id)
                 except Exception:
                     stats["failures"] += 1
                     logger.warning("%s: catch-up chat failed chat=%s", self.channel_id, chat_id, exc_info=True)
@@ -684,7 +684,7 @@ class LarkChannelAdapter(ChannelAdapter):
         now = time()
         chats = await self._bound_chats()
         assert self._inbox is not None
-        recent_bots = self._inbox.recent_bot_chats(now)
+        recent_bots = await self._inbox.recent_bot_chats(now)
         fast = recent_bots.intersection(chats)
         if self._resolve_chat is not None:
             fast.update(chat_id for chat_id in chats
@@ -709,7 +709,7 @@ class LarkChannelAdapter(ChannelAdapter):
                          threads_scanned=0, thread_failures=0, thread_roots_capped=0)
             try:
                 seen: set[str] = set()
-                thread_activity = self._inbox.has_thread_activity(chat_id, end - _CATCHUP_ROOT_MAX_AGE)
+                thread_activity = await self._inbox.has_thread_activity(chat_id, end - _CATCHUP_ROOT_MAX_AGE)
                 async for page in self._history_pages(
                     self._transport.list_messages, chat_id, start=start, end=end,  # type: ignore[attr-defined]
                 ):
@@ -753,7 +753,7 @@ class LarkChannelAdapter(ChannelAdapter):
             if (self._inbox is not None
                     and not self._ingress_lock.locked() and ready is not None and ready.is_set()):
                 try:
-                    self._inbox.checkpoint(time())
+                    await self._inbox.checkpoint(time())
                 except Exception:
                     logger.warning("%s: could not save consumer heartbeat", self.channel_id, exc_info=True)
 
@@ -803,21 +803,21 @@ class LarkChannelAdapter(ChannelAdapter):
             if close := getattr(events, "aclose", None):
                 await close()
 
-    def _remember_thread(self, chat_id: str, thread_id: str) -> None:
+    async def _remember_thread(self, chat_id: str, thread_id: str) -> None:
         if self._inbox is not None:
-            self._inbox.remember_thread(chat_id, thread_id, time())
+            await self._inbox.remember_thread(chat_id, thread_id, time())
 
     async def _handle_lark_event(self, event: dict[str, Any]) -> Literal["handled", "duplicate", "ignored", "too_old"]:
         async with self._ingress_lock:
             message_id = event.get("message_id")
-            if self._inbox is not None and message_id and self._inbox.processed(message_id):
+            if self._inbox is not None and message_id and await self._inbox.processed(message_id):
                 return "duplicate"
             created = event.get("_catchup_created_at")
             if created is not None and created.before(time() - _CATCHUP_MAX_AGE):
                 return "too_old"
             if (self._inbox is not None and event.get("type") == RECEIVE_EVENT
                     and created is None and event.get("sender_type") in {"app", "bot"} and event.get("chat_id")):
-                self._inbox.remember_bot(event["chat_id"], time())
+                await self._inbox.remember_bot(event["chat_id"], time())
             if self._own_message(event):
                 event["_bot_outcome"] = "own_message"
                 handled = False
@@ -828,7 +828,7 @@ class LarkChannelAdapter(ChannelAdapter):
                             event.get("chat_id"), event.get("sender_id"), message_id,
                             "handled" if handled else event.get("_bot_outcome", "ignored"))
             if self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT:
-                self._inbox.finish(message_id, chat_id=event.get("chat_id") or "",
+                await self._inbox.finish(message_id, chat_id=event.get("chat_id") or "",
                                    thread_id=(event.get("thread_id") or "") if handled else "", at=time())
             return "handled" if handled else "ignored"
 

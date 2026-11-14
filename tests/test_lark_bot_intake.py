@@ -86,7 +86,7 @@ async def _channel(root: Path, *, allowed: frozenset[str] = frozenset({OPEN_ID, 
     )
     bus = MessageBus(runtime_root=root)
     instance._bus = bus
-    instance._inbox = LarkInbox(root / "inbox.sqlite3")
+    instance._inbox = await LarkInbox.open(root / "inbox.sqlite3")
     try:
         yield instance, transport, bus
     finally:
@@ -124,7 +124,7 @@ def test_allowed_bot_poll_overlap_handles_once_and_replies_to_its_thread_message
             assert context["reply_to"] == "om_syntheticparent"
             assert context["root_id"] == "om_syntheticroot"
             assert context["thread_id"] == "omt_syntheticthread"
-            assert instance._inbox.processed("om_syntheticthreadreply")
+            assert (await instance._inbox.processed("om_syntheticthreadreply"))
             receipt = await instance.deliver(MessageEnvelope.create(
                 source=turn.target, target=channel_address("lark"), message_type=MessageType.AGENT_REPLY,
                 correlation_id=turn.correlation_id, payload={"text": "review received"}))
@@ -157,8 +157,8 @@ def test_slow_bot_poll_keeps_each_chats_queried_watermark(
         monkeypatch.setattr(LarkChannelAdapter, "_bound_chats", bound)
         async with _channel(tmp_path) as (instance, transport, bus):
             for chat in chats:
-                instance._inbox.remember_bot(chat, now - 86400)
-                instance._inbox.remember_thread(chat, f"omt_{chat}", now - 1)
+                await instance._inbox.remember_bot(chat, now - 86400)
+                await instance._inbox.remember_thread(chat, f"omt_{chat}", now - 1)
             messages = {chat: _message(f"om_syntheticduring{index}",
                                       create_time=str(int((now + 5 + index * 10) * 1000)))
                         for index, chat in enumerate(chats)}
@@ -211,7 +211,7 @@ def test_bot_poll_recovers_from_watermark_with_only_max_age_cap(
         now = time.time()
         monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
         async with _channel(tmp_path) as (instance, transport, bus):
-            instance._inbox.remember_bot(CHAT, now - 86400)
+            await instance._inbox.remember_bot(CHAT, now - 86400)
             transport.pages[CHAT] = _page(_message(
                 "om_syntheticdelayed", create_time=str(int((now - lookback + 1) * 1000))))
             last_poll = {CHAT: now - watermark_age}
@@ -247,8 +247,8 @@ def test_unlisted_bot_is_recorded_but_warns_once_per_chat_per_hour(
                 await instance._poll_bot_chats({})
             assert bus.journal.undelivered() == []
             assert rejected == [(OTHER_BOT, CHAT)] * 3
-            assert all(instance._inbox.processed(message) for message in (
-                "om_syntheticrefusedfirst", "om_syntheticrefusedsecond", "om_syntheticrefusedlater"))
+            assert all([(await instance._inbox.processed(message)) for message in (
+                "om_syntheticrefusedfirst", "om_syntheticrefusedsecond", "om_syntheticrefusedlater")])
             assert len([record for record in caplog.records if "not on the sender allowlist" in record.message]) == 2
             assert not any(kind in {"send", "reply", "react"} for kind, _ in transport.calls)
 
@@ -392,7 +392,7 @@ def test_bot_poll_combines_thread_discovery_activity_and_partial_page_recovery(
             active = "omt_syntheticactive"
             root = _message("om_syntheticroot", sender_type="user", sender=OPEN_ID, thread_id=thread)
             transport.pages[CHAT] = _page(root)
-            instance._inbox.remember_thread(CHAT, active, time.time() - 3 * 86400)
+            await instance._inbox.remember_thread(CHAT, active, time.time() - 3 * 86400)
             reads: list[tuple[str, str]] = []
 
             async def roots(chat_id: str, *, page_token: str = "") -> dict[str, Any]:
@@ -481,12 +481,12 @@ def test_bound_chat_bot_poll_cadence(tmp_path, monkeypatch, policy, bot_age, int
         monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
         async with _channel(tmp_path, resolve_chat=lambda *_: RouteDecision(
                 RouteAction.ADMIT, "manager-helper", True, sender_policy=policy)) as (instance, transport, _):
-            instance._inbox.remember_bot("unrelated-chat", clock[0])
+            await instance._inbox.remember_bot("unrelated-chat", clock[0])
             if bot_age is not None:
-                instance._inbox.remember_bot(CHAT, clock[0] - bot_age)
+                await instance._inbox.remember_bot(CHAT, clock[0] - bot_age)
                 # Cadence evidence must survive a channel restart.
-                instance._inbox.close()
-                instance._inbox = LarkInbox(tmp_path / "inbox.sqlite3")
+                await instance._inbox.close()
+                instance._inbox = await LarkInbox.open(tmp_path / "inbox.sqlite3")
             last_poll = {}
             await instance._poll_bot_chats(last_poll)
             assert len(transport.list_calls) == 1
@@ -544,7 +544,7 @@ def test_quiet_bot_poll_skips_thread_discovery(tmp_path, thread_age, scan):
     async def run():
         async with _channel(tmp_path) as (instance, transport, _):
             if thread_age is not None:
-                instance._inbox.remember_thread(CHAT, "omt_syntheticcandidate", time.time() - thread_age)
+                await instance._inbox.remember_thread(CHAT, "omt_syntheticcandidate", time.time() - thread_age)
             calls = []
 
             async def roots(chat_id, *, page_token=""):

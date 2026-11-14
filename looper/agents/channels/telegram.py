@@ -101,6 +101,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             raise ValueError("backlog_max_age_seconds must be a positive integer")
         self._backlog_max_age_seconds = backlog_max_age_seconds
         self._inbox: TelegramInbox | None = None
+        self._stop_boundary: Awaitable[None] | None = None
         self._reached_publish: set[int] = set()
         # Only the built-in row falls back to the environment; an added bot has its own token.
         self._bot_token = bot_token or (env.get("LOOPER_TELEGRAM_BOT_TOKEN", "") if channel_id is None else "")
@@ -162,7 +163,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             # channel row. Rotating one bot's token keeps its numeric identity.
             identity = self._bot_token.partition(":")[0]
             bot_id = identity if identity.isdecimal() else "invalid"
-            self._inbox = TelegramInbox(bus.runtime_root / ".local" / "telegram" / self.channel_id / f"{bot_id}.sqlite3")
+            self._inbox = await TelegramInbox.open(bus.runtime_root / ".local" / "telegram" / self.channel_id / f"{bot_id}.sqlite3")
             inbox = self._inbox
 
             class PollingRequest(HTTPXRequest):
@@ -171,7 +172,7 @@ class TelegramChannelAdapter(ChannelAdapter):
                     if code == 200 and url.endswith("/getUpdates"):
                         response = json.loads(payload)
                         if response.get("ok"):
-                            inbox.polling_received(response["result"])
+                            await inbox.polling_received(response["result"])
                     return code, payload
 
             # Own both transports even if Application.initialize fails. Save polling
@@ -202,7 +203,7 @@ class TelegramChannelAdapter(ChannelAdapter):
             self._outbound_task = asyncio.create_task(self._outbound_loop())
 
             await self._app.initialize()
-            self._inbox.polling_started(int(datetime.now(timezone.utc).timestamp()))
+            await self._inbox.polling_started(int(datetime.now(timezone.utc).timestamp()))
             await self._inbox.replay(self._app.bot)
             try:
                 from telegram import BotCommand
@@ -220,17 +221,28 @@ class TelegramChannelAdapter(ChannelAdapter):
         logger.info("telegram channel adapter started")
 
     def prepare_stop(self) -> None:
-        if self._inbox is not None and self._app is not None:
+        self._queue_stop_boundary()
+        if self._inbox is not None and self._stop_boundary is not None:
+            # The signal hook must not release the agent drain before commit.
+            self._inbox.flush()
+
+    def _queue_stop_boundary(self) -> None:
+        if self._inbox is not None and self._app is not None and self._stop_boundary is None:
             updater = self._app.updater
             if updater is not None and updater.running:
                 try:
-                    self._inbox.polling_stopped(int(datetime.now(timezone.utc).timestamp()))
+                    self._stop_boundary = self._inbox.polling_stopped(int(datetime.now(timezone.utc).timestamp()))
                 except Exception:
                     logger.warning("%s: telegram polling stop boundary could not be saved",
                                    self._channel_id, exc_info=True)
 
     async def stop(self) -> None:
-        self.prepare_stop()
+        self._queue_stop_boundary()
+        if self._stop_boundary is not None:
+            try:
+                await self._stop_boundary
+            except Exception:
+                logger.warning("%s: telegram polling stop boundary could not be saved", self._channel_id, exc_info=True)
         self._running = False
 
         async def cleanup(stage: str, action: Callable[[], Awaitable[Any]]) -> None:
@@ -261,8 +273,9 @@ class TelegramChannelAdapter(ChannelAdapter):
         self._requests = ()
         self._outbound_task = None
         if self._inbox is not None:
-            self._inbox.close()
+            await self._inbox.close()
             self._inbox = None
+        self._stop_boundary = None
         self._bus = None
         logger.info("telegram channel adapter stopped")
 
@@ -474,13 +487,13 @@ class TelegramChannelAdapter(ChannelAdapter):
         async def handle(update: Any, context: Any) -> None:
             assert self._inbox is not None
             try:
-                if self._inbox.processed(update.update_id):
+                if await self._inbox.processed(update.update_id):
                     logger.info("%s: duplicate Telegram update_id=%s ignored", self.channel_id, update.update_id)
                     return
                 message = update.effective_message
                 date = getattr(message, "date", None)
                 age = (datetime.now(timezone.utc) - date).total_seconds() if date is not None else 0
-                age_at_stop = self._inbox.age_at_stop(update.update_id)
+                age_at_stop = await self._inbox.age_at_stop(update.update_id)
                 if age_at_stop is not None:
                     age = age_at_stop
                 if age > self._backlog_max_age_seconds:
@@ -498,7 +511,7 @@ class TelegramChannelAdapter(ChannelAdapter):
                             logger.exception("%s: Telegram update_id=%s handler failed", self.channel_id, update.update_id)
                             raise
                         break
-                self._inbox.finish(update.update_id)
+                await self._inbox.finish(update.update_id)
             finally:
                 self._reached_publish.discard(update.update_id)
         return handle

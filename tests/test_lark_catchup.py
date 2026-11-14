@@ -93,14 +93,14 @@ def raw_message(message: dict[str, Any]) -> dict[str, Any]:
             "thread_replies": [raw_message(reply) for reply in message.get("thread_replies") or []]}
 
 
-def seed_boundary(root: Path, at: float) -> None:
+async def seed_boundary(root: Path, at: float) -> None:
     from looper.agents.channels.lark_inbox import LarkInbox
 
-    inbox = LarkInbox(root / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
+    inbox = await LarkInbox.open(root / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
     try:
-        inbox.checkpoint(at)
+        await inbox.checkpoint(at)
     finally:
-        inbox.close()
+        await inbox.close()
 
 
 async def catchup_done(instance: LarkChannelAdapter, transport: HistoryTransport, *, timeout: float = 3) -> None:
@@ -128,7 +128,7 @@ def isolate_observation(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_gap_group_mention_reaches_bound_manager_once_after_start(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     async def run() -> None:
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         transport = HistoryTransport()
         transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "messages": [
             history_message("om_synthetic_gap", at=now - 30, reply_to="om_synthetic_parent", root_id="om_synthetic_root")],
@@ -169,7 +169,7 @@ def test_minute_history_overlaps_restart_window_without_ending_thread_scan(
     async def run() -> None:
         now = datetime(2026, 11, 12, 18, 31, 10).timestamp()
         monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
-        seed_boundary(tmp_path, now - boundary_offset)  # Starts at 18:30:40 or exactly 18:31:00.
+        await seed_boundary(tmp_path, now - boundary_offset)  # Starts at 18:30:40 or exactly 18:31:00.
         messages = [history_message(f"om_minute_{minute}", at=now,
                                    create_time=f"2026-11-12 18:{minute}")
                     for minute in ("29", "30", "31", "32")]
@@ -216,7 +216,7 @@ def test_minute_history_overlaps_age_limit_but_excludes_previous_minute(
     async def run() -> None:
         now = datetime(2026, 11, 12, 18, 31, 10).timestamp()
         monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
-        seed_boundary(tmp_path, now - 900)
+        await seed_boundary(tmp_path, now - 900)
         transport = HistoryTransport()
         transport.pages["oc_synthetic_group"] = [{"messages": [
             history_message("om_cutoff", at=now, create_time="2026-11-12 18:16"),
@@ -243,7 +243,7 @@ def test_thread_catchup_never_requests_search_scopes(tmp_path, monkeypatch, scop
 
     async def run():
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         calls = []
 
         async def run_json(argv):
@@ -273,7 +273,7 @@ def test_thread_catchup_never_requests_search_scopes(tmp_path, monkeypatch, scop
             (message,) = bus.journal.undelivered()
             assert message.payload["channel_context"]["message_id"] == "om_reply"
             assert not any("+messages-search" in call for call in calls)
-            assert instance._inbox.debts() == {}
+            assert (await instance._inbox.debts()) == {}
         finally:
             await instance.stop()
             await bus.shutdown()
@@ -294,7 +294,7 @@ def test_thread_reply_keeps_raw_references_for_gate_routing(
 
     async def run() -> None:
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         reply = history_message("om_answer", at=now - 5, thread_id="omt_gate")
         raw = {"message_id": "om_answer", "parent_id": "om_gate_question", "root_id": "om_thread_root"}
 
@@ -381,7 +381,7 @@ def test_restart_recovers_nested_and_old_thread_mentions(
 
     async def run() -> None:
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         nested = history_message("om_nested", at=now - 40, parent_id="om_recent", root_id="om_recent")
         old_reply = history_message("om_old_reply", at=now - 30, parent_id="om_old", root_id="om_old")
         calls = []
@@ -439,8 +439,8 @@ def test_restart_recovers_nested_and_old_thread_mentions(
             assert all(m.target.agent_id == "manager-helper" and m.payload["text"] == "hello" for m in messages)
             assert messages[1].payload["channel_context"]["reply_to"] == "om_old"
             assert messages[1].payload["channel_context"]["root_id"] == "om_old"
-            assert instance._inbox.processed("om_old_reply")
-            assert not instance._inbox.processed("om_future")
+            assert (await instance._inbox.processed("om_old_reply"))
+            assert not (await instance._inbox.processed("om_future"))
             assert len([c for c in calls if "--params" in c and json.loads(c[c.index("--params") + 1])["container_id_type"] == "thread"]) == 3
             assert all(c[:3] == ["lark-cli", "--profile", "synthetic-profile"] and "bot" in c for c in calls)
         finally:
@@ -464,7 +464,7 @@ def test_busy_roots_do_not_hide_recent_replies_or_stall_next_restart(
         clock = [time.time()]
         monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
         boundary = clock[0] - 60
-        seed_boundary(tmp_path, boundary)
+        await seed_boundary(tmp_path, boundary)
         bus = MessageBus(runtime_root=tmp_path)
         for restart in range(2):
             message_id = f"om_main_{restart}"
@@ -505,18 +505,18 @@ def test_busy_roots_do_not_hide_recent_replies_or_stall_next_restart(
                 if restart:
                     expected.append("om_main_1")
                 assert ids == expected
-                assert instance._inbox.debts() == {}
+                assert (await instance._inbox.debts()) == {}
                 assert root_pages == list(range(5))
                 # Keep the consumer up beyond the original boundary's expiry, then stop cleanly.
                 clock[0] += 16 * 60
             finally:
                 await instance.stop()
-            inbox = LarkInbox(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
+            inbox = await LarkInbox.open(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
             try:
                 boundary = inbox.boundary
                 assert boundary == clock[0]
             finally:
-                inbox.close()
+                await inbox.close()
             clock[0] += 30
         await bus.shutdown()
 
@@ -535,7 +535,7 @@ def test_only_root_discovery_errors_preserve_debt_while_live_boundary_advances(
 
     async def run() -> None:
         boundary = time.time() - 60
-        seed_boundary(tmp_path, boundary)
+        await seed_boundary(tmp_path, boundary)
         entered, release, saved = asyncio.Event(), asyncio.Event(), asyncio.Event()
         transport = HistoryTransport()
         transport.pages["oc_synthetic_group"] = [{"messages": [], "chat_type": "group", "has_more": False}]
@@ -558,8 +558,8 @@ def test_only_root_discovery_errors_preserve_debt_while_live_boundary_advances(
             await instance.start(bus)
             checkpoint = instance._inbox.checkpoint
 
-            def save(at):
-                checkpoint(at)
+            async def save(at):
+                await checkpoint(at)
                 saved.set()
 
             monkeypatch.setattr(instance._inbox, "checkpoint", save)
@@ -569,18 +569,18 @@ def test_only_root_discovery_errors_preserve_debt_while_live_boundary_advances(
             await catchup_done(instance, transport)
             await asyncio.wait_for(saved.wait(), 1)
             assert instance._inbox.boundary > boundary
-            assert bool(instance._inbox.debts()) == (failure == "root_error")
+            assert bool((await instance._inbox.debts())) == (failure == "root_error")
             if failure == "root_error":
-                assert instance._inbox.debts()["oc_synthetic_group"][0] == boundary - 10
+                assert (await instance._inbox.debts())["oc_synthetic_group"][0] == boundary - 10
         finally:
             await instance.stop()
             await bus.shutdown()
-        inbox = LarkInbox(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
+        inbox = await LarkInbox.open(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
         try:
             assert inbox.boundary > boundary
-            assert ("oc_synthetic_group" in inbox.debts()) == (failure == "root_error")
+            assert ("oc_synthetic_group" in (await inbox.debts())) == (failure == "root_error")
         finally:
-            inbox.close()
+            await inbox.close()
 
     asyncio.run(asyncio.wait_for(run(), 5))
 
@@ -591,7 +591,7 @@ def test_live_event_racing_history_is_published_once(
 ) -> None:
     async def run() -> None:
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         transport = HistoryTransport()
         if live_first:
             transport.before_list, transport.release_list = asyncio.Event(), asyncio.Event()
@@ -627,7 +627,7 @@ def test_live_event_racing_history_is_published_once(
             assert message.payload["channel_context"]["message_id"] == "om_synthetic_race"
             if live_first:
                 assert "duplicates=1" in caplog.text
-            assert instance._inbox.processed("om_synthetic_race")
+            assert (await instance._inbox.processed("om_synthetic_race"))
             await asyncio.gather(*instance._reactions._pending)
             assert len([call for call in transport.calls if call[0] == "react"]) == 1
         finally:
@@ -640,7 +640,7 @@ def test_live_event_racing_history_is_published_once(
 def test_gap_group_without_bot_mention_is_not_answered(tmp_path: Path) -> None:
     async def run() -> None:
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         transport = HistoryTransport()
         transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "messages": [
             history_message("om_synthetic_unmentioned", at=now - 30, mentioned=False)], "has_more": False}]
@@ -665,7 +665,7 @@ def test_history_message_older_than_cap_is_not_answered_and_counted(
 
     async def run() -> None:
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         transport = HistoryTransport()
         transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "messages": [
             history_message("om_synthetic_old", at=now - _CATCHUP_MAX_AGE - 1)], "has_more": False}]
@@ -699,7 +699,7 @@ def test_one_chat_list_failure_does_not_block_other_chats(
 
     async def run() -> None:
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         transport = HistoryTransport()
         transport.pages["oc_synthetic_unavailable"] = [LarkCliError("synthetic permission denied")]
         transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "messages": [
@@ -743,13 +743,13 @@ def test_boundary_and_live_receipts_survive_a_new_adapter_object(
             before_stop = time.time()
             await first.stop()
             first_stopped = True
-            inbox = LarkInbox(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
+            inbox = await LarkInbox.open(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
             try:
                 stopped_at = inbox.boundary
                 assert stopped_at is not None and before_stop <= stopped_at <= time.time()
-                assert inbox.processed("om_synthetic_live")
+                assert (await inbox.processed("om_synthetic_live"))
             finally:
-                inbox.close()
+                await inbox.close()
             second_transport = HistoryTransport()
             second_transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "messages": [
                 history_message("om_synthetic_live", at=stopped_at),
@@ -776,7 +776,7 @@ def test_expired_boundary_skips_history_entirely(tmp_path: Path, caplog: pytest.
     from looper.agents.channels.lark import _CATCHUP_MAX_AGE
 
     async def run() -> None:
-        seed_boundary(tmp_path, time.time() - _CATCHUP_MAX_AGE - 1)
+        await seed_boundary(tmp_path, time.time() - _CATCHUP_MAX_AGE - 1)
         transport = HistoryTransport()
         instance = adapter(tmp_path, transport)
         bus = MessageBus(runtime_root=tmp_path)
@@ -806,7 +806,7 @@ def test_catchup_pages_and_chats_are_bounded(
     monkeypatch.setattr("looper.agents.channels.lark._CATCHUP_MAX_PAGES", 2)
 
     async def run() -> None:
-        seed_boundary(tmp_path, time.time() - 60)
+        await seed_boundary(tmp_path, time.time() - 60)
         transport = HistoryTransport()
         transport.pages["oc_synthetic_group"] = [
             {"chat_type": "group", "messages": [], "has_more": True, "page_token": "synthetic-next"},
@@ -832,7 +832,7 @@ def test_catchup_pages_and_chats_are_bounded(
 def test_listable_p2p_chat_is_recovered_without_a_mention(tmp_path: Path) -> None:
     async def run() -> None:
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         transport = HistoryTransport()
         transport.pages["oc_synthetic_group"] = [{"chat_type": "p2p", "messages": [
             history_message("om_synthetic_direct", at=now - 30, mentioned=False)], "has_more": False}]
@@ -852,23 +852,26 @@ def test_listable_p2p_chat_is_recovered_without_a_mention(tmp_path: Path) -> Non
 
 
 def test_durable_message_receipts_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from looper.agents.channels.lark_inbox import LarkInbox
+    async def run():
+        from looper.agents.channels.lark_inbox import LarkInbox
 
-    monkeypatch.setattr("looper.agents.channels.lark_inbox.PROCESSED_KEPT", 2)
-    path = tmp_path / "inbox.sqlite3"
-    inbox = LarkInbox(path)
-    try:
-        for message_id in ("om_synthetic_first", "om_synthetic_second", "om_synthetic_third"):
-            inbox.finish(message_id)
-    finally:
-        inbox.close()
-    reopened = LarkInbox(path)
-    try:
-        assert not reopened.processed("om_synthetic_first")
-        assert reopened.processed("om_synthetic_second")
-        assert reopened.processed("om_synthetic_third")
-    finally:
-        reopened.close()
+        monkeypatch.setattr("looper.agents.channels.lark_inbox.PROCESSED_KEPT", 2)
+        path = tmp_path / "inbox.sqlite3"
+        inbox = await LarkInbox.open(path)
+        try:
+            for message_id in ("om_synthetic_first", "om_synthetic_second", "om_synthetic_third"):
+                await inbox.finish(message_id)
+        finally:
+            await inbox.close()
+        reopened = await LarkInbox.open(path)
+        try:
+            assert not (await reopened.processed("om_synthetic_first"))
+            assert (await reopened.processed("om_synthetic_second"))
+            assert (await reopened.processed("om_synthetic_third"))
+        finally:
+            await reopened.close()
+
+    asyncio.run(run())
 
 
 def test_stopping_a_disconnected_consumer_preserves_the_last_checkpoint(tmp_path: Path) -> None:
@@ -876,7 +879,7 @@ def test_stopping_a_disconnected_consumer_preserves_the_last_checkpoint(tmp_path
 
     async def run() -> None:
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         transport = HistoryTransport()
         transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "messages": [], "has_more": False}]
         instance = adapter(tmp_path, transport)
@@ -887,15 +890,15 @@ def test_stopping_a_disconnected_consumer_preserves_the_last_checkpoint(tmp_path
             await catchup_done(instance, transport)
             assert instance._inbox is not None
             last_checkpoint = now - 30
-            instance._inbox.checkpoint(last_checkpoint)
+            await instance._inbox.checkpoint(last_checkpoint)
             transport.consumer_started.clear()
             await instance.stop()
             stopped = True
-            reopened = LarkInbox(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
+            reopened = await LarkInbox.open(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
             try:
                 assert reopened.boundary == last_checkpoint
             finally:
-                reopened.close()
+                await reopened.close()
         finally:
             if not stopped:
                 await instance.stop()
@@ -913,7 +916,7 @@ def test_idle_heartbeat_persists_while_catchup_is_pending(
 
     async def run() -> None:
         boundary = time.time() - 60
-        seed_boundary(tmp_path, boundary)
+        await seed_boundary(tmp_path, boundary)
         transport = HistoryTransport()
         transport.before_list, transport.release_list = asyncio.Event(), asyncio.Event()
         transport.pages["oc_synthetic_group"] = [{"chat_type": "group", "messages": [], "has_more": False}]
@@ -925,24 +928,24 @@ def test_idle_heartbeat_persists_while_catchup_is_pending(
             assert instance._inbox is not None
             checkpoint = instance._inbox.checkpoint
 
-            def save(at: float) -> None:
-                checkpoint(at)
+            async def save(at: float) -> None:
+                await checkpoint(at)
                 checkpoint_saved.set()
 
             monkeypatch.setattr(instance._inbox, "checkpoint", save)
             await asyncio.wait_for(transport.before_list.wait(), 3)
             await asyncio.wait_for(checkpoint_saved.wait(), 1)
             assert instance._inbox.boundary > boundary
-            assert "oc_synthetic_group" in instance._inbox.debts()
+            assert "oc_synthetic_group" in (await instance._inbox.debts())
             transport.release_list.set()
             await catchup_done(instance, transport)
             await asyncio.wait_for(checkpoint_saved.wait(), 3)
-            reopened = LarkInbox(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
+            reopened = await LarkInbox.open(tmp_path / ".local" / "lark" / "channel-lark" / "inbox.sqlite3")
             try:
                 assert reopened.boundary is not None
                 assert boundary < reopened.boundary <= time.time()
             finally:
-                reopened.close()
+                await reopened.close()
             assert bus.journal.undelivered() == []
             assert transport.calls == []
         finally:
@@ -969,7 +972,7 @@ def test_failed_chat_debt_survives_live_progress_and_restart(
         clock = [time.time()]
         monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
         original = clock[0] - 60
-        seed_boundary(tmp_path, original)
+        await seed_boundary(tmp_path, original)
         bus = MessageBus(runtime_root=tmp_path)
         first_transport = HistoryTransport()
         first_transport.pages = {
@@ -983,8 +986,8 @@ def test_failed_chat_debt_survives_live_progress_and_restart(
             saved = asyncio.Event()
             checkpoint = first._inbox.checkpoint
 
-            def save(at):
-                checkpoint(at)
+            async def save(at):
+                await checkpoint(at)
                 saved.set()
 
             monkeypatch.setattr(first._inbox, "checkpoint", save)
@@ -993,12 +996,12 @@ def test_failed_chat_debt_survives_live_progress_and_restart(
             assert first._inbox.boundary == clock[0]
         finally:
             await first.stop()
-        inbox = LarkInbox(tmp_path / ".local/lark/channel-lark/inbox.sqlite3")
+        inbox = await LarkInbox.open(tmp_path / ".local/lark/channel-lark/inbox.sqlite3")
         try:
             assert inbox.boundary == clock[0]
-            assert inbox.debts() == {"oc_failed": (original - 10, clock[0] - elapsed)}
+            assert (await inbox.debts()) == {"oc_failed": (original - 10, clock[0] - elapsed)}
         finally:
-            inbox.close()
+            await inbox.close()
         clock[0] += 30
         transport = HistoryTransport()
         transport.pages = {
@@ -1018,7 +1021,7 @@ def test_failed_chat_debt_survives_live_progress_and_restart(
             failed_call, good_call = transport.list_calls
             assert good_call["start"] == clock[0] - 40
             assert failed_call["start"] == (original - 10 if elapsed == 120 else good_call["start"])
-            assert second._inbox.debts() == {}
+            assert (await second._inbox.debts()) == {}
             if elapsed > 900:
                 assert "debt_windows_dropped=1" in caplog.text
                 assert "oc_failed" in caplog.text
@@ -1033,7 +1036,7 @@ def test_failed_chat_debt_survives_live_progress_and_restart(
 def test_discovery_window_survives_live_checkpoint(tmp_path, monkeypatch, failure):
     async def run():
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         transport = HistoryTransport()
         entered = asyncio.Event()
 
@@ -1051,8 +1054,8 @@ def test_discovery_window_survives_live_checkpoint(tmp_path, monkeypatch, failur
             await asyncio.wait_for(entered.wait(), 1)
             if failure == "error":
                 await catchup_done(instance, transport)
-            assert instance._inbox.discovery()[0] == now - 70
-            instance._inbox.checkpoint(now)
+            assert (await instance._inbox.discovery())[0] == now - 70
+            await instance._inbox.checkpoint(now)
         finally:
             await instance.stop()
         resumed_transport = HistoryTransport()
@@ -1065,8 +1068,8 @@ def test_discovery_window_survives_live_checkpoint(tmp_path, monkeypatch, failur
             assert resumed_transport.list_calls[0]["start"] == now - 70
             (message,) = bus.journal.undelivered()
             assert message.payload["channel_context"]["message_id"] == "om_discovered"
-            assert resumed._inbox.discovery() is None
-            assert resumed._inbox.debts() == {}
+            assert (await resumed._inbox.discovery()) is None
+            assert (await resumed._inbox.debts()) == {}
         finally:
             await resumed.stop()
             await bus.shutdown()
@@ -1080,10 +1083,10 @@ def test_partly_expired_chat_debt_keeps_recent_portion(tmp_path, monkeypatch, ca
     async def run():
         now = time.time()
         monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
-        seed_boundary(tmp_path, now - 10)
-        inbox = LarkInbox(tmp_path / ".local/lark/channel-lark/inbox.sqlite3")
-        inbox.defer("oc_synthetic_group", now - 1000, now - 60)
-        inbox.close()
+        await seed_boundary(tmp_path, now - 10)
+        inbox = await LarkInbox.open(tmp_path / ".local/lark/channel-lark/inbox.sqlite3")
+        await inbox.defer("oc_synthetic_group", now - 1000, now - 60)
+        await inbox.close()
         transport = HistoryTransport()
         transport.pages["oc_synthetic_group"] = [{
             "chat_type": "group", "messages": [history_message("om_debt", at=now - 800)], "has_more": False}]
@@ -1098,7 +1101,7 @@ def test_partly_expired_chat_debt_keeps_recent_portion(tmp_path, monkeypatch, ca
             assert message.payload["channel_context"]["message_id"] == "om_debt"
             assert "debt_windows_dropped=1" in caplog.text
             assert "skipped_seconds=100" in caplog.text
-            assert instance._inbox.debts() == {}
+            assert (await instance._inbox.debts()) == {}
         finally:
             await instance.stop()
             await bus.shutdown()
@@ -1113,10 +1116,10 @@ def test_owed_chat_is_retried_before_new_discovery_at_chat_limit(tmp_path, monke
 
     async def run():
         now = time.time()
-        seed_boundary(tmp_path, now - 10)
-        inbox = LarkInbox(tmp_path / ".local/lark/channel-lark/inbox.sqlite3")
-        inbox.defer("oc_owed", now - 100, now - 60)
-        inbox.close()
+        await seed_boundary(tmp_path, now - 10)
+        inbox = await LarkInbox.open(tmp_path / ".local/lark/channel-lark/inbox.sqlite3")
+        await inbox.defer("oc_owed", now - 100, now - 60)
+        await inbox.close()
         transport = HistoryTransport()
         transport.pages["oc_owed"] = [{"chat_type": "group", "messages": [
             history_message("om_owed", at=now - 80)], "has_more": False}]
@@ -1128,7 +1131,7 @@ def test_owed_chat_is_retried_before_new_discovery_at_chat_limit(tmp_path, monke
             assert [call["chat_id"] for call in transport.list_calls] == ["oc_owed"]
             (message,) = bus.journal.undelivered()
             assert message.payload["channel_context"]["message_id"] == "om_owed"
-            assert set(instance._inbox.debts()) == {"oc_synthetic_group"}
+            assert set((await instance._inbox.debts())) == {"oc_synthetic_group"}
         finally:
             await instance.stop()
             await bus.shutdown()
@@ -1142,7 +1145,7 @@ def test_thread_discovery_bounds_busy_chats_by_age_and_listing_budget(
 ):
     async def run():
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         transport = HistoryTransport()
         transport.pages["oc_synthetic_group"] = [{"messages": [], "chat_type": "group", "has_more": False}]
         root_calls, thread_calls = [], []
@@ -1188,7 +1191,7 @@ def test_thread_discovery_bounds_busy_chats_by_age_and_listing_budget(
             assert len(thread_calls) == count and len(set(thread_calls)) == count
             assert peak == 4
             assert len(bus.journal.undelivered()) == count
-            assert instance._inbox.debts() == {}
+            assert (await instance._inbox.debts()) == {}
             assert root_calls == ([0] if recent_roots == 30 else [0, 50, 100, 150, 200])
             summary = next(r.message for r in caplog.records if r.message.startswith("lark_catchup "))
             assert f"threads_scanned={count}" in summary
@@ -1208,7 +1211,7 @@ def test_thread_listing_failure_keeps_read_replies_and_completes_chat(
 ):
     async def run():
         now = time.time()
-        seed_boundary(tmp_path, now - 60)
+        await seed_boundary(tmp_path, now - 60)
         transport = HistoryTransport()
         transport.pages["oc_synthetic_group"] = [{"messages": [], "chat_type": "group", "has_more": False}]
 
@@ -1233,7 +1236,7 @@ def test_thread_listing_failure_keeps_read_replies_and_completes_chat(
             ids = [m.payload["channel_context"]["message_id"] for m in bus.journal.undelivered()]
             assert "om_synthetic_first" in ids
             assert len(ids) == (5 if failure == "page_limit" else 1)
-            assert instance._inbox.debts() == {}
+            assert (await instance._inbox.debts()) == {}
             summary = next(r.message for r in caplog.records if r.message.startswith("lark_catchup "))
             assert "thread_failures=1" in summary and " failures=0" in summary
             assert any("thread=omt_synthetic_partial" in r.message for r in caplog.records if r.levelname == "WARNING")
@@ -1306,18 +1309,18 @@ def test_recent_thread_activity_survives_restart_and_recovers_old_thread_once(
                                            "Synthetic reply", reply_to=(
                                                None if activity.startswith("sent_chat") else "om_synthetic_old_root"))
                 assert receipt.success
-            assert first._inbox.recent_threads("oc_synthetic_group", clock[0]) == ["omt_synthetic_active"]
+            assert (await first._inbox.recent_threads("oc_synthetic_group", clock[0])) == ["omt_synthetic_active"]
         finally:
             await first.stop()
         clock[0] += 3 * 86400
-        seed_boundary(tmp_path, clock[0] - 60)
+        await seed_boundary(tmp_path, clock[0] - 60)
         for _ in range(2):
             current_transport = transport()
             current = adapter(tmp_path, current_transport)
             try:
                 await current.start(bus)
                 await catchup_done(current, current_transport)
-                assert current._inbox.debts() == {}
+                assert (await current._inbox.debts()) == {}
             finally:
                 await current.stop()
         try:
@@ -1331,27 +1334,30 @@ def test_recent_thread_activity_survives_restart_and_recovers_old_thread_once(
 
 
 def test_thread_activity_is_durable_scoped_recent_and_bounded(tmp_path, monkeypatch):
-    from looper.agents.channels.lark_inbox import LarkInbox
+    async def run():
+        from looper.agents.channels.lark_inbox import LarkInbox
 
-    monkeypatch.setattr("looper.agents.channels.lark_inbox.THREADS_KEPT", 2)
-    path, now = tmp_path / "inbox.sqlite3", time.time()
-    inbox = LarkInbox(path)
-    try:
-        inbox.remember_thread("chat-a", "expired", now - 8 * 86400)
-        assert inbox.recent_threads("chat-a", now) == []
-        inbox.remember_thread("chat-a", "active", now - 3 * 86400)
-        inbox.remember_thread("chat-b", "other", now - 2 * 86400)
-        inbox.remember_thread("chat-a", "active", now)  # refreshing does not consume another slot
-        inbox.remember_thread("chat-a", "new", now + 1)
-    finally:
-        inbox.close()
-    reopened = LarkInbox(path)
-    try:
-        assert reopened.recent_threads("chat-a", now + 1) == ["new", "active"]
-        assert reopened.recent_threads("chat-b", now + 1) == []
-        assert reopened.recent_threads("chat-a", now + 8 * 86400) == []
-    finally:
-        reopened.close()
+        monkeypatch.setattr("looper.agents.channels.lark_inbox.THREADS_KEPT", 2)
+        path, now = tmp_path / "inbox.sqlite3", time.time()
+        inbox = await LarkInbox.open(path)
+        try:
+            await inbox.remember_thread("chat-a", "expired", now - 8 * 86400)
+            assert (await inbox.recent_threads("chat-a", now)) == []
+            await inbox.remember_thread("chat-a", "active", now - 3 * 86400)
+            await inbox.remember_thread("chat-b", "other", now - 2 * 86400)
+            await inbox.remember_thread("chat-a", "active", now)  # refreshing does not consume another slot
+            await inbox.remember_thread("chat-a", "new", now + 1)
+        finally:
+            await inbox.close()
+        reopened = await LarkInbox.open(path)
+        try:
+            assert (await reopened.recent_threads("chat-a", now + 1)) == ["new", "active"]
+            assert (await reopened.recent_threads("chat-b", now + 1)) == []
+            assert (await reopened.recent_threads("chat-a", now + 8 * 86400)) == []
+        finally:
+            await reopened.close()
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("failure", ["metadata_read", "store"])
@@ -1369,7 +1375,7 @@ def test_sent_thread_bookkeeping_failure_does_not_retry_successful_send(monkeypa
                 return {"data": {"message_id": "message-synthetic", **metadata}}
             raise lark_cli.LarkCliError("synthetic metadata read failure")
 
-        def remember(*args):
+        async def remember(*args):
             raise RuntimeError("synthetic store failure")
 
         monkeypatch.setattr(lark_cli, "run_json", run_json)

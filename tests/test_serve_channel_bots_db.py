@@ -554,9 +554,9 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             if first_fails and adapter.channel_id == f"channel-{channel_type}":
                 raise RuntimeError("synthetic startup failure")
             if channel_type == "telegram":
-                inbox = TelegramInbox(tmp_path / ".local" / "telegram" / adapter.channel_id / "111.sqlite3")
-                inbox.polling_stopped(stopped_at)
-                inbox.close()
+                inbox = await TelegramInbox.open(tmp_path / ".local" / "telegram" / adapter.channel_id / "111.sqlite3")
+                await inbox.polling_stopped(stopped_at)
+                await inbox.close()
 
                 async def start_polling(*, drop_pending_updates: bool) -> None:
                     assert drop_pending_updates is False

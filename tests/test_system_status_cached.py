@@ -270,11 +270,14 @@ def test_failed_check_keeps_last_answer_and_recovers_on_next_poll(server, monkey
 def test_periodic_proxy_tick_warms_the_status_cache(server, monkeypatch):
     _, owner = server
     owner.gateway_enabled = True
+    start = AsyncMock(side_effect=AssertionError('healthy proxy must not restart'))
+    monkeypatch.setattr(owner, '_start', start)
     state = {'pid': 1234, 'instance': 'synthetic', 'start_time': 'synthetic', 'port': 12345}
     monkeypatch.setattr(owner, '_state', lambda: state)
     running = AsyncMock(return_value=True)
     monkeypatch.setattr(owner, '_running', running)
-    monkeypatch.setattr(control, 'code_sha256', lambda: 'synthetic-code')
+    # Earlier health checks may already have populated the process-wide fingerprint.
+    monkeypatch.setattr(control, '_code_hash', 'synthetic-code')
     client = httpx.AsyncClient
     requests = []
     def health(request):
@@ -289,4 +292,5 @@ def test_periodic_proxy_tick_warms_the_status_cache(server, monkeypatch):
         assert status['proxy']['recorded'] == 7
         assert len(requests) == 1
         running.assert_awaited_once()
+        start.assert_not_awaited()
     asyncio.run(run())

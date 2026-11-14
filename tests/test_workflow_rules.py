@@ -391,7 +391,9 @@ def test_exhaustion_gate_cannot_be_cancelled_by_parallel_result(
 
     async def scenario(h):
         await h.start()
-        await h.until(lambda: bool(agent_db.store.gates.get("t1")))
+        # The replan saves a pending gate before dispatch opens it.
+        await h.until(lambda: any(g["state"] == ("pending" if pending else "open")
+                                  for g in agent_db.store.gates.get("t1", {}).values()))
         saved = next(iter(agent_db.store.gates["t1"].values()))
         assert saved["state"] == ("pending" if pending else "open")
         await h.release(WORK_OK)
