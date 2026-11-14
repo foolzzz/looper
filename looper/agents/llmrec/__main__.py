@@ -18,7 +18,7 @@ import time
 
 # Import the complete recorder before serving: an in-place upgrade must not mix versions.
 from . import capture as capture, control, dialects, gateway, proxy, translate, translate_stream, writer  # noqa: F401
-from . import LOCK_FILE, LOG_FILE, ROUTE_FORMAT, STATE_FILE, code_sha256
+from . import LOCK_FILE, LOG_FILE, OWNER_FILE, OwnerMode, ROUTE_FORMAT, STATE_FILE, code_sha256, process_alive
 from .. import proc_tree
 from ..keeper import read_json, write_json
 from ...db import llm_requests as llm_requests, gateway as gateway_db  # noqa: F401
@@ -45,6 +45,30 @@ async def _serve(args, dsn):
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, stopped.set)
+
+    async def watch_owner():
+        parent = os.getppid()
+        owner_seen = False
+        while not stopped.is_set():
+            owner = read_json(root / OWNER_FILE)
+            owner_seen = owner_seen or owner is not None
+            if owner and owner.get("mode") == OwnerMode.HANDOVER:
+                alive = True  # Kept runs pin this endpoint until the next controller adopts it.
+            elif owner and owner.get("mode") == OwnerMode.OWNED:
+                alive = await asyncio.to_thread(process_alive, owner.get("pid"), owner.get("start_time"))
+            else:
+                # Direct CLI boots without an owner file still follow their original parent.
+                alive = not owner_seen and parent != 1 and os.getppid() == parent
+            if not alive:
+                if read_json(root / OWNER_FILE) != owner:
+                    continue  # Adoption or a planned handover won the liveness check.
+                logger.info("request recording owner disappeared; stopping proxy")
+                stopped.set()
+                return
+            try:
+                await asyncio.wait_for(stopped.wait(), 1)
+            except asyncio.TimeoutError:
+                pass
 
     async def connect():
         backoff = 1
@@ -83,12 +107,21 @@ async def _serve(args, dsn):
     connection_task = asyncio.create_task(connect())
     writer_task = asyncio.create_task(sink.run(recover=True))
     watch_task = asyncio.create_task(watch())
+    owner_task = asyncio.create_task(watch_owner())
+
+    def force_exit():
+        logger.error("request recording shutdown timed out; exiting")
+        os._exit(1)
+
     try:
         await stopped.wait()
     finally:
+        # Parent death has no controller left to escalate a stuck stream or database drain.
+        backstop = loop.call_later(5, force_exit)
         connection_task.cancel()
         watch_task.cancel()
-        await asyncio.gather(connection_task, watch_task, return_exceptions=True)
+        owner_task.cancel()
+        await asyncio.gather(connection_task, watch_task, owner_task, return_exceptions=True)
         await server.close(grace_s=30)
         await sink.close(timeout=10)
         writer_task.cancel()
@@ -96,6 +129,7 @@ async def _serve(args, dsn):
         if sink.pool is not None:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(sink.pool.close(), 5)
+        backstop.cancel()
 
 
 def main(argv=None):

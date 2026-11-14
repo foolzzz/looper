@@ -153,6 +153,40 @@ def test_lost_lock_before_http_still_exits_if_agent_cleanup_fails(monkeypatch):
     asyncio.run(run())
 
 
+def test_lost_lock_stops_recording_child_even_when_agent_cleanup_fails(monkeypatch, tmp_path):
+    import sys
+    from looper.agents import proc_tree
+    from looper.agents.llmrec.control import ProxyControl
+    from looper.db import connection
+
+    async def run():
+        monkeypatch.setattr(proc_tree, "_spawns_fenced", False)
+        monkeypatch.setattr(connection, "fence", lambda: None)
+        async def end_owned(*, deadline):
+            raise OSError("agent cleanup failed")
+        monkeypatch.setattr(proc_tree, "end_owned", end_owned)
+        owner = ProxyControl(tmp_path, "", enabled=True)
+        child = await asyncio.create_subprocess_exec(sys.executable, "-c",
+            "import signal; print('ready', flush=True); signal.pause()", stdout=asyncio.subprocess.PIPE)
+        owner._children[child.pid] = child
+        exits = []
+        fence = serve.Fence(recording_proxy=owner, exit_now=exits.append)
+        try:
+            assert await asyncio.wait_for(child.stdout.readline(), 5) == b"ready\n"
+            fence.lost("lost during recording")
+            with pytest.raises(OSError, match="agent cleanup failed"):
+                await fence._ending
+            assert child.returncode == -signal.SIGTERM
+            assert exits == [75]
+        finally:
+            if fence._backstop is not None:
+                fence._backstop.cancel()
+            if child.returncode is None:
+                child.kill()
+            await child.wait()
+    asyncio.run(asyncio.wait_for(run(), 10))
+
+
 def test_startup_failure_closes_the_pool_before_releasing_the_lease(monkeypatch, tmp_path):
     from unittest.mock import AsyncMock
     from looper import db

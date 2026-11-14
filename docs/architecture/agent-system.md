@@ -3813,7 +3813,8 @@ before a settings change keep their existing route.
 - **Proxy and trust.** `serve` starts an independent process bound to
   `127.0.0.1`. Private route files and process identity live under the runtime
   root's `.local/llmrec`; the log is `logs/llmrec-proxy.log`. The process can
-  survive a control-plane restart and is adopted or replaced when safe;
+  survive a planned kept-run handover and is adopted or replaced when safe;
+  otherwise it stops with `serve` (5 s grace, then forced exit), including when its owner disappears.
   `serve` checks its health every five seconds. Forwarding does not wait for
   database writes: a bounded asynchronous sink retries writes and reports
   dropped requests or write errors in proxy status. Complete recordings and

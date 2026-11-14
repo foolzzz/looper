@@ -19,10 +19,10 @@ import httpx
 
 import looper
 from looper import child_env
-from . import (LOG_FILE, PROXY_ENV, TLS_ENV, ROUTES_DIR, ROUTE_FORMAT, ROUTE_ID, STATE_FILE, LlmrecRoute, LlmrecSkip,
-               RouteFile, RouteKind, SkipReason, boot_argv, code_sha256)
+from . import (LOG_FILE, OWNER_FILE, OwnerMode, PROXY_ENV, TLS_ENV, ROUTES_DIR, ROUTE_FORMAT, ROUTE_ID, STATE_FILE, LlmrecRoute, LlmrecSkip,
+               RouteFile, RouteKind, SkipReason, boot_argv, code_sha256, process_alive)
 from .. import proc_tree
-from ..keeper import read_json
+from ..keeper import read_json, write_json
 
 logger = logging.getLogger(__name__)
 _control: ProxyControl | None = None
@@ -101,9 +101,57 @@ class ProxyControl:
         self._start_lock = asyncio.Lock()
         self._start_attempted = False
         self._children: dict[int, asyncio.subprocess.Process] = {}
+        self._owner = None
+        self._closed = False
         self._resident: dict[str, RouteFile] = {}
         # Queued turns belong to this controller; keep old proxies' route files compatible.
         self._pending_record_ids: dict[str, int] = {}
+
+    async def _claim_owner(self) -> None:
+        if self._owner is None:
+            started = await asyncio.to_thread(proc_tree._start_time, os.getpid())
+            if not started:
+                raise RuntimeError("cannot identify request recording owner")
+            self._owner = {"mode": OwnerMode.OWNED, "pid": os.getpid(), "start_time": started,
+                           "token": secrets.token_urlsafe(16)}
+        path = self.runtime_root / OWNER_FILE
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        write_json(path, self._owner)
+
+    async def close(self, *, handover=False, grace_s=5) -> None:
+        """Stop owned proxies, or explicitly leave their endpoint for a planned upgrade."""
+        async with self._start_lock:
+            if self._closed:
+                return
+            owner = read_json(self.runtime_root / OWNER_FILE)
+            if owner and (not self._owner or owner.get("token") != self._owner["token"]):
+                return  # A replacement controller has already adopted the endpoint.
+            if handover and self._owner:
+                write_json(self.runtime_root / OWNER_FILE, {**self._owner, "mode": OwnerMode.HANDOVER})
+                logger.info("request recording proxy left running for planned handover")
+                return
+            state = self._state()
+            if state and self._owner:
+                await self._stop(state, grace_s=grace_s)
+            # A startup failure may leave a child that has not published proxy.json.
+            for pid, child in list(self._children.items()):
+                if child.returncode is None:
+                    try:
+                        child.terminate()
+                    except ProcessLookupError:
+                        pass
+                try:
+                    await asyncio.wait_for(child.wait(), grace_s)
+                    logger.info("request recording proxy stopped pid=%s", pid)
+                except asyncio.TimeoutError:
+                    try:
+                        child.kill()
+                    except ProcessLookupError:
+                        pass
+                    await asyncio.wait_for(child.wait(), 5)
+                    logger.warning("request recording proxy killed after shutdown timeout pid=%s", pid)
+                self._children.pop(pid, None)
+            self._closed = True
 
     def _state(self) -> dict | None:
         state = read_json(self.runtime_root / STATE_FILE)
@@ -115,7 +163,10 @@ class ProxyControl:
         return state
 
     async def _running(self, state) -> bool:
-        return bool(state and await asyncio.to_thread(proc_tree._start_time, state["pid"]) == state["start_time"])
+        child = self._children.get(state["pid"]) if state else None
+        if child is not None and child.returncode is not None:
+            return False
+        return bool(state and await asyncio.to_thread(process_alive, state["pid"], state["start_time"]))
 
     async def _health(self, *, cached=False) -> dict | None:
         if cached and time.monotonic() - self._health_at < 5:
@@ -175,16 +226,19 @@ class ProxyControl:
                 if await self._owns_process(state):
                     try:
                         os.kill(state["pid"], signal.SIGKILL)
+                        logger.warning("request recording proxy killed after shutdown timeout pid=%s", state["pid"])
                     except ProcessLookupError:
                         pass
                 deadline = time.monotonic() + 5
                 while await self._running(state) and time.monotonic() < deadline:
                     await asyncio.sleep(0.05)
                 if await self._running(state):
+                    logger.error("request recording proxy did not stop pid=%s", state["pid"])
                     raise TimeoutError("request recording proxy did not stop")
+            logger.info("request recording proxy stopped pid=%s", state["pid"])
         child = self._children.pop(state["pid"], None)
         if child is not None:
-            await child.wait()
+            await asyncio.wait_for(child.wait(), 5)
         current = self._state()
         if not preserve_state and (current is None or all(
                 current[key] == state[key] for key in ("instance", "pid", "start_time"))):
@@ -196,6 +250,9 @@ class ProxyControl:
 
     async def _start(self, *, port=None) -> bool:
         async with self._start_lock:
+            if self._closed:
+                return False
+            await self._claim_owner()
             if port is None and self.gateway_enabled:
                 port = self.gateway_port
             if await self._health():
@@ -253,6 +310,7 @@ class ProxyControl:
         from looper.db import system_settings
         from .gateway import GatewayConfig, GatewayKey
 
+        await self._claim_owner()
         values = await system_settings.get_settings(["gateway.enabled", "gateway.port"])
         self.gateway_enabled = values.get("gateway.enabled") == "true"
         self.gateway_port = int(values["gateway.port"]) if values.get("gateway.port") else None

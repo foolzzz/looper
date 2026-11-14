@@ -31,7 +31,10 @@ from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .llmrec.control import ProxyControl
 
 from .. import ops_config
 from ..ops_config import KeeperMode, OpsConfig
@@ -480,6 +483,7 @@ class Fence:
 
     http_server: AgentHTTPServer | None = None
     worker_pool: WorkerPool | None = None
+    recording_proxy: ProxyControl | None = None
     exit_now: Callable[[int], Any] = os._exit
     _lost: bool = False
     _backstop: asyncio.TimerHandle | None = None
@@ -504,7 +508,13 @@ class Fence:
 
         async def end_owned() -> None:
             try:
-                await proc_tree.end_owned(deadline=10)
+                cleanups = [proc_tree.end_owned(deadline=10)]
+                if self.recording_proxy is not None:
+                    cleanups.append(self.recording_proxy.close())
+                results = await asyncio.gather(*cleanups, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, BaseException):
+                        raise result
             finally:
                 self.exit(EXIT_LOCK_LOST)
 
@@ -650,6 +660,8 @@ async def _run_agent_system_watched(
     lease = None
     advisory_checks: asyncio.Task[None] | None = None
     http_server: AgentHTTPServer | None = None
+    control = None
+    mode = ShutdownMode.END_RUNS
     if ops.keeper_mode is KeeperMode.ON:
         with startup.measure("lease"):
             try:
@@ -727,6 +739,7 @@ async def _run_agent_system_watched(
                 values = await system_settings.get_settings(["llmrec.enabled", "llmrec.include_oauth"], pool=pool)
                 control = ProxyControl(runtime_root, dsn, enabled=values.get("llmrec.enabled", "true") == "true",
                                        include_oauth=values.get("llmrec.include_oauth") == "true")
+                fence.recording_proxy = control
                 install(control)
                 await control.at_start(scan.record_ids)
             except Exception:
@@ -951,7 +964,6 @@ async def _run_agent_system_watched(
         # Wait for shutdown signal
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
-        mode = ShutdownMode.END_RUNS
 
         def prepare_stop(sig: int) -> None:
             nonlocal mode
@@ -993,6 +1005,8 @@ async def _run_agent_system_watched(
                 await advisory_checks
             if mode is ShutdownMode.DETACH_KEPT:
                 await worker_pool.detach_kept(epoch=lease.epoch)
+                if control is not None:
+                    await control.close(handover=True)
             logger.info("shutting down agent system...")
             await consults.stop()
             await gate_reminders.stop()
@@ -1007,6 +1021,8 @@ async def _run_agent_system_watched(
                 await runner_supervisor.stop()
             await registry.stop_all()
             await bus.shutdown()
+            if control is not None:
+                await control.close(handover=mode is ShutdownMode.DETACH_KEPT)
             await close_pool()
             if lease is not None:
                 await lease.release()
@@ -1018,6 +1034,11 @@ async def _run_agent_system_watched(
         from .llmrec.control import install
 
         install(None)
+        if control is not None:
+            try:
+                await control.close(handover=mode is ShutdownMode.DETACH_KEPT)
+            except Exception:
+                logger.warning("request recording proxy shutdown failed", exc_info=True)
         if advisory_checks is not None:
             advisory_checks.cancel()
             with contextlib.suppress(asyncio.CancelledError):

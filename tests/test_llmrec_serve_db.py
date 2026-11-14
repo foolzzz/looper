@@ -1,4 +1,4 @@
-"""The detached recording proxy survives serve and recovers through its real five-second tick."""
+"""The recording proxy stops with serve and recovers through its real five-second tick."""
 
 import asyncio
 import http.client
@@ -109,7 +109,7 @@ def test_serve_proxy_switch_restart_recovery_and_shutdown(short_root, cli_entry)
     with fresh_database(str(DSN)) as (url, _):
         require_disposable_database(url, served=True)
         server = {'database_url': url, 'runtime_root': runtime, 'bin_dir': bin_dir, 'home': home,
-            'notes_root': home / 'notes', 'keeper_mode': 'on', 'startup_timeout': 60, 'env': environment}
+            'notes_root': home / 'notes', 'keeper_mode': 'on', 'startup_timeout': 120, 'env': environment}
         identities = []
         try:
             with running_server(**server, log_path=tmp_path / 'first.log') as api:
@@ -119,23 +119,25 @@ def test_serve_proxy_switch_restart_recovery_and_shutdown(short_root, cli_entry)
                 first = _until(lambda: (value := _state(state_path)) and _health(value) and value, timeout=20)
                 identities.append(first)
                 assert first['pid'] != os.getpid()
-            assert _health(first), 'serve shutdown stopped the independently running proxy'
+            _until(lambda: proc_tree._start_time(first['pid']) != first['start_time'])
+            assert not _health(first)
 
             with running_server(**server, log_path=tmp_path / 'second.log') as api:
                 reused = _until(lambda: (value := _state(state_path)) and _health(value) and value)
-                assert reused['pid'] == first['pid'] and reused['instance'] == first['instance']
+                assert reused['pid'] != first['pid'] and reused['instance'] != first['instance']
                 assert proc_tree._start_time(reused['pid']) == reused['start_time']
                 os.kill(reused['pid'], signal.SIGKILL)
                 # The real serve loop checks every five seconds; allow startup and shared-host scheduling.
                 recovered = _until(lambda: (value := _state(state_path)) and value['pid'] != reused['pid']
-                                   and _health(value) and value)
+                                   and _health(value) and value, timeout=30)
                 identities.append(recovered)
-                assert recovered['port'] == first['port']
+                assert recovered['port'] == reused['port']
                 assert recovered['instance'] != first['instance']
                 settings = api.post('/api/v1/llmrec_settings/update', {'enabled': False})['result']
                 assert not settings['enabled']
                 assert _health(recovered), 'disabling recording cut the proxy serving existing routes'
-            assert _health(recovered)
+            _until(lambda: proc_tree._start_time(recovered['pid']) != recovered['start_time'])
+            assert not _health(recovered)
 
             with running_server(**server, log_path=tmp_path / 'third.log') as api:
                 settings = api.post('/api/v1/llmrec_settings/get', {})['result']
@@ -152,3 +154,43 @@ def test_serve_proxy_switch_restart_recovery_and_shutdown(short_root, cli_entry)
                     if await owner._running(state):
                         await owner._stop(state)
             asyncio.run(cleanup())
+
+
+def test_startup_failure_after_proxy_boot_stops_proxy(short_root, cli_entry, monkeypatch):
+    from evals.prompt_regression import runner
+
+    root = short_root
+    runtime, home, bin_dir = (root / name for name in ('runtime', 'home', 'bin'))
+    home.mkdir()
+    _install_stubs(bin_dir)
+    # Exit in the real startup scope after llmrec has published a healthy endpoint.
+    monkeypatch.setattr(runner, '_SERVE', '''
+from looper.agents.llmrec.control import ProxyControl
+from looper.agents.keeper import write_json
+import asyncio
+at_start = ProxyControl.at_start
+async def fail_after_boot(self, kept):
+    await at_start(self, kept)
+    deadline = asyncio.get_running_loop().time() + 30
+    while not await self._health():
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(.05)
+    write_json(self.runtime_root / 'proxy-before-failure.json', self._state())
+    raise SystemExit(23)
+ProxyControl.at_start = fail_after_boot
+''' + runner._SERVE)
+    with fresh_database(str(DSN)) as (url, _):
+        require_disposable_database(url, served=True)
+        with pytest.raises(runner.EvalError, match='server exited'):
+            with running_server(database_url=url, runtime_root=runtime, home=home, bin_dir=bin_dir,
+                                notes_root=home / 'notes', keeper_mode='on',
+                                log_path=root / 'startup-failure.log', startup_timeout=120,
+                                env={'CLAUDE_CONFIG_DIR': str(home / '.claude'), 'CODEX_HOME': str(home / '.codex'),
+                                     'GROK_HOME': str(home / '.grok'), 'CURSOR_CONFIG_DIR': str(home / '.cursor-config'),
+                                     'CURSOR_DATA_DIR': str(home / '.cursor-data'), 'LOOPER_TELEGRAM_BOT_TOKEN': ''}):
+                pytest.fail('startup failure must prevent serving')
+        state = _state(runtime / 'proxy-before-failure.json')
+        assert state is not None, 'failure must occur after the proxy starts'
+        _until(lambda: proc_tree._start_time(state['pid']) != state['start_time'])
+        assert not _health(state)
+        assert not (runtime / STATE_FILE).exists()
