@@ -140,6 +140,35 @@ def _header_pairs(headers):
             value if isinstance(value, bytes) else value.encode('latin-1'))
 
 
+def check_route_token(headers, token: str) -> bool:
+    if not token:
+        return False
+    expected = token.encode()
+    return any(name == 'authorization' and value[:7].lower() == b'bearer '
+               and hmac.compare_digest(value[7:], expected) for name, value in _header_pairs(headers))
+
+
+async def route_api_key(route, sink) -> str:
+    from looper.db import gateway
+
+    try:
+        async with asyncio.timeout(3):
+            # Recording can listen before its database connects. Translation needs registry credentials.
+            if getattr(sink, 'pool', None) is None:
+                ready = getattr(sink, 'pool_ready', None)
+                if ready is None:
+                    raise Unavailable()
+                await ready.wait()
+            pool = sink.pool
+            target = await gateway.resolve_route(route.provider_id, pool=pool)
+    except Exception as error:
+        raise Unavailable() from error
+    if (target is None or not target['enabled'] or target['auth'] != 'api_key' or not target['api_key']
+            or target['base_url'] != route.upstream):
+        raise Rejection(403, 'permission_error', 'Route provider credentials unavailable or endpoint changed')
+    return target['api_key']
+
+
 def request_guard(headers, port) -> Rejection | None:
     fields = list(_header_pairs(headers))
     if any(name == 'origin' for name, _ in fields):

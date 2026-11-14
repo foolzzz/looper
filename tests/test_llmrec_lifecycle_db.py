@@ -127,6 +127,8 @@ def test_kept_outdated_proxy_replaced_with_gateway_disabled(tmp_path, monkeypatc
             path = tmp_path / ROUTES_DIR / f"{route.id}.json"
             route.write(path)
             payload = {**asdict(route), "format": route_format}
+            # Local route tokens were introduced in format 5.
+            payload.pop("local_token")
             if route_format == 3:
                 # v2.14.99 rejects fields introduced with gateway routes.
                 for field in ("kind", "record", "api", "dialect", "models"):
@@ -173,7 +175,9 @@ def test_kept_outdated_proxy_replaced_with_gateway_disabled(tmp_path, monkeypatc
             if replacement == "tick":
                 await adopted.tick()
             else:
-                assert await adopted._start()
+                assert await adopted._start(startup_timeout_s=15)
+            # A tick uses the recorder's best-effort startup budget; replacement may finish later.
+            await wait_for(adopted._health)
             current = adopted._state()
             assert current["pid"] != initial["pid"] and current["instance"] != initial["instance"]
             assert current["port"] == initial["port"]

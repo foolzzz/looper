@@ -187,13 +187,19 @@ def test_lost_lock_stops_recording_child_even_when_agent_cleanup_fails(monkeypat
     asyncio.run(asyncio.wait_for(run(), 10))
 
 
-def test_startup_failure_closes_the_pool_before_releasing_the_lease(monkeypatch, tmp_path):
+def test_startup_failure_closes_the_pool_before_releasing_the_lease(monkeypatch, tmp_path, caplog):
     from unittest.mock import AsyncMock
     from looper import db
     from looper.ops_config import KeeperMode, OpsConfig
     from looper.agents import operator_notes
 
     async def run():
+        settings_dir = tmp_path / '.local/prompts/claude-settings'
+        settings_dir.mkdir(parents=True)
+        for name in ('stale.json', '.settings-interrupted'):
+            (settings_dir / name).write_text('obsolete credential')
+        unrelated = tmp_path / '.local/prompts/keep.md'
+        unrelated.write_text('keep')
         events = []
         async def closed():
             events.append("pool closed")
@@ -211,6 +217,10 @@ def test_startup_failure_closes_the_pool_before_releasing_the_lease(monkeypatch,
         with pytest.raises(OSError, match="startup failed"):
             await serve._run_agent_system_owned(ops=ops, runtime_root=tmp_path, work_dir=tmp_path)
         assert events == ["pool closed", "lease released"]
+        assert not list(settings_dir.iterdir())
+        assert unrelated.read_text() == 'keep'
+        assert 'Removed 2 private Claude settings files' in caplog.text
+    caplog.set_level("INFO")
     asyncio.run(run())
 
 

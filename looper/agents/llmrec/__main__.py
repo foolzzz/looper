@@ -1,4 +1,4 @@
-"""Detached request recording process. Its database connection never gates forwarding."""
+"""Detached request recording proxy and translation gateway."""
 
 from __future__ import annotations
 
@@ -87,6 +87,7 @@ async def _serve(args, dsn):
         while not stopped.is_set():
             try:
                 sink.pool = await init_pool(dsn, min_size=1, max_size=2)
+                sink.pool_ready.set()
                 return
             except asyncio.CancelledError:
                 raise

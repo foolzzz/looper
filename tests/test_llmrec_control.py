@@ -343,6 +343,8 @@ def test_translation_route_exists_even_when_recording_is_off(tmp_path, monkeypat
     monkeypatch.setattr(owner, '_state', lambda: {'port': 12345})
     attached = asyncio.run(owner.attach(launch, agent_id='manager-test', task_id=None, reuse=True))
     route = RouteFile.read(tmp_path / ROUTES_DIR / f'{attached.llmrec.id}.json')
+    assert route.local_token and route.local_token == attached.llmrec.local_token
+    assert 'synthetic-key' not in (tmp_path / ROUTES_DIR / f'{route.id}.json').read_text()
     assert route.kind == RouteKind.TRANSLATE
     assert route.record is enabled
     assert route.models == {'chat-main': 'chat-main', 'chat-small': 'chat-small'}
@@ -377,7 +379,35 @@ def test_translation_failure_is_fail_closed_and_never_recording_bypass(tmp_path,
         summary='This run cannot start: the local gateway is unavailable.')
 
 
-@pytest.mark.parametrize('features,format', [({}, 4), ({'translate': 0}, 4), ({'translate': 1}, 3)])
+def test_translated_launch_waits_for_cold_proxy_startup(tmp_path, monkeypatch, translated_launch):  # noqa: F811
+    from looper.agents.llmrec import LlmrecRoute
+
+    boot = control.boot_argv
+
+    def delayed_boot(*args):
+        argv = boot(*args)
+        index = argv.index('-c') + 1
+        argv[index] = 'import time; time.sleep(3.2); ' + argv[index]
+        return argv
+
+    monkeypatch.setattr(control, 'boot_argv', delayed_boot)
+
+    async def body():
+        owner = control.ProxyControl(tmp_path, 'postgresql://127.0.0.1:1/disposable', enabled=False)
+        try:
+            launch = await owner.attach(translated_launch, agent_id='worker-test', task_id=None)
+            assert isinstance(launch.llmrec, LlmrecRoute)
+            assert launch.environment()['ANTHROPIC_AUTH_TOKEN'] == launch.llmrec.local_token
+        finally:
+            for child in list(owner._children.values()):
+                if child.returncode is None:
+                    child.terminate()
+                await asyncio.wait_for(child.wait(), 5)
+
+    asyncio.run(asyncio.wait_for(body(), 20))
+
+
+@pytest.mark.parametrize('features,format', [({}, 5), ({'translate': 0}, 5), ({'translate': 1}, 4)])
 def test_translation_refuses_outdated_proxy(tmp_path, monkeypatch, features, format, translated_launch):
 
     owner = control.ProxyControl(tmp_path, '', enabled=False)
@@ -413,6 +443,7 @@ def test_translated_resident_route_changes_with_effective_model(tmp_path, monkey
     changed = replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, resolved_model=resolved)))
     second = asyncio.run(owner.attach(changed, agent_id='manager-test', task_id=None, reuse=True))
     assert second.llmrec.id != first.llmrec.id
+    assert second.llmrec.local_token != first.llmrec.local_token
     assert second.binding_sha256 != first.binding_sha256
     assert RouteFile.read(tmp_path / ROUTES_DIR / f'{first.llmrec.id}.json').ended_at
 
@@ -491,6 +522,77 @@ def test_translation_routes_context_suffixed_main_and_background_models(tmp_path
         request = to_chat({'model': name, 'messages': [{'role': 'user', 'content': 'hello'}]},
                           DIALECTS[ChatDialect.GENERIC], route.models, session_id=None)
         assert json.loads(request.body)['model'] == name
+
+
+@pytest.mark.parametrize('available', [True, False])
+def test_first_translated_request_waits_for_registry_connection(tmp_path, monkeypatch, available):
+    from types import SimpleNamespace
+    from looper.agents.llmrec import __main__ as process, ROUTES_DIR
+    from tests.fake_model_api import FakeModelAPI, ResponseScript
+
+    async def body():
+        connecting, connect, requested = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        pool = SimpleNamespace(close=AsyncMock(), fetchrow=AsyncMock())
+
+        async def init_pool(*args, **kwargs):
+            connecting.set()
+            await connect.wait()
+            return pool
+
+        monkeypatch.setattr(process, 'init_pool', init_pool)
+        stop_handlers = {}
+        monkeypatch.setattr(asyncio.get_running_loop(), 'add_signal_handler',
+                            lambda sig, callback: stop_handlers.setdefault(sig, callback))
+        base_proxy = process.proxy.Proxy
+        proxies = []
+
+        class ObservedProxy(base_proxy):
+            async def start(self):
+                port = await super().start()
+                proxies.append(self)
+                return port
+
+            async def _translated(self, *args, **kwargs):
+                requested.set()
+                return await super()._translated(*args, **kwargs)
+
+        monkeypatch.setattr(process.proxy, 'Proxy', ObservedProxy)
+        script = ResponseScript(events=[{'id': 'chat-test', 'choices': [
+            {'delta': {'content': 'ok'}, 'finish_reason': 'stop'}]}, '[DONE]'])
+        async with FakeModelAPI([script]) as upstream:
+            pool.fetchrow.return_value = dict(base_url=upstream.base_url, api_key='test-key',
+                                             enabled=True, auth='api_key')
+            route = RouteFile(id='a' * 22, kind='translate', record=False, local_token='local-token',
+                provider_id='test-provider', upstream=upstream.base_url, api='openai-chat', dialect='generic',
+                models={'client': 'upstream'}, created_at='2026-01-01T00:00:00+00:00', agent_id='test')
+            route.write(tmp_path / ROUTES_DIR / f'{route.id}.json')
+            task = asyncio.create_task(process._serve(SimpleNamespace(
+                runtime_root=tmp_path, port=0, check_interval=60), 'disposable'))
+            try:
+                await connecting.wait()
+                async with httpx.AsyncClient(trust_env=False, timeout=5) as client:
+                    base = f'http://127.0.0.1:{proxies[0].port}'
+                    # Recording health stays available while the registry connects.
+                    assert (await client.get(base + '/llmrec/health')).status_code == 200
+                    request = asyncio.create_task(client.post(base + f'/r/{route.id}/v1/messages',
+                        headers={'authorization': 'Bearer local-token'},
+                        json={'model': 'client', 'messages': [], 'stream': True}))
+                    await requested.wait()
+                    done, _ = await asyncio.wait({request}, timeout=.05)
+                    assert not done, 'translation refused before the registry could finish connecting'
+                    if available:
+                        connect.set()
+                        assert (await request).status_code == 200
+                        assert upstream.requests[0].headers['authorization'] == 'Bearer test-key'
+                    else:
+                        assert (await request).status_code == 503
+                        assert not upstream.requests
+            finally:
+                connect.set()
+                stop_handlers[signal.SIGTERM]()
+                await asyncio.wait_for(task, 3)
+
+    asyncio.run(asyncio.wait_for(body(), 10))
 
 
 def test_proxy_recovers_writer_without_replacing_endpoint(tmp_path, monkeypatch):

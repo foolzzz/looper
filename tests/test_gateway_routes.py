@@ -23,7 +23,7 @@ def read(tmp_path, data):
 def test_record_defaults_and_translate_format():
     from looper.agents.llmrec import RouteKind
 
-    assert ROUTE_FORMAT == 4
+    assert ROUTE_FORMAT == 5
     assert route().kind == RouteKind.RECORD and route().record is True
     attached = LlmrecRoute('a' * 22, 'http://localhost/r/a', 'https://upstream.invalid')
     assert attached.kind is RouteKind.RECORD and attached.record is True
@@ -34,12 +34,13 @@ def test_record_defaults_and_translate_format():
 @pytest.mark.parametrize('record', [False, True])
 def test_translate_route_roundtrip(tmp_path, dialect, record):
     value = replace(route(), kind='translate', record=record, api='openai-chat', dialect=dialect,
-                    models={'client': 'upstream'})
+                    models={'client': 'upstream'}, local_token='local-route-token')
     value.write(tmp_path / 'route.json')
     assert RouteFile.read(tmp_path / 'route.json') == value
 
 
 @pytest.mark.parametrize('changes', [
+    {'local_token': ''}, {'local_token': None}, {'local_token': 1},
     {'kind': 'unknown'}, {'kind': []}, {'record': 1}, {'record': None},
     {'api': None}, {'api': 'openai-responses'}, {'dialect': None}, {'dialect': 'unknown'},
     {'dialect': []}, {'models': None}, {'models': {}}, {'models': []},
@@ -48,7 +49,7 @@ def test_translate_route_roundtrip(tmp_path, dialect, record):
 ])
 def test_translate_route_rejects_invalid_contract(tmp_path, changes):
     data = asdict(route()) | {'kind': 'translate', 'api': 'openai-chat', 'dialect': 'generic',
-                              'models': {'client': 'upstream'}} | changes
+                              'models': {'client': 'upstream'}, 'local_token': 'local-route-token'} | changes
     assert read(tmp_path, data) is None
 
 
@@ -70,3 +71,13 @@ def test_translation_metadata_counts_toward_buffer_size():
 def test_chat_capture_reads_cache_write_tokens(details, expected):
     usage = {'prompt_tokens': 20, 'completion_tokens': 3, 'prompt_tokens_details': details}
     assert tokens('/v1/chat/completions', {'usage': usage})[3] == expected
+
+
+def test_previous_translation_route_is_read_only_for_lifecycle(tmp_path):
+    legacy = replace(route(), format=4, kind='translate', api='openai-chat', dialect='generic',
+                     models={'client': 'upstream'})
+    path = tmp_path / 'route.json'
+    legacy.write(path)
+    assert 'local_token' not in json.loads(path.read_text())
+    assert RouteFile.read(path) is None
+    assert RouteFile.read(path, allow_legacy=True) == legacy

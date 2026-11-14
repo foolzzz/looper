@@ -1,7 +1,7 @@
 """Shared, versioned contract for the independent model recording proxy."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from datetime import datetime
 import hashlib
@@ -14,7 +14,7 @@ import tempfile
 
 from ... import child_env
 
-ROUTE_FORMAT = 4
+ROUTE_FORMAT = 5
 PROXY_ENV = frozenset(('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
                        'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy'))
 TLS_ENV = frozenset(('SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS',
@@ -95,6 +95,7 @@ class LlmrecRoute:
     upstream: str
     kind: RouteKind = RouteKind.RECORD
     record: bool = True
+    local_token: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ class RouteFile:
     upstream: str = ''
     kind: str = 'record'
     record: bool = True
+    local_token: str = field(default="", repr=False)
     api: str | None = None
     dialect: str | None = None
     models: dict[str, str] | None = None
@@ -134,13 +136,15 @@ class RouteFile:
             data = json.loads(Path(path).read_text())
             # Keep lifecycle ownership across upgrades without accepting old routes for new requests.
             if (not isinstance(data, dict)
-                    or data.get('format') not in ((3, ROUTE_FORMAT) if allow_legacy else (ROUTE_FORMAT,))):
+                    or data.get('format') not in ((3, 4, ROUTE_FORMAT) if allow_legacy else (ROUTE_FORMAT,))):
                 return None
             route = cls(**data)
             if route.kind not in (RouteKind.RECORD, RouteKind.TRANSLATE) or not isinstance(route.record, bool):
                 return None
             if route.kind == RouteKind.TRANSLATE:
                 from .dialects import ChatDialect
+                if (route.format == ROUTE_FORMAT and (not isinstance(route.local_token, str) or not route.local_token)):
+                    return None
                 if (route.api != 'openai-chat' or not isinstance(route.dialect, str)
                         or route.dialect not in tuple(ChatDialect)
                         or not isinstance(route.models, dict) or not route.models
@@ -179,6 +183,8 @@ class RouteFile:
 
     def write(self, path):
         data = asdict(self)
+        if self.format < 5:
+            data.pop("local_token")
         if self.format == 3:
             # The v2.14.99 proxy must still be able to read a kept route after bind/release.
             for field in ('kind', 'record', 'api', 'dialect', 'models'):
