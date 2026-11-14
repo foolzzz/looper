@@ -161,9 +161,9 @@ def test_partial_start_releases_resources(
 ) -> None:
     async def run() -> None:
         inbox_path = tmp_path / ".local/telegram/channel-telegram/0.sqlite3"
-        inbox = TelegramInbox(inbox_path)
-        inbox.polling_stopped(100)
-        inbox.close()
+        inbox = await TelegramInbox.open(inbox_path)
+        await inbox.polling_stopped(100)
+        await inbox.close()
         bus = MessageBus(runtime_root=tmp_path)
         registry = ChannelRegistry(bus)
         adapter = TelegramChannelAdapter(
@@ -182,7 +182,7 @@ def test_partial_start_releases_resources(
                 app.running = True
             elif name == "deleteWebhook":
                 app.updater.running = True
-                adapter._inbox.polling_received([])
+                await adapter._inbox.polling_received([])
             elif name == "updater.stop":
                 assert app.updater.running
                 app.updater.running = False
@@ -243,7 +243,7 @@ def test_partial_start_releases_resources(
             assert adapter._app is None and adapter._outbound_task is None and adapter._bus is None
             assert not adapter._requests
             assert not adapter.healthcheck()["healthy"]
-            inbox = TelegramInbox(inbox_path)
+            inbox = await TelegramInbox.open(inbox_path)
             try:
                 # Failed startup must not shorten the offline delivery window.
                 if failure is not None:
@@ -251,7 +251,7 @@ def test_partial_start_releases_resources(
                 else:
                     assert inbox.previous_polling_stopped_at > 100
             finally:
-                inbox.close()
+                await inbox.close()
             assert registry.get(adapter.channel_id) is None
             before = list(events)
             await adapter.stop()

@@ -148,17 +148,17 @@ def test_crash_does_not_reuse_an_older_clean_stop_boundary(tmp_path, caplog):
     async def run():
         path = tmp_path / "inbox.sqlite3"
         stopped_at = int(time.time()) - 2400
-        first = TelegramInbox(path)
-        first.polling_stopped(stopped_at)
-        first.close()
-        second = TelegramInbox(path)
+        first = await TelegramInbox.open(path)
+        await first.polling_stopped(stopped_at)
+        await first.close()
+        second = await TelegramInbox.open(path)
         assert second.previous_polling_stopped_at == stopped_at
-        second.polling_started()
+        await second.polling_started()
         assert second.previous_polling_stopped_at == stopped_at
-        second.polling_received([])
+        await second.polling_received([])
         # Simulate process loss: close without recording a clean polling stop.
-        second.close()
-        third = TelegramInbox(path)
+        await second.close()
+        third = await TelegramInbox.open(path)
         adapter = TelegramChannelAdapter(bot_token="0:synthetic", allowlist=SenderAllowlist(
             "channel-telegram", frozenset({"7"})))
         adapter._inbox = third
@@ -172,11 +172,11 @@ def test_crash_does_not_reuse_an_older_clean_stop_boundary(tmp_path, caplog):
             await adapter._durable(callback)(await third.get(), None)
             third.task_done()
             callback.assert_not_awaited()
-            assert third.processed(23)
+            assert (await third.processed(23))
             assert "stale Telegram update_id=23" in caplog.text
             assert "old pending content" not in caplog.text
         finally:
-            third.close()
+            await third.close()
 
     asyncio.run(run())
 
@@ -296,7 +296,7 @@ def test_downtime_exemption_ends_at_resume(tmp_path, monkeypatch, relative_date,
             assert (not queue.empty()) is delivered
             if delivered:
                 assert queue.get_nowait().payload["text"] == "delayed update"
-            assert adapters[1]._inbox.processed(101)
+            assert (await adapters[1]._inbox.processed(101))
         finally:
             for adapter in adapters:
                 await adapter.stop()
@@ -325,17 +325,21 @@ def test_restart_ages_pre_stop_updates_at_stop(tmp_path, monkeypatch, source, ag
         path = tmp_path / ".local/telegram/channel-telegram/0.sqlite3"
         api = BotAPI(path)
         api.send(101, "sent before stop", sent_at=stopped_at - age_at_stop)
-        inbox = TelegramInbox(path)
-        inbox.polling_stopped(stopped_at)
+        inbox = await TelegramInbox.open(path)
+        await inbox.polling_stopped(stopped_at)
         if source == "pending":
-            inbox.polling_received(api.updates)
+            await inbox.polling_received(api.updates)
             api.updates.clear()
-        inbox.close()
+        await inbox.close()
         acknowledged = asyncio.Event()
 
         async def request(transport, **kwargs):
             result = await api.request(**kwargs)
-            if kwargs["url"].endswith("/getUpdates"):
+            data = kwargs.get("request_data")
+            # Polling needs the next offset to prove PTB has enqueued the update;
+            # pending inbox rows are enqueued by replay before polling starts.
+            if kwargs["url"].endswith("/getUpdates") and (
+                    source == "pending" or data.parameters.get("offset", 0) == 102):
                 acknowledged.set()
             return result
 
@@ -352,7 +356,7 @@ def test_restart_ages_pre_stop_updates_at_stop(tmp_path, monkeypatch, source, ag
             assert (not queue.empty()) is delivered
             if delivered:
                 assert queue.get_nowait().payload["text"] == "sent before stop"
-            assert adapter._inbox.processed(101)
+            assert (await adapter._inbox.processed(101))
         finally:
             await adapter.stop()
             await bus.shutdown()
@@ -418,7 +422,7 @@ def test_pending_recovery_keeps_age_after_another_stop(tmp_path, monkeypatch, so
             await asyncio.wait_for(failed.wait(), 5)
             await asyncio.wait_for(adapters[0]._app.update_queue.join(), 2)
             assert handler.await_count == 3
-            assert not adapters[0]._inbox.processed(101)
+            assert not (await adapters[0]._inbox.processed(101))
             assert bus.get_queue("manager").empty()
             # The final polling page already retired the global recovery boundary.
             with sqlite3.connect(path) as db:
@@ -430,7 +434,7 @@ def test_pending_recovery_keeps_age_after_another_stop(tmp_path, monkeypatch, so
             await asyncio.wait_for(adapters[1]._app.update_queue.join(), 2)
             queue = bus.get_queue("manager")
             assert queue.get_nowait().payload["text"] == "pending across recovery"
-            assert queue.empty() and adapters[1]._inbox.processed(101)
+            assert queue.empty() and (await adapters[1]._inbox.processed(101))
         finally:
             for adapter in adapters:
                 await adapter.stop()
@@ -495,21 +499,21 @@ def test_acknowledged_update_replays_when_handler_never_started(tmp_path):
 
     async def run():
         path = tmp_path / "inbox.sqlite3"
-        first = TelegramInbox(path)
+        first = await TelegramInbox.open(path)
         bot = Bot("0:synthetic")
         raw = {"update_id": 22, "message": {"message_id": 8, "date": int(time.time()),
                "chat": {"id": 7, "type": "private"}, "text": "queued"}}
         await first.put(Update.de_json(raw, bot))
-        first.close()
-        second = TelegramInbox(path)
+        await first.close()
+        second = await TelegramInbox.open(path)
         try:
             await second.replay(bot)
             update = second.get_nowait()
             assert update.update_id == 22 and update.message.text == "queued"
-            second.finish(22)
-            assert second.processed(22)
+            await second.finish(22)
+            assert (await second.processed(22))
         finally:
-            second.close()
+            await second.close()
 
     asyncio.run(run())
 
@@ -608,7 +612,7 @@ def test_handler_failure_retry_and_restart(tmp_path, monkeypatch, caplog,
             await asyncio.wait_for(adapter._app.update_queue.join(), 2)
             assert calls == attempts
             success = failures == 2
-            assert adapter._inbox.processed(201) is success
+            assert (await adapter._inbox.processed(201)) is success
             assert not adapter._reached_publish
             queue = bus.get_queue("manager")
             delivered = success or failure_stage == "after_publish"
@@ -632,7 +636,7 @@ def test_handler_failure_retry_and_restart(tmp_path, monkeypatch, caplog,
                 replayed = await asyncio.wait_for(queue.get(), 2)
                 assert replayed.payload["text"] == "retry this update"
                 await asyncio.wait_for(adapter._app.update_queue.join(), 2)
-                assert adapter._inbox.processed(201)
+                assert (await adapter._inbox.processed(201))
                 assert not adapter._reached_publish and queue.empty()
         finally:
             await adapter.stop()
@@ -649,7 +653,7 @@ def test_handler_does_not_retry_when_stopped_during_backoff(tmp_path, monkeypatc
     from looper.agents.channels import telegram as channel
 
     async def run():
-        inbox = TelegramInbox(tmp_path / "inbox.sqlite3")
+        inbox = await TelegramInbox.open(tmp_path / "inbox.sqlite3")
         adapter = TelegramChannelAdapter(allowlist=SenderAllowlist("channel-telegram", frozenset({"7"})))
         adapter._inbox, adapter._running = inbox, True
         update = Update.de_json({"update_id": 202}, Bot("0:synthetic"))
@@ -667,8 +671,8 @@ def test_handler_does_not_retry_when_stopped_during_backoff(tmp_path, monkeypatc
                 await adapter._durable(callback)(await inbox.get(), None)
             inbox.task_done()
             assert callback.await_count == 1 and delays == [1]
-            assert not inbox.processed(202) and not adapter._reached_publish
+            assert not (await inbox.processed(202)) and not adapter._reached_publish
         finally:
-            inbox.close()
+            await inbox.close()
 
     asyncio.run(run())

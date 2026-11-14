@@ -86,7 +86,7 @@ async def _channel(root: Path, *, allowed: frozenset[str] = frozenset({OPEN_ID, 
     )
     bus = MessageBus(runtime_root=root)
     instance._bus = bus
-    instance._inbox = LarkInbox(root / "inbox.sqlite3")
+    instance._inbox = await LarkInbox.open(root / "inbox.sqlite3")
     try:
         yield instance, transport, bus
     finally:
@@ -118,7 +118,7 @@ def test_allowed_bot_poll_overlap_handles_once_and_replies_to_its_thread_message
             assert context["reply_to"] == "om_syntheticparent"
             assert context["root_id"] == "om_syntheticroot"
             assert context["thread_id"] == "omt_syntheticthread"
-            assert instance._inbox.processed("om_syntheticthreadreply")
+            assert (await instance._inbox.processed("om_syntheticthreadreply"))
             receipt = await instance.deliver(MessageEnvelope.create(
                 source=turn.target, target=channel_address("lark"), message_type=MessageType.AGENT_REPLY,
                 correlation_id=turn.correlation_id, payload={"text": "review received"}))
@@ -237,8 +237,8 @@ def test_unlisted_bot_is_recorded_but_warns_once_per_chat_per_hour(
                 await instance._poll_bot_chats({})
             assert bus.journal.undelivered() == []
             assert rejected == [(OTHER_BOT, CHAT)] * 3
-            assert all(instance._inbox.processed(message) for message in (
-                "om_syntheticrefusedfirst", "om_syntheticrefusedsecond", "om_syntheticrefusedlater"))
+            assert all([(await instance._inbox.processed(message)) for message in (
+                "om_syntheticrefusedfirst", "om_syntheticrefusedsecond", "om_syntheticrefusedlater")])
             assert len([record for record in caplog.records if "not on the sender allowlist" in record.message]) == 2
             assert not any(kind in {"send", "reply", "react"} for kind, _ in transport.calls)
 
@@ -382,7 +382,7 @@ def test_bot_poll_combines_thread_discovery_activity_and_partial_page_recovery(
             active = "omt_syntheticactive"
             root = _message("om_syntheticroot", sender_type="user", sender=OPEN_ID, thread_id=thread)
             transport.pages[CHAT] = _page(root)
-            instance._inbox.remember_thread(CHAT, active, time.time() - 3 * 86400)
+            await instance._inbox.remember_thread(CHAT, active, time.time() - 3 * 86400)
             reads: list[tuple[str, str]] = []
 
             async def roots(chat_id: str, *, page_token: str = "") -> dict[str, Any]:
