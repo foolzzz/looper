@@ -159,3 +159,16 @@ def test_minimum_interval_over_the_next_day(rule: str, min_seconds: int, close: 
 ])
 def test_descriptions(rule: str, words: str) -> None:
     assert cron.describe(cron.parse(rule), "America/Los_Angeles") == words
+
+
+def test_a_zone_is_checked_without_listing_every_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Listing every zone opens hundreds of files; on a loaded machine it blocked startup for minutes.
+    def listing() -> set[str]:
+        raise AssertionError("available_timezones must not be called")
+
+    monkeypatch.setattr(cron.zoneinfo, "available_timezones", listing)
+    assert cron.zone("America/Los_Angeles").key == "America/Los_Angeles"
+    assert cron.local_zone_name()
+    for name in ("Not/AZone", "../etc/passwd", "/etc/localtime"):
+        with pytest.raises(ValueError, match="unknown time zone"):
+            cron.zone(name)

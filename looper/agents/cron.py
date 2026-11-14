@@ -109,7 +109,21 @@ def _number(text: str, name: str, item: str) -> int:
 
 @lru_cache(maxsize=1)
 def _known_zones() -> frozenset[str]:
-    return frozenset(zoneinfo.available_timezones())
+    """Every zone name, from directory listings only. ``zoneinfo.available_timezones`` also opens each of the
+    hundreds of files to check it, which took minutes on a loaded machine and blocked the event loop at
+    startup; the exact-case names still matter on case-insensitive file systems."""
+    names: set[str] = set()
+    for root in zoneinfo.TZPATH:
+        for directory, _, files in os.walk(root):
+            relative = os.path.relpath(directory, root)
+            names.update(file if relative == "." else f"{relative}/{file}" for file in files)
+    try:
+        from importlib import resources
+
+        names.update(resources.files("tzdata").joinpath("zones").read_text(encoding="utf-8").split())
+    except (ImportError, OSError, ValueError):
+        pass
+    return frozenset(names)
 
 
 def zone(name: str) -> ZoneInfo:
@@ -119,9 +133,14 @@ def zone(name: str) -> ZoneInfo:
     known = _known_zones()
     if known and name not in known:
         raise ValueError(f"unknown time zone {name!r}: use an IANA name such as 'America/Los_Angeles' or 'UTC'")
+    return _zone(name)
+
+
+@lru_cache(maxsize=256)
+def _zone(name: str) -> ZoneInfo:
     try:
         return ZoneInfo(name)
-    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError, OSError):
         raise ValueError(f"unknown time zone {name!r}: use an IANA name such as 'America/Los_Angeles' or "
                          "'UTC'") from None
 
