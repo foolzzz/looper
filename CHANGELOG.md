@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.183] - 2026-11-13
+
+### Fixed
+
+- **Startup no longer blocks the event loop while time zone names are checked.** ([#1343](https://github.com/foolzzz/looper/pull/1343))
+  - Behavior change: `cron._known_zones` lists the zone directories (`zoneinfo.TZPATH`, names only) plus the `tzdata` package's zone list instead of calling `zoneinfo.available_timezones()`, so no zone file is opened (the watchdog had logged a 142 s stall in `Scheduler.__init__`). `cron.zone` loads only the named zone, cached per name, and an `OSError` while loading is reported as an unknown time zone. The same names are accepted and refused; exact-case names are still required.
+  - The code was merged before v2.14.182 was tagged, so that tag already contains it; the v2.14.182 notes did not list it.
+  - Not model-visible: no prompt, tool schema or API response changed.
+
 ## [2.14.182] - 2026-11-13
 
 ### Fixed
