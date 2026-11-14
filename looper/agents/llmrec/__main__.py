@@ -18,7 +18,7 @@ import time
 
 # Import the complete recorder before serving: an in-place upgrade must not mix versions.
 from . import capture as capture, control, dialects, gateway, proxy, translate, translate_stream, writer  # noqa: F401
-from . import LOCK_FILE, LOG_FILE, ROUTE_FORMAT, STATE_FILE, code_sha256
+from . import LOCK_FILE, LOG_FILE, OWNER_FILE, OwnerMode, ROUTE_FORMAT, STATE_FILE, code_sha256, process_alive
 from .. import proc_tree
 from ..keeper import read_json, write_json
 from ...db import llm_requests as llm_requests, gateway as gateway_db  # noqa: F401
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 async def _serve(args, dsn):
     root = args.runtime_root
+    parent = os.getppid()  # Capture before startup can yield to a dying parent.
     state_path = root / STATE_FILE
     sink = writer.DbSink(None)
     instance = secrets.token_urlsafe(16)
@@ -43,8 +44,43 @@ async def _serve(args, dsn):
                            "route_format": ROUTE_FORMAT, "started_at": datetime.now(timezone.utc).isoformat()})
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
+
+    def stop_signal(sig):
+        logger.info("request recording proxy stopping: signal=%s", sig.name)
+        stopped.set()
+
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stopped.set)
+        loop.add_signal_handler(sig, lambda sig=sig: stop_signal(sig))
+
+    async def watch_owner():
+        owner_seen = False
+        while not stopped.is_set():
+            owner = read_json(root / OWNER_FILE)
+            owner_seen = owner_seen or owner is not None
+            if owner and owner.get("mode") == OwnerMode.HANDOVER:
+                alive = True  # Kept runs pin this endpoint until the next controller adopts it.
+            elif owner and owner.get("mode") == OwnerMode.OWNED:
+                if owner.get("pid") == parent and os.getppid() != parent:
+                    alive = False  # Reparenting proves death even without ps or reaping the owner.
+                else:
+                    alive = (await asyncio.to_thread(process_alive, owner.get("pid"),
+                                                     owner.get("start_time"))) is not False
+            else:
+                # Direct CLI boots without an owner file still follow their original parent.
+                alive = not owner_seen and parent != 1 and os.getppid() == parent
+            if not alive:
+                if read_json(root / OWNER_FILE) != owner:
+                    continue  # Adoption or a planned handover won the liveness check.
+                logger.info("request recording proxy stopping: owner disappeared "
+                            "mode=%s owner_pid=%s original_parent=%s current_parent=%s",
+                            owner.get("mode") if owner else None, owner.get("pid") if owner else None,
+                            parent, os.getppid())
+                stopped.set()
+                return
+            try:
+                await asyncio.wait_for(stopped.wait(), 1)
+            except asyncio.TimeoutError:
+                pass
 
     async def connect():
         backoff = 1
@@ -74,22 +110,33 @@ async def _serve(args, dsn):
                 pass
             state = read_json(state_path)
             if not state or state.get("instance") != instance:
+                logger.info("request recording proxy stopping: state removed or replaced")
                 stopped.set()
             requests = server.stats["requests"]
             if requests != count:
                 last_request, count = time.monotonic(), requests
             if time.monotonic() - last_request >= 24 * 60 * 60:
+                logger.info("request recording proxy stopping: idle for 24 hours")
                 stopped.set()
 
     connection_task = asyncio.create_task(connect())
     writer_task = asyncio.create_task(sink.run(recover=True))
     watch_task = asyncio.create_task(watch())
+    owner_task = asyncio.create_task(watch_owner())
+
+    def force_exit():
+        logger.error("request recording shutdown timed out; exiting")
+        os._exit(1)
+
     try:
         await stopped.wait()
     finally:
+        # Parent death has no controller left to escalate a stuck stream or database drain.
+        backstop = loop.call_later(5, force_exit)
         connection_task.cancel()
         watch_task.cancel()
-        await asyncio.gather(connection_task, watch_task, return_exceptions=True)
+        owner_task.cancel()
+        await asyncio.gather(connection_task, watch_task, owner_task, return_exceptions=True)
         await server.close(grace_s=30)
         await sink.close(timeout=10)
         writer_task.cancel()
@@ -97,6 +144,7 @@ async def _serve(args, dsn):
         if sink.pool is not None:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(sink.pool.close(), 5)
+        backstop.cancel()
 
 
 def main(argv=None):

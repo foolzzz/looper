@@ -18,6 +18,30 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.189] - 2026-11-13
+
+### Changed
+
+- **The request-recording proxy ends when `looper serve` ends.** ([#1349](https://github.com/foolzzz/looper/pull/1349))
+  - Behavior change (maintainer decision, intended): the server records an owner file; every shutdown path stops the proxy, except a planned kept-run upgrade, which hands it over (`close(handover=True)`). The proxy also exits by itself when its owner is gone (checked once a second; a direct CLI boot follows its original parent), with a 5-second forced-exit backstop.
+  - Also in the diff, not in the PR text: a waiting room inbox joins the run's in-flight reminder send before deciding whether a pushed message belongs in its pull inbox, so a concurrent accepted push returns `delivered_message_ids` and no duplicate.
+  - Not model-visible: no prompt, tool description or tool schema changed.
+
+### Fixed
+
+- **Process-table reads no longer block the event loop.** ([#1351](https://github.com/foolzzz/looper/pull/1351))
+  - Agent spawn, graceful-stop preparation and consult result handling read the process table in worker threads; the durable record is kept until the stop finishes, and a spawn cancelled before its handle is returned ends the process.
+  - `TurnTree.track`, `_end`, `sweep`, tickers and command runs are deliberately unchanged. Not model-visible.
+
+## [2.14.188] - 2026-11-13
+
+### Fixed
+
+- **The request-recording code hash is not recomputed on the event loop.** ([#1356](https://github.com/foolzzz/looper/pull/1356))
+  - The code fingerprint (`code_sha256`) is computed once per server process in a background thread and reused by the outdated-proxy check and service startup; the PR presents latency as the only intended change.
+  - Visible consequence: checkout changes are noticed at the next server restart (as performed by upgrades), not at each health check; each proxy still fingerprints its code at startup. The PR text mentions an optional 60-second refresh that the diff does not contain.
+  - Not model-visible: no prompt, tool description, tool schema or agent environment changed.
+
 ## [2.14.187] - 2026-11-13
 
 ### Security

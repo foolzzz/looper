@@ -13,7 +13,7 @@ from tests.db_support import DSN, run_db
 
 
 @pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
-def test_scheduler_start_failure_closes_listener_and_latency_observers(monkeypatch, tmp_path):
+def test_scheduler_start_failure_closes_listener_and_latency_observers(monkeypatch, tmp_path, caplog):
     class StartupFailed(Exception):
         pass
 
@@ -40,6 +40,8 @@ def test_scheduler_start_failure_closes_listener_and_latency_observers(monkeypat
 
         async def http_started(server):
             await start_http(server)
+            assert server._startup_steps["code_manifest"] >= 0
+            assert list(server._startup_steps).index("code_manifest") < list(server._startup_steps).index("kept_scan")
             observed["listener"] = server._server
             observed["summary"] = server._summary_task
             observed["port"] = server._port
@@ -76,4 +78,7 @@ def test_scheduler_start_failure_closes_listener_and_latency_observers(monkeypat
                            for task in asyncio.all_tasks())
             assert observed["thread"] not in threading.enumerate()
 
-    run_db(run, monkeypatch, timeout=30)
+    with caplog.at_level("INFO", logger=serve.__name__):
+        run_db(run, monkeypatch, timeout=30)
+    summary, = [message for message in caplog.messages if message.startswith("startup steps:")]
+    assert "code_manifest=" in summary

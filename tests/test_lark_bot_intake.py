@@ -96,20 +96,26 @@ async def _channel(root: Path, *, allowed: frozenset[str] = frozenset({OPEN_ID, 
 
 @pytest.mark.parametrize("binding_only", [False, True])
 def test_allowed_bot_poll_overlap_handles_once_and_replies_to_its_thread_message(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, binding_only: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, binding_only: bool,
 ) -> None:
     async def run() -> None:
+        clock = [time.time()]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
         async with _channel(tmp_path,
                 allowed=frozenset({OPEN_ID}) if binding_only else frozenset({OPEN_ID, OTHER_BOT}),
                 resolve_chat=lambda *_: RouteDecision(RouteAction.ADMIT, "manager-helper", True,
                     senders=frozenset({OTHER_BOT}) if binding_only else frozenset())) as (instance, transport, bus):
             transport.pages[CHAT] = _page(_message(
                 "om_syntheticthreadreply", thread_id="omt_syntheticthread",
-                parent_id="om_syntheticparent", root_id="om_syntheticroot"))
+                parent_id="om_syntheticparent", root_id="om_syntheticroot",
+                create_time=str(int(clock[0] * 1000))))
             last_poll: dict[str, float] = {}
             with caplog.at_level("INFO"):
                 await instance._poll_bot_chats(last_poll)
+                clock[0] += 30
                 await instance._poll_bot_chats(last_poll)
+                assert await instance._handle_lark_event(history_event(
+                    transport.pages[CHAT]["messages"][0], CHAT, "group")) == "duplicate"
             (turn,) = bus.journal.undelivered()
             assert turn.target == manager_address("manager-helper")
             assert turn.payload["text"] == "review this"
@@ -150,6 +156,9 @@ def test_slow_bot_poll_keeps_each_chats_queried_watermark(
 
         monkeypatch.setattr(LarkChannelAdapter, "_bound_chats", bound)
         async with _channel(tmp_path) as (instance, transport, bus):
+            for chat in chats:
+                await instance._inbox.remember_bot(chat, now - 86400)
+                await instance._inbox.remember_thread(chat, f"omt_{chat}", now - 1)
             messages = {chat: _message(f"om_syntheticduring{index}",
                                       create_time=str(int((now + 5 + index * 10) * 1000)))
                         for index, chat in enumerate(chats)}
@@ -202,6 +211,7 @@ def test_bot_poll_recovers_from_watermark_with_only_max_age_cap(
         now = time.time()
         monkeypatch.setattr("looper.agents.channels.lark.time", lambda: now)
         async with _channel(tmp_path) as (instance, transport, bus):
+            await instance._inbox.remember_bot(CHAT, now - 86400)
             transport.pages[CHAT] = _page(_message(
                 "om_syntheticdelayed", create_time=str(int((now - lookback + 1) * 1000))))
             last_poll = {CHAT: now - watermark_age}
@@ -455,5 +465,124 @@ def test_polled_bot_obeys_disabled_manager_route(tmp_path: Path) -> None:
             await instance._poll_bot_chats({})
             assert bus.journal.undelivered() == []
             assert transport.calls == [("reply", {"message_id": "om_syntheticdisabled", "text": TURNED_OFF_REPLY})]
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("policy,bot_age,interval", [
+    (SenderPolicy.CHAT, None, 30),
+    (SenderPolicy.LISTED, 86400, 30),
+    (SenderPolicy.LISTED, None, 300),
+    (SenderPolicy.LISTED, 7 * 86400 + 1, 300),
+])
+def test_bound_chat_bot_poll_cadence(tmp_path, monkeypatch, policy, bot_age, interval):
+    async def run():
+        clock = [time.time()]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        async with _channel(tmp_path, resolve_chat=lambda *_: RouteDecision(
+                RouteAction.ADMIT, "manager-helper", True, sender_policy=policy)) as (instance, transport, _):
+            await instance._inbox.remember_bot("unrelated-chat", clock[0])
+            if bot_age is not None:
+                await instance._inbox.remember_bot(CHAT, clock[0] - bot_age)
+                # Cadence evidence must survive a channel restart.
+                await instance._inbox.close()
+                instance._inbox = await LarkInbox.open(tmp_path / "inbox.sqlite3")
+            last_poll = {}
+            await instance._poll_bot_chats(last_poll)
+            assert len(transport.list_calls) == 1
+            assert transport.list_calls[0]["start"] == clock[0] - interval - 10
+            clock[0] += interval - 1
+            await instance._poll_bot_chats(last_poll)
+            assert len(transport.list_calls) == 1
+            clock[0] += 1
+            await instance._poll_bot_chats(last_poll)
+            assert len(transport.list_calls) == 2
+            assert transport.list_calls[1]["start"] == transport.list_calls[0]["end"] - 10
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("live,age", [(False, 0), (False, 86400), (True, 0)])
+def test_bot_observation_promotes_slow_chat_even_without_mention(tmp_path, monkeypatch, live, age):
+    async def run():
+        clock = [time.time()]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        async with _channel(tmp_path) as (instance, transport, bus):
+            last_poll = {}
+            await instance._poll_bot_chats(last_poll)
+            clock[0] += 30
+            await instance._poll_bot_chats(last_poll)
+            assert len(transport.list_calls) == 1
+            posted_at = clock[0] - age
+            message = _message("om_syntheticactivity", mentioned=False,
+                               create_time=str(int(posted_at * 1000)))
+            if live:
+                await instance._handle_lark_event(history_event(message, CHAT, "group"))
+            else:
+                clock[0] += 270
+                transport.pages[CHAT] = _page(message)
+                await instance._poll_bot_chats(last_poll)
+            assert bus.journal.undelivered() == []
+            calls = len(transport.list_calls)
+            clock[0] += 30
+            await instance._poll_bot_chats(last_poll)
+            assert len(transport.list_calls) == calls + 1
+            # Replaying an old history page cannot keep a chat fast indefinitely.
+            transport.pages[CHAT] = _page()
+            clock[0] = posted_at + 7 * 86400 + 1
+            await instance._poll_bot_chats(last_poll)
+            calls = len(transport.list_calls)
+            clock[0] += 30
+            await instance._poll_bot_chats(last_poll)
+            assert len(transport.list_calls) == calls
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("thread_age,scan", [(None, False), (86401, False), (86399, True)])
+def test_quiet_bot_poll_skips_thread_discovery(tmp_path, thread_age, scan):
+    async def run():
+        async with _channel(tmp_path) as (instance, transport, _):
+            if thread_age is not None:
+                await instance._inbox.remember_thread(CHAT, "omt_syntheticcandidate", time.time() - thread_age)
+            calls = []
+
+            async def roots(chat_id, *, page_token=""):
+                calls.append("roots")
+                return {"roots": [], "has_more": False}
+
+            async def replies(thread_id, *, page_token=""):
+                calls.append("replies")
+                return _page()
+
+            transport.list_threads, transport.list_thread_messages = roots, replies
+            await instance._poll_bot_chats({})
+            assert len(transport.list_calls) == 1
+            assert calls == (["roots", "replies"] if scan else [])
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+def test_bot_poll_logs_cadence_counts_hourly(tmp_path, monkeypatch, caplog):
+    async def run():
+        clock = [time.time()]
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+
+        async def bound(self):
+            return [CHAT, "slow-chat"]
+
+        monkeypatch.setattr(LarkChannelAdapter, "_bound_chats", bound)
+        async with _channel(tmp_path, resolve_chat=lambda _, chat: RouteDecision(
+                RouteAction.ADMIT, "manager-helper", True,
+                sender_policy=SenderPolicy.CHAT if chat == CHAT else SenderPolicy.LISTED)) as (instance, _, _):
+            with caplog.at_level("INFO"):
+                last_poll = {}
+                for elapsed in (0, 30, 3599, 3600):
+                    # Advance wall time without sleeping or starting CLI processes.
+                    monkeypatch.setattr("looper.agents.channels.lark.monotonic", lambda: elapsed)
+                    await instance._poll_bot_chats(last_poll)
+            summaries = [r.message for r in caplog.records if "lark_bot_poll_cadence " in r.message]
+            assert len(summaries) == 2
+            assert all("fast=1 slow=1" in summary for summary in summaries)
 
     asyncio.run(asyncio.wait_for(run(), 5))

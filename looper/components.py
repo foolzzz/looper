@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import csv
 import hashlib
 import json
@@ -295,6 +296,23 @@ def manifest_from_directory(root: Path) -> Manifest:
 def loaded_manifest() -> Manifest:
     """One startup snapshot per interpreter, retained when installed files change."""
     return manifest_from_directory(Path(__file__).resolve().parent.parent)
+
+
+_loaded_manifest_task: asyncio.Task[Manifest] | None = None
+
+
+async def prepare_loaded_manifest() -> Manifest:
+    """Share the cold startup read without blocking the server's event loop."""
+    global _loaded_manifest_task
+    if _loaded_manifest_task is None or _loaded_manifest_task.cancelled():
+        _loaded_manifest_task = asyncio.create_task(asyncio.to_thread(loaded_manifest))
+    task = _loaded_manifest_task
+    try:
+        # A cancelled waiter must not let another caller start a second cold read.
+        return await asyncio.shield(task)
+    finally:
+        if task.done() and _loaded_manifest_task is task:
+            _loaded_manifest_task = None  # loaded_manifest owns the snapshot, not this task.
 
 
 if __name__ == "__main__":

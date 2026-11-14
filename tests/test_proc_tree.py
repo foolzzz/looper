@@ -117,6 +117,135 @@ def _ended_line(caplog: pytest.LogCaptureFixture) -> str:
     return line
 
 
+@pytest.mark.parametrize("operation", ["spawn", "begin_end"])
+def test_slow_process_table_reads_leave_the_loop_responsive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    reading = threading.Event()
+
+    def slow_read(*args: Any) -> Any:
+        reading.set()
+        time.sleep(1)
+        return "started" if operation == "spawn" else {}
+
+    monkeypatch.setattr(proc_tree, "_records", tmp_path)
+    monkeypatch.setattr(proc_tree, "_server", (os.getpid(), "server"))
+    monkeypatch.setattr(proc_tree, "_start_time" if operation == "spawn" else "_snapshot", slow_read)
+
+    async def _run() -> None:
+        ticks = 0
+        done = False
+
+        async def tick() -> None:
+            nonlocal ticks
+            while not done:
+                await asyncio.sleep(0.05)
+                if reading.is_set() and not done:
+                    ticks += 1
+
+        ticker = asyncio.create_task(tick())
+        process = None
+        try:
+            if operation == "spawn":
+                process = await proc_tree.spawn("/bin/sleep", "30")
+            else:
+                process = await asyncio.create_subprocess_exec("/bin/sleep", "30", start_new_session=True)
+                await proc_tree.begin_end(process)
+            assert reading.is_set()
+            assert ticks >= 10, f"only {ticks} loop ticks during a one-second process-table read"
+        finally:
+            done = True
+            await ticker
+            if process is not None:
+                process.kill()
+                await process.wait()
+            if proc_tree._forgetting:
+                await asyncio.gather(*proc_tree._forgetting)
+
+    asyncio.run(_run())
+
+
+def test_cancelling_the_spawn_start_time_read_reaps_the_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(proc_tree, "_records", tmp_path)
+    monkeypatch.setattr(proc_tree, "_server", (os.getpid(), "server"))
+    release = threading.Event()
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        reading = asyncio.Event()
+        processes = []
+        create = asyncio.create_subprocess_exec
+
+        async def remember(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+            process = await create(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        def start_time(pid: int) -> str:
+            loop.call_soon_threadsafe(reading.set)
+            release.wait()
+            return "started"
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", remember)
+        monkeypatch.setattr(proc_tree, "_start_time", start_time)
+        spawning = asyncio.create_task(proc_tree.spawn("/bin/sleep", "30"))
+        try:
+            await asyncio.wait_for(reading.wait(), 10)
+            spawning.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await spawning
+            assert processes[0].returncode is not None
+            assert not proc_tree._spawning
+        finally:
+            release.set()
+            await asyncio.gather(spawning, return_exceptions=True)
+            for process in processes:
+                if process.returncode is None:
+                    process.kill()
+                await process.wait()
+            await asyncio.gather(*proc_tree._forgetting)
+
+    asyncio.run(run())
+
+
+def test_begin_end_keeps_the_record_when_the_agent_exits_during_the_snapshot(
+    runtime_root: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = threading.Event()
+
+    async def run() -> None:
+        await proc_tree.sweep(runtime_root)
+        process = await proc_tree.spawn("/bin/cat", stdin=asyncio.subprocess.PIPE,
+                                        stdout=asyncio.subprocess.DEVNULL)
+        record = runtime_root / proc_tree.RECORDS_DIR / f"{process.pid}.json"
+        loop = asyncio.get_running_loop()
+        reading = asyncio.Event()
+
+        def snapshot() -> proc_tree.Table:
+            loop.call_soon_threadsafe(reading.set)
+            release.wait()
+            return {}
+
+        with monkeypatch.context() as patch:
+            patch.setattr(proc_tree, "_snapshot", snapshot)
+            preparing = asyncio.create_task(proc_tree.begin_end(process))
+            try:
+                await asyncio.wait_for(reading.wait(), 10)
+                process.stdin.close()
+                await process.wait()
+                await asyncio.gather(*proc_tree._forgetting)
+                assert record.exists()
+            finally:
+                release.set()
+                await preparing
+        await proc_tree.end(process, label="snapshot test cleanup")
+        assert not record.exists()
+
+    asyncio.run(run())
+
+
 def test_end_reaches_every_process_the_agent_started(
     tmp_path: Path, trees: list[dict[str, int]], caplog: pytest.LogCaptureFixture,
 ) -> None:

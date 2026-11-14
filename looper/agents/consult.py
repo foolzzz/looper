@@ -531,7 +531,7 @@ class ConsultService:
             async for event in runtime.parse_process(process, model=launch.model, launch=launch):
                 if event.get("type") == "result":
                     # Read before the record is awaited, which a stop may cut short.
-                    known.update(proc_tree.tree_of(process))
+                    known.update(await asyncio.to_thread(proc_tree.tree_of, process))
                 await recorder.record(event)
                 if (capped := recorder.cap_stop) is not None:
                     result = capped.result_event

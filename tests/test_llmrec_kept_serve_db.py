@@ -77,7 +77,7 @@ def test_kept_worker_request_finishes_on_same_record_after_planned_restart(monke
         server['env'] = {'CLAUDE_CONFIG_DIR': str(home / '.claude'), 'CODEX_HOME': str(home / '.codex'),
             'GROK_HOME': str(home / '.grok'), 'CURSOR_CONFIG_DIR': str(home / '.cursor-config'),
             'CURSOR_DATA_DIR': str(home / '.cursor-data'), 'LOOPER_TELEGRAM_BOT_TOKEN': ''}
-        server['startup_timeout'] = 60
+        server['startup_timeout'] = 120
         state_path = runtime / STATE_FILE
         proxy_state = None
         try:

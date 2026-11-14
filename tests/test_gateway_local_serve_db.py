@@ -85,7 +85,10 @@ def test_serve_local_gateway_enable_rotate_and_disable(monkeypatch):
                     assert _models(endpoint, new_key)[0] == 200
                     disabled = api.post('/api/v1/gateway/update', {'enabled': False})['result']
                     assert not disabled['enabled'] and _models(endpoint, new_key)[0] == 404
-                assert proc_tree._start_time(state['pid']) == state['start_time'], 'proxy should be detached from serve'
+                assert proc_tree._start_time(state['pid']) != state['start_time'], 'proxy should stop with serve'
+                assert not (runtime / STATE_FILE).exists()
+                with pytest.raises(ConnectionRefusedError):
+                    _models(endpoint, new_key)
             finally:
                 async def cleanup():
                     owner = ProxyControl(runtime, url, enabled=False)

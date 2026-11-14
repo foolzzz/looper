@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 from evals.prompt_regression.runner import Api, EvalError, running_server
+from looper.agents.llmrec import OWNER_FILE
 from tests.db_support import DSN, fresh_database_without_recording
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -211,9 +212,9 @@ def test_a_task_carries_on_after_the_server_restarts(tmp_path: Path) -> None:
     # The M2 baseline held: each finished Planner turn records its own 0.001, never the session's total.
     planner_costs = [r["cost_usd"] for r in records if r["agent_id"].startswith("planner-") and r["cost_usd"]]
     assert planner_costs and all(c == pytest.approx(PLANNER_TURN_COST) for c in planner_costs)
-    # The database holds task state; only the proxy's disabled gateway configuration is written locally.
+    # The database holds task state; only proxy ownership and disabled gateway configuration are written locally.
     gateway_config = runtime / ".local/llmrec/gateway.json"
-    assert list(runtime.glob(".local/**/*.json")) == [gateway_config]
+    assert set(runtime.glob(".local/**/*.json")) == {runtime / OWNER_FILE, gateway_config}
     assert json.loads(gateway_config.read_text()) == {"format": 1, "enabled": False, "record": False}
     assert not (runtime / ".local" / "planner").exists() and not (runtime / ".local" / "manager").exists()
 
@@ -247,7 +248,7 @@ def test_a_task_failed_at_its_cap_continues_from_the_database_after_a_restart(tm
     argvs = _log(state, "planner_argv.jsonl")
     assert argvs[-1][argvs[-1].index("--resume") + 1] == "fake-planner-session"
     gateway_config = runtime / ".local/llmrec/gateway.json"
-    assert list(runtime.glob(".local/**/*.json")) == [gateway_config]
+    assert set(runtime.glob(".local/**/*.json")) == {runtime / OWNER_FILE, gateway_config}
     assert json.loads(gateway_config.read_text()) == {"format": 1, "enabled": False, "record": False}
 
 
