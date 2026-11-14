@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.185] - 2026-11-13
+
+### Fixed
+
+- **Translated runs without upstream cache usage show a dash, not 0%.** ([#1347](https://github.com/foolzzz/looper/pull/1347), fixes [#1161](https://github.com/foolzzz/looper/issues/1161) and [#1155](https://github.com/foolzzz/looper/issues/1155))
+  - Behavior change: the proxy records per run whether any upstream request reported cache fields (kept in memory, up to 1,024 runs, independent of request recording) and answers it at `GET /llmrec/cache-usage/<route>/<record>`. When a translated run ends and the answer is `false`, `cache_read_tokens` and `cache_creation_tokens` are stored as null instead of Claude Code's synthesized zeros, so the dashboard shows a dash. Unknown evidence (proxy unavailable, restarted or evicted) keeps the counts as before; recorded runs are not changed.
+  - Documentation: the gateway section of the agent-system architecture is corrected (translated `message_start` omits cache counts; byte-based first-request estimate can run about 15-20% high; the context-full switch applies to runtimes that report context).
+  - Not model-visible: no prompt, tool description or tool schema changed.
+
 ## [2.14.184] - 2026-11-13
 
 ### Fixed
