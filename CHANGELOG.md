@@ -18,6 +18,50 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.184] - 2026-11-13
+
+### Fixed
+
+- **`system.status` answers from cached check state, so every API operation stays under 2 s.** ([#1333](https://github.com/foolzzz/looper/pull/1333))
+  - Behavior change: the Codex login check reads the last probe result immediately (`codex_login.cached_status`) and refreshes a stale one in one daemon thread; before, the poll waited for `codex login status`. The Codex, coco and Cursor login checks report `pending` ("checking") until a first probe result exists. Each check's refresh runs as a shielded task shared across polls, so a client disconnect does not cancel it. A check that has not finished within 1 s returns its previous result with " (still checking)" appended to the detail. A check that raises keeps its last result and is logged.
+  - Behavior change: the model request recording and gateway checks read the local proxy status once per poll from its cached health (`ProxyControl.status(cached=True)`, valid for 15 s, never probing processes or HTTP; older than that it reports no health). The recorded-request storage size is cached for 60 s and one scan is shared across polls. The startup check (`run_checks`) still reads live state.
+  - Not model-visible: no prompt, tool description or tool schema changed; the only API difference is the `system.status` check results described above.
+
+## [2.14.183] - 2026-11-13
+
+### Fixed
+
+- **Startup no longer blocks the event loop while time zone names are checked.** ([#1343](https://github.com/foolzzz/looper/pull/1343))
+  - Behavior change: `cron._known_zones` lists the zone directories (`zoneinfo.TZPATH`, names only) plus the `tzdata` package's zone list instead of calling `zoneinfo.available_timezones()`, so no zone file is opened (the watchdog had logged a 142 s stall in `Scheduler.__init__`). `cron.zone` loads only the named zone, cached per name, and an `OSError` while loading is reported as an unknown time zone. The same names are accepted and refused; exact-case names are still required.
+  - The code was merged before v2.14.182 was tagged, so that tag already contains it; the v2.14.182 notes did not list it.
+  - Not model-visible: no prompt, tool schema or API response changed.
+
+## [2.14.182] - 2026-11-13
+
+### Fixed
+
+- **Lease health check: a timeout is uncertain, not an immediate loss.** ([#1342](https://github.com/foolzzz/looper/pull/1342))
+  - Behavior change: a health query that times out after 5 s, or overlaps a loop/process stall reported by the watchdog, makes ownership uncertain. New agent spawns are refused (`proc_tree.spawn` raises "the control plane lock is uncertain; no new agents") while the HTTP listener stays open, and the lease is rechecked at once with a 15 s query timeout for at most 30 s. A clean held-lock reply lifts the temporary fence; a missing lock, a connection failure or an exhausted window still takes the terminal exit path (code 75). Before, one timeout lost the lock at once.
+  - Not model-visible: no prompt, tool schema or API response changed.
+
+## [2.14.181] - 2026-11-13
+
+### Fixed
+
+- **Upgrade no longer fails when the old service's pid was reused.** ([#1339](https://github.com/foolzzz/looper/pull/1339))
+  - Behavior change: `_pid_alive` treats `PermissionError` like `ProcessLookupError`, so a pid we may not signal (another user's process that took the pid) counts as "our old service has exited" and the upgrade continues instead of failing with `[Errno 1] Operation not permitted`.
+  - Not model-visible: no prompt, tool schema or API response changed.
+
+## [2.14.180] - 2026-11-13
+
+### Added
+
+- **API latency observability.** ([#1332](https://github.com/foolzzz/looper/pull/1332))
+  - Behavior change: a non-stream API operation over 2 s logs `api slow` with total, database time, query count, `other_ms` and its await chain; every 600 s the server logs per-operation p50/p95/p99, maximum and counts over 2 s, plus loop stall statistics.
+  - An event-loop watchdog starts before startup work and logs the blocked loop's stack after 1 s, 5 s and 15 s, and process scheduling gaps separately.
+  - The `api client=...` line is now also written for failed or cancelled requests; streams add `first_byte_ms`. `stop()` of the HTTP server is idempotent and runs on failed startups.
+  - Not model-visible: server log lines only; no prompt, tool schema or API response changed.
+
 ## [2.14.179] - 2026-11-13
 
 ### Fixed

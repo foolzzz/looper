@@ -118,8 +118,9 @@ class ProxyControl:
         return bool(state and await asyncio.to_thread(proc_tree._start_time, state["pid"]) == state["start_time"])
 
     async def _health(self, *, cached=False) -> dict | None:
-        if cached and time.monotonic() - self._health_at < 5:
-            return self._health_cache
+        # Status polls never probe processes or HTTP, even when the periodic tick is late.
+        if cached:
+            return self._health_cache if time.monotonic() - self._health_at < 15 else None
         result = None
         state = self._state()
         if self._failed_health and (not state or any(
@@ -345,8 +346,8 @@ class ProxyControl:
                 self.gateway_port = state["port"]
                 await system_settings.put_settings({"gateway.port": str(self.gateway_port)})
 
-    async def status(self) -> dict:
-        health = await self._health()
+    async def status(self, *, cached: bool = False) -> dict:
+        health = await self._health(cached=cached)
         state = self._state()
         counters = health or self._failed_health or {}
         return {"enabled": self.enabled, "include_oauth": self.include_oauth, "proxy": {

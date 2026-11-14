@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import plistlib
 import stat
 import subprocess
@@ -1617,3 +1618,18 @@ def test_install_preserves_the_legacy_telegram_token_for_the_builtin_channel(
     assert argv[-4:-2] == ["--runtime-root", str(tmp_path / ".loopx")]
     monkeypatch.setattr(service.os, "environ", environment)
     assert bots.builtin_env_token({}) == SHELL_ENV["LOOPX_TELEGRAM_BOT_TOKEN"]
+
+
+def test_a_pid_now_owned_by_another_user_is_not_our_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    # After the old service exits, a busy machine can hand its pid to another user's process: signalling it
+    # is refused, and the upgrade must treat our process as gone instead of failing on the error.
+    def kill(pid: int, sig: int) -> None:
+        raise {1: PermissionError, 2: ProcessLookupError}.get(pid, OSError)(1, "refused")
+
+    monkeypatch.setattr(service.os, "kill", kill)
+    assert service._pid_alive(1) is False
+    assert service._pid_alive(2) is False
+
+
+def test_our_live_process_is_alive() -> None:
+    assert service._pid_alive(os.getpid()) is True

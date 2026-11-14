@@ -5113,9 +5113,15 @@ client address and backend start time; unavailable fields are reported as
 unknown. The serve process id is in `application_name`, not `backend_pid`.
 Each successful start increments
 the `control_plane_epoch` key in `system_settings` after the schema check. If the connection
-closes or a health check finds the lock lost (within 10 seconds), the server
+closes or a health check finds the lock lost, the server
 fences its database pool, closes the HTTP listener, ends its own agents and exits
-with code 75, without updating run records or detaching runs. Kept runs are
+with code 75, without updating run records or detaching runs. A health query
+that times out after 5 seconds, or overlaps a loop/process stall reported by
+the watchdog, instead makes ownership uncertain: new agent spawns are fenced
+while the HTTP listener stays open. The lease is rechecked immediately with
+a 15-second query timeout for at most 30 seconds. A clean held-lock reply
+removes only the temporary fence; a missing lock, connection failure, or
+exhausted recheck window takes the terminal exit path. Kept runs are
 fenced synchronously before any owned agent cleanup: their sockets close
 without sending a request or touching their files. Command schedule runners
 are also left running: they deliberately start outside `proc_tree.spawn`,
@@ -5305,6 +5311,24 @@ continue firing, including queued runs and Run now: their runs survive service
 restarts, and the drain does not wait for them.
 
 ## HTTP API
+
+API latency diagnostics use the existing logger. Non-stream operations taking
+more than 2 s emit `api slow` with total time, accumulated asyncpg query time
+(`db_ms`, including connection reset queries), query count, `other_ms` and the
+request's await chain captured at 2 s. `other_ms` is total minus accumulated DB
+time; concurrent queries can make it negative. Streams retain their INFO
+completion line with `first_byte_ms` (the first response write, or `None` if no
+bytes were written), and do not enter slow warnings or latency summaries.
+
+Every nonempty 600 s window emits per-operation counts, nearest-rank p50/p95/p99,
+maximum and counts above 2 s, followed by loop stall statistics. Percentiles use
+at most the first 20,000 samples per operation; counts and maxima include all
+requests, and a separate line reports dropped samples. The watchdog starts
+before startup work: it records blocked-loop stacks after 1 s, then changed
+innermost frames at 5 and 15 s, and logs recovery. Its independent observer
+separately reports process scheduling gaps; system sleep remains the suspend
+detector's responsibility. Neither diagnostic changes API responses or the
+Telegram/Lark channel protocols, and the dashboard and CLI need no new controls.
 
 The HTTP server has five route classes: the exact paths `/login` and `/logout`
 handle sign-in and sign-out; other paths outside `/api/` serve dashboard

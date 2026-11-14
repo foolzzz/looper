@@ -54,6 +54,7 @@ from .gate_service import GateReminders
 from .drain import DrainPhase, DrainScope, DrainState
 from .wait_service import WaitService
 from .http_server import AgentHTTPServer
+from .loop_watch import LoopWatch
 from .log_redaction import log_to_stderr
 from .scheduler import Scheduler
 from .runtimes.runner.supervisor import RunnerSupervisor
@@ -601,6 +602,23 @@ async def _run_agent_system_owned(
 ) -> None:
     """Start the full agent system with the ops settings ``ops`` and run until interrupted."""
 
+    loop_watch = LoopWatch()
+    loop_watch.start()  # Observe synchronous startup work before the first await.
+    try:
+        await _run_agent_system_watched(ops=ops, runtime_root=runtime_root, work_dir=work_dir,
+                                        claude_bin=claude_bin, skip_backup=skip_backup,
+                                        runner_supervisors=runner_supervisors, ownership=ownership,
+                                        exit_now=exit_now, loop_watch=loop_watch)
+    finally:
+        await loop_watch.stop()
+
+
+async def _run_agent_system_watched(
+    *, ops: OpsConfig, runtime_root: Path, work_dir: Path, claude_bin: str,
+    skip_backup: bool, runner_supervisors: tuple[RunnerSupervisor, ...],
+    ownership: contextlib.AsyncExitStack | None, exit_now: Callable[[int], Any],
+    loop_watch: LoopWatch,
+) -> None:
     # --- Database (required) ---
     from ..db import init_pool, ensure_schema, close_pool
 
@@ -631,10 +649,11 @@ async def _run_agent_system_owned(
     fence = Fence(exit_now=exit_now)
     lease = None
     advisory_checks: asyncio.Task[None] | None = None
+    http_server: AgentHTTPServer | None = None
     if ops.keeper_mode is KeeperMode.ON:
         with startup.measure("lease"):
             try:
-                lease = await ControlPlaneLease.acquire(dsn, on_lost=fence.lost)
+                lease = await ControlPlaneLease.acquire(dsn, on_lost=fence.lost, loop_watch=loop_watch)
             except LockHeld as exc:
                 raise StartupCheckFailed(
                     f"another looper serve already runs on this database: {exc.holder.describe()}. "
@@ -891,6 +910,7 @@ async def _run_agent_system_owned(
                 ops_config=ops,
                 channels=registry,
                 startup_steps=startup.steps,
+                loop_watch=loop_watch,
             )
         fence.http_server = http_server
         with startup.measure("http"):
@@ -1003,10 +1023,14 @@ async def _run_agent_system_owned(
             with contextlib.suppress(asyncio.CancelledError):
                 await advisory_checks
         try:
-            await close_pool()
+            if http_server is not None:
+                await http_server.stop()
         finally:
-            if lease is not None:
-                await lease.release()
+            try:
+                await close_pool()
+            finally:
+                if lease is not None:
+                    await lease.release()
 
 
 def _pending_advisory_checks() -> list[list[self_check.Check]]:

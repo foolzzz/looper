@@ -45,6 +45,21 @@ def test_gateway_check_without_controller_reports_unknown_status(monkeypatch):
     assert asyncio.run(self_check.gateway_check()).status == self_check.WARN
 
 
+def test_gateway_check_reads_live_auth_failures_unless_cached(tmp_path, monkeypatch):
+    monkeypatch.setattr(self_check, '_translated_profile_rows', AsyncMock(return_value=[
+        {'type': 'claude-code', 'protocol': 'openai-chat'}]))
+    owner = control.ProxyControl(tmp_path, '', enabled=False)
+    monkeypatch.setattr(control, '_control', owner)
+    monkeypatch.setattr(owner, '_health', AsyncMock(side_effect=lambda *, cached=False: {
+        'auth_failures': 0 if cached else 1}))
+
+    async def run():
+        assert (await self_check.gateway_check(cached=True)).status == self_check.OK
+        assert (await self_check.gateway_check()).status == self_check.WARN
+
+    asyncio.run(run())
+
+
 def test_gateway_check_distinguishes_lazy_start_from_failed_start(tmp_path, monkeypatch):
     monkeypatch.setattr(self_check, '_translated_profile_rows', AsyncMock(return_value=[
         {'type': 'claude-code', 'protocol': 'openai-chat'}]))
