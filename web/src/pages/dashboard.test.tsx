@@ -286,6 +286,38 @@ describe("Dashboard waiting gates", () => {
     expect(input.value).toBe("Draft");
   });
 
+  it.each([
+    { read: "list", previouslyLoaded: false },
+    { read: "detail", previouslyLoaded: false },
+    { read: "list", previouslyLoaded: true },
+    { read: "detail", previouslyLoaded: true },
+  ])("retries a failed $read read on the next overview poll (previously loaded: $previouslyLoaded)", async ({ read, previouslyLoaded }) => {
+    if (previouslyLoaded) {
+      details = [task("a", [gate("g1")])];
+      await show();
+      overview.tasks.needs_you = 2;
+    }
+    details.push(task("b", [gate("g2")]));
+    if (read === "list") vi.mocked(fetchTasks).mockRejectedValueOnce(new Error("Offline"));
+    else vi.mocked(fetchTaskDetail).mockRejectedValueOnce(new Error("Offline"));
+    if (previouslyLoaded) await act(async () => vi.advanceTimersByTimeAsync(5000));
+    else await show();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Offline");
+    const listCalls = vi.mocked(fetchTasks).mock.calls.length;
+    const detailCalls = vi.mocked(fetchTaskDetail).mock.calls.length;
+
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(fetchTasks).toHaveBeenCalledTimes(listCalls + 1);
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(detailCalls + details.length);
+    expect(section()!.querySelectorAll("article")).toHaveLength(details.length);
+    for (const detail of details) expect(section()!.textContent).toContain(detail.gates[0].topic);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(fetchTasks).toHaveBeenCalledTimes(listCalls + 1);
+    expect(fetchTaskDetail).toHaveBeenCalledTimes(detailCalls + details.length);
+  });
+
   it("pauses overview reads while hidden and refreshes once on visibility", async () => {
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
     await show();

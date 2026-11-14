@@ -78,7 +78,9 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
   const [replies, setReplies] = useState<Reply[]>([]);
   const pendingReplies = useRef<Reply[]>([]);
   const loaded = useRef<{ needsYou: number; refresh: number } | null>(null);
-  const pendingRevision = replies.length ? revision : null;
+  // Keep retrying failed full reads on overview polls until this count and refresh are loaded.
+  const pendingRevision = replies.length || !loaded.current || loaded.current.needsYou !== needsYou
+    || loaded.current.refresh !== refresh ? revision : null;
   const loading = useRef(false);
   const queued = useRef<(() => Promise<void>) | null>(null);
   useEffect(() => () => {
@@ -128,7 +130,7 @@ export function DashboardGates({ needsYou, revision }: { needsYou: number; revis
           !pageIds.includes(task.task_id) && task.group === "needs_you").length;
         if (fullRead) {
           setMoreTasks(Math.max(0, Object.values(page.counts).reduce((sum, n) => sum + n, 0) - readTasks));
-          loaded.current = { needsYou, refresh };
+          if (!errors.length) loaded.current = { needsYou, refresh };
         }
         setError(errors[0] ?? "");
       } catch (err) {
