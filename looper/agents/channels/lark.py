@@ -215,6 +215,15 @@ class LarkChannelAdapter(ChannelAdapter):
             await self._inbox.checkpoint(boundary if boundary is not None else time())
         else:
             boundary = None
+            if self._resolve_chat is not None and any(
+                    (route := self._resolve_chat(self.channel_id, chat_id)).explicit
+                    and (route.sender_policy == SenderPolicy.CHAT
+                         or any(sender.startswith("cli_") for sender in route.senders | self._allowlist.ids))
+                    for chat_id in await self._bound_chats()):
+                logger.warning(
+                    "%s: messages sent by other bots are not received on this channel type unless the app "
+                    "has Lark's permission to receive bot messages; alternatively use the lark-cli channel's "
+                    "polling", self.channel_id)
         self._bus = bus
         self._running = True
         self._outbound_task = asyncio.create_task(self._outbound_loop())
@@ -702,8 +711,9 @@ class LarkChannelAdapter(ChannelAdapter):
             interval = _BOT_POLL_SECONDS if chat_id in fast else _BOT_SLOW_POLL_SECONDS
             if chat_id in last_poll and end - last_poll[chat_id] < interval:
                 continue
-            # Resume from this chat's queried boundary, regardless of how long other listings took.
-            start = max(last_poll.get(chat_id, now - interval) - _CATCHUP_OVERLAP,
+            # Save the first boundary before querying so a failed listing keeps its window.
+            boundary = last_poll.setdefault(chat_id, now - interval)
+            start = max(boundary - _CATCHUP_OVERLAP,
                         end - _CATCHUP_MAX_AGE)
             stats = dict(messages_found=0, handled=0, duplicates=0, too_old=0, failures=0,
                          threads_scanned=0, thread_failures=0, thread_roots_capped=0)

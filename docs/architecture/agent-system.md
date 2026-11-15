@@ -5904,7 +5904,14 @@ implementation supplies it and is retested.
   refreshing an expired token once. It reconnects with exponential backoff capped at 300 s and
   0.5–1.0 jitter; a stream that yields an event or lasts 60 s resets the backoff. Direct
   messages, group @-mentions, replies, statuses, notices, schedules and gates
-  follow the Lark rules below. The backend exposes
+  follow the Lark rules below. Messages sent by other bots are not received on
+  this channel type unless the app has Lark's permission to receive bot messages.
+  This channel has no history polling or handled-message record; the `lark-cli`
+  channel's polling is the alternative for bot @-mentions. At startup it logs
+  one WARNING if any binding uses `sender_policy: chat` or admits a bot app id
+  (`cli_...`) through the binding or channel sender allowlist. A bot's `ou_...`
+  open id alone cannot be distinguished from a person's id for this check.
+  The backend exposes
   `POST /api/v1/channels/status` and `POST /api/v1/channels/people`
   with `channel_type: "lark_bot"`,
   including sender names and rejected senders, and Settings → Channels has its

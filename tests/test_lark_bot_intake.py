@@ -203,6 +203,93 @@ def test_slow_bot_poll_keeps_each_chats_queried_watermark(
     asyncio.run(asyncio.wait_for(run(), 5))
 
 
+@pytest.mark.parametrize("policy,retry_delay", [
+    (SenderPolicy.CHAT, 30), (SenderPolicy.LISTED, 300), (SenderPolicy.CHAT, 1800),
+])
+def test_failed_first_bot_poll_retains_its_window_until_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: SenderPolicy, retry_delay: int,
+) -> None:
+    from looper.agents.channels.lark import (
+        _BOT_POLL_SECONDS, _BOT_SLOW_POLL_SECONDS, _CATCHUP_MAX_AGE, _CATCHUP_OVERLAP,
+    )
+
+    async def run() -> None:
+        now = time.time()
+        clock = [now]
+        interval = _BOT_POLL_SECONDS if policy is SenderPolicy.CHAT else _BOT_SLOW_POLL_SECONDS
+        monkeypatch.setattr("looper.agents.channels.lark.time", lambda: clock[0])
+        async with _channel(tmp_path, resolve_chat=lambda *_: RouteDecision(
+                RouteAction.ADMIT, "manager-helper", True, sender_policy=policy)) as (instance, transport, bus):
+            transport.pages[CHAT] = ConnectionError("stand-in unavailable")
+            last_poll: dict[str, float] = {}
+            await instance._poll_bot_chats(last_poll)
+            assert last_poll == {CHAT: now - interval}
+            assert bus.journal.undelivered() == []
+            clock[0] += retry_delay
+            start = max(transport.list_calls[0]["start"], clock[0] - _CATCHUP_MAX_AGE)
+            message = _message("om_syntheticretried", create_time=str(int((start + 1) * 1000)))
+            transport.pages[CHAT] = _page(message)
+            await instance._poll_bot_chats(last_poll)
+            assert transport.list_calls[1]["start"] == start
+            assert last_poll == {CHAT: clock[0]}
+            (turn,) = bus.journal.undelivered()
+            assert turn.payload["channel_context"]["message_id"] == message["message_id"]
+            assert await instance._inbox.processed(message["message_id"])
+            assert await instance._handle_lark_event(history_event(message, CHAT, "group")) == "duplicate"
+            succeeded_at = clock[0]
+            clock[0] += interval
+            await instance._poll_bot_chats(last_poll)
+            assert transport.list_calls[2]["start"] == succeeded_at - _CATCHUP_OVERLAP
+            assert last_poll == {CHAT: clock[0]}
+            assert len(bus.journal.undelivered()) == 1
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("channel_type,policy,senders,allowed,bound,warning", [
+    ("lark_bot", SenderPolicy.CHAT, frozenset(), frozenset({OPEN_ID}), True, True),
+    ("lark_bot", SenderPolicy.LISTED, frozenset({OTHER_APP}), frozenset({OPEN_ID}), True, True),
+    ("lark_bot", SenderPolicy.LISTED, frozenset(), frozenset({OTHER_APP}), True, True),
+    ("lark_bot", SenderPolicy.LISTED, frozenset({OPEN_ID}), frozenset({OPEN_ID}), True, False),
+    ("lark_bot", SenderPolicy.CHAT, frozenset({OTHER_APP}), frozenset({OTHER_APP}), False, False),
+    ("lark", SenderPolicy.CHAT, frozenset({OTHER_APP}), frozenset({OPEN_ID}), True, False),
+])
+def test_bot_token_start_warns_once_for_bindings_that_admit_other_bots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    channel_type: str, policy: SenderPolicy, senders: frozenset[str], allowed: frozenset[str],
+    bound: bool, warning: bool,
+) -> None:
+    async def bound_chats(self: LarkChannelAdapter) -> list[str]:
+        return [CHAT, "oc_syntheticsecond"] if bound else []
+
+    monkeypatch.setattr(LarkChannelAdapter, "_bound_chats", bound_chats)
+
+    async def run() -> None:
+        instance = LarkChannelAdapter(
+            channel_type=channel_type, runtime_root=tmp_path, transport=StubTransport(),
+            allowlist=SenderAllowlist(f"channel-{channel_type}", allowed),
+            resolve_chat=lambda *_: RouteDecision(RouteAction.ADMIT, "manager-helper", True,
+                                                 senders=senders, sender_policy=policy))
+        bus = MessageBus(runtime_root=tmp_path)
+        try:
+            with caplog.at_level("WARNING"):
+                await instance.start(bus)
+            warnings = [record.message for record in caplog.records if record.levelname == "WARNING"]
+            assert len(warnings) == int(warning)
+            if warning:
+                assert instance.channel_id in warnings[0]
+                assert "messages sent by other bots" in warnings[0]
+                assert "permission to receive bot messages" in warnings[0]
+                assert "lark-cli" in warnings[0] and "polling" in warnings[0]
+            if channel_type == "lark_bot":
+                assert instance._inbox is None and instance._bot_poll_task is None
+        finally:
+            await instance.stop()
+            await bus.shutdown()
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
 @pytest.mark.parametrize("watermark_age,lookback", [(120, 130), (1800, 900)])
 def test_bot_poll_recovers_from_watermark_with_only_max_age_cap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, watermark_age: int, lookback: int,
@@ -417,7 +504,8 @@ def test_bot_poll_combines_thread_discovery_activity_and_partial_page_recovery(
                 f"om_syntheticbot{thread}", f"om_syntheticbot{active}"}
             assert {turn.payload["channel_context"]["thread_id"] for turn in turns} == {thread, active}
             assert reads.count((thread, "")) == reads.count((active, "")) == 1
-            assert (CHAT in last_poll) is not later_page_fails
+            assert CHAT in last_poll
+            assert (last_poll[CHAT] == transport.list_calls[0]["end"]) is not later_page_fails
 
     asyncio.run(asyncio.wait_for(run(), 5))
 
