@@ -281,8 +281,17 @@ async def scan_at_start(runtime_root: Path, *, epoch: int | None = None,
     for path in bad_files:
         records[path] = _recover(path, runtime_root / proc_tree.RECORDS_DIR)
     # Finish the whole liveness preflight before ending keepers or deleting any directory.
-    alive = await asyncio.to_thread(live, {path.name: record for path, record in records.items()
-                                         if record is not None})
+    # Six 5-second ps timeouts plus backoff take at most about a minute.
+    for attempt in range(1, 7):
+        try:
+            alive = await asyncio.to_thread(live, {path.name: record for path, record in records.items()
+                                                 if record is not None})
+            break
+        except OSError as exc:
+            logger.warning("cannot read keeper start times (attempt %d/6)", attempt)
+            if attempt == 6:
+                raise OSError(f"cannot read keeper start times after {attempt} tries") from exc
+            await asyncio.sleep(2 ** (attempt - 1))
     manifests = {path: read_json(path / MANIFEST) for path in records} if epoch is not None else {}
     holds = await plans.run_holds([path.name for path in records], pool=pool) if epoch is not None else {}
     ids = [data["record_id"] for data in manifests.values()
