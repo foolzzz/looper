@@ -18,6 +18,17 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.14.193] - 2026-11-15
+
+### Changed
+
+- **Lark bot-mention poll keeps a failed first window; bot-token channel warns.** ([#1365](https://github.com/foolzzz/looper/pull/1365))
+  - The poll stores a chat's first boundary before listing, so a failed first listing is retried from it instead of lost. At startup the bot-token channel logs one WARNING if a binding uses `sender_policy: chat` or admits a bot app id (`cli_...`), since it cannot receive other bots' messages without Lark's permission.
+  - Not model-visible.
+- **Startup retries reading keeper start times.** ([#1366](https://github.com/foolzzz/looper/pull/1366))
+  - Up to 6 attempts with 1 to 16 s waits (about a minute) before startup refuses; refusal when all fail is unchanged.
+  - Not model-visible.
+
 ## [2.14.192] - 2026-11-13
 
 ### Changed
