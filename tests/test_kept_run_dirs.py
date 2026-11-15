@@ -6,11 +6,12 @@ import signal
 import stat
 import sys
 import tempfile
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -251,18 +252,58 @@ def test_unknown_liveness_refuses_to_start(tmp_path, monkeypatch, failure_at):
             def unavailable(pids):
                 nonlocal calls
                 calls += 1
-                return None if calls == failure_at else starts(pids)
+                return None if calls >= failure_at else starts(pids)
 
-            monkeypatch.setattr(proc_tree, "_start_times", unavailable)
-            with pytest.raises(OSError):
-                await kept_dirs.scan_at_start(tmp_path)
+            with monkeypatch.context() as patch:
+                patch.setattr(proc_tree, "_start_times", unavailable)
+                patch.setattr(kept_dirs, "asyncio", Mock(wraps=asyncio, sleep=AsyncMock()))
+                with pytest.raises(OSError):
+                    await kept_dirs.scan_at_start(tmp_path)
             assert directory.exists() and bad.exists()
             assert process.returncode is None
 
     asyncio.run(run())
 
 
-def test_serve_refuses_unknown_liveness_before_interrupting_records(tmp_path, monkeypatch):
+@pytest.mark.parametrize("started", ["original", "reused", None])
+@pytest.mark.parametrize("failures", [0, 2])
+def test_startup_retries_keeper_start_times_before_deciding_liveness(tmp_path, monkeypatch, caplog,
+                                                                  started, failures):
+    directory = tmp_path / keeper.RUNS_DIR / "worker-leftover"
+    directory.mkdir(parents=True)
+    keeper.write_json(directory / keeper.STATE, dict(
+        format=1, keeper_pid=123, keeper_started="original", child_pid=None, child_started=None,
+        state="starting", end_reason=None, controller_epoch=None, socket=None,
+    ))
+    calls = []
+    loop_thread = threading.get_ident()
+
+    def starts(pids):
+        assert threading.get_ident() != loop_thread
+        calls.append(list(pids))
+        return None if len(calls) <= failures else ({} if started is None else {123: started})
+
+    sleep, end = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(proc_tree, "_start_times", starts)
+    monkeypatch.setattr(kept_dirs, "asyncio", Mock(wraps=asyncio, sleep=sleep))
+    monkeypatch.setattr(kept_dirs, "end_keeper", end)
+    scan = asyncio.run(kept_dirs.scan_at_start(tmp_path))
+    assert calls == [[123]] * (failures + 1)
+    assert [call.args[0] for call in sleep.await_args_list] == [1, 2][:failures]
+    assert [record.getMessage() for record in caplog.records if record.name == kept_dirs.__name__] == [
+        f"cannot read keeper start times (attempt {attempt}/6)" for attempt in range(1, failures + 1)
+    ]
+    assert all(record.levelname == "WARNING" for record in caplog.records)
+    if started == "original":
+        assert scan.ended == {kept_dirs.Reason.NOT_ADOPTABLE: 1} and scan.released == 0
+        end.assert_awaited_once()
+    else:
+        assert not scan.ended and scan.released == 1
+        end.assert_not_awaited()
+    assert not directory.exists()
+
+
+def test_serve_refuses_unknown_liveness_before_interrupting_records(tmp_path, monkeypatch, caplog):
     from looper import db
     from looper.agents import chat_settings, profile_registry, scheduler_settings, serve, waits
     from looper.db import llm_records
@@ -285,9 +326,38 @@ def test_serve_refuses_unknown_liveness_before_interrupting_records(tmp_path, mo
 
     async def run():
         async with running_keeper(tmp_path) as (directory, process, _state):
-            monkeypatch.setattr(proc_tree, "_start_times", lambda pids: None)
-            with pytest.raises(serve.StartupCheckFailed, match="cannot tell whether kept runs are still running"):
-                await serve._run_agent_system_owned(ops=ops, runtime_root=tmp_path, work_dir=tmp_path)
+            calls = []
+            loop_thread = threading.get_ident()
+
+            def unavailable(pids):
+                assert threading.get_ident() != loop_thread
+                calls.append(list(pids))
+                return None
+
+            elapsed = 0.0
+
+            async def pause(delay):
+                nonlocal elapsed
+                elapsed += delay
+
+            sleep = AsyncMock(side_effect=pause)
+            with monkeypatch.context() as patch:
+                patch.setattr(proc_tree, "_start_times", unavailable)
+                patch.setattr(kept_dirs, "asyncio", Mock(wraps=asyncio, sleep=sleep))
+                patch.setattr(serve, "time", SimpleNamespace(monotonic=lambda: elapsed))
+                startup = serve._StartupSteps(0.0)
+                patch.setattr(serve, "_StartupSteps", lambda _: startup)
+                with pytest.raises(serve.StartupCheckFailed, match=(
+                        "cannot tell whether kept runs are still running: "
+                        "cannot read keeper start times after 6 tries")):
+                    await serve._run_agent_system_owned(ops=ops, runtime_root=tmp_path, work_dir=tmp_path)
+            assert len(calls) == 6
+            assert [call.args[0] for call in sleep.await_args_list] == [1, 2, 4, 8, 16]
+            assert startup.steps["kept_scan"] == 31
+            assert [record.getMessage() for record in caplog.records
+                    if record.name == kept_dirs.__name__] == [
+                f"cannot read keeper start times (attempt {attempt}/6)" for attempt in range(1, 7)
+            ]
             assert directory.exists() and process.returncode is None
             interrupted.assert_not_awaited()
 
