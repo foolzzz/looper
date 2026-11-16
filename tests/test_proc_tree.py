@@ -1810,23 +1810,34 @@ def test_cancelling_a_refresh_does_not_lose_new_descendants(monkeypatch: pytest.
     starts = {101: "agent", 102: "command", 103: "grandchild"}
     signalled: set[int] = set()
     monkeypatch.setattr(proc_tree, "_snapshot", lambda: dict(table))
-    monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids})
-    monkeypatch.setattr(proc_tree, "_start_time", lambda pid: starts.get(pid))
+    monkeypatch.setattr(proc_tree, "_start_times", lambda pids: {pid: starts[pid] for pid in pids if pid in table})
+    monkeypatch.setattr(proc_tree, "_start_time", lambda pid: starts.get(pid) if pid in table else None)
     # A real process may have the same pid as this synthetic agent, especially on Linux.
     monkeypatch.setattr(proc_tree.os, "getpgid", lambda pid: pytest.fail("must not probe a synthetic pid"))
 
-    def killpg(group: int, sig: int) -> None:
-        for pid, (_, pgid) in list(table.items()):
-            if pgid == group:
-                signalled.add(pid)
-                table.pop(pid)
-                if pid == agent.pid:
-                    agent.returncode = -sig
-
-    monkeypatch.setattr(proc_tree.os, "killpg", killpg)
-
     async def _run() -> None:
+        exited = asyncio.Event()
+
+        def killpg(group: int, sig: int) -> None:
+            for pid, (_, pgid) in list(table.items()):
+                if pgid == group:
+                    signalled.add(pid)
+                    table.pop(pid)
+                    if pid == agent.pid:
+                        agent.returncode = -sig
+            if not table:
+                exited.set()
+
+        monkeypatch.setattr(proc_tree.os, "killpg", killpg)
         tree = proc_tree.track(agent)
+        strays = tree._strays
+
+        async def after_exit(exclude: frozenset[int]) -> list[Any]:
+            # Exercise discovery after group cleanup: identity lookups must no longer list the dead children.
+            await exited.wait()
+            return await strays(exclude)
+
+        monkeypatch.setattr(tree, "_strays", after_exit)
         table.update({102: (101, 102), 103: (102, 102)})
         reached = asyncio.Event()
         to_thread = asyncio.to_thread

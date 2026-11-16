@@ -301,21 +301,41 @@ def test_one_model_event_then_exit_never_falls_back(run_primary, runtime, launch
     assert len(records) == 1
 
 
-def test_model_event_before_prompt_delivery_never_falls_back(run_primary, monkeypatch):
+@pytest.mark.parametrize("runtime", ["codex", "cursor-agent"])
+@pytest.mark.parametrize("launcher", list(Launcher))
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("model_event", [False, True])
+def test_exit_before_prompt_delivery_preserves_output_and_fallback_policy(
+    run_primary, agent_db, monkeypatch, runtime, launcher, exit_code, model_event,
+):
     spawn = worker.proc_tree.spawn
+    first = True
 
     async def exited_process(*args, **kwargs):
+        nonlocal first
         process = await spawn(*args, **kwargs)
-        # Force the CLI to exit before start() writes, without relying on scheduling.
-        await asyncio.wait_for(process.wait(), 5)
+        # Only the primary exits before start() writes; a fallback must still receive its prompt.
+        if first:
+            first = False
+            await asyncio.wait_for(process.wait(), 5)
         return process
 
     monkeypatch.setattr(worker.proc_tree, "spawn", exited_process)
-    event = {"type": "item.started", "item": {"id": "call", "type": "command_execution", "command": "pwd"}}
-    result, records = run_primary("codex", Launcher.TTADK, events=[event], exit_code=0)
-    assert result["status"] == "failed"
-    assert "fallback" not in result
-    assert len(records) == 1
+    event = ({"type": "item.started", "item": {"id": "call", "type": "command_execution", "command": "pwd"}}
+             if runtime == "codex" else ASSISTANT)
+    result, records = run_primary(runtime, launcher, events=[event] if model_event else [], exit_code=exit_code)
+    falls_back = not model_event and (exit_code != 0 or launcher is Launcher.TTADK)
+    assert result["status"] == ("completed" if falls_back else "failed")
+    assert ("fallback" in result) is falls_back
+    assert len(records) == (2 if falls_back else 1)
+    error = agent_db.finish_record.await_args_list[0].kwargs["error"]
+    assert "Unknown model" in error
+    assert "user turn" not in error
+    if falls_back:
+        assert "Unknown model" in result["fallback"][0]["reason"]
+    else:
+        assert result["error"] == error
+        assert "Unknown model" in result["stderr"]
 
 
 @pytest.mark.parametrize("runtime", ["codex", "coco"])

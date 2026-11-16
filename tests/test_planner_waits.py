@@ -854,28 +854,34 @@ async def _open_then(h: Any, agent_db: Any, key: str, state: str, **fields: Any)
     await _wake(h)
 
 
-def test_a_timed_out_wait_is_extended(planner_claude: Any, agent_db: Any) -> None:
+def test_a_timed_out_wait_is_extended(
+    planner_claude: Any, agent_db: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock(_NOW)
+    _freeze(monkeypatch, clock)
     answer = "R" * 350
     claude = planner_claude(plan(wait_step("w1")), _wait_reply("extend", answer, max_wait_seconds=86400))
 
     async def scenario(h: Any) -> None:
         await h.start()
-        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        # The startup event also delivers waits: finish it before arming the next event's timeout.
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING and not h.planner._handling_message)
         goals = len(_goals(h))
         # Two recorded failures, and the second automatic retry (300 s) is already due, so this event decides.
         _arm(agent_db, "w1", "timed_out", failures=2,
-             failed_at=datetime.now(timezone.utc) - timedelta(seconds=301))
+             failed_at=clock.at - timedelta(seconds=301))
         await _wake(h)
         await h.until(lambda: _stored_wait(agent_db, "w1")["state"] == "waiting"
-                      and _stored_wait(agent_db, "w1")["extensions"] == 1)
+                      and _stored_wait(agent_db, "w1")["extensions"] == 1
+                      and len(_goals(h)) > goals)
         assert len(_goals(h)) > goals
 
     drive(claude, _hold, scenario)
 
     stored = _stored_wait(agent_db, "w1")
     assert stored["failures"] == 0 and stored["failed_at"] is None
-    assert abs((stored["deadline_at"] - stored["next_check_at"]).total_seconds() - 86400) < 2
-    assert abs((stored["next_check_at"] - datetime.now(timezone.utc)).total_seconds()) < 30
+    assert stored["deadline_at"] - stored["next_check_at"] == timedelta(seconds=86400)
+    assert stored["next_check_at"] == clock.at
     assert _stored_steps(agent_db)["w1"]["status"] == "waiting"
     assert _entries(agent_db, "wait_extended", "w1")[0]["summary"].startswith(f"wait extended by 1 d: {answer[:20]}")
     lines = activity(agent_db)
@@ -1379,6 +1385,7 @@ def _freeze(monkeypatch: pytest.MonkeyPatch, clock: _Clock) -> None:
         def now(cls, tz: Any = None) -> datetime:
             return clock.at if tz is None else clock.at.astimezone(tz)
 
+    clock.at = Frozen.fromisoformat(clock.at.isoformat())
     monkeypatch.setattr(planner_module, "datetime", Frozen)
     monkeypatch.setattr(planner_protocol, "datetime", Frozen)
 
@@ -1498,13 +1505,15 @@ def test_run_deadline_refuses_a_long_extend_and_caps_a_late_one(
 
     async def scenario(h: Any) -> None:
         await h.start()
-        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING)
+        # The timeout belongs to the wake event, after startup has finished delivering waits.
+        await h.until(lambda: _wait_state(h, "w1") is WaitState.WAITING and not h.planner._handling_message)
         assert calls == ["t1"]
         due["at"] = _step(h, "w1").wait.due_at
         due["opened"] = _step(h, "w1").wait.opened_at
         _arm(agent_db, "w1", "timed_out")
         await _wake(h)
-        await h.until(lambda: _stored_wait(agent_db, "w1")["extensions"] == 1)
+        await h.until(lambda: _stored_wait(agent_db, "w1")["extensions"] == 1
+                      and not h.planner._handling_message)
         assert calls == ["t1", "t1"]  # the repair parses twice and still reads the run once
 
     drive(claude, _hold, scenario)
@@ -1599,13 +1608,16 @@ def test_run_deadline_is_named_in_the_wait_message(
 
     async def scenario(h: Any) -> None:
         await h.start()
-        await h.until(lambda: h.held and _wait_state(h, "w1") is WaitState.WAITING)
+        # The WORK_RESULT must decide before the timeout is delivered in that event's tail.
+        await h.until(lambda: h.held and _wait_state(h, "w1") is WaitState.WAITING
+                      and not h.planner._handling_message)
         assert calls == ["t1"]
         _arm(agent_db, "w1", "timed_out", checks=4,
              last_checked_at=datetime(2026, 10, 19, 11, 0, tzinfo=timezone.utc),
              last_result="not_ready", last_output="still waiting", last_error="disk full", notice="dashboard")
         await h.release(WORK_OK)
-        await h.until(lambda: _stored_wait(agent_db, "w1")["extensions"] == 1)
+        await h.until(lambda: _stored_wait(agent_db, "w1")["extensions"] == 1
+                      and not h.planner._handling_message)
 
     drive(claude, _hold, scenario)
 
