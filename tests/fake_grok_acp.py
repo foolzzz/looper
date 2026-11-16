@@ -85,6 +85,7 @@ def stall():
         time.sleep(600)
 
 def prompt(request, text):
+    text = os.environ.get('FAKE_ACP_STEER_SCENARIO', text)
     state['turns'] += 1
     save()
     if text.startswith('STEER_'):
@@ -101,7 +102,7 @@ def prompt(request, text):
                        rawOutput={'type': 'Bash', 'output': [], 'exit_code': 0})
                 chunk('last response already started')
         else:
-            chunk('last response already started')
+            chunk(os.environ.get('FAKE_ACP_STEER_RESULT', 'last response already started'))
         open(os.path.join(root, 'steer-ready'), 'w').close()
         accepted = False
         while not accepted:

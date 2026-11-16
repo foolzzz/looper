@@ -378,6 +378,11 @@ class GrokChannel:
                 future.set_exception(ConnectionResetError("the Grok run has ended"))
                 future.exception()
 
+    def dropped_input(self) -> list[str]:
+        """Recover unread Planner input; room deliveries keep their unconfirmed cursor."""
+        return [delivery.text for ident, delivery in self._interjections.items()
+                if delivery.accepted and not delivery.observed and not ident.startswith("looper-reminder-")]
+
     def end_input(self) -> None:
         self._phase = _Phase.FINISHED
         self._ready.set()

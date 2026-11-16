@@ -566,7 +566,8 @@ class ProcessRun:
         return await stderr_tail(self.process.stderr, STDERR_DRAIN_SEC)
 
     def dropped_input(self) -> list[str]:
-        return []
+        dropped = getattr(self._channel, "dropped_input", None)
+        return dropped() if dropped is not None else []
 
 
 @dataclass
