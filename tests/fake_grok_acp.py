@@ -117,7 +117,10 @@ def prompt(request, text):
             if text == 'STEER_REFUSE':
                 out({'id': pending['id'], 'error': {'code': -32602, 'message': 'interjection refused'}})
             else:
-                out({'id': pending['id'], 'result': {'status': 'queued'}})
+                result = {'status': 'queued'}
+                if os.environ.get('FAKE_ACP_INTERJECT_FLAT') != '1':
+                    result = {'result': result}
+                out({'id': pending['id'], 'result': result})
                 out({'method': '_x.ai/session/interjection', 'params': params})
             accepted = True
         open(os.path.join(root, 'steer-accepted'), 'w').close()
@@ -272,5 +275,8 @@ for line in sys.stdin:
         prompt(request, message['params']['prompt'][0]['text'])
     elif method == '_x.ai/interject':
         code = int(os.environ.get('FAKE_ACP_INTERJECT_CODE', '-32602'))
-        out({'id': request, 'error': {'code': code, 'message': os.environ.get('FAKE_ACP_INTERJECT_MESSAGE', 'session not found' if code == -32602 else 'method not found')}})
+        reason = 'session not found: ' + message['params']['sessionId'] if code == -32602 else None
+        out({'id': request, 'error': {'code': code,
+             'message': os.environ.get('FAKE_ACP_INTERJECT_MESSAGE', 'Invalid params' if code == -32602 else 'method not found'),
+             'data': json.loads(os.environ['FAKE_ACP_INTERJECT_DATA']) if 'FAKE_ACP_INTERJECT_DATA' in os.environ else reason}})
 """

@@ -76,7 +76,8 @@ def probe_interject(executable: str, *, home: str, env: dict[str, str], timeout:
                         break
                     error = message.get("error")
                     return ("result" not in message and isinstance(error, dict) and error.get("code") == -32602
-                            and "session not found" in str(error.get("message", "")).lower())
+                            and any("session not found" in str(error.get(field, "")).lower()
+                                    for field in ("message", "data")))
     except OSError:
         return False
     finally:
@@ -95,6 +96,14 @@ def probe_interject(executable: str, *, home: str, env: dict[str, str], timeout:
                     pass
                 process.communicate()
     return False
+
+
+def _interject_queued(response: Mapping[str, Any]) -> bool:
+    """Accept Grok 1.0.77's nested status and the flat JSON-RPC result shape."""
+    result = response.get("result")
+    return isinstance(result, Mapping) and (
+        result.get("status") == "queued"
+        or isinstance(nested := result.get("result"), Mapping) and nested.get("status") == "queued")
 
 
 @dataclass
@@ -230,9 +239,8 @@ class GrokChannel:
                         and ("result" in message) != ("error" in message) and ident in self._pending):
                     delivery_id = self._request_delivery.get(ident)
                     delivery = self._interjections.get(delivery_id) if delivery_id else None
-                    result = message.get("result")
                     if delivery is not None:
-                        delivery.accepted = isinstance(result, Mapping) and result.get("status") == "queued"
+                        delivery.accepted = _interject_queued(message)
                         if "error" in message:
                             self._interjections.pop(delivery_id, None)
                     future = self._pending[ident]
@@ -363,9 +371,7 @@ class GrokChannel:
                 return attempt.result
             if "error" in response:
                 return DeliveryResult.REJECTED
-            result = response.get("result")
-            return (DeliveryResult.ACCEPTED if isinstance(result, Mapping) and result.get("status") == "queued"
-                    else DeliveryResult.UNKNOWN)
+            return DeliveryResult.ACCEPTED if _interject_queued(response) else DeliveryResult.UNKNOWN
         finally:
             if ident is not None:
                 self._request_delivery.pop(ident, None)

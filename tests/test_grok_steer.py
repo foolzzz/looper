@@ -41,21 +41,25 @@ def _steering_launch(*, executable: str = "grok"):
         launch.settings, profile=dataclasses.replace(launch.profile, runtime=runtime)))
 
 
-@pytest.mark.parametrize(("version", "code", "message", "supported", "checked"), [
-    ("grok 1.0.76", -32602, "session not found", False, False),
-    ("grok 1.0.77", -32602, "session not found", True, True),
-    ("grok 1.0.78", -32602, "session not found", True, True),
-    ("grok 1.0.77", -32601, "method not found", False, True),
-    ("grok 1.0.77", -32603, "internal error", False, True),
-    ("grok 1.0.77", -32602, "invalid params", False, True),
+@pytest.mark.parametrize(("version", "code", "message", "data", "supported", "checked"), [
+    ("grok 1.0.76", -32602, "Invalid params", "session not found: probe", False, False),
+    ("grok 1.0.77", -32602, "session not found: probe", None, True, True),
+    ("grok 1.0.78", -32602, "Invalid params", "session not found: probe", True, True),
+    ("grok 1.0.77", -32602, "Invalid params", {"reason": "Session Not Found: probe"}, True, True),
+    ("grok 1.0.77", -32602, "Invalid params", [{"reason": "session not found: probe"}], True, True),
+    ("grok 1.0.77", -32601, "method not found", "session not found: probe", False, True),
+    ("grok 1.0.77", -32603, "internal error", "session not found: probe", False, True),
+    ("grok 1.0.77", -32602, "Invalid params", None, False, True),
+    ("grok 1.0.77", -32602, "Invalid params", {"reason": "invalid session"}, False, True),
 ])
 def test_probe_requires_the_minimum_version_and_the_interject_method(
-    tmp_path: Path, version: str, code: int, message: str, supported: bool, checked: bool,
+    tmp_path: Path, version: str, code: int, message: str, data: Any, supported: bool, checked: bool,
 ) -> None:
     # Embed the fake settings: the runtime deliberately filters inherited variables.
     body = ("import os\n"
             f"os.environ.update({{'FAKE_ACP_ROOT': {str(tmp_path)!r}, 'FAKE_ACP_VERSION': {version!r}, "
-            f"'FAKE_ACP_INTERJECT_CODE': {str(code)!r}, 'FAKE_ACP_INTERJECT_MESSAGE': {message!r}}})\n" + FAKE_ACP)
+            f"'FAKE_ACP_INTERJECT_CODE': {str(code)!r}, 'FAKE_ACP_INTERJECT_MESSAGE': {message!r}, "
+            f"'FAKE_ACP_INTERJECT_DATA': {json.dumps(data)!r}}})\n" + FAKE_ACP)
     executable = fake_claude(tmp_path / "grok", body)
     probe = GrokRuntime().probe(executable)
     assert probe.error is None and probe.version == version
@@ -118,18 +122,21 @@ def _receipts(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [e for e in events if e.get("type") == "user" and e.get("isReplay") is True]
 
 
-@pytest.mark.parametrize("scenario", [
-    "STEER_TOOL", "STEER_FINAL", "STEER_LATE", "STEER_REFUSE", "STEER_EMPTY", "STEER_TOOL_ONLY",
+@pytest.mark.parametrize(("scenario", "delivery_id", "flat"), [
+    *[(scenario, delivery_id, False)
+      for scenario in ("STEER_TOOL", "STEER_FINAL", "STEER_LATE", "STEER_REFUSE", "STEER_EMPTY", "STEER_TOOL_ONLY")
+      for delivery_id in ("planner-input-1", "looper-reminder-0123456789ab-42")],
+    ("STEER_TOOL", "planner-input-1", True),
 ])
-@pytest.mark.parametrize("delivery_id", ["planner-input-1", "looper-reminder-0123456789ab-42"])
 def test_acceptance_is_not_read_until_model_output_after_a_later_tool_result(
-    tmp_path: Path, scenario: str, delivery_id: str,
+    tmp_path: Path, scenario: str, delivery_id: str, flat: bool,
 ) -> None:
     async def run() -> None:
         home = tmp_path / "home"
         home.mkdir()
         handle = ProcessRun(GrokRuntime(), [
             "env", f"HOME={home}", f"GROK_HOME={home}", f"FAKE_ACP_ROOT={tmp_path}",
+            f"FAKE_ACP_INTERJECT_FLAT={int(flat)}",
             sys.executable, "-u", "-c", FAKE_ACP, "agent", "--always-approve", "stdio",
         ], launch=_steering_launch(), cwd=tmp_path, session_dir=None, label="test-grok")
         assert handle.dropped_input() == []
@@ -209,7 +216,12 @@ def test_planner_queued_input_during_the_final_response_reaches_the_work_result(
     settings = {"FAKE_ACP_ROOT": str(tmp_path), "FAKE_ACP_STEER_SCENARIO": "STEER_FINAL",
                 "FAKE_ACP_STEER_RESULT": report}
     executable = fake_claude(tmp_path / "grok", f"import os\nos.environ.update({settings!r})\n" + FAKE_ACP)
-    launch = _steering_launch(executable=executable)
+    probe = GrokRuntime().probe(executable)
+    assert probe.error is None and Capability.STEER in probe.capabilities
+    launch = _launch(executable=executable)
+    runtime = dataclasses.replace(launch.profile.runtime, capabilities=probe.capabilities)
+    launch = dataclasses.replace(launch, settings=dataclasses.replace(
+        launch.settings, profile=dataclasses.replace(launch.profile, runtime=runtime)))
     monkeypatch.setattr(worker_module, "load_agent_settings", AsyncMock(return_value=launch.settings))
 
     async def run() -> None:

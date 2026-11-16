@@ -11,10 +11,10 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from looper.agents.agent_settings import Launch
-from looper.agents.room import MemberKind, RoomDelivery, RoomInput, Seat, room_section
+from looper.agents.room import MemberKind, RoomDelivery, RoomInput, RoomService, Seat, room_section
 from looper.agents.runtimes import ADAPTERS, Capability, RoomPush
 from looper.agents.runtimes.channel import DeliveryResult
-from looper.agents.tiers.worker import ConsumeStart, RunContext, WorkerConfig, WorkerPool, room_input
+from looper.agents.tiers.worker import ConsumeStart, RunContext, WorkerConfig, WorkerPool, WorkerProcess, room_input
 from tests.run_handle_support import ScriptedRun
 
 
@@ -87,10 +87,17 @@ def test_grok_room_push_can_accept_while_worker_consumes_a_tool_event(tmp_path, 
     import os
     import sys
 
+    from fake_claude import fake_claude
     from fake_grok_acp import FAKE_ACP
+    from looper.agents import room as room_module
     from looper.agents.runtimes import grok_steer
+    from looper.agents.runtimes.grok import GrokRuntime
     from looper.agents.runtimes.grok_steer import GrokChannel
 
+    executable = fake_claude(tmp_path / "grok", "import os\n"
+                            f"os.environ['FAKE_ACP_ROOT'] = {str(tmp_path)!r}\n" + FAKE_ACP)
+    probe = GrokRuntime().probe(executable)
+    assert probe.error is None and Capability.STEER in probe.capabilities
     # A synchronous room send from the event consumer must not block the ACP reader.
     monkeypatch.setattr(grok_steer, "_SEND_TIMEOUT_SEC", 0.25)
 
@@ -105,13 +112,30 @@ def test_grok_room_push_can_accept_while_worker_consumes_a_tool_event(tmp_path, 
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         channel = GrokChannel(process, model="grok-4.7", cwd=str(tmp_path))
         launch = Launch()
-        runtime = replace(launch.profile.runtime, type="grok", capabilities=ADAPTERS["grok"].capabilities | {Capability.STEER})
+        runtime = replace(launch.profile.runtime, type="grok", capabilities=probe.capabilities)
         launch = replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, runtime=runtime)))
         pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
         seat = Seat("worker@s1", "worker", MemberKind.WORK, run="w1")
-        room = SimpleNamespace(delivery=AsyncMock(return_value=RoomDelivery("new instructions", 42, (42,), True, 0)),
-                               confirm=AsyncMock())
+        room = RoomService(worker_pool=pool)
+        monkeypatch.setattr(room, "enabled", AsyncMock(return_value=True))
+        cursor = 0
+
+        async def mark_read(task_id, seat_key, through):
+            nonlocal cursor
+            assert (task_id, seat_key) == ("task", seat.key)
+            cursor = max(cursor, through)
+
+        mark = AsyncMock(side_effect=mark_read)
+        monkeypatch.setattr(room_module.db_room, "mark_read", mark)
+        monkeypatch.setattr(room_module.db_room, "last_read", AsyncMock(side_effect=lambda *_: cursor))
+        row = {"id": 42, "sender_seat": "worker@s2", "kind": "question", "body": "new instructions",
+               "audience": [seat.key], "audience_all": False}
+        monkeypatch.setattr(room_module.db_room, "messages", AsyncMock(
+            side_effect=lambda _, *, after=0: [row] if after < row["id"] else []))
         pool.room_ops = SimpleNamespace(room=room)
+        pool._active["w1"] = WorkerProcess("w1", "s1", "p1", parent_task_id="task")
+        activity = AsyncMock()
+        monkeypatch.setattr(pool, "_activity", activity)
         accepted, tool_result = asyncio.Event(), asyncio.Event()
         original_send = channel.send
         outcomes = []
@@ -145,16 +169,23 @@ def test_grok_room_push_can_accept_while_worker_consumes_a_tool_event(tmp_path, 
             await asyncio.wait_for(accepted.wait(), 3)
             assert outcomes == [DeliveryResult.ACCEPTED]
             assert pool._reminders["w1"].sent == 1
-            room.confirm.assert_not_awaited()
+            mark.assert_not_awaited()
+            assert cursor == 0
             assert not (tmp_path / "steer-tool.done").exists()
             (tmp_path / "steer-tool.finish").touch()
             await asyncio.wait_for(tool_result.wait(), 2)
-            room.confirm.assert_not_awaited()
+            mark.assert_not_awaited()
+            assert cursor == 0
             (tmp_path / "steer-model.start").touch()
             result = await asyncio.wait_for(consuming, 3)
             assert result["status"] == "completed"
-            room.confirm.assert_awaited_once_with("task", seat.key, 42)
+            mark.assert_awaited_once_with("task", seat.key, 42)
+            assert cursor == 42
+            assert await room.delivery("task", seat) is None
             requests = [json.loads(line) for line in (tmp_path / "steer-requests.jsonl").read_text().splitlines()]
+            activity.assert_any_await("task", "w1", "phase", "Room messages delivered: #42",
+                                      metadata={"room_delivery": {"ids": [42], "through": 42,
+                                                                 "chars": len(requests[0]["params"]["text"])}})
             assert [r["method"] for r in requests] == ["_x.ai/interject"]
             assert process.returncode == 0
         finally:

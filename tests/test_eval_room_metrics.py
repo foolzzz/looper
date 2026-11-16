@@ -51,6 +51,34 @@ def test_an_inbox_woken_by_delivery_is_counted_separately(wrapped, delivered):
     assert result["room_inbox_empty"] == int(not delivered)
 
 
+@pytest.mark.parametrize("prefix", ["looper__", "mcp__looper__", ""])
+def test_grok_use_tool_inbox_calls_keep_the_outer_result_id(prefix):
+    def call(call_id, tool):
+        return {"type": "tool_use", "id": call_id, "name": "use_tool",
+                "input": {"tool_name": prefix + tool, "tool_input": {}}}
+
+    events = [
+        _event("assistant", call("empty", "looper_room_inbox"), call("wake", "looper_room_inbox"),
+               call("roster", "looper_room_roster"), call("other", "looper_task_info")),
+        _event("user", _result('{"messages": []}', "empty"),
+               _result('{"result": {"messages": [], "delivered_message_ids": [4]}}', "wake"),
+               _result('{"messages": []}', "other")),
+    ]
+    result = metrics.room_metrics({}, [], {1: events})
+    assert result["room_tool_calls"] == 3
+    assert result["room_inbox_calls"] == 2
+    assert result["room_inbox_empty"] == 1
+    assert result["room_inbox_woken_by_delivery"] == 1
+
+
+@pytest.mark.parametrize("arguments", [None, [], "looper_room_inbox", {}, {"tool_name": None}, {"tool_name": []}])
+def test_malformed_use_tool_inputs_are_not_room_calls(arguments):
+    events = [_event("assistant", {"type": "tool_use", "id": "inbox", "name": "use_tool", "input": arguments}),
+              _event("user", _result('{"messages": []}'))]
+    result = metrics.room_metrics({}, [], {1: events})
+    assert result["room_tool_calls"] == result["room_inbox_calls"] == result["room_inbox_empty"] == 0
+
+
 @pytest.mark.parametrize("content", [
     "tool failed", "[]", "null", '"text"', '{"result": null}', '{"result": []}',
     '{}', '{"messages": null}', '{"messages": {}}', 123,

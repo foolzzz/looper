@@ -185,7 +185,7 @@ _CONCLUSION = "Settled with the user at gate "
 
 
 # The agent room's tools as a run's tool calls name them (``mcp__looper__<tool>``; another runtime may drop the
-# prefix).
+# prefix or wrap the name in Grok's ``use_tool``).
 ROOM_TOOL_PREFIX = "looper_room_"
 
 
@@ -219,6 +219,10 @@ def room_metrics(detail: Mapping[str, Any], activity: Iterable[Mapping[str, Any]
                     continue
                 if event["type"] == "assistant" and block.get("type") == "tool_use":
                     name = str(block.get("name") or "")
+                    arguments = block.get("input")
+                    if name == "use_tool" and isinstance(arguments, Mapping):
+                        name = arguments.get("tool_name")
+                        name = name if isinstance(name, str) else ""
                     calls += int(ROOM_TOOL_PREFIX in name)
                     if name.endswith("looper_room_inbox"):
                         inbox_calls += 1
