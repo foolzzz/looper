@@ -48,7 +48,7 @@ directories), one at a time over the HTTP API:
 | `vault_closeout_keeps` | the project has the knowledge vault on; adding multiplication uncovers a test runner that needs `CALC_LOCALE=C`: the Planner's closeout must keep that fact in a committed note under `codex-mem/` |
 | `vault_closeout_nothing` | the same switch on a one-file greeting task: the Planner closes out without writing a note |
 | `room_interface` | two parts built at the same time, each in a worktree of its own (`step_workspaces` `worktree` for this task), where the store's author picks the record's field names while writing it and the client must use them: the agents must coordinate in the task's agent room (`room_messages` at least 1), and `python cli.py widget 3` works against the store |
-| `room_consult` | two steps in a git repository, the second after the first: the first makes up a 20-character code while it runs, saves it to `generated-code.txt` in its working directory and its SHA-256 to `code.sha256`, and commits both before finishing. It keeps the code out of its report and unsolicited messages. The second asks the first for the code instead of reading its saved copy, then writes it to `code.txt`; a consult of the ended run can recover the saved value (`room_consults` at least 1). The plan cannot choose the code, and it cannot be brute-forced from its digest |
+| `room_consult` | two steps in a git repository, the second after the first: the first makes up a 20-character code while it runs, saves it to `generated-code.txt` in its working directory and its SHA-256 to `code.sha256`, and commits both before finishing. It keeps the code out of its report and unsolicited messages. The second asks the first for the code and must not read the saved copy itself, then writes the answer to `code.txt`; the first may read its own saved copy to answer the consult of its ended run (`room_consults` at least 1). The plan cannot choose the code, and it cannot be brute-forced from its digest |
 | `room_quiet` | a one-file task with the agent room on, as every task now has it: no room message at all (`room_messages` 0), one step |
 | `planner_plan_file` | the requirement asks for a PLAN.md with the plan before anything else, which the Planner may be tempted to write itself: it runs read-only, so a Worker writes it, and the Planner changes no file (`max_planner_modified_files` 0); `planner_denials` says whether it tried |
 | `reviewer_retry_note` | the Planner and the Workers play a script and only the Reviewer is Claude Code: the plan left out a region, the step's first attempt fails, the Planner retries it with a note that corrects the count, and the Reviewer, who has the note, must pass the corrected work in its one review (the requirement leaves the regions to the step, so only the note can correct it) |
@@ -83,8 +83,10 @@ and escalations apart; of them `room_questions`, `room_unanswered` and `room_int
 `room_reminders`, the reminders Claude Code runs got; `room_deliveries`, room deliveries recorded in activity;
 `room_refused`, the posts the room refused; `room_tool_calls`, the runs' calls of the room's tools, reads included;
 `room_inbox_calls`, inbox calls, and `room_inbox_empty`, those that returned an empty messages list;
-`room_consults`, the consults of seats whose run
-had ended, of them answered `room_consults_answered`), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
+`room_consults`, the consults of seats whose run had ended, of them replied `room_consults_replied`
+(the API's `answered` state, including replies without the requested value; older results call this
+`room_consults_answered`). No count of answers the asker used is reported: consult records have no reliable
+usage signal), retries, reviews, cost (the task cost API), tokens (the runs' records: prompt, uncached
 and cached, and output; what a runtime without prices still reports), contract violations
 (replies the Planner's reply parser or the Worker/Reviewer report check
 rejected; the JSON keeps why the parser rejected each Planner reply,
