@@ -2960,7 +2960,8 @@ often the largest share of a run's cost; a profile a schedule chose cannot be de
 (`{worker, reviewer}`, each 1–64 or null for the default: how many of each
 run's task's Workers and Reviewers run at once, `schedule_task_limits`); and, from S2, an optional
 `gate_command` with `gate_timeout_seconds` (1–600, default 60), an optional `daily_budget_usd`, `notify` (`failures`,
-`alerts`, `always`, `never`) and a `notify_target` (a channel and chat: an allowlisted
+`alerts`, `always`, `never`), `notify_format` (`report`, the default, or `deliverable`)
+and a `notify_target` (a channel and chat: an allowlisted
 sender's direct chat or a chat explicitly bound to a Manager on a built-in channel;
 none: the dashboard only). Bound chats use the binding's bot; removing the binding
 keeps the saved target, marks it unavailable and logs failed delivery without rerouting.
@@ -3163,7 +3164,7 @@ evaluation is required before the original schedule requirement is complete.
   started (the server stopped in between), which is started a minute later.
 - **Messages and alerts** (S2, `looper/agents/schedule_notify.py`). Every
   run that ends goes to the notifier, in the background. `notify` `failures`
-  sends a message for each failed run (`failed`, `timed_out`, `gate_failed`),
+  sends a message for each failed run (`failed`, `timed_out`, `gate_failed`, `interrupted`),
   `always` for each run that ran something, `alerts` and `never` none; skipped
   runs never do. Two alerts go out once per streak, each with one recovery
   message, under every `notify` but `never` (`alerts` sends only them): 3
@@ -3180,14 +3181,37 @@ evaluation is required before the original schedule requirement is complete.
   queued, checking its gate or its task running within its run timeout, nor
   the busy skips it causes; the alert starts only while `last_ok_at` is still
   the one its deadline came from, so a run that goes well while the pass looks
-  raises none), recovered the same way. The text is code-written (the schedule, the run's status, a
-  summary snippet, its cost and the link to the task, absolute (`links`)). It goes through
+  raises none), recovered the same way.
+  `notify_format` selects the run message independently of `notify`:
+  - `report` keeps the operator's status line, summary, cost and dashboard
+    link on success and failure. The summary preserves line breaks, drops
+    blank lines, and is limited to 12 lines and 1,200 characters, with `…`
+    when cut. Alerts and recoveries follow the notification policy above.
+  - `deliverable` is for an agent schedule whose chat message is the delivery.
+    On success it sends only the body of the result's `## Delivered` section,
+    ending at the next level-two heading. Without that section it uses the
+    whole result after removing leading level-two headings. It preserves line
+    breaks, trims surrounding blank lines and cuts at a line boundary with
+    `…` within 4,000 characters. Failed runs send a short Chinese sentence
+    naming the schedule, then `原因：` and the body of `## Why it ended`
+    (ending before the next level-two heading), or the run's error if that
+    section is absent. The reason preserves line breaks, drops Markdown
+    heading markers and is limited to 800 characters at a line boundary.
+    Neither message includes status, cost, a link or other result sections.
+    All failure, stale, deadline and overlap alerts and their recoveries are
+    recorded as `dashboard` without being sent to the chat, including under
+    `notify=alerts`. `notify` still chooses which runs receive a message.
+    Command schedules accept only `report`; `deliverable` is refused.
+  The setting is saved with the schedule, exposed by the HTTP API and
+  Manager tools, included in configuration export/import, and editable beside
+  the dashboard's notification settings. Message text goes through
   the channel registry to the running Telegram or Lark channel
   (`ChannelAdapter.notify`: Telegram's bot to the user's private chat, Lark's
   `lark-cli im +messages-send --as bot --user-id`), to a chat the channel's
   sender allowlist allows. Every message is recorded in
   `schedule_notifications`: `sent`, `failed` with the reason (such as a channel
-  that is not running), or `dashboard` (no chat, or an alert under `never`).
+  that is not running), or `dashboard` (no chat, an alert under `never`, or
+  an alert/recovery for a `deliverable` schedule).
 - **Deleting.** A project with schedules is not deleted (409) until they are.
   Deleting a schedule (the project's Schedules tab, the Schedules page, the
   schedule's page, `POST /api/v1/schedule_admin/delete` with `schedule_id`, the Manager's

@@ -57,7 +57,7 @@ FIELD_WORDS = {
     "run_timeout_seconds": "运行超时", "gate_command": "前置检查", "gate_timeout_seconds": "前置检查超时",
     "run_budget_usd": "每次运行的花费上限", "daily_budget_usd": "每日花费上限", "notify": "通知",
     "user_gates": "用户确认",
-    "notify_target": "通知对象", "profile_overrides": "Agent Profile", "task_limits": "每次运行的任务并发",
+    "notify_format": "通知格式", "notify_target": "通知对象", "profile_overrides": "Agent Profile", "task_limits": "每次运行的任务并发",
     "template_key": "任务模板", "template_inputs": "模板静态输入",
 }
 _OVERLAP_WORDS = {"skip": "跳过这次触发", "queue": "排队等它结束（最多一个）", "parallel": "并行运行"}
@@ -115,7 +115,7 @@ def _listed(view: Mapping[str, Any]) -> dict[str, Any]:
     return {"schedule_id": view["schedule_id"], "name": view["name"], "project": view["project_name"],
             "cron": view["cron"], "timezone": view["timezone"], "description": view["description"], "kind": view["kind"],
             "enabled": view["enabled"], "next_fire_at": view["next_fire_at"],
-            "user_gates": view["user_gates"],
+            "user_gates": view["user_gates"], "notify_format": view["notify_format"],
             "template_key": view.get("template_key"), "template_name": view.get("template_name"),
             "template_inputs": view.get("template_inputs") or {},
             "last_run": _run_listed(view["last_run"]) if view["last_run"] else None,
@@ -609,6 +609,8 @@ def _shown(key: str, view: Mapping[str, Any], names: Mapping[str, str]) -> str:
         return _money(value, "不限")
     if key == "notify":
         return _NOTIFY_WORDS.get(value, value)
+    if key == "notify_format":
+        return "仅交付正文" if value == "deliverable" else "运行报告"
     if key == "user_gates":
         return "开启" if value == "on" else "关闭"
     if key == "notify_target":
@@ -643,7 +645,8 @@ async def _configuration(view: Mapping[str, Any], project: Mapping[str, Any]) ->
             + f"；错过的触发：{_shown('catch_up', view, names)}",
             *(f"- {FIELD_WORDS[key]}：{_shown(key, view, names)}"
               for key in ("run_timeout_seconds", "success_deadline", "alert_policy")),
-            f"- 通知：{_shown('notify', view, names)} → {_shown('notify_target', view, names)}"]
+            f"- 通知：{_shown('notify', view, names)} → {_shown('notify_target', view, names)}",
+            f"- 通知格式：{_shown('notify_format', view, names)}"]
     lines = [f"- 定时任务：{view['name']}（{view['schedule_id']}），项目 {view['project_name']}",
              f"- 时间规则：{_shown('cron', view, names)}，时区 {view['timezone']}",
              f"- 接下来 {NEXT_SHOWN} 次：{_next_fires(view)}",
@@ -655,7 +658,8 @@ async def _configuration(view: Mapping[str, Any], project: Mapping[str, Any]) ->
              f"- 前置检查：{_shown('gate_command', view, names)}",
              f"- 用户确认：{_shown('user_gates', view, names)}",
              f"- 花费上限：每次运行 {_shown('run_budget_usd', view, names)}，每天 {_shown('daily_budget_usd', view, names)}",
-             f"- 通知：{_shown('notify', view, names)} → {_shown('notify_target', view, names)}"]
+             f"- 通知：{_shown('notify', view, names)} → {_shown('notify_target', view, names)}",
+             f"- 通知格式：{_shown('notify_format', view, names)}"]
     lines.append(f"- 运行超时：{_shown('run_timeout_seconds', view, names)}")
     if view.get("template_key"):
         lines.extend(f"- {FIELD_WORDS[key]}：{_shown(key, view, names)}" for key in ("template_key", "template_inputs"))
@@ -724,6 +728,8 @@ _FIELDS = {
         "gate_command": {"type": "string", "description": "Shell; prints each run's input, nothing skips it."},
         "gate_timeout_seconds": {"type": "integer"},
         "notify": {"type": "string", "enum": [n.value for n in schedules.Notify]},
+        "notify_format": {"type": "string", "enum": [n.value for n in schedules.NotifyFormat],
+                          "description": "report (default): operator report; deliverable: delivered text only, agent schedules only."},
         "user_gates": {"type": "string", "enum": ["off", "on"],
                        "description": "Allow this schedule's tasks to ask for user input when the project also "
                                       "allows user gates. Default off. Waiting counts against the run timeout."},

@@ -84,7 +84,9 @@ def test_omitted_schedule_owner_defaults_and_roundtrips(monkeypatch: pytest.Monk
         assert set(exported["projects"][0]["schedules"][0]) == {
             "name", "cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
             "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds",
-            "daily_budget_usd", "notify", "user_gates", "notify_target", "profiles", "task_limits"}
+            "daily_budget_usd", "notify", "notify_format", "user_gates", "notify_target", "profiles", "task_limits"}
+        # Older documents without a notification format keep operator reports after import/export.
+        assert exported["projects"][0]["schedules"][0]["notify_format"] == "report"
 
     run_db(test, monkeypatch, timeout=20)
 

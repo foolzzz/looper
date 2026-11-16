@@ -1067,6 +1067,7 @@ export type ScheduleRunStatus =
   | "skipped_gate"
   | "gate_failed"
   | "skipped_budget";
+export type ScheduleNotifyFormat = "report" | "deliverable";
 /** "failures": failed runs and the two alerts with their recoveries; "alerts": the alerts and their recoveries
  * only; "always": every run that ran a task, and the alerts; "never": nothing is sent. */
 export type ScheduleNotify = "failures" | "alerts" | "always" | "never";
@@ -1195,6 +1196,7 @@ export interface ScheduleInfo {
   /** Null: no daily cap. */
   daily_budget_usd: number | null;
   notify: ScheduleNotify;
+  notify_format: ScheduleNotifyFormat;
   /** Whether this schedule's tasks may open user gates (also requires the project's permission). */
   user_gates: ScheduleUserGates;
   /** Null: dashboard only. */
@@ -1273,6 +1275,7 @@ export interface ScheduleFields {
   gate_timeout_seconds?: number | null;
   daily_budget_usd?: number | null;
   notify?: ScheduleNotify;
+  notify_format?: ScheduleNotifyFormat;
   user_gates?: ScheduleUserGates;
   notify_target?: ScheduleNotifyTarget | null;
 }

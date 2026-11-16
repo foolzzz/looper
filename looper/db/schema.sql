@@ -1089,6 +1089,8 @@ CREATE TABLE IF NOT EXISTS schedules (
     daily_budget_usd DOUBLE PRECISION CHECK (daily_budget_usd > 0),
     notify TEXT NOT NULL DEFAULT 'failures'
     CHECK (notify IN ('failures', 'alerts', 'always', 'never')),
+    notify_format TEXT NOT NULL DEFAULT 'report' CHECK (notify_format IN ('report', 'deliverable')),
+    CONSTRAINT schedules_command_notify_format_check CHECK (kind <> 'command' OR notify_format = 'report'),
     notify_channel TEXT CHECK (notify_channel IN ('telegram', 'lark', 'lark_bot')),
     notify_chat TEXT,
     user_gates TEXT NOT NULL DEFAULT 'off' CHECK (user_gates IN ('off', 'on')),

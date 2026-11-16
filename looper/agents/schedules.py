@@ -122,6 +122,11 @@ class SkipRows(str, Enum):
 ROUTINE_SKIPS = ("skipped_gate", "skipped_overlap")
 
 
+class NotifyFormat(str, Enum):
+    REPORT = "report"
+    DELIVERABLE = "deliverable"
+
+
 class Notify(str, Enum):
     FAILURES = "failures"  # failed runs, the alerts and their recoveries
     ALERTS = "alerts"  # the alerts and their recoveries only, no run's own message
@@ -278,6 +283,7 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
         "created_via": row["created_via"], "created_at": row["created_at"], "updated_at": row["updated_at"],
         "gate_command": row.get("gate_command"), "gate_timeout_seconds": row.get("gate_timeout_seconds"),
         "daily_budget_usd": row.get("daily_budget_usd"), "notify": row.get("notify") or Notify.FAILURES.value,
+        "notify_format": row.get("notify_format") or NotifyFormat.REPORT.value,
         "user_gates": row.get("user_gates", UserGates.OFF.value),
         "notify_target": target, "spent_today_usd": round(spent_today, 6),
         "alerts": {"failures_since": row.get("failures_alert_at"), "stale_since": row.get("stale_alert_at"),
@@ -496,6 +502,7 @@ _PARSERS = {
     "run_budget_usd": _budget("run_budget_usd"),
     "gate_command": _gate_command, "gate_timeout_seconds": _gate_timeout,
     "daily_budget_usd": _budget("daily_budget_usd"), "notify": lambda raw: _choice("notify", raw, Notify),
+    "notify_format": lambda raw: _choice("notify_format", raw, NotifyFormat),
     "user_gates": lambda raw: _choice("user_gates", raw, UserGates),
     "kind": lambda raw: _choice("kind", raw, Kind), "command": _command, "env": _env,
     "env_file": _env_file, "success_deadline": _success_deadline,
@@ -585,6 +592,8 @@ async def _fields(data: Mapping[str, Any], *, update: bool, resolve_profiles: bo
 
 def _check_kind_fields(kind: str, merged: Mapping[str, Any]) -> None:
     if kind == Kind.COMMAND.value:
+        if merged.get("notify_format", NotifyFormat.REPORT.value) != NotifyFormat.REPORT.value:
+            raise RequestError(HTTP_400, "a command schedule supports notify_format = report only")
         if not merged.get("command"):
             raise RequestError(HTTP_400, "command is required: a nonempty shell command")
         for field in ("requirement", "template_key", "template_inputs", "gate_command", "gate_timeout_seconds",

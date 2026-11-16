@@ -15,6 +15,7 @@ recorded as ``sent``, ``failed`` or ``dashboard``.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -115,6 +116,55 @@ def snippet(text: str | None) -> str:
     return flat if len(flat) <= SNIPPET_CHARS else f"{flat[:SNIPPET_CHARS]}…"
 
 
+def _bounded_lines(text: str, limit: int) -> str:
+    """Keep complete lines, including room for the truncation marker."""
+    lines = text.strip().splitlines()
+    if len(text.strip()) <= limit:
+        return "\n".join(lines)
+    kept: list[str] = []
+    size = 1  # The ellipsis, plus a newline for every retained line.
+    for line in lines:
+        if size + len(line) + 1 > limit:
+            break
+        kept.append(line)
+        size += len(line) + 1
+    return "\n".join([*kept, "…"])
+
+
+def _report_summary(text: str) -> str:
+    lines = [line for line in text.splitlines() if line.strip()]
+    summary = "\n".join(lines[:12])
+    if len(lines) > 12 or len(summary) > 1200:
+        return summary[:1199] + "…"
+    return summary
+
+
+def _section(text: str, title: str) -> str | None:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() == f"## {title}":
+            end = next((i for i in range(index + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+            return "\n".join(lines[index + 1:end]).strip()
+    return None
+
+
+def _deliverable_text(schedule: Mapping[str, Any], run: Mapping[str, Any]) -> str:
+    summary = run.get("summary") or ""
+    if run["status"] in db_schedules.FAILURES:
+        reason = _section(summary, "Why it ended")
+        if reason is None:
+            reason = run.get("error") or "暂无错误详情。"
+        reason = re.sub(r"(?m)^ {0,3}#{1,6}\s+", "", reason)
+        return f"今天的「{schedule['name']}」没能按时生成。\n原因：\n{_bounded_lines(reason, 800)}"
+    text = _section(summary, "Delivered")
+    if text is None:
+        lines = summary.strip().splitlines()
+        while lines and (not lines[0].strip() or lines[0].startswith("## ")):
+            lines.pop(0)
+        text = "\n".join(lines)
+    return _bounded_lines(text, 4000)
+
+
 def _local(moment: datetime, zone_name: str) -> str:
     return moment.astimezone(cron.zone(zone_name)).strftime("%Y-%m-%d %H:%M %Z")
 
@@ -122,10 +172,12 @@ def _local(moment: datetime, zone_name: str) -> str:
 def run_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any], *, base: str = "") -> str:
     if schedule.get("kind") == "command":
         return command_run_text(schedule, project_name, run, base=base)
+    if schedule.get("notify_format") == "deliverable":
+        return _deliverable_text(schedule, run)
     when = _local(run.get("fired_at") or run["scheduled_for"], schedule["timezone"])
     lines = [f"定时任务「{schedule['name']}」（项目 {project_name}）{when} 的运行："
              f"{STATUS_WORDS.get(run['status'], run['status'])}"]
-    if text := snippet(run.get("summary") or run.get("error")):
+    if text := _report_summary(run.get("summary") or run.get("error") or ""):
         lines.append(text)
     cost = f"花费 ${format_usd(float(run['cost_usd']))}" if run.get("cost_usd") is not None else "无花费"
     link = task_link(base, run["task_id"]) if run.get("task_id") else schedule_link(base, schedule)
@@ -343,7 +395,8 @@ class Notifier:
 
         channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
         status, error = "dashboard", None
-        if channel and chat and schedule["notify"] != "never":
+        dashboard_alert = kind is not Kind.RUN and schedule.get("notify_format") == "deliverable"
+        if channel and chat and schedule["notify"] != "never" and not dashboard_alert:
             if not any((t["channel"], t["chat"]) == (channel, chat) for t in await notify_targets()):
                 status, error = "failed", ("the notification target is unavailable: "
                                            "its allowlist entry or chat binding was removed")
