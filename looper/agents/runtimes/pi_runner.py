@@ -53,7 +53,7 @@ def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None =
 
 
 class PiRunnerRuntime(PiRuntime):
-    room_push = RoomPush.NONE  # Runner receipts are independent of CLI user-message echoes.
+    room_push = RoomPush.RUNNER
     hosts_runs = True
     platform_tools_in_process = True
     can_interrupt = True

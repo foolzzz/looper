@@ -563,7 +563,7 @@ def test_room_reminders_survive_adoption(tmp_path, monkeypatch):
             adopted = await case.b.adopt(case.run_id, case.expect)
             assert adopted.outcome is AdoptOutcome.ADOPTED
             state = case.b._reminders[case.run_id]
-            assert state.uuids == reminders == {"looper-reminder-0123456789ab-42"}
+            assert set(state.uuids) == reminders == {"looper-reminder-0123456789ab-42"}
             assert state.through == 42 and state.pending
             (tmp_path / 'reminder-result').touch()
             result = (await _finished(case)).payload

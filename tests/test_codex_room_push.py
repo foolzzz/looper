@@ -12,13 +12,14 @@ import pytest
 
 from looper.agents.agent_settings import Launch
 from looper.agents.room import MemberKind, RoomDelivery, RoomInput, Seat, room_section
-from looper.agents.runtimes import ADAPTERS, Capability, room_push
+from looper.agents.runtimes import ADAPTERS, Capability, RoomPush, room_push
 from looper.agents.runtimes.channel import DeliveryResult
 from looper.agents.runtimes.codex import CodexStream
+from looper.agents.runtimes.dsh_runner import DshRunnerRuntime
 from looper.agents.runtimes.omp import OmpStream
+from looper.agents.runtimes.omp_steer import OmpChannel
 from looper.agents.runtimes.pi import PiStream
 from looper.agents.runtimes.pi_runner import PiRunnerRuntime
-from looper.agents.runtimes.omp_steer import OmpChannel
 from looper.agents.runtimes.pi_steer import PiChannel
 from looper.agents.tiers.worker import ConsumeStart, RunContext, WorkerConfig, WorkerPool, _Reminders, room_input
 from tests.run_handle_support import ScriptedRun
@@ -36,14 +37,18 @@ def _launch(steer: bool, runtime_type: str = "codex") -> Launch:
     ("codex", True, "steer"), ("codex", False, "none"), ("claude-code", False, "user_turn"),
     ("omp", True, "steer"), ("omp", False, "none"), ("pi", True, "steer"), ("pi", False, "none"),
     *((name, True, "none") for name in ("cursor-agent", "grok", "dsh")),
+    pytest.param(PiRunnerRuntime(None, pi=None), False, "runner", id="pi-runner"),
+    pytest.param(DshRunnerRuntime(None, dsh=None), False, "runner", id="dsh-runner"),
+    pytest.param(SimpleNamespace(room_push=RoomPush.RUNNER, hosts_runs=False), True, "none", id="unhosted-runner"),
 ])
 def test_only_opted_in_runtimes_deliver_room_messages(runtime, steer, expected):
-    assert room_push(SimpleNamespace(runtime=ADAPTERS[runtime], steers=steer)).value == expected
+    adapter = ADAPTERS[runtime] if isinstance(runtime, str) else runtime
+    assert room_push(SimpleNamespace(runtime=adapter, steers=steer)).value == expected
 
 
 def test_pi_runner_does_not_inherit_cli_text_receipts():
     runtime = PiRunnerRuntime(None, pi=None)
-    assert room_push(SimpleNamespace(runtime=runtime, steers=True)).value == "none"
+    assert room_push(SimpleNamespace(runtime=runtime, steers=True)) is RoomPush.RUNNER
 
 
 @pytest.mark.parametrize("outcome", ["accepted", "rejected", "unknown", "ended"])
@@ -58,7 +63,7 @@ def test_steering_delivery_waits_for_history_after_acceptance(tmp_path, caplog, 
             send.side_effect = RuntimeError("no active turn")
         pool._inputs["w1"] = SimpleNamespace(send=send)
         pool._reminders["w1"] = state = _Reminders(next_delivery=select, confirm=confirm,
-                                                  through=40, confirm_on_item=True)
+                                                  through=40, receipt=RoomPush.STEER)
         assert not await pool.remind("w1")
         select.assert_not_awaited()
         send.assert_not_awaited()
@@ -181,7 +186,7 @@ def test_history_receipts_match_ids_and_never_skip_unseen_deliveries(tmp_path, m
                       RoomDelivery(texts[1], 43, (43,), True, 0)]
         pool._inputs["w1"] = SimpleNamespace(send=AsyncMock(return_value=DeliveryResult.ACCEPTED))
         pool._reminders["w1"] = state = _Reminders(next_delivery=AsyncMock(side_effect=deliveries),
-                                                  confirm=confirm, confirm_on_item=True, tools_running=1)
+                                                  confirm=confirm, receipt=RoomPush.STEER, tools_running=1)
         try:
             assert await pool.remind("w1")
             assert await pool.remind("w1")
@@ -244,7 +249,7 @@ def test_codex_stream_delivers_only_during_tools_and_matches_guidance(tmp_path, 
                 for event in stream.translate({"type": "item.completed", "item": {**item, "exit_code": 0}}):
                     yield event
                 if steer:
-                    assert state.tools_running == 0 and state.confirm_on_item
+                    assert state.tools_running == 0 and state.receipt is RoomPush.STEER
                     captured.append(state)
                     assert not await pool.remind("w1")
                     assert self.inputs == [delivery.text]

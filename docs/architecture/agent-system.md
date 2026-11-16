@@ -4651,7 +4651,8 @@ before.
   waiting, and `looper_room_read` for earlier or clipped messages. Claude Code
   Workers use `PUSHED_WAITS`: after doing the rest, they wait for a needed
   answer with a waiting report, and deliveries can arrive as their own turn.
-  Its Reviewers and steering Codex runs use `PUSHED`, never a waiting report.
+  Its Reviewers, steering Codex runs and hosted Pi/DSH runner runs use
+  `PUSHED`, never a waiting report.
   Runtimes without room deliveries, including Cursor, keep `PULL`; pulling Workers wait with
   `wait_seconds` only for an answer they cannot go on without, after doing
   the rest, never as a timer.
@@ -4666,12 +4667,11 @@ before.
   Every tool's answer carries unread counts. The inbox tool description says
   `wait_seconds` is only for an answer the run cannot go on without, never a
   timer; each call costs a request, and per-runtime wait caps still apply.
-  Running Claude Code Workers and Reviewers (`RoomPush.USER_TURN`) and
-  steering-capable Codex, OMP RPC and Pi CLI RPC runs (`RoomPush.STEER`)
-  instead receive message bodies. Steering requires the probed capability:
-  Codex 0.162.0 or newer with `turn/steer` in its schema, OMP 18.4.3 or
-  newer with RPC support, or Pi CLI with RPC support (`[runtimes] pi = "cli"`).
-  The Pi SDK runner does not use CLI text receipts. A delivery is triggered
+  Running Claude Code Workers and Reviewers (`RoomPush.USER_TURN`), Codex
+  runs with the probed steering capability (`RoomPush.STEER`, Codex 0.162.0
+  or newer with `turn/steer` in its schema), and hosted Pi/DSH runs
+  (`RoomPush.RUNNER`, independent of the CLI steering capability) instead
+  receive message bodies
   when a message names them or an interface post
   reaches them. Other posts ride along in an oldest-first prefix: at most
   10 messages and 4,000 characters, bodies clipped at 1,500 for addressed or
@@ -4681,22 +4681,24 @@ before.
   A batch with an addressed message can go every 10 s; other batches every
   60 s, with a retry when the interval ends. Claude Code messages are marked
   read on the delivery's replay echo or a result naming its uuid in `user_message_uuids`,
-  never merely on writing stdin. Steering deliveries use Codex's `turn/steer`
-  or OMP's and Pi CLI's `steer` only while a tool call runs and remain in
-  flight after acknowledgement. They are marked read when the runtime shows
-  the steered user message: an app-server `userMessage` history item for Codex,
-  or a user-role `message_end` for OMP and Pi CLI. Each translates to a
-  `user_message_receipt` containing `[Looper room]` and every `- #<id> from`
-  line of the delivery, advancing only past earlier confirmed deliveries.
-  These events are receipts, not assistant output. Codex can confirm during
-  the tool call; OMP and Pi CLI inject after the current tool batch returns.
-  For an accepted delivery, if no receipt arrives within 30 s after that
-  batch returns while the run is still active, Looper logs a warning and
+  never merely on writing stdin. Codex deliveries use `turn/steer` only while
+  a tool call runs and remain in flight after acknowledgement. They are marked
+  read when an app-server `userMessage` history item carries the delivery's
+  message ids, advancing only past earlier confirmed deliveries. These items
+  are receipts, not assistant output. If no item arrives within 30 s of
+  acknowledgement while the run is still active, Looper logs a warning and
   falls back to acknowledging that delivery as read. A run ending before
   receipt or fallback leaves the messages unread for its next turn or retry.
   A rejection or no active turn leaves them unread; an unknown
   acknowledgement advances the in-flight cursor without marking them read
   or retrying, and logs the uncertainty.
+  Hosted runner deliveries use `steer` and are marked read only when
+  `steer_applied` names their delivery uuid as `message_id`, after the steer
+  joins a model request. Acceptance alone marks nothing read, and there is
+  no fallback timer. A `steer_dropped` leaves its messages unread and closes
+  room confirmation for that run: the cumulative cursor cannot skip the
+  dropped delivery to confirm a later one. These drops appear in activity
+  as room deliveries, never as Planner `missed_input`.
   While in flight, that run's inbox and unread counts exclude the delivered
   bodies; an inbox wait still detects matching
   messages within that range as described above. A waiting Worker's check
@@ -4708,7 +4710,8 @@ before.
   answering only those messages preserves the previous outcome, including
   when a final-reply race makes the delivery a separate turn after the report;
   cost still comes from the last result (the session's totals).
-  Other runtimes and consults pull; the Planner's `[ROOM]` turns are unchanged.
+  Runs without an opted-in room push mode and consults pull; the Planner's
+  `[ROOM]` turns are unchanged.
 - **The Planner.** A message for `planner`, and every escalation, is stored
   `planner_pending` and wakes the Planner (`ROOM_MESSAGE`) after a 30 s batch
   (`ROOM_BATCH_SECONDS`); after the event it is in, the Planner gives all that
