@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from looper.agents.agent_settings import Launch
-from looper.agents.room import MemberKind, RoomDelivery, RoomInput, Seat, room_section
+from looper.agents.room import MemberKind, RoomDelivery, RoomInput, RoomService, Seat, room_section
 from looper.agents.runtimes import ADAPTERS, Capability, RoomPush, room_push
 from looper.agents.runtimes.channel import DeliveryResult
 from looper.agents.runtimes.codex import CodexStream
@@ -173,8 +173,9 @@ def test_rpc_room_ack_is_consumed_while_the_delivery_waits(tmp_path, agent_db, m
     asyncio.run(asyncio.wait_for(run(), 4))
 
 
+@pytest.mark.parametrize("runtime_type", ["codex", "omp", "pi"])
 @pytest.mark.parametrize("combined", [False, True])
-def test_history_receipts_match_ids_and_never_skip_unseen_deliveries(tmp_path, monkeypatch, combined):
+def test_history_receipts_match_ids_and_never_skip_unseen_deliveries(tmp_path, monkeypatch, combined, runtime_type):
     from looper.agents.tiers import worker
 
     monkeypatch.setattr(worker, "ADDRESSED_INTERVAL_SEC", 0)
@@ -188,7 +189,8 @@ def test_history_receipts_match_ids_and_never_skip_unseen_deliveries(tmp_path, m
                       RoomDelivery(texts[1], 43, (43,), True, 0)]
         pool._inputs["w1"] = SimpleNamespace(send=AsyncMock(return_value=DeliveryResult.ACCEPTED))
         pool._reminders["w1"] = state = _Reminders(next_delivery=AsyncMock(side_effect=deliveries),
-                                                  confirm=confirm, receipt=RoomPush.STEER, tools_running=1)
+                                                  confirm=confirm, receipt=RoomPush.STEER, tools_running=1,
+                                                  receipt_fallback=ADAPTERS[runtime_type].room_receipt_fallback)
         try:
             assert await pool.remind("w1")
             assert await pool.remind("w1")
@@ -275,16 +277,18 @@ def test_codex_stream_delivers_only_during_tools_and_matches_guidance(tmp_path, 
 
 
 @pytest.mark.parametrize(("runtime_type", "outcome"), [
-    ("omp", "receipt"), ("pi", "receipt"), ("codex", "receipt"),
-    ("omp", "fallback"), ("pi", "ended"), ("omp", "unknown"),
-    ("omp", "late_ack"), ("omp", "late_unknown"), ("pi", "ended_armed"),
+    *((runtime, outcome) for runtime in ("omp", "pi") for outcome in (
+        "receipt", "late_receipt", "ended", "ended_after_tools", "late_ended", "unknown", "late_unknown")),
+    *(("codex", outcome) for outcome in ("receipt", "fallback", "late_ack", "ended_armed")),
 ])
 def test_rpc_room_receipts_and_fallback_follow_tool_batch(
     tmp_path, agent_db, monkeypatch, caplog, runtime_type, outcome,
 ):
     from looper.agents.tiers import worker
+    from looper.agents import room as room_module
+    from looper.agents.project_execution import RoomLimits
 
-    monkeypatch.setattr(worker, "ROOM_ITEM_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr(worker, "ROOM_ITEM_TIMEOUT_SEC", 0.01)
 
     async def run():
         launch = _launch(True, runtime_type)
@@ -293,10 +297,27 @@ def test_rpc_room_receipts_and_fallback_follow_tool_batch(
         delivery = RoomDelivery(text, 42, (42,), True, 0)
         confirmed = asyncio.Event()
         send_started, acknowledge = asyncio.Event(), asyncio.Event()
-        late = outcome in ("late_ack", "late_unknown")
+        late = outcome in ("late_ack", "late_unknown", "late_receipt", "late_ended")
         unknown = outcome in ("unknown", "late_unknown")
+        cursor = 0
+        readback = RoomService(worker_pool=pool)
+        row = {"id": 42, "sender_seat": "worker@s2", "kind": "info", "body": "你好 /skill",
+               "audience": ["worker@s1"], "audience_all": False}
+        monkeypatch.setattr(readback, "enabled", AsyncMock(return_value=True))
+        monkeypatch.setattr(readback, "_context", AsyncMock(return_value=SimpleNamespace(limits=RoomLimits())))
+        monkeypatch.setattr(room_module.db_room, "last_read", AsyncMock(side_effect=lambda *args: cursor))
+        monkeypatch.setattr(room_module.db_room, "messages", AsyncMock(
+            side_effect=lambda task, *, after=0: [row] if after < row["id"] else []))
+
+        async def mark_read(task, key, through):
+            nonlocal cursor
+            assert (task, key) == ("task", "worker@s1")
+            cursor = max(cursor, through)
+            confirmed.set()
+
+        monkeypatch.setattr(room_module.db_room, "mark_read", AsyncMock(side_effect=mark_read))
         room = SimpleNamespace(delivery=AsyncMock(return_value=delivery),
-                               confirm=AsyncMock(side_effect=lambda *args: confirmed.set()))
+                               confirm=AsyncMock(wraps=readback.confirm))
         pool.room_ops = SimpleNamespace(room=room)
         seat = Seat("worker@s1", "worker", MemberKind.WORK, run="w1")
         assert room_input(launch, is_verify=False) is RoomInput.PUSHED
@@ -316,6 +337,8 @@ def test_rpc_room_receipts_and_fallback_follow_tool_batch(
                 return [{"type": "system", "subtype": "user_message_receipt", "text": value}]
             return stream.translate({"type": "message_end", "message": {"role": "user", "content": value}})
 
+        captured = []
+
         class Run(ScriptedRun):
             async def send(self, value, **kwargs):
                 await super().send(value, **kwargs)
@@ -326,6 +349,7 @@ def test_rpc_room_receipts_and_fallback_follow_tool_batch(
 
             async def events(self):
                 state = pool._reminders["w1"]
+                captured.append(state)
                 assert not await pool.remind("w1")
                 if late:
                     state.pending = False  # A new post below arrives after the tool batch starts.
@@ -341,7 +365,7 @@ def test_rpc_room_receipts_and_fallback_follow_tool_batch(
                 await asyncio.sleep(0.08)
                 room.confirm.assert_not_awaited()
                 assert state.steered[42].fallback is None
-                if runtime_type == "codex":
+                if runtime_type == "codex" and outcome == "receipt":
                     # Codex shows the history item immediately, even while the tools still run.
                     for event in receipt(text):
                         yield event
@@ -363,22 +387,33 @@ def test_rpc_room_receipts_and_fallback_follow_tool_batch(
                         assert await sending is (not unknown)
                     if outcome in ("fallback", "late_ack"):
                         timer = state.steered[42].fallback
+                        assert timer is not None
                         # Later tool batches cannot reset this delivery's receipt window.
                         for done in (False, True):
                             for event in stream.translate(tool_event("cmd-3", done=done)):
                                 yield event
                         assert state.steered[42].fallback is timer
                         await asyncio.wait_for(confirmed.wait(), 1)
-                    elif runtime_type != "codex" and outcome == "receipt":
+                    elif runtime_type != "codex":
+                        # Acceptance may arrive after the last tool result, while the runtime
+                        # holds the steer until a later tool call ends. Time proves no read.
+                        entry = state.steered[42]
+                        assert entry.fallback is None and not entry.armed
+                        await asyncio.sleep(0.03)
+                        room.confirm.assert_not_awaited()
+                        assert cursor == 0 and state.confirmed == 0
+                        assert (await readback.delivery("task", replace(seat, run="next-run"))).ids == (42,)
+                    if outcome in ("receipt", "late_receipt") and runtime_type != "codex":
+                        for done in (False, True):
+                            for event in stream.translate(tool_event("cmd-3", done=done)):
+                                yield event
+                        assert state.steered[42].fallback is None
                         for value in ("Planner steer", "[Looper room]\n- #41 from worker@s2 (info): other"):
                             for event in receipt(value):
                                 yield event
                         room.confirm.assert_not_awaited()
                         for event in receipt(text):
                             yield event
-                    elif unknown:
-                        await asyncio.sleep(0.08)
-                        room.confirm.assert_not_awaited()
                 yield {"type": "result", "subtype": "success", "result": json.dumps({
                     "status": "completed", "summary": "done", "changed_files": {}})}
 
@@ -388,11 +423,26 @@ def test_rpc_room_receipts_and_fallback_follow_tool_batch(
         try:
             result = await pool._consume_once(ctx, Run([]), recorder, start=ConsumeStart.NEW)
             assert result["status"] == "completed"
-            if outcome in ("receipt", "fallback", "late_ack"):
+            state = captured[0]
+            if outcome in ("receipt", "late_receipt", "fallback", "late_ack"):
                 room.confirm.assert_awaited_once_with("task", seat.key, 42)
+                assert cursor == state.confirmed == 42
+                assert await readback.delivery("task", replace(seat, run="next-run")) is None
             else:
-                await asyncio.sleep(0.08)
+                if runtime_type != "codex":
+                    assert all(entry.fallback is None and not entry.armed for entry in state.steered.values())
+                else:
+                    timer = state.steered[42].fallback
+                    assert timer is not None and timer.cancelled()
+                pool._drop_reminders("w1")
+                assert "w1" not in pool._inputs and "w1" not in pool._reminders
+                assert state.retry is None or state.retry.done()
+                await asyncio.sleep(0.03)
                 room.confirm.assert_not_awaited()
+                assert cursor == state.confirmed == 0
+                assert (await readback.delivery("task", replace(seat, run="next-run"))).ids == (42,)
+                inbox = await readback.inbox("task", seat, peek=True)
+                assert [message["id"] for message in inbox["messages"]] == [42]
             assert ("room delivery history item timed out" in caplog.text) is (outcome in ("fallback", "late_ack"))
         finally:
             pool._drop_reminders("w1")

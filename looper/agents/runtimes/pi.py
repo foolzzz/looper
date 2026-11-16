@@ -125,6 +125,8 @@ class PiRuntime(RuntimeAdapter):
 
     type = "pi"
     room_push = RoomPush.STEER
+    # A steer can wait for a later tool call to end; only its user-message receipt proves the model saw it.
+    room_receipt_fallback = False
     label = "pi"
     default_executable = "pi"
     # MCP means the Looper platform bridge only; catalog MCP is recorded as skipped.
