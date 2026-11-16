@@ -383,7 +383,7 @@ class CursorAgentRuntime(RuntimeAdapter):
             saved.get("instructions_sha256") != hashlib.sha256(instructions).hexdigest()
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
-                    session_dir: Path | None = None, prompt_file: Path | None = None) -> StreamChannel:
+                    session_dir: Path | None = None, prompt_file: Path | None = None, max_turns: int = 0) -> StreamChannel:
         if prompt_file is None:
             raise RuntimeUnsupported("Cursor Agent needs Looper's instruction prompt before starting a run")
         servers, _ = mcp_servers(launch.library)

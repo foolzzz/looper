@@ -415,6 +415,8 @@ class RuntimeAdapter(ABC):
     # Planner's nudge, an agent room reminder. A runtime that reads only its prompt has False.
     run_input: ClassVar[bool] = False
     room_push: ClassVar[RoomPush] = RoomPush.NONE
+    # Whether an accepted room delivery may be confirmed without a runtime receipt after a bounded wait.
+    room_receipt_fallback: ClassVar[bool] = True
     keepable: ClassVar[bool] = False  # a keeper may hold its run across a control-plane restart
     # Enable only when recorded CLI samples and stand-in streams pin down its first model event.
     first_event_known: ClassVar[bool] = False
@@ -561,10 +563,10 @@ class RuntimeAdapter(ABC):
         raise RuntimeUnsupported(f"a {self.label} run cannot be hosted in a runner session")
 
     def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
-                    session_dir: Path | None = None, prompt_file: Path | None = None) -> RunChannel:
+                    session_dir: Path | None = None, prompt_file: Path | None = None, max_turns: int = 0) -> RunChannel:
         """How the Worker talks to ``process``, started from ``run_command`` (or ``steer_command`` when
         ``launch.steers``). ``prompt_file`` is the immutable Looper instruction prompt for runtimes
-        that deliver instructions on stdin."""
+        that deliver instructions on stdin. ``max_turns`` bounds model responses on transports that emulate it."""
         return StreamChannel(self, process, model=launch.model)
 
     def kept_session_dir(self, command: Sequence[str]) -> Path | None:
