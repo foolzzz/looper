@@ -132,7 +132,8 @@ class RunnerChannel:
         if self._input_closed or self._turn is None or self._turn.done() or not self.session.started:
             return DeliveryResult.REJECTED
         message_id = uuid or "steer-" + uuid4().hex
-        self._sent[message_id] = text
+        if uuid is None:
+            self._sent[message_id] = text  # Only Planner input is returned by dropped_input().
         task = asyncio.create_task(self.session.steer(text, message_id=message_id))
         self._steers.add(task)
         def finished(task):

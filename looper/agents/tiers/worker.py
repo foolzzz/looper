@@ -479,13 +479,14 @@ class _Reminders:
     notified: int = 0
     next_delivery: Callable[[int], Awaitable[RoomDelivery | None]] | None = None
     confirm: Callable[[int], Awaitable[None]] | None = None
-    confirm_on_item: bool = False
+    receipt: RoomPush = RoomPush.USER_TURN
     steered: dict[int, _SteeredDelivery] = field(default_factory=dict)
+    receipts_closed: bool = False
     through: int = 0
     confirmed: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     retry: asyncio.Task | None = None
-    uuids: set[str] = field(default_factory=set)  # the ones written, by the uuid Claude names in a result
+    uuids: dict[str, int] = field(default_factory=dict)  # delivery uuid → cumulative cursor
     last_at: float = float("-inf")
     tools_running: int = 0  # its tool calls that have no result yet
     waiting: bool = False
@@ -501,7 +502,7 @@ def uuid_through(value: object) -> int | None:
     return int(found[1]) if found else None
 
 
-def answers_only_reminders(result_event: dict[str, Any], reminders: set[str]) -> bool:
+def answers_only_reminders(result_event: dict[str, Any], reminders: Collection[str]) -> bool:
     """Whether the user messages a turn answers (``user_message_uuids``) are all room reminders."""
     answered = result_event.get("user_message_uuids") or []
     return bool(answered) and bool(reminders) and all(u in reminders for u in answered)
@@ -1327,7 +1328,7 @@ class WorkerPool:
                     message = json.loads(line)
                     reminder_id = message.get("uuid")
                     if isinstance(reminder_id, str) and reminder_id.startswith(REMINDER_PREFIX):
-                        reminders.uuids.add(reminder_id)
+                        reminders.uuids[reminder_id] = uuid_through(reminder_id) or 0
                         reminders.through = max(reminders.through, uuid_through(reminder_id) or 0)
                 reminders.pending = True
                 self._reminders[run_id] = reminders
@@ -1566,14 +1567,14 @@ class WorkerPool:
         return {wp.worker_id: (wp.status, wp.since) for wp in self._active.values()
                 if wp.parent_task_id == task_id and wp.status in ("pending", "running")}
 
-    def _room_reminders(self, task_id: str, seat: Seat, *, confirm_on_item: bool = False) -> _Reminders:
+    def _room_reminders(self, task_id: str, seat: Seat, *, receipt: RoomPush = RoomPush.USER_TURN) -> _Reminders:
         if self.room_ops is None:
-            return _Reminders(confirm_on_item=confirm_on_item)
+            return _Reminders(receipt=receipt)
         room = self.room_ops.room
         # Messages can predate the run, so the first tool call or wait must check without a new post.
         return _Reminders(pending=True, next_delivery=lambda after: room.delivery(task_id, seat, after=after),
                           confirm=lambda through: room.confirm(task_id, seat.key, through),
-                          confirm_on_item=confirm_on_item)
+                          receipt=receipt)
 
     def room_in_flight(self, worker_id: str) -> int:
         state = self._reminders.get(worker_id)
@@ -1605,7 +1606,7 @@ class WorkerPool:
 
     async def _confirm_room_prefix(self, worker_id: str, state: _Reminders) -> None:
         # The room cursor is cumulative: a later receipt must not skip an unseen delivery.
-        while state.steered:
+        while state.steered and not state.receipts_closed:
             through, entry = next(iter(state.steered.items()))
             if not entry.observed:
                 break
@@ -1682,15 +1683,15 @@ class WorkerPool:
                     self._retry_reminder(worker_id, state, state.last_at + interval - now)
                     return sent
                 reminder = delivery_uuid(delivery.through)
-                state.uuids.add(reminder)  # An echo may arrive while send awaits acceptance.
-                if state.confirm_on_item:
+                state.uuids[reminder] = delivery.through  # A receipt may arrive while send awaits acceptance.
+                if state.receipt in (RoomPush.STEER, RoomPush.RUNNER) and not state.receipts_closed:
                     state.steered[delivery.through] = _SteeredDelivery(delivery)
                 try:
                     result = await channel.send(delivery.text, uuid=reminder)
                 except (BrokenPipeError, ConnectionResetError, RuntimeError):
                     result = DeliveryResult.REJECTED
                 if result is DeliveryResult.REJECTED:
-                    state.uuids.discard(reminder)
+                    state.uuids.pop(reminder, None)
                     state.steered.pop(delivery.through, None)
                     return sent
                 state.through = max(state.through, delivery.through)
@@ -1699,7 +1700,7 @@ class WorkerPool:
                 if result is DeliveryResult.UNKNOWN:
                     logger.warning("worker %s room delivery acceptance unknown; not retrying", worker_id)
                     return sent
-                if state.confirm_on_item and (entry := state.steered.get(delivery.through)) is not None:
+                if state.receipt is RoomPush.STEER and (entry := state.steered.get(delivery.through)) is not None:
                     self._room_item_fallback(worker_id, state, entry)
                 state.sent += 1
                 sent = True
@@ -1718,7 +1719,7 @@ class WorkerPool:
                 return sent
 
     async def _confirm_delivery(self, worker_id: str, state: _Reminders, through: int) -> None:
-        if through <= state.confirmed or state.confirm is None:
+        if state.receipts_closed or through <= state.confirmed or state.confirm is None:
             return
         state.confirmed = through
         try:
@@ -2573,7 +2574,8 @@ class WorkerPool:
 
                 event_type = event.get("type", "")
                 if event_type == "system" and event.get("subtype") == "codex_user_message" \
-                        and (reminders := self._reminders.get(worker_id)) is not None:
+                        and (reminders := self._reminders.get(worker_id)) is not None \
+                        and reminders.receipt is RoomPush.STEER:
                     await self._room_history_item(worker_id, reminders, event.get("text") or "")
                 # Background agents stream their own messages before the lead resumes.
                 if waiting is not None and not event.get("parent_tool_use_id") and (event_type == "assistant" or
@@ -2587,7 +2589,24 @@ class WorkerPool:
 
                 if event_type == "system" and parent_task_id and not replaying:
                     runner = event.get("runner") or {}
-                    if event.get("subtype") == "steer_applied":
+                    reminders = self._reminders.get(worker_id)
+                    if reminders is not None and reminders.receipt is RoomPush.RUNNER \
+                            and runner.get("message_id") in reminders.uuids:
+                        through = reminders.uuids[runner["message_id"]]
+                        if event.get("subtype") == "steer_applied":
+                            if (entry := reminders.steered.get(through)) is not None:
+                                entry.observed = True
+                                await self._confirm_room_prefix(worker_id, reminders)
+                                await self._activity(parent_task_id, worker_id, "phase",
+                                                     "Room messages " + ", ".join(f"#{i}" for i in entry.delivery.ids)
+                                                     + f" reached the model (after request {runner.get('after_request_id')})")
+                        elif event.get("subtype") == "steer_dropped":
+                            # Confirming any later delivery would also mark this dropped prefix read.
+                            reminders.receipts_closed = True
+                            reminders.steered.clear()
+                            await self._activity(parent_task_id, worker_id, "phase",
+                                                 f"Room delivery dropped ({runner.get('reason')}); its messages stay unread")
+                    elif event.get("subtype") == "steer_applied":
                         await self._activity(parent_task_id, worker_id, "phase",
                                              "Planner message reached the model in the run's turn "
                                              f"(after request {runner.get('after_request_id')})")
@@ -2638,7 +2657,8 @@ class WorkerPool:
                                         logger.debug("failed to insert text activity", exc_info=True)
 
                 elif event_type == "user" and (reminders := self._reminders.get(worker_id)) is not None:
-                    if event.get("isReplay") is True and event.get("uuid") in reminders.uuids:
+                    if reminders.receipt is not RoomPush.RUNNER and event.get("isReplay") is True \
+                            and event.get("uuid") in reminders.uuids:
                         if (through := uuid_through(event.get("uuid"))) is not None:
                             await self._confirm_delivery(worker_id, reminders, through)
                     content = (event.get("message") or {}).get("content")
@@ -2652,7 +2672,7 @@ class WorkerPool:
                     # its outcome, unless its turn only answered room reminders after input ended or without
                     # a status report. While input is open, a reminder can wake a waiting Worker to report.
                     reminders = self._reminders.get(worker_id)
-                    if reminders is not None:
+                    if reminders is not None and reminders.receipt is not RoomPush.RUNNER:
                         for value in event.get("user_message_uuids") or []:
                             if value in reminders.uuids and (through := uuid_through(value)) is not None:
                                 await self._confirm_delivery(worker_id, reminders, through)
@@ -2776,7 +2796,7 @@ class WorkerPool:
                         ready.set()
                     if seat is not None and (push := room_push(launch)) is not RoomPush.NONE:
                         self._reminders.setdefault(worker_id, self._room_reminders(
-                            parent_task_id, seat, confirm_on_item=push is RoomPush.STEER))
+                            parent_task_id, seat, receipt=push))
                 except (BrokenPipeError, ConnectionResetError):
                     # The process exited before reading; its output decides the outcome.
                     logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
