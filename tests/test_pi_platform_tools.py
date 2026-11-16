@@ -189,6 +189,7 @@ def platform(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_workflows: None
     monkeypatch.setattr(schedules, "list_schedules", AsyncMock(return_value=[]))
     monkeypatch.setattr(tasks, "project_tasks", AsyncMock(return_value=[]))
     monkeypatch.setattr(managers, "template_using_project", AsyncMock(return_value=None))
+    monkeypatch.setattr(managers, "managers_scoped_to", AsyncMock(return_value=[]))
     monkeypatch.setattr(manager_actions, "record", AsyncMock())
     monkeypatch.setattr(agent_setting_layers, "list_layers", AsyncMock(return_value=[]))
     monkeypatch.setattr(agent_setting_layers, "planner_profiles", AsyncMock(return_value=[]))

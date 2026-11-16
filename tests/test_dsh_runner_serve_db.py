@@ -201,7 +201,7 @@ def isolated_dsh(tmp_path):
         database.__exit__(None, None, None)
 
 
-def dsh_runner_processes(tmp_path):
+def dsh_runner_processes(tmp_path, *, stopping=None):
     processes = subprocess.run(["ps", "-ww", "-A", "-o", "pid=,stat=,command="], capture_output=True,
                                text=True, check=True, timeout=5).stdout
     owned = []
@@ -213,33 +213,39 @@ def dsh_runner_processes(tmp_path):
         _, stat, command = line.split(maxsplit=2)
         if stat.startswith("Z") or "E" in stat:
             continue  # The process has exited and serve is reaping it.
-        command = shlex.split(command)
-        assert Path(command[0]).name == "node" and any(
-            arg.endswith("dsh_runner/src/main.ts") for arg in command[1:]), line
+        # After SIGKILL, Linux can clear argv before ps reports a zombie. Keep
+        # waiting for this exact PID to exit without rechecking its lost argv.
+        if pid != stopping:
+            command = shlex.split(command)
+            assert Path(command[0]).name == "node" and any(
+                arg.endswith("dsh_runner/src/main.ts") for arg in command[1:]), line
         owned.append(pid)
     return owned
 
 
-@pytest.mark.parametrize("stat,command,expected", [
-    ("Z+", "[MainThread] <defunct>", []),
-    ("UE", "(node)", []),
-    ("S", '/usr/bin/node "/runner path/dsh_runner/src/main.ts"', [15333]),
+@pytest.mark.parametrize("stat,command,stopping,expected", [
+    ("Z+", "[MainThread] <defunct>", None, []),
+    ("UE", "(node)", None, []),
+    ("S", '/usr/bin/node "/runner path/dsh_runner/src/main.ts"', None, [15333]),
+    ("Rs", "[MainThread]", 15333, [15333]),
 ])
-def test_dsh_runner_processes_states(tmp_path, monkeypatch, stat, command, expected):
+def test_dsh_runner_processes_states(tmp_path, monkeypatch, stat, command, stopping, expected):
     directory = tmp_path / "runtime/.local/agent-processes"
     directory.mkdir(parents=True)
     (directory / "15333.json").write_text("{}")
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs:
         subprocess.CompletedProcess(args, 0, stdout=f"  15333 {stat} {command}\n"))
 
-    assert dsh_runner_processes(tmp_path) == expected
+    assert dsh_runner_processes(tmp_path, stopping=stopping) == expected
 
 
 @pytest.mark.parametrize("command", [
     "/usr/bin/python /runner/dsh_runner/src/main.ts",
     "/usr/bin/node /runner/other.ts",
+    "[MainThread]",
 ])
-def test_dsh_runner_processes_rejects_other_live_processes(tmp_path, monkeypatch, command):
+@pytest.mark.parametrize("stopping", [None, 15334])
+def test_dsh_runner_processes_rejects_other_live_processes(tmp_path, monkeypatch, command, stopping):
     directory = tmp_path / "runtime/.local/agent-processes"
     directory.mkdir(parents=True)
     (directory / "15333.json").write_text("{}")
@@ -247,7 +253,7 @@ def test_dsh_runner_processes_rejects_other_live_processes(tmp_path, monkeypatch
         subprocess.CompletedProcess(args, 0, stdout=f"  15333 S {command}\n"))
 
     with pytest.raises(AssertionError):
-        dsh_runner_processes(tmp_path)
+        dsh_runner_processes(tmp_path, stopping=stopping)
 
 
 def send(api, message_id, text):
@@ -351,7 +357,7 @@ def test_dsh_runner_manager_turn_stop_and_restart(isolated_dsh, tmp_path):
     assert dsh_runner_processes(tmp_path) == [pid]
 
     os.kill(pid, signal.SIGKILL)
-    wait_until(lambda: dsh_runner_processes(tmp_path), lambda pids: pid not in pids, timeout=10)
+    wait_until(lambda: dsh_runner_processes(tmp_path, stopping=pid), lambda pids: pid not in pids, timeout=10)
     # A replacement starts on demand, when the next message needs a lease.
     send(api, "restarted", "Continue after runner restart")
     assert FACT in reply(api, "restarted")
