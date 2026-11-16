@@ -28,7 +28,8 @@ def _launch(steer: bool) -> Launch:
 
 @pytest.mark.parametrize(("runtime", "steer", "expected"), [
     ("codex", True, "steer"), ("codex", False, "none"), ("claude-code", False, "user_turn"),
-    *((name, True, "none") for name in ("cursor-agent", "grok", "omp", "pi", "dsh")),
+    ("grok", True, "steer"), ("grok", False, "none"),
+    *((name, True, "none") for name in ("cursor-agent", "omp", "pi", "dsh")),
 ])
 def test_only_opted_in_runtimes_deliver_room_messages(runtime, steer, expected):
     assert room_push(SimpleNamespace(runtime=ADAPTERS[runtime], steers=steer)).value == expected

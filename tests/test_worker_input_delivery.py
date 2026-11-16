@@ -37,13 +37,14 @@ class Channel:
         self.release = asyncio.Event()
         self.settled = asyncio.Event()
         self.sent: list[str] = []
+        self.uuids: list[str | None] = []
         self.written: list[str] = []
         self.error: Exception | None = None
 
     async def wait_input_ready(self) -> None:
         pass
 
-    async def send(self, text: str) -> DeliveryResult:
+    async def send(self, text: str, *, uuid: str | None = None) -> DeliveryResult:
         self.started.set()
         try:
             async with delivery_attempt(self.send_timeout) as attempt:
@@ -51,6 +52,7 @@ class Channel:
                     raise self.error
                 attempt.writing = True
                 self.written.append(text)
+                self.uuids.append(uuid)
                 await self.release.wait()
                 self.sent.append(text)
             return attempt.result
@@ -60,6 +62,9 @@ class Channel:
 
 @pytest.fixture(autouse=True)
 def budgets(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Exercise the real bus routing, but keep journal fsync/executor latency out
+    # of these scaled channel deadlines. Durability is covered by test_agent_bus.
+    monkeypatch.setattr(MessageBus, "_journal_io", AsyncMock())
     monkeypatch.setattr(worker_module, "WORKER_INPUT_DELIVERY_TIMEOUT", 0.03)
     monkeypatch.setattr(planner_module, "WORKER_INPUT_TIMEOUT", 0.5)
 
@@ -130,11 +135,11 @@ def test_starting_worker_acceptance_after_four_seconds_is_acknowledged_once(
     async def run() -> None:
         async with delivery(tmp_path) as (_, planner, plan, step, channel, ready, acks):
             channel.send_timeout = 4 / 5
+            await planner._save(plan, step)
             loop = asyncio.get_running_loop()
             opening = loop.call_later(0.05, ready.set)
             accepting = loop.call_later(0.83, channel.release.set)
             try:
-                await planner._save(plan, step)
                 await correct(planner, plan, step, caller)
                 assert [ack.payload for ack in acks] == [{"delivered": True}]
                 assert len(channel.written) == 1 and channel.sent == channel.written
@@ -213,6 +218,7 @@ def test_ready_before_deadline_delivers_exactly_once(tmp_path: Path, agent_db: A
             await request
             assert [ack.payload for ack in acks] == [{"delivered": True}]
             assert len(channel.sent) == 1 and channel.sent[0].endswith("use blue")
+            assert channel.uuids == [acks[0].reply_to]
             assert step.missed_messages == []
 
     asyncio.run(asyncio.wait_for(run(), 2))
@@ -375,12 +381,12 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
             opening = None
             send_input = pool.send_input
 
-            async def deliver_input(worker_id: str, text: str) -> DeliveryResult:
+            async def deliver_input(worker_id: str, text: str, **kwargs: Any) -> DeliveryResult:
                 nonlocal opening
                 if startup != "past_deadline":
                     opening = asyncio.get_running_loop().call_later(
                         0.4 if startup in ("within_budget", "late_ack") else 1.3, handshake.set)
-                return await send_input(worker_id, text)
+                return await send_input(worker_id, text, **kwargs)
 
             monkeypatch.setattr(pool, "send_input", deliver_input)
             try:
@@ -418,8 +424,9 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
 
 
 @pytest.mark.parametrize("caller", ["chat", "supervise"])
+@pytest.mark.parametrize("blocked_at", ["send", "journal"])
 def test_missing_bus_ack_is_unknown_and_late_acceptance_is_not_replayed(
-    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, caller: str,
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, caller: str, blocked_at: str,
 ) -> None:
     monkeypatch.setattr(worker_module, "WORKER_INPUT_DELIVERY_TIMEOUT", .2)
     monkeypatch.setattr(planner_module, "WORKER_INPUT_TIMEOUT", .01)
@@ -428,12 +435,25 @@ def test_missing_bus_ack_is_unknown_and_late_acceptance_is_not_replayed(
         async with delivery(tmp_path) as (pool, planner, plan, step, channel, ready, acks):
             channel.send_timeout = .1
             ready.set()
+            journaling, release_journal = asyncio.Event(), asyncio.Event()
+            if blocked_at == "journal":
+                channel.release.set()
+
+                async def journal_io(operation: Any, *args: Any) -> None:
+                    if args and args[0].message_type == MessageType.WORKER_INPUT_RESULT:
+                        journaling.set()
+                        await release_journal.wait()
+
+                monkeypatch.setattr(planner._bus, "_journal_io", journal_io)
             await planner._save(plan, step)
             answer = await correct(planner, plan, step, caller)
             assert not acks and step.missed_messages == []
+            if blocked_at == "journal":
+                assert journaling.is_set() and channel.sent == channel.written
             if caller == "chat":
                 assert "未确认" in answer and "Passing it on" not in answer
             channel.release.set()
+            release_journal.set()
             await channel.settled.wait()
             # Channel settlement precedes the durable bus acknowledgement.
             await asyncio.gather(*pool._input_deliveries)

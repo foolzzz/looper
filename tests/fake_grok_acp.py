@@ -18,18 +18,25 @@ chosen by its text (the stand-in is told, not guessed):
 - ``GARBAGE``: lines that are not JSON objects between the notifications;
 - ``ASK``: asks the client for a permission (a request of the agent's own) and answers with the outcome;
 - ``ERROR``: answers ``session/prompt`` with a JSON-RPC error;
+- ``STEER_TOOL``, ``STEER_REFUSE``, ``STEER_FINAL``, ``STEER_LATE``, ``STEER_EMPTY`` and ``STEER_TOOL_ONLY``:
+  pause at explicit test gates to separate
+  interjection acceptance from a tool result and the start or continuation of model output;
 - anything else: answers with the first line of Looper's prompt (from the rules file), the message and the turn.
 
 ``FAKE_ACP_DEAD`` makes the process exit at once (a Grok with no ``agent stdio``), ``FAKE_ACP_NO_LOAD`` leaves
 ``loadSession`` out of ``initialize``, ``FAKE_ACP_SILENT`` never answers ``initialize``. A ``stall`` file beside
 ``acp-argv.jsonl`` makes it read nothing more once it has a session.
+``FAKE_ACP_VERSION`` and ``FAKE_ACP_INTERJECT_CODE`` control the no-model capability probe.
 """
 
 FAKE_ACP = """\
 import json, os, sys, time, urllib.parse
 args = sys.argv[1:]
+if '--version' in args:
+    print(os.environ.get('FAKE_ACP_VERSION', 'grok 1.0.77'))
+    sys.exit(0)
 home = os.environ['GROK_HOME']
-root = os.path.dirname(os.path.dirname(home))
+root = os.environ.get('FAKE_ACP_ROOT', os.path.dirname(os.path.dirname(home)))
 open(os.path.join(root, 'acp-argv.jsonl'), 'a').write(json.dumps(
     {'home': home, 'user_home': os.environ['HOME'], 'args': args, 'pid': os.getpid(), 'cwd': os.getcwd(),
      'key': os.environ.get('XAI_API_KEY')}) + '\\n')
@@ -80,6 +87,70 @@ def stall():
 def prompt(request, text):
     state['turns'] += 1
     save()
+    if text.startswith('STEER_'):
+        import select
+        # A fake tool remains in progress while interjections are read. Explicit
+        # test gates separate acceptance, tool completion and the next response.
+        tool = text not in ('STEER_FINAL', 'STEER_LATE')
+        if tool or text == 'STEER_LATE':
+            completed(10, 0, 1)
+            update('tool_call', toolCallId='steer-tool', title='run_terminal_command', rawInput={'command': 'wait for input'})
+            update('tool_call_update', toolCallId='steer-tool', status='in_progress')
+            if text == 'STEER_LATE':
+                update('tool_call_update', toolCallId='steer-tool', status='completed',
+                       rawOutput={'type': 'Bash', 'output': [], 'exit_code': 0})
+                chunk('last response already started')
+        else:
+            chunk('last response already started')
+        open(os.path.join(root, 'steer-ready'), 'w').close()
+        accepted = False
+        while not accepted:
+            pending = json.loads(sys.stdin.readline())
+            open(os.path.join(root, 'steer-requests.jsonl'), 'a').write(json.dumps(pending) + '\\n')
+            if pending['method'] == 'session/cancel':
+                finish(request, 'cancelled', usage(1, 100, 0, 3, 50000000))
+                return
+            assert pending['method'] == '_x.ai/interject'
+            params = pending['params']
+            assert params['sessionId'] == state['session'] and isinstance(params['text'], str)
+            if text == 'STEER_REFUSE':
+                out({'id': pending['id'], 'error': {'code': -32602, 'message': 'interjection refused'}})
+            else:
+                out({'id': pending['id'], 'result': {'status': 'queued'}})
+                out({'method': '_x.ai/session/interjection', 'params': params})
+            accepted = True
+        open(os.path.join(root, 'steer-accepted'), 'w').close()
+        while not os.path.exists(os.path.join(root, 'steer-tool.finish')):
+            if select.select([sys.stdin], [], [], 0.01)[0]:
+                line = sys.stdin.readline()
+                if not line:
+                    sys.exit(0)
+                pending = json.loads(line)
+                open(os.path.join(root, 'steer-requests.jsonl'), 'a').write(json.dumps(pending) + '\\n')
+                if pending['method'] == 'session/cancel':
+                    finish(request, 'cancelled', usage(1, 100, 0, 3, 50000000))
+                    return
+        if tool:
+            update('tool_call_update', toolCallId='steer-tool', status='completed',
+                   rawOutput={'type': 'Bash', 'output': [], 'exit_code': 0})
+            open(os.path.join(root, 'steer-tool.done'), 'w').close()
+            while not os.path.exists(os.path.join(root, 'steer-model.start')):
+                time.sleep(0.01)
+            if text == 'STEER_EMPTY':
+                chunk('')
+            elif text == 'STEER_TOOL_ONLY':
+                completed(10, 0, 1)
+                update('tool_call', toolCallId='next-tool', title='read_file', rawInput={'path': 'example.txt'})
+                update('tool_call_update', toolCallId='next-tool', status='completed',
+                       rawOutput={'type': 'ReadFile', 'content': 'example'})
+            else:
+                chunk(os.environ.get('FAKE_ACP_STEER_RESULT', 'next model response'))
+        elif text == 'STEER_LATE':
+            chunk(' tail of the same response')
+        if text != 'STEER_TOOL_ONLY':
+            completed(10, 0, 1)
+        finish(request, 'end_turn', usage(2 if tool else 1, 100, 0, 3, 50000000))
+        return
     if 'ERROR' in text:
         out({'id': request, 'error': {'code': -32603, 'message': 'model unavailable'}})
         return
@@ -172,6 +243,7 @@ for line in sys.stdin:
     except ValueError:
         continue
     method, request = message.get('method'), message.get('id')
+    open(os.path.join(root, 'acp-requests.jsonl'), 'a').write(json.dumps(message) + '\\n')
     if method == 'initialize':
         if os.environ.get('FAKE_ACP_SILENT'):
             time.sleep(600)
@@ -197,4 +269,7 @@ for line in sys.stdin:
         stall()
     elif method == 'session/prompt':
         prompt(request, message['params']['prompt'][0]['text'])
+    elif method == '_x.ai/interject':
+        code = int(os.environ.get('FAKE_ACP_INTERJECT_CODE', '-32602'))
+        out({'id': request, 'error': {'code': code, 'message': os.environ.get('FAKE_ACP_INTERJECT_MESSAGE', 'session not found' if code == -32602 else 'method not found')}})
 """

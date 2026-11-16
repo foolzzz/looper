@@ -1283,9 +1283,9 @@ class TestWorkerInput:
                 await release.wait()
                 await take_slot(wp)
 
-            async def capture_input(worker_id: str, text: str) -> DeliveryResult:
+            async def capture_input(worker_id: str, text: str, **kwargs: Any) -> DeliveryResult:
                 input_attempted.set()
-                return await send_input(worker_id, text)
+                return await send_input(worker_id, text, **kwargs)
 
             monkeypatch.setattr(pool, "_take_slot", hold_start)
             monkeypatch.setattr(pool, "send_input", capture_input)
@@ -1354,9 +1354,9 @@ class TestWorkerInput:
                 await release.wait()
                 await take_slot(wp)
 
-            async def capture_input(worker_id: str, text: str) -> DeliveryResult:
+            async def capture_input(worker_id: str, text: str, **kwargs: Any) -> DeliveryResult:
                 input_attempted.set()
-                return await send_input(worker_id, text)
+                return await send_input(worker_id, text, **kwargs)
 
             async def fail_execute(*args: Any, **kwargs: Any) -> None:
                 raise RuntimeError("startup failed")

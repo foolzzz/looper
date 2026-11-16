@@ -241,7 +241,7 @@ def test_worker_uses_its_run_channel_over_the_bus(
             assert result.payload["status"] == "completed"
             assert result.payload["summary"] == "got: hello"
             assert commands == ["steer" if steer else "run"]
-            assert sent == [("hello", None)] and ended == [True]
+            assert sent == [("hello", reply.reply_to)] and ended == [True]
             assert not pool.accepts_input("w1")
             assert not await pool.send_input("w1", "too late")
         finally:
