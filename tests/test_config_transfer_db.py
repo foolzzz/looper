@@ -954,7 +954,8 @@ def test_a_schedule_whose_settings_changed_is_rewritten_disabled_and_one_that_di
                 "name": "weekly", "cron": "0 9 * * 1", "timezone": "UTC", "requirement": "Sum up the week.",
                 "overlap": "skip", "max_parallel_runs": 3, "catch_up": "once", "run_timeout_seconds": "default",
                 "run_budget_usd": None, "gate_command": None, "gate_timeout_seconds": None,
-                "daily_budget_usd": None, "notify": "failures", "user_gates": "off", "notify_target": None,
+                "daily_budget_usd": None, "notify": "failures", "notify_format": "report",
+                "user_gates": "off", "notify_target": None,
                 "profiles": {}, "task_limits": {}}
             # Not whether it was enabled, nor its directory: a flag says it had one.
             assert "enabled" not in nightly and "work_dir" not in nightly and nightly["repoint"] is True
