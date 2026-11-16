@@ -123,13 +123,13 @@ else:
 
 
 async def _ran(pool: Any, work: Path, *, session: str | None = "s-1", provider: str = "prov-claude-subscription",
-               prompt: str = "## Role\nYou build the API.\n\n" + WORK_CONTRACT) -> None:
+               prompt: str = "## Role\nYou build the API.\n\n" + WORK_CONTRACT, runtime: str = "claude-code") -> None:
     """s1's Worker (worker-1, backend_rd@s1) ran in ``work`` and its step was accepted: its record has its
     session."""
     work.mkdir(exist_ok=True)
     await pool.execute("UPDATE tasks SET work_dir = $1", str(work))
     await pool.execute("UPDATE task_steps SET status = 'verified' WHERE id = 'step-s1'")
-    metadata = {"profile": {"runtime": {"type": "claude-code"}, "provider": {"id": provider}},
+    metadata = {"profile": {"runtime": {"type": runtime}, "provider": {"id": provider}},
                 "system_prompt": prompt, "cwd": str(work)}
     await pool.execute("INSERT INTO llm_records (agent_id, task_id, session_id, status, metadata) "
                        "VALUES ('worker-1', 'task-r', $1, 'completed', $2::jsonb)", session, json.dumps(metadata))
@@ -418,19 +418,28 @@ def test_a_consult_checks_its_result_cost_when_the_recorded_cost_lookup_fails(
     run_db(test, monkeypatch)
 
 
-def test_a_consult_with_no_full_provider_price_does_not_run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("runtime_type", ["claude-code", "coco"])
+def test_a_consult_with_no_full_provider_price_goes_to_the_planner(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, runtime_type: str,
+) -> None:
     from dataclasses import replace
 
     from looper.agents import consult
     from looper.agents.agent_settings import AgentSettings
-    from looper.agents.profile_registry import BUILTIN_PROFILE, cost_basis
-    from looper.agents.runtimes import AuthKind
+    from looper.agents.profile_registry import BUILTIN_PROFILE, CatalogModel, cost_basis
+    from looper.agents.runtimes import AuthKind, adapter
 
     seen = tmp_path / "seen.jsonl"
     monkeypatch.setenv("SEEN", str(seen))
     provider = replace(BUILTIN_PROFILE.provider, id="provider-test", auth=AuthKind.API_KEY,
                        base_url="https://provider.invalid", api_key="test-key")
     profile = replace(BUILTIN_PROFILE, provider=provider, model="unpriced-model")
+    if runtime_type == "coco":
+        runtime = adapter(runtime_type)
+        provider = replace(provider, auth=AuthKind.OAUTH, oauth_runtime_type=runtime_type,
+                           protocols=runtime.protocols, catalog=(CatalogModel(profile.model),))
+        profile = replace(profile, provider=provider, agent_teams=False,
+                          runtime=replace(profile.runtime, type=runtime_type, capabilities=runtime.capabilities))
     assert cost_basis(profile)["source"] == "provider_price"
     assert profile.model in cost_basis(profile)["unpriced"]
 
@@ -441,18 +450,36 @@ def test_a_consult_with_no_full_provider_price_does_not_run(monkeypatch: pytest.
 
     async def test(pool: Any) -> None:
         await _room_task(pool)
-        await _ran(pool, tmp_path / "work", provider=provider.id)
+        await _ran(pool, tmp_path / "work", provider=provider.id, runtime=runtime_type)
+        await pool.execute("UPDATE llm_records SET output_text = $1 WHERE agent_id = 'worker-1'",
+                           json.dumps({"status": "completed", "summary": "the field is qty"}))
+        original = await pool.fetchrow("SELECT * FROM llm_records WHERE agent_id = 'worker-1'")
         room = RoomService(batch_seconds=0)
         service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
+        source = tmp_path / "source-session"
+        source.mkdir()
+        (source / "session").write_text("original session")
+        monkeypatch.setattr(service, "_session_dir", lambda *args: source)
         try:
             question = await room.post("task-r", FE, kind="question", body="qty?", to=["backend_rd@s1"])
             row = await _settled(pool)
-            assert (row["state"], row["fallback_reason"]) == ("fallback", "runtime_cannot")
+            assert (row["state"], row["fallback_reason"]) == ("fallback", "budget_unavailable")
             assert "model has no full price" in row["detail"]
             assert not seen.exists()
             assert await pool.fetchval("SELECT count(*) FROM llm_records WHERE agent_id LIKE 'consult-%'") == 0
             escalation = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'escalation'")
             assert escalation["reply_to"] == question["id"] and escalation["planner_pending"]
+            notice = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'notice'")
+            for message in (escalation, notice):
+                assert "budget_unavailable" in message["body"] and "no full price" in message["body"]
+            assert list(notice["audience"]) == [FE.key]
+            assert list(escalation["audience"]) == [PLANNER.key]
+            assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE kind = 'answer'") == 0
+            assert await pool.fetchrow("SELECT * FROM llm_records WHERE agent_id = 'worker-1'") == original
+            assert (source / "session").read_text() == "original session"
+            inbox = await room.inbox("task-r", FE, peek=True)
+            assert any(message["id"] == notice["id"] for message in inbox["messages"])
+            assert await room.inbox("task-r", FE, peek=True) == inbox
         finally:
             await service.stop()
 
@@ -1124,7 +1151,7 @@ def test_a_failure_after_the_snapshot_cleans_the_checkout_and_session_fork(
         if phase != "prompt":
             assert len(forks) == 1
         listed = subprocess.run(["git", "worktree", "list"], cwd=repo, capture_output=True, text=True, check=True)
-        assert "consult-" not in listed.stdout
+        assert len(listed.stdout.splitlines()) == 1  # only the original checkout remains
 
     run_db(test, monkeypatch)
 

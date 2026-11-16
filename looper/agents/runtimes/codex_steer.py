@@ -84,13 +84,13 @@ class CodexChannel:
     """One app-server thread and turn; the reader drives the handshake and resolves steering replies."""
 
     def __init__(self, process: asyncio.subprocess.Process, *, model: str, effort: str, cwd: str,
-                 keep_session: bool) -> None:
+                 keep_session: bool, runtime: str = "codex") -> None:
         self._process = process
         self._model = model
         self._effort = effort
         self._cwd = cwd
         self._keep_session = keep_session
-        self._stream = CodexStream(model=model)
+        self._stream = CodexStream(model=model, runtime=runtime)
         self._room_window = RoomSteerWindow()
         self._lock = asyncio.Lock()
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}

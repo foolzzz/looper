@@ -31,7 +31,9 @@ to the Planner with the reason (``room.FallbackReason``), as in R1a.
   under its task's limit of the seat's kind (Worker or Reviewer), as any run does. Its spend is a run of its own
   (``consult-<12 hex>``), in the task's cost. After each run its recorded cost is checked, falling back to the
   result's own figure. A cost over its cap or still unknown drops the answers on every runtime.
-  A provider-priced model without a full price cannot run a consult (``runtime_cannot``).
+  A provider-priced model without a full price cannot run a consult (``budget_unavailable``): time and turn
+  limits do not establish a spend cap. The question and reason go to the Planner, and its asker gets the reason
+  too. The source run's report and session stay intact; no answer or delivery receipt is invented.
   One deadline covers writing the prompt, reading the reply and waiting for exit; stderr is drained with a short
   tail kept for errors, and the process tree is ended on success too. The tree is read every ``TREE_WATCH_SEC`` and
   again before the result is recorded, and the consult's own process group is signalled; a child that calls
@@ -350,7 +352,7 @@ class ConsultService:
 
         basis = cost_basis(launch.profile)
         if basis["source"] == "provider_price" and launch.model in basis["unpriced"]:
-            raise _Failed(FallbackReason.RUNTIME_CANNOT, "its model has no full price with its provider, so "
+            raise _Failed(FallbackReason.BUDGET_UNAVAILABLE, "its model has no full price with its provider, so "
                                                          "room_consult_budget_usd cannot hold")
         runtime = launch.runtime
         if launch.read_only_mode is ReadOnly.CHECK:
@@ -667,7 +669,7 @@ class ConsultService:
 
 # The reasons a consult gives up before its run started (its questions went to the Planner without one).
 _BEFORE_RUNNING = (FallbackReason.NO_SESSION, FallbackReason.RUNTIME_CANNOT, FallbackReason.NO_SNAPSHOT,
-                   FallbackReason.LIMIT)
+                   FallbackReason.LIMIT, FallbackReason.BUDGET_UNAVAILABLE)
 
 
 async def _run_cost(task_id: str, run_id: str) -> float | None:
