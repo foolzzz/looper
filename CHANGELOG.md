@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.4] - 2026-11-16
+
+### Changed
+
+- **Room push for OMP RPC runs and Pi CLI RPC runs.** ([#1371](https://github.com/foolzzz/looper/pull/1371))
+  - OMP (18.4.3+ with RPC) and Pi CLI RPC Workers and Reviewers with detected steering now receive room deliveries as steered input, so their room guidance moves from `PULL` to `PUSHED`. Existing registrations keep their saved capabilities until Re-detect. Behavior change (maintainer decision, intended).
+  - Both runtimes and Codex report the user-message history receipt as one `user_message_receipt` event (Codex's `codex_user_message` subtype is renamed). A delivery is marked read on that receipt or, after a 30 second window that starts once the accepted delivery's tool batch has returned, by the receipt fallback.
+  - Model-visible: OMP and Pi Workers and Reviewers with detected steering get the pushed room guidance instead of the pull guidance, and room message bodies arrive as steered input.
+
 ## [2.15.3] - 2026-11-16
 
 ### Changed
