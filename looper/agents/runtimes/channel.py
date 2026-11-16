@@ -83,6 +83,7 @@ class RunChannel(Protocol):
 
     ``send`` reports accepted, rejected before writing, or unknown acceptance. Explicit runtime refusals may
     raise ``RuntimeError``. Unknown input must not be replayed automatically.
+    ``uuid`` names a room delivery; it is never reported by ``dropped_input``.
     ``wait_input_ready`` waits for the startup handshake without writing a turn.
     Once ready, ``send_timeout`` reserves the full write and acceptance budget.
     ``start`` may raise ``BrokenPipeError`` or ``ConnectionResetError`` if input has closed.
