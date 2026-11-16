@@ -768,6 +768,8 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 2026-11-04 | Cursor Agent 管家与规划者（本分支）：逐轮续接 owner 固定目录中的 chat，首轮从 stdin 注入 Looper 指令，续接只发本轮提示；指令哈希与 chat id 一起保存，指令变化时新建会话，清理旧 chat 并按已保存会话回收 owner 目录，管家不支持 stop。控制台、Telegram/Lark 与 CLI 沿用共享角色注册入口；定向替身测试和一次性 PostgreSQL 四角色注册验证通过，未调用真实 Cursor 或模型，Planner MCP 与续接 usage 口径仍待真实验证。 |
 
+| 2026-11-16 | Grok Worker/Reviewer 的运行中引导（本分支）：版本至少 1.0.77 且无模型探测确认 `_x.ai/interject` 后使用 ACP，Planner 消息与房间投递携带 delivery uuid，房间指导改为 `PUSHED`；无能力时保留 headless 与 `PULL`。接受通知不标已读，只有通知后工具结束、再开始的模型输出才确认，拒绝或提前结束留待下轮，无计时兜底。替身覆盖能力探测、回执边界、工具继续运行与原路径；真实隔离 serve、`chat_correction` / `room_interface` 各 `--reps 2` 和真实 prompt 对照由维护者在合入前完成，本分支未运行真实 Grok。 |
+
 ## 5. 不属于本 RFC 的待办
 
 这些问题在开发过程中发现，独立排期，不阻塞 M1–M6。
@@ -896,7 +898,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 - **Codex、OMP 的规划者只读（looper #183 的后续）**（✅ looper #203，见[规划者只读 RFC](../architecture/rfcs/planner-read-only-v0.zh-CN.md) 4.1）：Codex 用只读沙箱加 `approval_policy="never"`，规划者的每个 MCP 服务器加 `default_tools_approval_mode="approve"`；OMP 用 `--tools read,glob,grep`，MCP 工具仍可用。两者的运行记录 `metadata.read_only` 分别是 `sandbox`、`tools`。留下的：Codex 的沙箱不给类型化的拒绝记录；OMP 的规划者没有 shell；回退检查（`check`）现在没有运行时用。
 - **Manager 自己动手做小活（looper #88 的真实对话发现）**：haiku 收到「创建一个 hello.txt」这类一句话的小活时没有走任务流程，直接用自己的工具在 Manager 的工作目录里写了文件（Manager 有全部工具、不需确认）；要不要在 role prompt 里限定 Manager 不亲自改文件，或收窄它的工具，待定。
 - **OMP 运行时的已知差距（M9e）**：运行中的 OMP Worker 的引导已改走 `--mode rpc`（`interruptMode` 设 `wait`，探测到版本和 rpc 才启用，见 Worker 引导 RFC）；omp 的 `task` 工具找子 agent 定义时从工作目录一路往上找 `.omp/agents`，过了仓库根也不停，工作目录在操作者家目录下时会读到 `~/.omp/agents`（如果有），Looper 关不掉，只能整个去掉 `task` 工具；工作目录不在 git 仓库里时关掉了向上查找的发现来源，工作目录自己的 `AGENTS.md`、`CLAUDE.md`、`.omp/` 等也不读；后台请求（skill 描述压缩成路由提示、压缩摘要）不在事件流里，不计入花费和单次上限；每个新进程的首个请求基本不命中提示缓存（评测里未缓存输入 101k，Codex 约 60k），可以试 `--prompt-cache-key`；每个 runtime root 第一次运行要解压约 167 MB 的原生库（`omp/natives`）。
-- **Grok 运行时的已知差距（M9f）**：运行中的 Grok Worker 不能被引导（headless 只读一次提示，ACP 的 `grok agent stdio` 没有声明运行中追加输入的扩展，未采用），规划者的消息只能留给这一步的决策轮；Grok 没有花费上限参数，花费只在一轮结束时报，所以单次上限停不住 Grok 的运行（注册时警告，任务上限照算）；Grok 把登录刷新写回 `auth.json` 的方式没有核实（闭源，维护者决定不强制刷新真实 token），靠每次运行后和启动时的分叉检查兜底；压缩事件的字段、子 agent 的响应是否出现在流里没有实跑触发；Grok 一直保存会话（没有不存的选项），一次运行的会话随它的家目录一天后删掉；被结束时正在跑的工具调用不在事件流里；只做了 Grok 自己的登录，API key provider（`[model.<id>]` 的 `api_backend`）未接。
+- **Grok 运行时的已知差距（M9f）**：本分支已为探测通过的 1.0.77+ Worker/Reviewer 接入 ACP 运行中引导（见第 4 节），未通过探测时仍 headless；真实隔离 serve、纠偏与房间接口评测及 prompt 对照待维护者在合入前完成；Grok 没有花费上限参数，花费只在一轮结束时报，所以单次上限停不住 Grok 的运行（注册时警告，任务上限照算）；Grok 把登录刷新写回 `auth.json` 的方式没有核实（闭源，维护者决定不强制刷新真实 token），靠每次运行后和启动时的分叉检查兜底；压缩事件的字段、子 agent 的响应是否出现在流里没有实跑触发；Grok 一直保存会话（没有不存的选项），一次运行的会话随它的家目录一天后删掉；被结束时正在跑的工具调用不在事件流里；只做了 Grok 自己的登录，API key provider（`[model.<id>]` 的 `api_backend`）未接。
 - **Pi 运行时的已知差距（M9g）**：嵌套再启动 `pi` 的隔离没有实跑（子 shell 的 `unset` 前缀已用 `/bin/sh -c` 核对，子 shell 保持私有 HOME）；全部生产工具 schema 没有逐个普查（代表性富 schema 已被 pi 接受）；thinking 是否被模型钳制没有在真实模型上检查；服务崩溃后按保存的会话再起没有单独实跑（假 pi 单测和安装后的假 provider 覆盖同一 serve 内的续接，以及新的 `ResidentPi` 重新加载已存 id）；没有加 RPC `abort`/`clear_queue`。真实协议和 Claude 对照见第 5.4 节。替身渠道消息没有发送。
 
 - **Reviewer 看不到重试时补充的说明（2026-10-15，告警分诊定时任务的影子运行发现；✅ looper #183：评审请求带上这一步的全部重试说明，评审任务一节标为规划者对这一步的修改）**：Planner 决定重试一个步骤时写给 Worker 的补充说明（例如放宽的边界、只需补齐某个输出），Reviewer 看不到，它按原始的步骤说明评审。结果是 Worker 照补充说明做了，评审却判不通过，整步作废、重新规划，或者多重试几次。重试时应把 Planner 的补充说明一并交给 Reviewer。
