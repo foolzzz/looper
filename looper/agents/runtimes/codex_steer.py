@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 from ..claude_cli import iter_lines
-from .channel import DeliveryAttempt, DeliveryResult, delivery_attempt
+from .channel import DeliveryAttempt, DeliveryResult, RoomSteerWindow, delivery_attempt
 from .codex import CodexStream
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,7 @@ class CodexChannel:
         self._cwd = cwd
         self._keep_session = keep_session
         self._stream = CodexStream(model=model)
+        self._room_window = RoomSteerWindow()
         self._lock = asyncio.Lock()
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._next_id = 0
@@ -207,6 +208,7 @@ class CodexChannel:
                                      type(exc).__name__)
                         continue
                     for event in translated:
+                        self._room_window.observe(event)
                         events.put_nowait(event)
                     continue
                 future = self._pending.pop(request_id, None)
@@ -284,16 +286,17 @@ class CodexChannel:
 
     async def send(self, text: str, *, uuid: str | None = None) -> DeliveryResult:
         async with delivery_attempt(self.send_timeout) as attempt:
-            await self._steer(text, attempt)
+            await self._steer(text, attempt, uuid=uuid)
         return attempt.result
 
-    async def _steer(self, text: str, attempt: DeliveryAttempt) -> None:
+    async def _steer(self, text: str, attempt: DeliveryAttempt, *, uuid: str | None = None) -> None:
         """Readiness, lock, write and acknowledgement under the caller's one deadline."""
         await self.wait_input_ready()
         async with self._lock:
             self._check_open()
             if self._turn_id is None:
                 raise RuntimeError("no active turn")
+            self._room_window.check(uuid)
             attempt.writing = True
             request_id, future = await self._request("turn/steer", {
                 "threadId": self._thread_id, "expectedTurnId": self._turn_id,

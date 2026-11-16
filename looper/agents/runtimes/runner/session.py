@@ -373,13 +373,14 @@ class RunnerSession:
             "is_error": True, "errors": [message], "trace_id": trace, "num_turns": 0},
             session_started=False, usage_complete=False, prompt_sent=False)
 
-    async def steer(self, text: str, *, message_id: str, if_idle: str = "reject") -> dict:
+    async def steer(self, text: str, *, message_id: str, if_idle: str = "reject",
+                    before_write: Callable[[], None] | None = None) -> dict:
         if if_idle != "reject":
             raise ProtocolError(ErrorCode.INVALID_PARAMS)
         if self._turn is None or self._closing:
             raise ProtocolError(ErrorCode.NOT_RUNNING)
         turn = self._turn
-        return await self._lease.bridge.steer(turn.session_id, turn.trace_id, message_id, text)
+        return await self._lease.bridge.steer(turn.session_id, turn.trace_id, message_id, text, before_write=before_write)
 
     async def interrupt(self) -> StopMethod | None:
         if self._cancel is None:

@@ -20,7 +20,7 @@ from enum import Enum, auto
 from typing import Any
 
 from ..claude_cli import iter_lines
-from .channel import DeliveryResult, delivery_attempt
+from .channel import DeliveryResult, RoomSteerWindow, delivery_attempt
 from .grok_acp import CANCEL_GRACE_SEC, INIT_TIMEOUT_SEC, PROTOCOL_VERSION, SETUP_TIMEOUT_SEC, AcpTurn
 
 INTERJECT = "_x.ai/interject"
@@ -149,6 +149,7 @@ class GrokChannel:
         self._model_open = False
         self._response_start = 0
         self._last_response_start: int | None = None
+        self._room_window = RoomSteerWindow()
         self._inbox: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
 
     async def _write(self, method: str, params: dict[str, Any], *, request: bool = True) -> int:
@@ -234,6 +235,16 @@ class GrokChannel:
                     continue
                 if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
                     continue
+                params = message.get("params")
+                if (message.get("method") == "session/update" and isinstance(params, Mapping)
+                        and params.get("sessionId") == self._session):
+                    update = params.get("update")
+                    if isinstance(update, Mapping) and isinstance(call_id := update.get("toolCallId"), str):
+                        if update.get("sessionUpdate") == "tool_call":
+                            self._room_window.tool_started(call_id)
+                        elif (update.get("sessionUpdate") == "tool_call_update"
+                              and update.get("status") in ("completed", "failed")):
+                            self._room_window.tool_finished(call_id)
                 ident = message.get("id")
                 if (message.get("method") is None and isinstance(ident, int) and not isinstance(ident, bool)
                         and ("result" in message) != ("error" in message) and ident in self._pending):
@@ -356,6 +367,7 @@ class GrokChannel:
                 async with self._lock:
                     if self._phase is not _Phase.RUNNING or self._stop is not None:
                         return DeliveryResult.REJECTED
+                    self._room_window.check(uuid)
                     delivery_id = uuid or str(uuids.uuid4())
                     # Register before drain: stdout may acknowledge while the write is still pending.
                     ident = self._next_id + 1

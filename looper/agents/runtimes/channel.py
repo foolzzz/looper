@@ -61,6 +61,43 @@ class DeliveryResult(Enum):
         return self is DeliveryResult.ACCEPTED
 
 
+class RoomSteerWindow:
+    """Room input needs an outstanding tool at the protocol write boundary.
+
+    Track producer-side events: a Worker's event consumer can lag behind the
+    protocol reader while recording activity. Other input keeps its own rules.
+    """
+
+    def __init__(self) -> None:
+        self._tools: set[str] = set()
+
+    def tool_started(self, tool_id: str) -> None:
+        if tool_id:
+            self._tools.add(tool_id)
+
+    def tool_finished(self, tool_id: str) -> None:
+        self._tools.discard(tool_id)
+
+    def observe(self, event: dict[str, Any]) -> None:
+        if event.get("type") not in ("assistant", "user") or event.get("parent_tool_use_id"):
+            return
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            return
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if event.get("type") == "assistant" and block.get("type") == "tool_use":
+                self.tool_started(str(block.get("id") or ""))
+            elif event.get("type") == "user" and block.get("type") == "tool_result":
+                self.tool_finished(str(block.get("tool_use_id") or ""))
+
+    def check(self, uuid: str | None) -> None:
+        if uuid is not None and uuid.startswith("looper-reminder-") and not self._tools:
+            raise RuntimeError("room delivery requires a running tool")
+
+
 @dataclass
 class DeliveryAttempt:
     writing: bool = False

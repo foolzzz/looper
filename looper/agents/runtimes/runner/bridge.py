@@ -198,11 +198,13 @@ class RunnerBridge:
     async def health(self):
         return await self.request("runner/health", {})
 
-    async def _write(self, message, entry=None):
+    async def _write(self, message, entry=None, *, before_write: Callable[[], None] | None = None):
         frame = p.encode_frame(message)
         async with self._write_lock:
             if self._error:
                 raise self._error
+            if before_write is not None:
+                before_write()
             try:
                 self.writer.write(frame)
                 if entry is not None:
@@ -212,7 +214,7 @@ class RunnerBridge:
                 self._fail(ConnectionLost("runner-exited: stdin unavailable"))
                 raise self._error from None
 
-    async def request(self, method, params, *, _entry=None):
+    async def request(self, method, params, *, _entry=None, before_write: Callable[[], None] | None = None):
         if self._error:
             raise self._error
         if method != "initialize" and not self._initialized:
@@ -228,7 +230,7 @@ class RunnerBridge:
         self._pending[rpc_id] = Pending(method, params, future, _entry)
         try:
             async with asyncio.timeout(self.control_timeout):
-                await self._write(p.Request(rpc_id, method, params), _entry)
+                await self._write(p.Request(rpc_id, method, params), _entry, before_write=before_write)
                 return await asyncio.shield(future)
         except (TimeoutError, asyncio.CancelledError):
             if method in _LOCAL_CONTROLS:
@@ -334,14 +336,14 @@ class RunnerBridge:
         await _value(entry.turn.stop())
         return await self.request("session/cancel", {"session_id": session_id, "trace_id": trace_id})
 
-    async def steer(self, session_id, trace_id, message_id, text):
+    async def steer(self, session_id, trace_id, message_id, text, *, before_write: Callable[[], None] | None = None):
         entry = self._entry(session_id, trace_id)
         if entry.close_state != CloseState.OPEN or entry.state != State.RUNNING or entry.stopped:
             raise p.ProtocolError(p.ErrorCode.NOT_RUNNING)
         if not self.capabilities.get("steer", {}).get("in_trace", False):
             raise p.ProtocolError(p.ErrorCode.UNSUPPORTED)
         return await self.request("session/steer", {"session_id": session_id, "trace_id": trace_id,
-            "message_id": message_id, "text": text, "if_idle": "reject"})
+            "message_id": message_id, "text": text, "if_idle": "reject"}, before_write=before_write)
 
     def _transition_close(self, entry: SessionEntry, state: CloseState, reason: str) -> None:
         previous = entry.close_state

@@ -1687,6 +1687,10 @@ class WorkerPool:
                 if delivery is None:
                     state.pending = state.notified != notified
                     continue
+                # The room read can outlast the final tool. Leave that delivery
+                # pending instead of steering the model while it writes its report.
+                if self._inputs.get(worker_id) is not channel or (not state.tools_running and not state.waiting):
+                    return sent
                 now = time.monotonic()
                 interval = ADDRESSED_INTERVAL_SEC if delivery.addressed else REMINDER_INTERVAL_SEC
                 if state.last_at + interval > now:

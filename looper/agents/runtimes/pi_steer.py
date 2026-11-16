@@ -9,7 +9,7 @@ from enum import Enum, auto
 from typing import Any
 
 from ..claude_cli import iter_lines
-from .channel import DeliveryResult, delivery_attempt
+from .channel import DeliveryResult, RoomSteerWindow, delivery_attempt
 from .pi import PiStream
 
 _SETUP_TIMEOUT_SEC = 10.0
@@ -31,6 +31,7 @@ class PiChannel:
     def __init__(self, process: asyncio.subprocess.Process, *, model: str | None, cwd: str) -> None:
         self._process = process
         self._stream = PiStream(model=model)
+        self._room_window = RoomSteerWindow()
         self._cwd = cwd
         self._lock = asyncio.Lock()
         self._ready = asyncio.Event()
@@ -156,7 +157,10 @@ class PiChannel:
                                 self._finish()
                             yield self._early_result
                     continue
+                if kind == "tool_execution_end":
+                    self._room_window.tool_finished(str(raw.get("toolCallId") or ""))
                 for event in self._stream.translate(raw):
+                    self._room_window.observe(event)
                     if event.get("type") == "result":
                         if self._phase is _Phase.PROMPT:
                             # Fast completion may precede its ACK. Acceptance still decides
@@ -216,6 +220,7 @@ class PiChannel:
                 async with self._lock:
                     if self._phase is _Phase.FINISHED or self._process.stdin.is_closing():
                         raise RuntimeError("the Pi run has ended")
+                    self._room_window.check(uuid)
                     attempt.writing = True
                     request_id, future = await self._write("steer", message=text)
                     assert future is not None
