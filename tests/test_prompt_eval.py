@@ -538,7 +538,9 @@ def test_the_consult_task_keeps_the_generated_code_after_the_first_step_ends() -
     assert "generated-code.txt in its working directory" in task.requirement
     assert "commits both files before finishing" in task.requirement
     assert "asks the first step for the code" in task.requirement
-    assert "rather than reading its saved copy" in task.requirement
+    assert "The second step must not read the saved copy itself" in task.requirement
+    assert "The first step may read its own saved copy to answer" in task.requirement
+    assert task.expect["min_room_consults"] == 1
     assert task.fake["attempts"]["s1"][0]["files"]["generated-code.txt"] == task.fake["consult_answer"]
 
 
@@ -2392,7 +2394,7 @@ _GATES = {"gate_ambiguous": (1, 1, 1, 0, 0, 0, 0, 1), "gate_end_early": (1, 1, 1
 # which answers in a [ROOM] turn; room_consult's second step asks the first, whose run has ended, and a consult of
 # its session answers. Nothing is left unanswered; every other task's room stays quiet.
 _ROOM_KEYS = ("room_messages", "room_questions", "room_unanswered", "room_interface", "room_refused",
-              "room_tool_calls", "room_consults", "room_consults_answered")
+              "room_tool_calls", "room_consults", "room_consults_replied")
 _ROOM = {"room_interface": (3, 1, 0, 1, 0, 2, 0, 0), "room_consult": (2, 1, 0, 0, 0, 1, 1, 1)}
 # The Planner turns of each kind that some tasks take.
 _PLANNER_TURNS = {"chat_correction": ("chat", 1), "gate_ambiguous": ("gate", 1), "room_interface": ("room", 1)}

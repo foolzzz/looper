@@ -1434,8 +1434,9 @@ ROOM_TASKS: tuple[EvalTask, ...] = (
                     "code.sha256, saves the code itself to generated-code.txt in its working directory, and "
                     "commits both files before finishing. Keep the code out of its report and unsolicited "
                     "messages, telling it only to whoever asks for it. The second step asks the first step for "
-                    "the code, rather than reading its saved copy, and writes that code, its "
-                    f"{CODE_LENGTH} characters only, to code.txt.",
+                    f"the code and writes that code, its {CODE_LENGTH} characters only, to code.txt. "
+                    "The second step must not read the saved copy itself. "
+                    "The first step may read its own saved copy to answer.",
         check=_code_matches,
         init_git=True,
         expect={"min_room_consults": 1},

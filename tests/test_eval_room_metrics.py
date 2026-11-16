@@ -123,6 +123,15 @@ def test_room_deliveries_and_reminders_are_counted_separately():
     assert all(value == 0 for value in metrics.room_metrics({}, [], {}).values())
 
 
+@pytest.mark.parametrize("consults, replied", [({}, 0), ({"total": 3, "answered": 2}, 2)])
+def test_consult_replies_do_not_claim_the_asker_used_the_answer(consults, replied):
+    # The API's answered state includes replies that omit the requested value.
+    result = metrics.room_metrics({"room": {"consults": consults}}, [], {})
+    assert result["room_consults"] == consults.get("total", 0)
+    assert result["room_consults_replied"] == replied
+    assert "room_consults_answered" not in result
+
+
 def test_comparison_renders_room_metrics_beside_an_older_baseline():
     row = {"id": "room_interface", "outcome": "pass"}
     counted = {"room_deliveries": 1, "room_inbox_calls": 2, "room_inbox_empty": 1}
