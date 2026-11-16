@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.10] - 2026-11-16
+
+### Fixed
+
+- **Claude Code failures keep their reason.** ([#1391](https://github.com/foolzzz/looper/pull/1391))
+  - A Claude Code turn that ends with an error result now reports the result's reason (an expired login, a usage limit, an API error with its HTTP status) in the recorded error, instead of only `did not succeed (success)`. The reason is redacted (keys, `Bearer` tokens, `Authorization` values, the profile's API key) before it is cut to 300 characters, and whitespace is collapsed. When the result has no reason text, the old wording is kept.
+  - The Planner, Manager and Worker/reviewer paths all show the reason; the message reads `Claude Code turn did not succeed: <reason>` (capped at 500 characters). Other runtimes keep their `run did not succeed` wording and bound.
+  - Changed files: `looper/agents/runtimes/claude_code.py`, `looper/agents/tiers/worker.py` and a new test file. No prompt, tool schema or PostgreSQL schema change.
+
 ## [2.15.9] - 2026-11-16
 
 ### Changed
