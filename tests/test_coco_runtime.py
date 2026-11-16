@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 import tomllib
@@ -23,7 +24,9 @@ from looper.agents.run_usage import Usage
 from looper.agents.profile_registry import (
     Endpoint, LegacyAgentProfile, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec,
 )
-from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, Launcher, RuntimeUnsupported, VendorType, adapter
+from looper.agents.runtimes import (
+    ApiProtocol, AuthKind, Capability, Launcher, RoomPush, RuntimeUnsupported, VendorType, adapter, room_push,
+)
 from looper.agents.runtimes import coco_login
 from looper.agents.runtimes.coco import CocoRuntime
 from looper.agents.runtimes.codex import _codex_usage
@@ -171,20 +174,71 @@ def test_explicit_environment_cannot_replace_loopers_coco_home(name, source):
         launch.environment()
 
 
-def test_probe_checks_only_version_in_a_disposable_home(tmp_path):
+@pytest.mark.parametrize("schema,exit_code,steer", [
+    ({"oneOf": [{"properties": {"method": {"enum": ["turn/steer"]}}}]}, 0, True),
+    ({"oneOf": [{"properties": {"method": {"enum": ["turn/start"]}}}]}, 0, False),
+    (None, 0, False),
+    ("invalid JSON", 0, False),
+    ({"description": "turn/steer"}, 0, False),
+    ({"oneOf": [{"properties": {"method": {"enum": ["turn/steer"]}}}]}, 1, False),
+])
+def test_probe_checks_version_and_steering_schema_in_disposable_homes(tmp_path, schema, exit_code, steer):
     recorded = tmp_path / "probed-home"
     executable = fake_claude(tmp_path / "coco", (
-        "import os, sys\nfrom pathlib import Path\n"
-        "assert sys.argv[1:] == ['--version'], sys.argv\n"
+        "import json, os, sys\nfrom pathlib import Path\n"
         "home = Path(os.environ['TRAE_HOME'])\nassert list(home.iterdir()) == []\n"
-        f"Path({str(recorded)!r}).write_text(str(home))\n"
-        "print('traecli 0.214.1')\n"
+        f"with Path({str(recorded)!r}).open('a') as log: log.write(str(home) + '\\n')\n"
+        "if sys.argv[1:] == ['--version']:\n    print('traecli 0.1.0')\n    sys.exit(0)\n"
+        "assert sys.argv[1:4] == ['app-server', 'generate-json-schema', '--out'], sys.argv\n"
+        "out = Path(sys.argv[4])\nout.mkdir(parents=True)\n"
+        f"schema = {schema!r}\n"
+        "if schema is not None:\n"
+        "    (out / 'ClientRequest.json').write_text(schema if isinstance(schema, str) else json.dumps(schema))\n"
+        f"sys.exit({exit_code})\n"
     ))
     probe = COCO.probe_for(executable, Launcher.NATIVE)
-    assert probe.error is None and probe.version == "traecli 0.214.1"
-    assert probe.capabilities == {Capability.RUN, Capability.MCP, Capability.ADD_DIRS,
-                                  Capability.RESIDENT_SESSION, Capability.RESUME}
-    assert not Path(recorded.read_text()).exists()
+    assert probe.error is None and probe.version == "traecli 0.1.0"
+    assert probe.capabilities == COCO.capabilities | ({Capability.STEER} if steer else set())
+    homes = recorded.read_text().splitlines()
+    assert len(homes) == 2 and homes[0] != homes[1]
+    assert all(not Path(home).exists() for home in homes)
+
+
+@pytest.mark.parametrize("failure", [OSError("schema unavailable"), subprocess.TimeoutExpired("coco", 10)])
+def test_schema_probe_failure_keeps_exec_capabilities(monkeypatch, failure):
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        assert kwargs["timeout"] == 10
+        if command[1:] == ["--version"]:
+            return subprocess.CompletedProcess(command, 0, stdout="traecli 0.215.0", stderr="")
+        raise failure
+
+    monkeypatch.setattr(subprocess, "run", run)
+    probe = COCO.probe("coco")
+    assert probe.version == "traecli 0.215.0" and probe.error is None
+    assert probe.capabilities == COCO.capabilities and len(calls) == 2
+
+
+@pytest.mark.parametrize("launcher", [Launcher.NATIVE, Launcher.TTADK])
+@pytest.mark.parametrize("session", [False, True])
+def test_steering_reuses_coco_home_and_launcher(tmp_path, launcher, session):
+    launch = _launch()
+    runtime = replace(launch.profile.runtime, launcher=launcher, capabilities=COCO.capabilities | {Capability.STEER})
+    launch = replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, runtime=runtime)))
+    prompt = SystemPrompt("COCO INSTRUCTIONS").write_file(tmp_path)
+    session_dir = tmp_path / "session" if session else None
+    command = COCO.steer_command("coco", cwd=tmp_path, prompt_file=prompt, launch=launch, session_dir=session_dir)
+    home = Path(command[1].removeprefix("TRAE_HOME="))
+    program = ["coco"] if launcher is Launcher.NATIVE else ["coco", "code", "-t", "trae-cli", "--skip-check", "--"]
+    assert command == ["env", f"TRAE_HOME={home}", *program, "app-server"]
+    if session:
+        assert home == session_dir
+    assert "COCO INSTRUCTIONS" in (home / "AGENTS.md").read_text()
+    assert tomllib.loads((home / "traecli.toml").read_text())["cli_auth_credentials_store"] == "file"
+    assert (home / "cli" / "auth.json").is_symlink()
+    assert room_push(launch) is RoomPush.STEER
 
 
 def test_only_launch_checks_the_selected_executable_catalog_without_case_sensitivity(tmp_path, monkeypatch):
@@ -243,13 +297,11 @@ def test_unavailable_model_catalog_does_not_block_pairing(monkeypatch):
     COCO.check_pairing(_launch(model="GPT-9").profile.provider, "GPT-9")
 
 
-@pytest.mark.parametrize("method", ["consult_command", "steer_command"])
-def test_unsupported_session_operations_refuse_before_creating_a_home(tmp_path, method):
+def test_consults_refuse_before_creating_a_home(tmp_path):
     kwargs = {"cwd": tmp_path, "prompt_file": tmp_path / "unused", "launch": _launch()}
-    if method == "consult_command":
-        kwargs.update(session_id="session", session_dir=None, fork_dir=tmp_path / "fork")
+    kwargs.update(session_id="session", session_dir=None, fork_dir=tmp_path / "fork")
     with pytest.raises(RuntimeUnsupported):
-        getattr(COCO, method)("coco", **kwargs)
+        COCO.consult_command("coco", **kwargs)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["bin"]
 
 

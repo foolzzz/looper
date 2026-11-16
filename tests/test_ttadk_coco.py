@@ -16,7 +16,7 @@ from looper.agents import agent_settings, profile_registry as registry
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.llmrec import control
 from looper.agents.profile_registry import Endpoint, ModelSpec, ProviderSpec, ResolvedAgentProfile, ResolvedModel, RuntimeSpec
-from looper.agents.runtimes import ApiProtocol, AuthKind, Launcher, VendorType, adapter, coco_login, ttadk
+from looper.agents.runtimes import ApiProtocol, AuthKind, Capability, Launcher, VendorType, adapter, coco_login, ttadk
 from looper.agents.system_prompt import SystemPrompt
 from looper.agents.tiers import worker
 from test_agent_planner_worker import _step_envelope, _worker_row
@@ -54,6 +54,12 @@ from pathlib import Path
 args = sys.argv[1:]
 with open({str(calls)!r}, 'a') as log: log.write(json.dumps([Path(sys.argv[0]).name, *args]) + '\\n')
 if args == ['--version']: print('traecli 0.214.1')
+elif args[:3] == ['app-server', 'generate-json-schema', '--out']:
+    assert not any(Path(os.environ['TRAE_HOME']).iterdir())
+    out = Path(args[3])
+    out.mkdir(parents=True)
+    (out / 'ClientRequest.json').write_text(json.dumps({{'oneOf': [
+        {{'properties': {{'method': {{'enum': ['turn/steer']}}}}}}]}}))
 elif args == ['login', 'status']: print('Logged in')
 elif args == ['models', '--json']: print('[{{"name":"GPT-5.5","config_name":"gpt-5.5"}}]')
 else:
@@ -115,7 +121,7 @@ def test_coco_wrapper_probe_uses_configured_native_command(stand_ins, command):
         (operator / ".ttadk").mkdir()
         (operator / ".ttadk" / "setting.json").write_text(json.dumps({"ai_tool_commands": {"trae-cli": command}}))
     found = COCO.probe_for(executable, Launcher.TTADK)
-    assert found.capabilities == COCO.capabilities
+    assert found.capabilities == COCO.capabilities | ({Capability.STEER} if command != "missing-coco" else set())
     if command == "missing-coco":
         assert found.version == "ttadk 1.0.37 / unknown" and "not found" in found.error
     else:
@@ -128,6 +134,7 @@ def test_coco_wrapper_probe_uses_configured_native_command(stand_ins, command):
     assert invocations[0] == ["ttadk", "--version"]
     if command != "missing-coco":
         assert invocations[1] == ["custom-coco" if command == "custom-coco" else "traex", "--version"]
+        assert invocations[2][:4] == [invocations[1][0], "app-server", "generate-json-schema", "--out"]
 
 
 def test_coco_wrapper_preflight_uses_ttadk_then_native_login_and_model(stand_ins):
