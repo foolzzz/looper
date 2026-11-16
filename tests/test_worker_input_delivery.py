@@ -37,13 +37,14 @@ class Channel:
         self.release = asyncio.Event()
         self.settled = asyncio.Event()
         self.sent: list[str] = []
+        self.uuids: list[str | None] = []
         self.written: list[str] = []
         self.error: Exception | None = None
 
     async def wait_input_ready(self) -> None:
         pass
 
-    async def send(self, text: str) -> DeliveryResult:
+    async def send(self, text: str, *, uuid: str | None = None) -> DeliveryResult:
         self.started.set()
         try:
             async with delivery_attempt(self.send_timeout) as attempt:
@@ -51,6 +52,7 @@ class Channel:
                     raise self.error
                 attempt.writing = True
                 self.written.append(text)
+                self.uuids.append(uuid)
                 await self.release.wait()
                 self.sent.append(text)
             return attempt.result
@@ -60,6 +62,9 @@ class Channel:
 
 @pytest.fixture(autouse=True)
 def budgets(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Exercise the real bus routing, but keep journal fsync/executor latency out
+    # of these scaled channel deadlines. Durability is covered by test_agent_bus.
+    monkeypatch.setattr(MessageBus, "_journal_io", AsyncMock())
     monkeypatch.setattr(worker_module, "WORKER_INPUT_DELIVERY_TIMEOUT", 0.03)
     monkeypatch.setattr(planner_module, "WORKER_INPUT_TIMEOUT", 0.5)
 
@@ -130,11 +135,11 @@ def test_starting_worker_acceptance_after_four_seconds_is_acknowledged_once(
     async def run() -> None:
         async with delivery(tmp_path) as (_, planner, plan, step, channel, ready, acks):
             channel.send_timeout = 4 / 5
+            await planner._save(plan, step)
             loop = asyncio.get_running_loop()
             opening = loop.call_later(0.05, ready.set)
             accepting = loop.call_later(0.83, channel.release.set)
             try:
-                await planner._save(plan, step)
                 await correct(planner, plan, step, caller)
                 assert [ack.payload for ack in acks] == [{"delivered": True}]
                 assert len(channel.written) == 1 and channel.sent == channel.written
@@ -213,6 +218,7 @@ def test_ready_before_deadline_delivers_exactly_once(tmp_path: Path, agent_db: A
             await request
             assert [ack.payload for ack in acks] == [{"delivered": True}]
             assert len(channel.sent) == 1 and channel.sent[0].endswith("use blue")
+            assert channel.uuids == [acks[0].reply_to]
             assert step.missed_messages == []
 
     asyncio.run(asyncio.wait_for(run(), 2))
@@ -276,7 +282,7 @@ def test_cancellation_leaves_no_late_send(tmp_path: Path, blocked_at: str) -> No
 
 
 _STARTING_RUNTIME = r'''
-import json, sys, time
+import json, sys
 
 print('STARTED', flush=True)
 
@@ -296,14 +302,14 @@ for line in sys.stdin:
             {'turn': {'id': 'turn'}} if command == 'turn/start' else {})
         if command == 'turn/steer':
             accepted.append(request['params']['input'][0]['text'])
-            time.sleep(ACK_DELAY)
+            emit({'test_steer_ack': True})
         emit({'id': request['id'], 'result': result})
     else:
         data = {'sessionId': 'session'} if command == 'get_state' else (
             {'disposition': 'started'} if command == 'prompt' else {'disposition': 'queued'})
         if command == 'steer':
             accepted.append(request['message'])
-            time.sleep(ACK_DELAY)
+            emit({'test_steer_ack': True})
         emit({'type': 'response', 'id': request['id'], 'command': command, 'success': True, 'data': data})
 
 report = json.dumps({'status': 'completed', 'summary': json.dumps(accepted), 'changed_files': {}})
@@ -323,16 +329,15 @@ else:
 def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
     tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, runtime: str, caller: str, startup: str,
 ) -> None:
-    # Handshake + acceptance must outlast a send timeout, while each phase has
-    # enough scheduling headroom for a shared CI runner.
+    # Advance the loop clock at protocol boundaries, so handshake + acceptance
+    # outlast a send timeout without racing the shared runner's scheduling.
     monkeypatch.setattr(worker_module, "WORKER_INPUT_DELIVERY_TIMEOUT", 3.0)
     monkeypatch.setattr(planner_module, "WORKER_INPUT_TIMEOUT", 3.5)
     monkeypatch.setattr(codex_steer, "_REQUEST_TIMEOUT_SEC", 2.0)
     monkeypatch.setattr(omp_steer, "_STEER_TIMEOUT_SEC", 2.0)
     monkeypatch.setattr(pi_steer, "_STEER_TIMEOUT_SEC", 2.0)
     log = tmp_path / "requests.jsonl"
-    executable = fake_claude(tmp_path / "runtime", f"RUNTIME = {runtime!r}\nLOG = {str(log)!r}\n"
-                            f"ACK_DELAY = {2.2 if startup == 'late_ack' else 1.7 if startup == 'within_budget' else 0}\n" + _STARTING_RUNTIME)
+    executable = fake_claude(tmp_path / "runtime", f"RUNTIME = {runtime!r}\nLOG = {str(log)!r}\n" + _STARTING_RUNTIME)
     runtime_adapter = adapter(runtime)
     profile = resolved_profile("profile", "test", RuntimeSpec("runtime", runtime, runtime, executable,
         frozenset(runtime_adapter.capabilities | {Capability.STEER})),
@@ -341,6 +346,23 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
     monkeypatch.setattr(worker_module, "load_agent_settings", AsyncMock(return_value=AgentSettings(profile=profile)))
 
     async def run() -> None:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        runtime_module = {"codex": codex_steer, "omp": omp_steer, "pi": pi_steer}[runtime]
+        iter_lines = runtime_module.iter_lines
+
+        async def timed_lines(stream: asyncio.StreamReader):
+            nonlocal now
+            async for line in iter_lines(stream):
+                if json.loads(line) == {"test_steer_ack": True}:
+                    now += 2.2 if startup == "late_ack" else 1.7 if startup == "within_budget" else 0
+                    # Let due timeout callbacks settle before exposing the ACK.
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                else:
+                    yield line
+
+        monkeypatch.setattr(runtime_module, "iter_lines", timed_lines)
         async with delivery(tmp_path) as (pool, planner, plan, step, _, _, acks):
             # Dispatch a real process. Hold its stdout reader after start() has returned,
             # leaving the runtime's real handshake incomplete when the correction arrives.
@@ -352,6 +374,16 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
             def channel_factory(*args: Any, **kwargs: Any) -> Any:
                 channel = factory(*args, **kwargs)
                 events = channel.events
+                wait_input_ready = channel.wait_input_ready
+
+                async def timed_readiness():
+                    nonlocal now
+                    if not handshake.is_set():
+                        now += 3.1 if startup == "past_deadline" else (
+                            0.4 if startup in ("within_budget", "late_ack") else 1.3)
+                        if startup != "past_deadline":
+                            handshake.set()
+                    await wait_input_ready()
 
                 async def delayed_events():
                     assert await args[0].stdout.readline() == b"STARTED\n"
@@ -361,6 +393,7 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
                         yield event
 
                 channel.events = delayed_events
+                channel.wait_input_ready = timed_readiness
                 return channel
 
             monkeypatch.setattr(runtime_adapter, "run_channel", channel_factory)
@@ -372,19 +405,11 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
                 payload={"task_id": "s1", "instruction": "write it", "context": {"work_dir": str(tmp_path)}},
             ))
             await asyncio.wait_for(reading.wait(), 3)
-            opening = None
-            send_input = pool.send_input
-
-            async def deliver_input(worker_id: str, text: str) -> DeliveryResult:
-                nonlocal opening
-                if startup != "past_deadline":
-                    opening = asyncio.get_running_loop().call_later(
-                        0.4 if startup in ("within_budget", "late_ack") else 1.3, handshake.set)
-                return await send_input(worker_id, text)
-
-            monkeypatch.setattr(pool, "send_input", deliver_input)
+            now = loop.time()
             try:
-                await correct(planner, plan, step, caller)
+                with monkeypatch.context() as clock:
+                    clock.setattr(loop, "time", lambda: now)
+                    await correct(planner, plan, step, caller)
                 delivered = None if startup == "late_ack" else startup == "within_budget"
                 assert [ack.payload for ack in acks] == [{"delivered": delivered}]
                 assert step.missed_messages == (["use blue"] if delivered is False else [])
@@ -411,15 +436,15 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
                 await process.wait()
                 assert not planner._bus._reply_futures
             finally:
-                if opening is not None:
-                    opening.cancel()
+                handshake.set()
 
     asyncio.run(asyncio.wait_for(run(), 8))
 
 
 @pytest.mark.parametrize("caller", ["chat", "supervise"])
+@pytest.mark.parametrize("blocked_at", ["send", "journal"])
 def test_missing_bus_ack_is_unknown_and_late_acceptance_is_not_replayed(
-    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, caller: str,
+    tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, caller: str, blocked_at: str,
 ) -> None:
     monkeypatch.setattr(worker_module, "WORKER_INPUT_DELIVERY_TIMEOUT", .2)
     monkeypatch.setattr(planner_module, "WORKER_INPUT_TIMEOUT", .01)
@@ -428,12 +453,25 @@ def test_missing_bus_ack_is_unknown_and_late_acceptance_is_not_replayed(
         async with delivery(tmp_path) as (pool, planner, plan, step, channel, ready, acks):
             channel.send_timeout = .1
             ready.set()
+            journaling, release_journal = asyncio.Event(), asyncio.Event()
+            if blocked_at == "journal":
+                channel.release.set()
+
+                async def journal_io(operation: Any, *args: Any) -> None:
+                    if args and args[0].message_type == MessageType.WORKER_INPUT_RESULT:
+                        journaling.set()
+                        await release_journal.wait()
+
+                monkeypatch.setattr(planner._bus, "_journal_io", journal_io)
             await planner._save(plan, step)
             answer = await correct(planner, plan, step, caller)
             assert not acks and step.missed_messages == []
+            if blocked_at == "journal":
+                assert journaling.is_set() and channel.sent == channel.written
             if caller == "chat":
                 assert "未确认" in answer and "Passing it on" not in answer
             channel.release.set()
+            release_journal.set()
             await channel.settled.wait()
             # Channel settlement precedes the durable bus acknowledgement.
             await asyncio.gather(*pool._input_deliveries)

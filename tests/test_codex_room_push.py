@@ -31,7 +31,8 @@ def _launch(steer: bool, runtime_type: str = "codex") -> Launch:
 @pytest.mark.parametrize(("runtime", "steer", "expected"), [
     ("codex", True, "steer"), ("codex", False, "none"), ("coco", True, "steer"),
     ("coco", False, "none"), ("claude-code", False, "user_turn"),
-    *((name, True, "none") for name in ("cursor-agent", "grok", "omp", "pi", "dsh")),
+    ("grok", True, "steer"), ("grok", False, "none"),
+    *((name, True, "none") for name in ("cursor-agent", "omp", "pi", "dsh")),
     pytest.param(PiRunnerRuntime(None, pi=None), False, "runner", id="pi-runner"),
     pytest.param(DshRunnerRuntime(None, dsh=None), False, "runner", id="dsh-runner"),
     pytest.param(SimpleNamespace(room_push=RoomPush.RUNNER, hosts_runs=False), True, "none", id="unhosted-runner"),

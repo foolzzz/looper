@@ -480,6 +480,7 @@ class _Reminders:
     next_delivery: Callable[[int], Awaitable[RoomDelivery | None]] | None = None
     confirm: Callable[[int], Awaitable[None]] | None = None
     receipt: RoomPush = RoomPush.USER_TURN
+    receipt_fallback: bool = True
     steered: dict[int, _SteeredDelivery] = field(default_factory=dict)
     receipts_closed: bool = False
     through: int = 0
@@ -512,10 +513,11 @@ class ProcessRun:
     """One runtime process, with its channel and process-tree cleanup owned together."""
 
     def __init__(self, runtime: RuntimeAdapter, command: list[str], *, launch: Launch,
-                 cwd: str | Path, session_dir: Path | None, label: str, prompt_file: Path | None = None) -> None:
+                 cwd: str | Path, session_dir: Path | None, label: str, prompt_file: Path | None = None,
+                 max_turns: int = 0) -> None:
         self._runtime, self._command, self._launch = runtime, command, launch
         self._cwd, self._session_dir, self._label = cwd, session_dir, label
-        self._prompt_file = prompt_file
+        self._prompt_file, self._max_turns = prompt_file, max_turns
         self.process: asyncio.subprocess.Process | None = None
         self._channel: RunChannel | None = None
         self._ended = False
@@ -542,7 +544,8 @@ class ProcessRun:
             raise RunStartError(str(exc)) from exc
         try:
             self._channel = self._runtime.run_channel(self.process, launch=self._launch, cwd=self._cwd,
-                                                       session_dir=self._session_dir, prompt_file=self._prompt_file)
+                                                       session_dir=self._session_dir, prompt_file=self._prompt_file,
+                                                       max_turns=self._max_turns)
         except BaseException:
             await self.end()
             raise
@@ -563,7 +566,8 @@ class ProcessRun:
         return await stderr_tail(self.process.stderr, STDERR_DRAIN_SEC)
 
     def dropped_input(self) -> list[str]:
-        return []
+        dropped = getattr(self._channel, "dropped_input", None)
+        return dropped() if dropped is not None else []
 
 
 @dataclass
@@ -1515,7 +1519,8 @@ class WorkerPool:
         assert self._bus is not None
         result = DeliveryResult.UNKNOWN
         try:
-            result = await self.send_input(envelope.target.agent_id, str(envelope.payload.get("text", "")))
+            result = await self.send_input(envelope.target.agent_id, str(envelope.payload.get("text", "")),
+                                           uuid=envelope.message_id)
         finally:
             await self._bus.publish(MessageEnvelope.create(
                 source=envelope.target,
@@ -1530,7 +1535,7 @@ class WorkerPool:
         """True while the worker's Claude run still reads user turns."""
         return worker_id in self._inputs
 
-    async def send_input(self, worker_id: str, text: str) -> DeliveryResult:
+    async def send_input(self, worker_id: str, text: str, *, uuid: str | None = None) -> DeliveryResult:
         """Reserve the channel's full acceptance timeout before writing a user turn.
 
         Readiness includes the runtime handshake and is bounded by the pool's deadline. Once sending starts,
@@ -1551,7 +1556,7 @@ class WorkerPool:
             if deadline - loop.time() < channel.send_timeout:
                 logger.warning("worker %s has insufficient time to accept input before acknowledgement", worker_id)
                 return DeliveryResult.REJECTED
-            result = await channel.send(text)
+            result = await channel.send(text, **({"uuid": uuid} if uuid is not None else {}))
         except TimeoutError:
             logger.warning("worker %s input delivery timed out before acknowledgement", worker_id)
             return DeliveryResult.REJECTED
@@ -1567,14 +1572,15 @@ class WorkerPool:
         return {wp.worker_id: (wp.status, wp.since) for wp in self._active.values()
                 if wp.parent_task_id == task_id and wp.status in ("pending", "running")}
 
-    def _room_reminders(self, task_id: str, seat: Seat, *, receipt: RoomPush = RoomPush.USER_TURN) -> _Reminders:
+    def _room_reminders(self, task_id: str, seat: Seat, *, receipt: RoomPush = RoomPush.USER_TURN,
+                        receipt_fallback: bool = True) -> _Reminders:
         if self.room_ops is None:
-            return _Reminders(receipt=receipt)
+            return _Reminders(receipt=receipt, receipt_fallback=receipt_fallback)
         room = self.room_ops.room
         # Messages can predate the run, so the first tool call or wait must check without a new post.
         return _Reminders(pending=True, next_delivery=lambda after: room.delivery(task_id, seat, after=after),
                           confirm=lambda through: room.confirm(task_id, seat.key, through),
-                          receipt=receipt)
+                          receipt=receipt, receipt_fallback=receipt_fallback)
 
     def room_in_flight(self, worker_id: str) -> int:
         state = self._reminders.get(worker_id)
@@ -1616,7 +1622,7 @@ class WorkerPool:
             await self._confirm_delivery(worker_id, state, through)
 
     def _room_item_fallback(self, worker_id: str, state: _Reminders, entry: _SteeredDelivery) -> None:
-        if entry.observed:
+        if entry.observed or not state.receipt_fallback:
             return
 
         async def fallback() -> None:
@@ -2248,7 +2254,7 @@ class WorkerPool:
                         wp.handle = handle  # register before activity and record writes can lose the lock
                 else:
                     handle = ProcessRun(runtime, command, launch=launch, cwd=work_dir, session_dir=session_dir,
-                                        prompt_file=prompt_file,
+                                        prompt_file=prompt_file, max_turns=max_turns,
                                         label=f"worker {worker_id}")
         except (RuntimeUnsupported, OSError) as exc:
             problem = f"Cannot prepare {runtime.label}: {exc}"
@@ -2660,7 +2666,12 @@ class WorkerPool:
                     if reminders.receipt is not RoomPush.RUNNER and event.get("isReplay") is True \
                             and event.get("uuid") in reminders.uuids:
                         if (through := uuid_through(event.get("uuid"))) is not None:
-                            await self._confirm_delivery(worker_id, reminders, through)
+                            if reminders.receipt is RoomPush.STEER:
+                                if (entry := reminders.steered.get(through)) is not None:
+                                    entry.observed = True
+                                await self._confirm_room_prefix(worker_id, reminders)
+                            else:
+                                await self._confirm_delivery(worker_id, reminders, through)
                     content = (event.get("message") or {}).get("content")
                     done = sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_result") \
                         if isinstance(content, list) else 0
@@ -2796,7 +2807,8 @@ class WorkerPool:
                         ready.set()
                     if seat is not None and (push := room_push(launch)) is not RoomPush.NONE:
                         self._reminders.setdefault(worker_id, self._room_reminders(
-                            parent_task_id, seat, receipt=push))
+                            parent_task_id, seat, receipt=push,
+                            receipt_fallback=runtime.room_receipt_fallback))
                 except (BrokenPipeError, ConnectionResetError):
                     # The process exited before reading; its output decides the outcome.
                     logger.warning("worker %s: Claude closed stdin before the prompt was sent", worker_id)
@@ -2848,7 +2860,7 @@ class WorkerPool:
                 retry_command = command + (runtime.resume_args(resume_session_id) if resume_session_id else [])
                 handle = ProcessRun(runtime, retry_command, launch=launch, cwd=work_dir,
                                     session_dir=handle._session_dir, prompt_file=handle._prompt_file,
-                                    label=f"worker {worker_id}")
+                                    max_turns=handle._max_turns, label=f"worker {worker_id}")
                 waited, ended, input_ended = False, False, False
                 await handle.launch()
                 channel = handle.channel
