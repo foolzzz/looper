@@ -243,6 +243,11 @@ for line in sys.stdin:
             pool._drop_reminders(worker_id)
 
     asyncio.run(asyncio.wait_for(run(), 15))
+    recorded = agent_db.start_record.await_args.kwargs["metadata"]
+    assert recorded["profile"]["runtime"]["type"] == "coco"
+    events = [event for call in agent_db.append_events.await_args_list for _, event in call.args[1]]
+    init = next(event for event in events if event.get("subtype") == "init")
+    assert init["runtime"] == "coco" and init["session_id"] == "coco-thread"
     assert room.first_turn.await_args.kwargs["mode"] is RoomInput.PUSHED
     seat = "reviewer@calc-module" if review else "worker@calc-module"
     room.confirm.assert_awaited_once_with("task-1", seat, 42)

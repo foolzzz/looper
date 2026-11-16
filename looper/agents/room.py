@@ -133,6 +133,7 @@ class FallbackReason(str, Enum):
     LIMIT = "limit"  # the task had its room_consults_per_task
     MANY_SEATS = "many_seats"  # a role with several seats that ran: which one to ask is the asker's to say
     BUDGET = "budget"  # its cost reached room_consult_budget_usd or could not be checked
+    BUDGET_UNAVAILABLE = "budget_unavailable"  # no full model price to enforce the consult's spend cap
     TIMEOUT = "timeout"  # the consult ran over room_consult_timeout_seconds
     STOPPED = "stopped"  # its run was stopped
     ROOM_OFF = "room_off"  # its task's agent room was turned off before it ended
@@ -781,7 +782,7 @@ class RoomService:
             await db_room.add(task_id, sender_seat=LOOPER, sender_kind=MemberKind.LOOPER.value,
                               kind=MessageKind.NOTICE.value, via="looper", reason=Reason.CONSULT_FALLBACK.value,
                               body=f"{target} cannot take your question {message['id']} now ({reason.value}): the "
-                                   "Planner has it and will answer in the room.",
+                                   f"Planner has it and will answer in the room. Reason: {_line(why, 600)}.",
                               audience=[asker], reply_to=message["id"], pool=pool)
 
     async def finish_consult(self, task_id: str, consult_id: int, seat: str, *, state: str, expect: Sequence[str],
