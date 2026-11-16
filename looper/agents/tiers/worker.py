@@ -366,6 +366,7 @@ def judge_result(
     is_verify: bool,
     started_at: datetime | None = None,
     runtime_label: str = "Claude Code",
+    runtime_type: str | None = None,
     failure_detail: str | None = None,
     severity: bool = False,
 ) -> dict[str, Any]:
@@ -384,7 +385,8 @@ def judge_result(
                       f"{runtime_label} ended without a result event")
     if result_event.get("is_error") or result_event.get("subtype") != "success":
         subtype = result_event.get("subtype") or "error"
-        return failed(budget_error(result_event) or (f"{runtime_label} run did not succeed: {failure_detail}"[:500]
+        subject = "turn" if runtime_type == "claude-code" else "run"
+        return failed(budget_error(result_event) or (f"{runtime_label} {subject} did not succeed: {failure_detail}"[:500]
                       if failure_detail else f"{runtime_label} run did not succeed ({subtype})"))
     text = str(result_event.get("result") or "")
     diagnostics = _ReportDiagnostics()
@@ -2980,7 +2982,8 @@ class WorkerPool:
             )
 
         outcome = await asyncio.to_thread(judge_result, result_event, work_dir=Path(work_dir), is_verify=is_verify,
-                                          started_at=started_at, runtime_label=runtime.label, failure_detail=detail,
+                                          started_at=started_at, runtime_label=runtime.label, runtime_type=runtime.type,
+                                          failure_detail=detail,
                                           severity=ctx.severity)
         if not is_verify:
             outcome.update(head=await asyncio.to_thread(_git_head, work_dir), runtime_id=launch.profile.runtime.id)
