@@ -282,7 +282,7 @@ def test_cancellation_leaves_no_late_send(tmp_path: Path, blocked_at: str) -> No
 
 
 _STARTING_RUNTIME = r'''
-import json, sys, time
+import json, sys
 
 print('STARTED', flush=True)
 
@@ -302,14 +302,14 @@ for line in sys.stdin:
             {'turn': {'id': 'turn'}} if command == 'turn/start' else {})
         if command == 'turn/steer':
             accepted.append(request['params']['input'][0]['text'])
-            time.sleep(ACK_DELAY)
+            emit({'test_steer_ack': True})
         emit({'id': request['id'], 'result': result})
     else:
         data = {'sessionId': 'session'} if command == 'get_state' else (
             {'disposition': 'started'} if command == 'prompt' else {'disposition': 'queued'})
         if command == 'steer':
             accepted.append(request['message'])
-            time.sleep(ACK_DELAY)
+            emit({'test_steer_ack': True})
         emit({'type': 'response', 'id': request['id'], 'command': command, 'success': True, 'data': data})
 
 report = json.dumps({'status': 'completed', 'summary': json.dumps(accepted), 'changed_files': {}})
@@ -329,16 +329,15 @@ else:
 def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
     tmp_path: Path, agent_db: Any, monkeypatch: pytest.MonkeyPatch, runtime: str, caller: str, startup: str,
 ) -> None:
-    # Handshake + acceptance must outlast a send timeout, while each phase has
-    # enough scheduling headroom for a shared CI runner.
+    # Advance the loop clock at protocol boundaries, so handshake + acceptance
+    # outlast a send timeout without racing the shared runner's scheduling.
     monkeypatch.setattr(worker_module, "WORKER_INPUT_DELIVERY_TIMEOUT", 3.0)
     monkeypatch.setattr(planner_module, "WORKER_INPUT_TIMEOUT", 3.5)
     monkeypatch.setattr(codex_steer, "_REQUEST_TIMEOUT_SEC", 2.0)
     monkeypatch.setattr(omp_steer, "_STEER_TIMEOUT_SEC", 2.0)
     monkeypatch.setattr(pi_steer, "_STEER_TIMEOUT_SEC", 2.0)
     log = tmp_path / "requests.jsonl"
-    executable = fake_claude(tmp_path / "runtime", f"RUNTIME = {runtime!r}\nLOG = {str(log)!r}\n"
-                            f"ACK_DELAY = {2.2 if startup == 'late_ack' else 1.7 if startup == 'within_budget' else 0}\n" + _STARTING_RUNTIME)
+    executable = fake_claude(tmp_path / "runtime", f"RUNTIME = {runtime!r}\nLOG = {str(log)!r}\n" + _STARTING_RUNTIME)
     runtime_adapter = adapter(runtime)
     profile = resolved_profile("profile", "test", RuntimeSpec("runtime", runtime, runtime, executable,
         frozenset(runtime_adapter.capabilities | {Capability.STEER})),
@@ -347,6 +346,23 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
     monkeypatch.setattr(worker_module, "load_agent_settings", AsyncMock(return_value=AgentSettings(profile=profile)))
 
     async def run() -> None:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        runtime_module = {"codex": codex_steer, "omp": omp_steer, "pi": pi_steer}[runtime]
+        iter_lines = runtime_module.iter_lines
+
+        async def timed_lines(stream: asyncio.StreamReader):
+            nonlocal now
+            async for line in iter_lines(stream):
+                if json.loads(line) == {"test_steer_ack": True}:
+                    now += 2.2 if startup == "late_ack" else 1.7 if startup == "within_budget" else 0
+                    # Let due timeout callbacks settle before exposing the ACK.
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                else:
+                    yield line
+
+        monkeypatch.setattr(runtime_module, "iter_lines", timed_lines)
         async with delivery(tmp_path) as (pool, planner, plan, step, _, _, acks):
             # Dispatch a real process. Hold its stdout reader after start() has returned,
             # leaving the runtime's real handshake incomplete when the correction arrives.
@@ -358,6 +374,16 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
             def channel_factory(*args: Any, **kwargs: Any) -> Any:
                 channel = factory(*args, **kwargs)
                 events = channel.events
+                wait_input_ready = channel.wait_input_ready
+
+                async def timed_readiness():
+                    nonlocal now
+                    if not handshake.is_set():
+                        now += 3.1 if startup == "past_deadline" else (
+                            0.4 if startup in ("within_budget", "late_ack") else 1.3)
+                        if startup != "past_deadline":
+                            handshake.set()
+                    await wait_input_ready()
 
                 async def delayed_events():
                     assert await args[0].stdout.readline() == b"STARTED\n"
@@ -367,6 +393,7 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
                         yield event
 
                 channel.events = delayed_events
+                channel.wait_input_ready = timed_readiness
                 return channel
 
             monkeypatch.setattr(runtime_adapter, "run_channel", channel_factory)
@@ -378,19 +405,11 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
                 payload={"task_id": "s1", "instruction": "write it", "context": {"work_dir": str(tmp_path)}},
             ))
             await asyncio.wait_for(reading.wait(), 3)
-            opening = None
-            send_input = pool.send_input
-
-            async def deliver_input(worker_id: str, text: str, **kwargs: Any) -> DeliveryResult:
-                nonlocal opening
-                if startup != "past_deadline":
-                    opening = asyncio.get_running_loop().call_later(
-                        0.4 if startup in ("within_budget", "late_ack") else 1.3, handshake.set)
-                return await send_input(worker_id, text, **kwargs)
-
-            monkeypatch.setattr(pool, "send_input", deliver_input)
+            now = loop.time()
             try:
-                await correct(planner, plan, step, caller)
+                with monkeypatch.context() as clock:
+                    clock.setattr(loop, "time", lambda: now)
+                    await correct(planner, plan, step, caller)
                 delivered = None if startup == "late_ack" else startup == "within_budget"
                 assert [ack.payload for ack in acks] == [{"delivered": delivered}]
                 assert step.missed_messages == (["use blue"] if delivered is False else [])
@@ -417,8 +436,7 @@ def test_runtime_handshake_preserves_the_post_write_acceptance_budget(
                 await process.wait()
                 assert not planner._bus._reply_futures
             finally:
-                if opening is not None:
-                    opening.cancel()
+                handshake.set()
 
     asyncio.run(asyncio.wait_for(run(), 8))
 
