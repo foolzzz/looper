@@ -4786,10 +4786,7 @@ before.
   run, falling back to the result's own `total_cost_usd` when it is unknown;
   over-cap or still-unknown costs drop the answers and send the questions to
   the Planner as `budget`. A provider-priced model without a full price
-  cannot start a consult (`budget_unavailable`), including unpriced Coco runs.
-  Time and turn limits do not establish a spend cap, so the question goes to
-  the Planner with the missing-price reason; the asker also receives that
-  reason. The source run's report and session remain intact. One deadline covers writing stdin,
+  cannot start a consult (`runtime_cannot`). One deadline covers writing stdin,
   reading stdout and waiting for exit. Stderr is drained, with its last 2,000
   characters kept for errors, and
   the process tree is ended on success too. A
@@ -4804,7 +4801,7 @@ before.
   oldest consult of each seat, and runs the others in order when it ends.
 - **Escalations** (`reason`): a question no seat can take (`consult_fallback`,
   with the typed reason: `not_started`, `no_session`, `session_gone`,
-  `runtime_cannot`, `no_snapshot`, `limit`, `many_seats`, `budget`, `budget_unavailable`, `timeout`,
+  `runtime_cannot`, `no_snapshot`, `limit`, `many_seats`, `budget`, `timeout`,
   `contract`, `wrote_files`, `stopped` or `unsure`), with a notice to the asker; two seats trading
   `room_ping_pong_rounds` messages to each other only, with no answer between
   (`ping_pong`, once at that count); an interface post that replies to an

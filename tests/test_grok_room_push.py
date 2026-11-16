@@ -203,3 +203,130 @@ def test_grok_room_push_can_accept_while_worker_consumes_a_tool_event(tmp_path, 
             await process.wait()
 
     asyncio.run(asyncio.wait_for(run(), 8))
+
+
+@pytest.mark.parametrize("final_started", [False, True])
+def test_grok_room_delivery_after_last_tool_keeps_report_and_unread_cursor(
+    tmp_path, agent_db, monkeypatch, final_started,
+):
+    from looper.agents import room as room_module
+    from looper.agents.runtimes.grok_acp import PROTOCOL_VERSION
+    from looper.agents.runtimes.grok_steer import GrokChannel
+
+    async def run():
+        stdout = asyncio.StreamReader()
+        requests = []
+        prompt_sent, delivery_requested, delivery_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        result_recorded, record_release, send_attempted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        def emit(message):
+            stdout.feed_data((json.dumps({"jsonrpc": "2.0", **message}) + "\n").encode())
+
+        def update(kind, **fields):
+            emit({"method": "session/update", "params": {"sessionId": "session", "update": {
+                "sessionUpdate": kind, **fields}}})
+
+        class Writer:
+            closed = False
+
+            def write(self, data):
+                request = json.loads(data)
+                requests.append(request)
+                if request["method"] == "initialize":
+                    emit({"id": request["id"], "result": {"protocolVersion": PROTOCOL_VERSION}})
+                elif request["method"] == "session/new":
+                    emit({"id": request["id"], "result": {"sessionId": "session"}})
+                elif request["method"] == "session/prompt":
+                    prompt_sent.set()
+
+            async def drain(self):
+                pass
+
+            def is_closing(self):
+                return self.closed
+
+            def close(self):
+                self.closed = True
+                stdout.feed_eof()
+
+        channel = GrokChannel(SimpleNamespace(stdin=Writer(), stdout=stdout), model="grok", cwd=str(tmp_path))
+        launch = Launch()
+        runtime = replace(launch.profile.runtime, type="grok", capabilities=ADAPTERS["grok"].capabilities | {Capability.STEER})
+        launch = replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, runtime=runtime)))
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        seat = Seat("worker@s1", "worker", MemberKind.WORK, run="w1")
+        room = RoomService(worker_pool=pool)
+        monkeypatch.setattr(room, "enabled", AsyncMock(return_value=True))
+        mark = AsyncMock()
+        monkeypatch.setattr(room_module.db_room, "mark_read", mark)
+        monkeypatch.setattr(room_module.db_room, "last_read", AsyncMock(return_value=0))
+        row = {"id": 42, "sender_seat": "worker@s2", "kind": "question", "body": "new instructions",
+               "audience": [seat.key], "audience_all": False}
+        monkeypatch.setattr(room_module.db_room, "messages", AsyncMock(return_value=[row]))
+
+        async def delivery(after):
+            delivery_requested.set()
+            await delivery_release.wait()
+            return await room.delivery("task", seat, after=after)
+
+        pool.room_ops = SimpleNamespace(room=SimpleNamespace(delivery=lambda *_, after: delivery(after),
+                                                           confirm=room.confirm))
+        original_send = channel.send
+
+        async def send(*args, **kwargs):
+            try:
+                return await original_send(*args, **kwargs)
+            finally:
+                send_attempted.set()
+
+        monkeypatch.setattr(channel, "send", send)
+
+        class Run(ScriptedRun):
+            @property
+            def channel(self):
+                return channel
+
+        async def record(event):
+            content = (event.get("message") or {}).get("content")
+            if isinstance(content, list) and any(b.get("type") == "tool_result" for b in content):
+                result_recorded.set()
+                await record_release.wait()
+
+        recorder = Mock(cap_stop=None, record=AsyncMock(side_effect=record), finish=AsyncMock())
+        ctx = RunContext("w1", "task", "s1", str(tmp_path), "do the step", False, launch, launch.runtime,
+                         seat, 5, datetime.now(timezone.utc), False, [])
+        consuming = asyncio.create_task(pool._consume_once(ctx, Run([]), recorder, start=ConsumeStart.NEW))
+        report = json.dumps({"status": "completed", "summary": "done", "changed_files": {}})
+        try:
+            await prompt_sent.wait()
+            update("tool_call", toolCallId="last-tool", title="read_file", rawInput={})
+            await delivery_requested.wait()
+            update("tool_call_update", toolCallId="last-tool", status="completed", rawOutput={})
+            if final_started:
+                update("agent_message_chunk", content={"type": "text", "text": report})
+            await result_recorded.wait()
+            # The Worker is still recording the result, but the ACP reader already
+            # knows no tool remains. A delayed delivery must not write an interjection.
+            delivery_release.set()
+            await send_attempted.wait()
+            assert all(request["method"] != "_x.ai/interject" for request in requests)
+            mark.assert_not_awaited()
+            record_release.set()
+            if not final_started:
+                update("agent_message_chunk", content={"type": "text", "text": report})
+            emit({"id": next(r["id"] for r in requests if r["method"] == "session/prompt"),
+                  "result": {"stopReason": "end_turn"}})
+            result = await consuming
+            assert result["status"] == "completed" and result["summary"] == "done"
+            mark.assert_not_awaited()
+            unread = await room.delivery("task", seat)
+            assert unread is not None and unread.ids == (42,)
+        finally:
+            record_release.set()
+            delivery_release.set()
+            pool._drop_reminders("w1")
+            channel.end_input()
+            consuming.cancel()
+            await asyncio.gather(consuming, return_exceptions=True)
+
+    asyncio.run(asyncio.wait_for(run(), 5))

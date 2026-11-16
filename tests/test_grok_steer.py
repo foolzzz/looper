@@ -125,7 +125,8 @@ def _receipts(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 @pytest.mark.parametrize(("scenario", "delivery_id", "flat"), [
     *[(scenario, delivery_id, False)
       for scenario in ("STEER_TOOL", "STEER_FINAL", "STEER_LATE", "STEER_REFUSE", "STEER_EMPTY", "STEER_TOOL_ONLY")
-      for delivery_id in ("planner-input-1", "looper-reminder-0123456789ab-42")],
+      for delivery_id in ("planner-input-1", "looper-reminder-0123456789ab-42")
+      if delivery_id == "planner-input-1" or scenario not in ("STEER_FINAL", "STEER_LATE")],
     ("STEER_TOOL", "planner-input-1", True),
 ])
 def test_acceptance_is_not_read_until_model_output_after_a_later_tool_result(

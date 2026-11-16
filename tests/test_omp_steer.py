@@ -193,10 +193,17 @@ while True:
         emit({'type': 'agent_end', 'isTerminal': False})
         if scenario == 'crash':
             sys.exit(1)
+        if scenario.startswith('room_final_'):
+            if scenario.endswith('execution'):
+                emit({'type': 'tool_execution_end', 'toolCallId': 'tool-1', 'result': {'content': []}})
+            else:
+                emit({'type': 'message_end', 'message': {'role': 'toolResult', 'toolCallId': 'tool-1',
+                      'content': 'done'}})
+            emit({'type': 'notice', 'text': 'final response started'})
         if scenario in ('normal', 'noise'):
             deadline = time.monotonic() + 0.15
     elif command == 'steer':
-        finish('got: ' + request['message'])
+        finish('original report' if scenario.startswith('room_final_') else 'got: ' + request['message'])
 """
 
 
@@ -703,3 +710,41 @@ def test_the_prompt_waits_for_both_setup_acks_in_any_order() -> None:
         assert [r["type"] for r in stdin.sent] == ["set_interrupt_mode", "get_state", "prompt"]
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("boundary", ["result", "execution"])
+def test_room_steer_after_last_tool_keeps_report(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                boundary: str) -> None:
+    executable = _fake(tmp_path, monkeypatch, "room_final_" + boundary)
+
+    async def run() -> None:
+        process, channel = await _spawn(executable, tmp_path)
+        ready = asyncio.Event()
+        events = []
+
+        async def consume() -> None:
+            async for event in channel.events():
+                events.append(event)
+                if event.get("event", {}).get("text") == "final response started":
+                    ready.set()
+                if event["type"] == "result":
+                    channel.end_input()
+
+        await channel.start("produce report")
+        reading = asyncio.create_task(consume())
+        try:
+            await ready.wait()
+            with pytest.raises(RuntimeError):
+                await channel.send("late room delivery", uuid=worker.delivery_uuid(42))
+            assert await channel.send("Planner follow-up", uuid="planner-message") is DeliveryResult.ACCEPTED
+            await reading
+            await process.wait()
+            result, = [event for event in events if event["type"] == "result"]
+            assert json.loads(result["result"])["summary"] == "original report"
+            assert [r["message"] for r in _requests(tmp_path) if r.get("type") == "steer"] == ["Planner follow-up"]
+        finally:
+            reading.cancel()
+            await asyncio.gather(reading, return_exceptions=True)
+            await _close(process, channel)
+
+    asyncio.run(asyncio.wait_for(run(), 5))

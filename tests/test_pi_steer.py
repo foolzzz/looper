@@ -49,7 +49,8 @@ def assistant(text, stop='stop'):
         stopReason=stop, content=[dict(type='text', text=text)], usage=dict(input=7, output=3))))
 
 def finish():
-    assistant('final\u2028answer')
+    assistant(json.dumps({'status': 'completed', 'summary': 'original report'})
+              if scenario.startswith('steer_room_final_') else 'final\u2028answer')
     emit(dict(type='agent_settled', aborted=False))
 
 if scenario == 'early_exit':
@@ -120,6 +121,13 @@ if scenario.startswith('usage_'):
     if scenario == 'eof':
         sys.exit(2)
 if scenario.startswith('steer_'):
+    if scenario.startswith('steer_room_final_'):
+        emit(dict(type='message_end', message=dict(role='assistant', stopReason='toolUse',
+            content=[dict(type='toolCall', id='cmd', name='bash', arguments=dict(command='work'))])))
+        if scenario.endswith('execution'):
+            emit(dict(type='tool_execution_end', toolCallId='cmd'))
+        else:
+            emit(dict(type='message_end', message=dict(role='toolResult', toolCallId='cmd', content='done')))
     emit(dict(type='steer_ready'))
     waiting = []
     while not os.path.exists(record_path + '.finish'):
@@ -150,7 +158,7 @@ if scenario.startswith('steer_'):
             finish()
             ack(steer, data=dict(disposition='queued'))
         else:
-            disposition = scenario.removeprefix('steer_')
+            disposition = 'queued' if scenario.startswith('steer_room_final_') else scenario.removeprefix('steer_')
             ack(steer, success=disposition != 'rejected', error='SECRET-rejection',
                 command='prompt' if disposition == 'wrong_command' else 'steer',
                 data={} if disposition == 'missing' else dict(disposition=disposition))
@@ -520,3 +528,20 @@ def test_cancelled_send_and_end_input_clear_pending(tmp_path: Path) -> None:
         assert not channel._pending and not channel._steers
 
     asyncio.run(_steering_run(tmp_path, 'steer_wait', check))
+
+
+@pytest.mark.parametrize("boundary", ["result", "execution"])
+def test_room_steer_after_last_tool_keeps_report(tmp_path: Path, boundary: str) -> None:
+    from looper.agents.tiers.worker import delivery_uuid
+
+    async def check(channel: PiChannel, events: list[dict[str, Any]], ended: asyncio.Event) -> None:
+        with pytest.raises(RuntimeError):
+            await channel.send("late room delivery", uuid=delivery_uuid(42))
+        assert await channel.send("Planner follow-up", uuid="planner-message") is DeliveryResult.ACCEPTED
+        assert [r["message"] for r in _records(tmp_path) if r.get("type") == "steer"] == ["Planner follow-up"]
+        (tmp_path / "requests.jsonl.finish").touch()
+        await ended.wait()
+        result, = [event for event in events if event["type"] == "result"]
+        assert json.loads(result["result"])["summary"] == "original report"
+
+    asyncio.run(_steering_run(tmp_path, "steer_room_final_" + boundary, check))

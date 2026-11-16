@@ -1,12 +1,13 @@
 """Hosted run contracts use real session RPCs, without starting a runner process."""
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
-from looper.agents.tiers.worker import RunReply, WorkerConfig, WorkerPool, WorkerProcess
+from looper.agents.tiers.worker import RunReply, WorkerConfig, WorkerPool, WorkerProcess, delivery_uuid
 from looper.agents.runtimes import ApiProtocol
 from looper.agents.runtimes.api.adapter import KEY_ENV
 from looper.agents.runtimes.api.loop import ToolCall
@@ -186,6 +187,9 @@ def test_dropped_steer_is_reported_once(tmp_path, late, source, reason):
             # when the next model request hits the request limit.
             await update(writer, turn, "message", model="model", content=[{
                 "type": "tool_use", "id": "tool", "name": "bash", "input": {"command": "true"}}])
+            stream = handle.events()
+            prefix = [await anext(stream), await anext(stream)]
+            assert [event["type"] for event in prefix] == ["system", "assistant"]
             message_ids = []
             for index, text in enumerate(("applied", "dropped"), 1):
                 sending = asyncio.create_task(deliver(text, index))
@@ -202,7 +206,7 @@ def test_dropped_steer_is_reported_once(tmp_path, late, source, reason):
             await update(writer, turn, "tool_result", call_id="tool", text="done", is_error=False)
             await update(writer, turn, "steer_dropped", message_id=message_ids[1], reason=reason)
             await settle(writer, turn, outcome="max_requests")
-            output = await events(handle)
+            output = prefix + [event async for event in stream]
             assert [e["subtype"] for e in output if e["type"] == "system"] == [
                 "init", "steer_applied", "steer_dropped"]
             assert output[-1]["subtype"] == "error_max_turns"
@@ -341,6 +345,70 @@ def test_run_failure_still_emits_one_terminal_event(tmp_path, failure, monkeypat
             with pytest.raises(RuntimeError, match="the run has ended"):
                 await handle.wait_input_ready()
             assert await handle.send("ended") is DeliveryResult.REJECTED
+            await close(handle, reader, writer)
+            assert not failures
+    run(exercise())
+
+
+@pytest.mark.parametrize("boundary", ["before-send", "before-rpc", "before-write"])
+def test_room_steer_after_last_tool_result_keeps_report(tmp_path, boundary, monkeypatch):
+    async def exercise():
+        async with connection() as (bridge, reader, writer, failures):
+            handle = channel(tmp_path, FakeSupervisor(bridge, tmp_path))
+            await launch(handle, reader, writer)
+            _, turn = await begin(handle, reader, writer)
+            stream = handle.events()
+            assert (await anext(stream))["subtype"] == "init"
+            await update(writer, turn, "message", model="model", content=[{
+                "type": "tool_use", "id": "tool", "name": "bash", "input": {"command": "true"}}])
+            assert (await anext(stream))["type"] == "assistant"
+            if boundary == "before-write":
+                entered = asyncio.Event()
+                steer = handle.session.steer
+
+                async def observed_steer(*args, **kwargs):
+                    entered.set()
+                    return await steer(*args, **kwargs)
+
+                monkeypatch.setattr(handle.session, "steer", observed_steer)
+                await bridge._write_lock.acquire()
+                try:
+                    sending = asyncio.create_task(handle.send("room delivery", uuid=delivery_uuid(42)))
+                    await entered.wait()
+                    await update(writer, turn, "tool_result", call_id="tool", text="done", is_error=False)
+                    assert (await anext(stream))["type"] == "user"
+                finally:
+                    bridge._write_lock.release()
+                assert await sending is DeliveryResult.REJECTED
+            elif boundary == "before-rpc":
+                # The send task starts while the tool runs; its child RPC task is
+                # scheduled behind a final tool-result event already ready to deliver.
+                sending = asyncio.create_task(handle.send("room delivery", uuid=delivery_uuid(42)))
+                asyncio.get_running_loop().call_soon(handle._on_event, {
+                    "type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tool"}]}})
+                assert await sending is DeliveryResult.REJECTED
+            else:
+                await update(writer, turn, "tool_result", call_id="tool", text="done", is_error=False)
+            if boundary != "before-write":
+                assert (await anext(stream))["type"] == "user"
+            report = json.dumps({"status": "completed", "summary": "done", "changed_files": {}})
+            await update(writer, turn, "text_delta", text=report)
+            assert (await anext(stream))["type"] == "stream_event"
+            if boundary == "before-send":
+                assert await handle.send("room delivery", uuid=delivery_uuid(42)) is DeliveryResult.REJECTED
+            await no_frame(reader)
+            assert not bridge._error and not bridge._pending
+            # Explicit Planner input retains its ordinary in-trace steering contract.
+            sending = asyncio.create_task(handle.send("planner follow up"))
+            request = await p.read_frame(reader)
+            assert request.method == "session/steer" and request.params["text"] == "planner follow up"
+            await send(writer, p.Response(request.id, result={**turn, "status": "queued"}))
+            assert await sending is DeliveryResult.ACCEPTED
+            await update(writer, turn, "settled", outcome="completed", final_text=report,
+                         requests=0, usage_complete=True)
+            output = [event async for event in stream]
+            assert output[-1]["result"] == report
+            assert handle.dropped_input() == []
             await close(handle, reader, writer)
             assert not failures
     run(exercise())
