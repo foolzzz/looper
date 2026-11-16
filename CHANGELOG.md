@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.7] - 2026-11-16
+
+### Fixed
+
+- **Recurring CI flakes.** ([#1382](https://github.com/foolzzz/looper/pull/1382))
+  - Test-only: the PR changes five test files and no file in the `looper` package, so the installed behavior is the same as v2.15.6. The Cursor guard that treats stdin closed before the first prompt as a broken pipe (`BrokenPipeError`) was already shipped by #1379 in v2.15.6; the PR adds a broader test of it.
+  - The tests now wait for the Planner's complete startup and message handling before injecting a timeout, use a frozen clock for retry and extension timestamps, keep the process-tree stand-in's identity lookups consistent with its process table, complete the Pi platform fixture's database boundary, and keep waiting for the exact DSH runner PID after SIGKILL when Linux has cleared its argv.
+  - No behavior change. No model-visible change: no prompt, tool schema or contract changed.
+
 ## [2.15.6] - 2026-11-16
 
 ### Fixed
