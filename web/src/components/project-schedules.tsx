@@ -29,6 +29,7 @@ import {
   type ScheduleKind,
   type ScheduleLimits,
   type ScheduleNotify,
+  type ScheduleNotifyFormat,
   type ScheduleUserGates,
   type ScheduleNotifyTarget,
   type ScheduleOverlap,
@@ -266,6 +267,7 @@ interface Draft {
   /** USD; "" = no daily cap. */
   dailyBudget: string;
   notify: ScheduleNotify;
+  notifyFormat: ScheduleNotifyFormat;
   userGates: ScheduleUserGates;
   /** `targetKey` of the target; "" = dashboard only. */
   notifyTarget: string;
@@ -305,6 +307,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
       gateTimeout: "",
       dailyBudget: "",
       notify: "failures",
+      notifyFormat: "report",
       userGates: "off",
       notifyTarget: "",
     };
@@ -338,6 +341,7 @@ function draftOf(schedule: ScheduleInfo | null, limits: ScheduleLimits): Draft {
     gateTimeout: schedule.gate_timeout_seconds == null ? "" : String(schedule.gate_timeout_seconds),
     dailyBudget: schedule.daily_budget_usd == null ? "" : String(schedule.daily_budget_usd),
     notify: schedule.notify,
+    notifyFormat: schedule.notify_format ?? "report",
     userGates: schedule.user_gates,
     notifyTarget: targetKey(schedule.notify_target),
   };
@@ -399,7 +403,7 @@ function environmentOf(text: string) {
 
 type FormFields = ScheduleFields & Required<Pick<ScheduleFields,
   "name" | "cron" | "timezone" | "work_dir" | "overlap" | "max_parallel_runs" | "catch_up" |
-  "run_timeout_seconds" | "notify" | "notify_target" | "success_deadline" |
+  "run_timeout_seconds" | "notify" | "notify_format" | "notify_target" | "success_deadline" |
   "alert_failures_after" | "alert_stale_after_seconds" | "alert_overlap_after">>;
 
 /** Command fields are kept separate from task settings before serialization. */
@@ -412,7 +416,7 @@ function fieldsOf(draft: Draft, limits: ScheduleLimits, schedule: ScheduleInfo |
     max_parallel_runs: Number(draft.maxParallel.trim() || NaN), catch_up: draft.catchUp,
     run_timeout_seconds: draft.timeoutMode === "limit" ? Math.round((minutes ?? NaN) * 60)
       : draft.timeoutMode === "none" || draft.kind === "command" ? null : "default" as const,
-    notify: draft.notify, notify_target: targetOf(draft.notifyTarget),
+    notify: draft.notify, notify_format: draft.notifyFormat, notify_target: targetOf(draft.notifyTarget),
     success_deadline: draft.deadline.trim() || null,
     alert_failures_after: numberOf(draft.failuresAfter),
     alert_stale_after_seconds: draft.staleAfterMinutes.trim() ? Math.round(Number(draft.staleAfterMinutes) * 60) : null,
@@ -460,7 +464,7 @@ function changesOf(fields: FormFields, schedule: ScheduleInfo): ScheduleUpdate {
     }
     const stored = key in policyKeys
       ? thresholdValue(schedule, policyKeys[key as keyof typeof policyKeys])
-      : schedule[key as keyof ScheduleInfo] ?? null;
+      : key === "notify_format" ? schedule.notify_format ?? "report" : schedule[key as keyof ScheduleInfo] ?? null;
     // Object order does not change saved environment or template inputs.
     const canonical = (item: unknown) => item && typeof item === "object"
       ? JSON.stringify(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item;
@@ -759,6 +763,21 @@ function GateBudgetNotify({
       </div>
 
       </>}
+      <div className="space-y-1">
+        <label htmlFor={id("notify-format")} className={LABEL}>Message format</label>
+        <select id={id("notify-format")} value={draft.notifyFormat}
+          onChange={(e) => set("notifyFormat", e.target.value as ScheduleNotifyFormat)}
+          disabled={draft.kind === "command"} aria-describedby={id("notify-format-hint")} className={SELECT}>
+          <option value="report">Operator report</option>
+          {draft.kind === "agent" && <option value="deliverable">Delivered text only</option>}
+        </select>
+        <p id={id("notify-format-hint")} className="text-xs text-muted-foreground">
+          {draft.kind === "command" ? "Command schedules send operator reports." :
+            draft.notifyFormat === "deliverable"
+              ? "Sends the delivered text on success and a short reason on failure. Alerts stay on the dashboard."
+              : "Includes run status, result summary, cost and dashboard link."}
+        </p>
+      </div>
       <div className="grid gap-3 sm:grid-cols-2">
         <Choices
           name={id("notify")}
@@ -960,7 +979,7 @@ function ScheduleForm({
       {schedule ? <p className="text-sm text-muted-foreground">Type: {isCommand ? "Command" : "Agent task"}</p> : (
         <Choices name={id("kind")} legend="Type" value={draft.kind}
           onChange={(kind) => {
-            setDraft((d) => ({ ...d, kind, timeoutMode: kind === "command" ? "none" : "default" }));
+            setDraft((d) => ({ ...d, kind, notifyFormat: kind === "command" ? "report" : d.notifyFormat, timeoutMode: kind === "command" ? "none" : "default" }));
             setSaved(false);
           }} options={[
             { value: "agent", label: "Agent task", hint: "Each firing starts a task: a Planner and Workers, with model spend." },

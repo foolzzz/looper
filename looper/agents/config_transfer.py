@@ -132,7 +132,7 @@ SECTIONS = ("runtimes", "providers", "models", "profiles", "gateway.aliases", "s
 # ``notify_target``, ``profiles`` (by name) and ``task_limits``.
 _SCHEDULE_FIELDS = ("name", "cron", "timezone", "requirement", "overlap", "max_parallel_runs", "catch_up",
                     "run_timeout_seconds", "run_budget_usd", "gate_command", "gate_timeout_seconds", "daily_budget_usd",
-                    "notify", "user_gates")
+                    "notify", "notify_format", "user_gates")
 _COMMAND_FIELDS = ("command", "env", "env_file")
 _ALERT_FIELDS = ("success_deadline", "alert_failures_after", "alert_stale_after_seconds", "alert_overlap_after")
 _AGENT_SCHEDULE_FIELDS = ("requirement", "gate_command", "gate_timeout_seconds", "run_budget_usd",
@@ -2373,7 +2373,8 @@ class _Importer:
         owner = entry.get("manager", "manager")
         if not isinstance(owner, str) or owner not in managers:
             raise _Skip(f"Manager owner conflict: no nondeleted Manager {owner!r} here or in the file")
-        defaults = {"overlap": "skip", "max_parallel_runs": 3, "catch_up": "once", "notify": "failures"}
+        defaults = {"overlap": "skip", "max_parallel_runs": 3, "catch_up": "once", "notify": "failures",
+                    "notify_format": "report"}
         if kind == "agent":
             defaults["user_gates"] = "off"
         values: dict[str, Any] = {"manager_id": owner, "kind": kind, "command": None, "env": {}, "env_file": None}

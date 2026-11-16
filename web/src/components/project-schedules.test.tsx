@@ -119,7 +119,7 @@ describe("schedule Planner session", () => {
       description: "Every morning", requirement: "Read reports", work_dir: "", overlap: "skip", catch_up: "once",
       max_parallel_runs: 3, run_timeout_seconds: "default", run_timeout_effective_seconds: 60,
       run_budget_usd: null, profile_overrides: {}, task_limits: { worker: null, reviewer: null },
-      gate_command: null, gate_timeout_seconds: null, daily_budget_usd: null, notify: "failures",
+      gate_command: null, gate_timeout_seconds: null, daily_budget_usd: null, notify: "failures", notify_format: "report",
       notify_target: null, user_gates: "off", spent_today_usd: 0, enabled: false, last_run: null,
       alerts: { failures_since: null, stale_since: null },
     } as ScheduleInfo;
@@ -167,7 +167,7 @@ describe("schedule Planner session", () => {
     expect(container.textContent).not.toContain("wait counts against the run timeout");
     await act(async () => button("Create").click());
     expect(writes[0]).toEqual({ kind: "agent", name: "Daily check", cron: "0 9 * * *", requirement: "Read reports",
-      timezone: "UTC", overlap: "skip", catch_up: "once", run_timeout_seconds: null, notify: "failures", user_gates: "on" });
+      timezone: "UTC", overlap: "skip", catch_up: "once", run_timeout_seconds: null, notify: "failures", notify_format: "report", user_gates: "on" });
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-controls="schedule-sched/a-panel"]')!.click());
     expect(gates().getAttribute("aria-checked")).toBe("true");
     await act(async () => gates().click());
@@ -183,7 +183,7 @@ const storedSchedule = (kind: "agent" | "command" = "agent"): ScheduleInfo => ({
   max_parallel_runs: 3, run_timeout_seconds: kind === "command" ? null : "default",
   run_timeout_effective_seconds: null, run_budget_usd: null, profile_overrides: {},
   task_limits: { worker: null, reviewer: null }, gate_command: null, gate_timeout_seconds: null,
-  daily_budget_usd: null, notify: "failures", notify_target: null, user_gates: "off",
+  daily_budget_usd: null, notify: "failures", notify_format: "report", notify_target: null, user_gates: "off",
   spent_today_usd: 0, enabled: false, last_run: null, command: kind === "command" ? "echo ready" : null,
   env: { ZONE: "west", APP: "reports" }, env_file: null, success_deadline: null,
   alert_policy: { failures_after: { value: 3, default: true }, stale_after_seconds: { value: 900, default: true },
@@ -244,10 +244,35 @@ describe("schedule form types", () => {
   });
   afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
 
+  it("saves the selected audience format and restricts commands to reports", async () => {
+    await render(storedSchedule());
+    const format = container.querySelector<HTMLSelectElement>('[id$="-notify-format"]')!;
+    expect(format).not.toBeNull();
+    expect(format.value).toBe("report");
+    await act(async () => {
+      format.value = "deliverable";
+      format.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => button("Save").click());
+    expect(writes).toEqual([{ notify_format: "deliverable" }]);
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render(storedSchedule("command"));
+    const commandFormat = container.querySelector<HTMLSelectElement>('[id$="-notify-format"]')!;
+    expect([...commandFormat.options].map((option) => option.value)).toEqual(["report"]);
+    expect(commandFormat.disabled).toBe(true);
+  });
+
   it("switches to command fields and submits only command settings", async () => {
     await render();
     expect(input("requirement")).toBeTruthy();
+    const format = container.querySelector<HTMLSelectElement>('[id$="-notify-format"]')!;
+    await act(async () => {
+      format.value = "deliverable";
+      format.dispatchEvent(new Event("change", { bubbles: true }));
+    });
     await command();
+    expect(format.value).toBe("report");
     expect(input("requirement")).toBeNull();
     expect(input("command")).toBeTruthy();
     expect(container.textContent).not.toContain("Use the default");
@@ -258,7 +283,7 @@ describe("schedule form types", () => {
     expect(writes).toEqual([{
       kind: "command", name: "Daily check", cron: "0 9 * * *", timezone: "UTC", command: "echo ready",
       env: {}, env_file: null, overlap: "skip", catch_up: "once", run_timeout_seconds: null,
-      notify: "failures", success_deadline: null, alert_failures_after: null,
+      notify: "failures", notify_format: "report", success_deadline: null, alert_failures_after: null,
       alert_stale_after_seconds: null, alert_overlap_after: null,
     }]);
   });
@@ -322,7 +347,7 @@ describe("schedule form types", () => {
     const { kind, ...body } = writes[0];
     expect(kind).toBe("agent");
     expect(body).toEqual({ name: "Daily check", cron: "0 9 * * *", requirement: "Read reports", timezone: "UTC",
-      overlap: "skip", catch_up: "once", run_timeout_seconds: "default", notify: "failures", user_gates: "off" });
+      overlap: "skip", catch_up: "once", run_timeout_seconds: "default", notify: "failures", notify_format: "report", user_gates: "off" });
   });
 
   it.each(["agent", "command"] as const)("shows saved %s alert settings and kind-specific notification hints", async (kind) => {

@@ -149,7 +149,7 @@ describe("Settings → Scheduler", () => {
       run_timeout_effective_seconds: override ? 60 : null, run_budget_usd: null, profile_overrides: override ? { worker: "p" } : {},
       task_limits: { worker: null, reviewer: null }, enabled: false, next_fire_at: null, last_fired_at: null,
       last_success_at: null, consecutive_failures: 0, created_via: "dashboard", created_at: "", updated_at: "",
-      last_run: null, gate_command: null, gate_timeout_seconds: null, daily_budget_usd: null, notify: "never", user_gates: override ? "on" : "off",
+      last_run: null, gate_command: null, gate_timeout_seconds: null, daily_budget_usd: null, notify: "never", notify_format: "report", user_gates: override ? "on" : "off",
       notify_target: null, spent_today_usd: 0, alerts: { failures_since: null, stale_since: null, deadline_since: null, overlap_since: null },
       planner_session: { active: false, runtime: null, profile: null, last_task_id: null, last_task_title: null, updated_at: null },
     };

@@ -105,6 +105,7 @@ _SCHEMA_LOCK = 0x6C6F6F70  # "loop"
 
 REGISTRY_SCHEMA_VERSION = 4
 _SCHEDULE_USER_GATES = "schedule_user_gates"
+_SCHEDULE_NOTIFY_FORMAT = "schedule_notify_format"
 _RUNTIME_LAUNCHER = "runtime_launcher"
 _PROFILE_FALLBACK = "profile_fallback"
 _PROFILE_WEB_SEARCH = "profile_web_search"
@@ -380,6 +381,16 @@ async def _schedule_user_gates_pending(conn: asyncpg.Connection) -> bool:
     return not await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM pg_attribute "
         "WHERE attrelid = to_regclass('schedules') AND attname = 'user_gates' "
+        "AND attnum > 0 AND NOT attisdropped)")
+
+
+async def _schedule_notify_format_pending(conn: asyncpg.Connection) -> bool:
+    if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)",
+                           _SCHEDULE_NOTIFY_FORMAT):
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute "
+        "WHERE attrelid = to_regclass('schedules') AND attname = 'notify_format' "
         "AND attnum > 0 AND NOT attisdropped)")
 
 
@@ -738,6 +749,12 @@ async def ensure_schema(pool: asyncpg.Pool | asyncpg.Connection | None = None) -
             for ddl in _COMMAND_SCHEDULES_DDL:
                 await conn.execute(ddl)
             await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _COMMAND_SCHEDULES)
+        if await _schedule_notify_format_pending(conn):
+            await conn.execute("ALTER TABLE schedules ADD COLUMN notify_format TEXT NOT NULL DEFAULT 'report' "
+                               "CHECK (notify_format IN ('report', 'deliverable'))")
+            await conn.execute("ALTER TABLE schedules ADD CONSTRAINT schedules_command_notify_format_check "
+                               "CHECK (kind <> 'command' OR notify_format = 'report')")
+            await conn.execute("INSERT INTO schema_migrations (name) VALUES ($1)", _SCHEDULE_NOTIFY_FORMAT)
         if await _task_process_record_pending(conn):
             await conn.execute("ALTER TABLE tasks ADD COLUMN process_record JSONB "
                                "CHECK (jsonb_typeof(process_record) = 'object')")
@@ -881,7 +898,8 @@ async def schema_change_pending(conn: asyncpg.Connection) -> bool:
         await conn.execute(f"SELECT pg_advisory_xact_lock({_SCHEMA_LOCK})")
         state = await _classify_schema(conn, sql)
         return state == "bridge" or (state == "current" and (
-            await _schedule_user_gates_pending(conn) or await _cursor_login_pending(conn)
+            await _schedule_user_gates_pending(conn) or await _schedule_notify_format_pending(conn)
+            or await _cursor_login_pending(conn)
             or await _model_name_parameters_pending(conn)
             or await _coco_login_pending(conn)
             or await _runtime_launcher_pending(conn) or await _profile_fallback_pending(conn)

@@ -45,7 +45,9 @@ _KIND_CHECK = """    CONSTRAINT schedules_kind_fields_check CHECK (
 async def existing_baseline(conn):
     prefix, schedules_start, sql = connection.SCHEMA_PATH.read_text().partition("CREATE TABLE IF NOT EXISTS schedules (")
     sql, next_table, suffix = sql.partition("CREATE TABLE IF NOT EXISTS llm_records (")
-    pieces = [*_SCHEDULE_COLUMNS.splitlines(keepends=True), *_RUN_COLUMNS.splitlines(keepends=True),
+    pieces = ["    notify_format TEXT NOT NULL DEFAULT 'report' CHECK (notify_format IN ('report', 'deliverable')),\n",
+              "    CONSTRAINT schedules_command_notify_format_check CHECK (kind <> 'command' OR notify_format = 'report'),\n",
+              *_SCHEDULE_COLUMNS.splitlines(keepends=True), *_RUN_COLUMNS.splitlines(keepends=True),
               "    deferred_by_drain BOOLEAN NOT NULL DEFAULT false,\n",
               _KIND_CHECK, "                      'succeeded', 'interrupted')),\n",
               "                                              'deadline_alert', 'deadline_recovered', 'overlap_alert', 'overlap_recovered')),\n",
@@ -86,7 +88,7 @@ def test_existing_baseline_upgrades_once_preserves_data_and_matches_fresh():
             assert await structure(old) == shape
             await connection.ensure_schema(old)
             expected = {line.strip().split()[0]: None for line in _SCHEDULE_COLUMNS.splitlines()}
-            expected.update(kind="agent", env="{}", consecutive_overlaps=0)
+            expected.update(kind="agent", env="{}", consecutive_overlaps=0, notify_format="report")
             assert dict(await old.fetchrow("SELECT * FROM schedules")) == {**before["schedules"][0], **expected}
             run_defaults = {line.strip().split()[0]: None for line in _RUN_COLUMNS.splitlines()}
             run_defaults["log_truncated"] = False

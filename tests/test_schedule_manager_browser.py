@@ -152,6 +152,31 @@ def test_bound_target_stays_visible_as_unavailable_after_binding_removal(dashboa
 
 
 @pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
+def test_audience_format_create_reload_and_edit(dashboard, tmp_path, width):
+    from playwright.sync_api import expect
+
+    page, base, state = dashboard
+    page.set_viewport_size({"width": width, "height": 900})
+    new_schedule(page, base)
+    format_select = page.get_by_label("Message format", exact=True)
+    expect(format_select).to_have_value("report")
+    format_select.select_option("deliverable")
+    page.get_by_role("button", name="Create", exact=True).click()
+    # The fake API records the request before the UI finishes saving and opens its deep link.
+    expect(page).to_have_url(f"{base}/#projects/proj-example/schedules/sched-example")
+    assert state["schedules"][0]["notify_format"] == "deliverable"
+    page.reload()
+    expect(page.get_by_label("Message format", exact=True)).to_have_value("deliverable")
+    page.get_by_label("Message format", exact=True).scroll_into_view_if_needed()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.screenshot(path=str(tmp_path / "audience-format.png"), full_page=True)
+    page.get_by_label("Message format", exact=True).select_option("report")
+    page.get_by_role("button", name="Save", exact=True).click()
+    expect(page.get_by_role("button", name="Save", exact=True)).to_be_disabled()
+    assert state["schedules"][0]["notify_format"] == "report"
+
+
+@pytest.mark.parametrize("width", [1280, 390], ids=["desktop", "narrow"])
 def test_scenario_owner_create_reload_and_immutable_edit(dashboard, tmp_path, width):
     from playwright.sync_api import expect
 
@@ -593,7 +618,7 @@ def test_command_form_create_edit_and_agent_regression(tmp_path, staged_dashboar
             assert fields == {"kind": "agent", "name": "Agent report", "cron": "0 9 * * *",
                               "timezone": "UTC", "requirement": "Review the daily reports.",
                               "overlap": "skip", "catch_up": "once", "run_timeout_seconds": "default",
-                              "notify": "failures", "user_gates": "off"}
+                              "notify": "failures", "notify_format": "report", "user_gates": "off"}
             assert not errors
         finally:
             context.close()
