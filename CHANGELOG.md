@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.3] - 2026-11-16
+
+### Changed
+
+- **Grok steering and room push over ACP.** ([#1372](https://github.com/foolzzz/looper/pull/1372))
+  - Grok 1.0.77+ is probed for the hidden `_x.ai/interject` method with a nonexistent session (only a -32602 "session not found" error enables steering; no model call). Grok Workers and Reviewers with detected steering run over one ACP process in the run's isolated home, so Planner corrections and room deliveries reach the run mid-turn; other runs keep headless execution and `PULL`. Existing registrations keep their saved capabilities until Re-detect. Behavior change.
+  - Room deliveries are marked read only on model output that starts after a tool result following the acceptance notification; refused or unseen deliveries stay unread, with no timer fallback, and steering never cancels a running tool.
+  - Model-visible: Grok Workers and Reviewers with detected steering get the pushed room guidance instead of the pull guidance, and room message bodies arrive as steered input.
+  - The eval metrics count Grok room calls wrapped in `use_tool`.
+
 ## [2.15.2] - 2026-11-16
 
 ### Changed
