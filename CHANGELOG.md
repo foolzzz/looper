@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.5] - 2026-11-16
+
+### Changed
+
+- **Room push: keep the report when a steer lands during the last model response.** ([#1380](https://github.com/foolzzz/looper/pull/1380))
+  - Room deliveries (`looper-reminder-*` ids) are steered into a running Worker or Reviewer only while one of its tool calls is outstanding or it waits in the room inbox. The Worker checks the rule before it reads a delivery, and each steering channel (Codex, OMP, Pi CLI, the runner channel and Grok) checks it again at the protocol write, from its own tool-start and tool-result events. Planner messages and other input keep their own rules. Behavior change.
+  - A delivery that finds no running tool is returned as rejected and stays unread: it is steered at the next tool call, listed on the next run, or answered by the Planner. A room message posted while a Worker writes its final answer no longer lands in that answer's turn.
+  - Model-visible: the final answer of a step is no longer followed by a steered room message, so its report is not displaced; no prompt text or tool schema changed.
+
 ## [2.15.4] - 2026-11-16
 
 ### Changed
