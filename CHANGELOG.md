@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.9] - 2026-11-16
+
+### Changed
+
+- **`room_consult` eval: who may read the saved copy; replied count.** ([#1389](https://github.com/foolzzz/looper/pull/1389), fixes #1387)
+  - Eval and tests only: the PR changes `evals/README.md`, `evals/prompt_regression/metrics.py`, `evals/prompt_regression/tasks.py` and two test files, and no file in the `looper` package, so the installed behavior is the same as v2.15.8.
+  - The task requirement now says the second step must not read the saved copy itself and the first step may read its own copy to answer the consult.
+  - The eval metric `room_consults_answered` is renamed `room_consults_replied`: the API's `answered` state records a reply, including one without the requested value, not that the asker used it. The committed real-run baselines still carry the old key.
+  - No model-visible change in the product; only the eval task's requirement text changed.
+
 ## [2.15.8] - 2026-11-16
 
 ### Changed
