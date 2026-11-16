@@ -447,5 +447,18 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     def budget_error(self, result_event: dict[str, Any] | None) -> str | None:
         return claude_cli.budget_error(result_event)
 
+    def failure_detail(self, result_event: dict[str, Any] | None, *, launch: Launch,
+                       command: list[str], pid: int | None = None) -> str | None:
+        from .omp import provider_error, safe_error
+
+        if not result_event or (not result_event.get("is_error") and result_event.get("subtype") == "success"):
+            return None
+        text = result_event.get("result")
+        status = result_event.get("status_code", result_event.get("status"))
+        detail = provider_error(text if isinstance(text, str) else "", status)
+        # Redact the complete diagnostic before whitespace normalization and clipping.
+        detail = safe_error(detail, secrets=(launch.profile.provider.api_key or "",), limit=None)
+        return " ".join(detail.split())[:300] or None
+
     def permission_denials(self, result_event: dict[str, Any] | None) -> list[dict[str, str]]:
         return claude_cli.permission_denials(result_event)
