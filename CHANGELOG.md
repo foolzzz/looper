@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.8] - 2026-11-16
+
+### Changed
+
+- **`room_consult` eval task writes its value down.** ([#1386](https://github.com/foolzzz/looper/pull/1386), fixes #1381)
+  - Eval and tests only: the PR changes `evals/README.md`, `evals/prompt_regression/tasks.py` and two test files, and no file in the `looper` package, so the installed behavior is the same as v2.15.7.
+  - The task now runs in a git repository; its first step saves the generated code to `generated-code.txt` and commits it with `code.sha256`, and the second step must ask the first for the code rather than read the file. The check and the `min_room_consults` expectation are unchanged.
+  - A new test pins that a consult refused with `no_snapshot` (task directory not a git checkout) tells the asker the reason, the Planner escalation included. The reason text already existed.
+  - No model-visible change in the product; only the eval task's requirement text changed.
+
 ## [2.15.7] - 2026-11-16
 
 ### Fixed
