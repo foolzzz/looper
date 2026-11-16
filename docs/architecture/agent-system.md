@@ -4697,13 +4697,20 @@ before.
   only while a tool call runs and remain in flight after acknowledgement. They are marked
   read when an app-server `userMessage` history item carries the delivery's
   message ids, advancing only past earlier confirmed deliveries. These items
-  are receipts, not assistant output. If no item arrives within 30 s of
-  acknowledgement while the run is still active, Looper logs a warning and
+  are receipts, not assistant output. If no item arrives within 30 s after
+  the accepted delivery's current tool batch returns (or its acceptance when
+  no tool is running), while the run is still active, Looper logs a warning and
   falls back to acknowledging that delivery as read. A run ending before
   receipt or fallback leaves the messages unread for its next turn or retry.
   A rejection or no active turn leaves them unread; an unknown
   acknowledgement advances the in-flight cursor without marking them read
   or retrying, and logs the uncertainty.
+  Steering OMP and Pi CLI runs also receive room messages during tool calls.
+  They can hold an accepted steer until a later tool call ends, so only their
+  runtime's user-message receipt carrying the delivery's message ids confirms
+  it as read; there is no fallback timer, as with Grok. Receipts advance the
+  seat's read cursor only past earlier confirmed deliveries. Without a
+  receipt, the delivery stays unread for the next run or its inbox.
   Hosted runner deliveries use `steer` and are marked read only when
   `steer_applied` names their delivery uuid as `message_id`, after the steer
   joins a model request. Acceptance alone marks nothing read, and there is

@@ -149,6 +149,8 @@ STEER_MIN_VERSION = (18, 4, 3)
 
 class OmpRuntime(RuntimeAdapter):
     room_push = RoomPush.STEER
+    # A steer can wait for a later tool call to end; only its user-message receipt proves the model saw it.
+    room_receipt_fallback = False
     can_replace_system_prompt = True
     type = "omp"
     label = "OMP"
