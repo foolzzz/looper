@@ -1424,25 +1424,29 @@ ROOM_TASKS: tuple[EvalTask, ...] = (
         },
     ),
     EvalTask(
-        # A second step needs what only the first step's session knows, and the first has ended: the second asks it
-        # in the room, and a consult of its session answers.
+        # The second step asks the first after it ended; the saved code survives the first run's processes.
         id="room_consult",
         # The first step makes the code up as it runs, so the plan cannot carry it, and tells it only when asked, so
         # it cannot post it ahead.
         requirement="Do this as two steps, the second after the first. The first step makes up a random code of "
                     f"{CODE_LENGTH} lowercase letters and digits while it runs (the plan does not choose it, and it "
-                    "is not derived from anything), writes only its SHA-256 hex digest (of the code, no newline) to "
-                    "code.sha256, and keeps the code itself out of every file, commit and its report, telling it "
-                    "only to whoever asks for it. The second step writes that code, its "
+                    "is not derived from anything), writes its SHA-256 hex digest (of the code, no newline) to "
+                    "code.sha256, saves the code itself to generated-code.txt in its working directory, and "
+                    "commits both files before finishing. Keep the code out of its report and unsolicited "
+                    "messages, telling it only to whoever asks for it. The second step asks the first step for "
+                    "the code, rather than reading its saved copy, and writes that code, its "
                     f"{CODE_LENGTH} characters only, to code.txt.",
         check=_code_matches,
+        init_git=True,
         expect={"min_room_consults": 1},
         fake={
-            "plan": [_step("s1", "Make up a code; write its SHA-256 to code.sha256.", ["code.sha256 exists"]),
-                     _step("s2", "Write the code s1 made up to code.txt.", ["code.txt holds it"],
+            "plan": [_step("s1", "Make up a code; save it to generated-code.txt and its SHA-256 to code.sha256; "
+                           "commit both files.", ["both files are committed"]),
+                     _step("s2", "Ask s1 for its code and write it to code.txt.", ["code.txt holds it"],
                            depends_on=["s1"])],
             "attempts": {
-                "s1": [{"status": "completed", "files": {"code.sha256": _FAKE_CODE_SHA}}],
+                "s1": [{"status": "completed", "files": {"code.sha256": _FAKE_CODE_SHA,
+                                                         "generated-code.txt": _FAKE_CODE}}],
                 "s2": [{"status": "completed", "answer_file": "code.txt"}],
             },
             # The second step's Worker asks the first's seat, which has ended: a consult answers in its inbox.

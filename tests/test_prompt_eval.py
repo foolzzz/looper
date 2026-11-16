@@ -527,10 +527,19 @@ def test_the_consult_check_takes_only_the_code_whose_digest_the_first_step_wrote
     if code is not None:
         (tmp_path / "code.txt").write_text(code + "\n")
     assert (task.check(tmp_path) is not None) is found
-    # The code is out of reach of trying every one against its digest (a 6-digit number's took a second), so only
-    # the first step's session can give it; the requirement asks for that code.
+    # The digest cannot be brute-forced (unlike a 6-digit number's); the second step must ask the first for its code.
     assert len(task_list.CODE_ALPHABET) ** task_list.CODE_LENGTH >= 2 ** 100
     assert f"{task_list.CODE_LENGTH} lowercase letters and digits" in task.requirement
+
+
+def test_the_consult_task_keeps_the_generated_code_after_the_first_step_ends() -> None:
+    task = task_list.select(["room_consult"])[0]
+    assert task.init_git
+    assert "generated-code.txt in its working directory" in task.requirement
+    assert "commits both files before finishing" in task.requirement
+    assert "asks the first step for the code" in task.requirement
+    assert "rather than reading its saved copy" in task.requirement
+    assert task.fake["attempts"]["s1"][0]["files"]["generated-code.txt"] == task.fake["consult_answer"]
 
 
 @pytest.mark.parametrize(("delivery", "fields"), [

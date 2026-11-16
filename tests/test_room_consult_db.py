@@ -652,6 +652,57 @@ def test_a_question_no_consult_can_answer_goes_to_the_planner_with_why(
     run_db(test, monkeypatch)
 
 
+def test_an_omp_consult_outside_git_tells_the_asker_why_it_needs_a_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from looper.agents import consult
+    from looper.agents.agent_settings import AgentSettings
+    from looper.agents.profile_registry import CatalogModel, LegacyProviderSpec, RuntimeSpec
+    from looper.agents.room import run_session_dir
+    from looper.agents.runtimes import ApiProtocol, AuthKind, Capability
+    from tests.runtime_model_helpers import resolved_profile
+
+    profile = resolved_profile("omp-test", "OMP", RuntimeSpec("omp-test", "OMP", "omp",
+        capabilities=frozenset({Capability.READ_TOOLS})), LegacyProviderSpec(
+            "provider-test", "Test", auth=AuthKind.API_KEY, api_key="test-key",
+            protocols=frozenset({ApiProtocol.ANTHROPIC_MESSAGES}), base_url="https://provider.invalid",
+            catalog=(CatalogModel("test-model", input_usd_per_mtok=1, output_usd_per_mtok=2,
+                                  cache_read_usd_per_mtok=0, cache_write_usd_per_mtok=0),)), "test-model")
+    monkeypatch.setattr(consult, "load_agent_settings", AsyncMock(return_value=AgentSettings(profile=profile)))
+    # A caller may place pytest's temporary directory inside the source checkout.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setattr(child_env, "_allowed", child_env._allowed | {"GIT_CEILING_DIRECTORIES"})
+
+    async def test(pool: Any) -> None:
+        await _room_task(pool)
+        await _ran(pool, tmp_path / "work", provider=profile.provider.id, runtime="omp")
+        room = RoomService(batch_seconds=0)
+        service = _service(tmp_path, room, _Pool({"worker-2": "running"}))
+        source = run_session_dir(service.runtime_root, "omp", "task-r", "worker-1")
+        assert source is not None
+        source.mkdir(parents=True)
+        try:
+            question = await room.post("task-r", FE, kind="question", body="Which code?", to=["backend_rd@s1"])
+            row = await _settled(pool)
+            assert (row["state"], row["fallback_reason"]) == ("fallback", "no_snapshot"), row
+            assert "not a git checkout" in row["detail"] and "cannot be kept from writing" in row["detail"]
+            inbox = await room.inbox("task-r", FE)
+            notice, = [m for m in inbox["messages"] if m["kind"] == "notice"]
+            assert notice["reply_to"] == question["id"]
+            assert "no_snapshot" in notice["body"] and row["detail"] in notice["body"]
+            assert "Planner has it" in notice["body"]
+            escalation = await pool.fetchrow("SELECT * FROM room_messages WHERE kind = 'escalation'")
+            assert escalation["planner_pending"] and row["detail"] in escalation["body"]
+            assert await pool.fetchval("SELECT count(*) FROM room_messages WHERE kind = 'answer'") == 0
+            assert await pool.fetchval("SELECT count(*) FROM llm_records") == 1
+        finally:
+            await service.stop()
+
+    run_db(test, monkeypatch, timeout=30)
+
+
 def test_a_question_the_consult_left_unanswered_goes_to_the_planner_and_the_answered_one_does_not(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
