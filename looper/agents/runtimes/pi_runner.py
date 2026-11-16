@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from ... import child_env
 from ..agent_settings import AgentType
 from ..system_prompt_mode import SystemPromptMode
-from . import ADAPTERS, PromptBlock, RuntimeUnsupported, instructions, runtime_prompt_text
+from . import ADAPTERS, PromptBlock, RoomPush, RuntimeUnsupported, instructions, runtime_prompt_text
 from .pi import (
     API_NAMES, KEY_ENV, PiRuntime, _isolated_env, _private_dir, _write_private,
     _session_file, provider_api, runtime_notes,
@@ -53,6 +53,7 @@ def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None =
 
 
 class PiRunnerRuntime(PiRuntime):
+    room_push = RoomPush.NONE  # Runner receipts are independent of CLI user-message echoes.
     hosts_runs = True
     platform_tools_in_process = True
     can_interrupt = True

@@ -81,6 +81,20 @@ def test_a_suffix_free_deepseek_model_gets_its_million_token_catalog_window() ->
 # --- Events ---
 
 
+@pytest.mark.parametrize("content", ["[Looper room]\n- #42 from worker@s2 (info): 你好 /skill",
+    [{"type": "text", "text": "[Looper room]"}, {"type": "image", "data": "ignored"},
+     {"type": "text", "text": "- #42 from worker@s2 (info): 你好 /skill"}]])
+def test_user_message_end_is_a_single_verbatim_receipt(content) -> None:
+    from looper.agents.runtimes.omp import OmpStream
+
+    stream = OmpStream()
+    message = {"role": "user", "content": content}
+    assert stream.translate({"type": "message_start", "message": message, "steering": True}) == []
+    assert stream.translate({"type": "message_end", "message": message}) == [
+        {"type": "system", "subtype": "user_message_receipt",
+         "text": "[Looper room]\n- #42 from worker@s2 (info): 你好 /skill"}]
+
+
 async def _parse_async(lines: bytes, model: str | None) -> list[dict[str, Any]]:
     reader = asyncio.StreamReader()
     reader.feed_data(lines)
@@ -315,7 +329,8 @@ def test_a_run_gets_a_home_of_its_own_with_only_the_generated_files(
     assert again[1] == command[1] and _flag(again, "--append-system-prompt") != [prompt]
 
 
-def test_outside_a_repository_the_sources_that_climb_are_off(tmp_path: Path) -> None:
+def test_outside_a_repository_the_sources_that_climb_are_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("looper.agents.runtimes.omp.outside_repository", lambda cwd: True)
     work = tmp_path / "plain"
     work.mkdir()
     command = OMP.run_command("omp", cwd=work, prompt_file=_prompt_file(tmp_path), launch=_launch())
@@ -813,7 +828,7 @@ def test_a_resident_turn_is_priced_and_stops_at_the_soft_cap_between_requests(tm
 
     capped, totals, kinds = asyncio.run(_run())
     # The first request's usage event took the turn over its cap: it ends there, before the tool's result.
-    assert kinds == ["system", "assistant", "usage"]
+    assert kinds == ["system", "system", "assistant", "usage"]  # Init and the input receipt spend no tokens.
     assert OMP.budget_error(capped.result_event) == (
         f"Looper stopped the run at its per-run spend cap: {capped.result_event['errors'][0]}")
     assert capped.usage.cost_usd == pytest.approx(request_cost)

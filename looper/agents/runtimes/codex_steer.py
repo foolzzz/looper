@@ -198,7 +198,7 @@ class CodexChannel:
                             item = raw.get("item") or {}
                             if item.get("type") == "user_message":
                                 # History receipt, never model output or evidence of model work.
-                                translated.append({"type": "system", "subtype": "codex_user_message",
+                                translated.append({"type": "system", "subtype": "user_message_receipt",
                                                    "text": item["text"]})
                             else:
                                 translated.extend(self._stream.translate(raw))

@@ -109,6 +109,7 @@ Codex 的 `app-server` 通知先翻译成 `exec --json` 的事件形状（`threa
 
 ## 6. 已知差距
 
+- D5 的 room 限制是本文写作时的范围：当前探测到引导能力的 Codex、OMP 18.4.3+ RPC 和 Pi CLI RPC 运行也接收 room 推送。以带 `[Looper room]` 和整批消息 id 的用户消息回执确认已读；30 秒回执兜底窗口从当前工具批次返回后开始。Pi SDK runner 不走 CLI 文本回执路径，详见 [Delivery](../agent-system.md#a-tasks-agent-room)。
 - Codex 的 `app-server` 是实验性接口，字段可能随版本变；探测只看版本下限和 `turn/steer` 在不在，协议字段变了要靠真实运行的评测发现。
 - 引导在运行结束瞬间到达：服务端已接受但这一轮正好结束时，这条消息可能不被处理；回执只说明服务端接受了它。
 - Codex 不报压缩和单次请求的用量（与 `exec` 相同）；`thread/tokenUsage/updated` 给线程累计值，Looper 照旧在一轮结束时判断单次上限。

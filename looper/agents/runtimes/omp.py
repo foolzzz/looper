@@ -87,7 +87,7 @@ from ..log_redaction import strip_ansi
 from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
+    ApiProtocol, AuthKind, Capability, Probe, PromptBlock, ProviderBinding, ReadOnly, RoomPush, RunCost, RuntimeAdapter,
     RunChannel, RuntimeUnsupported, StreamChannel, instructions, runtime_prompt_text,
 )
 from .instructions import Delivery, InstructionFile
@@ -148,6 +148,7 @@ STEER_MIN_VERSION = (18, 4, 3)
 
 
 class OmpRuntime(RuntimeAdapter):
+    room_push = RoomPush.STEER
     can_replace_system_prompt = True
     type = "omp"
     label = "OMP"
@@ -847,7 +848,10 @@ class OmpStream:
             return [{"type": "user", **self._base(), "message": {"role": "user", "content": [
                 {"type": "tool_result", "tool_use_id": str(message.get("toolCallId") or ""),
                  "content": _text(message.get("content")), "is_error": bool(message.get("isError"))}]}}]
-        return []  # the user's message, which Looper wrote
+        if role == "user":
+            return [{"type": "system", "subtype": "user_message_receipt", **self._base(),
+                     "text": _text(message.get("content"))}]
+        return []
 
     def _assistant(self, message: Mapping[str, Any]) -> list[dict[str, Any]]:
         blocks: list[dict[str, Any]] = []

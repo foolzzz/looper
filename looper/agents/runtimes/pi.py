@@ -38,7 +38,7 @@ from ... import child_env
 from ..run_usage import Usage, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RunCost, RuntimeAdapter,
+    ApiProtocol, AuthKind, Capability, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, RoomPush, RunCost, RuntimeAdapter,
     RuntimeUnsupported, instructions, runtime_prompt_text,
 )
 from .channel import RunChannel
@@ -124,6 +124,7 @@ class PiRuntime(RuntimeAdapter):
     """pi's four-role runtime, with the scoped Looper platform tool bridge."""
 
     type = "pi"
+    room_push = RoomPush.STEER
     label = "pi"
     default_executable = "pi"
     # MCP means the Looper platform bridge only; catalog MCP is recorded as skipped.
@@ -516,7 +517,10 @@ class PiStream:
                     {"type": "tool_result", "tool_use_id": str(message.get("toolCallId") or ""),
                      "content": _message_text(message.get("content")), "is_error": bool(message.get("isError"))}]}},
                     *self._usage(message.get("usage"), parent_tool_use_id=str(message.get("toolCallId") or ""))]
-            if role in ("user", "system"):
+            if role == "user":
+                return [{"type": "system", "subtype": "user_message_receipt", **self._base(),
+                         "text": _message_text(message.get("content"))}]
+            if role == "system":
                 return []  # Input already supplied by Looper.
         if kind == "compaction_end":
             return self._compaction(raw)
