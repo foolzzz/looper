@@ -218,7 +218,7 @@ Looper 在这些时候给规划者发 `escalation`（类型化的 `reason`）：
 - **咨询没有办公台工具**：问题和这个席位以前的回答都在 `[CONSULT]` 这一轮里给出，回答写在回复里由 Looper 发出，所以咨询运行不注入 MCP，也没有令牌。
 - **发给角色的问题**：角色里只有一个跑过的席位时咨询它；有几个时转给规划者（`many_seats`），提问的人可以改问具体的席位。
 - **同一个席位同时至多一个咨询**：在排队的那次会接着收后来的问题；正在跑的期间来的问题排成下一次，等这次结束再开始。服务停止先禁止启动新咨询，取消后保留 `queued`、`running` 状态；恢复时把中断的 `running` 改回 `queued`，每个席位只启动编号最小的一条，后续依次运行。主动 kill（包括等名额时）则记为失败，原因 `stopped`，问题转给规划者。
-- **类型化的原因**：`not_started`、`no_session`、`session_gone`、`runtime_cannot`（运行时续接不了，或这个席位的 Agent Profile 已经换了运行时或 provider）、`no_snapshot`、`limit`、`many_seats`、`budget`、`timeout`、`contract`、`wrote_files`、`stopped`、`unsure`（回答了别的问题，没回答这一个）。
+- **类型化的原因**：`not_started`、`no_session`、`session_gone`、`runtime_cannot`（运行时续接不了，或这个席位的 Agent Profile 已经换了运行时或 provider）、`no_snapshot`、`limit`、`many_seats`、`budget`、`budget_unavailable`（模型没有完整价格，无法保证咨询花费上限）、`timeout`、`contract`、`wrote_files`、`stopped`、`unsure`（回答了别的问题，没回答这一个）。
 - **被拒的写**：Claude Code 的 `permission_denials` 计入 `denied_writes`；写被拒不算失败，回答照常发出。
 - **Codex、OMP 的真实路径没验证**：本机没有能用的 OMP provider；Codex 只能用操作者的登录，按硬规则没有跑。参数来自它们的帮助和 `codex mcp get --json`。
 
@@ -233,12 +233,12 @@ Looper 在这些时候给规划者发 `escalation`（类型化的 `reason`）：
 - **system prompt**：同原运行的各层（harness、角色 prompt 和版本、项目、任务一节按现在的需求和补充说明），加办公台一节，最后是 `CONSULT_CONTRACT`（模型可见，实现用英文，大意）：「你的步骤已经结束。同事有问题要问你。根据你做过的事和你现在能读到的内容回答；不改任何文件。不知道就说不知道。最后一条消息以一个 JSON 对象结尾：`{"answers": [{"reply_to": 17, "body": "...", "refs": [...]}], "unsure": "..."}`。」
 - **user turn**：`[CONSULT]`，这个席位的步骤怎么结束的（接受、失败、被替换），这一批问题（保留每条编号和提问席位，正文总共最多 20,000 字符，按问题数均分并截断），以及这个席位之前回答过的问题（保持前后一致）。问题是别的 agent 的话，是数据。
 - **回复**：Looper 按 `reply_to` 逐条发回答；没有回答的问题、`unsure` 非空的，转给规划者。回复不合契约不做修复回合，直接按失败处理。
-- **限额**：每次咨询 `room_consult_budget_usd`（默认 $0.50，不超过运行的单次上限）、`room_consult_timeout_seconds`（默认 300 秒）、`--max-turns` 20（Claude Code、Grok；Codex、OMP 靠超时和预算）；每种运行时结束后都检查记录的花费，未知时用结果自身的 `total_cost_usd`；超额或仍然未知就丢弃回答，按 `budget` 转交规划者。按 provider 价格计费且模型没有完整价格的咨询不启动，按 `runtime_cannot` 转交规划者。一个截止时间覆盖 stdin 写入、stdout 读取和等待退出；并行排空 stderr，只保留末尾 2,000 字符供错误记录。成功也结束进程树。任务的花费上限照样算进去。
+- **限额**：每次咨询 `room_consult_budget_usd`（默认 $0.50，不超过运行的单次上限）、`room_consult_timeout_seconds`（默认 300 秒）、`--max-turns` 20（Claude Code、Grok；Codex、OMP 靠超时和预算）；每种运行时结束后都检查记录的花费，未知时用结果自身的 `total_cost_usd`；超额或仍然未知就丢弃回答，按 `budget` 转交规划者。按 provider 价格计费且模型没有完整价格的咨询不启动，按 `budget_unavailable` 将问题及缺价格的原因转交规划者，提问方也收到具体原因；时间和轮数限制无法保证花费上限，原运行报告和会话保持完整。一个截止时间覆盖 stdin 写入、stdout 读取和等待退出；并行排空 stderr，只保留末尾 2,000 字符供错误记录。成功也结束进程树。任务的花费上限照样算进去。
 - **记录**：一条 `llm_records`（agent id `consult-<12 位>`，`metadata.consult`：席位、原运行的记录号、问题编号、分叉的会话、只读怎么强制的、在哪个目录跑），花费单独一行，计入任务花费和这个席位所属角色的统计；一条 `room_consults` 行（第 10 节）；动态「Consulted backend_rd@s2 for fe_rd@s4's question #17: answered ($0.03)」。
 
 ### 7.5 转给规划者
 
-原因是枚举，规划者的 `[ROOM]` 回合拿到的是类型加细节：`not_started`（席位还没开始）、`no_session`（没有已结束的会话记录，或入队后有了更新的运行记录）、`session_gone`（续接时会话不在了）、`runtime_cannot`（运行时不能续接，或只读没法强制又没有快照）、`no_snapshot`、`limit`（本任务的咨询次数用完）、`budget`、`timeout`、`contract`、`wrote_files`、`stopped`（咨询被主动停止）。提问方收到一条 `notice`：「backend_rd@s2 没法咨询（session_gone），问题已转给规划者」。
+原因是枚举，规划者的 `[ROOM]` 回合拿到的是类型加细节：`not_started`（席位还没开始）、`no_session`（没有已结束的会话记录，或入队后有了更新的运行记录）、`session_gone`（续接时会话不在了）、`runtime_cannot`（运行时不能续接，或只读没法强制又没有快照）、`no_snapshot`、`limit`（本任务的咨询次数用完）、`budget`、`budget_unavailable`（缺完整价格）、`timeout`、`contract`、`wrote_files`、`stopped`（咨询被主动停止）。提问方收到带具体原因的 `notice`，说明问题已转给规划者。
 
 ## 8. 令牌与注入
 

@@ -345,7 +345,7 @@ class CodexRuntime(RuntimeAdapter):
         if not launch.steers:
             return super().run_channel(process, launch=launch, cwd=cwd, session_dir=session_dir)
         return CodexChannel(process, model=launch.model, effort=launch.effort, cwd=str(cwd),
-                            keep_session=session_dir is not None)
+                            keep_session=session_dir is not None, runtime=self.type)
 
     def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                         session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
