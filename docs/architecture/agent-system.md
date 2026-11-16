@@ -4662,8 +4662,8 @@ before.
   waiting, and `looper_room_read` for earlier or clipped messages. Claude Code
   Workers use `PUSHED_WAITS`: after doing the rest, they wait for a needed
   answer with a waiting report, and deliveries can arrive as their own turn.
-  Its Reviewers and steering Codex and Coco runs use `PUSHED`, never a
-  waiting report.
+  Its Reviewers, steering Codex and Coco runs and hosted Pi/DSH runner runs
+  use `PUSHED`, never a waiting report.
   Runtimes without room deliveries, including Cursor, keep `PULL`; pulling Workers wait with
   `wait_seconds` only for an answer they cannot go on without, after doing
   the rest, never as a timer.
@@ -4678,9 +4678,11 @@ before.
   Every tool's answer carries unread counts. The inbox tool description says
   `wait_seconds` is only for an answer the run cannot go on without, never a
   timer; each call costs a request, and per-runtime wait caps still apply.
-  Running Claude Code Workers and Reviewers (`RoomPush.USER_TURN`) and Codex
+  Running Claude Code Workers and Reviewers (`RoomPush.USER_TURN`), Codex
   and Coco runs with the probed steering capability (`RoomPush.STEER`,
-  Codex 0.162.0 or newer, or Coco with `turn/steer` in its schema) instead
+  Codex 0.162.0 or newer, or Coco with `turn/steer` in its schema), and
+  hosted Pi/DSH runs (`RoomPush.RUNNER`, independent of the CLI steering
+  capability) instead
   receive message bodies
   when a message names them or an interface post
   reaches them. Other posts ride along in an oldest-first prefix: at most
@@ -4702,6 +4704,13 @@ before.
   A rejection or no active turn leaves them unread; an unknown
   acknowledgement advances the in-flight cursor without marking them read
   or retrying, and logs the uncertainty.
+  Hosted runner deliveries use `steer` and are marked read only when
+  `steer_applied` names their delivery uuid as `message_id`, after the steer
+  joins a model request. Acceptance alone marks nothing read, and there is
+  no fallback timer. A `steer_dropped` leaves its messages unread and closes
+  room confirmation for that run: the cumulative cursor cannot skip the
+  dropped delivery to confirm a later one. These drops appear in activity
+  as room deliveries, never as Planner `missed_input`.
   While in flight, that run's inbox and unread counts exclude the delivered
   bodies; an inbox wait still detects matching
   messages within that range as described above. A waiting Worker's check
@@ -4713,7 +4722,8 @@ before.
   answering only those messages preserves the previous outcome, including
   when a final-reply race makes the delivery a separate turn after the report;
   cost still comes from the last result (the session's totals).
-  Other runtimes and consults pull; the Planner's `[ROOM]` turns are unchanged.
+  Runs without an opted-in room push mode and consults pull; the Planner's
+  `[ROOM]` turns are unchanged.
 - **The Planner.** A message for `planner`, and every escalation, is stored
   `planner_pending` and wakes the Planner (`ROOM_MESSAGE`) after a 30 s batch
   (`ROOM_BATCH_SECONDS`); after the event it is in, the Planner gives all that

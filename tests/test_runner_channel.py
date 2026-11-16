@@ -1,8 +1,12 @@
 """Hosted run contracts use real session RPCs, without starting a runner process."""
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+from looper.agents.message import planner_address
+from looper.agents.tiers.worker import RunReply, WorkerConfig, WorkerPool, WorkerProcess
 from looper.agents.runtimes import ApiProtocol
 from looper.agents.runtimes.api.adapter import KEY_ENV
 from looper.agents.runtimes.api.loop import ToolCall
@@ -152,29 +156,42 @@ def test_send_maps_steer_outcomes(tmp_path, outcome):
 
 
 @pytest.mark.parametrize("late", [False, True])
-def test_dropped_steer_is_reported_once(tmp_path, late):
+@pytest.mark.parametrize("room", [False, True])
+def test_dropped_steer_is_reported_once(tmp_path, late, room):
     async def exercise():
         async with connection() as (bridge, reader, writer, _):
             handle = channel(tmp_path, FakeSupervisor(bridge, tmp_path))
             await launch(handle, reader, writer)
             _, turn = await begin(handle, reader, writer)
             handle.send_timeout = 0.02
+            message_ids = []
             for message_id, text in (("first", "applied"), ("second", "dropped")):
-                sending = asyncio.create_task(handle.send(text, uuid=message_id))
+                sending = asyncio.create_task(handle.send(text, uuid=message_id) if room else handle.send(text))
                 request = await p.read_frame(reader)
+                message_ids.append(request.params["message_id"])
                 if late and message_id == "second":
                     assert await sending is DeliveryResult.UNKNOWN
                 await send(writer, p.Response(request.id, result={**turn, "status": "queued"}))
                 if not late or message_id == "first":
                     assert await sending is DeliveryResult.ACCEPTED
-            await update(writer, turn, "steer_applied", message_id="first", after_request_id="q",
+            await update(writer, turn, "steer_applied", message_id=message_ids[0], after_request_id="q",
                          after_tool_batch=True, new_turn=False)
-            await update(writer, turn, "steer_dropped", message_id="second", reason="turn_ended")
+            await update(writer, turn, "steer_dropped", message_id=message_ids[1], reason="turn_ended")
             await settle(writer, turn)
-            await events(handle)
-            assert handle.dropped_input() == ["dropped"]
+            output = await events(handle)
+            assert [e["subtype"] for e in output if e["type"] == "system"] == [
+                "init", "steer_applied", "steer_dropped"]
+            expected = [] if room else ["dropped"]
+            assert handle.dropped_input() == expected
             handle.dropped_input().append("caller mutation")
-            assert handle.dropped_input() == ["dropped"]
+            assert handle.dropped_input() == expected
+            pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+            pool._bus = SimpleNamespace(publish=AsyncMock())
+            wp = WorkerProcess("w1", "step", "plan", handle=handle)
+            await pool._finish_run(wp, None, RunReply(planner_address("task"), "reply", {}),
+                                   AsyncMock(return_value={"status": "completed"}))
+            result = pool._bus.publish.await_args.args[0].payload
+            assert result.get("missed_input", []) == expected
             await close(handle, reader, writer)
     run(exercise())
 
