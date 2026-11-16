@@ -18,6 +18,15 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.11] - 2026-11-16
+
+### Changed
+
+- **OMP and Pi CLI room push: confirmed by receipt only.** ([#1392](https://github.com/foolzzz/looper/pull/1392))
+  - A room message pushed into a running OMP or Pi CLI turn is now marked read only when the runtime's user-message receipt carries the delivery's message ids. Before, these two runtimes used the 30 s fallback that marks a delivery read when no receipt arrives; they now set `room_receipt_fallback = False`, as Grok does. A steer can wait for a later tool call to end, so the timer could mark a message read before the model saw it.
+  - A delivery without a receipt stays unread for the next run or the inbox. Codex keeps its 30 s fallback.
+  - Changed files: `looper/agents/runtimes/omp.py` and `looper/agents/runtimes/pi.py` (two lines each), `tests/test_codex_room_push.py`, and the steering text in `docs/architecture/agent-system.md` and its Chinese RFC. No prompt, tool schema or PostgreSQL schema change.
+
 ## [2.15.10] - 2026-11-16
 
 ### Fixed
