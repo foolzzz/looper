@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.2] - 2026-11-16
+
+### Changed
+
+- **Coco steering and room push through its app-server.** ([#1370](https://github.com/foolzzz/looper/pull/1370))
+  - Coco Workers and Reviewers use `coco app-server` and the shared `CodexChannel` when detection finds `turn/steer` in the generated `ClientRequest.json`; otherwise they keep `exec --json`. Detected steering enables Planner messages during a run and moves room delivery from `PULL` to `PUSHED`. Existing registrations keep their saved capabilities until Re-detect. Behavior change (maintainer decision, intended).
+  - Model-visible: Coco Workers and Reviewers with detected steering get the pushed room guidance instead of the pull guidance, and room message bodies arrive as steered input.
+
 ## [2.15.1] - 2026-11-16
 
 ### Changed

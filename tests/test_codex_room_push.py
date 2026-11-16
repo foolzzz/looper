@@ -21,15 +21,16 @@ from looper.agents.tiers.worker import ConsumeStart, RunContext, WorkerConfig, W
 from tests.run_handle_support import ScriptedRun
 
 
-def _launch(steer: bool) -> Launch:
+def _launch(steer: bool, runtime_type: str = "codex") -> Launch:
     launch = Launch()
-    runtime = replace(launch.profile.runtime, type="codex",
-                      capabilities=ADAPTERS["codex"].capabilities | ({Capability.STEER} if steer else set()))
+    runtime = replace(launch.profile.runtime, type=runtime_type,
+                      capabilities=ADAPTERS[runtime_type].capabilities | ({Capability.STEER} if steer else set()))
     return replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, runtime=runtime)))
 
 
 @pytest.mark.parametrize(("runtime", "steer", "expected"), [
-    ("codex", True, "steer"), ("codex", False, "none"), ("claude-code", False, "user_turn"),
+    ("codex", True, "steer"), ("codex", False, "none"), ("coco", True, "steer"),
+    ("coco", False, "none"), ("claude-code", False, "user_turn"),
     ("grok", True, "steer"), ("grok", False, "none"),
     *((name, True, "none") for name in ("cursor-agent", "omp", "pi", "dsh")),
     pytest.param(PiRunnerRuntime(None, pi=None), False, "runner", id="pi-runner"),
@@ -114,9 +115,10 @@ def test_history_receipts_match_ids_and_never_skip_unseen_deliveries(tmp_path, m
 
 @pytest.mark.parametrize("steer", [True, False])
 @pytest.mark.parametrize("review", [True, False])
-def test_codex_stream_delivers_only_during_tools_and_matches_guidance(tmp_path, agent_db, steer, review):
+@pytest.mark.parametrize("runtime_type", ["codex", "coco"])
+def test_codex_stream_delivers_only_during_tools_and_matches_guidance(tmp_path, agent_db, steer, review, runtime_type):
     async def run():
-        launch = _launch(steer)
+        launch = _launch(steer, runtime_type)
         pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
         seat = Seat("reviewer@s1" if review else "worker@s1", "reviewer" if review else "worker",
                     MemberKind.REVIEW if review else MemberKind.WORK, run="w1")

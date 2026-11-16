@@ -1318,8 +1318,9 @@ Manager tools.
   `resume`, `steer`, `read_tools`, `compaction_events` and `mcp` when the
   probe accepts version 1.3.0 or newer and every required help flag, and none
   otherwise. Pi's `mcp` is the Looper platform bridge only; Cursor Agent has
-  `run`, `resident_session`, `resume`, `mcp` and `add_dirs`, as does Coco). Codex and OMP list `steer` when
-  their probe finds the steering protocol (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md));
+  `run`, `resident_session`, `resume`, `mcp` and `add_dirs`, as does Coco).
+  Codex, Coco and OMP list `steer` when their probe finds the steering protocol
+  (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md));
   Claude Code and Grok do not. Pi's `steer` is in that probed set.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
@@ -1731,7 +1732,15 @@ Manager tools.
   are `auto`, `gpt-5.3-codex`, `gpt-5.6-sol-high`, `composer-2.5` and
   `gemini-3.7-flash-high`, without built-in prices.
 - **Coco (TRAE CLI)** (`looper/agents/runtimes/coco.py`, the `coco` CLI)
-  runs Manager, Planner, Worker and Reviewer through the Codex adapter's `exec --json` path.
+  runs Manager and Planner through the Codex adapter's `exec --json` path.
+  Workers and Reviewers use `coco app-server` and the shared `CodexChannel`
+  when detection finds `turn/steer` in the generated `ClientRequest.json`;
+  otherwise they keep `exec --json`. Version and schema detection each use an
+  empty temporary `TRAE_HOME`; Coco's version is not subject to Codex's
+  version gate.
+  Existing registrations keep their saved capabilities until Re-detect:
+  detecting steering enables Planner messages during a run and switches room
+  delivery and its model-visible guidance from `PULL` to `PUSHED`.
   It is a Codex-family CLI with its own home layout: Looper sets `TRAE_HOME`
   to a private run directory containing `traecli.toml`, `AGENTS.md` and a
   `cli/auth.json` symbolic link to the operator's coco login. Looper never
@@ -1755,7 +1764,9 @@ Manager tools.
   id for the next turn.
 
   **Through TTADK.** The separate `ttadk-coco` runtime uses
-  `ttadk code -t trae-cli --skip-check -- exec --json …`. TTADK adds its
+  `ttadk code -t trae-cli --skip-check -- exec --json …`.
+  Workers and Reviewers with detected steering instead use
+  `ttadk code -t trae-cli --skip-check -- app-server`. TTADK adds its
   sign-in check, banner lines and launch event; Coco uses the same isolated
   `TRAE_HOME` and login. The retired `ttadk code -t coco` command no longer
   exists. TTADK's `-m` does not select a model for this tool: Looper passes
@@ -1773,8 +1784,8 @@ Manager tools.
   login row shows `coco login status` and `coco login` when it cannot be used.
   Coco reports tokens only, no actual model or prices, so `model_reported`
   stays empty and usage is unpriced. TRAE's servers make the model requests;
-  the recording proxy marks these runs `not_covered`. Consult and steering
-  support are not enabled yet.
+  the recording proxy marks these runs `not_covered`. Consult support is not
+  enabled yet.
 - **Pi** (`looper/agents/runtimes/pi.py`, the `pi` CLI, minimum 1.3.0,
   verified against pi 1.3.0 in the [pi runtime RFC](rfcs/pi-runtime-v0.zh-CN.md))
   runs Manager, Planner, Worker and Reviewer. With the default `[runtimes] pi = "runner"`,
@@ -4651,8 +4662,8 @@ before.
   waiting, and `looper_room_read` for earlier or clipped messages. Claude Code
   Workers use `PUSHED_WAITS`: after doing the rest, they wait for a needed
   answer with a waiting report, and deliveries can arrive as their own turn.
-  Its Reviewers, steering Codex runs and hosted Pi/DSH runner runs use
-  `PUSHED`, never a waiting report.
+  Its Reviewers, steering Codex and Coco runs and hosted Pi/DSH runner runs
+  use `PUSHED`, never a waiting report.
   Runtimes without room deliveries, including Cursor, keep `PULL`; pulling Workers wait with
   `wait_seconds` only for an answer they cannot go on without, after doing
   the rest, never as a timer.
@@ -4668,9 +4679,10 @@ before.
   `wait_seconds` is only for an answer the run cannot go on without, never a
   timer; each call costs a request, and per-runtime wait caps still apply.
   Running Claude Code Workers and Reviewers (`RoomPush.USER_TURN`), Codex
-  runs with the probed steering capability (`RoomPush.STEER`, Codex 0.162.0
-  or newer with `turn/steer` in its schema), and hosted Pi/DSH runs
-  (`RoomPush.RUNNER`, independent of the CLI steering capability) instead
+  and Coco runs with the probed steering capability (`RoomPush.STEER`,
+  Codex 0.162.0 or newer, or Coco with `turn/steer` in its schema), and
+  hosted Pi/DSH runs (`RoomPush.RUNNER`, independent of the CLI steering
+  capability) instead
   receive message bodies
   when a message names them or an interface post
   reaches them. Other posts ride along in an oldest-first prefix: at most
@@ -4681,8 +4693,8 @@ before.
   A batch with an addressed message can go every 10 s; other batches every
   60 s, with a retry when the interval ends. Claude Code messages are marked
   read on the delivery's replay echo or a result naming its uuid in `user_message_uuids`,
-  never merely on writing stdin. Codex deliveries use `turn/steer` only while
-  a tool call runs and remain in flight after acknowledgement. They are marked
+  never merely on writing stdin. Codex and Coco deliveries use `turn/steer`
+  only while a tool call runs and remain in flight after acknowledgement. They are marked
   read when an app-server `userMessage` history item carries the delivery's
   message ids, advancing only past earlier confirmed deliveries. These items
   are receipts, not assistant output. If no item arrives within 30 s of
