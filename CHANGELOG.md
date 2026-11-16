@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-11-16
+
+This is a minor release, not a patch release. No pull request was merged after v2.14.193, so it changes no code; it marks the 2.14 series. Its release body, [docs/releases/v2.15.0.md](docs/releases/v2.15.0.md), summarizes the series since v2.14.0 by theme, and the entries below it stay the record of each patch.
+
+### Changed
+
+- **Version number only.** `looper.__version__` and `pyproject.toml` move from 2.14.193 to 2.15.0.
+  - No code, schema, setting or interface differs from v2.14.193; the first start of this version changes and backs up nothing for an installation already on v2.14.193. The bridge boundary is unchanged (upgrade to v2.13.165 first if older).
+  - Not model-visible.
+
 ## [2.14.193] - 2026-11-15
 
 ### Changed
