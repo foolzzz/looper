@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from ...run_usage import Price
 from ..api.loop import ToolCall, ToolOutcome, ToolSpec, TurnTools
-from ..channel import DeliveryResult, RunStartError
+from ..channel import DeliveryResult, RoomSteerWindow, RunStartError
 from .bridge import ConnectionLost, RpcFailure
 from .protocol import ErrorCode, ProtocolError
 from .session import Descriptor, RunnerSession
@@ -49,6 +49,7 @@ class RunnerChannel:
         self._steers: set[asyncio.Task] = set()
         self._sent: dict[str, str] = {}
         self._dropped: list[str] = []
+        self._room_window = RoomSteerWindow()
 
     @property
     def command(self) -> list[str]:
@@ -104,6 +105,7 @@ class RunnerChannel:
             self._ready.set()
 
     def _on_event(self, event: dict[str, Any]) -> None:
+        self._room_window.observe(event)
         if event.get("type") == "system":
             subtype = event.get("subtype")
             if subtype == "init":
@@ -131,10 +133,20 @@ class RunnerChannel:
     async def send(self, text: str, *, uuid: str | None = None) -> DeliveryResult:
         if self._input_closed or self._turn is None or self._turn.done() or not self.session.started:
             return DeliveryResult.REJECTED
+        try:
+            self._room_window.check(uuid)
+        except RuntimeError:
+            return DeliveryResult.REJECTED
         message_id = uuid or "steer-" + uuid4().hex
         if not message_id.startswith("looper-reminder-"):
             self._sent[message_id] = text  # Only Planner input is returned by dropped_input().
-        task = asyncio.create_task(self.session.steer(text, message_id=message_id))
+        def before_write() -> None:
+            try:
+                self._room_window.check(uuid)
+            except RuntimeError:
+                raise ProtocolError(ErrorCode.NOT_RUNNING) from None
+
+        task = asyncio.create_task(self.session.steer(text, message_id=message_id, before_write=before_write))
         self._steers.add(task)
         def finished(task):
             self._steers.discard(task)
