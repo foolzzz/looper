@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from looper.agents.message import planner_address
+from looper.agents.message import MessageEnvelope, MessageType, planner_address, worker_address
 from looper.agents.tiers.worker import RunReply, WorkerConfig, WorkerPool, WorkerProcess
 from looper.agents.runtimes import ApiProtocol
 from looper.agents.runtimes.api.adapter import KEY_ENV
@@ -156,37 +156,60 @@ def test_send_maps_steer_outcomes(tmp_path, outcome):
 
 
 @pytest.mark.parametrize("late", [False, True])
-@pytest.mark.parametrize("room", [False, True])
-def test_dropped_steer_is_reported_once(tmp_path, late, room):
+@pytest.mark.parametrize("source", ["generated", "planner", "room"])
+@pytest.mark.parametrize("reason", ["turn_ended", "session_closed"])
+def test_dropped_steer_is_reported_once(tmp_path, late, source, reason):
     async def exercise():
         async with connection() as (bridge, reader, writer, _):
             handle = channel(tmp_path, FakeSupervisor(bridge, tmp_path))
             await launch(handle, reader, writer)
             _, turn = await begin(handle, reader, writer)
             handle.send_timeout = 0.02
+            pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+            pool._bus = SimpleNamespace(publish=AsyncMock())
+            pool._inputs["w1"] = handle
+
+            async def deliver(text, index):
+                if source == "planner":
+                    envelope = MessageEnvelope.create(
+                        source=planner_address("task"), target=worker_address("w1"),
+                        message_type=MessageType.WORKER_INPUT, payload={"text": text})
+                    await pool._deliver_input(envelope)
+                    ack = pool._bus.publish.await_args.args[0]
+                    assert ack.message_type is MessageType.WORKER_INPUT_RESULT
+                    assert ack.reply_to == envelope.message_id == message_ids[-1]
+                    return DeliveryResult(ack.payload["delivered"])
+                uuid = f"looper-reminder-012345abcdef-{index}" if source == "room" else None
+                return await handle.send(text, uuid=uuid)
+
+            # A steer queued during the last request's tool batch can be dropped
+            # when the next model request hits the request limit.
+            await update(writer, turn, "message", model="model", content=[{
+                "type": "tool_use", "id": "tool", "name": "bash", "input": {"command": "true"}}])
             message_ids = []
-            for message_id, text in (("first", "applied"), ("second", "dropped")):
-                sending = asyncio.create_task(handle.send(text, uuid=message_id) if room else handle.send(text))
+            for index, text in enumerate(("applied", "dropped"), 1):
+                sending = asyncio.create_task(deliver(text, index))
                 request = await p.read_frame(reader)
+                assert request.method == "session/steer" and request.params["text"] == text
                 message_ids.append(request.params["message_id"])
-                if late and message_id == "second":
+                if late and index == 2:
                     assert await sending is DeliveryResult.UNKNOWN
                 await send(writer, p.Response(request.id, result={**turn, "status": "queued"}))
-                if not late or message_id == "first":
+                if not late or index == 1:
                     assert await sending is DeliveryResult.ACCEPTED
             await update(writer, turn, "steer_applied", message_id=message_ids[0], after_request_id="q",
                          after_tool_batch=True, new_turn=False)
-            await update(writer, turn, "steer_dropped", message_id=message_ids[1], reason="turn_ended")
-            await settle(writer, turn)
+            await update(writer, turn, "tool_result", call_id="tool", text="done", is_error=False)
+            await update(writer, turn, "steer_dropped", message_id=message_ids[1], reason=reason)
+            await settle(writer, turn, outcome="max_requests")
             output = await events(handle)
             assert [e["subtype"] for e in output if e["type"] == "system"] == [
                 "init", "steer_applied", "steer_dropped"]
-            expected = [] if room else ["dropped"]
+            assert output[-1]["subtype"] == "error_max_turns"
+            expected = [] if source == "room" else ["dropped"]
             assert handle.dropped_input() == expected
             handle.dropped_input().append("caller mutation")
             assert handle.dropped_input() == expected
-            pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
-            pool._bus = SimpleNamespace(publish=AsyncMock())
             wp = WorkerProcess("w1", "step", "plan", handle=handle)
             await pool._finish_run(wp, None, RunReply(planner_address("task"), "reply", {}),
                                    AsyncMock(return_value={"status": "completed"}))
