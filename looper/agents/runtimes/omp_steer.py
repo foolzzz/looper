@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from ..claude_cli import iter_lines
-from .channel import DeliveryAttempt, DeliveryResult, delivery_attempt
+from .channel import DeliveryAttempt, DeliveryResult, RoomSteerWindow, delivery_attempt
 from .omp import OmpStream, provider_error, safe_error
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ class OmpChannel:
                  secrets: tuple[str, ...] = ()) -> None:
         self._process = process
         self._stream = OmpStream(model=model, secrets=secrets)
+        self._room_window = RoomSteerWindow()
         self._cwd = cwd
         self._lock = asyncio.Lock()
         self._next_id = 0
@@ -119,7 +120,10 @@ class OmpChannel:
                     continue
                 if raw.get("type") in _DROPPED:
                     continue
+                if raw.get("type") == "tool_execution_end":
+                    self._room_window.tool_finished(str(raw.get("toolCallId") or ""))
                 for event in self._stream.translate(raw):
+                    self._room_window.observe(event)
                     if event.get("type") == "result":
                         self._result_seen = True
                         if event.get("is_error"):
@@ -159,7 +163,7 @@ class OmpChannel:
 
     async def send(self, text: str, *, uuid: str | None = None) -> DeliveryResult:
         async with delivery_attempt(self.send_timeout) as attempt:
-            response = await self._steer(text, attempt)
+            response = await self._steer(text, attempt, uuid=uuid)
             if response.get("command") != "steer":
                 return DeliveryResult.UNKNOWN
             if response.get("success") is False:
@@ -168,12 +172,13 @@ class OmpChannel:
                 return DeliveryResult.UNKNOWN
         return attempt.result
 
-    async def _steer(self, text: str, attempt: DeliveryAttempt) -> dict[str, Any]:
+    async def _steer(self, text: str, attempt: DeliveryAttempt, *, uuid: str | None = None) -> dict[str, Any]:
         """Lock, write and acknowledgement under the caller's one deadline."""
         assert self._process.stdin is not None
         async with self._lock:
             if self._ended or self._result_seen or self._process.stdin.is_closing():
                 raise RuntimeError("the OMP run has ended")
+            self._room_window.check(uuid)
             attempt.writing = True
             request_id, future = await self._write("steer", message=text)
         try:

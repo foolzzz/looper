@@ -986,3 +986,79 @@ def test_a_secret_used_as_a_key_does_not_reach_the_logs(caplog: pytest.LogCaptur
     caplog.set_level("DEBUG")
     asyncio.run(run())
     assert "ignoring" in caplog.text and "SECRET" not in caplog.text
+
+
+@pytest.mark.parametrize("blocked", ["read_ahead", "lock"])
+def test_room_steer_after_last_tool_keeps_report_even_with_queued_output(blocked: str,
+                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    from looper.agents.tiers.worker import delivery_uuid
+
+    async def run() -> None:
+        requests = []
+
+        class Stdin(_StalledStdin):
+            def write(self, data: bytes) -> None:
+                request = json.loads(data)
+                requests.append(request)
+                process.stdout.feed_data(json.dumps({"id": request["id"], "result": {"turnId": "t"}}).encode() + b"\n")
+
+            async def drain(self) -> None:
+                pass
+
+        process = _Process(Stdin())
+        channel = CodexChannel(process, model="m", effort="", cwd="/", keep_session=False)  # type: ignore[arg-type]
+        channel._turn_ready.set()
+        channel._turn_id, channel._thread_id = "t", "th"
+        final_seen = asyncio.Event()
+        translate = channel._stream.translate
+
+        def observe(raw: dict[str, Any]) -> list[dict[str, Any]]:
+            if raw.get("item", {}).get("type") == "agent_message":
+                final_seen.set()
+            return translate(raw)
+
+        monkeypatch.setattr(channel._stream, "translate", observe)
+
+        def notify(method: str, **params: Any) -> None:
+            process.stdout.feed_data(json.dumps({"method": method, "params": params}).encode() + b"\n")
+
+        item = {"id": "cmd", "type": "commandExecution", "command": "work", "status": "inProgress"}
+        notify("item/started", item=item)
+        iterator = channel.events()
+        first = await anext(iterator)
+        assert _blocks([first], "tool_use")
+        sending = None
+        try:
+            if blocked == "lock":
+                await channel._lock.acquire()
+                sending = asyncio.create_task(channel.send("late room delivery", uuid=delivery_uuid(42)))
+                await asyncio.sleep(0)
+            notify("item/completed", item={**item, "status": "completed", "exitCode": 0})
+            notify("item/started", item={"id": "answer", "type": "agentMessage", "text": ""})
+            await final_seen.wait()
+            # The consumer still holds the tool-start event; the protocol reader must close the window itself.
+            if blocked == "lock":
+                channel._lock.release()
+            else:
+                sending = asyncio.create_task(channel.send("late room delivery", uuid=delivery_uuid(42)))
+            with pytest.raises(RuntimeError):
+                await sending
+            assert requests == []
+            assert await channel.send("Planner follow-up", uuid="planner-message") is DeliveryResult.ACCEPTED
+            report = json.dumps({"status": "completed", "summary": "original report"})
+            notify("item/completed", item={"id": "answer", "type": "agentMessage", "text": report})
+            notify("turn/completed", turn={"id": "t", "status": "completed"})
+            process.stdout.feed_eof()
+            events = [event async for event in iterator]
+            result, = [event for event in events if event["type"] == "result"]
+            assert result["result"] == report
+            assert [r["params"]["input"][0]["text"] for r in requests] == ["Planner follow-up"]
+        finally:
+            if channel._lock.locked():
+                channel._lock.release()
+            if sending is not None:
+                sending.cancel()
+                await asyncio.gather(sending, return_exceptions=True)
+            await iterator.aclose()
+
+    asyncio.run(asyncio.wait_for(run(), 3))
