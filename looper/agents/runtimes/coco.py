@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shlex
 import subprocess
 import tempfile
@@ -68,7 +69,25 @@ class CocoRuntime(CodexRuntime):
         if done.returncode != 0 or not first:
             return Probe(None, self.capabilities, f"{executable} --version failed (exit code {done.returncode})"
                                                   + (f": {first}" if first else ""))
-        return Probe(first[:200], self.capabilities)
+        capabilities = self.capabilities
+        try:
+            with tempfile.TemporaryDirectory(prefix="looper-coco-schema-") as directory:
+                root = Path(directory)
+                home = root / "home"
+                home.mkdir()
+                schema = subprocess.run(
+                    [executable, "app-server", "generate-json-schema", "--out", str(root / "schema")],
+                    capture_output=True, text=True, timeout=10, check=False,
+                    env={**child_env.inherited(), "TRAE_HOME": str(home)},
+                )
+                if schema.returncode == 0:
+                    requests = json.loads((root / "schema" / "ClientRequest.json").read_text(encoding="utf-8"))
+                    if any(request.get("properties", {}).get("method", {}).get("enum") == ["turn/steer"]
+                           for request in requests.get("oneOf", [])):
+                        capabilities |= {Capability.STEER}
+        except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
+            pass  # Older Coco builds keep the exec path when the schema is unavailable.
+        return Probe(first[:200], capabilities)
 
     def bind_provider(self, provider: ProviderSpec, model: str, effort: str) -> ProviderBinding:
         if provider.auth is not AuthKind.OAUTH or provider.oauth_runtime_type != self.type:
@@ -118,10 +137,6 @@ class CocoRuntime(CodexRuntime):
 
     def resident_session(self, label: str) -> ResidentSession:
         return ResidentCodex(label=label, home=COCO, runtime_label=self.label)
-
-    def steer_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
-                      max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
-        raise RuntimeUnsupported("coco runs cannot be steered yet")
 
     def consult_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
                         session_id: str, session_dir: Path | None, fork_dir: Path, max_turns: int = 0) -> list[str]:
