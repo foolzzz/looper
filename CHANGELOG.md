@@ -18,6 +18,16 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.6] - 2026-11-16
+
+### Fixed
+
+- **Room consults without full model prices, and the runtime label of steering Codex-family runs.** ([#1379](https://github.com/foolzzz/looper/pull/1379), fixes [#1374](https://github.com/foolzzz/looper/issues/1374))
+  - A consult that needs a spend cap but whose model has no full provider price (as the Coco models) is no longer refused as `runtime_cannot`. It ends with the new typed reason `budget_unavailable` before it starts, because time and turn limits do not establish a spend cap. The question and the reason go to the Planner, and the asking seat's notice names the reason too (it did not before). The source run's report and session are left intact, and no answer is invented. Behavior change.
+  - A steering run on a runtime that uses the Codex channel (Coco) reports its own runtime in its init event again; it reported `codex` since #1370.
+  - The Cursor channel raises `BrokenPipeError` when the runtime has closed stdin before the first prompt, instead of writing to it.
+  - Model-visible: the room's `[ROOM]` escalation to the Planner and the asker's notice now carry `budget_unavailable` and the reason text; no prompt contract or tool schema changed.
+
 ## [2.15.5] - 2026-11-16
 
 ### Changed
