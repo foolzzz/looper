@@ -12,7 +12,7 @@ import pytest
 
 from looper.agents.agent_settings import Launch
 from looper.agents.room import MemberKind, RoomDelivery, RoomInput, Seat, room_section
-from looper.agents.runtimes import ADAPTERS, Capability
+from looper.agents.runtimes import ADAPTERS, Capability, RoomPush
 from looper.agents.runtimes.channel import DeliveryResult
 from looper.agents.tiers.worker import ConsumeStart, RunContext, WorkerConfig, WorkerPool, room_input
 from tests.run_handle_support import ScriptedRun
@@ -48,7 +48,7 @@ def test_grok_room_read_follows_receipts_without_timeout(tmp_path, agent_db, mon
                 yield {"type": "assistant", "message": {"content": [
                     {"type": "tool_use", "name": "read_file", "input": {}, "id": "tool"}]}}
                 state = pool._reminders["w1"]
-                assert state.confirm_on_item and not state.receipt_fallback
+                assert state.receipt is RoomPush.STEER and not state.receipt_fallback
                 assert sent
                 room.confirm.assert_not_awaited()
                 if outcome == "read":

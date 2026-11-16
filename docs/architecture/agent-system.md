@@ -1318,9 +1318,9 @@ Manager tools.
   `resume`, `steer`, `read_tools`, `compaction_events` and `mcp` when the
   probe accepts version 1.3.0 or newer and every required help flag, and none
   otherwise. Pi's `mcp` is the Looper platform bridge only; Cursor Agent has
-  `run`, `resident_session`, `resume`, `mcp` and `add_dirs`, as does Coco). Codex, OMP and Grok list `steer` when
-  their probe finds the steering protocol (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md)
-  and Grok's probe below); Claude Code does not. Pi's `steer` is in that probed set.
+  `run`, `resident_session`, `resume`, `mcp` and `add_dirs`, as does Coco). Codex and OMP list `steer` when
+  their probe finds the steering protocol (see the [steering RFC](rfcs/worker-steering-v0.zh-CN.md));
+  Claude Code and Grok do not. Pi's `steer` is in that probed set.
 - **Codex** (`looper/agents/runtimes/codex.py`, verified against Codex CLI
   0.162.0 in the RFC's section 6) runs `codex exec --json` with API key
   providers that serve `openai-responses`, or with Codex's own ChatGPT
@@ -1528,9 +1528,9 @@ Manager tools.
   delivery to real accounts. `looper config init-ops` writes the `dsh` runtime
   setting; ordinary CLI Profile selection is unchanged.
 
-- **Grok** (`looper/agents/runtimes/grok.py`, xAI's `grok` CLI; headless and
-  resident ACP verified against 1.0.62 in the [Grok runtime RFC](rfcs/grok-runtime-v0.zh-CN.md),
-  mid-turn interjections against 1.0.77) runs headless `grok --prompt-file /dev/stdin --output-format
+- **Grok** (`looper/agents/runtimes/grok.py`, xAI's `grok` CLI, verified
+  against Grok 1.0.62 in the [Grok runtime RFC](rfcs/grok-runtime-v0.zh-CN.md))
+  runs headless `grok --prompt-file /dev/stdin --output-format
   streaming-messages-json --always-approve --trust` with Grok's own login
   only (the built-in provider `grok-login`, below). Agent Profiles default
   `web_search` to `true`. Setting it to `false` adds `--disable-web-search`
@@ -1556,20 +1556,8 @@ Manager tools.
   `~/.claude/settings.json` through it whatever its config says. A project's
   instruction files are read by Grok itself, every name it knows in each
   directory from the repository's root down (`AGENTS.md` and `CLAUDE.md`
-  both when both are there). A Worker or Reviewer without the probed `steer`
-  capability is one headless process with its prompt on stdin, which then
-  closes. With `steer`, it uses `grok_steer.GrokChannel`: one ACP process in
-  the run's home, `session/new` and one `session/prompt`, with Planner messages
-  and room deliveries sent through `_x.ai/interject` (`sessionId`, `text`,
-  `interjectionId` set to the delivery uuid). The probe requires version
-  1.0.77 or newer and checks the method without a model call: an interjection
-  to a nonexistent session must return -32602, "session not found"; -32601
-  means the method is absent. It is not declared in `initialize` capabilities.
-  Acceptance leaves a running tool untouched. The channel reuses `AcpTurn`
-  for events and cost, emulates `--max-turns`, and restricts reading tools
-  through an agent profile's `tools:` line, since root `--tools` has no effect
-  on `agent stdio`. Runs without that capability retain headless `PULL` behavior.
-  The Manager and a Planner run one
+  both when both are there). A Worker or Reviewer is one process with its
+  prompt on stdin, which then closes. The Manager and a Planner run one
   resident process over ACP (`grok --trust --no-auto-update agent
   --always-approve -m <model> --effort <effort> stdio`, JSON-RPC lines on
   stdio; `grok_acp.AcpGrok`) in a home of their own (`grok/sessions/<agent>`,
@@ -4663,7 +4651,8 @@ before.
   waiting, and `looper_room_read` for earlier or clipped messages. Claude Code
   Workers use `PUSHED_WAITS`: after doing the rest, they wait for a needed
   answer with a waiting report, and deliveries can arrive as their own turn.
-  Its Reviewers and steering Codex and Grok runs use `PUSHED`, never a waiting report.
+  Its Reviewers, steering Codex runs and hosted Pi/DSH runner runs use
+  `PUSHED`, never a waiting report.
   Runtimes without room deliveries, including Cursor, keep `PULL`; pulling Workers wait with
   `wait_seconds` only for an answer they cannot go on without, after doing
   the rest, never as a timer.
@@ -4678,10 +4667,11 @@ before.
   Every tool's answer carries unread counts. The inbox tool description says
   `wait_seconds` is only for an answer the run cannot go on without, never a
   timer; each call costs a request, and per-runtime wait caps still apply.
-  Running Claude Code Workers and Reviewers (`RoomPush.USER_TURN`) and Codex or Grok
+  Running Claude Code Workers and Reviewers (`RoomPush.USER_TURN`), Codex
   runs with the probed steering capability (`RoomPush.STEER`, Codex 0.162.0
-  or newer with `turn/steer` in its schema, or Grok 1.0.77 or newer with
-  `_x.ai/interject` verified by the probe) instead receive message bodies
+  or newer with `turn/steer` in its schema), and hosted Pi/DSH runs
+  (`RoomPush.RUNNER`, independent of the CLI steering capability) instead
+  receive message bodies
   when a message names them or an interface post
   reaches them. Other posts ride along in an oldest-first prefix: at most
   10 messages and 4,000 characters, bodies clipped at 1,500 for addressed or
@@ -4699,18 +4689,16 @@ before.
   acknowledgement while the run is still active, Looper logs a warning and
   falls back to acknowledging that delivery as read. A run ending before
   receipt or fallback leaves the messages unread for its next turn or retry.
-  Grok's queued response and `_x.ai/session/interjection` notification are
-  acceptance receipts only: the delivery stays in flight. It is marked read
-  when the stream shows new model output starting after a tool result that
-  ended after that notification, advancing only past earlier confirmed
-  deliveries. The running tool is not cancelled. A turn ending before that
-  evidence, or an interjection refused with an error response, leaves the
-  message unread for the next turn or retry. Grok has no timer fallback that
-  marks unseen messages read; idle-session, final-response and multiple-
-  interjection behavior has not been verified on the real CLI.
   A rejection or no active turn leaves them unread; an unknown
   acknowledgement advances the in-flight cursor without marking them read
   or retrying, and logs the uncertainty.
+  Hosted runner deliveries use `steer` and are marked read only when
+  `steer_applied` names their delivery uuid as `message_id`, after the steer
+  joins a model request. Acceptance alone marks nothing read, and there is
+  no fallback timer. A `steer_dropped` leaves its messages unread and closes
+  room confirmation for that run: the cumulative cursor cannot skip the
+  dropped delivery to confirm a later one. These drops appear in activity
+  as room deliveries, never as Planner `missed_input`.
   While in flight, that run's inbox and unread counts exclude the delivered
   bodies; an inbox wait still detects matching
   messages within that range as described above. A waiting Worker's check
@@ -4722,7 +4710,8 @@ before.
   answering only those messages preserves the previous outcome, including
   when a final-reply race makes the delivery a separate turn after the report;
   cost still comes from the last result (the session's totals).
-  Other runtimes and consults pull; the Planner's `[ROOM]` turns are unchanged.
+  Runs without an opted-in room push mode and consults pull; the Planner's
+  `[ROOM]` turns are unchanged.
 - **The Planner.** A message for `planner`, and every escalation, is stored
   `planner_pending` and wakes the Planner (`ROOM_MESSAGE`) after a 30 s batch
   (`ROOM_BATCH_SECONDS`); after the event it is in, the Planner gives all that

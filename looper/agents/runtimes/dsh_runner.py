@@ -15,7 +15,7 @@ from ... import child_env
 from ..agent_settings import AgentType
 from ..library import ItemKind
 from ..profile_registry import RegistryError
-from . import ADAPTERS, ApiProtocol, PromptBlock, RuntimeUnsupported, instructions, runtime_prompt_text
+from . import ADAPTERS, ApiProtocol, PromptBlock, RoomPush, RuntimeUnsupported, instructions, runtime_prompt_text
 from . import dsh
 from .api.adapter import KEY_ENV
 from .channel import Fork
@@ -56,6 +56,7 @@ def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None =
 
 
 class DshRunnerRuntime(DshRuntime):
+    room_push = RoomPush.RUNNER
     hosts_runs = platform_tools_in_process = can_interrupt = True
     isolation_id = "dsh-runner/v1"
 

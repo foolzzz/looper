@@ -18,6 +18,14 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.1] - 2026-11-16
+
+### Changed
+
+- **Room push for SDK-runner runs (Pi and DSH default path).** ([#1369](https://github.com/foolzzz/looper/pull/1369))
+  - Hosted Pi and DSH runs get room messages by `steer` (new `RoomPush.RUNNER`) instead of pulling them. A delivery is marked read only when `steer_applied` names its uuid as `message_id`; acceptance alone marks nothing and there is no fallback timer. A `steer_dropped` leaves its messages unread and closes room confirmation for that run; the drop shows in activity, never as Planner `missed_input`. Behavior change (maintainer decision, intended).
+  - Model-visible: these runs get the pushed room guidance instead of the pull guidance, and room message bodies arrive as steered input.
+
 ## [2.15.0] - 2026-11-16
 
 This is a minor release, not a patch release. No pull request was merged after v2.14.193, so it changes no code; it marks the 2.14 series. Its release body, [docs/releases/v2.15.0.md](docs/releases/v2.15.0.md), summarizes the series since v2.14.0 by theme, and the entries below it stay the record of each patch.
