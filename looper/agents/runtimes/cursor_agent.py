@@ -476,6 +476,8 @@ class CursorChannel(StreamChannel):
 
     async def start(self, prompt: str, *, resume: bool = False) -> None:
         assert self._process.stdin is not None
+        if self._process.stdin.is_closing():
+            raise BrokenPipeError("the runtime closed stdin before the first prompt")
         await self._cursor.write_turn(self._process.stdin, prompt, instructions="" if resume else self._instructions)
 
     def events(self) -> AsyncIterator[dict[str, Any]]:

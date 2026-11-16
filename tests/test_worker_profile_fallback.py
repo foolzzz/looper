@@ -301,7 +301,9 @@ def test_one_model_event_then_exit_never_falls_back(run_primary, runtime, launch
     assert len(records) == 1
 
 
-def test_model_event_before_prompt_delivery_never_falls_back(run_primary, monkeypatch):
+@pytest.mark.parametrize("runtime", ["codex", "cursor-agent"])
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_model_event_before_prompt_delivery_never_falls_back(run_primary, monkeypatch, runtime, exit_code):
     spawn = worker.proc_tree.spawn
 
     async def exited_process(*args, **kwargs):
@@ -311,8 +313,9 @@ def test_model_event_before_prompt_delivery_never_falls_back(run_primary, monkey
         return process
 
     monkeypatch.setattr(worker.proc_tree, "spawn", exited_process)
-    event = {"type": "item.started", "item": {"id": "call", "type": "command_execution", "command": "pwd"}}
-    result, records = run_primary("codex", Launcher.TTADK, events=[event], exit_code=0)
+    event = ({"type": "item.started", "item": {"id": "call", "type": "command_execution", "command": "pwd"}}
+             if runtime == "codex" else ASSISTANT)
+    result, records = run_primary(runtime, Launcher.TTADK, events=[event], exit_code=exit_code)
     assert result["status"] == "failed"
     assert "fallback" not in result
     assert len(records) == 1
