@@ -18,6 +18,19 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.12] - 2026-11-16
+
+### Added
+
+- **Delivered-text notifications for agent schedules.** ([#1394](https://github.com/foolzzz/looper/pull/1394))
+  - New schedule setting `notify_format`: `report` (default) or `deliverable`, in the database (additive migration `schedule_notify_format`), HTTP API, Manager tools, config export/import and the dashboard's schedule form. Command schedules accept only `report`.
+  - With `deliverable`, a successful run sends only the result's `## Delivered` section (or the result without leading headings), up to 4,000 characters at a line boundary; a failed run sends a short Chinese sentence and the `## Why it ended` section or the run error, up to 800 characters. Alerts and recoveries stay on the dashboard.
+
+### Changed
+
+- **Operator reports keep summary line breaks.** ([#1394](https://github.com/foolzzz/looper/pull/1394)) An agent run's `report` message drops blank lines and limits the summary to 12 lines and 1,200 characters, instead of one flattened snippet. Status, cost and link remain.
+- The agent-system docs list `interrupted` among the failures `notify=failures` sends, as the code already did.
+
 ## [2.15.11] - 2026-11-16
 
 ### Changed
