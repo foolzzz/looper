@@ -5,8 +5,11 @@ Verified against Grok 1.0.62 (the Grok runtime RFC, sections 2 and 12):
 - **A run** is ``grok --prompt-file /dev/stdin --output-format
   streaming-messages-json ...``: headless mode reads no prompt from stdin, so
   the prompt is read as a file, the process's stdin to its end; it runs one turn
-  and exits. It takes no user turn while it runs, so a Worker cannot be steered
+  and exits. Runs without the probed steering capability keep this path
   (``write_turn`` closes stdin after the prompt).
+- **A steering run** uses ACP (``grok_steer.GrokChannel``) and Grok 1.0.77's
+  hidden ``_x.ai/interject`` method. A version check and missing-session probe
+  enable it without a model call. Acceptance is distinct from model consumption.
 - **A resident session** (the Manager, a Planner) is one process over ACP
   (``grok_acp.AcpGrok``); when Grok cannot serve it so, one such headless
   process per turn, resuming the session (``--resume <id>``, ``ResidentGrok``).
@@ -60,6 +63,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -74,8 +78,8 @@ from ... import child_env
 from ..run_usage import Usage, request_tokens, run_usage
 from ..system_prompt_mode import SystemPromptMode
 from . import (
-    ApiProtocol, AuthKind, Capability, CostSource, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, ResidentTransport,
-    RunCost, RuntimeAdapter, RuntimeUnsupported, grok_login, instructions, runtime_prompt_text,
+    ApiProtocol, AuthKind, Capability, CostSource, Launcher, Probe, PromptBlock, ProviderBinding, ReadOnly, ResidentTransport, RoomPush,
+    RunChannel, RunCost, RuntimeAdapter, RuntimeUnsupported, grok_login, instructions, runtime_prompt_text,
 )
 from .codex import _HASHED, _toml_key, _toml_value
 from .instructions import InstructionFile
@@ -140,10 +144,12 @@ class GrokRuntime(RuntimeAdapter):
     runtime_cost_capped = False
     # A read-only run gets reading tools only (``READ_ONLY_TOOLS``).
     read_only = ReadOnly.TOOLS
-    # The Manager's and a Planner's session is one process over ACP (``grok_acp``); a Worker's or Reviewer's run
-    # stays headless.
+    # The Manager's and a Planner's session is one process over ACP (``grok_acp``); steering Workers and
+    # Reviewers use ``grok_steer``, while other runs stay headless.
     resident_transport = ResidentTransport.ACP
     can_interrupt = True  # ACP's ``session/cancel`` (not once the session has fallen back to per turn)
+    room_push = RoomPush.STEER
+    room_receipt_fallback = False  # Acceptance alone never proves the model saw an interjection.
 
     def reported_model(self, event: Mapping[str, Any]) -> str | None:
         if (event.get("type") != "assistant" or event.get("parent_tool_use_id")
@@ -153,23 +159,31 @@ class GrokRuntime(RuntimeAdapter):
         return model if isinstance(model, str) and model.strip() and model not in ("unknown", "<synthetic>") else None
 
     def probe(self, executable: str) -> Probe:
-        """``<executable> --version``, with an empty ``GROK_HOME`` of its own so nothing of the operator's is read."""
+        """The version and hidden interjection method, in an empty home without a model call."""
         home = tempfile.mkdtemp(prefix="looper-grok-probe-")
         try:
-            done = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                  timeout=_PROBE_TIMEOUT_SEC, check=False,
-                                  env={**_grok_env(child_env.inherited()), "GROK_HOME": home, "HOME": home, **dict(FIXED_ENV)})
-        except FileNotFoundError:
-            return Probe(None, self.capabilities, f"{executable!r} was not found")
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return Probe(None, self.capabilities, f"{executable} --version did not run: {type(exc).__name__}: {exc}")
+            env = {**_grok_env(child_env.inherited()), "GROK_HOME": home, "HOME": home, **dict(FIXED_ENV)}
+            try:
+                done = subprocess.run([executable, "--version"], capture_output=True, text=True,
+                                      timeout=_PROBE_TIMEOUT_SEC, check=False, env=env)
+            except FileNotFoundError:
+                return Probe(None, self.capabilities, f"{executable!r} was not found")
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return Probe(None, self.capabilities, f"{executable} --version did not run: {type(exc).__name__}: {exc}")
+            first = next((line.strip() for line in (done.stdout or done.stderr).splitlines() if line.strip()), "")
+            if done.returncode != 0 or not first:
+                return Probe(None, self.capabilities, f"{executable} --version failed (exit code {done.returncode})"
+                                                      + (f": {first}" if first else ""))
+            capabilities = self.capabilities_for(first)
+            version = re.search(r"(\d+)\.(\d+)\.(\d+)", first)
+            if version and tuple(map(int, version.groups())) >= (1, 0, 77):
+                from .grok_steer import probe_interject
+
+                if probe_interject(executable, home=home, env=env, timeout=_PROBE_TIMEOUT_SEC):
+                    capabilities |= {Capability.STEER}
+            return Probe(first[:200], capabilities)
         finally:
             shutil.rmtree(home, ignore_errors=True)
-        first = next((line.strip() for line in (done.stdout or done.stderr).splitlines() if line.strip()), "")
-        if done.returncode != 0 or not first:
-            return Probe(None, self.capabilities, f"{executable} --version failed (exit code {done.returncode})"
-                                                  + (f": {first}" if first else ""))
-        return Probe(first[:200], self.capabilities_for(first))
 
     def isolation_args(self, cwd: str | Path) -> list[str]:
         """None: Grok's isolation is its own ``GROK_HOME`` and the config Looper writes there (``config_toml``)."""
@@ -243,6 +257,33 @@ class GrokRuntime(RuntimeAdapter):
         """One run: the prompt read from stdin; its session stays in the run's home, removed with it. ``session_dir``
         is not used: a consult finds a Grok run's session in the home its recorded command names."""
         return self._command(executable, prompt_file, launch, max_turns)
+
+    def steer_command(self, executable: str, *, cwd: str | Path, prompt_file: Path, launch: Launch,
+                      max_turns: int = 0, session_dir: Path | None = None) -> list[str]:
+        """ACP in the same isolated home as a headless run; root --tools has no effect on agent stdio."""
+        from .grok_acp import PROFILE_FILE, acp_argv, agent_profile, parse_command
+
+        if not launch.steers:
+            raise RuntimeUnsupported("this Grok runtime cannot steer a run; upgrade Grok and probe again")
+        command = self.run_command(executable, cwd=cwd, prompt_file=prompt_file, launch=launch,
+                                   max_turns=max_turns, session_dir=session_dir)
+        acp = parse_command(command)
+        home = Path(command[1].partition("=")[2])
+        profile = home / "agent.md" if acp.agent else None
+        if acp.tools:
+            definition = profile.read_text(encoding="utf-8") if profile else None
+            profile = home / PROFILE_FILE
+            _write_private(profile, agent_profile(definition, acp.tools))
+        return acp_argv(acp, home, profile)
+
+    def run_channel(self, process: asyncio.subprocess.Process, *, launch: Launch, cwd: str | Path,
+                    session_dir: Path | None = None, prompt_file: Path | None = None, max_turns: int = 0) -> RunChannel:
+        from .grok_steer import GrokChannel
+
+        if not launch.steers:
+            return super().run_channel(process, launch=launch, cwd=cwd, session_dir=session_dir,
+                                       prompt_file=prompt_file, max_turns=max_turns)
+        return GrokChannel(process, model=launch.model, cwd=str(cwd), max_turns=max_turns)
 
     def kept_session_dir(self, command: Sequence[str]) -> Path | None:
         """The home a finished run (its recorded ``command``) kept its session in: its ``GROK_HOME``."""

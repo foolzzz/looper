@@ -79,7 +79,7 @@ def test_runner_room_receipts_control_the_read_cursor(tmp_path, monkeypatch, age
                 room.confirm.assert_not_awaited()
                 assert state.steered[42].fallback is None
                 # Other protocols' echoes are not the runner's deterministic model receipt.
-                yield {"type": "system", "subtype": "codex_user_message", "text": texts[0]}
+                yield {"type": "system", "subtype": "user_message_receipt", "text": texts[0]}
                 yield {"type": "user", "isReplay": True, "uuid": first}
                 room.confirm.assert_not_awaited()
                 yield event("steer_applied", "another-message")
