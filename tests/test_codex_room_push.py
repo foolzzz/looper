@@ -1,4 +1,4 @@
-"""Room deliveries follow Codex's steering and history receipt boundary."""
+"""Room deliveries follow steering and user-message receipt boundaries."""
 from __future__ import annotations
 
 import asyncio
@@ -16,7 +16,11 @@ from looper.agents.runtimes import ADAPTERS, Capability, RoomPush, room_push
 from looper.agents.runtimes.channel import DeliveryResult
 from looper.agents.runtimes.codex import CodexStream
 from looper.agents.runtimes.dsh_runner import DshRunnerRuntime
+from looper.agents.runtimes.omp import OmpStream
+from looper.agents.runtimes.omp_steer import OmpChannel
+from looper.agents.runtimes.pi import PiStream
 from looper.agents.runtimes.pi_runner import PiRunnerRuntime
+from looper.agents.runtimes.pi_steer import PiChannel
 from looper.agents.tiers.worker import ConsumeStart, RunContext, WorkerConfig, WorkerPool, _Reminders, room_input
 from tests.run_handle_support import ScriptedRun
 
@@ -24,7 +28,8 @@ from tests.run_handle_support import ScriptedRun
 def _launch(steer: bool, runtime_type: str = "codex") -> Launch:
     launch = Launch()
     runtime = replace(launch.profile.runtime, type=runtime_type,
-                      capabilities=ADAPTERS[runtime_type].capabilities | ({Capability.STEER} if steer else set()))
+                      capabilities=(ADAPTERS[runtime_type].capabilities - {Capability.STEER})
+                      | ({Capability.STEER} if steer else set()))
     return replace(launch, settings=replace(launch.settings, profile=replace(launch.profile, runtime=runtime)))
 
 
@@ -32,7 +37,8 @@ def _launch(steer: bool, runtime_type: str = "codex") -> Launch:
     ("codex", True, "steer"), ("codex", False, "none"), ("coco", True, "steer"),
     ("coco", False, "none"), ("claude-code", False, "user_turn"),
     ("grok", True, "steer"), ("grok", False, "none"),
-    *((name, True, "none") for name in ("cursor-agent", "omp", "pi", "dsh")),
+    ("omp", True, "steer"), ("omp", False, "none"), ("pi", True, "steer"), ("pi", False, "none"),
+    *((name, True, "none") for name in ("cursor-agent", "dsh")),
     pytest.param(PiRunnerRuntime(None, pi=None), False, "runner", id="pi-runner"),
     pytest.param(DshRunnerRuntime(None, dsh=None), False, "runner", id="dsh-runner"),
     pytest.param(SimpleNamespace(room_push=RoomPush.RUNNER, hosts_runs=False), True, "none", id="unhosted-runner"),
@@ -40,6 +46,11 @@ def _launch(steer: bool, runtime_type: str = "codex") -> Launch:
 def test_only_opted_in_runtimes_deliver_room_messages(runtime, steer, expected):
     adapter = ADAPTERS[runtime] if isinstance(runtime, str) else runtime
     assert room_push(SimpleNamespace(runtime=adapter, steers=steer)).value == expected
+
+
+def test_pi_runner_does_not_inherit_cli_text_receipts():
+    runtime = PiRunnerRuntime(None, pi=None)
+    assert room_push(SimpleNamespace(runtime=runtime, steers=True)) is RoomPush.RUNNER
 
 
 @pytest.mark.parametrize("outcome", ["accepted", "rejected", "unknown", "ended"])
@@ -74,6 +85,92 @@ def test_steering_delivery_waits_for_history_after_acceptance(tmp_path, caplog, 
             assert "room delivery acceptance unknown; not retrying" in caplog.text
 
     asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize("runtime_type", ["omp", "pi"])
+def test_rpc_room_ack_is_consumed_while_the_delivery_waits(tmp_path, agent_db, monkeypatch, caplog, runtime_type):
+    from looper.agents.runtimes import omp_steer, pi_steer
+
+    monkeypatch.setattr(omp_steer if runtime_type == "omp" else pi_steer, "_STEER_TIMEOUT_SEC", 0.05)
+
+    async def run():
+        stdout, requests, delivered = asyncio.StreamReader(), asyncio.Queue(), asyncio.Event()
+        closed = False
+
+        class Input:
+            def write(self, line):
+                requests.put_nowait(json.loads(line))
+
+            async def drain(self):
+                pass
+
+            def is_closing(self):
+                return closed
+
+            def close(self):
+                nonlocal closed
+                closed = True
+                stdout.feed_eof()
+
+        channel = {"omp": OmpChannel, "pi": PiChannel}[runtime_type](
+            SimpleNamespace(stdout=stdout, stdin=Input()), model="test-model", cwd=str(tmp_path))
+        launch = _launch(True, runtime_type)
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        pool._active["w1"] = SimpleNamespace(parent_task_id="task")
+        pool._activity = AsyncMock(side_effect=lambda *a, **kw: delivered.set())
+        text = "[Looper room]\n- #42 from worker@s2 (info): bluebird"
+        room = SimpleNamespace(delivery=AsyncMock(return_value=RoomDelivery(text, 42, (42,), True, 0)),
+                               confirm=AsyncMock())
+        pool.room_ops = SimpleNamespace(room=room)
+
+        def emit(raw):
+            stdout.feed_data((json.dumps(raw) + "\n").encode())
+
+        async def peer():
+            while True:
+                request = await requests.get()
+                command = request["type"]
+                emit({"type": "response", "id": request["id"], "command": command, "success": True,
+                      "data": {"sessionId": "session", "disposition": "started" if command == "prompt" else "queued"}})
+                if command == "prompt":
+                    emit({"type": "message_end", "message": {"role": "assistant", "stopReason": "toolUse", "content": [
+                        {"type": "toolCall", "id": "cmd", "name": "bash", "arguments": {"command": "sleep 25"}}]}})
+                if command == "steer":
+                    assert request["message"] == text
+                    # Only the real channel's events iterator can consume the ACK above.
+                    await asyncio.wait_for(delivered.wait(), 1)
+                    emit({"type": "message_end", "message": {"role": "toolResult", "toolCallId": "cmd",
+                                                               "content": "done"}})
+                    emit({"type": "message_end", "message": {"role": "user", "content": text}})
+                    emit({"type": "message_end", "message": {"role": "assistant", "stopReason": "stop", "content": [
+                        {"type": "text", "text": json.dumps({"status": "completed", "summary": "done"})}]}})
+                    emit({"type": "agent_end", "isTerminal": True} if runtime_type == "omp" else
+                         {"type": "agent_settled", "aborted": False})
+                    return
+
+        class Run(ScriptedRun):
+            @property
+            def channel(self):
+                return channel
+
+        seat = Seat("worker@s1", "worker", MemberKind.WORK, run="w1")
+        ctx = RunContext("w1", "task", "s1", str(tmp_path), "do the step", False, launch, launch.runtime,
+                         seat, 2, datetime.now(timezone.utc), False, [])
+        recorder = Mock(cap_stop=None, record=AsyncMock(), finish=AsyncMock())
+        server = asyncio.create_task(peer())
+        try:
+            result = await pool._consume_once(ctx, Run([]), recorder, start=ConsumeStart.NEW)
+            await server
+            assert result["status"] == "completed", result
+            room.confirm.assert_awaited_once_with("task", seat.key, 42)
+            assert "acceptance unknown" not in caplog.text
+        finally:
+            pool._drop_reminders("w1")
+            channel.end_input()
+            server.cancel()
+            await asyncio.gather(server, return_exceptions=True)
+
+    asyncio.run(asyncio.wait_for(run(), 4))
 
 
 @pytest.mark.parametrize("combined", [False, True])
@@ -129,8 +226,14 @@ def test_codex_stream_delivers_only_during_tools_and_matches_guidance(tmp_path, 
         assert mode is (RoomInput.PUSHED if steer else RoomInput.PULL)
         assert ("Do not poll your inbox" in room_section(seat, mode)) is steer
         captured = []
+        sent = asyncio.Event()
 
         class Run(ScriptedRun):
+            async def send(self, text, **kwargs):
+                result = await super().send(text, **kwargs)
+                sent.set()
+                return result
+
             async def events(self):
                 state = pool._reminders.get("w1")
                 assert (state is not None) is steer
@@ -142,6 +245,7 @@ def test_codex_stream_delivers_only_during_tools_and_matches_guidance(tmp_path, 
                 for event in stream.translate({"type": "item.started", "item": item}):
                     yield event
                 if steer:
+                    await asyncio.wait_for(sent.wait(), 1)
                     assert state.tools_running == 1 and not state.waiting
                     assert self.inputs == [delivery.text]
                     room.confirm.assert_not_awaited()
@@ -166,5 +270,131 @@ def test_codex_stream_delivers_only_during_tools_and_matches_guidance(tmp_path, 
         result = await pool._consume_once(ctx, handle, recorder, start=ConsumeStart.NEW)
         assert (result["passed"] if review else result["status"] == "completed")
         assert bool(captured) is steer
+
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@pytest.mark.parametrize(("runtime_type", "outcome"), [
+    ("omp", "receipt"), ("pi", "receipt"), ("codex", "receipt"),
+    ("omp", "fallback"), ("pi", "ended"), ("omp", "unknown"),
+    ("omp", "late_ack"), ("omp", "late_unknown"), ("pi", "ended_armed"),
+])
+def test_rpc_room_receipts_and_fallback_follow_tool_batch(
+    tmp_path, agent_db, monkeypatch, caplog, runtime_type, outcome,
+):
+    from looper.agents.tiers import worker
+
+    monkeypatch.setattr(worker, "ROOM_ITEM_TIMEOUT_SEC", 0.05)
+
+    async def run():
+        launch = _launch(True, runtime_type)
+        pool = WorkerPool(config=WorkerConfig(), runtime_root=tmp_path)
+        text = "[Looper room]\n- #42 from worker@s2 (info): 你好 /skill"
+        delivery = RoomDelivery(text, 42, (42,), True, 0)
+        confirmed = asyncio.Event()
+        send_started, acknowledge = asyncio.Event(), asyncio.Event()
+        late = outcome in ("late_ack", "late_unknown")
+        unknown = outcome in ("unknown", "late_unknown")
+        room = SimpleNamespace(delivery=AsyncMock(return_value=delivery),
+                               confirm=AsyncMock(side_effect=lambda *args: confirmed.set()))
+        pool.room_ops = SimpleNamespace(room=room)
+        seat = Seat("worker@s1", "worker", MemberKind.WORK, run="w1")
+        assert room_input(launch, is_verify=False) is RoomInput.PUSHED
+        stream = {"omp": OmpStream, "pi": PiStream, "codex": CodexStream}[runtime_type]()
+
+        def tool_event(call_id, *, done=False):
+            if runtime_type == "codex":
+                return {"type": "item.completed" if done else "item.started", "item": {
+                    "id": call_id, "type": "command_execution", "command": "sleep 25", "exit_code": 0}}
+            message = ({"role": "toolResult", "toolCallId": call_id, "content": "done"} if done else {
+                "role": "assistant", "content": [{"type": "toolCall", "id": call_id,
+                                                   "name": "bash", "arguments": {"command": "sleep 25"}}]})
+            return {"type": "message_end", "message": message}
+
+        def receipt(value):
+            if runtime_type == "codex":
+                return [{"type": "system", "subtype": "user_message_receipt", "text": value}]
+            return stream.translate({"type": "message_end", "message": {"role": "user", "content": value}})
+
+        class Run(ScriptedRun):
+            async def send(self, value, **kwargs):
+                await super().send(value, **kwargs)
+                send_started.set()
+                if late:
+                    await acknowledge.wait()
+                return DeliveryResult.UNKNOWN if unknown else DeliveryResult.ACCEPTED
+
+            async def events(self):
+                state = pool._reminders["w1"]
+                assert not await pool.remind("w1")
+                if late:
+                    state.pending = False  # A new post below arrives after the tool batch starts.
+                for event in receipt("initial prompt"):
+                    yield event
+                for call_id in ("cmd-1", "cmd-2"):
+                    for event in stream.translate(tool_event(call_id)):
+                        yield event
+                if late:
+                    sending = asyncio.create_task(pool.remind("w1"))
+                await asyncio.wait_for(send_started.wait(), 1)
+                assert state.tools_running == 2 and self.inputs == [text]
+                await asyncio.sleep(0.08)
+                room.confirm.assert_not_awaited()
+                assert state.steered[42].fallback is None
+                if runtime_type == "codex":
+                    # Codex shows the history item immediately, even while the tools still run.
+                    for event in receipt(text):
+                        yield event
+                    room.confirm.assert_awaited_once_with("task", seat.key, 42)
+                for event in stream.translate(tool_event("cmd-1", done=True)):
+                    yield event
+                assert state.tools_running == 1
+                if runtime_type != "codex":
+                    await asyncio.sleep(0.08)
+                    room.confirm.assert_not_awaited()
+                    assert state.steered[42].fallback is None
+                if outcome != "ended":
+                    for event in stream.translate(tool_event("cmd-2", done=True)):
+                        yield event
+                    assert state.tools_running == 0
+                    if late:
+                        assert state.steered[42].fallback is None
+                        acknowledge.set()
+                        assert await sending is (not unknown)
+                    if outcome in ("fallback", "late_ack"):
+                        timer = state.steered[42].fallback
+                        # Later tool batches cannot reset this delivery's receipt window.
+                        for done in (False, True):
+                            for event in stream.translate(tool_event("cmd-3", done=done)):
+                                yield event
+                        assert state.steered[42].fallback is timer
+                        await asyncio.wait_for(confirmed.wait(), 1)
+                    elif runtime_type != "codex" and outcome == "receipt":
+                        for value in ("Planner steer", "[Looper room]\n- #41 from worker@s2 (info): other"):
+                            for event in receipt(value):
+                                yield event
+                        room.confirm.assert_not_awaited()
+                        for event in receipt(text):
+                            yield event
+                    elif unknown:
+                        await asyncio.sleep(0.08)
+                        room.confirm.assert_not_awaited()
+                yield {"type": "result", "subtype": "success", "result": json.dumps({
+                    "status": "completed", "summary": "done", "changed_files": {}})}
+
+        ctx = RunContext("w1", "task", "s1", str(tmp_path), "do the step", False, launch, launch.runtime,
+                         seat, 5, datetime.now(timezone.utc), False, [])
+        recorder = Mock(cap_stop=None, record=AsyncMock(), finish=AsyncMock())
+        try:
+            result = await pool._consume_once(ctx, Run([]), recorder, start=ConsumeStart.NEW)
+            assert result["status"] == "completed"
+            if outcome in ("receipt", "fallback", "late_ack"):
+                room.confirm.assert_awaited_once_with("task", seat.key, 42)
+            else:
+                await asyncio.sleep(0.08)
+                room.confirm.assert_not_awaited()
+            assert ("room delivery history item timed out" in caplog.text) is (outcome in ("fallback", "late_ack"))
+        finally:
+            pool._drop_reminders("w1")
 
     asyncio.run(asyncio.wait_for(run(), 5))

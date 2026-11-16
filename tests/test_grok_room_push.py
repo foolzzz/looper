@@ -49,6 +49,11 @@ def test_grok_room_read_follows_receipts_without_timeout(tmp_path, agent_db, mon
                     {"type": "tool_use", "name": "read_file", "input": {}, "id": "tool"}]}}
                 state = pool._reminders["w1"]
                 assert state.receipt is RoomPush.STEER and not state.receipt_fallback
+                # A steering run's send is scheduled off the events iterator.
+                for _ in range(100):
+                    if sent:
+                        break
+                    await asyncio.sleep(0.01)
                 assert sent
                 room.confirm.assert_not_awaited()
                 if outcome == "read":

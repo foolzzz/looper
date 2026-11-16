@@ -468,6 +468,8 @@ ROOM_ITEM_TIMEOUT_SEC = 30.0
 class _SteeredDelivery:
     delivery: RoomDelivery
     observed: bool = False
+    acceptance: DeliveryResult = DeliveryResult.UNKNOWN
+    armed: bool = False
     fallback: asyncio.Task | None = None
 
 
@@ -1622,8 +1624,10 @@ class WorkerPool:
             await self._confirm_delivery(worker_id, state, through)
 
     def _room_item_fallback(self, worker_id: str, state: _Reminders, entry: _SteeredDelivery) -> None:
-        if entry.observed or not state.receipt_fallback:
+        if (entry.observed or entry.armed or not state.receipt_fallback
+                or entry.acceptance is not DeliveryResult.ACCEPTED):
             return
+        entry.armed = True
 
         async def fallback() -> None:
             await asyncio.sleep(ROOM_ITEM_TIMEOUT_SEC)
@@ -1707,7 +1711,10 @@ class WorkerPool:
                     logger.warning("worker %s room delivery acceptance unknown; not retrying", worker_id)
                     return sent
                 if state.receipt is RoomPush.STEER and (entry := state.steered.get(delivery.through)) is not None:
-                    self._room_item_fallback(worker_id, state, entry)
+                    entry.acceptance = result
+                    # Tool results can race the send's acknowledgement on another task.
+                    if not state.tools_running:
+                        self._room_item_fallback(worker_id, state, entry)
                 state.sent += 1
                 sent = True
                 wp = self._active.get(worker_id)
@@ -2497,6 +2504,8 @@ class WorkerPool:
             nonlocal input_ended
             self._inputs.pop(worker_id, None)
             if (reminders := self._reminders.get(worker_id)) is not None:
+                if reminders.retry is not None:
+                    reminders.retry.cancel()
                 self._cancel_room_fallbacks(reminders)
             if not input_ended:
                 channel.end_input()
@@ -2579,7 +2588,7 @@ class WorkerPool:
                     return
 
                 event_type = event.get("type", "")
-                if event_type == "system" and event.get("subtype") == "codex_user_message" \
+                if event_type == "system" and event.get("subtype") == "user_message_receipt" \
                         and (reminders := self._reminders.get(worker_id)) is not None \
                         and reminders.receipt is RoomPush.STEER:
                     await self._room_history_item(worker_id, reminders, event.get("text") or "")
@@ -2631,7 +2640,11 @@ class WorkerPool:
                         # A tool call runs: a reminder written now is folded into this turn.
                         reminders.tools_running += calls
                         if not replaying:
-                            await self._flush_reminder(worker_id)
+                            if reminders.receipt is RoomPush.STEER:
+                                # RPC acknowledgements are read by this same events iterator.
+                                self._retry_reminder(worker_id, reminders, 0)
+                            else:
+                                await self._flush_reminder(worker_id)
                     for block in content_blocks:
                         block_type = block.get("type", "")
                         if block_type == "tool_use":
@@ -2676,6 +2689,9 @@ class WorkerPool:
                     done = sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_result") \
                         if isinstance(content, list) else 0
                     reminders.tools_running = max(0, reminders.tools_running - done)
+                    if done and not reminders.tools_running and reminders.receipt is RoomPush.STEER:
+                        for entry in reminders.steered.values():
+                            self._room_item_fallback(worker_id, reminders, entry)
 
                 elif event_type == "result":
                     # Background work (an agent team's teammates) can end in turns of Claude's own after this

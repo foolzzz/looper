@@ -168,6 +168,9 @@ for line in sys.stdin:
             if mode == "room_end":
                 sys.exit(1)
             if mode.startswith("room_"):
+                if mode == "room_fallback":
+                    notify("item/completed", item={"id": "command-1", "type": "commandExecution",
+                                                  "command": "sleep 1", "exitCode": 0, "status": "completed"})
                 gate = Path(os.environ["FAKE_CODEX_FINISH_GATE"])
                 deadline = time.monotonic() + 3
                 while not gate.exists() and time.monotonic() < deadline:
@@ -775,7 +778,7 @@ def test_room_read_cursor_follows_history_or_bounded_fallback(app_server, tmp_pa
                 events = [call.args[0] for call in recorder.record.await_args_list]
                 assert [b["text"] for b in _blocks(events, "text")] == ([] if mode == "room_end" else [
                     json.dumps({"status": "completed", "summary": "done"})])
-                receipts = [e for e in events if e.get("subtype") == "codex_user_message"]
+                receipts = [e for e in events if e.get("subtype") == "user_message_receipt"]
                 assert bool(receipts) is (mode == "room_item")
                 assert not any(launch.runtime.is_model_event(e) for e in receipts)
                 assert ("room delivery history item timed out" in caplog.text) is (mode == "room_fallback")

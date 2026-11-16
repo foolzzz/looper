@@ -30,6 +30,19 @@ def _assistant(text: str = "Done.", stop: str = "stop", **fields: Any) -> dict[s
 SETTLED = {"type": "agent_settled", "aborted": False}
 
 
+@pytest.mark.parametrize("content", ["[Looper room]\n- #42 from worker@s2 (info): 你好 /template",
+    [{"type": "text", "text": "[Looper room]"}, {"type": "image", "data": "ignored"},
+     {"type": "text", "text": "- #42 from worker@s2 (info): 你好 /template"}]])
+def test_user_message_end_is_a_single_verbatim_receipt(content) -> None:
+    stream = PiStream()
+    message = {"role": "user", "content": content}
+    assert stream.translate({"type": "message_start", "message": message}) == []
+    assert stream.translate({"type": "message_end", "message": message}) == [
+        {"type": "system", "subtype": "user_message_receipt",
+         "text": "[Looper room]\n- #42 from worker@s2 (info): 你好 /template"}]
+    assert stream.translate({"type": "message_end", "message": {"role": "system", "content": content}}) == []
+
+
 async def _read(data: bytes, *, chunk_size: int = 4093) -> list[dict[str, Any]]:
     # Exercise real chunk boundaries, including split UTF-8 sequences and large records.
     reader = asyncio.StreamReader(limit=64)
