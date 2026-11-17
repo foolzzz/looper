@@ -11,12 +11,22 @@ _NUM = {"type": "number"}
 _LOAD = _object({"running": _INT, "waiting": _INT})
 _PLANNER = _object({"agent_id": _STR, "task_id": _STR, "project_id": _NULL_STR,
                     "project_name": _NULL_STR, "requirement": _STR, "name": _STR})
+_TASK_ROLE = _object({"id": _STR, "kind": {"type": "string", "enum": ["work", "review"]}, "version": _INT})
 _RUN = _object({
     "agent_id": _STR, "role": {"type": "string", "enum": ["worker", "reviewer"]}, "task_id": _STR,
     "project_id": _NULL_STR, "project_name": _NULL_STR, "task_name": _STR, "step": _STR, "instruction": _STR,
     "state": {"type": "string", "enum": ["running", "waiting"]}, "elapsed_seconds": _NUM,
-    "task_role": _object({"id": _STR, "kind": {"type": "string", "enum": ["work", "review"]}, "version": _INT})},
+    "task_role": _TASK_ROLE},
     ["agent_id", "role", "task_id", "task_name", "project_id", "project_name", "step", "instruction", "state", "elapsed_seconds"])
+_RATE = {kind: _INT for kind in ("total", "input", "output", "cache_read", "cache_creation")}
+_PROCESS = _object({
+    "agent_id": _STR, "role": {"type": "string", "enum": ["manager", "planner", "worker", "reviewer", "consult"]},
+    "name": _NULL_STR, "task_id": _NULL_STR, "task_name": _NULL_STR, "project_id": _NULL_STR, "project_name": _NULL_STR,
+    "step": _NULL_STR, "instruction": _NULL_STR, "task_role": _TASK_ROLE, "runtime": _NULL_STR, "model": _NULL_STR,
+    "pid": {"type": ["integer", "null"]}, "state": {"type": "string", "enum": ["running", "waiting"]},
+    "elapsed_seconds": _NUM, "tpm": _object(_RATE) | {"type": ["object", "null"]}},
+    ["agent_id", "role", "name", "task_id", "task_name", "project_id", "project_name", "step", "instruction",
+     "runtime", "model", "pid", "state", "elapsed_seconds", "tpm"])
 _SCHEDULE = {"schedule_id": _STR, "name": _STR, "project_id": _STR, "project_name": _STR}
 _OVERVIEW = _object({
     "version": _STR,
@@ -28,6 +38,8 @@ _OVERVIEW = _object({
         "managers": _array(_object({"agent_id": _STR, "name": _STR, "state": {"type": "string", "enum": ["busy", "idle", "stopped"]}})),
         "planners": _array(_PLANNER), "workers": _array(_RUN), "reviewers": _array(_RUN)},
         ["manager", "planners", "workers", "reviewers"]),
+    "processes": _array(_PROCESS),
+    "tpm": _object({**_RATE, "window_seconds": _INT}),
     "projects": _array(_object({"project_id": _STR, "name": _STR,
         "tasks": _object({"running": _INT, "ready": _INT}), "workers": _LOAD, "reviewers": _LOAD})),
     "idle_projects": _INT,

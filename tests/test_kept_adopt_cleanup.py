@@ -124,7 +124,7 @@ def test_a_live_cap_result_is_persisted_when_the_replay_boundary_completes(tmp_p
             cap_stop = None
             finish = AsyncMock()
 
-            def account(self, event):
+            def account(self, event, *, replayed=False):
                 # A new price table can make usage from the detached portion exceed its frozen cap.
                 assert event['type'] == 'usage'
                 self.cap_stop = CapStop(cap, Usage(cost_usd=.2))
@@ -178,7 +178,7 @@ def test_output_after_a_replayed_result_is_recorded_until_eof(tmp_path):
             cap_stop = None
             finish = AsyncMock()
 
-            def account(self, event):
+            def account(self, event, *, replayed=False):
                 accounted.append(event)
 
             async def record(self, event):

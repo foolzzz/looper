@@ -131,6 +131,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     can_replace_system_prompt = True
     type = "claude-code"
     label = "Claude Code"
+    streams_usage = True
     default_executable = "claude"
     image_input = ImageInput.READ_TOOL
     # Verified against Claude Code 2.1.285 (claude_cli); its replies follow Looper's contracts by prompt, so no

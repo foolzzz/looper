@@ -396,6 +396,9 @@ class RuntimeAdapter(ABC):
     # Worker, Reviewer and consult runs use hosted_run instead of their own process. Their platform tools
     # are passed in process by the caller, without an MCP entry.
     hosts_runs: ClassVar[bool] = False
+    # Its usage events come while a run goes on (each model request, message or step), so the dashboard shows the
+    # run's tokens per minute; False: they come only when a turn ends (Codex, Coco, Cursor), or it is not known.
+    streams_usage: ClassVar[bool] = False
     protocols: ClassVar[frozenset[ApiProtocol]]
     # Reachable only through Looper's local translating gateway.
     translated_protocols: ClassVar[frozenset[ApiProtocol]] = frozenset()

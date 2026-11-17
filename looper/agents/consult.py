@@ -506,6 +506,7 @@ class ConsultService:
         except OSError as exc:
             await recorder.finish(output_text=None, result_event=None, error=f"cannot start the consult: {exc}")
             raise _Failed(FallbackReason.RUNTIME_CANNOT, f"its runtime does not start: {exc}") from None
+        recorder.track_pid(lambda: process.pid)
         assert process.stdin is not None and process.stdout is not None and process.stderr is not None
         result: dict[str, Any] | None = None
         started = False
@@ -587,7 +588,7 @@ class ConsultService:
 
         recorder = ClaudeRunRecorder(agent_id=run_id, task_id=task_id, command=handle.command, cwd=cwd,
                                      input_text=prompt, step_id=str(step["id"]), system_prompt=system_prompt,
-                                     launch=launch, whole_process=True)
+                                     launch=launch, whole_process=True, pid_of=lambda: handle.pid)
         await recorder.start()
         result: dict[str, Any] | None = None
         started, ended = False, False

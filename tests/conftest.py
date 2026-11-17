@@ -483,6 +483,19 @@ def _gate_command_state(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_live_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The runs going on now and their token windows belong to one test, not to earlier recorders in this worker."""
+    live_runs = sys.modules.get("looper.agents.live_runs")
+    if live_runs is None:
+        return
+
+    import weakref
+
+    monkeypatch.setattr(live_runs, "_live", weakref.WeakSet())
+    monkeypatch.setattr(live_runs, "_ended", [])
+
+
+@pytest.fixture(autouse=True)
 def _chat_stop_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts with stopping a reply off, its default (``chat_settings``), whatever an earlier one set."""
     from looper.agents import chat_settings

@@ -1499,6 +1499,7 @@ class ManagerAgent:
             session_id=self._session_id,
             system_prompt=prepared.system_prompt,
             launch=launch,
+            pid_of=lambda: self._claude.pid,
         )
         try:
             await token.keep("recorder_start", recorder.start(), 10)
@@ -2425,7 +2426,7 @@ class ManagerAgent:
         recorder = ClaudeRunRecorder(
             agent_id=self.agent_id, task_id=None, command=process.command, cwd=str(self._config.work_dir),
             input_text=text, session_id=self._session_id, system_prompt=process.system_prompt,
-            launch=process.launch,
+            launch=process.launch, pid_of=lambda: self._claude.pid,
         )
         async with recorder:
             parts: list[str] = []
@@ -2581,6 +2582,7 @@ class ManagerAgent:
                 system_prompt=system_prompt,
                 launch=launch,
                 autonomous=True,
+                pid_of=lambda: self._claude.pid,
             )
             await recorder.start()
 

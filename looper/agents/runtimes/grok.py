@@ -127,6 +127,7 @@ class GrokRuntime(RuntimeAdapter):
     can_replace_system_prompt = True
     type = "grok"
     label = "Grok"
+    streams_usage = True
     default_executable = "grok"
     # Headless Grok: one process per turn, resumed; MCP; compaction events; its cost, once a run ends.
     # COMPACTION_EVENTS describes the headless stream; ACP resident sessions do not report compaction.

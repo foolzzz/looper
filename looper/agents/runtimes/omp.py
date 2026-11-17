@@ -154,6 +154,7 @@ class OmpRuntime(RuntimeAdapter):
     can_replace_system_prompt = True
     type = "omp"
     label = "OMP"
+    streams_usage = True
     default_executable = "omp"
     # Verified against omp 18.4.3: Claude plugins' skills, commands and agents load (no hooks); compaction events;
     # tokens only, per request.
