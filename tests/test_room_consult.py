@@ -113,6 +113,9 @@ def test_dsh_consult_verifies_the_process_exit(monkeypatch: pytest.MonkeyPatch, 
         async def start(self):
             pass
 
+        def track_pid(self, pid_of):
+            pass
+
         async def record(self, event):
             pass
 
@@ -512,6 +515,9 @@ def test_a_failed_run_with_a_valid_final_is_not_delivered_as_an_answer(monkeypat
             pass
 
         async def start(self):
+            pass
+
+        def track_pid(self, pid_of):
             pass
 
         async def record(self, event):
