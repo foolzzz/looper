@@ -52,6 +52,7 @@ type pyStep struct {
 	Do     string `json:"do"`
 	N      int    `json:"n"`
 	Client int    `json:"client"`
+	Frames int    `json:"frames"`
 	Event  any    `json:"event,omitempty"`
 }
 
@@ -177,7 +178,7 @@ func (o *pyActivity) play(t *testing.T, req pyPlay) pyResult {
 		o.failed = true
 		t.Fatalf("python oracle write: %v\n%s", err, o.stderr.String())
 	}
-	line, err := readOracleLine(o, 20*time.Second)
+	line, err := readOracleLine(o, 40*time.Second)
 	if err != nil {
 		o.failed = true
 		if o.cmd.Process != nil {
@@ -310,9 +311,9 @@ func TestActivityStreamSocketMatchesPython(t *testing.T) {
 		py := ora.play(t, pyPlay{
 			Task: activityStreamTask, Query: "since=0&limit=1", Rows: historyPairs(rows),
 			Steps: []pyStep{
-				{Do: "arm"}, {Do: "take"},
+				{Do: "arm"}, {Do: "take", Frames: 501},
 				{Do: "publish", Event: liveEvent},
-				{Do: "arm"}, {Do: "take"},
+				{Do: "arm"}, {Do: "take", Frames: 1},
 				{Do: "close"}, {Do: "eof"},
 			},
 		})
@@ -340,17 +341,18 @@ func TestActivityStreamSocketMatchesPython(t *testing.T) {
 		cases := []struct {
 			query  string
 			sinces []int64
+			frames int
 		}{
-			{query: "", sinces: []int64{0, 3}},
-			{query: "since=", sinces: []int64{0, 3}},
-			{query: "since=0", sinces: []int64{0, 3}},
-			{query: "since=2", sinces: []int64{2, 3}},
+			{query: "", sinces: []int64{0, 3}, frames: 3},
+			{query: "since=", sinces: []int64{0, 3}, frames: 3},
+			{query: "since=0", sinces: []int64{0, 3}, frames: 3},
+			{query: "since=2", sinces: []int64{2, 3}, frames: 1},
 		}
 		for _, tc := range cases {
 			t.Run(tc.query, func(t *testing.T) {
 				py := ora.play(t, pyPlay{
 					Task: activityStreamTask, Query: tc.query, Rows: historyPairs(rows),
-					Steps: []pyStep{{Do: "arm"}, {Do: "take"}, {Do: "drop"}},
+					Steps: []pyStep{{Do: "arm"}, {Do: "take", Frames: tc.frames}, {Do: "drop"}},
 				})
 				reads := &streamReads{rows: rows}
 				srv, _, addr := startActivity(t, reads, nil)
@@ -404,9 +406,9 @@ func TestActivityStreamSocketMatchesPython(t *testing.T) {
 		py := ora.play(t, pyPlay{
 			Task: activityStreamTask, Query: "since=" + digits, Rows: historyPairs(rows),
 			Steps: []pyStep{
-				{Do: "arm"}, {Do: "take"},
+				{Do: "arm"}, {Do: "take", Frames: 0},
 				{Do: "publish", Event: liveEvent},
-				{Do: "arm"}, {Do: "take"},
+				{Do: "arm"}, {Do: "take", Frames: 1},
 				{Do: "drop"},
 			},
 		})
@@ -435,9 +437,9 @@ func TestActivityStreamSocketMatchesPython(t *testing.T) {
 				Task: activityStreamTask, Query: "since=0", Rows: historyPairs(activityHistory(3, activityStreamTask)),
 				FailAfter: failAt(0),
 				Steps: []pyStep{
-					{Do: "arm"}, {Do: "take"},
+					{Do: "arm"}, {Do: "take", Frames: 0},
 					{Do: "publish", Event: liveEvent},
-					{Do: "arm"}, {Do: "take"},
+					{Do: "arm"}, {Do: "take", Frames: 1},
 					{Do: "drop"},
 				},
 			})
@@ -458,9 +460,9 @@ func TestActivityStreamSocketMatchesPython(t *testing.T) {
 				Task: activityStreamTask, Query: "since=0", Rows: historyPairs(rows),
 				FailAfter: failAt(1),
 				Steps: []pyStep{
-					{Do: "arm"}, {Do: "take"},
+					{Do: "arm"}, {Do: "take", Frames: 500},
 					{Do: "publish", Event: liveEvent},
-					{Do: "arm"}, {Do: "take"},
+					{Do: "arm"}, {Do: "take", Frames: 1},
 					{Do: "drop"},
 				},
 			})
@@ -483,9 +485,9 @@ func TestActivityStreamSocketMatchesPython(t *testing.T) {
 		py := ora.play(t, pyPlay{
 			Task: activityStreamTask, Query: "since=0",
 			Steps: []pyStep{
-				{Do: "arm"}, {Do: "take"},
+				{Do: "arm"}, {Do: "take", Frames: 0},
 				{Do: "fire"},
-				{Do: "arm"}, {Do: "take"},
+				{Do: "arm"}, {Do: "take", Frames: 1},
 				{Do: "drop"},
 			},
 		})
@@ -513,10 +515,10 @@ func TestActivityStreamSocketMatchesPython(t *testing.T) {
 		py := ora.play(t, pyPlay{
 			Task: activityStreamTask, Query: "since=0", Hold: true,
 			Steps: []pyStep{
-				{Do: "entered"}, {Do: "take"},
+				{Do: "entered"}, {Do: "take", Frames: 0},
 				{Do: "publish", Event: liveEvent},
 				{Do: "fire"}, {Do: "release"},
-				{Do: "arm"}, {Do: "take"},
+				{Do: "arm"}, {Do: "take", Frames: 1},
 				{Do: "drop"},
 			},
 		})
@@ -547,15 +549,15 @@ func TestActivityStreamSocketMatchesPython(t *testing.T) {
 			Task: activityStreamTask, Query: "since=0", Clients: 2,
 			Steps: []pyStep{
 				{Do: "arm", N: 2},
-				{Do: "take", Client: 0}, {Do: "take", Client: 1},
+				{Do: "take", Client: 0, Frames: 0}, {Do: "take", Client: 1, Frames: 0},
 				{Do: "publish", Event: one},
 				{Do: "arm", N: 2},
-				{Do: "take", Client: 0}, {Do: "take", Client: 1},
+				{Do: "take", Client: 0, Frames: 1}, {Do: "take", Client: 1, Frames: 1},
 				{Do: "drop", Client: 0},
 				{Do: "subs", N: 2},
 				{Do: "publish", Event: two},
 				{Do: "arm", N: 1},
-				{Do: "take", Client: 1},
+				{Do: "take", Client: 1, Frames: 1},
 				{Do: "subs", N: 1},
 			},
 		})
@@ -583,6 +585,10 @@ func TestActivityStreamSocketMatchesPython(t *testing.T) {
 			Steps: []pyStep{
 				{Do: "arm"},
 				{Do: "subs", N: 1},
+				// drop waits until the server transport is closing. The
+				// subscriber is still held: Python unsubscribes in finally
+				// after the next write fails. publish is that write, and the
+				// last subs waits for the handler task to finish.
 				{Do: "drop"},
 				{Do: "subs", N: 1},
 				{Do: "publish", Event: liveEvent},

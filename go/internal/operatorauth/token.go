@@ -1,6 +1,7 @@
 // Package operatorauth is the operator credential for looper serve.
-// The token file and the access checks follow looper/agents/operator_auth.py.
-// Password records, sessions, and the login limiter are not in this package.
+// The token file, the password file, and the access checks follow
+// looper/agents/operator_auth.py. Sessions and the login limiter are not
+// in this package. POST /login and POST /logout stay 405 until those exist.
 package operatorauth
 
 import (

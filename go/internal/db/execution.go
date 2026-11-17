@@ -32,7 +32,7 @@ var executionFields = []string{
 	"role_text_max_chars", "user_gates", "gate_reminder_hours", "agent_room", "room_post_per_minute",
 	"room_broadcasts_per_run", "room_message_max_chars", "room_messages_per_task", "room_ping_pong_rounds",
 	"room_wait_max_seconds", "room_consult_budget_usd", "room_consult_timeout_seconds", "room_consults_per_task",
-	"task_workspaces", "operator_notes",
+	"task_workspaces", "operator_notes", "vault",
 }
 
 // roomLimit is low, high. The default is not returned; null inherits it.
@@ -53,6 +53,7 @@ var executionChoice = map[string][]string{
 	"step_workspaces":    {"shared", "worktree"},
 	"task_workspaces":    {"in_place", "worktree"},
 	"operator_notes":     {"off", "on"},
+	"vault":              {"off", "on"},
 	"planner_roles":      {"off", "on"},
 	"user_gates":         {"off", "on"},
 	"agent_room":         {"off", "on"},

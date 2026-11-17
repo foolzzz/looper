@@ -27,13 +27,16 @@ Go release tags are `vX.Y.Z-go`. The steps are under Releases.
   value still matches Python (400 when it is outside 1..200).
 - Python is the reference until switch-over. The parity target is the latest
   `main` merged into this branch. G1sync moved that target from v2.10.0 to
-  v2.11.0. Read-only routes are checked by golden JSON: same seeded database,
+  v2.11.0. This branch's `looper.__version__` is 2.12.1, and configuration
+  exports write that string. Read-only routes are checked by golden JSON:
+  same seeded database,
   both servers, compare bodies.
 - Operator routes require the token file under the runtime root. `looper serve`
   checks that root and the token before it dials PostgreSQL. An empty
-  `--runtime-root` is the process directory, not `~/.looper`. Password login,
-  sessions, and rate limits are not served: `POST /login` and `POST /logout`
-  stay 405, and `can_sign_out` stays false.
+  `--runtime-root` is the process directory, not `~/.looper`. The password
+  file (`operator-password`, scrypt) is read and written by `operatorauth`.
+  Password login, sessions, and rate limits are not served: `POST /login`
+  and `POST /logout` stay 405, and `can_sign_out` stays false.
 - Defaults follow Python in the milestone that owns the flag. G0's flags are
   the ones named below.
 - Logs go through `log/slog`. A database URL, password, or token is not a log
@@ -42,8 +45,15 @@ Go release tags are `vX.Y.Z-go`. The steps are under Releases.
 ## Module layout
 
 Module `github.com/foolzzz/looper/go`, Go 1.24. The HTTP server and the CLI
-use the standard library. The only external dependency is the pgx stdlib
-driver, `github.com/jackc/pgx/v5/stdlib`, behind `database/sql`.
+use the standard library. External modules are only the ones the Python
+contract needs:
+
+- `github.com/jackc/pgx/v5` for PostgreSQL (`database/sql` uses the stdlib driver).
+- `golang.org/x/sys/unix` for private credential files (`O_NOFOLLOW`, directory file descriptors).
+- `golang.org/x/text/cases` for knowledge titles.
+- `golang.org/x/crypto/scrypt` for the operator password file. The 64 MiB OpenSSL limit is checked before the KDF runs.
+
+No other external modules.
 
 - `cmd/looper` — `version`, `serve`, signal handling, shutdown.
 - `internal/config` — flag parsing.
@@ -249,19 +259,6 @@ v2.10.0 and v2.11.0. Runtime-named failure text, the dashboard
 `Referrer-Policy: same-origin` header, and `/logout` are not on the ported
 read surface.
 
-The external seed step regenerates `go/testdata/parity/config_export` from
-this tree's Python, then runs `git diff --exit-code` on that directory. That
-compares the worktree with the index. An unstaged v2.11.0 golden update
-exits 1 and stops the run before `go test`, which is what the first harness
-tail showed. The regenerated fixtures are staged and not committed, so a
-stable regeneration leaves that diff empty, and a generator that rewrites
-bytes still fails it. `looper_version` in those fixtures is
-`looper.__version__` (`2.11.0`); the generator does not patch it. CI copies
-the directory before regeneration and runs `diff -ru` against that copy, so
-a clean checkout still fails when committed fixtures drift. `go vet ./...`
-and `go test ./...` passed from `go/` with `LOOPGO_TEST_DATABASE_URL` and
-`LOOPGO_CONFIG_EXPORT_PARITY_URL` set to disposable `loopgo_*` databases.
-
 G1r serves the operator token file and the HTTP authentication boundary.
 `looper serve` checks the runtime root and creates or reads the token before
 it dials PostgreSQL. An empty `--runtime-root` is the process directory.
@@ -271,17 +268,36 @@ the body. Agent routes keep their own token. Loopback browser navigation can
 sign in. Password login, scrypt, sessions, and rate limits are deferred:
 `POST /login` and `POST /logout` stay 405.
 
+G1s reads and writes that password file. The scrypt parameters, URL-safe
+base64, and private atomic replace match Python. `load_password` decodes the
+file the way `json.loads` decodes bytes: a BOM, UTF-16, or UTF-32 record is
+accepted, and an illegal UTF-8 byte inside an ignored string rejects the
+record. `json.loads` also accepts `NaN`, `Infinity`, and `-Infinity`. An
+ignored field may hold them, including inside a nested value. A required
+integer that is one of those constants is still not a password record.
+The cache reloads when inode, size, mtime, mode, or owner changes,
+including when size, mtime, or owner is the only field that changed. Sign-in
+HTTP, sessions, and the login limiter stay deferred, so `POST /login` and
+`POST /logout` still answer 405 and `can_sign_out` stays false. The merged
+schema's `projects.vault` column is in the embedded copy, the project
+execution view, and the config-export fixtures, which use `looper_version`
+2.12.1.
+
 A hijacked refusal write has a deadline. `Shutdown` and `Close` close that
 socket, because hijack removes it from `http.Server`'s set. Schedule responses
 expose an inherited run timeout as `"default"` plus
 `run_timeout_effective_seconds`. Project schedule limits include
 `run_timeout_default_seconds`. Those four goldens were regenerated from this
-tree's Python. Config-export regeneration against a disposable `loopgo_*`
-database left the worktree fixtures unchanged. Those fixtures are staged and
-not committed, so the external seed step's `git diff --exit-code` on
-`go/testdata/parity/config_export` is empty. `go vet ./...` and
-`go test ./...` from `go/` passed with both parity database variables set to
-disposable `loopgo_*` databases.
+tree's Python. The config-export snapshot contains `looper_version` 2.12.1
+and `vault`. Regenerating it from this tree's Python against a disposable
+database left those files unchanged. Activity-stream parity waits for an
+exact count of complete SSE frames. A play resets its rows and clock only
+after that play's handler and pump tasks have finished. Dropping a client
+waits until the server transport is closing; the subscriber remains until
+the handler's next write fails and that handler task finishes. From `go/`,
+`go vet ./...` and `go test -count=1 -timeout 480s ./...` passed on
+disposable databases. `go test -count=20 -timeout 30m -run TestActivityStream
+./internal/httpapi/` passed as well.
 
 G1p serves `POST /api/chat/messages` and `GET /api/chat/events`. A non-empty
 `cid` reads that message stream. A blank `cid` leaves `session` in effect,

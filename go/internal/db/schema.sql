@@ -672,6 +672,7 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS workspace_links TEXT[] CHECK (card
 -- operator's Claude Code notes for their directory ('on', also when NULL; 'off').
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS task_workspaces TEXT CHECK (task_workspaces IN ('in_place', 'worktree'));
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS operator_notes TEXT CHECK (operator_notes IN ('off', 'on'));
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS vault TEXT CHECK (vault IN ('off', 'on'));
 -- How many times the Planner may retry one step (NULL: 2).
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS max_step_retries INTEGER
     CHECK (max_step_retries >= 0 AND max_step_retries <= 20);

@@ -1,5 +1,5 @@
 {"format":"looper-config/v2",
-"looper_version":"2.11.0",
+"looper_version":"2.12.1",
 "exported_at":"2026-06-15T12:00:00+00:00",
 "secrets":"omitted",
 "runtimes":[{"name":"Legacy Code","type":"claude-code","executable":null},{"name":"Portable Codex","type":"codex","executable":"codex"}],

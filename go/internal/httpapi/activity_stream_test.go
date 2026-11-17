@@ -31,10 +31,10 @@ func TestActivityStreamConstantsMatchPython(t *testing.T) {
 		Task: activityStreamTask, Query: "since=0", Clients: 1,
 		Steps: []pyStep{
 			{Do: "arm"},
-			{Do: "take"},
+			{Do: "take", Frames: 0},
 			{Do: "fire"},
 			{Do: "arm"},
-			{Do: "take"},
+			{Do: "take", Frames: 1},
 			{Do: "close"},
 			{Do: "eof"},
 		},
@@ -743,10 +743,10 @@ func pythonActivityFrames(t *testing.T, live bool, rows [][]any) []byte {
 			Task: activityStreamTask, Query: "since=0", Clients: 1,
 			Steps: []pyStep{
 				{Do: "arm"},
-				{Do: "take"},
+				{Do: "take", Frames: 0},
 				{Do: "publish", Event: rows[0]},
 				{Do: "arm"},
-				{Do: "take"},
+				{Do: "take", Frames: 1},
 				{Do: "drop"},
 			},
 		})
@@ -756,17 +756,42 @@ func pythonActivityFrames(t *testing.T, live bool, rows [][]any) []byte {
 		if _, rest := splitHTTPHead(res.Parts[0]); len(rest) != 0 {
 			t.Fatalf("live header carried %q", rest)
 		}
+		if n := countSSEFrames(res.Parts[1]); n != 1 {
+			t.Fatalf("live frames %d", n)
+		}
 		return res.Parts[1]
 	}
 	res := ora.play(t, pyPlay{
 		Task: activityStreamTask, Query: "since=0", Rows: rows, Once: true, Clients: 1,
-		Steps: []pyStep{{Do: "arm"}, {Do: "take"}, {Do: "drop"}},
+		Steps: []pyStep{{Do: "arm"}, {Do: "take", Frames: len(rows)}, {Do: "drop"}},
 	})
 	if len(res.Parts) != 1 {
 		t.Fatalf("replay parts %d", len(res.Parts))
 	}
 	_, frames := splitHTTPHead(res.Parts[0])
+	if n := countSSEFrames(frames); n != len(rows) {
+		t.Fatalf("replay frames %d want %d", n, len(rows))
+	}
 	return frames
+}
+
+// countSSEFrames counts complete SSE frames. A trailing partial frame is -1.
+func countSSEFrames(body []byte) int {
+	if len(body) == 0 {
+		return 0
+	}
+	n := 0
+	for {
+		i := bytes.Index(body, []byte("\n\n"))
+		if i < 0 {
+			return -1
+		}
+		n++
+		body = body[i+2:]
+		if len(body) == 0 {
+			return n
+		}
+	}
 }
 
 type streamReads struct {

@@ -16,7 +16,7 @@ import (
 
 // PythonVersion is looper.__version__ on the parity target. A configuration
 // export writes it as looper_version.
-const PythonVersion = "2.11.0"
+const PythonVersion = "2.12.1"
 
 // Each read is deliberately separate from dashboard reads: only this explicit
 // download path may read provider keys and unmasked MCP values.

@@ -53,6 +53,10 @@ func TestExecutionViewIgnoresInvalid(t *testing.T) {
 		{name: "consult ok", in: map[string]any{"room_consult_budget_usd": 0.5}, key: "room_consult_budget_usd", want: 0.5},
 		{name: "retries over", in: map[string]any{"max_step_retries": 21}, key: "max_step_retries", want: nil, warn: true},
 		{name: "empty string inherits", in: map[string]any{"review_policy": ""}, key: "review_policy", want: nil},
+		{name: "vault unset", in: map[string]any{}, key: "vault", want: nil},
+		{name: "vault on", in: map[string]any{"vault": "on"}, key: "vault", want: "on"},
+		{name: "vault off", in: map[string]any{"vault": "off"}, key: "vault", want: "off"},
+		{name: "vault bad", in: map[string]any{"id": "proj-x", "vault": "sideways"}, key: "vault", want: nil, warn: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -128,6 +132,9 @@ func TestProjectViewUsesExecutionRules(t *testing.T) {
 	}
 	if got["distill_lessons"] != "off" || got["project_id"] != "proj-x" || got["task_count"] != 1 {
 		t.Fatalf("view %#v", got)
+	}
+	if got["vault"] != nil {
+		t.Fatalf("vault %#v", got["vault"])
 	}
 }
 

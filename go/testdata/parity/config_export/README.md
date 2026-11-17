@@ -1,6 +1,6 @@
 # Config export reference fixtures
 
-The repository's Python v2.11.0 implementation generated these files. Every
+The repository's Python v2.12.1 implementation generated these files. Every
 secret is synthetic. No model, channel or operator runtime is used.
 
 `rows.json` contains the synthetic results of the export reads. The offline
@@ -13,7 +13,7 @@ the post-upgrade profile `Fixture Agent · high`.
 
 `*.json` bodies and `*.http` responses preserve exact Python bytes. Only time
 and version are frozen: `2026-06-15T12:00:00+00:00`, download date `2026-06-15`,
-version `2.11.0`. `*.summary.json` contains the four export summaries.
+version `2.12.1`. `*.summary.json` contains the four export summaries.
 
 The cases cover default redaction, explicit secret inclusion, optional projects,
 text/upload/path knowledge documents, role templates and catalog references,

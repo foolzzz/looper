@@ -285,7 +285,8 @@
       "room_consult_timeout_seconds": null,
       "room_consults_per_task": null,
       "task_workspaces": "worktree",
-      "operator_notes": "off"
+      "operator_notes": "off",
+      "vault": null
     },
     {
       "id": "proj-export-beta",
@@ -315,7 +316,8 @@
       "room_consult_timeout_seconds": null,
       "room_consults_per_task": null,
       "task_workspaces": null,
-      "operator_notes": null
+      "operator_notes": null,
+      "vault": null
     }
   ],
   "items": [
