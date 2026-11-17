@@ -275,6 +275,41 @@ export interface LiveStepRun {
   task_role?: RunRole;
 }
 
+/** Tokens in the last 60 s; total = input + output + cache_read + cache_creation. */
+export interface TokenRate {
+  total: number;
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_creation: number;
+}
+
+/** An agent process running now (or a Worker/Reviewer waiting for room under its task's limit). */
+export interface AgentProcess {
+  agent_id: string;
+  role: "manager" | "planner" | "worker" | "reviewer" | "consult";
+  /** A Manager's display name; null otherwise. */
+  name: string | null;
+  task_id: string | null;
+  task_name: string | null;
+  project_id: string | null;
+  project_name: string | null;
+  /** A Worker's or Reviewer's step; null for others. */
+  step: string | null;
+  instruction: string | null;
+  task_role?: RunRole;
+  /** Runtime label, e.g. "Claude Code"; null while waiting. */
+  runtime: string | null;
+  model: string | null;
+  /** OS pid when known. */
+  pid: number | null;
+  /** waiting: no process yet. */
+  state: "running" | "waiting";
+  elapsed_seconds: number;
+  /** null: waiting, or the runtime reports usage only when a turn ends. */
+  tpm: TokenRate | null;
+}
+
 /** How many of one role run in a project, and how many wait for their task's limit. */
 export interface RoleLoad {
   running: number;
@@ -310,6 +345,10 @@ export interface Overview {
     workers: LiveStepRun[];
     reviewers: LiveStepRun[];
   };
+  /** Agent processes running now, ordered by the server. */
+  processes: AgentProcess[];
+  /** All agents' tokens in the last `window_seconds`, runs that ended within it included. */
+  tpm: TokenRate & { window_seconds: number };
   /** The projects with a task in progress or ready. */
   projects: {
     project_id: string;

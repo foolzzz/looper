@@ -15,6 +15,13 @@ export function formatTokens(value: number | null | undefined): string {
   return `${(value / 1_000_000).toFixed(2).replace(/\.?0+$/, "")}M`;
 }
 
+/** Tokens per minute: 950, 12.3k, 1.2M. */
+export function formatTpm(value: number): string {
+  if (value < 1000) return String(value);
+  const trim = (x: number) => x.toFixed(1).replace(/\.0$/, "");
+  return value < 999_950 ? `${trim(value / 1000)}k` : `${trim(value / 1_000_000)}M`;
+}
+
 /** "25.1k → 1.4k tokens": a compaction's context before and after, as Claude Code counts them. */
 export function compactionChange(c: Compaction): string {
   return `${formatTokens(c.pre_tokens)} → ${formatTokens(c.post_tokens)} tokens`;

@@ -1,21 +1,22 @@
 import { startPolling } from "@/lib/polling";
 import { useWaitingGates } from "@/lib/use-waiting-gates";
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { DashboardGates } from "@/components/dashboard-gates";
 import { RunStatusBadge, ScheduleTime } from "@/components/project-schedules";
 import {
   fetchOverview,
   TASK_GROUPS,
-  type LiveStepRun,
+  type AgentProcess,
+  type TokenRate,
   type ComponentHealth,
   type Overview,
   type OverviewSchedules,
   type TaskGroup,
 } from "@/lib/api";
 import { historyHref } from "@/pages/agent-history";
-import { formatUsd } from "@/lib/usage";
+import { formatTpm, formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
 /** The groups always counted; "Needs you", "Cancelled" and "Other" show only when they hold a task. */
@@ -114,18 +115,6 @@ function TaskCounts({ tasks }: { tasks: Overview["tasks"] }) {
   );
 }
 
-function AgentRow({ role, count, children }: { role: string; count?: React.ReactNode; children?: React.ReactNode }) {
-  return (
-    <div className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 py-2.5 first:pt-0 last:pb-0">
-      <span className="text-sm font-medium">{role}</span>
-      <div className="min-w-0 space-y-1">
-        {count !== undefined && <p className="text-sm tabular-nums">{count}</p>}
-        {children}
-      </div>
-    </div>
-  );
-}
-
 function AgentTask({ taskId, name, project }: { taskId: string; name: string; project: string | null }) {
   const label = project ? `${project} · ${name}` : name;
   return (
@@ -138,78 +127,92 @@ function AgentTask({ taskId, name, project }: { taskId: string; name: string; pr
   );
 }
 
-function StepRuns({ runs }: { runs: LiveStepRun[] }) {
-  return runs.map((run) => {
-    const instruction = run.instruction.split("\n")[0] || run.step || run.agent_id;
-    return (
-      <div key={run.agent_id} className="min-w-0">
-        <AgentTask taskId={run.task_id} name={run.task_name || run.task_id} project={run.project_name} />
-        <p className="flex min-w-0 items-baseline gap-2 text-xs">
-          {/* A run as a role its task's Planner defined shows the role's id. */}
-          {run.task_role && <span title={run.task_role.id} className="max-w-20 truncate font-mono text-foreground">{run.task_role.id}</span>}
-          <a
-            href={historyHref(run.agent_id, run.task_id)}
-            title={instruction}
-            className={cn("min-w-0 truncate text-muted-foreground", linkClass)}
-          >
-            {instruction}
-          </a>
-          {run.state === "waiting" ? (
-            <Badge variant="warning" className="shrink-0">waiting</Badge>
-          ) : (
-            <span className="shrink-0 tabular-nums text-muted-foreground">{elapsed(run.elapsed_seconds)}</span>
-          )}
-        </p>
-      </div>
-    );
-  });
+const ROLE_LABEL: Record<AgentProcess["role"], string> = {
+  manager: "Manager", planner: "Planner", worker: "Worker", reviewer: "Reviewer", consult: "Consult",
+};
+
+/** A figure whose breakdown is its hover text, reachable by keyboard. */
+const focusable = "rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+/** The last minute's tokens by kind, as a hover text. */
+function tpmBreakdown(t: TokenRate, windowSeconds = 60): string {
+  const n = (v: number) => v.toLocaleString("en-US");
+  return `Input ${n(t.input)} · Output ${n(t.output)} · Cache read ${n(t.cache_read)} · Cache write ${n(t.cache_creation)} · last ${windowSeconds} s`;
 }
 
-function runCount(runs: LiveStepRun[], extraRunning = 0): string {
-  const running = runs.filter((r) => r.state === "running").length + extraRunning;
-  const waiting = runs.filter((r) => r.state === "waiting").length;
-  return `${running} running${waiting ? ` · ${waiting} waiting` : ""}`;
+function Tpm({ rate, windowSeconds, running = true }: { rate: TokenRate | null; windowSeconds?: number; running?: boolean }) {
+  if (!rate) {
+    return <span title={running ? "Usage is reported when a turn ends" : undefined} className="text-muted-foreground">—</span>;
+  }
+  const text = tpmBreakdown(rate, windowSeconds);
+  return <span tabIndex={0} title={text} aria-label={`${formatTpm(rate.total)} tokens per minute. ${text}`} className={focusable}>{formatTpm(rate.total)}</span>;
 }
 
-function Agents({ agents }: { agents: Overview["agents"] }) {
-  const { manager, planners, workers, reviewers } = agents;
-  const managers = (agents.managers ?? (manager ? [{ ...manager, name: "Manager" }] : []))
-    .filter((m) => m.state !== "stopped");
-  const busyManagers = managers.filter((m) => m.state === "busy").length;
+function ProcessRow({ p, windowSeconds }: { p: AgentProcess; windowSeconds: number }) {
+  const instruction = (p.instruction ?? "").split("\n")[0] || p.step || "";
+  const runtime = [p.runtime, p.model].filter(Boolean).join(" · ");
+  const label = p.name && p.name !== ROLE_LABEL[p.role] ? `${ROLE_LABEL[p.role]} · ${p.name}` : ROLE_LABEL[p.role];
   return (
-    <Section title="Agents running now" meta={runCount([...workers, ...reviewers], busyManagers + planners.length)}>
-      <div className="divide-y divide-border">
-        <AgentRow role={managers.length > 1 ? "Managers" : "Manager"} count={`${busyManagers} busy`}>
-          {managers.map((m) => (
-            <a key={m.agent_id} href={historyHref(m.agent_id)} className={cn("flex min-w-0 items-center gap-1.5 text-sm", linkClass)}>
-              <span title={m.name} className="min-w-0 truncate">{m.name}</span>
-              {m.state === "busy" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" aria-hidden="true" />}
-              <span className="shrink-0 text-xs text-muted-foreground">{m.state}</span>
-            </a>
-          ))}
-          {managers.length === 0 && <p className="text-sm text-muted-foreground">{agents.managers ? "None" : "unknown"}</p>}
-        </AgentRow>
-        <AgentRow role="Planners" count={planners.length}>
-          {planners.map((p) => (
-            <div key={p.agent_id} className="min-w-0">
-              <AgentTask taskId={p.task_id} name={p.name || p.requirement.split("\n")[0]} project={p.project_name} />
-              <a
-                href={historyHref(p.agent_id, p.task_id)}
-                title={p.requirement.split("\n")[0]}
-                className={cn("block truncate text-xs text-muted-foreground", linkClass)}
-              >
-                {p.name && p.name !== p.requirement.split("\n")[0] ? p.requirement.split("\n")[0] : "planning"}
-              </a>
-            </div>
-          ))}
-        </AgentRow>
-        <AgentRow role="Workers" count={runCount(workers)}>
-          <StepRuns runs={workers} />
-        </AgentRow>
-        <AgentRow role="Reviewers" count={runCount(reviewers)}>
-          <StepRuns runs={reviewers} />
-        </AgentRow>
+    <div role="row" className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-0.5 py-2 text-sm lg:grid-cols-[9rem_minmax(0,1fr)_14rem_4.5rem_4.5rem_4.5rem]">
+      <div role="cell" className="col-start-1 row-start-1 flex min-w-0 items-baseline gap-2 lg:order-1 lg:col-auto lg:row-auto">
+        <a href={historyHref(p.agent_id, p.task_id ?? undefined)} title={label} className={cn("min-w-0 truncate font-medium", linkClass)}>{label}</a>
+        {p.task_role && <span title={p.task_role.id} className="max-w-20 shrink-0 truncate font-mono text-xs">{p.task_role.id}</span>}
       </div>
+      <div role="cell" className="col-span-2 row-start-2 min-w-0 lg:order-2 lg:col-auto lg:row-auto">
+        {p.task_id && <AgentTask taskId={p.task_id} name={p.task_name || p.task_id} project={p.project_name} />}
+        {instruction && (p.role === "worker" || p.role === "reviewer") && (
+          <p title={instruction} className="truncate text-xs text-muted-foreground">{instruction}</p>
+        )}
+      </div>
+      <div className="col-span-2 row-start-3 flex flex-wrap gap-x-3 text-xs text-muted-foreground lg:contents">
+        <span role="cell" title={runtime || undefined} className="min-w-0 truncate lg:order-3 lg:text-sm">{runtime || "—"}</span>
+        <span role="cell" className="font-mono tabular-nums lg:order-4 lg:text-sm">
+          <span className="lg:hidden">PID </span>{p.pid ?? "—"}
+        </span>
+        <span role="cell" className="tabular-nums lg:order-6 lg:text-right lg:text-sm lg:text-foreground">
+          <span className="lg:hidden">TPM </span><Tpm rate={p.tpm} windowSeconds={windowSeconds} running={p.state === "running"} />
+        </span>
+      </div>
+      <div role="cell" className="col-start-2 row-start-1 justify-self-end tabular-nums text-muted-foreground lg:order-5 lg:col-auto lg:row-auto lg:justify-self-start">
+        {p.state === "waiting" ? <Badge variant="warning">waiting</Badge> : elapsed(p.elapsed_seconds)}
+      </div>
+    </div>
+  );
+}
+
+const COLUMNS = ["Agent", "Task / step", "Runtime · model", "PID", "Time", "TPM"];
+
+function Agents({ overview }: { overview: Overview }) {
+  const { agents } = overview;
+  const processes = overview.processes ?? [];
+  const tpm = overview.tpm;
+  const running = processes.filter((p) => p.state === "running").length;
+  const waiting = processes.length - running;
+  // A Manager between turns has no process row; a stopped one (or one suspended while idle) is left out, as before.
+  const listed = new Set(processes.map((p) => p.agent_id));
+  const idle = (agents.managers ?? (agents.manager ? [{ ...agents.manager, name: "Manager" }] : []))
+    .filter((m) => m.state === "idle" && !listed.has(m.agent_id)).map((m) => m.name);
+  return (
+    <Section
+      title="Agents running now"
+      meta={<>
+        {running} running{waiting > 0 && ` · ${waiting} waiting`}
+        {tpm && <> · <span tabIndex={0} title={tpmBreakdown(tpm, tpm.window_seconds)} className={cn("tabular-nums", focusable)}>{formatTpm(tpm.total)} TPM</span></>}
+      </>}
+    >
+      {processes.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No agent is running now</p>
+      ) : (
+        <div role="table" aria-label="Agent processes">
+          <div role="row" className="hidden gap-x-3 border-b border-border pb-1.5 text-xs text-muted-foreground lg:grid lg:grid-cols-[9rem_minmax(0,1fr)_14rem_4.5rem_4.5rem_4.5rem]">
+            {COLUMNS.map((c, i) => <span key={c} role="columnheader" className={i === 5 ? "text-right" : undefined}>{c}</span>)}
+          </div>
+          <div role="rowgroup" className="divide-y divide-border">
+            {processes.map((p, i) => <ProcessRow key={`${p.agent_id}-${i}`} p={p} windowSeconds={tpm?.window_seconds ?? 60} />)}
+          </div>
+        </div>
+      )}
+      {idle.length > 0 && <p className="mt-3 text-xs text-muted-foreground">Idle: {idle.join(", ")}</p>}
     </Section>
   );
 }
@@ -463,7 +466,7 @@ export function DashboardPage() {
       </div>
       <TaskCounts tasks={overview.tasks} />
       <DashboardGates needsYou={overview.tasks.needs_you} waitingGates={waitingGates} revision={overview} />
-      <Agents agents={overview.agents} />
+      <Agents overview={overview} />
       <Concurrency projects={overview.projects} idle={overview.idle_projects} />
       {overview.schedules.total > 0 && <Schedules schedules={overview.schedules} />}
       <Spend spend={overview.spend_today} />
