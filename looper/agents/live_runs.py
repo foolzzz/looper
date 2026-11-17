@@ -124,6 +124,7 @@ def untrack(run: LiveRun) -> None:
     if run in _live:
         _live.discard(run)
         _drop_spent()  # without a reader too, ended runs do not pile up
+        run.pid_of = None  # an ended run holds no process handle
         if not run.window.empty:
             _ended.append(run)
 

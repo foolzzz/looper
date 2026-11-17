@@ -136,16 +136,17 @@ describe("Dashboard waiting gates", () => {
     expect(taskSpan.className).toContain("truncate");
   });
 
-  it("lists the idle Managers below the table, not one with a process or a stopped one", async () => {
+  it("names the busy and idle Managers without a row below the table, not one with a row or a stopped one", async () => {
     overview.agents.managers = [
       { agent_id: "manager", name: "Manager", state: "busy" },
+      { agent_id: "manager-s", name: "Starting manager", state: "busy" },
       { agent_id: "manager-a", name: "Review manager", state: "idle" },
       { agent_id: "manager-b", name: "Old manager", state: "stopped" },
     ];
     overview.processes = [proc({ agent_id: "manager", role: "manager", name: "Manager", task_id: null, task_name: null,
       project_id: null, project_name: null, step: null, instruction: null })];
     await show();
-    expect(agentsSection().querySelector("p.mt-3")!.textContent).toBe("Idle: Review manager");
+    expect(agentsSection().querySelector("p.mt-3")!.textContent).toBe("Busy: Starting manager · Idle: Review manager");
     expect(agentsSection().querySelector('a[href="#history/manager"]')).not.toBeNull();
   });
 

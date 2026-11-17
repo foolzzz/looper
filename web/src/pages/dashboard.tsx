@@ -188,10 +188,15 @@ function Agents({ overview }: { overview: Overview }) {
   const tpm = overview.tpm;
   const running = processes.filter((p) => p.state === "running").length;
   const waiting = processes.length - running;
-  // A Manager between turns has no process row; a stopped one (or one suspended while idle) is left out, as before.
+  // A Manager without a row is named below: busy before its turn's run starts (its runtime starting, a session
+  // switch) or idle between turns; a stopped one (or one suspended while idle) is left out, as before.
   const listed = new Set(processes.map((p) => p.agent_id));
-  const idle = (agents.managers ?? (agents.manager ? [{ ...agents.manager, name: "Manager" }] : []))
-    .filter((m) => m.state === "idle" && !listed.has(m.agent_id)).map((m) => m.name);
+  const resting = (agents.managers ?? (agents.manager ? [{ ...agents.manager, name: "Manager" }] : []))
+    .filter((m) => !listed.has(m.agent_id));
+  const restLine = (["busy", "idle"] as const).map((state) => {
+    const names = resting.filter((m) => m.state === state).map((m) => m.name);
+    return names.length ? `${state === "busy" ? "Busy" : "Idle"}: ${names.join(", ")}` : "";
+  }).filter(Boolean).join(" · ");
   return (
     <Section
       title="Agents running now"
@@ -212,7 +217,7 @@ function Agents({ overview }: { overview: Overview }) {
           </div>
         </div>
       )}
-      {idle.length > 0 && <p className="mt-3 text-xs text-muted-foreground">Idle: {idle.join(", ")}</p>}
+      {restLine && <p className="mt-3 text-xs text-muted-foreground">{restLine}</p>}
     </Section>
   );
 }
