@@ -43,6 +43,7 @@ class TokenWindow:
         counts = tuple(getattr(usage, name) or 0 for name in _KINDS.values())
         if any(counts):
             self._events.append((self.clock(), counts))
+        self._prune()  # a long run nobody looks at keeps only its last minute
 
     def _prune(self) -> None:
         cutoff = self.clock() - WINDOW_SEC
@@ -122,8 +123,13 @@ def untrack(run: LiveRun) -> None:
     """The run ended (or another server follows it now); its tokens stay in the total while the window holds them."""
     if run in _live:
         _live.discard(run)
+        _drop_spent()  # without a reader too, ended runs do not pile up
         if not run.window.empty:
             _ended.append(run)
+
+
+def _drop_spent() -> None:
+    _ended[:] = [run for run in _ended if not run.window.empty]
 
 
 def running() -> list[LiveRun]:
@@ -133,5 +139,5 @@ def running() -> list[LiveRun]:
 
 def counted() -> list[LiveRun]:
     """Every run whose tokens are in a window now: the running ones and those that ended within it."""
-    _ended[:] = [run for run in _ended if not run.window.empty]
+    _drop_spent()
     return [*running(), *_ended]

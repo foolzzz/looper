@@ -36,6 +36,28 @@ def test_a_window_holds_every_token_kind_of_the_last_minute() -> None:
     assert window.empty
 
 
+def test_nothing_older_than_the_window_is_kept_when_nobody_reads_it() -> None:
+    now = [0.0]
+
+    def run(agent_id: str) -> live_runs.LiveRun:
+        made = live_runs.LiveRun(agent_id=agent_id, role="worker", task_id=None, step_id=None, runtime="Claude Code",
+                                 model=None, streams_usage=True, started_at=datetime.now(timezone.utc),
+                                 window=live_runs.TokenWindow(clock=lambda: now[0]))
+        live_runs.track(made)
+        return made
+
+    first, second = run("worker-1"), run("worker-2")
+    for _ in range(3):
+        first.window.add(Usage(output_tokens=1))
+        second.window.add(Usage(output_tokens=1))
+    live_runs.untrack(first)
+    now[0] += 61
+    second.window.add(Usage(output_tokens=1))
+    assert len(second.window._events) == 1  # the run's older events went as new ones came
+    live_runs.untrack(second)
+    assert live_runs._ended == [second]  # the run that ended a minute ago went when the next one ended
+
+
 @pytest.mark.parametrize("close", ["end_left_open", "detach"])
 def test_a_recorder_lists_its_run_until_it_closes_and_its_tokens_stay_in_the_total(agent_db: Any, close: str) -> None:
     from looper.agents.claude_cli import ClaudeRunRecorder
