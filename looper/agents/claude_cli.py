@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
-from . import proc_tree
+from . import live_runs, proc_tree
+from .live_runs import LiveRun
 from .run_usage import Price, Usage, compaction, reported_totals, request_context, request_tokens, run_usage
 from .system_prompt_mode import SystemPromptMode
 
@@ -1434,6 +1435,7 @@ class ClaudeRunRecorder:
         launch: Launch | None = None,
         autonomous: bool = False,
         whole_process: bool = False,
+        pid_of: Callable[[], int | None] | None = None,
     ) -> None:
         self._agent_id = agent_id
         self._autonomous = autonomous
@@ -1451,6 +1453,8 @@ class ClaudeRunRecorder:
         self._session_id = session_id
         self._step_id = step_id
         self._pid = pid
+        self._pid_of = pid_of  # the pid of the process serving the run, while it runs (the dashboard lists it)
+        self._live: LiveRun | None = None  # the run while the dashboard lists it (``live_runs``)
         self._system_prompt = system_prompt
         self._record_id: int | None = None
         self._closed = False
@@ -1504,6 +1508,7 @@ class ClaudeRunRecorder:
         if launch.price is not None:
             recorder._spend = RunSpend(launch.price, launch.model, max_budget_usd)
         recorder._resumed = True
+        recorder._track(state["created_at"])
         return recorder
 
     @property
@@ -1518,6 +1523,7 @@ class ClaudeRunRecorder:
         from ..db import llm_records
         from .runtimes.instructions import record as instructions_record
 
+        self._track(datetime.now(timezone.utc))
         try:
             self._record_id = await llm_records.start_record(
                 agent_id=self._agent_id,
@@ -1563,9 +1569,10 @@ class ClaudeRunRecorder:
         self.account(event)
         await self.persist(event)
 
-    def account(self, event: dict[str, Any]) -> None:
+    def account(self, event: dict[str, Any], *, replayed: bool = False) -> None:
         """What ``event`` tells the run (its usage, so its cap, its model and session), at once; ``persist`` writes
-        it to the record, which may wait on the database."""
+        it to the record, which may wait on the database. A ``replayed`` event (a resumed run's output read again)
+        rebuilds the run's usage but is not new: its tokens are not counted in the run's TPM again."""
         self._model_reported = self._runtime().reported_model(event) or self._model_reported
         if event.get("type") == "system" and event.get("subtype") == "status":
             if event.get("status") == "compacting":
@@ -1584,9 +1591,12 @@ class ClaudeRunRecorder:
         if event.get("type") == "usage":  # internal: counted, not part of the transcript
             from .runtimes.pricing import event_usage
 
+            found = event_usage(event)
+            if found is not None and self._live is not None and not replayed:
+                self._live.window.add(found[1])
             if self._spend is not None:
                 self._spend.add(event)
-            elif (found := event_usage(event)) is not None:
+            elif found is not None:
                 self._streamed = self._streamed.plus(found[1])
             return
         if event.get("type") == "stream_event":
@@ -1597,6 +1607,8 @@ class ClaudeRunRecorder:
             self._model = event.get("model") or self._model
             self._model_display = event.get("model_display") or self._model_display
             self._session_id = event.get("session_id") or self._session_id
+        if self._live is not None:
+            self._live.model = self._model_reported or self._model or self._live.model
         if (context := request_context(event)) is not None:
             self._context_tokens = context
         if (compacted := compaction(event)) is not None:
@@ -1637,6 +1649,37 @@ class ClaudeRunRecorder:
         if spend.budget_unverifiable:
             result["errors"] = ["Cannot verify the configured budget: root step usage is missing or unpriced"]
         return CapStop(result, spend.usage)
+
+    def _track(self, started_at: datetime) -> None:
+        """List the run as running now (``live_runs``), from ``started_at``: a run for one of the four roles or a
+        consult."""
+        launch = self._launch
+        if self._live is not None or launch is None:
+            return
+        try:
+            role = "consult" if launch.consult else launch.role.value if launch.role is not None else None
+            if role is None:
+                return
+            self._live = LiveRun(
+                agent_id=self._agent_id, role=role, task_id=self._task_id, step_id=self._step_id,
+                runtime=launch.runtime.label, model=launch.model or None,
+                streams_usage=launch.runtime.streams_usage, started_at=started_at,
+                pid_of=self._pid_of if self._pid_of is not None else (lambda: self._pid) if self._pid is not None else None)
+        except Exception:  # listing the run is observability too: it never fails the run
+            logger.warning("could not list the run of %s as running", self._agent_id, exc_info=True)
+            return
+        live_runs.track(self._live)
+
+    def track_pid(self, pid_of: Callable[[], int | None]) -> None:
+        """Read the pid of the process serving the run from ``pid_of`` (an owner that has it only once the run
+        resumed)."""
+        self._pid_of = pid_of
+        if self._live is not None:
+            self._live.pid_of = pid_of
+
+    def _untrack(self) -> None:
+        if self._live is not None:
+            live_runs.untrack(self._live)
 
     def _runtime(self) -> RuntimeAdapter:
         """The runtime the recorded run went through (Claude Code for a record without a launch)."""
@@ -1759,6 +1802,7 @@ class ClaudeRunRecorder:
     def detach(self) -> None:
         """Leave the running record for the next control plane to resume."""
         self._detached = self._closed = True
+        self._untrack()
 
     async def end_left_open(self, exc: BaseException | None = None, *, output_text: str | None = None) -> None:
         """Close the record if the run left it open, ended as ``ended_by(exc)`` says, with what the run's usage
@@ -1791,6 +1835,7 @@ class ClaudeRunRecorder:
         stopped). Waiting is bounded by ``CLOSE_TIMEOUT_SEC`` even if the database
         ignores cancellation; a failed write is logged.
         """
+        self._untrack()
         if self._record_id is None or self._closed:
             return
         self._closed = True

@@ -297,6 +297,7 @@ class DshRuntime(RuntimeAdapter):
 
     type = "dsh"
     label = "DSH"
+    streams_usage = True
     default_executable = "dsh"
     capabilities = frozenset({Capability.RUN, Capability.MCP, Capability.RESIDENT_SESSION, Capability.RESUME})
     protocols = frozenset({ApiProtocol.ANTHROPIC_MESSAGES})

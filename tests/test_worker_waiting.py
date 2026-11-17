@@ -550,7 +550,7 @@ def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch
         sleep = AsyncMock(side_effect=AssertionError("an adopted wait must be checked immediately"))
         monkeypatch.setattr(worker, "_waiting_sleep", sleep)
         accounted, persisted = [], []
-        recorder = SimpleNamespace(cap_stop=None, account=accounted.append,
+        recorder = SimpleNamespace(cap_stop=None, account=lambda event, *, replayed=False: accounted.append((event, replayed)),
                                    record=AsyncMock(side_effect=persisted.append), finish=AsyncMock())
 
         written = []
@@ -586,7 +586,7 @@ def test_an_adopted_wait_is_checked_at_the_replay_boundary(tmp_path, monkeypatch
         if room_pending:
             assert written == [delivery.text]
             assert pool._reminders["w1"].through == 42
-        assert accounted == [_waiting()] and persisted[-1] == _completed()
+        assert accounted == [(_waiting(), True)] and persisted[-1] == _completed()
         assert not any((call.kwargs.get("metadata") or {}).get("state") == "waiting"
                        for call in agent_db.insert_activity.await_args_list)
         sleep.assert_not_awaited()
@@ -615,7 +615,7 @@ def test_an_adopted_wait_over_budget_ends_without_a_check_or_live_event(tmp_path
         capped = soft_cap_result(.2, .1)
         recorder = SimpleNamespace(cap_stop=None, record=AsyncMock(), finish=AsyncMock())
 
-        def account(event):
+        def account(event, *, replayed=False):
             recorder.cap_stop = CapStop(capped, Usage(cost_usd=.2))
 
         recorder.account = account

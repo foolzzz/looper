@@ -1317,6 +1317,7 @@ class WorkerPool:
                 raise AttachError(AdoptFailure.PROTOCOL, "keeper mode is off")
             handle = await KeptRun.attach(run_dir, runtime=launch.runtime, launch=launch, epoch=self._keeper.epoch,
                                           on_stale=self._on_stale or (lambda reason: None), label=f"worker {run_id}")
+            recorder.track_pid(lambda: handle.pid)
             is_verify = agent is AgentType.REVIEWER
             if seat is None and self.room_ops is not None and manifest.get("room_seat"):
                 seat = run_seat(manifest, is_verify=is_verify, run=run_id)
@@ -2398,6 +2399,7 @@ class WorkerPool:
             system_prompt=ctx.system_prompt,
             launch=launch,
             whole_process=True,
+            pid_of=lambda: handle.pid,
         )
         async with self._record_run(worker_id, recorder):
             if fallbacks:
@@ -2576,7 +2578,7 @@ class WorkerPool:
                 ctx.model_events += int(runtime.is_model_event(event))
                 replaying = isinstance(handle, KeptRun) and handle.replaying
                 if replaying:
-                    recorder.account(event)
+                    recorder.account(event, replayed=True)
                     replay_events += 1
                 else:
                     # On adoption the replay's usage must stop the first live event before any writes.

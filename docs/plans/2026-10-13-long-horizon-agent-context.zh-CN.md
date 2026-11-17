@@ -556,6 +556,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-16 | Dashboard「Agents running now」改为运行中 agent 的进程表：每个 Manager/Planner 轮次、Worker/Reviewer/consult 运行一行，带 runtime、模型、pid、时长和最近 60 秒的 TPM（四类 token 合计，悬停看细分），排队中的步骤运行标 waiting；标题显示全部 agent 的总 TPM（含一分钟内刚结束的运行）。用量来自 recorder 收到的 usage 事件，只在内存里计数，kept run 重放不重复计入；Codex、Coco、Cursor 只在轮次结束上报用量，每行显示「—」（`RuntimeAdapter.streams_usage`）。仅控制台展示变化，`/api/v1/system/overview` 新增 `processes` 与 `tpm`，Manager 工具、CLI overview 与消息渠道不变。一次性数据库上用替身 Claude 验证 TPM 线性上升到 147,300 后按窗口回落至 0，1280/768/390 px 截图无横向滚动。 |
 | 2026-11-13 | Claude Code 翻译路由凭据隔离（本分支未合入）：客户端环境和私有 settings 只持有每路由随机本地 token，代理校验后从 registry 读取上游 key，启动时删除旧私有 settings 并记录数量。翻译启动保留 15 秒冷启动预算，首个翻译请求在现有凭据读取超时内等待数据库连接，连接失败仍拒绝转发；控制台、Telegram、Lark 与 CLI 共用启动和代理路径，无需入口改动。定向回归 206 项通过，隔离 serve 配替身客户端与上游完成两轮对话和文件扫描；真实模型未验证。 |
 | 2026-11-13 | Manager 会话的 Profile 读取与选择不再等待运行时登录探测（本分支未合入）：使用缓存与单次后台刷新，未知状态以 `checking` 表示，实际启动仍等待登录检查并拒绝已知不可用的 Profile。HTTP 服务在监听前完成 API 路由注册，避免首次读取同步导入全部 API 模块；控制台与 Telegram/Lark `/profile` 共用非阻塞路径，CLI 的启动检查不变。 |
 | 2026-11-12 | Lark CLI 重启回补（本分支未合入）：运行目录持久化消费边界与有界消息回执，消费就绪后在后台按绑定和最近观察聊天回补，复用准入、群 @、路由与附件路径；限制消息年龄、聊天数和页数，每次启动汇总统计。替身覆盖停机消息、实时竞争去重、过期、单聊天失败及对象重建；真实 Lark 权限与 p2p 历史可列性仍待验证，控制台、Telegram 和产品 CLI 无需改动。 |

@@ -4171,6 +4171,7 @@ class PlannerAgent:
             pid=self._claude.pid,
             system_prompt=process.system_prompt,
             launch=process.launch,
+            pid_of=lambda: self._claude.pid,
         )
 
     async def _exchange(self, text: str, process: _Process, limit: int, *, resuming: str | None = None,
@@ -4491,6 +4492,7 @@ class PlannerAgent:
                 system_prompt=system_prompt,
                 launch=launch,
                 autonomous=True,
+                pid_of=lambda: self._claude.pid,
             )
             await recorder.start()
 

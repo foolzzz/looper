@@ -6,7 +6,7 @@ import { DashboardPage } from "@/pages/dashboard";
 import { Sidebar } from "@/components/sidebar";
 import { WaitingGatesProvider } from "@/lib/use-waiting-gates";
 import { fetchGates, fetchOverview, fetchProjectsList, fetchTasks, fetchTaskDetail, postGateMessage, GATE_MESSAGE_MAX_CHARS,
-  type GateList, type Overview, type TaskDetail, type UserGate, type GatePosted } from "@/lib/api";
+  type GateList, type AgentProcess, type Overview, type TaskDetail, type UserGate, type GatePosted } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
   ...await original<typeof import("@/lib/api")>(),
@@ -48,6 +48,7 @@ describe("Dashboard waiting gates", () => {
       projects: [], idle_projects: 0, health: { unhealthy: [] },
       schedules: { total: 0, enabled: 0, next: [], failing: [], skipped_today: {} },
       spend_today: { since: "", provider_priced_usd: 0, equivalent_usd: 0, runs: 0, running: 0, unpriced_runs: 0 },
+    processes: [], tpm: { total: 0, input: 0, output: 0, cache_read: 0, cache_creation: 0, window_seconds: 60 },
     } as unknown as Overview;
     vi.mocked(fetchOverview).mockImplementation(async () => ({ ...overview }));
     vi.mocked(fetchGates).mockImplementation(async () => ({ counts: { waiting_user: waitingGates } } as GateList));
@@ -79,102 +80,74 @@ describe("Dashboard waiting gates", () => {
     return input;
   };
 
-  it("counts the fleet's busy agents separately from waiting runs and links their tasks", async () => {
-    overview.agents = {
-      manager: { agent_id: "manager", state: "busy" },
-      managers: [
-        { agent_id: "manager", name: "Manager", state: "busy" },
-        { agent_id: "manager-build", name: "Build manager", state: "busy" },
-        { agent_id: "manager-review", name: "Review manager", state: "idle" },
-        { agent_id: "manager-off", name: "Stopped manager", state: "stopped" },
-      ],
-      planners: [{ agent_id: "planner-a", task_id: "a", name: "Build parser", requirement: "Plan the parser",
-        project_id: "project-a", project_name: "Compiler" }],
-      workers: [{ agent_id: "worker-a", role: "worker", task_id: "a", task_name: "Build parser",
-        project_id: "project-a", project_name: "Compiler", step: "parse", instruction: "Implement parsing\nMore detail",
-        state: "running", elapsed_seconds: 120, task_role: { id: "developer", kind: "work", version: 1 } },
-      { agent_id: "worker-b", role: "worker", task_id: "b", task_name: "Add tests",
-        project_id: null, project_name: null, step: "test", instruction: "", state: "waiting", elapsed_seconds: 0 }],
-      reviewers: [{ agent_id: "reviewer-a", role: "reviewer", task_id: "a", task_name: "Build parser",
-        project_id: "project-a", project_name: "Compiler", step: "review", instruction: "Review parsing",
-        state: "running", elapsed_seconds: 30 }],
-    };
+  const proc = (extra: Partial<AgentProcess>): AgentProcess => ({
+    agent_id: "worker-a", role: "worker", name: null, task_id: "a", task_name: "Build parser",
+    project_id: "project-a", project_name: "Compiler", step: "parse", instruction: "Implement parsing\nMore detail",
+    runtime: "Claude Code", model: "sonnet", pid: 4242, state: "running", elapsed_seconds: 120,
+    tpm: { total: 12_340, input: 1000, output: 2000, cache_read: 9000, cache_creation: 340 }, ...extra,
+  });
+  const agentsSection = () => container.querySelector('section[aria-label="Agents running now"]')!;
+
+  it("lists a running process with its task, runtime, pid, time and TPM, and the total in the header", async () => {
+    overview.processes = [proc({ task_role: { id: "developer", kind: "work", version: 1 } })];
+    overview.tpm = { total: 15_000, input: 1, output: 2, cache_read: 3, cache_creation: 4, window_seconds: 60 };
     await show();
-    const agents = container.querySelector('section[aria-label="Agents running now"]')!;
-    expect(agents.firstElementChild!.textContent).toContain("5 running · 1 waiting");
-    const rows = agents.querySelector(".divide-y")!.children;
-    expect(rows[0].firstElementChild!.textContent).toBe("Managers");
-    expect(rows[0].textContent).toContain("2 busy");
-    expect(rows[1].textContent).toContain("Planners1");
-    expect(rows[2].textContent).toContain("1 running · 1 waiting");
-    expect(rows[3].textContent).toContain("1 running");
-    const managers = [...rows[0].querySelectorAll("a")];
-    expect(managers.map((a) => a.textContent)).toEqual(["Managerbusy", "Build managerbusy", "Review manageridle"]);
-    expect(managers.map((a) => a.getAttribute("href"))).toEqual([
-      "#history/manager", "#history/manager-build", "#history/manager-review",
-    ]);
-    for (const row of [rows[1], rows[2], rows[3]]) {
-      const link = row.querySelector('a[href="#tasks/a"]')!;
-      expect(link.textContent).toBe("Compiler · Build parser");
-      expect(link.getAttribute("title")).toBe("Compiler · Build parser");
-    }
-    expect(rows[1].textContent).toContain("Plan the parser");
-    expect(rows[2].textContent).toContain("developer");
-    expect(rows[2].textContent).toContain("Implement parsing");
-    expect(rows[2].textContent).not.toContain("More detail");
-    expect(rows[2].textContent).toContain("2 min");
-    expect(rows[2].querySelector('a[href="#tasks/b"]')!.textContent).toBe("Add tests");
-    expect(rows[2].textContent).toContain("testwaiting");
+    const text = agentsSection().textContent!;
+    expect(agentsSection().firstElementChild!.textContent).toBe("Agents running now1 running · 15k TPM");
+    for (const part of ["Worker", "developer", "Claude Code · sonnet", "4242", "2 min", "12.3k", "Implement parsing"]) expect(text).toContain(part);
+    expect(text).not.toContain("More detail");
+    expect(agentsSection().querySelector('a[href="#tasks/a"]')!.textContent).toBe("Compiler · Build parser");
+    expect(agentsSection().querySelector('a[href="#history/worker-a?task=a"]')).not.toBeNull();
+    expect(agentsSection().querySelector('[title*="Cache read 9,000"]')).not.toBeNull();
   });
 
-  it.each(["busy", "idle", null] as const)("falls back to the single Manager: %s", async (state) => {
-    overview.agents.manager = state ? { agent_id: "manager", state } : null;
+  it("shows a dash for a running process without usage, and the waiting badge for a waiting one", async () => {
+    overview.processes = [
+      proc({ tpm: null }),
+      proc({ agent_id: "worker-b", state: "waiting", runtime: null, model: null, pid: null, tpm: null, elapsed_seconds: 0 }),
+    ];
     await show();
-    const agents = container.querySelector('section[aria-label="Agents running now"]')!;
-    expect(agents.firstElementChild!.textContent).toContain(`${state === "busy" ? 1 : 0} running`);
-    expect(agents.firstElementChild!.textContent).not.toContain("waiting");
-    const link = agents.querySelector('a[href="#history/manager"]');
-    expect(agents.querySelector(".divide-y")!.firstElementChild!.firstElementChild!.textContent).toBe("Manager");
-    if (state) expect(link!.textContent).toBe(`Manager${state}`);
-    else expect(link).toBeNull();
+    const [running, waiting] = [...agentsSection().querySelectorAll('[role="rowgroup"] [role="row"]')];
+    expect(running.querySelector('[title="Usage is reported when a turn ends"]')!.textContent).toBe("—");
+    expect(waiting.textContent).toContain("waiting");
+    expect(waiting.querySelector('[title="Usage is reported when a turn ends"]')).toBeNull();
+    expect(waiting.textContent).toContain("—");
+    expect(agentsSection().firstElementChild!.textContent).toContain("1 running · 1 waiting");
   });
 
-  it.each(["Plan the parser", ""])("avoids repeating a Planner's requirement as its name: %s", async (name) => {
-    overview.agents.planners = [{ agent_id: "planner-a", task_id: "a", name,
-      requirement: "Plan the parser\nAdditional details", project_id: null, project_name: null }];
+  it("says when no agent is running", async () => {
+    overview.processes = [];
     await show();
-    const agents = container.querySelector('section[aria-label="Agents running now"]')!;
-    expect(agents.querySelector('a[href="#tasks/a"]')!.textContent).toBe("Plan the parser");
-    expect(agents.querySelector('a[href="#history/planner-a?task=a"]')!.textContent).toBe("planning");
+    expect(agentsSection().textContent).toContain("No agent is running now");
+    expect(agentsSection().querySelector('[role="table"]')).toBeNull();
   });
 
   it("keeps the task name beside a long project name on a narrow screen", async () => {
     vi.stubGlobal("innerWidth", 390);
     const project = "A very long project name that would fill the entire row on a phone";
-    overview.agents.planners = [{ agent_id: "planner-a", task_id: "a", name: "Build parser",
-      requirement: "Plan the parser", project_id: "project-a", project_name: project }];
+    overview.processes = [proc({ agent_id: "planner-a", role: "planner", project_name: project, step: null, instruction: null })];
     await show();
-    const link = container.querySelector('section[aria-label="Agents running now"] a[href="#tasks/a"]')!;
+    const link = agentsSection().querySelector('a[href="#tasks/a"]')!;
     const projectSpan = link.querySelector(`span[title="${project}"]`)!;
     const taskSpan = link.querySelector('span[title="Build parser"]')!;
-    expect(projectSpan.textContent).toBe(project);
-    expect(taskSpan.textContent).toBe("Build parser");
     expect(projectSpan.className).toContain("max-w-[40%]");
     expect(projectSpan.className).toContain("shrink-0");
     expect(taskSpan.className).toContain("min-w-0");
     expect(taskSpan.className).toContain("truncate");
-    expect(link.classList.contains("inline-block")).toBe(true);
-    expect(link.classList.contains("max-w-full")).toBe(true);
-    expect(link.classList.contains("block")).toBe(false);
   });
 
-  it("treats an empty fleet as authoritative", async () => {
-    overview.agents.manager = { agent_id: "manager", state: "busy" };
-    overview.agents.managers = [];
+  it("names the busy and idle Managers without a row below the table, not one with a row or a stopped one", async () => {
+    overview.agents.managers = [
+      { agent_id: "manager", name: "Manager", state: "busy" },
+      { agent_id: "manager-s", name: "Starting manager", state: "busy" },
+      { agent_id: "manager-a", name: "Review manager", state: "idle" },
+      { agent_id: "manager-b", name: "Old manager", state: "stopped" },
+    ];
+    overview.processes = [proc({ agent_id: "manager", role: "manager", name: "Manager", task_id: null, task_name: null,
+      project_id: null, project_name: null, step: null, instruction: null })];
     await show();
-    const agents = container.querySelector('section[aria-label="Agents running now"]')!;
-    expect(agents.firstElementChild!.textContent).toContain("0 running");
-    expect(agents.querySelector('a[href="#history/manager"]')).toBeNull();
+    expect(agentsSection().querySelector("p.mt-3")!.textContent).toBe("Busy: Starting manager · Idle: Review manager");
+    expect(agentsSection().querySelector('a[href="#history/manager"]')).not.toBeNull();
   });
 
   it.each([false, true])("keeps the overlap warning distinct and hides absent alerts: %s", async (alert) => {
