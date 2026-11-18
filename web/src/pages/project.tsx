@@ -124,7 +124,7 @@ const STATUS_VARIANT: Record<string, "default" | "success" | "warning" | "destru
 
 function TasksCard({ project }: { project: Project }) {
   const loaded = useLoad(
-    () => fetchTasks({ projectId: project.project_id, limit: PREVIEW }),
+    () => fetchTasks({ projectId: project.project_id, limit: PREVIEW, excludeScheduled: true }),
     `${project.project_id}:${project.task_count}`,
   );
   const tasks = loaded?.data ? loaded.data.tasks : null;
@@ -139,7 +139,9 @@ function TasksCard({ project }: { project: Project }) {
       {!tasks ? (
         <Loading error={loaded?.error} />
       ) : tasks.length === 0 ? (
-        <p className="text-xs text-muted-foreground">No tasks yet</p>
+        <p className="text-xs text-muted-foreground">
+          {loaded?.data && loaded.data.hidden_scheduled > 0 ? "Only tasks from schedules so far" : "No tasks yet"}
+        </p>
       ) : (
         <ul className="space-y-1.5">
           {tasks.map((task) => (

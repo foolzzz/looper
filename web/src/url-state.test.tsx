@@ -176,7 +176,7 @@ describe("the dashboard keeps its place in the URL", () => {
     it("opens the status filter from the hash and asks the server for it", async () => {
       await open("#tasks?status=failed");
       expect(vi.mocked(fetch).mock.calls).toContainEqual(["/api/v1/tasks/page", expect.objectContaining({
-        method: "POST", body: JSON.stringify({ status: "failed" }),
+        method: "POST", body: JSON.stringify({ status: "failed", exclude_scheduled: true }),
       })]);
     });
 
@@ -187,6 +187,15 @@ describe("the dashboard keeps its place in the URL", () => {
       expect(new URLSearchParams(hash().split("?")[1]).get("project")).toBe("p1");
       await click("All");
       expect(hash()).toBe("#tasks?project=p1");
+    });
+
+    it("hides schedule-created tasks unless the hash says scheduled=include", async () => {
+      await open("#tasks");
+      await open("#tasks?scheduled=include");
+      const bodies = vi.mocked(fetch).mock.calls.filter(([url]) => url === "/api/v1/tasks/page")
+        .map(([, options]) => JSON.parse(String(options?.body)));
+      expect(bodies.some((body) => body.exclude_scheduled === true)).toBe(true);
+      expect(bodies.at(-1)).not.toHaveProperty("exclude_scheduled");
     });
 
     it("lists every task for an unknown status", async () => {

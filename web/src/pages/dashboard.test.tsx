@@ -53,7 +53,7 @@ describe("Dashboard waiting gates", () => {
     vi.mocked(fetchOverview).mockImplementation(async () => ({ ...overview }));
     vi.mocked(fetchGates).mockImplementation(async () => ({ counts: { waiting_user: waitingGates } } as GateList));
     vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
-    vi.mocked(fetchTasks).mockImplementation(async () => ({ tasks: details.slice(0, 10), next_before: details.length > 10 ? "next-page" : null, counts: { waiting_user: details.length } }));
+    vi.mocked(fetchTasks).mockImplementation(async () => ({ tasks: details.slice(0, 10), next_before: details.length > 10 ? "next-page" : null, counts: { waiting_user: details.length }, hidden_scheduled: 0 }));
     vi.mocked(fetchTaskDetail).mockImplementation(async (id) => details.find((t) => t.task_id === id)!);
     container = document.createElement("div");
     document.body.append(container);
@@ -99,6 +99,13 @@ describe("Dashboard waiting gates", () => {
     expect(agentsSection().querySelector('a[href="#tasks/a"]')!.textContent).toBe("Compiler · Build parser");
     expect(agentsSection().querySelector('a[href="#history/worker-a?task=a"]')).not.toBeNull();
     expect(agentsSection().querySelector('[title*="Cache read 9,000"]')).not.toBeNull();
+  });
+
+  it("links each count to the Tasks list with scheduled tasks included, so the list matches the count", async () => {
+    await show();
+    const tiles = [...container.querySelectorAll<HTMLAnchorElement>('a[href^="#tasks?group="]')];
+    expect(tiles.length).toBeGreaterThan(0);
+    for (const tile of tiles) expect(new URLSearchParams(tile.getAttribute("href")!.split("?")[1]).get("scheduled")).toBe("include");
   });
 
   it("shows a dash for a running process without usage, and the waiting badge for a waiting one", async () => {
@@ -229,7 +236,7 @@ describe("Dashboard waiting gates", () => {
     details = [task("a", Array.from({ length: 13 }, (_, i) => gate(`g${i}`)))];
     await show();
     expect(section()!.querySelectorAll("article")).toHaveLength(10);
-    const more = section()!.querySelector('a[href="#tasks?group=needs_you"]');
+    const more = section()!.querySelector('a[href="#tasks?group=needs_you&scheduled=include"]');
     expect(more?.textContent).toBe("and 3 more");
   });
 
@@ -477,7 +484,7 @@ describe("Dashboard waiting gates", () => {
     await show();
     expect(section()).toBeNull();
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("Offline");
-    expect(container.querySelector('a[href="#tasks?group=needs_you"]')).toBeTruthy();
+    expect(container.querySelector('a[href="#tasks?group=needs_you&scheduled=include"]')).toBeTruthy();
   });
 
   it("does not send blank or over-limit replies", async () => {
@@ -497,7 +504,7 @@ describe("Dashboard waiting gates", () => {
     await show();
     expect(fetchTaskDetail).toHaveBeenCalledTimes(10);
     expect(section()!.querySelectorAll("article")).toHaveLength(10);
-    expect(section()!.querySelector('a[href="#tasks?group=needs_you"]')?.textContent?.trim())
+    expect(section()!.querySelector('a[href="#tasks?group=needs_you&scheduled=include"]')?.textContent?.trim())
       .toBe("View 2 more tasks needing you");
   });
 
@@ -509,7 +516,7 @@ describe("Dashboard waiting gates", () => {
     await show();
     expect(fetchTaskDetail).toHaveBeenCalledTimes(10);
     expect(section()!.querySelectorAll("article")).toHaveLength(0);
-    expect(section()!.querySelector('a[href="#tasks?group=needs_you"]')?.textContent?.trim())
+    expect(section()!.querySelector('a[href="#tasks?group=needs_you&scheduled=include"]')?.textContent?.trim())
       .toBe("View 1 more task needing you");
   });
 
@@ -519,7 +526,7 @@ describe("Dashboard waiting gates", () => {
     overview.tasks.needs_you = 12;
     await show();
     expect(section()!.querySelectorAll("article")).toHaveLength(10);
-    const links = [...section()!.querySelectorAll('a[href="#tasks?group=needs_you"]')];
+    const links = [...section()!.querySelectorAll('a[href="#tasks?group=needs_you&scheduled=include"]')];
     expect(links.map((link) => link.textContent?.trim())).toEqual([
       "and 2 more", "View 2 more tasks needing you",
     ]);
@@ -609,7 +616,7 @@ describe("Dashboard waiting gates", () => {
     expect(section()!.querySelectorAll("article")).toHaveLength(10);
     expect(section()!.textContent).toContain("You replied: My answer");
     expect(fetchTaskDetail).toHaveBeenLastCalledWith("a");
-    const links = [...section()!.querySelectorAll('a[href="#tasks?group=needs_you"]')];
+    const links = [...section()!.querySelectorAll('a[href="#tasks?group=needs_you&scheduled=include"]')];
     expect(links.map((link) => link.textContent?.trim())).toEqual([
       "and 1 more", "View 1 more task needing you",
     ]);
