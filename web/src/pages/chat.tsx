@@ -1163,7 +1163,8 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
       {managerView && <aside className="hidden w-72 shrink-0 border-r border-border md:block">{conversationList}</aside>}
       <div className="flex h-full min-w-0 flex-1 flex-col">
       <div className="border-b border-border px-5 py-3">
-        <div className="flex items-center gap-2">
+        {/* Wraps on a narrow screen, so the session controls move to a second line instead of off the edge. */}
+        <div className="flex flex-wrap items-center gap-2">
           {managerView && (
             <button
               type="button"
@@ -1196,7 +1197,7 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
               <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
             </button>
             {agentDropdown && (
-              <div className="absolute left-0 top-full z-50 mt-1 max-h-[70vh] w-96 overflow-y-auto rounded-lg border border-border bg-popover py-1 shadow-lg">
+              <div className="absolute left-0 top-full z-50 mt-1 max-h-[70vh] w-96 max-w-[calc(100vw-5rem)] overflow-y-auto rounded-lg border border-border bg-popover py-1 shadow-lg">
                 {managers.map((m) => (
                   <AgentRow
                     key={m.id}
@@ -1267,7 +1268,7 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
             )}
           </div>
 
-          <div className="ml-auto flex items-center gap-3">
+          <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-x-3 gap-y-2">
             {viewing && (
               <span className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground">
                 <ChannelBadge channel={viewing.channel} />
@@ -1284,7 +1285,7 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
                 ref={newSessionButtonRef}
                 onClick={toggleNewPanel}
                 disabled={sending}
-                className="flex h-7 items-center gap-1.5 rounded-md border border-border px-2 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-50"
+                className="flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-border px-2 text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors disabled:opacity-50"
                 title="Start a new Manager session, optionally on another Agent Profile"
               >
                 <RotateCcw className="h-3.5 w-3.5" />
@@ -1301,7 +1302,7 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
                 <Plus className="h-3.5 w-3.5" />
               </button>
             )}
-            <div className="flex items-center gap-1.5">
+            <div className="hidden items-center gap-1.5 sm:flex">
               <span className="relative flex h-2 w-2">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-75" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-success" />
