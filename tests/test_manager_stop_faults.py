@@ -98,6 +98,9 @@ def test_a_stop_at_each_preparation_step(name: str, agent_db: Any, monkeypatch: 
             _setup(name, manager, session, agent_db)
             hold = hold_at(monkeypatch, name)
             envelope = _web("你好")
+            if name == "read_quote":  # only a message that quotes another reads it
+                envelope.payload["quote_ref"] = {"channel_id": "channel-lark", "chat_id": "oc_dm",
+                                                 "message_id": "om_in", "kind": "forward"}
             handling = asyncio.create_task(manager._handle(envelope))
             await asyncio.wait_for(hold.reached.wait(), 5)
             token = manager.turn_for(envelope.message_id)

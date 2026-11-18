@@ -25,10 +25,12 @@ from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 LARK = channel_address("lark", "channel-lark")
 
 
-def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route, text: str = "PostgreSQL") -> dict[str, Any]:
-    """One Lark message to a Manager whose routing answers ``routed``: what it published (with whether the channel
-    is to store it), what it stored, and what reached its model."""
-    seen: dict[str, Any] = {"model": [], "stored": []}
+def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route, text: str = "PostgreSQL",
+            quote_ref: dict[str, str] | None = None) -> dict[str, Any]:
+    """One Lark message (with ``quote_ref``, what the adapter says it replies to) to a Manager whose routing answers
+    ``routed``: what it published (with whether the channel is to store it), what it stored, what reached its model
+    and what it read of the quote."""
+    seen: dict[str, Any] = {"model": [], "stored": [], "read": []}
 
     async def route(envelope: MessageEnvelope, **_: Any) -> Route:
         return routed
@@ -36,6 +38,12 @@ def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route, text: str = "Postgre
     async def invoke(self: Any, token: Any, prepared: Any) -> str:
         seen["model"].append((prepared.message, prepared.note))
         return "the Manager's answer"
+
+    async def read_quote(ref: Any, *, after: int) -> Any:
+        from looper.agents.channels import lark_quote
+
+        seen["read"].append(ref.parent_id)
+        return lark_quote.unread(ref, "recalled")
 
     async def persist(self: Any, envelope: MessageEnvelope, role: str, content: str, message_id: str) -> None:
         seen["stored"].append((role, content))
@@ -50,6 +58,7 @@ def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route, text: str = "Postgre
             bus = MessageBus(runtime_root=root)
             manager = ManagerAgent(config=ManagerConfig(claude_bin="claude", work_dir=root), runtime_root=root)
             manager._bus = bus
+            manager.read_quote = read_quote
 
             async def tools_problem() -> None:
                 return None
@@ -64,7 +73,8 @@ def _handle(monkeypatch: pytest.MonkeyPatch, routed: Route, text: str = "Postgre
             await manager._handle(MessageEnvelope.create(
                 source=LARK, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
                 payload={"text": text, "channel_context": {"chat_id": "oc_dm", "chat_type": "p2p",
-                                                           "message_id": "om_9", "reply_to": "om_1"}},
+                                                           "message_id": "om_9", "reply_to": "om_1"},
+                         **({"quote_ref": quote_ref} if quote_ref else {})},
                 correlation_id="corr-1"))
             queue = bus.get_queue(LARK.agent_id)
             seen["sent"] = []
@@ -109,6 +119,21 @@ class TestGateReplies:
         assert seen["model"] == [("PostgreSQL", note)]
         assert seen["stored"] == [("user", "PostgreSQL")]
         assert (MessageType.AGENT_REPLY, "the Manager's answer", True) in seen["sent"]
+
+    @pytest.mark.parametrize("kind", [RouteKind.DELIVERED, RouteKind.KEPT, RouteKind.REFUSED, RouteKind.CLOSED,
+                                      RouteKind.NONE])
+    def test_a_gate_reply_that_quotes_its_post_is_routed_first_and_read_only_by_a_turn(
+        self, monkeypatch: pytest.MonkeyPatch, kind: RouteKind,
+    ) -> None:
+        """A reply to a gate's post carries the post as what it quotes: the gate gets it before anything is read, and
+        only a message that becomes a model turn reads the quote."""
+        ref = {"channel_id": "channel-lark", "chat_id": "oc_dm", "message_id": "om_9", "kind": "reply",
+               "parent_id": "om_1"}
+        seen = _handle(monkeypatch, Route(kind, reply="已收到。" if kind in (RouteKind.KEPT, RouteKind.REFUSED) else ""),
+                       quote_ref=ref)
+        turn = kind in (RouteKind.CLOSED, RouteKind.NONE)
+        assert seen["read"] == (["om_1"] if turn else [])
+        assert [message for message, _ in seen["model"]] == (["PostgreSQL"] if turn else [])
 
     def test_any_other_message_is_the_managers(self, monkeypatch: pytest.MonkeyPatch) -> None:
         seen = _handle(monkeypatch, Route(RouteKind.NONE))

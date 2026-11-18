@@ -125,6 +125,38 @@ if args[:6] == ["im", "reactions", "create", "--as", "bot", "--message-id"] and 
         sys.exit(1)
     answer({{"ok": True, "identity": "bot", "data": {{"reaction_id": "re_" + args[6],
                                                     "reaction_type": json.loads(args[8])["reaction_type"]}}}})
+if args[:2] == ["api", "GET"] and args[2].startswith("/open-apis/im/v1/messages/") and args[3:] == ["--as", "bot"]:
+    # A message read by id: the world's raw items (a merged forward first, then its children). An id ending in
+    # "slow" outlasts the caller's first try; one ending in "servertimeout" gets the platform's time-out, as a long
+    # merged forward sometimes does.
+    from urllib.parse import unquote
+    message_id = unquote(args[2].rsplit("/", 1)[1])
+    if message_id.endswith("slow"):
+        time.sleep(5)
+    if message_id.endswith("servertimeout"):
+        print(json.dumps({{"ok": False, "identity": "bot", "error": {{"type": "network", "subtype": "timeout",
+            "message": "API call failed: server time out error"}}}}), file=sys.stderr)
+        sys.exit(4)
+    if message_id.endswith("noscope"):
+        print(json.dumps({{"ok": False, "error": {{"type": "authorization", "code": 99991672,
+            "message": "access denied", "missing_scopes": ["im:message:readonly"]}}}}), file=sys.stderr)
+        sys.exit(1)
+    items = world.get("messages", {{}}).get(message_id)
+    if items is None:
+        refuse("the message does not exist", api_code=230001)
+    answer({{"code": 0, "msg": "success", "data": {{"items": items}}}})
+if args[:5] == ["api", "GET", "/open-apis/im/v1/messages", "--as", "bot"] and args[5:6] == ["--params"]:
+    params = json.loads(args[6])
+    if params.get("container_id_type") != "thread":
+        refuse("this stand-in lists threads only")
+    answer({{"code": 0, "data": {{"items": world.get("threads", {{}}).get(params["container_id"], []),
+                                  "has_more": False}}}})
+if args[:6] == ["im", "+messages-mget", "--as", "bot", "--no-reactions", "--message-ids"] and len(args) == 7:
+    # lark-cli's rendering of the same message: content as text, the sender's name resolved.
+    messages = world.get("mget", {{}}).get(args[6])
+    if messages is None:
+        refuse("the message does not exist", api_code=230001)
+    answer({{"ok": True, "identity": "bot", "data": {{"messages": messages, "total": len(messages)}}}})
 if args == ["event", "consume", "im.message.receive_v1", "--as", "bot"]:
     # Like lark-cli 1.0.97: stdin EOF is the signal to stop, so a consumer whose stdin is /dev/null or closed
     # stops before it delivers anything.
@@ -141,6 +173,10 @@ refuse('unknown command "%s" for "lark-cli"' % args[0])
 
 WORLD: dict[str, Any] = {
     "resources": {},
+    # Read by id (raw items), through lark-cli's shortcut (rendered) and threads' messages, newest first.
+    "messages": {},
+    "mget": {},
+    "threads": {},
     "active": "cli_main",
     "profiles": {
         "cli_main": {"app_id": "cli_main", "signed_in": True, "bot": "HelperBot"},

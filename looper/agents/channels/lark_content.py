@@ -11,6 +11,8 @@ from typing import Any
 class ContentKind(str, Enum):
     TEXT = "text"
     RICH = "rich"
+    # A merged forward: no words of the sender's own; the forwarded messages are read as a quote (``lark_quote``).
+    FORWARD = "forward"
     UNSUPPORTED = "unsupported"
 
 
@@ -29,6 +31,10 @@ class ResourceRef:
     kind: ResourceKind
     key: str
     name: str = ""
+    # The message it is downloaded through, when not the one received: a quoted message. A merged forward's raw
+    # read gives each child the keys of its own message, so a child's resource comes through the child's id;
+    # lark-cli's rendering of a forward shows the forward's own copies, which come through the forward's id.
+    message_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -63,9 +69,14 @@ _RESOURCES = re.compile(
 )
 
 
-def parse(message_type: str, content: str, bot_mentions: list[dict[str, Any]]) -> Inbound:
+def parse(message_type: str, content: str, bot_mentions: list[dict[str, Any]], *,
+          after: int = 0, message_id: str = "") -> Inbound:
+    """``after``: how many resources come before these (they are numbered on from it); ``message_id``: the message
+    they are downloaded through (``ResourceRef.message_id``)."""
     if message_type == "text":
         return Inbound(ContentKind.TEXT, _without_mentions(content, bot_mentions))
+    if message_type == "merge_forward":
+        return Inbound(ContentKind.FORWARD, "")
     if message_type not in RICH_TYPES:
         return Inbound(ContentKind.UNSUPPORTED, "")
 
@@ -89,11 +100,12 @@ def parse(message_type: str, content: str, bot_mentions: list[dict[str, Any]]) -
     resources: list[ResourceRef] = []
 
     def resource(found: re.Match[str]) -> str:
+        index = after + len(resources) + 1
         if key := found["inline_image"] or found["image"]:
-            ref = ResourceRef(len(resources) + 1, ResourceKind.IMAGE, key)
+            ref = ResourceRef(index, ResourceKind.IMAGE, key, message_id=message_id)
         elif key := found["file"]:
             name = re.sub(r"\\(.)", lambda char: " " if char[1] in "nrt" else char[1], found["name"] or "")
-            ref = ResourceRef(len(resources) + 1, ResourceKind.FILE, key, name or key)
+            ref = ResourceRef(index, ResourceKind.FILE, key, name or key, message_id=message_id)
         else:
             kind = "video" if found["video"] else "voice message" if found["audio"] else "folder"
             return f"[{kind}: not supported yet]"

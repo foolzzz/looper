@@ -23,6 +23,7 @@ from looper.agents.bus import MessageBus
 from looper.agents.claude_cli import ISOLATION_ID, isolation_args
 from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
 from looper.agents.tiers.manager import TOOLS_CONTRACT, ManagerAgent, ManagerConfig
+from tests.db_support import until
 
 WEB = channel_address("web")
 
@@ -684,9 +685,10 @@ def _task_chat(answers: list[str], messages: list[str | tuple[str, str]]) -> Sim
     return asyncio.run(_run())
 
 
-def _channel_turns(messages: list[tuple[Any, dict[str, Any], str]]) -> list[str]:
-    """Send each ``(source, channel_context, text)`` to one Manager, as that channel's adapter would; return the
-    user turns its Claude got."""
+def _channel_turns(messages: list[tuple[Any, ...]], *, read_quote: Any = None) -> list[str]:
+    """Send each ``(source, channel_context, text)`` (and the rest of the payload, when a fourth item gives it) to
+    one Manager, as that channel's adapter would, with ``read_quote`` as its channels' quote reader; return the user
+    turns its Claude got."""
 
     async def _run() -> list[str]:
         with tempfile.TemporaryDirectory() as tmp:
@@ -697,10 +699,12 @@ def _channel_turns(messages: list[tuple[Any, dict[str, Any], str]]) -> list[str]
                 runtime_root=root,
             )
             manager._bus = bus
-            for index, (source, context, text) in enumerate(messages):
+            manager.read_quote = read_quote
+            for index, (source, context, text, *more) in enumerate(messages):
                 await manager._handle(MessageEnvelope.create(
                     source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
-                    payload={"text": text, "channel_context": context}, correlation_id=f"corr-{index}",
+                    payload={"text": text, "channel_context": context, **(more[0] if more else {})},
+                    correlation_id=f"corr-{index}",
                     metadata={"origin_channel_id": source.agent_id},
                 ))
             await manager.stop()
@@ -868,6 +872,138 @@ class TestManagerChannelLine:
             ["Channel: the Looper dashboard chat", "hi"],
             ["Channel: the Looper dashboard chat", "hello"],
         ]
+
+
+_GROUP = {"chat_id": "oc_team", "chat_type": "group", "sender_id": "ou_1", "sender_name": "Ada Lovelace"}
+
+
+def _quote_ref(kind: str = "reply") -> dict[str, str]:
+    from looper.agents.channels.lark_quote import QuoteKind, QuoteRef
+
+    ref = QuoteRef("channel-lark", "oc_team", "om_in", QuoteKind(kind), parent_id="" if kind == "forward" else "om_f")
+    return ref.to_payload()
+
+
+@pytest.mark.usefixtures("agent_db")
+def test_the_quote_is_read_as_the_turn_is_prepared_and_follows_the_users_words(tmp_path: Path) -> None:
+    """What a Lark message replies to or forwards is read through its channel while the turn is prepared, and comes
+    after the user's words as quoted content, within the quote's size cap, its images numbered after the message's
+    own; a message with no words of its own but a quote is answered too."""
+    from looper.agents.channels import lark_quote
+    from looper.agents.chat_attachments import Attachment, AttachmentKind, AttachmentState
+
+    def item(message_id: str, msg_type: str, text: str, **fields: Any) -> dict[str, Any]:
+        return {"message_id": message_id, "msg_type": msg_type, "create_time": "1763350000000",
+                "sender": {"id": "ou_2", "sender_type": "user"}, "body": {"content": json.dumps({"text": text})},
+                **fields}
+
+    children = [item(f"om_{n}", "text", "x" * 2_000, upper_message_id="om_f") for n in range(60)]
+    quote, _ = lark_quote.build(lark_quote.QuoteKind.REPLY, "om_f", [item("om_f", "merge_forward", ""), *children],
+                                names={"ou_2": "Bob"})
+    image = Attachment(2, AttachmentKind.IMAGE, AttachmentState.SAVED, "image.png", "lark",
+                       path=str(tmp_path / "2.png"), mime="image/png", size=8)
+    reads: list[tuple[Any, int]] = []
+
+    async def read_quote(ref: Any, *, after: int) -> Any:
+        reads.append((ref, after))
+        return lark_quote.QuoteRead((quote,), (image,))
+
+    own = {"attachments": [{"index": 1, "kind": "image", "state": "failed", "name": "own.png", "source": "lark",
+                            "reason": "timed out"}]}
+    turns = _channel_turns([(LARK, _GROUP, "summarize this", {"quote_ref": _quote_ref(), **own}),
+                            (LARK, _GROUP, "", {"quote_ref": _quote_ref()})], read_quote=read_quote)
+    assert [(ref.to_payload(), after) for ref, after in reads] == [(_quote_ref(), 1), (_quote_ref(), 0)]
+    for turn, words in zip(turns, ("summarize this", ""), strict=True):
+        _, found, block = turn.partition(f"Channel: a Lark group chat, from Ada Lovelace\n\n{words}\n\n")
+        assert found
+        assert block.startswith(lark_quote.INTRO + '\n<lark_quote id="om_f" type="merge_forward" from="Bob" '
+                                'note="the message this one replies to: a merged forward of 60 messages')
+        quoted, _, attachments = block.partition("\n</lark_quote>\n\n")
+        assert quoted.endswith("\n… 55 more not shown") and len(quoted) <= lark_quote.BLOCK_MAX + 500
+        assert attachments.startswith("Attachments sent with this message")
+        assert ("1. image \"own.png\": not received (timed out)" in attachments) is bool(words)
+        assert f'2. image "image.png" (image/png, 8 B): {tmp_path / "2.png"}' in attachments
+
+
+@pytest.mark.usefixtures("agent_db")
+@pytest.mark.parametrize("failure", ["no reader", "unavailable", "internal error", "hangs"])
+def test_a_quote_that_cannot_be_read_says_so_and_the_message_is_answered(
+    monkeypatch: pytest.MonkeyPatch, failure: str,
+) -> None:
+    from looper.agents.channels import lark_quote
+    from looper.agents.tiers import manager as manager_module
+
+    monkeypatch.setattr(manager_module, "QUOTE_READ_SEC", 0.2)
+
+    async def read_quote(ref: Any, *, after: int) -> Any:
+        if failure == "unavailable":
+            raise lark_quote.QuoteUnavailable("channel-lark is not running")
+        if failure == "hangs":
+            await asyncio.Event().wait()
+        raise RuntimeError("a renderer bug")
+
+    (turn,) = _channel_turns([(LARK, _GROUP, "", {"quote_ref": _quote_ref("forward")})],
+                             read_quote=None if failure == "no reader" else read_quote)
+    reason = {"internal error": "internal error", "hangs": "timeout"}.get(failure, "channel not running")
+    assert turn.endswith('<lark_quote id="om_in" note="could not be read">\n'
+                         f"[quoted message om_in could not be read: {reason}]\n</lark_quote>")
+
+
+@pytest.mark.usefixtures("agent_db")
+def test_a_replayed_message_reads_its_quote_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The journal keeps the message with its reference, never what it quotes: a server that stops while it reads
+    leaves it unacknowledged, and the next one's Manager reads the quote again."""
+    from looper.agents.channels import lark_quote
+
+    async def main() -> None:
+        envelope = MessageEnvelope.create(
+            source=LARK, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE, correlation_id="corr-q",
+            payload={"text": "what does it say?", "quote_ref": _quote_ref(), "channel_context": _GROUP},
+            metadata={"origin_channel_id": "channel-lark"})
+        reading, reads, turns = asyncio.Event(), [], []
+
+        async def stuck(ref: Any, *, after: int) -> Any:
+            reads.append(ref)
+            reading.set()
+            await asyncio.Event().wait()
+
+        async def read(ref: Any, *, after: int) -> Any:
+            reads.append(ref)
+            return lark_quote.unread(ref, "recalled")
+
+        async def model(self: Any, token: Any, prepared: Any) -> str:
+            turns.append(prepared.turn_text)
+            return "ok"
+
+        monkeypatch.setattr(ManagerAgent, "_run_prepared", model)
+        bus = MessageBus(runtime_root=tmp_path)
+        await bus.start()
+        first = ManagerAgent(config=ManagerConfig(claude_bin="claude", work_dir=tmp_path), runtime_root=tmp_path)
+        first.read_quote = stuck
+        await first.start(bus)
+        await bus.publish(envelope)
+        await asyncio.wait_for(reading.wait(), 5)
+        first._task.cancel()  # the server is gone mid-read: nothing acknowledged
+        await asyncio.gather(first._task, return_exceptions=True)
+        (journaled,) = bus.journal.undelivered()
+        assert journaled.payload["quote_ref"] == _quote_ref() and "quoted" not in journaled.payload
+        await bus.shutdown()
+
+        restarted = MessageBus(runtime_root=tmp_path)
+        await restarted.start()
+        second = ManagerAgent(config=ManagerConfig(claude_bin="claude", work_dir=tmp_path), runtime_root=tmp_path)
+        second.read_quote = read
+        await second.start(restarted)
+        try:
+            await until(lambda: bool(turns), timeout=10)
+            assert [ref.to_payload() for ref in reads] == [_quote_ref(), _quote_ref()]
+            assert "what does it say?\n\n" + lark_quote.INTRO in turns[0]
+            assert "[quoted message om_f could not be read: recalled]" in turns[0]
+        finally:
+            await second.stop()
+            await restarted.shutdown()
+
+    asyncio.run(main())
 
 
 def _system(**values: Any) -> dict[str, Any]:

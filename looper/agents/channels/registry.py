@@ -16,6 +16,7 @@ from ..message import parse_channel_id
 from ..task_notice import NotifyTarget
 from .base import ChannelAdapter, PostReceipt
 from .chat_routing import RouteDecision, RoutingSnapshot, load_snapshot
+from .lark_quote import QuoteRead, QuoteReader, QuoteRef, QuoteUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,15 @@ class ChannelRegistry:
         if adapter is None:
             return PostReceipt(False, error=self._not_running(channel_id))
         return await adapter.post(target, text, reply_to=reply_to, idempotency_key=idempotency_key)
+
+    async def read_quote(self, ref: QuoteRef, *, after: int) -> QuoteRead:
+        """What a received message quotes, read by the running channel that received it (``QuoteReader``); raises
+        ``QuoteUnavailable`` when that channel is not running or reads no quotes."""
+        adapter = self._channels.get(ref.channel_id)
+        if not isinstance(adapter, QuoteReader):
+            raise QuoteUnavailable(f"{ref.channel_id} is not running" if adapter is None
+                                   else f"{ref.channel_id} reads no quotes")
+        return await adapter.read_quote(ref, after=after)
 
     def list_channels(self) -> list[dict[str, Any]]:
         return [

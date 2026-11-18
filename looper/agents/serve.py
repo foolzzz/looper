@@ -865,7 +865,7 @@ async def _run_agent_system_watched(
             tools_ready = asyncio.Event()
             fleet = ManagerFleet(platform=platform, supervisor=supervisor, runtime_root=runtime_root,
                                  url=_local_url(host, port), config=manager_config, broadcaster=broadcaster, drain=drain,
-                                 tools_ready=tools_ready)
+                                 tools_ready=tools_ready, read_quote=registry.read_quote)
             if ownership is not None:
                 ownership.push_async_callback(fleet.stop)
             task_router.manager_running = fleet.is_running

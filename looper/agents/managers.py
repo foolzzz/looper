@@ -19,6 +19,7 @@ from typing import Any, Literal
 from ..db import managers as db_managers
 from . import chat_settings
 from .channels.chat_routing import boundary_log
+from .channels.lark_quote import ReadQuote
 from .bus import MessageBus
 from .drain import DrainState
 from .managers_api import DEFAULT_MANAGER_ID, MAX_ENABLED_MANAGERS, ManagerDefinition
@@ -84,9 +85,11 @@ def chat_stop_reply(summary: ChatStopSummary) -> str:
 class ManagerFleet:
     def __init__(self, *, platform: Platform, supervisor: AgentSupervisor, runtime_root: Path, url: str,
                  config: ManagerConfig, broadcaster: Any | None, clock: Callable[[], float] = time.monotonic,
-                 drain: DrainState | None = None, tools_ready: asyncio.Event | None = None) -> None:
+                 drain: DrainState | None = None, tools_ready: asyncio.Event | None = None,
+                 read_quote: ReadQuote | None = None) -> None:
         self._drain = drain
         self._tools_ready = tools_ready
+        self._read_quote = read_quote
         if drain is not None:
             drain.add_source(self.drain_waiting)
         self._platform = platform
@@ -122,6 +125,7 @@ class ManagerFleet:
         agent.ops = ops
         agent.on_turned_off = self._turned_off
         agent.stop_chat = self.stop_chat
+        agent.read_quote = self._read_quote
         self._agents[definition.id] = agent
         self._ops[definition.id] = ops
         return agent

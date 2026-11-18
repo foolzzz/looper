@@ -262,6 +262,8 @@ def _render(message_type: str, raw_content: str, mentions: list[dict[str, Any]])
         return _resource_tag("video" if message_type in {"media", "video"} else message_type, body)
     if message_type == "sticker":
         return "[Sticker]"
+    if message_type == "interactive":
+        return _card(body)
     if message_type != "post":
         return f"[{message_type}]"
 
@@ -317,6 +319,29 @@ def _render(message_type: str, raw_content: str, mentions: list[dict[str, Any]])
     return text
 
 
+def _card(body: dict[str, Any]) -> str:
+    """A card's title and text, as the platform returns a card's content; ``[card message]`` without either."""
+    header = _object(body.get("header"))
+    title = body.get("title") or _object(header.get("title")).get("content") or ""
+    texts: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, list):
+            for item in node:
+                walk(item)
+        elif isinstance(node, dict):
+            for key, value in node.items():
+                if key in {"text", "content"} and isinstance(value, str):
+                    if value.strip():
+                        texts.append(value.strip())
+                elif key not in {"title", "header"} and isinstance(value, (dict, list)):
+                    walk(value)
+
+    walk(body.get("elements") if "elements" in body else body.get("body"))
+    lines = [line for line in (title if isinstance(title, str) else "", *texts) if line]
+    return "\n".join(lines) or "[card message]"
+
+
 def _flat_event(payload: bytes) -> dict[str, Any] | None:
     data = _object(json.loads(payload))
     header = _object(data.get("header"))
@@ -324,8 +349,6 @@ def _flat_event(payload: bytes) -> dict[str, Any] | None:
         return None
     event = _object(data.get("event"))
     message, sender = _object(event.get("message")), _object(event.get("sender"))
-    if message.get("message_type") == "interactive":
-        return None
     mentions = [{"id": _object(mention.get("id")).get("open_id") or "", "key": mention.get("key") or "",
                  "name": mention.get("name") or ""} for mention in message.get("mentions") or []
                 if isinstance(mention, dict)]
@@ -346,7 +369,7 @@ def _flat_event(payload: bytes) -> dict[str, Any] | None:
             "chat_type": message.get("chat_type") or "", "message_id": message.get("message_id") or "",
             "message_type": message.get("message_type") or "", "sender_id": _object(sender.get("sender_id")).get("open_id") or "",
             "sender_type": sender.get("sender_type") or "", "mentions": mentions, "content": content}
-    for source, target in (("parent_id", "reply_to"), ("root_id", "root_id")):
+    for source, target in (("parent_id", "reply_to"), ("root_id", "root_id"), ("thread_id", "thread_id")):
         if message.get(source):
             flat[target] = message[source]
     return flat
