@@ -5996,63 +5996,57 @@ implementation supplies it and is retested.
   in posts, image messages and file messages become numbered `[image N]` /
   `[file N: name]` placeholders and attachments for the Manager.
 
-  **What a message quotes** (`lark_quote.py`). Once a message is admitted (a
-  direct message, or a group message that @-mentions the bot; never an
-  unaddressed group message, which is still ignored without any read, a silent
-  chat, a turned-off Manager or `/stop`), the adapter reads as the bot what it
-  points to: a merged forward itself, else the message it replies to
-  (`reply_to`; a merged forward comes with its children, each naming it in
-  `upper_message_id`), and in a thread, when it does not reply to the thread's
-  first message, that first message and the thread's latest 10 messages
-  (`list_thread_messages`). Both transports read `GET
-  /open-apis/im/v1/messages/{id}` (`lark-cli api GET … --as bot`, or the bot
-  token's REST call) and try once more when the first read fails (the
-  platform sometimes answers a long merged forward with its time-out after
-  about 5 s) or takes 7 s (lark-cli: `im +messages-mget --as bot
-  --no-reactions`, whose rendering is kept as it is); the message waits at
-  most 15 s for this, names included. A message that quotes is read in the
-  background, outside the channel's ingress, at most 4 at once across chats:
-  other chats, and `/stop` in any chat, do not wait for it, while a chat's
-  later messages wait behind it, so each chat reaches the Manager in order
-  (its downloads are read there too). Past 10 unpublished messages in a chat,
-  or 100 in all, a message's quotes are not read (`busy`), in order still. A
-  `/stop` publishes its chat's messages still being read at once, ahead of
-  itself, typed as withdrawn (`payload.withdrawn`): the Manager keeps them in
-  the chat's history and tells the next turn the user withdrew them, never
-  taking one as a turn or a gate reply. Such a message's receipt is written
-  only after it is published; publishing and writing are each tried 5 times
-  (0.5–4 s apart). Until the receipt is written the message keeps the restart
-  boundary (heartbeat and a clean stop), its chat's catch-up window and the
-  bot poll's window where they are. One that still fails is held
-  (`lark_delivery_held`, ERROR): it stays unrecorded, and so do its chat's
-  later messages, which are not published; the next start's catch-up reads
-  them again in order, within its 15-minute window. One published but not
-  recorded can then reach the Manager twice. An internal error reading a
-  quote leaves `could not be read: internal error`, so the message still
-  arrives. The adapter remembers the latest 1,000 group messages in a thread,
-  for answering in the thread.
-  What was read goes in `payload["quoted"]` (`Quote`: kind, id, type, sender,
-  lines), never in `payload["text"]`, which gate routing and `/stop` read. The
-  Manager shows it after the user's words, under a line saying it is quoted
-  content and not the user's instructions, as `<lark_quote id=… type=… from=…
-  note=…>` blocks: one line per message, `[MM-DD HH:MM] name: content`,
-  replies one level in, at most 1,500 characters a message (300 for one this
-  bot sent), 50 messages and 8,000 characters a block, then `… N more not
-  shown`. A nested merged forward is expanded one level, deeper ones show
-  `[merged forward, not expanded]`; cards show their title and text, else
-  `[card message]`; a recalled message `[recalled]`. A merged forward's
-  children are read live, so they can include replies posted after the
-  forward. Images and files in quoted messages are numbered after the
-  message's own and share its 10 attachments. A merged forward's raw read
-  gives each child the keys of its own message, so those download through the
+  **What a message quotes** (`lark_quote.py`). The adapter reads nothing for
+  it. Once a message is admitted (a direct message, or a group message that
+  @-mentions the bot; never an unaddressed group message, which is still
+  ignored, a silent chat, a turned-off Manager or `/stop`), the envelope
+  carries a small reference beside the user's words, `payload["quote_ref"]`
+  (`QuoteRef`: `channel_id`, `chat_id`, `message_id`, `kind`, and `parent_id`,
+  `root_id`, `thread_id` when given). `kind` is `forward` for a merged
+  forward, which points to itself; `reply` for a message that replies to
+  another (`reply_to`); and `thread` when, in a thread, that message is not
+  the thread's first: the first message and the thread's latest 10 messages
+  (`list_thread_messages`) are read too. `payload["text"]` stays the user's
+  words, which gate routing and `/stop` read. The Manager reads the quote
+  while it prepares the turn: after commands and gate routing (a `/command`
+  or a gate reply reads nothing), in the stoppable step `read_quote`, through
+  the running channel the reference names (`ChannelRegistry.read_quote`,
+  which raises `QuoteUnavailable` when that channel is not running). The read
+  is therefore part of the message's turn: messages are read in the order the
+  Manager takes them, a `/stop` from the chat cancels the read like any
+  preparation step (the next turn is told the user withdrew the message), and
+  a restart replays the journaled envelope, with its reference, so the quote
+  is read again. Both transports read `GET /open-apis/im/v1/messages/{id}`
+  (`lark-cli api GET … --as bot`, or the bot token's REST call) and try once
+  more when the first read fails (the platform sometimes answers a long merged
+  forward with its time-out after about 5 s) or takes 7 s (lark-cli: `im
+  +messages-mget --as bot --no-reactions`, whose rendering is kept as it is);
+  the read takes at most 15 s, names included, and the Manager gives a reader
+  80 s in all, its downloads included. The Manager shows the quotes after the
+  user's words, under a line saying they are quoted content and not the
+  user's instructions, as `<lark_quote id=… type=… from=… note=…>` blocks: one
+  line per message, `[MM-DD HH:MM] name: content`, replies one level in, at
+  most 1,500 characters a message (300 for one this bot sent), 50 messages and
+  8,000 characters a block, then `… N more not shown`. A nested merged forward
+  is expanded one level, deeper ones show `[merged forward, not expanded]`;
+  cards show their title and text, else `[card message]`; a recalled message
+  `[recalled]`. A merged forward's children are read live, so they can include
+  replies posted after the forward. Images and files in quoted messages are
+  saved beside the message's own, numbered after them, and share its 10
+  attachments; one not received is shown to the Manager as not received,
+  without a separate notice to the user. A merged forward's raw read gives
+  each child the keys of its own message, so those download through the
   child's id (the forward's id refuses them); lark-cli's rendering shows the
-  forward's own copies, which download through the forward's id. A read
-  that fails leaves `[quoted message om_… could not be read: <why>]` (timeout,
-  recalled, missing permission im:message:readonly, error <code>) and the
-  message goes on; one with no words of its own but a quote is answered too.
-  One INFO `lark_quote` line per quote logs its ids, kind, type, message
-  count, lines, characters, resources and outcome, never content. Reading
-  needs the app's `im:message:readonly`, as downloads do.
+  forward's own copies, which download through the forward's id. A read that
+  fails leaves `[quoted message om_… could not be read: <why>]` (timeout,
+  recalled, missing permission im:message:readonly, error <code>, channel not
+  running, internal error) and the turn goes on; a message with no words of
+  its own but a quote, such as a bare merged forward, is answered too. The
+  quote is not stored in the chat's history. One INFO `lark_quote` line per
+  message logs its ids, kind, quoted ids, message count, characters,
+  attachments, outcome and seconds, never content. Reading needs the app's
+  `im:message:readonly`, as downloads do. The adapter remembers the latest
+  1,000 group messages in a thread, for answering in the thread.
 
   After sender
   admission, routing and the reaction, resources download sequentially as the
