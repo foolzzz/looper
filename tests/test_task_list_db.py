@@ -82,3 +82,62 @@ def test_running_filter_lists_planner_work_and_counts_every_task_once(monkeypatc
         assert await tasks.count_by_status(pool=pool) == {"running": 3, "waiting": 1, "archived": 1}
 
     run_db(test, monkeypatch, timeout=30)
+
+
+def test_excluding_scheduled_tasks_filters_rows_and_counts_and_reports_what_it_hid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from looper.db import tasks
+
+    async def test(pool: Any) -> None:
+        project = await _project(pool)
+        await pool.execute(
+            "INSERT INTO schedules (id, project_id, name, cron, timezone, requirement, enabled) "
+            "VALUES ('sched-a', $1, 'Report', '0 * * * *', 'UTC', 'report', false)", project["id"])
+        await _task(pool, "task-own-1", "running", project, requirement="real work")
+        await _task(pool, "task-own-2", "failed", project, requirement="more real work")
+        for n, status in enumerate(("completed", "completed", "failed")):
+            await tasks.create_task(task_id=f"task-sched-{n}", requirement="progress report", project_id=project["id"],
+                                    work_dir="/w", status=status, schedule_id="sched-a", pool=pool)
+
+        # The database layer: off by default, rows and counts agree when on.
+        assert {r["id"] for r in await tasks.list_tasks(pool=pool)} == {
+            "task-own-1", "task-own-2", "task-sched-0", "task-sched-1", "task-sched-2"}
+        assert {r["id"] for r in await tasks.list_tasks(exclude_scheduled=True, pool=pool)} == {
+            "task-own-1", "task-own-2"}
+        assert sum((await tasks.count_by_status(pool=pool)).values()) == 5
+        assert await tasks.count_by_status(exclude_scheduled=True, pool=pool) == {"running": 1, "failed": 1}
+
+        async def page(**arguments: Any) -> dict[str, Any]:
+            status, body = await _get(_server(), "/api/v1/tasks/page", arguments)
+            assert status == 200, body
+            return body
+
+        everything = await page()  # the API default keeps every task
+        assert len(everything["tasks"]) == 5 and everything["hidden_scheduled"] == 0
+
+        hiding = await page(exclude_scheduled=True)
+        assert [r["task_id"] for r in hiding["tasks"]] == ["task-own-2", "task-own-1"]
+        assert hiding["counts"] == {"running": 1, "failed": 1} and hiding["hidden_scheduled"] == 3
+
+        # Combined with project, group, status and query filters, hidden_scheduled follows the same filters.
+        in_project = await page(exclude_scheduled=True, project_id=project["id"])
+        assert in_project["hidden_scheduled"] == 3
+        assert (await page(exclude_scheduled=True, project_id="no-such-project"))["hidden_scheduled"] == 0
+        attention = await page(exclude_scheduled=True, group="attention")
+        assert {r["task_id"] for r in attention["tasks"]} == {"task-own-2"} and attention["hidden_scheduled"] == 1  # only the failed one is in the group
+        by_status = await page(exclude_scheduled=True, status="failed")
+        assert [r["task_id"] for r in by_status["tasks"]] == ["task-own-2"]
+        assert by_status["hidden_scheduled"] == 3  # status narrows the rows, not the counts
+        searched = await page(exclude_scheduled=True, query="progress")
+        assert searched["tasks"] == [] and searched["hidden_scheduled"] == 3
+        assert (await page(exclude_scheduled=True, query="real work"))["hidden_scheduled"] == 0
+
+        # A schedule's own list is the opposite filter, so asking for both is refused.
+        status, body = await _get(_server(), "/api/v1/tasks/page", {"exclude_scheduled": True, "schedule_id": "sched-a"})
+        assert status == 400, body
+        assert "schedule_id" in str(body)
+        scheduled = await page(schedule_id="sched-a")
+        assert len(scheduled["tasks"]) == 3
+
+    run_db(test, monkeypatch, timeout=30)

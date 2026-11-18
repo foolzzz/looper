@@ -417,6 +417,8 @@ export interface TasksPage {
   next_before: string | null;
   /** Counts by status filter under the other list filters (not status or cursor); each task counted once. */
   counts: Record<string, number>;
+  /** With `excludeScheduled`: how many tasks (under the same filters, not status) it left out; else 0. */
+  hidden_scheduled: number;
 }
 
 /** A page of tasks: `limit` (default 50, at most 200) of them older than the task `before`, filtered by project,
@@ -431,6 +433,8 @@ export async function fetchTasks(
     before?: string | null;
     limit?: number;
     query?: string;
+    /** Leave out the tasks an agent schedule created (never together with `scheduleId`). */
+    excludeScheduled?: boolean;
   } = {},
 ): Promise<TasksPage> {
   const result = await callV1<TasksPage>("/api/v1/tasks/page", {
@@ -442,6 +446,7 @@ export async function fetchTasks(
     ...(filters.before ? { before: filters.before } : {}),
     ...(filters.limit ? { limit: filters.limit } : {}),
     ...(filters.query ? { query: filters.query } : {}),
+    ...(filters.excludeScheduled ? { exclude_scheduled: true } : {}),
   });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result;

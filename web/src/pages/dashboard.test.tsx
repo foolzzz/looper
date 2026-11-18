@@ -53,7 +53,7 @@ describe("Dashboard waiting gates", () => {
     vi.mocked(fetchOverview).mockImplementation(async () => ({ ...overview }));
     vi.mocked(fetchGates).mockImplementation(async () => ({ counts: { waiting_user: waitingGates } } as GateList));
     vi.mocked(fetchProjectsList).mockResolvedValue({ projects: [], projects_root: "" });
-    vi.mocked(fetchTasks).mockImplementation(async () => ({ tasks: details.slice(0, 10), next_before: details.length > 10 ? "next-page" : null, counts: { waiting_user: details.length } }));
+    vi.mocked(fetchTasks).mockImplementation(async () => ({ tasks: details.slice(0, 10), next_before: details.length > 10 ? "next-page" : null, counts: { waiting_user: details.length }, hidden_scheduled: 0 }));
     vi.mocked(fetchTaskDetail).mockImplementation(async (id) => details.find((t) => t.task_id === id)!);
     container = document.createElement("div");
     document.body.append(container);

@@ -186,7 +186,7 @@ interface TasksPageProps {
   onNavigate?: (sub: string, query?: string) => void;
 }
 
-function filterQuery(project: string, group: TaskGroup | null, schedule = "", status: StatusFilter = "all", manager = "", search = ""): string {
+function filterQuery(project: string, group: TaskGroup | null, schedule = "", status: StatusFilter = "all", manager = "", search = "", includeScheduled = false): string {
   const query = new URLSearchParams();
   if (project) query.set("project", project);
   if (group) query.set("group", group);
@@ -194,6 +194,7 @@ function filterQuery(project: string, group: TaskGroup | null, schedule = "", st
   if (status !== "all") query.set("status", status);
   if (manager) query.set("manager", manager);
   if (search) query.set("query", search);
+  if (includeScheduled) query.set("scheduled", "include");
   return query.toString();
 }
 
@@ -223,7 +224,10 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const searchFilter = params.get("query") || "";
   const statusParam = params.get("status");
   const filter: StatusFilter = STATUS_FILTERS.find((f) => f === statusParam) ?? "all";
-  const listKey = filterQuery(projectFilter, groupFilter, scheduleFilter, filter, managerFilter, searchFilter);
+  // Tasks agent schedules created are hidden unless "scheduled=include"; a schedule's own list shows them.
+  const includeScheduled = params.get("scheduled") === "include";
+  const hideScheduled = !includeScheduled && !scheduleFilter;
+  const listKey = filterQuery(projectFilter, groupFilter, scheduleFilter, filter, managerFilter, searchFilter, includeScheduled);
   const [managers, setManagers] = useState<ManagerInfo[] | null>(null);
   const [managerError, setManagerError] = useState("");
   useEffect(() => {
@@ -263,6 +267,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   /** Continues the list (null at its end), and how many tasks each status holds under the URL's filters. */
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [counts, setCounts] = useState<Record<string, number>>({});
+  /** How many tasks "Hide tasks from schedules" leaves out under the URL's filters. */
+  const [hiddenScheduled, setHiddenScheduled] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   /** Whether older pages were loaded for the list `key`: a refresh then keeps them below the newest page. */
   const older = useRef({ key: "", loaded: false });
@@ -299,11 +305,13 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   }, [sub, query]);
   const setSelectedTaskId = (id: string | null) =>
     id ? onNavigate?.(id) : onNavigate?.("", listQuery.current);
-  const setProjectFilter = (id: string) => onNavigate?.("", filterQuery(id, groupFilter, scheduleFilter, filter, managerFilter, searchFilter));
-  const clearGroup = () => onNavigate?.("", filterQuery(projectFilter, null, scheduleFilter, filter, managerFilter, searchFilter));
-  const clearSchedule = () => onNavigate?.("", filterQuery(projectFilter, groupFilter, "", filter, managerFilter, searchFilter));
-  const setFilter = (next: StatusFilter) => onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, next, managerFilter, searchFilter));
-  const setManagerFilter = (id: string) => onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, filter, id, searchFilter));
+  const setProjectFilter = (id: string) => onNavigate?.("", filterQuery(id, groupFilter, scheduleFilter, filter, managerFilter, searchFilter, includeScheduled));
+  const clearGroup = () => onNavigate?.("", filterQuery(projectFilter, null, scheduleFilter, filter, managerFilter, searchFilter, includeScheduled));
+  const clearSchedule = () => onNavigate?.("", filterQuery(projectFilter, groupFilter, "", filter, managerFilter, searchFilter, includeScheduled));
+  const setFilter = (next: StatusFilter) => onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, next, managerFilter, searchFilter, includeScheduled));
+  const setHideScheduled = (hide: boolean) =>
+    onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, filter, managerFilter, searchFilter, !hide));
+  const setManagerFilter = (id: string) => onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, filter, id, searchFilter, includeScheduled));
 
   // A fresh identity also rejects an old A response after navigating A → B → A.
   // Keep its cursor synchronous so pending pages see a refresh's boundary before React renders.
@@ -322,6 +330,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     group: groupFilter ?? undefined,
     scheduleId: scheduleFilter || undefined,
     status: filter === "all" ? undefined : filter,
+    excludeScheduled: hideScheduled || undefined,
   };
 
   /** Read the newest page again; older pages loaded for this list stay below it. */
@@ -337,6 +346,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         if (!isCurrent()) return;
         appliedRefresh.current = refresh;
         setCounts(page.counts);
+        setHiddenScheduled(page.hidden_scheduled ?? 0);
         if (older.current.key === requested && older.current.loaded) {
           setTasks((current) => withOlder(page.tasks, current));
         } else {
@@ -359,6 +369,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     setLoadedFor(null);
     setTasks([]);
     setCounts({});
+    setHiddenScheduled(0);
     setNextBefore(null);
     setLoadingMore(false);
     setError("");
@@ -390,6 +401,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         filterRequest.before = page.next_before;
         setNextBefore(page.next_before);
         setCounts(page.counts);
+        setHiddenScheduled(page.hidden_scheduled ?? 0);
         setError("");
       })
       .catch((e) => canAppend() && setError(e.message))
@@ -505,7 +517,10 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
 
   // The server filters by project and schedule too; this keeps the list right while a new filter loads.
   const projectTasks = tasks.filter(
-    (t) => (!projectFilter || t.project_id === projectFilter) && (!scheduleFilter || t.schedule_id === scheduleFilter),
+    (t) =>
+      (!projectFilter || t.project_id === projectFilter) &&
+      (!scheduleFilter || t.schedule_id === scheduleFilter) &&
+      !(hideScheduled && t.schedule_id),
   );
   // The schedule filter's name: from its tasks, else asked once (an unknown schedule shows its id).
   const scheduleName = scheduleFilter
@@ -639,6 +654,23 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
             </button>
           </span>
         )}
+        <label
+          className={`inline-flex min-h-8 items-center gap-2 text-xs font-medium pointer-coarse:min-h-11 ${
+            scheduleFilter ? "text-muted-foreground/60" : "cursor-pointer text-foreground"
+          }`}
+        >
+          <input
+            type="checkbox"
+            className="h-4 w-4 accent-primary"
+            checked={hideScheduled}
+            disabled={!!scheduleFilter}
+            onChange={(e) => setHideScheduled(e.target.checked)}
+          />
+          Hide tasks from schedules
+          {hideScheduled && hiddenScheduled > 0 && (
+            <span className="font-normal text-muted-foreground">{hiddenScheduled} hidden</span>
+          )}
+        </label>
         <div className="flex items-center gap-1 flex-wrap">
           {STATUS_FILTERS.map((f) => {
             const count = f === "all" ? total : counts[f] || 0;

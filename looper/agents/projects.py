@@ -738,22 +738,27 @@ async def list_tasks_page(
     *, limit: int = TASKS_PAGE, project_id: str | None = None, status: str | None = None,
     group: db_tasks.TaskGroup | None = None, schedule_id: str | None = None, before: str | None = None,
     manager_id: str | None = None, project_ids: Sequence[str] | None = None,
-    query: str = "", compact: bool = False, search_limit: int = 200,
+    query: str = "", compact: bool = False, search_limit: int = 200, exclude_scheduled: bool = False,
 ) -> dict[str, Any]:
-    """A console page or the Manager's compact list; keyword searches retain its bounded recent-task search."""
+    """A console page or the Manager's compact list; keyword searches retain its bounded recent-task search.
+    ``exclude_scheduled`` leaves out tasks an agent schedule created and reports how many the other filters hid."""
     from ..db import managers as db_managers
     from ..db.llm_records import task_costs
 
     query = " ".join(query.split()).casefold()
     if before is not None and not await db_tasks.task_exists(before):
         raise RequestError(HTTP_400, f"before must be a task id; {before!r} is not one")
+    if exclude_scheduled and schedule_id is not None:
+        raise RequestError(HTTP_400, "exclude_scheduled cannot be combined with schedule_id")
     if manager_id is not None and await db_managers.get_manager(manager_id) is None:
-        return {"tasks": [], "more": False} if compact else {"tasks": [], "counts": {}, "next_before": None}
+        return {"tasks": [], "more": False} if compact else {
+            "tasks": [], "counts": {}, "next_before": None, "hidden_scheduled": 0}
     filters = {"project_id": project_id, "group": group, "schedule_id": schedule_id, "manager_id": manager_id,
                "project_ids": project_ids}
     fetch_limit = (search_limit if query else limit) if compact else limit + 1
     search = {"query": query} if query and not compact else {}
-    page = await db_tasks.list_tasks(limit=fetch_limit, status=status, before=before, **filters, **search)
+    hiding = {"exclude_scheduled": True} if exclude_scheduled else {}
+    page = await db_tasks.list_tasks(limit=fetch_limit, status=status, before=before, **filters, **search, **hiding)
     if compact:
         if query:
             page = [t for t in page if query in " ".join(
@@ -761,7 +766,9 @@ async def list_tasks_page(
         return {"tasks": [task_listed(task) for task in page[:limit]], "more": len(page) > limit}
 
     tasks = page[:limit]
-    counts = await db_tasks.count_by_status(**filters, **search)
+    counts = await db_tasks.count_by_status(**filters, **search, **hiding)
+    hidden = (sum((await db_tasks.count_by_status(**filters, **search)).values()) - sum(counts.values())
+              if exclude_scheduled else 0)
     costs = await task_costs([t["id"] for t in tasks])
     manager_names = {m["id"]: m["name"] for m in await db_managers.list_managers(include_deleted=True)}
     result = []
@@ -794,7 +801,8 @@ async def list_tasks_page(
             # What the task's Planner, Workers and Reviewers spent so far.
             "cost": costs.get(t.get("id", "")),
         })
-    return {"tasks": result, "next_before": tasks[-1]["id"] if len(page) > limit else None, "counts": counts}
+    return {"tasks": result, "next_before": tasks[-1]["id"] if len(page) > limit else None, "counts": counts,
+            "hidden_scheduled": hidden}
 
 
 async def task_readiness(task: dict[str, Any], *, compact: bool = False) -> list[dict[str, Any]]:
