@@ -556,6 +556,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 | 日期 | 事项 |
 |---|---|
+| 2026-11-17 | 控制台手机适配第二步，共享控件：外壳高度改用 `dvh`（iOS Safari 的工具栏不收起，`100vh` 会把 Chat 输入框和抽屉底部压到工具栏下面）；触屏（`pointer: coarse`）上输入框、下拉框和文本域统一 16 px（iOS 聚焦字号不足 16 px 会放大页面），`Button`、`Input`、`SELECT` 和侧栏各行、开关的点击区域到 44 px，用鼠标的桌面保持原样。各页在手机视口（390、360、844 × 390）合计不足 16 px 的表单字段从 211 个降到 0，触屏小目标合计（含 768 平板）1721 降到 1323，抽屉里的小目标 15 降到 0；各页自带的固定高度（任务头部的项目下拉框 24 px 等）和页内按钮留给第三步。真机 iOS 的缩放与工具栏行为未验证。 |
 | 2026-11-17 | 控制台手机适配第一步，修三处挡住使用的问题：侧栏的 New project 对话框改挂到 `document.body`（原先侧栏的 translate 把它限制在 223 px 宽的侧栏里，桌面同样如此），Escape 只关对话框、不再连带关掉抽屉；抽屉在高度不够时（手机横屏、展开 Settings）整列滚动，项目列表不再被压成 1 px；Chat 头部换行，手机和平板上 New conversation 与 New session 可点，Agent 下拉框不超出屏幕。界面检查宽度加上手机竖屏 390 px 与横屏 844 × 390。共享控件（输入框字号、触控尺寸、动态视口高度）和各页布局在后续两步。 |
 | 2026-11-16 | Dashboard「Agents running now」改为运行中 agent 的进程表：每个 Manager/Planner 轮次、Worker/Reviewer/consult 运行一行，带 runtime、模型、pid、时长和最近 60 秒的 TPM（四类 token 合计，悬停看细分），排队中的步骤运行标 waiting；标题显示全部 agent 的总 TPM（含一分钟内刚结束的运行）。用量来自 recorder 收到的 usage 事件，只在内存里计数，kept run 重放不重复计入；Codex、Coco、Cursor 只在轮次结束上报用量，每行显示「—」（`RuntimeAdapter.streams_usage`）。仅控制台展示变化，`/api/v1/system/overview` 新增 `processes` 与 `tpm`，Manager 工具、CLI overview 与消息渠道不变。一次性数据库上用替身 Claude 验证 TPM 线性上升到 147,300 后按窗口回落至 0，1280/768/390 px 截图无横向滚动。 |
 | 2026-11-13 | Claude Code 翻译路由凭据隔离（本分支未合入）：客户端环境和私有 settings 只持有每路由随机本地 token，代理校验后从 registry 读取上游 key，启动时删除旧私有 settings 并记录数量。翻译启动保留 15 秒冷启动预算，首个翻译请求在现有凭据读取超时内等待数据库连接，连接失败仍拒绝转发；控制台、Telegram、Lark 与 CLI 共用启动和代理路径，无需入口改动。定向回归 206 项通过，隔离 serve 配替身客户端与上游完成两轮对话和文件扫描；真实模型未验证。 |
