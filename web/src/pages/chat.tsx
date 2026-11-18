@@ -1160,9 +1160,9 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
 
   return (
     <div className="flex h-full">
-      {managerView && <aside className="hidden w-72 shrink-0 border-r border-border md:block">{conversationList}</aside>}
+      {managerView && <aside className="hidden w-72 shrink-0 border-r border-border lg:block">{conversationList}</aside>}
       <div className="flex h-full min-w-0 flex-1 flex-col">
-      <div className="border-b border-border px-5 py-3">
+      <div className="border-b border-border px-5 py-2 lg:py-3">
         {/* Wraps on a narrow screen, so the session controls move to a second line instead of off the edge. */}
         <div className="flex flex-wrap items-center gap-2">
           {managerView && (
@@ -1170,7 +1170,7 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
               type="button"
               onClick={() => setListOpen(!listOpen)}
               aria-expanded={listOpen}
-              className="flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-accent hover:text-foreground transition-colors md:hidden"
+              className="flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-accent hover:text-foreground transition-colors lg:hidden"
               title="Conversations"
               aria-label="Conversations"
             >
@@ -1276,7 +1276,8 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
               </span>
             )}
             {!viewing && sessionId && (
-              <span className="hidden font-mono text-[11px] text-muted-foreground sm:inline">{sessionId}</span>
+              // Below lg the raw id would push the session controls to a second line, over the messages.
+              <span className="hidden font-mono text-[11px] text-muted-foreground lg:inline">{sessionId}</span>
             )}
             {target.kind === "manager" && !viewing && <ManagerSessionProfile active={active} refreshKey={profileRefresh} managerId={target.id} />}
             {target.kind === "manager" && !viewing && (
@@ -1370,11 +1371,11 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
         </div>
       )}
 
-      {managerView && listOpen && <div className="min-h-0 flex-1 md:hidden">{conversationList}</div>}
+      {managerView && listOpen && <div className="min-h-0 flex-1 lg:hidden">{conversationList}</div>}
 
       <div
         ref={scrollRef}
-        className={cn("flex-1 overflow-y-auto px-5 py-4 space-y-4", managerView && listOpen && "hidden md:block")}
+        className={cn("flex-1 overflow-y-auto px-5 py-4 space-y-4", managerView && listOpen && "hidden lg:block")}
         onClick={() => agentDropdown && setAgentDropdown(false)}
       >
         {target.kind === "planner" && target.task_id && (
@@ -1487,7 +1488,7 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
             <div
               className={cn(
                 // A long line (a JSON reply, a path, a URL) wraps inside the bubble instead of widening the page.
-                "min-w-0 max-w-[70%] rounded-lg px-4 py-2.5 text-sm [overflow-wrap:anywhere]",
+                "min-w-0 max-w-[85%] rounded-lg px-4 py-2.5 text-sm [overflow-wrap:anywhere] sm:max-w-[70%]",
                 msg.role === "user"
                   ? "bg-primary text-primary-foreground"
                   : "bg-muted text-foreground"
@@ -1517,7 +1518,7 @@ export function ChatPage({ query, onQuery, active = true }: { active?: boolean; 
         ))}
       </div>
 
-      <div className={cn("border-t border-border p-4", managerView && listOpen && "hidden md:block")}>
+      <div className={cn("border-t border-border p-4", managerView && listOpen && "hidden lg:block")}>
         {viewing ? (
           <p className="text-xs text-muted-foreground">
             This conversation is in {channelLabel(viewing.channel)}, where the Manager answers it; here it is read-only.
@@ -1595,7 +1596,7 @@ function ChannelMessages({ session, messages }: { session: ChatSession; messages
                 <Bot className="h-4 w-4 text-primary" />
               </div>
             )}
-            <div className={cn("flex min-w-0 max-w-[70%] flex-col", isUser ? "items-end" : "items-start")}>
+            <div className={cn("flex min-w-0 max-w-[85%] flex-col sm:max-w-[70%]", isUser ? "items-end" : "items-start")}>
               <div
                 className={cn(
                   "min-w-0 rounded-lg px-4 py-2.5 text-sm [overflow-wrap:anywhere]",

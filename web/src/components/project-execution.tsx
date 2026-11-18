@@ -69,7 +69,7 @@ export function executionChanges(draft: ExecutionDraft, project: Project): Proje
 }
 
 const SELECT =
-  "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
+  "flex h-9 pointer-coarse:h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
 
 /** A project's execution settings in its editor; an empty field inherits. */
 export function ProjectExecutionFields({

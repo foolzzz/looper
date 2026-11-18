@@ -313,7 +313,8 @@ function LoginLine({ provider, label }: { provider: Provider; label: string }) {
     <div role="status" className="space-y-1 text-xs text-warning">
       <p className="flex items-start gap-1">
         <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        <span>
+        {/* A long path in the detail breaks instead of widening the page. */}
+        <span className="min-w-0 break-words">
           {login.state === "unavailable" ? `Login unavailable ${login.detail}` : `Login not usable: ${login.detail}`}.{" "}
           {login.state === "unavailable" ? (
             <>Runs with it do not start. Check {help.check ? <code className="font-mono">{help.check}</code> : "the login"} on

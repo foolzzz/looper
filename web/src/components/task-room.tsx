@@ -405,7 +405,7 @@ export function TaskRoomTab({ task, filter: filterParam, role: roleParam, onFilt
             aria-label="From or to a role"
             value={role}
             onChange={(e) => setFilters(filter, e.target.value)}
-            className="h-8 min-w-0 max-w-full rounded-md border border-input bg-transparent px-2 text-xs text-foreground"
+            className="h-8 min-w-0 max-w-full rounded-md border border-input bg-transparent px-2 text-xs text-foreground pointer-coarse:h-11"
           >
             <option value="">From or to any role</option>
             {roomRoles(view.seats).map((r) => (

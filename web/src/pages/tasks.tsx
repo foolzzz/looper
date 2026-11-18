@@ -585,7 +585,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
           aria-label="Project"
           value={projectFilter}
           onChange={(e) => setProjectFilter(e.target.value)}
-          className="h-8 max-w-[14rem] rounded-md border border-input bg-transparent px-2 text-xs font-medium text-foreground"
+          className="h-8 max-w-[14rem] rounded-md border border-input bg-transparent px-2 text-xs font-medium text-foreground pointer-coarse:h-11"
         >
           <option value="">All projects</option>
           {projects?.map((p) => (
@@ -598,7 +598,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
             aria-label="Manager"
             value={managerFilter}
             onChange={(e) => setManagerFilter(e.target.value)}
-            className="h-11 max-w-[14rem] rounded-md border border-input bg-transparent px-2 text-xs font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-8"
+            className="h-8 max-w-[14rem] rounded-md border border-input bg-transparent px-2 text-xs font-medium text-foreground pointer-coarse:h-11 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             <option value="">All Managers</option>
             {managers?.map((manager) => (
@@ -744,11 +744,12 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
               className="px-5 py-4 cursor-pointer hover:bg-muted/50 transition-colors"
               onClick={() => setSelectedTaskId(task.task_id)}
             >
-              <div className="flex items-start justify-between gap-4">
+              {/* A phone puts the actions under the title, so the title has the row's width and two lines. */}
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
                 <div className="flex items-start gap-3 min-w-0">
                   {statusIcon(task.status)}
                   <div className="min-w-0">
-                    <p className="text-sm font-medium truncate">{task.name || task.requirement}</p>
+                    <p className="text-sm font-medium truncate max-sm:line-clamp-2 max-sm:whitespace-normal max-sm:break-words">{task.name || task.requirement}</p>
                     <div className="mt-1.5 flex items-center gap-2 flex-wrap">
                       {statusBadge(task.status)}
                       <ScheduledBadge task={task} />
@@ -782,7 +783,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                     </div>
                   </div>
                 </div>
-                <div className="shrink-0 flex items-center gap-1">
+                <div className="shrink-0 flex flex-wrap items-center gap-1 max-sm:pl-7">
                   {isActiveTask(task) && (
                     <button
                       type="button"
@@ -790,7 +791,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                         e.stopPropagation();
                         handleStop(task.task_id);
                       }}
-                      className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-warning hover:bg-warning/10 transition-colors"
+                      className="flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-warning hover:bg-warning/10 transition-colors"
                     >
                       <Pause className="h-3.5 w-3.5" />
                       Stop
@@ -803,14 +804,14 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                         type="button"
                         onClick={() => handleStart(task, true)}
                         title="Delete the task's steps, plan and Planner session, then plan it anew from its requirement"
-                        className="rounded-md px-2 py-1 text-xs bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                        className="rounded-md px-2 py-1 text-xs pointer-coarse:min-h-11 pointer-coarse:min-w-11 bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
                       >
                         Start over
                       </button>
                       <button
                         type="button"
                         onClick={() => setConfirmStartOver(null)}
-                        className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                        className="rounded-md px-2 py-1 text-xs pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-muted-foreground hover:text-foreground transition-colors"
                       >
                         No
                       </button>
@@ -825,7 +826,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                             handleStart(task);
                           }}
                           title={task.status === READY_STATUS ? undefined : "Continue from the saved plan: accepted steps are kept"}
-                          className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-success hover:bg-success/10 transition-colors"
+                          className="flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-success hover:bg-success/10 transition-colors"
                         >
                           <Play className="h-3.5 w-3.5" />
                           Start
@@ -840,7 +841,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                             }}
                             aria-label="Start over"
                             title="Start over: delete its steps and plan it anew"
-                            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                            className="flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
                           >
                             <RotateCcw className="h-3.5 w-3.5" />
                             <span className="hidden sm:inline">Start over</span>
@@ -854,14 +855,14 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                       <button
                         type="button"
                         onClick={() => handleDelete(task.task_id)}
-                        className="rounded-md px-2 py-1 text-xs bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
+                        className="rounded-md px-2 py-1 text-xs pointer-coarse:min-h-11 pointer-coarse:min-w-11 bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors"
                       >
                         Confirm
                       </button>
                       <button
                         type="button"
                         onClick={() => setConfirmDelete(null)}
-                        className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                        className="rounded-md px-2 py-1 text-xs pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-muted-foreground hover:text-foreground transition-colors"
                       >
                         No
                       </button>
@@ -874,7 +875,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
                         setConfirmStartOver(null);
                         setConfirmDelete(task.task_id);
                       }}
-                      className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                      aria-label="Delete task"
+                      className="flex items-center justify-center gap-1 rounded-md px-2 py-1 text-xs pointer-coarse:min-h-11 pointer-coarse:min-w-11 text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>

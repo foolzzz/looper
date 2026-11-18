@@ -10,6 +10,7 @@ import { ProjectRoleSummary } from "@/components/role-stats";
 import { ProjectSchedulesSection } from "@/components/project-schedules";
 import { ProjectSkillsSection } from "@/components/project-skills";
 import { ProjectSettingsForm } from "@/components/project-settings";
+import { TabStrip } from "@/components/tab-strip";
 import {
   fetchKnowledge,
   fetchProjectAgentSettings,
@@ -364,7 +365,8 @@ function ExecutionCard({ project, onOpen }: { project: Project; onOpen: () => vo
 
 function Overview({ project, onTab }: { project: Project; onTab: (tab: Tab) => void }) {
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
+    // One column below lg that the cards cannot widen: an implicit column grows to their widest unwrapped row.
+    <div className="grid grid-cols-[minmax(0,1fr)] gap-4 lg:grid-cols-2">
       <TasksCard project={project} />
       <OverviewCard title="Background" action={<CardLink onClick={() => onTab("settings")}>Edit in Settings</CardLink>}>
         {project.background ? (
@@ -461,7 +463,7 @@ export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
         </p>
       </header>
 
-      <div role="tablist" aria-label="Project" className="flex gap-1 overflow-x-auto border-b border-border">
+      <TabStrip label="Project" selected={tab} className="gap-1 border-b border-border [--gutter:--spacing(6)]">
         {TABS.map((t) => (
           <button
             key={t.id}
@@ -480,7 +482,7 @@ export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
               document.getElementById(`project-tab-${next}`)?.focus();
             }}
             className={cn(
-              "-mb-px whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+              "-mb-px whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium transition-colors pointer-coarse:min-h-11 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
               tab === t.id
                 ? "border-primary text-foreground"
                 : "border-transparent text-muted-foreground hover:text-foreground",
@@ -489,7 +491,7 @@ export function ProjectPage({ sub, onNavigate }: ProjectPageProps) {
             {t.label}
           </button>
         ))}
-      </div>
+      </TabStrip>
 
       <div id="project-tabpanel" role="tabpanel" aria-labelledby={`project-tab-${tab}`}>
         {tab === "overview" && <Overview project={project} onTab={openTab} />}

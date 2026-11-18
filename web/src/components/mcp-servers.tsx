@@ -14,7 +14,7 @@ import {
 } from "@/lib/api";
 import { useSettingsTarget } from "@/lib/settings-target";
 
-const SELECT = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
+const SELECT = "flex h-9 pointer-coarse:h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
 const TEXTAREA =
   "w-full resize-y rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs leading-relaxed text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
@@ -313,7 +313,7 @@ export function McpToolbar({ catalog, onCatalog, onAdded }: { catalog: Catalog; 
       <div className="flex flex-wrap items-center gap-2 px-5 py-2">
         <span className="text-xs font-medium">MCP servers</span>
         <span className="text-[11px] text-muted-foreground">install them like any item; each run gets the ones installed for its role</span>
-        <div className="ml-auto flex gap-2">
+        <div className="ml-auto flex flex-wrap justify-end gap-2">
           <Button type="button" size="sm" variant="outline" onClick={() => setAdding(!adding)} aria-expanded={adding}>
             <Plus className="h-3.5 w-3.5" /> Add MCP server
           </Button>
