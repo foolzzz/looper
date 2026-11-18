@@ -52,7 +52,7 @@ import { useEventWindow } from "@/lib/use-event-window";
 import { startPolling } from "@/lib/polling";
 import { useTaskRuns } from "@/lib/use-task-runs";
 import { type NodeCard, type TaskRuns, gateCard, waitCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
-import { FIT_MIN_ZOOM, FIT_PADDING, conditionNodes, conditionState, dependencyEdges, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
+import { FIT_PADDING, conditionNodes, conditionState, dependencyEdges, fitMinZoom, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
 import { workspacesByStep } from "@/lib/workspaces";
 import { type RoomFilter, roomNote } from "@/lib/room";
@@ -2006,6 +2006,9 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
     setHideSkipped(hide);
     storeHideSkipped(hide);
   };
+  // The fits made before the toolbar measures the graph: below lg the graph spans the window, and from lg it is far
+  // wider than a phone, so the window's width decides as the graph's would.
+  const minZoom = fitMinZoom(window.innerWidth);
 
   return (
     // Taller for a deeper plan, so its labels stay readable before any zoom; full screen, the whole screen (the
@@ -2021,7 +2024,7 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
         edges={edges}
         nodeTypes={NODE_TYPES}
         fitView
-        fitViewOptions={{ padding: FIT_PADDING, minZoom: FIT_MIN_ZOOM }}
+        fitViewOptions={{ padding: FIT_PADDING, minZoom }}
         minZoom={0.15}
         colorMode="dark"
         proOptions={{ hideAttribution: true }}
@@ -2033,7 +2036,7 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
         defaultEdgeOptions={{ type: "smoothstep" }}
       >
         <Background color="var(--color-border)" gap={20} />
-        <Controls showInteractive={false} fitViewOptions={{ minZoom: FIT_MIN_ZOOM }} />
+        <Controls showInteractive={false} fitViewOptions={{ minZoom }} />
         <PipelineMeasurements nodes={nodes} />
         <NodeCards cards={cards} />
         <PipelineToolbar skipped={skipped} hideSkipped={hideSkipped} onHideSkipped={changeHideSkipped}

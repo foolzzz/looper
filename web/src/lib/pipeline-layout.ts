@@ -11,9 +11,15 @@ const CONTROLS_ROOM = 56;
 const TOOLBAR_ROOM = 80;
 export const FIT_PADDING: Padding = { top: 0.12, right: 0.12, left: `${CONTROLS_ROOM}px`, bottom: `${TOOLBAR_ROOM}px` };
 
-/** The least a fit zooms to: a node's 12 px name stays at least 10 px on screen. A plan wider than that fits on a narrow
- * screen is shown at this zoom, centred, and the rest is a pan away (zooming out by hand still goes further). */
-export const FIT_MIN_ZOOM = 10 / 12;
+/** Below this width (a phone held upright) a fit would shrink a plan of a few parallel steps past reading. */
+const NARROW_PIPELINE = 640;
+
+/** The least a fit zooms to in a Pipeline `width` px wide. A narrow one keeps a node's 12 px name at least 10 px on
+ * screen: a plan wider than that is shown centred, the rest a pan away. A wider one has no floor of its own, so the
+ * whole plan fits. Zooming out by hand still goes further either way. */
+export function fitMinZoom(width: number): number | undefined {
+  return width < NARROW_PIPELINE ? 10 / 12 : undefined;
+}
 
 /** The room a fit leaves, with the graph's panels measured (one frame, the window's coordinates), wherever that is
  * more than `FIT_PADDING`'s, with a gap: beside a panel taller than it is wide (the zoom controls, a column at a

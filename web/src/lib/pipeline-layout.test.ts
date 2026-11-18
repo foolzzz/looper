@@ -4,6 +4,7 @@ import {
   conditionNodes,
   dependencyEdges,
   conditionState,
+  fitMinZoom,
   fitPadding,
   shownSteps,
   stepColumns,
@@ -89,6 +90,15 @@ describe("the viewer's choice", () => {
     vi.stubGlobal("window", { get localStorage(): Storage { throw new DOMException("denied", "SecurityError"); } });
     expect(storedHideSkipped()).toBe(true);
     expect(() => storeHideSkipped(false)).not.toThrow();
+  });
+});
+
+describe("fitMinZoom", () => {
+  it.each([
+    { width: 639, floor: 10 / 12 },
+    { width: 640, floor: undefined },
+  ])("floors a fit's zoom only in a Pipeline narrower than 640 px ($width px)", ({ width, floor }) => {
+    expect(fitMinZoom(width)).toBe(floor);
   });
 });
 
