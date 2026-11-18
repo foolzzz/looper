@@ -59,7 +59,8 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   direct message`, `Channel: a Lark group chat, from <sender>` (the name the
   allowlist resolves, else the open_id), or for Telegram `a Telegram direct
   message` (a group's chat id is negative: `a Telegram group chat`), from the
-  message's source channel and chat (`_message_origin`).
+  message's source channel and chat (`_message_origin`). What a Lark message
+  replies to or forwards follows the message as quoted content (Lark, below).
   The session may run its own Agent Profile. `/profile` lists the choices and
   `/profile <n|name|id>` switches it; `/profile 0` follows Settings again.
   Looper answers these, never the model (`session_profile.parse_profile_command`).
@@ -5957,8 +5958,8 @@ implementation supplies it and is retested.
   scope through the resource API, enforcing the size cap while streaming and
   refreshing an expired token once. It reconnects with exponential backoff capped at 300 s and
   0.5–1.0 jitter; a stream that yields an event or lasts 60 s resets the backoff. Direct
-  messages, group @-mentions, replies, statuses, notices, schedules and gates
-  follow the Lark rules below. Messages sent by other bots are not received on
+  messages, group @-mentions, replies, threads (an event keeps its `thread_id`, so answers stay in the
+  thread), quoted content, statuses, notices, schedules and gates follow the Lark rules below. Messages sent by other bots are not received on
   this channel type unless the app has Lark's permission to receive bot messages.
   This channel has no history polling or handled-message record; the `lark-cli`
   channel's polling is the alternative for bot @-mentions. At startup it logs
@@ -5990,10 +5991,46 @@ implementation supplies it and is retested.
   rich posts also handle `@@name` and `<at>` tags),
   and the Manager is told the sender's name (`contact +search-user`, the
   name the allowlist resolves, else the open_id after 5 s). Text and rich-text
-  posts reach the Manager. Posts keep lark-cli's rendered titles, paragraphs,
+  posts, and merged forwards (`merge_forward`) in a direct message, reach the Manager. Posts keep lark-cli's rendered titles, paragraphs,
   links and fenced code, with other mentions shown as `@name`. Images and files
   in posts, image messages and file messages become numbered `[image N]` /
-  `[file N: name]` placeholders and attachments for the Manager. After sender
+  `[file N: name]` placeholders and attachments for the Manager.
+
+  **What a message quotes** (`lark_quote.py`). Once a message is admitted (a
+  direct message, or a group message that @-mentions the bot; never an
+  unaddressed group message, which is still ignored without any read, a silent
+  chat, a turned-off Manager or `/stop`), the adapter reads as the bot what it
+  points to: a merged forward itself, else the message it replies to
+  (`reply_to`; a merged forward comes with its children, each naming it in
+  `upper_message_id`), and in a thread, when it does not reply to the thread's
+  first message, that first message and the thread's latest 10 messages
+  (`list_thread_messages`). Both transports read `GET
+  /open-apis/im/v1/messages/{id}` (`lark-cli api GET … --as bot`, or the bot
+  token's REST call) and try once more when the first read fails or takes 4 s
+  (lark-cli: `im +messages-mget --as bot --no-reactions`, whose rendering is
+  kept as it is); the message waits at most 10 s for this, names included.
+  What was read goes in `payload["quoted"]` (`Quote`: kind, id, type, sender,
+  lines), never in `payload["text"]`, which gate routing and `/stop` read. The
+  Manager shows it after the user's words, under a line saying it is quoted
+  content and not the user's instructions, as `<lark_quote id=… type=… from=…
+  note=…>` blocks: one line per message, `[MM-DD HH:MM] name: content`,
+  replies one level in, at most 1,500 characters a message (300 for one this
+  bot sent), 50 messages and 8,000 characters a block, then `… N more not
+  shown`. A nested merged forward is expanded one level, deeper ones show
+  `[merged forward, not expanded]`; cards show their title and text, else
+  `[card message]`; a recalled message `[recalled]`. A merged forward's
+  children are read live, so they can include replies posted after the
+  forward. Images and files in quoted messages are numbered after the
+  message's own, share its 10 attachments, and inside a merged forward
+  download through the forward's id (its children's ids are refused). A read
+  that fails leaves `[quoted message om_… could not be read: <why>]` (timeout,
+  recalled, missing permission im:message:readonly, error <code>) and the
+  message goes on; one with no words of its own but a quote is answered too.
+  One INFO `lark_quote` line per quote logs its ids, kind, type, message
+  count, lines, characters, resources and outcome, never content. Reading
+  needs the app's `im:message:readonly`, as downloads do.
+
+  After sender
   admission, routing and the reaction, resources download sequentially as the
   bot (`im +messages-resources-download --as bot`, app scope
   `im:message:readonly`): at most 10 per message, 30 s per resource and 60 s
@@ -6010,10 +6047,10 @@ implementation supplies it and is retested.
   Other types receive 「暂不支持这类飞书消息（<type>），请发文字、富文本、图片或文件。」
   as text, in reply to the message in a group or sent to the direct chat,
   after admission and routing; silent chats receive nothing, and a turned-off
-  Manager gets only the usual turned-off reply. Bots' messages, interactive
-  cards and empty messages are ignored. The bot-token channel renders posts
-  and resource markers into the same notation before the shared adapter reads
-  them. All outgoing Lark, Telegram and dashboard chat text redacts stored
+  Manager gets only the usual turned-off reply. Bots' messages and empty
+  messages are ignored; a card (`interactive`) gets the other types' answer on
+  both transports. The bot-token channel renders posts, cards and resource
+  markers into the same notation before the shared adapter reads them. All outgoing Lark, Telegram and dashboard chat text redacts stored
   attachment paths, including filenames with spaces and Unicode. Dashboard
   turns with attachments show the final answer without streaming text deltas,
   so a path split across chunks cannot escape redaction. It sends with `lark-cli im
