@@ -6019,7 +6019,9 @@ implementation supplies it and is retested.
   so a path split across chunks cannot escape redaction. It sends with `lark-cli im
   +messages-send --as bot`: a reply as Markdown (`--markdown`, a rich-text
   post) to the chat its message came from, a schedule's message as text to a
-  user (`--user-id`); a failed send carries lark-cli's reason. In a group the
+  user (`--user-id`); a failed send carries lark-cli's reason. A body that
+  starts with `@` (an @-mention) is passed with one more `@`: lark-cli reads
+  `@path` from a file and takes `@@` for a literal `@`. In a group the
   status message and the answer reply to the message (`lark-cli im
   +messages-reply --as bot --message-id om_…`), while the task's progress
   and end notice go to the group (`--chat-id`): the bot posts in a group only

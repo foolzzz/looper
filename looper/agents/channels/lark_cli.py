@@ -117,7 +117,7 @@ def send_command(*, chat_id: str | None = None, user_id: str | None = None, text
     if (text is None) == (markdown is None):
         raise ValueError("send exactly one of text and markdown")
     target = ["--chat-id", chat_id] if chat_id is not None else ["--user-id", user_id]
-    body = ["--text", text] if text is not None else ["--markdown", markdown]
+    body = _body(text, markdown)
     return [*_base(profile), "im", "+messages-send", "--as", "bot", *target, *body, *_key(idempotency_key)]
 
 
@@ -128,9 +128,16 @@ def reply_command(message_id: str, *, text: str | None = None, markdown: str | N
     the same chat that quotes it; ``idempotency_key`` as for ``send_command``."""
     if (text is None) == (markdown is None):
         raise ValueError("reply with exactly one of text and markdown")
-    body = ["--text", text] if text is not None else ["--markdown", markdown]
+    body = _body(text, markdown)
     return [*_base(profile), "im", "+messages-reply", "--as", "bot", "--message-id", message_id, *body,
             *(["--reply-in-thread"] if reply_in_thread else []), *_key(idempotency_key)]
+
+
+def _body(text: str | None, markdown: str | None) -> list[str]:
+    """The flag and value of a message body. lark-cli reads a value that starts with ``@`` from a file and takes
+    ``@@`` for a literal ``@``, so a body that starts with an @-mention gets one more ``@``."""
+    flag, value = ("--text", text) if text is not None else ("--markdown", markdown)
+    return [flag, "@" + value if value.startswith("@") else value]
 
 
 def _key(idempotency_key: str | None) -> list[str]:
@@ -152,7 +159,7 @@ def edit_command(message_id: str, *, text: str | None = None, markdown: str | No
     ``markdown``. Feishu edits one message at most 20 times."""
     if (text is None) == (markdown is None):
         raise ValueError("edit with exactly one of text and markdown")
-    body = ["--text", text] if text is not None else ["--markdown", markdown]
+    body = _body(text, markdown)
     return [*_base(profile), "im", "+messages-edit", "--as", "bot", "--message-id", message_id, *body]
 
 

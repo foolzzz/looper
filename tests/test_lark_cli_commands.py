@@ -92,6 +92,21 @@ def test_replies_go_as_markdown_to_their_chat_and_messages_as_text_to_a_user(tmp
     ]
 
 
+@pytest.mark.parametrize("group_message", [None, "om_11"])
+def test_an_answer_that_starts_with_an_at_mention_is_delivered(tmp_path: Path, lark_cli_stand_in: Path,
+                                                               group_message: str | None) -> None:
+    adapter = _adapter(tmp_path)
+    adapter._correlation_chat["c1"] = "oc_group"
+    if group_message:
+        adapter._group_message["c1"] = group_message
+    text = "@Ada Lovelace the task is done"
+    reply = MessageEnvelope.create(source=channel_address("lark"), target=channel_address("lark"),
+                                   message_type=MessageType.AGENT_REPLY, payload={"text": text}, correlation_id="c1")
+    assert asyncio.run(adapter.deliver(reply)).success
+    # lark-cli turns the leading "@@" back into "@", so the chat shows the answer as written.
+    assert _calls(lark_cli_stand_in)[-1][-2:] == ["--markdown", "@" + text]
+
+
 def test_a_failed_send_says_why(tmp_path: Path, lark_cli_stand_in: Path) -> None:
     adapter = _adapter(tmp_path)
     adapter._correlation_chat["c1"] = "oc_gone"

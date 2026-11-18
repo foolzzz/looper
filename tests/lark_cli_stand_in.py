@@ -45,6 +45,10 @@ if "--idempotency-key" in args:
     if len(args) <= at + 1 or not 0 < len(args[at + 1]) <= 50:
         refuse("--idempotency-key: at most 50 characters")
     args = args[:at] + args[at + 2:]
+for flag in ("--text", "--markdown"):
+    # lark-cli 1.0.100 reads "@path" from a file and takes "@@" for a literal "@".
+    if flag in args and args[args.index(flag) + 1][:1] == "@" and args[args.index(flag) + 1][:2] != "@@":
+        refuse('%s: cannot read file "%s"' % (flag, args[args.index(flag) + 1][1:]))
 profile = world["profiles"].get(name or world["active"])
 if profile is None:
     refuse('profile "%s" not found' % name, 3)
