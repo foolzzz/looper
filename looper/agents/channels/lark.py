@@ -14,7 +14,7 @@ import math
 import re
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from random import uniform as _reconnect_jitter
@@ -53,9 +53,12 @@ RejectedListener = Callable[[str, str | None], Awaitable[None]]
 
 # How long finding a group sender's name may hold up their message; then the Manager gets the open_id.
 _NAME_LOOKUP_SECONDS = 5.0
-# How long reading what a message quotes may hold it up, names included; then it goes on with what was read.
-_QUOTE_SECONDS = 10.0
+# How long reading what a message quotes may hold it up, names included; then it goes on with what was read. A
+# long merged forward's raw read fails after about 5 s and its rendered read then takes about 6 s.
+_QUOTE_SECONDS = 15.0
 _DOWNLOAD_MESSAGE_SECONDS = 60.0
+# Messages read in the background at once (what they quote, their downloads), across chats.
+_DELIVERY_CONCURRENCY = 4
 _CATCHUP_MAX_AGE = 15 * 60
 _CATCHUP_OVERLAP = 10
 _CATCHUP_MAX_CHATS = 100
@@ -116,6 +119,24 @@ def _not_received(attachments: list[Attachment]) -> str:
             reason += "（缺少权限 im:message:readonly）"
         items.append(label + reason)
     return f"有 {len(items)} 个附件没有收下：" + "；".join(items) + "。其余内容已交给 Manager。"
+
+
+@dataclass
+class _Delivery:
+    """An admitted message on its way to the Manager: what is read for it (``targets``, its resources, its sender's
+    name) and what its envelope carries. ``skip`` publishes it at once with nothing more read (a ``/stop``)."""
+
+    event: dict[str, Any]
+    chat_id: str
+    group: bool
+    message_id: str
+    text: str
+    inbound: lark_content.Inbound
+    manager_id: str
+    metadata: dict[str, Any]
+    sender: str
+    targets: list[tuple[QuoteKind, str]]
+    skip: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 def _check_lark_cli_available() -> bool:
@@ -181,6 +202,12 @@ class LarkChannelAdapter(ChannelAdapter):
         self._bot_poll_logged_at: float | None = None
         self._inbox: LarkInbox | None = None
         self._ingress_lock = asyncio.Lock()
+        # Messages read in the background, by their task; each chat's last one, which the next one waits for, so a
+        # chat's messages reach the Manager in order; their ids, for deduplication until they are recorded.
+        self._deliveries: dict[asyncio.Task[None], _Delivery] = {}
+        self._chat_tail: dict[str, asyncio.Task[None]] = {}
+        self._in_flight: set[str] = set()
+        self._delivery_slots = asyncio.Semaphore(_DELIVERY_CONCURRENCY)
         self._running = False
         # correlation_id → lark chat_id for reply routing
         self._correlation_chat: dict[str, str] = {}
@@ -240,7 +267,7 @@ class LarkChannelAdapter(ChannelAdapter):
     async def stop(self) -> None:
         # Cancellation during admission/download must not move the recovery boundary past that message.
         ready = getattr(self._transport, "consumer_started", None)
-        clean = (not self._ingress_lock.locked()
+        clean = (not self._ingress_lock.locked() and not self._deliveries
                  and ready is not None and ready.is_set())
         stopped_at = time()
         self._running = False
@@ -251,6 +278,10 @@ class LarkChannelAdapter(ChannelAdapter):
                     await task
                 except asyncio.CancelledError:
                     pass
+        deliveries = list(self._deliveries)
+        for task in deliveries:
+            task.cancel()
+        await asyncio.gather(*deliveries, return_exceptions=True)
         await self._reactions.stop()
         if isinstance(self._transport, CliTransport):
             self._transport.on_thread_activity = None
@@ -764,7 +795,8 @@ class LarkChannelAdapter(ChannelAdapter):
             await asyncio.sleep(_HEARTBEAT_SECONDS)
             ready = getattr(self._transport, "consumer_started", None)
             if (self._inbox is not None
-                    and not self._ingress_lock.locked() and ready is not None and ready.is_set()):
+                    and not self._ingress_lock.locked() and not self._deliveries
+                    and ready is not None and ready.is_set()):
                 try:
                     await self._inbox.checkpoint(time())
                 except Exception:
@@ -823,7 +855,8 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _handle_lark_event(self, event: dict[str, Any]) -> Literal["handled", "duplicate", "ignored", "too_old"]:
         async with self._ingress_lock:
             message_id = event.get("message_id")
-            if self._inbox is not None and message_id and await self._inbox.processed(message_id):
+            if message_id in self._in_flight or (
+                    self._inbox is not None and message_id and await self._inbox.processed(message_id)):
                 return "duplicate"
             created = event.get("_catchup_created_at")
             if created is not None and created.before(time() - _CATCHUP_MAX_AGE):
@@ -840,7 +873,8 @@ class LarkChannelAdapter(ChannelAdapter):
                 logger.info("lark_bot_message chat=%s bot_id=%s message_id=%s outcome=%s",
                             event.get("chat_id"), event.get("sender_id"), message_id,
                             "handled" if handled else event.get("_bot_outcome", "ignored"))
-            if self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT:
+            if (self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT
+                    and not event.get("_scheduled")):  # a scheduled one is recorded once it is published
                 await self._inbox.finish(message_id, chat_id=event.get("chat_id") or "",
                                    thread_id=(event.get("thread_id") or "") if handled else "", at=time())
             return "handled" if handled else "ignored"
@@ -853,7 +887,6 @@ class LarkChannelAdapter(ChannelAdapter):
         message's text with each mention shown as ``@name``, for a reply ``reply_to`` and ``root_id``, and in a
         thread ``thread_id``."""
         assert self._bus is not None
-        import uuid as _uuid
 
         if event.get("type", "") != RECEIVE_EVENT:
             return
@@ -960,74 +993,165 @@ class LarkChannelAdapter(ChannelAdapter):
                                chat_id, exc_info=True)
             return True
         self._reactions.add(chat_id, message_id)  # the bot saw it; in the background, the Manager gets it now
+        stop = is_stop_command(text)
+        delivery = _Delivery(event, chat_id, group, message_id, text, inbound, manager_id, metadata,
+                             sender_open_id or "", [] if stop else self._quote_targets(
+                                 event, message_id, forward=inbound.kind is lark_content.ContentKind.FORWARD))
+        if stop:
+            # Claimed at once: this chat's messages still being read go first, unread, so the stop withdraws them.
+            await self._flush(chat_id)
+        elif delivery.targets or chat_id in self._chat_tail:
+            # Read in the background, behind this chat's earlier messages: other chats and stops do not wait.
+            self._schedule(delivery)
+            event["_scheduled"] = True
+            return True
+        await self._publish(delivery, *await self._prepare(delivery))
+        return True
+
+    async def _prepare(self, delivery: _Delivery) -> tuple[list[Quote], list[Attachment], str]:
+        """What the message's envelope needs read: its quotes, its and their resources (the ones not received are
+        told in one reply), and in a group its sender's name."""
+        message_id = delivery.message_id
         quoted: list[Quote] = []
         quoted_resources: tuple[lark_content.ResourceRef, ...] = ()
-        if not is_stop_command(text):  # a stop is claimed at once: nothing it quotes is read
+        if delivery.targets:
             try:
-                quoted, quoted_resources = await self._quote(
-                    event, message_id, forward=inbound.kind is lark_content.ContentKind.FORWARD,
-                    after=len(inbound.resources))
+                quoted, quoted_resources = await self._quote(delivery)
             except Exception:
                 logger.warning("%s: could not read what message %s quotes", self.channel_id, message_id,
                                exc_info=True)
-        resources = inbound.resources + quoted_resources
+        resources = delivery.inbound.resources + quoted_resources
         attachments = await self._collect(message_id, resources) if resources else []
         if any(item.state is not AttachmentState.SAVED for item in attachments):
             try:
                 reply = _not_received(attachments)
-                if group:
+                if delivery.group:
                     await self._reply(message_id, text=reply)
                 else:
-                    await self._transport.send(chat_id=chat_id, text=reply)
+                    await self._transport.send(chat_id=delivery.chat_id, text=reply)
                 attachments = [replace(item, told=True) if item.state is not AttachmentState.SAVED else item
                                for item in attachments]
             except LarkCliError:
                 logger.warning("%s: could not report attachments not received", self.channel_id, exc_info=True)
+        name = await self._sender_name(delivery.sender) if delivery.group else ""
+        return quoted, attachments, name
+
+    async def _publish(self, delivery: _Delivery, quoted: list[Quote], attachments: list[Attachment],
+                       sender_name: str) -> None:
+        assert self._bus is not None
+        import uuid as _uuid
+
+        chat_id, message_id, event = delivery.chat_id, delivery.message_id, delivery.event
         correlation_id = str(_uuid.uuid4())
         self._correlation_chat[correlation_id] = chat_id
-        context = {"chat_id": chat_id, "chat_type": "group" if group else "p2p", "sender_id": sender_open_id or "",
+        context = {"chat_id": chat_id, "chat_type": "group" if delivery.group else "p2p", "sender_id": delivery.sender,
                    "message_id": message_id}
         # What the message replies to: the message it answers and the first of its thread (a gate's messages).
         for key in ("reply_to", "root_id", "thread_id"):
             if isinstance(ref := event.get(key), str) and ref:
                 context[key] = ref
-        if group:
+        if delivery.group:
             if message_id:
                 self._group_message[correlation_id] = message_id
-            context["sender_name"] = await self._sender_name(sender_open_id or "")
+            context["sender_name"] = sender_name
 
         envelope = MessageEnvelope.create(
             source=self._address,
-            target=manager_address(manager_id),
+            target=manager_address(delivery.manager_id),
             message_type=MessageType.USER_MESSAGE,
             payload={
-                "text": text,
+                "text": delivery.text,
                 **({"quoted": [quote.to_payload() for quote in quoted]} if quoted else {}),
                 **({"attachments": [item.to_payload() for item in attachments]} if attachments else {}),
                 "language": "zh",
                 "channel_context": context,
             },
             correlation_id=correlation_id,
-            metadata=metadata,
+            metadata=delivery.metadata,
         )
         await self._bus.publish(envelope)
-        return True
 
-    async def _quote(self, event: dict[str, Any], message_id: str, *, forward: bool,
-                     after: int) -> tuple[list[Quote], tuple[lark_content.ResourceRef, ...]]:
-        """What the message quotes (``lark_quote``), read as the bot within ``_QUOTE_SECONDS``: a merged forward
-        itself, else the message it replies to, and in a thread, when that is not the thread's first message, the
-        first message and the latest replies. A read that fails becomes a line saying why; the message goes on."""
-        read = getattr(self._transport, "get_message", None)
-        if read is None:
-            return [], ()
-        reply_to, root_id, thread_id = (str(event.get(key) or "") for key in ("reply_to", "root_id", "thread_id"))
+    def _schedule(self, delivery: _Delivery) -> None:
+        previous = self._chat_tail.get(delivery.chat_id)
+        task = asyncio.create_task(self._deliver_later(delivery, previous))
+        self._deliveries[task] = delivery
+        self._chat_tail[delivery.chat_id] = task
+        self._in_flight.add(delivery.message_id)
+
+        def done(finished: asyncio.Task[None]) -> None:
+            self._deliveries.pop(finished, None)
+            self._in_flight.discard(delivery.message_id)
+            if self._chat_tail.get(delivery.chat_id) is finished:
+                del self._chat_tail[delivery.chat_id]
+
+        task.add_done_callback(done)
+
+    async def _deliver_later(self, delivery: _Delivery, previous: asyncio.Task[None] | None) -> None:
+        """Read what the message needs (at most ``_DELIVERY_CONCURRENCY`` at once), unless a stop skips it, then
+        publish it after the chat's previous message and record it."""
+        async def bounded() -> tuple[list[Quote], list[Attachment], str]:
+            async with self._delivery_slots:
+                return await self._prepare(delivery)
+
+        work = asyncio.create_task(bounded())
+        skipped = asyncio.create_task(delivery.skip.wait())
+        try:
+            await asyncio.wait({work, skipped}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (work, skipped):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(work, skipped, return_exceptions=True)
+        if not work.cancelled() and work.exception() is None:
+            prepared = work.result()
+        else:
+            if not work.cancelled():
+                logger.warning("%s: could not read for message %s", self.channel_id, delivery.message_id,
+                               exc_info=work.exception())
+            why = "stopped by the user" if delivery.skip.is_set() else "error"
+            prepared = ([lark_quote.build(kind, ref, [], error=why)[0] for kind, ref in delivery.targets], [],
+                        delivery.sender)
+        if previous is not None:
+            await asyncio.gather(previous, return_exceptions=True)
+        try:
+            await self._publish(delivery, *prepared)
+            # Recorded only once published: one cut short is read again after a restart.
+            if self._inbox is not None and delivery.event.get("type") == RECEIVE_EVENT:
+                await self._inbox.finish(delivery.message_id, chat_id=delivery.chat_id,
+                                         thread_id=delivery.event.get("thread_id") or "", at=time())
+        except Exception:
+            logger.warning("%s: could not publish message %s", self.channel_id, delivery.message_id, exc_info=True)
+
+    async def _flush(self, chat_id: str) -> None:
+        """Publish this chat's messages still being read at once, with what they have."""
+        pending = [task for task, delivery in self._deliveries.items() if delivery.chat_id == chat_id]
+        for task in pending:
+            self._deliveries[task].skip.set()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _quote_targets(self, event: dict[str, Any], message_id: str, *,
+                       forward: bool) -> list[tuple[QuoteKind, str]]:
+        """What the message quotes: a merged forward itself, else the message it replies to, and in a thread, when
+        that is not the thread's first message, the first message (with the latest replies); none when the
+        transport cannot read messages."""
+        if not hasattr(self._transport, "get_message"):
+            return []
+        reply_to, root_id, thread_id = (value if isinstance(value := event.get(key), str) else ""
+                                        for key in ("reply_to", "root_id", "thread_id"))
         wanted = [(QuoteKind.FORWARD, message_id)] if forward else [(QuoteKind.REPLY, reply_to)] if reply_to else []
         if (reply_to and root_id and root_id != reply_to and thread_id
                 and hasattr(self._transport, "list_thread_messages")):
             wanted.append((QuoteKind.THREAD, root_id))
-        if not wanted:
-            return [], ()
+        return wanted
+
+    async def _quote(self, delivery: _Delivery) -> tuple[list[Quote], tuple[lark_content.ResourceRef, ...]]:
+        """The message's quotes (``lark_quote``), read as the bot within ``_QUOTE_SECONDS``; a read that fails
+        becomes a line saying why."""
+        read = self._transport.get_message  # type: ignore[attr-defined]
+        event, message_id, wanted = delivery.event, delivery.message_id, delivery.targets
+        after = len(delivery.inbound.resources)
+        reply_to, thread_id = str(event.get("reply_to") or ""), str(event.get("thread_id") or "")
         deadline = monotonic() + _QUOTE_SECONDS
 
         async def fetch(kind: QuoteKind, ref: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:

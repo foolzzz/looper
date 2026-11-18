@@ -888,7 +888,7 @@ def test_quoted_lark_content_follows_the_users_words_marked_and_bounded() -> Non
     context = {"chat_id": "oc_team", "chat_type": "group", "sender_id": "ou_1", "sender_name": "Ada Lovelace"}
     quoted = {"quoted": [quote.to_payload()]}
     turns = _channel_turns([(LARK, context, "summarize this", quoted), (LARK, context, "", quoted)])
-    for turn, words in zip(turns, ("summarize this", "")):
+    for turn, words in zip(turns, ("summarize this", ""), strict=True):
         _, found, block = turn.partition(f"Channel: a Lark group chat, from Ada Lovelace\n\n{words}\n\n")
         assert found
         assert block.startswith(lark_quote.INTRO + '\n<lark_quote id="om_f" type="merge_forward" from="Bob" '

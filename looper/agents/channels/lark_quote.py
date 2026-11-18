@@ -144,7 +144,8 @@ class _Entry:
 def _forward(items: Sequence[Mapping[str, Any]], message_id: str, *, indent: int = 0) -> tuple[list[_Entry], int]:
     """The message read as ``message_id`` and, for a merged forward, its children in place of it (each child names
     its forward in ``upper_message_id``; a nested forward's children follow it, one level in), a reply to another
-    child one level in; with the number of the outer forward's children. Resources come through ``message_id``."""
+    child one level in; with the number of the outer forward's children. A child's resources come through its own
+    id: the raw read gives it the keys of its own message (the forward's id refuses them)."""
     top = next((item for item in items if item.get("message_id") == message_id), items[0])
     children: dict[str, list[Mapping[str, Any]]] = {}
     for item in items:
@@ -158,7 +159,7 @@ def _forward(items: Sequence[Mapping[str, Any]], message_id: str, *, indent: int
         for kid in kids:
             reply = kid.get("parent_id") in ids or (kid.get("root_id") in ids and kid.get("root_id") != kid.get("message_id"))
             nested = kid.get("msg_type") == "merge_forward" and not kid.get("deleted")
-            entries.append(_Entry(kid, base + reply, message_id, level,
+            entries.append(_Entry(kid, base + reply, str(kid.get("message_id") or message_id), level,
                                   len(children.get(str(kid.get("message_id") or ""), [])) if nested else -1))
             if nested and level < FORWARD_LEVELS:
                 expand(kid, level + 1, base + reply + 1)

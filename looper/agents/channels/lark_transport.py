@@ -17,9 +17,9 @@ from .lark_content import ResourceRef
 logger = logging.getLogger(__name__)
 _CONSUMER_STDERR_LINES = 5
 _CONSUMER_STOP_GRACE_SEC = 5.0
-# A message read's first try; the rest of its time goes to the second (the platform gives up on a long merged
-# forward after about 5 s).
-READ_FIRST_SECONDS = 4.0
+# A message read's first try; the rest of its time goes to the second. Measured through lark-cli: a raw read
+# takes 4–5 s, and on a long merged forward the platform sometimes gives up after about 5 s.
+READ_FIRST_SECONDS = 7.0
 
 
 class LarkTransport(Protocol):

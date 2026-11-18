@@ -25,6 +25,7 @@ from looper.agents.channels.lark_content import ResourceKind, ResourceRef
 from looper.agents.channels.lark_quote import QuoteKind
 from looper.agents.gate_routing import references
 from looper.agents.message import MessageEnvelope, MessageType
+from test_lark_transport import StubTransport, _adapter, _event
 
 STAMP = "1763350000000"
 PNG = b"\x89PNG\r\n\x1a\n"
@@ -67,7 +68,7 @@ def test_one_quoted_message_renders_by_type(msg_type: str, content: Any, fields:
     assert found == refs
 
 
-def test_a_merged_forward_groups_children_nests_two_levels_and_downloads_through_the_container() -> None:
+def test_a_merged_forward_groups_children_nests_two_levels_and_downloads_through_each_child() -> None:
     items = [
         *_forward("om_f"),
         _item("om_a", content="topic", upper_message_id="om_f"),
@@ -81,7 +82,7 @@ def test_a_merged_forward_groups_children_nests_two_levels_and_downloads_through
     assert [line.partition("[")[0] for line in quote.lines] == ["", "  ", "", "  ", "  "]
     assert _bodies(quote) == ["topic", "answer", "[merged forward, 2 messages]", "[image 1]",
                               "[merged forward, not expanded]"]
-    assert refs == (ResourceRef(1, ResourceKind.IMAGE, "img_c", message_id="om_f"),)
+    assert refs == (ResourceRef(1, ResourceKind.IMAGE, "img_c", message_id="om_c"),)  # the child's own keys
     assert (quote.message_type, quote.messages) == ("merge_forward", 3)
 
 
@@ -151,7 +152,7 @@ async def _received(tmp_path: Path, event: dict[str, Any]) -> list[Any]:
     adapter._bus = bus
     try:
         await adapter._handle_lark_event(event)
-        await asyncio.gather(*adapter._reactions._pending)
+        await asyncio.gather(*adapter._deliveries, *adapter._reactions._pending)
         return bus.journal.undelivered()
     finally:
         await adapter.stop()
@@ -173,25 +174,31 @@ def test_a_reply_reads_its_parent_into_quoted_and_keeps_the_text(tmp_path: Path,
     assert downloads[0][downloads[0].index("--message-id") + 1] == "om_parent"
 
 
+@pytest.mark.parametrize("parent", ["om_longslow", "om_longservertimeout"])
 def test_a_raw_read_that_times_out_falls_back_to_the_rendered_read_once(
-    tmp_path: Path, lark_cli_stand_in: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, lark_cli_stand_in: Path, monkeypatch: pytest.MonkeyPatch, parent: str,
 ) -> None:
-    monkeypatch.setattr(lark_transport, "READ_FIRST_SECONDS", 0.5)
-    rendered = "<forwarded_messages>\n[10:02] Bob: the plan\n![Image](img_f)\n</forwarded_messages>"
-    _world(tmp_path, mget={"om_longslow": [{"message_id": "om_longslow", "msg_type": "merge_forward",
-                                            "create_time": "2026-11-17 10:05",
-                                            "sender": {"id": "ou_zyxwvut987", "name": "Alan Turing"},
-                                            "content": rendered}]})
-    (message,) = asyncio.run(_received(tmp_path, _cli_event(reply_to="om_longslow")))
+    monkeypatch.setattr(lark_transport, "READ_FIRST_SECONDS", 1.5)
+    rendered = "<forwarded_messages>\n[10:02] Bob: the plan\n[Image: img_f]\n</forwarded_messages>"
+    _world(tmp_path, mget={parent: [{"message_id": parent, "msg_type": "merge_forward",
+                                     "create_time": "2026-11-17 10:05",
+                                     "sender": {"id": "ou_zyxwvut987", "name": "Alan Turing"},
+                                     "content": rendered}]})
+    (message,) = asyncio.run(_received(tmp_path, _cli_event(reply_to=parent)))
     (quote,) = lark_quote.quotes(message.payload["quoted"])
     assert quote.sender == "Alan Turing" and quote.message_type == "merge_forward"
     assert "Bob: the plan" in quote.lines[0] and "[image 1]" in quote.lines[0]
-    assert [argv[2] if argv[0] == "api" else argv[1] for argv in _reads(lark_cli_stand_in)] == [
-        "/open-apis/im/v1/messages/om_longslow", "+messages-mget"]
+    # A stand-in killed at its first try may not have logged it yet; the rendered read comes once, last.
+    reads = [argv[2] if argv[0] == "api" else argv[1] for argv in _reads(lark_cli_stand_in)]
+    assert reads[-1] == "+messages-mget" and reads.count("+messages-mget") == 1
+    assert set(reads[:-1]) <= {f"/open-apis/im/v1/messages/{parent}"}
+    downloads = [argv for argv in _calls(lark_cli_stand_in) if "+messages-resources-download" in argv]
+    assert downloads[0][downloads[0].index("--message-id") + 1] == parent  # the rendering shows the forward's copies
 
 
 @pytest.mark.parametrize(("parent", "reason"), [("om_unknown", "error 230001"),
-                                                ("om_noscope", "missing permission im:message:readonly")])
+                                                ("om_noscope", "missing permission im:message:readonly"),
+                                                ("om_lostservertimeout", "timeout")])
 def test_an_unreadable_parent_still_publishes_the_message(tmp_path: Path, lark_cli_stand_in: Path, parent: str,
                                                           reason: str) -> None:
     (message,) = asyncio.run(_received(tmp_path, _cli_event(reply_to=parent)))
@@ -269,6 +276,7 @@ def test_a_bot_channel_reply_in_a_thread_is_quoted_and_answered_in_the_thread(
                     event = await asyncio.wait_for(pending, 2)
                     assert event["thread_id"] == "omt_thread"
                     await adapter._handle_lark_event(event)
+                await asyncio.gather(*adapter._deliveries)
                 message = bus.get_queue("manager").get_nowait()
                 assert message.payload["text"] == "explain"
                 (quote,) = lark_quote.quotes(message.payload["quoted"])
@@ -287,3 +295,67 @@ def test_a_bot_channel_reply_in_a_thread_is_quoted_and_answered_in_the_thread(
                 await bus.shutdown()
 
     asyncio.run(asyncio.wait_for(main(), 15))
+
+
+# --- Reading off the channel's ingress: other chats, stops and a chat's order ---
+
+
+class _SlowReads(StubTransport):
+    """Reads that wait until ``release`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def get_message(self, message_id: str, *, timeout: float) -> list[dict[str, Any]]:
+        await self.release.wait()
+        return [_item(message_id, content="the parent")]
+
+
+def _texts(bus: MessageBus) -> list[str]:
+    return [message.payload["text"] for message in bus.journal.undelivered()]
+
+
+def test_a_slow_quote_holds_up_only_its_own_chat_and_keeps_its_order(tmp_path: Path) -> None:
+    async def main() -> None:
+        transport = _SlowReads()
+        adapter = _adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        handle = lambda **fields: asyncio.wait_for(adapter._handle_lark_event(_event(**fields)), 2)  # noqa: E731
+        try:
+            await handle(message_id="om_a1", chat_id="oc_a", content="what does it say?", reply_to="om_parent")
+            await handle(message_id="om_a2", chat_id="oc_a", content="and then?")
+            await handle(message_id="om_b1", chat_id="oc_b", content="plain")
+            await handle(message_id="om_b2", chat_id="oc_b", content="/stop")
+            assert _texts(bus) == ["plain", "/stop"]  # chat b did not wait; om_a2 waits behind om_a1
+            transport.release.set()
+            await asyncio.wait_for(asyncio.gather(*adapter._deliveries), 2)
+            assert _texts(bus) == ["plain", "/stop", "what does it say?", "and then?"]
+            (quote,) = lark_quote.quotes(bus.journal.undelivered()[2].payload["quoted"])
+            assert _bodies(quote) == ["the parent"]
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
+
+
+def test_a_stop_publishes_its_chats_unread_messages_first_without_waiting(tmp_path: Path) -> None:
+    """The model has not seen them, so the stop withdraws them like any queued message."""
+    async def main() -> None:
+        transport = _SlowReads()
+        adapter = _adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        try:
+            await adapter._handle_lark_event(_event(message_id="om_a1", content="explain", reply_to="om_parent"))
+            await asyncio.wait_for(adapter._handle_lark_event(_event(message_id="om_a2", content="/stop")), 2)
+            assert _texts(bus) == ["explain", "/stop"] and not adapter._deliveries
+            (quote,) = lark_quote.quotes(bus.journal.undelivered()[0].payload["quoted"])
+            assert quote.lines == ("[quoted message om_parent could not be read: stopped by the user]",)
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())

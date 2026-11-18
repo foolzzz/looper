@@ -127,11 +127,16 @@ if args[:6] == ["im", "reactions", "create", "--as", "bot", "--message-id"] and 
                                                     "reaction_type": json.loads(args[8])["reaction_type"]}}}})
 if args[:2] == ["api", "GET"] and args[2].startswith("/open-apis/im/v1/messages/") and args[3:] == ["--as", "bot"]:
     # A message read by id: the world's raw items (a merged forward first, then its children). An id ending in
-    # "slow" outlasts the caller's first try, as the platform does on a long merged forward.
+    # "slow" outlasts the caller's first try; one ending in "servertimeout" gets the platform's time-out, as a long
+    # merged forward sometimes does.
     from urllib.parse import unquote
     message_id = unquote(args[2].rsplit("/", 1)[1])
     if message_id.endswith("slow"):
         time.sleep(5)
+    if message_id.endswith("servertimeout"):
+        print(json.dumps({{"ok": False, "identity": "bot", "error": {{"type": "network", "subtype": "timeout",
+            "message": "API call failed: server time out error"}}}}), file=sys.stderr)
+        sys.exit(4)
     if message_id.endswith("noscope"):
         print(json.dumps({{"ok": False, "error": {{"type": "authorization", "code": 99991672,
             "message": "access denied", "missing_scopes": ["im:message:readonly"]}}}}), file=sys.stderr)

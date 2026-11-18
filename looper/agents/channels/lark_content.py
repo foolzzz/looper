@@ -31,8 +31,9 @@ class ResourceRef:
     kind: ResourceKind
     key: str
     name: str = ""
-    # The message it is downloaded through, when not the one received: a quoted message, or for a resource inside
-    # a merged forward the forward itself (its children's own ids are refused).
+    # The message it is downloaded through, when not the one received: a quoted message. A merged forward's raw
+    # read gives each child the keys of its own message, so a child's resource comes through the child's id;
+    # lark-cli's rendering of a forward shows the forward's own copies, which come through the forward's id.
     message_id: str = ""
 
 

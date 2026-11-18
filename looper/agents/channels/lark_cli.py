@@ -252,6 +252,11 @@ def failure_code(stderr: bytes | str) -> int | None:
     return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
+def _error_type(error: Mapping[str, Any]) -> str | None:
+    """lark-cli's error type; ``TIMEOUT`` for the platform's own time-out (``"subtype": "timeout"``)."""
+    return TIMEOUT if error.get("subtype") == "timeout" else error.get("type")
+
+
 def environment() -> dict[str, str]:
     """What lark-cli starts with: a child's variables (``child_env``) and the server's ``LARK_*``."""
     return {**child_env.inherited(), **{k: v for k, v in os.environ.items() if k.startswith("LARK_")}}
@@ -280,7 +285,7 @@ async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS, cwd: Pa
         raise
     if process.returncode != 0:
         try:
-            error_type = json.loads(stderr or b"{}").get("error", {}).get("type")
+            error_type = _error_type(json.loads(stderr or b"{}").get("error", {}))
         except (ValueError, AttributeError):
             error_type = None
         raise LarkCliError(f"lark-cli exited {process.returncode}: {failure(stderr or b'')}",
@@ -300,7 +305,7 @@ async def run_json(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS,
     if data.get("ok") is False:
         error = data.get("error") or {}
         raise LarkCliError(failure(out) or "lark-cli answered ok: false",
-                           code=failure_code(out), error_type=error.get("type"))
+                           code=failure_code(out), error_type=_error_type(error))
     return data
 
 

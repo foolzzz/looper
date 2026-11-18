@@ -709,6 +709,7 @@ class TestLarkAllowlist:
                                          on_rejected=_rejected, bot_open_id=bot_open_id)
             adapter._bus = bus  # what start() sets, without running lark-cli
             await adapter._handle_lark_event(event)
+            await asyncio.gather(*adapter._deliveries)  # a reply's quote is read in the background
             messages = _manager_messages(bus)
             await asyncio.gather(*adapter._reactions._pending)
             await adapter.stop()
