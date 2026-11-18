@@ -84,7 +84,7 @@ function App() {
   // Once the session ended nothing else renders: unmounting the pages stops every poller and stream.
   if (useSessionEnded()) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-background p-4">
+      <div className="flex h-dvh w-screen items-center justify-center bg-background p-4">
         <SessionEndedBanner />
       </div>
     );
@@ -92,7 +92,7 @@ function App() {
 
   return (
     <WaitingGatesProvider>
-    <div className="flex h-screen w-screen overflow-hidden bg-background">
+    <div className="flex h-dvh w-screen overflow-hidden bg-background">
       <Sidebar
         activePage={route.page}
         activeSettingsPage={route.page === "settings" ? (route.sub.split("/")[0] as SettingsPageId) : null}

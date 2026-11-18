@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 
 /** The pieces the provider and Agent Profile lists share: a titled list with its add form, rows, and forms. */
 
-export const SELECT = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
+export const SELECT = "flex h-9 pointer-coarse:h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground";
 export const LABEL = "text-xs font-medium text-muted-foreground";
 export const SMALL_LABEL = "text-[11px] text-muted-foreground";
 

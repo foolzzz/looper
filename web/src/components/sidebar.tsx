@@ -83,7 +83,7 @@ export function Sidebar({
       aria-label="Navigation"
       className={cn(
         // The whole column scrolls when it is taller than the screen (a phone on its side, Settings open).
-        "fixed inset-y-0 left-0 z-40 flex h-screen w-56 flex-col overflow-y-auto overscroll-contain border-r border-border bg-card",
+        "fixed inset-y-0 left-0 z-40 flex h-dvh w-56 flex-col overflow-y-auto overscroll-contain border-r border-border bg-card",
         "transition-[transform,visibility] duration-200 motion-reduce:transition-none",
         "lg:visible lg:static lg:z-auto lg:translate-x-0",
         open ? "visible translate-x-0" : "invisible -translate-x-full",
@@ -102,7 +102,7 @@ export function Sidebar({
           type="button"
           onClick={onClose}
           aria-label="Close navigation"
-          className="-mr-2 flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring lg:hidden"
+          className="-mr-2 flex h-9 w-9 shrink-0 pointer-coarse:h-11 pointer-coarse:w-11 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring lg:hidden"
         >
           <X className="h-4 w-4" />
         </button>
@@ -115,7 +115,7 @@ export function Sidebar({
             type="button"
             onClick={() => onNavigate(page)}
             className={cn(
-              "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+              "flex w-full items-center gap-3 rounded-md px-3 py-2 pointer-coarse:py-3 text-sm font-medium transition-colors",
               activePage === page
                 ? "bg-primary/10 text-primary"
                 : "text-muted-foreground hover:bg-accent hover:text-foreground"
@@ -193,7 +193,7 @@ function SettingsGroup({
         aria-expanded={expanded}
         aria-controls={SETTINGS_LIST_ID}
         className={cn(
-          "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          "flex w-full items-center gap-3 rounded-md px-3 py-2 pointer-coarse:py-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
           activePage !== null && !expanded
             ? "bg-primary/10 text-primary"
             : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -216,7 +216,7 @@ function SettingsGroup({
                 onClick={() => onOpen(id)}
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "flex w-full items-center gap-2.5 rounded-md py-1.5 pl-9 pr-3 text-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                  "flex w-full items-center gap-2.5 rounded-md py-1.5 pointer-coarse:py-3 pl-9 pr-3 text-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
                   active ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-accent hover:text-foreground",
                 )}
               >
@@ -254,7 +254,7 @@ function ProjectsSection({
           onClick={() => setCreating(true)}
           aria-label="New project"
           title="New project"
-          className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="flex h-6 w-6 pointer-coarse:-my-2.5 pointer-coarse:-mr-2.5 pointer-coarse:h-11 pointer-coarse:w-11 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <Plus className="h-3.5 w-3.5" />
         </button>
@@ -276,7 +276,7 @@ function ProjectsSection({
                 aria-current={active ? "page" : undefined}
                 title={`${p.name}${p.work_dir ? ` — ${p.work_dir}` : ""}\n${p.task_count} ${p.task_count === 1 ? "task" : "tasks"}, ${p.active_count} active`}
                 className={cn(
-                  "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors",
+                  "flex w-full items-center gap-2 rounded-md px-3 py-1.5 pointer-coarse:py-3 text-sm transition-colors",
                   active
                     ? "bg-primary/10 text-primary"
                     : "text-muted-foreground hover:bg-accent hover:text-foreground",
