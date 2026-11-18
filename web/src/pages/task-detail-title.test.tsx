@@ -114,4 +114,56 @@ describe("the task page heading", () => {
     expect(input()!.value).toBe("Rejected");
     expect(heading() ?? "").not.toBe("Rejected");
   });
+
+  it("keeps the title, status and actions in the header and folds the rest behind Details below lg", async () => {
+    await act(async () => root.render(<TaskDetailRoute taskId="task-a" onBack={() => {}} />));
+    await settle();
+    const button = (name: string) =>
+      [...container.querySelectorAll("button")].find((b) => (b.getAttribute("aria-label") ?? b.textContent?.trim()) === name);
+    const idLine = [...container.querySelectorAll("span")].find((s) => s.textContent === "task-a")!;
+    const project = container.querySelector("select[aria-label='Project']")!.closest(".contents")!;
+    const header = button("Back to tasks")!.closest(".border-b")!;
+    expect(heading()).toBe("Parser");
+    expect(header.textContent).toContain("Failed");
+    expect(button("Start")).toBeDefined();
+    expect(button("Start over")).toBeDefined();
+    const details = button("Details")!;
+    expect(details.getAttribute("aria-expanded")).toBe("false");
+    expect(idLine.classList).toContain("max-lg:hidden");
+    expect(project.classList).toContain("max-lg:hidden");
+
+    await act(async () => details.click());
+    expect(details.getAttribute("aria-expanded")).toBe("true");
+    expect(idLine.classList).not.toContain("max-lg:hidden");
+    expect(project.classList).not.toContain("max-lg:hidden");
+  });
+
+  it.each([
+    { strip: "wider than the screen", width: 600, revealed: true },
+    { strip: "that fits", width: 0, revealed: false },
+  ])("scrolls the newly selected tab into view only in a tab strip $strip", async ({ width, revealed }) => {
+    // The test DOM lays nothing out: the tab strip reports the width its tabs would take.
+    Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+      configurable: true,
+      get(this: HTMLElement) { return this.getAttribute("role") === "tablist" ? width : 0; },
+    });
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {});
+    try {
+      await act(async () => root.render(<TaskDetailRoute taskId="task-a" onBack={() => {}} />));
+      await settle();
+      const tab = (name: string) =>
+        [...container.querySelectorAll<HTMLElement>("[role='tab']")].find((t) => t.textContent?.trim() === name)!;
+      await act(async () => tab("Conversation").click());
+      expect(tab("Conversation").getAttribute("aria-selected")).toBe("true");
+      if (revealed) {
+        expect(scroll.mock.contexts.at(-1)).toBe(tab("Conversation"));
+        expect(scroll).toHaveBeenLastCalledWith({ block: "nearest", inline: "nearest" });
+      } else {
+        expect(scroll.mock.contexts.filter((el) => (el as HTMLElement).getAttribute("role") === "tab")).toEqual([]);
+      }
+    } finally {
+      delete (HTMLElement.prototype as { scrollWidth?: number }).scrollWidth;
+      scroll.mockRestore();
+    }
+  });
 });

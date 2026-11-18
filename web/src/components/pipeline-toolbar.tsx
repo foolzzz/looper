@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { Panel, useReactFlow, useStore } from "@xyflow/react";
 import { Maximize2, Minimize2 } from "lucide-react";
-import { fitPadding } from "@/lib/pipeline-layout";
+import { FIT_MIN_ZOOM, fitPadding } from "@/lib/pipeline-layout";
 
 /** The Pipeline graph's own controls (a child of `ReactFlow`), at its bottom right, clear of its zoom controls:
  * whether the steps a replan dropped are drawn, with how many are left out, and full screen; full screen, the way
@@ -31,7 +31,7 @@ export function PipelineToolbar({
         // This toolbar's panels and React Flow's zoom controls.
         const panels = [...(root?.querySelectorAll("[data-card-avoid], .react-flow__controls") ?? [])]
           .map((panel) => panel.getBoundingClientRect());
-        void fitView({ padding: root ? fitPadding(root.getBoundingClientRect(), panels) : undefined });
+        void fitView({ padding: root ? fitPadding(root.getBoundingClientRect(), panels) : undefined, minZoom: FIT_MIN_ZOOM });
       });
     });
     return () => {

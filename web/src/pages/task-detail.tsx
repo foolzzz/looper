@@ -46,12 +46,13 @@ import { TaskWaits, WaitBadge } from "@/components/task-waits";
 import { WAIT_STATES, waitAnchor } from "@/lib/waits";
 import { TaskWorkspaceCard, TaskWorkspaces, WorktreeMarker } from "@/components/task-workspaces";
 import { TaskRoomTab } from "@/components/task-room";
+import { TabStrip } from "@/components/tab-strip";
 import { GATE_STATES, GATE_TURNS, gateAnchor, gateLook, gateTurn, stepAnchor } from "@/lib/gates";
 import { useEventWindow } from "@/lib/use-event-window";
 import { startPolling } from "@/lib/polling";
 import { useTaskRuns } from "@/lib/use-task-runs";
 import { type NodeCard, type TaskRuns, gateCard, waitCard, nodeCardId, plannerCard, resultCard, stepCard, stepSpan } from "@/lib/node-cards";
-import { FIT_PADDING, conditionNodes, conditionState, dependencyEdges, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
+import { FIT_MIN_ZOOM, FIT_PADDING, conditionNodes, conditionState, dependencyEdges, shownSteps, stepColumns, stepLevels, storeHideSkipped, storedHideSkipped } from "@/lib/pipeline-layout";
 import { useFullScreen } from "@/lib/full-screen";
 import { workspacesByStep } from "@/lib/workspaces";
 import { type RoomFilter, roomNote } from "@/lib/room";
@@ -390,7 +391,9 @@ const TITLE_MAX_CHARS = 60;
 
 /** The task page's heading: the task's name, with a pencil to rename it (any status); Enter or Save stores the new
  * title, Esc cancels, and the server's refusal is shown beside the input. */
-function TaskHeading({ task, taskId, onRenamed }: { task: TaskDetail | null; taskId: string; onRenamed: () => void }) {
+function TaskHeading({ task, taskId, onRenamed, className }: {
+  task: TaskDetail | null; taskId: string; onRenamed: () => void; className?: string;
+}) {
   const name = task?.name || task?.requirement || taskId;
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState("");
@@ -415,7 +418,7 @@ function TaskHeading({ task, taskId, onRenamed }: { task: TaskDetail | null; tas
 
   if (editing) {
     return (
-      <div>
+      <div className={className}>
         <div className="flex items-center gap-2">
           <Input
             autoFocus
@@ -439,8 +442,9 @@ function TaskHeading({ task, taskId, onRenamed }: { task: TaskDetail | null; tas
     );
   }
   return (
-    <div className="flex items-center gap-1.5">
-      <h1 className="text-lg font-semibold leading-tight truncate">{name}</h1>
+    <div className={cn("flex items-center gap-1.5", className)}>
+      {/* A phone has the width for two lines, not one cut short. */}
+      <h1 className="text-lg font-semibold leading-tight truncate max-sm:line-clamp-2 max-sm:whitespace-normal max-sm:break-words">{name}</h1>
       {task?.workflow && <Badge variant="outline">{task.workflow.name}</Badge>}
       {task && (
         <button
@@ -448,7 +452,7 @@ function TaskHeading({ task, taskId, onRenamed }: { task: TaskDetail | null; tas
           aria-label="Rename task"
           title="Rename task"
           onClick={() => { setText(task.title || task.name); setError(""); setEditing(true); }}
-          className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="shrink-0 rounded-md p-1 text-muted-foreground pointer-coarse:-m-[11px] pointer-coarse:p-[15px] hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
@@ -577,12 +581,12 @@ function managerActionLabel(action: ManagerAction): string {
 const URL_PATTERN = /^https?:\/\/\S+$/;
 
 /** Under the title: which Manager created the task and from which template; nothing for a plain default one. */
-function TaskCreatedBy({ task }: { task: TaskDetail }) {
+function TaskCreatedBy({ task, className }: { task: TaskDetail; className?: string }) {
   const template = task.template ?? null;
   const managerId = task.manager_id ?? "manager";
   if (managerId === "manager" && !template) return null;
   return (
-    <div className="mt-1 text-xs text-muted-foreground">
+    <div className={cn("mt-1 text-xs text-muted-foreground", className)}>
       <p>
         Created by {task.manager_name || managerId}
         {template && <> · template {template.name}</>}
@@ -736,7 +740,7 @@ function TaskConfigSection({ task }: { task: TaskDetail }) {
               className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary/50"
             />
           ) : (
-            <p className="mt-1 text-sm font-mono">{task.work_dir || "—"}</p>
+            <p className="mt-1 break-all text-sm font-mono">{task.work_dir || "—"}</p>
           )}
         </div>
         <div>
@@ -2017,7 +2021,7 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
         edges={edges}
         nodeTypes={NODE_TYPES}
         fitView
-        fitViewOptions={{ padding: FIT_PADDING }}
+        fitViewOptions={{ padding: FIT_PADDING, minZoom: FIT_MIN_ZOOM }}
         minZoom={0.15}
         colorMode="dark"
         proOptions={{ hideAttribution: true }}
@@ -2029,7 +2033,7 @@ function PipelineTab({ task, runs, onOpenGate }: { task: TaskDetail; runs: TaskR
         defaultEdgeOptions={{ type: "smoothstep" }}
       >
         <Background color="var(--color-border)" gap={20} />
-        <Controls showInteractive={false} />
+        <Controls showInteractive={false} fitViewOptions={{ minZoom: FIT_MIN_ZOOM }} />
         <PipelineMeasurements nodes={nodes} />
         <NodeCards cards={cards} />
         <PipelineToolbar skipped={skipped} hideSkipped={hideSkipped} onHideSkipped={changeHideSkipped}
@@ -2092,7 +2096,7 @@ function TaskProjectControl({
           setError("");
           setMoved(false);
         }}
-        className="h-6 max-w-[14rem] rounded-md border border-input bg-transparent px-1.5 text-xs text-foreground"
+        className="h-6 max-w-[14rem] rounded-md border border-input bg-transparent px-1.5 text-xs text-foreground pointer-coarse:h-11"
       >
         {!listed && <option value={task.project_id}>{task.project_name || task.project_id}</option>}
         {options.map((p) => (
@@ -2164,6 +2168,9 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
   const [actionError, setActionError] = useState("");
   /** Start over waits for its confirmation: it deletes the task's steps and plan. */
   const [confirmStartOver, setConfirmStartOver] = useState(false);
+  // Below lg the header's secondary details (task id, project, schedule, creator) are folded until asked for.
+  const [details, setDetails] = useState(false);
+  const folded = details ? "" : "max-lg:hidden";
   const [localTab, setLocalTab] = useState<Tab>("overview");
   const tab: Tab = onTab ? parseTab(tabParam) : localTab;
   const setTab = useCallback((next: Tab) => (onTab ? onTab(next) : setLocalTab(next)), [onTab]);
@@ -2264,42 +2271,57 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
 
   return (
     <div className="flex h-full flex-col">
-      {/* Header */}
-      <div className="border-b border-border px-5 py-3">
-        <div className="flex items-center gap-3">
+      {/* Header. Below lg it keeps to one row (a phone: a row of status and actions over a two-line title), and the
+          task id, project, schedule and creator fold away behind Details, so the tab content keeps the screen. */}
+      <div className="border-b border-border px-5 py-2 lg:py-3">
+        <div className="flex items-center gap-3 max-sm:flex-wrap max-sm:gap-y-2">
           <button
             type="button"
             onClick={onBack}
             aria-label="Back to tasks"
             title="Back to tasks"
-            className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            className="flex h-8 w-8 items-center justify-center rounded-md hover:bg-accent transition-colors pointer-coarse:-m-1.5 pointer-coarse:h-11 pointer-coarse:w-11 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
             <ArrowLeft className="h-4 w-4" aria-hidden="true" />
           </button>
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 flex-1 max-sm:contents sm:max-lg:flex sm:max-lg:flex-wrap sm:max-lg:items-center sm:max-lg:gap-x-2">
             <TaskHeading
               task={task}
               taskId={taskId}
               onRenamed={() => { fetchTaskDetail(taskId).then(setTask, () => {}); }}
+              className="max-sm:order-1 max-sm:basis-full sm:max-lg:min-w-48 sm:max-lg:flex-1"
             />
-            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-              <span className="text-xs text-muted-foreground">{taskId}</span>
+            <div className="flex items-center gap-2 mt-0.5 flex-wrap max-lg:mt-0 max-sm:min-w-0 max-sm:flex-1">
+              <span className={cn("text-xs text-muted-foreground", folded)}>{taskId}</span>
               {task && taskStatusBadge(task.status)}
-              {task && <ScheduledBadge task={task} />}
+              {task && <span className={cn("contents", folded)}><ScheduledBadge task={task} /></span>}
               {task?.continues_schedule_session && (
-                <span className="text-xs text-muted-foreground">continues the schedule&apos;s Planner session</span>
+                <span className={cn("text-xs text-muted-foreground", folded)}>continues the schedule&apos;s Planner session</span>
               )}
               {task && isActiveTask(task) && task.phase && task.phase !== task.status && phaseBadge(task, true)}
               {task && (
-                <TaskProjectControl
-                  task={task}
-                  onMoved={(projectId, projectName) =>
-                    setTask((t) => (t ? { ...t, project_id: projectId, project_name: projectName } : t))
-                  }
-                />
+                <span className={cn("contents", folded)}>
+                  <TaskProjectControl
+                    task={task}
+                    onMoved={(projectId, projectName) =>
+                      setTask((t) => (t ? { ...t, project_id: projectId, project_name: projectName } : t))
+                    }
+                  />
+                </span>
+              )}
+              {task && (
+                <button
+                  type="button"
+                  onClick={() => setDetails(!details)}
+                  aria-expanded={details}
+                  className="flex h-6 items-center gap-1 rounded-md px-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground transition-colors pointer-coarse:-my-2.5 pointer-coarse:h-11 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring lg:hidden"
+                >
+                  Details
+                  <ChevronDown className={cn("h-3.5 w-3.5", details && "rotate-180")} aria-hidden="true" />
+                </button>
               )}
             </div>
-            {task && <TaskCreatedBy task={task} />}
+            {task && <TaskCreatedBy task={task} className={cn("max-sm:order-2 max-lg:basis-full", folded)} />}
           </div>
           {task && isActiveTask(task) && (
             <button
@@ -2308,7 +2330,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
                 () => setActionError(""),
                 (err) => setActionError(err instanceof Error ? err.message : String(err)),
               )}
-              className="flex items-center gap-1.5 rounded-md border border-warning/50 px-3 py-1.5 text-xs font-medium text-warning hover:bg-warning/10 transition-colors"
+              className="flex items-center gap-1.5 rounded-md border border-warning/50 px-3 py-1.5 text-xs font-medium text-warning hover:bg-warning/10 transition-colors pointer-coarse:-my-2 pointer-coarse:min-h-11"
             >
               <Pause className="h-3.5 w-3.5" />
               Stop
@@ -2322,14 +2344,14 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
                 onClick={() => start(true)}
                 disabled={restartPending}
                 title="Delete the task's steps, plan and Planner session, then plan it anew from its requirement"
-                className="rounded-md px-3 py-1.5 text-xs font-medium bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors disabled:opacity-50"
+                className="rounded-md px-3 py-1.5 text-xs font-medium bg-destructive text-destructive-foreground hover:bg-destructive/90 transition-colors disabled:opacity-50 pointer-coarse:-my-2 pointer-coarse:min-h-11"
               >
                 Start over
               </button>
               <button
                 type="button"
                 onClick={() => setConfirmStartOver(false)}
-                className="rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                className="rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors pointer-coarse:-my-2 pointer-coarse:min-h-11"
               >
                 No
               </button>
@@ -2342,7 +2364,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
                 onClick={() => start(false)}
                 disabled={restartPending}
                 title={task.status === READY_STATUS ? undefined : "Continue from the saved plan: accepted steps are kept"}
-                className="flex items-center gap-1.5 rounded-md border border-success/50 px-3 py-1.5 text-xs font-medium text-success hover:bg-success/10 transition-colors disabled:opacity-50"
+                className="flex items-center gap-1.5 rounded-md border border-success/50 px-3 py-1.5 text-xs font-medium text-success hover:bg-success/10 transition-colors disabled:opacity-50 pointer-coarse:-my-2 pointer-coarse:min-h-11"
               >
                 <Play className="h-3.5 w-3.5" />
                 Start
@@ -2354,7 +2376,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
                   disabled={restartPending}
                   aria-label="Start over"
                   title="Start over: delete its steps and plan it anew"
-                  className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors disabled:opacity-50"
+                  className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground transition-colors disabled:opacity-50 pointer-coarse:-my-2 pointer-coarse:min-h-11"
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
                   <span className="hidden sm:inline">Start over</span>
@@ -2366,7 +2388,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
         {actionError && <p role="alert" className="mt-1 text-xs text-destructive">{actionError}</p>}
 
         {/* Tabs */}
-        <div role="tablist" aria-label="Task" className="flex flex-wrap gap-1 mt-3">
+        <TabStrip label="Task" selected={tab} className="mt-2 gap-1 lg:mt-3 [--gutter:--spacing(5)]">
           {tabs.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -2375,7 +2397,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
               aria-selected={tab === id}
               onClick={() => setTab(id)}
               className={cn(
-                "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+                "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors pointer-coarse:min-h-11",
                 tab === id
                   ? "bg-primary/10 text-primary"
                   : "text-muted-foreground hover:bg-accent hover:text-foreground",
@@ -2385,7 +2407,7 @@ function TaskDetailPage({ taskId, gateStep, tab: tabParam, onTab, roomFilter, ro
               {label}
             </button>
           ))}
-        </div>
+        </TabStrip>
       </div>
 
       {/* Content */}

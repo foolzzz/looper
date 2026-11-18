@@ -379,7 +379,7 @@ function LaunchCommand({ record }: { record: RunRecord }) {
         </span>
         <CopyButton text={full} label="Copy" />
       </div>
-      {cwd && <p className="mb-1 font-mono text-[11px] text-muted-foreground">cwd: {cwd}</p>}
+      {cwd && <p className="mb-1 break-all font-mono text-[11px] text-muted-foreground">cwd: {cwd}</p>}
       <p className="font-mono text-[11px] leading-relaxed break-all">
         {command.map((arg, i) => {
           const long = arg.length > LONG_ARG;

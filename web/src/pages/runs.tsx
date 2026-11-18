@@ -74,7 +74,7 @@ function AgentCard({
       <div className="flex items-start gap-3">
         <div
           className={cn(
-            "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg",
+            "hidden h-10 w-10 shrink-0 items-center justify-center rounded-lg sm:flex",
             config.enabled ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
           )}
         >
@@ -90,7 +90,7 @@ function AgentCard({
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {roleBadge(config.role)}
           </div>
-          <div className="mt-2 flex items-center gap-3 text-xs text-muted-foreground">
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
             {profile && (
               <span className="flex min-w-0 items-center gap-1">
                 <Cpu className="h-3 w-3 shrink-0" />
@@ -253,8 +253,8 @@ export function RunsPage({ sub, onNavigate }: RunsPageProps) {
       )}
 
       <div className="flex flex-col gap-6 lg:flex-row">
-        {/* Card list */}
-        <div className="space-y-3 lg:w-72 lg:shrink-0">
+        {/* Card list: two by two below lg, so the selected role's runs start on the first screen of a phone. */}
+        <div className="grid grid-cols-2 gap-3 lg:block lg:w-72 lg:shrink-0 lg:space-y-3">
           {configs.map((cfg) => (
             <AgentCard
               key={cfg.role}

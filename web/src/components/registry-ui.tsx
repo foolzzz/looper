@@ -32,8 +32,9 @@ export function RegistryList({
     <section aria-labelledby={`${id}-title`} className="rounded-lg border border-border bg-card">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3">
         <h3 id={`${id}-title`} className="text-sm font-semibold">{title}</h3>
-        <p className="min-w-0 flex-1 text-[11px] text-muted-foreground">{hint}</p>
-        <Button type="button" size="sm" variant="outline" onClick={() => setAdding(!adding)} aria-expanded={adding}>
+        {/* A phone has no room for the hint between the title and the button: it takes the line under them. */}
+        <p className="min-w-0 flex-1 text-[11px] text-muted-foreground max-sm:order-last max-sm:basis-full">{hint}</p>
+        <Button type="button" size="sm" variant="outline" onClick={() => setAdding(!adding)} aria-expanded={adding} className="ml-auto">
           <Plus className="h-3.5 w-3.5" /> {addLabel}
         </Button>
       </div>
