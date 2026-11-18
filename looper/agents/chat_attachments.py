@@ -71,7 +71,9 @@ def root(runtime_root: Path) -> Path:
     return runtime_root / ROOT_DIR
 
 
-def message_dir(runtime_root: Path, source: str, message_id: str) -> Path:
+def message_dir(runtime_root: Path, source: str, message_id: str, *, keep: bool = False) -> Path:
+    """The message's own attachment directory, made empty; with ``keep``, what is there stays (a second collection
+    for the same message, numbered after the first)."""
     def safe_id(value: str) -> str:
         return re.sub(r"[^A-Za-z0-9_-]", "_", value)[:100] or "_"
     directory = root(runtime_root)
@@ -83,9 +85,9 @@ def message_dir(runtime_root: Path, source: str, message_id: str) -> Path:
     directory = directory / safe_id(source) / safe_id(message_id)
     if directory.is_symlink():
         directory.unlink()
-    elif directory.exists():
+    elif directory.exists() and not keep:
         shutil.rmtree(directory)
-    directory.mkdir(mode=0o700)
+    directory.mkdir(mode=0o700, exist_ok=keep)
     directory.chmod(0o700)
     return directory
 

@@ -10,6 +10,7 @@ as quoted content and not as instructions."""
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -158,6 +159,19 @@ def _safe(text: str) -> str:
     return re.sub(r"<(\s*/?\s*lark_quote)", r"‹\1", text, flags=re.IGNORECASE)
 
 
+def _one_line(text: str) -> str:
+    """``text`` on one line: control and format characters (line breaks, bidi overrides) become spaces."""
+    return " ".join("".join(" " if unicodedata.category(char).startswith("C") else char for char in text).split())
+
+
+_ATTRIBUTE = str.maketrans({"<": "‹", ">": "›", '"': "'"})
+
+
+def _attribute(value: str) -> str:
+    """A tag's attribute value, which cannot end its value or its tag, or start a line of its own."""
+    return _one_line(value).translate(_ATTRIBUTE)
+
+
 def _time(raw: Any) -> str:
     try:
         stamp = float(raw)
@@ -172,7 +186,8 @@ def _sender(item: Mapping[str, Any], names: Mapping[str, str], own: frozenset[st
     sender_id = str(sender.get("id") or "")
     if sender_id and sender_id in own:
         return "this bot"
-    return str(names.get(sender_id) or sender.get("name") or sender_id or sender.get("sender_type") or "unknown")
+    return _one_line(str(names.get(sender_id) or sender.get("name") or sender_id or sender.get("sender_type")
+                         or "")) or "unknown"
 
 
 def sender_ids(items: Iterable[Mapping[str, Any]]) -> list[str]:
@@ -308,6 +323,6 @@ def section(found: Sequence[Quote]) -> list[str]:
     lines = [INTRO]
     for quote in found:
         attributes = {"id": quote.message_id, "type": quote.message_type, "from": quote.sender, "note": _note(quote)}
-        shown = " ".join(f'{key}="{_safe(value).replace(chr(34), chr(39))}"' for key, value in attributes.items() if value)
+        shown = " ".join(f'{key}="{_attribute(value)}"' for key, value in attributes.items() if value)
         lines += [f"<lark_quote {shown}>", *quote.lines, "</lark_quote>"]
     return lines

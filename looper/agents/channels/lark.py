@@ -1057,13 +1057,16 @@ class LarkChannelAdapter(ChannelAdapter):
                                             own=(self._bot_open_id, self._bot_app_id), after=after + len(resources))
             quotes.append(quote)
             resources += found
-        attachments = await self._collect(ref.message_id, tuple(resources)) if resources else []
+        # Beside the message's own, which stay (they are numbered before ``after``); read again on a replay.
+        attachments = await self._collect(ref.message_id, tuple(resources), keep=True) if resources else []
         return QuoteRead(tuple(quotes), tuple(attachments))
 
-    async def _collect(self, message_id: str, refs: tuple[lark_content.ResourceRef, ...]) -> list[Attachment]:
+    async def _collect(self, message_id: str, refs: tuple[lark_content.ResourceRef, ...], *,
+                       keep: bool = False) -> list[Attachment]:
+        """Download ``refs`` into the message's attachment directory; ``keep``: add to what is there."""
         deadline = monotonic() + _DOWNLOAD_MESSAGE_SECONDS
         try:
-            directory = files.message_dir(self._runtime_root, self.channel_id, message_id)
+            directory = files.message_dir(self._runtime_root, self.channel_id, message_id, keep=keep)
         except (OSError, ValueError):
             directory = None
         attachments = []
@@ -1082,6 +1085,7 @@ class LarkChannelAdapter(ChannelAdapter):
                     item = replace(item, reason="could not be saved")
                 else:
                     maximum = files.IMAGE_MAX_BYTES if kind is AttachmentKind.IMAGE else files.FILE_MAX_BYTES
+                    part.unlink(missing_ok=True)  # a kept directory may hold one a stopped earlier read left
                     await asyncio.wait_for(self._transport.download(ref.message_id or message_id, ref, part,
                                                                     max_bytes=maximum), min(30, remaining))
                     item = files.accept(part, index=ref.index, kind=kind, name=ref.name,
