@@ -6006,9 +6006,19 @@ implementation supplies it and is retested.
   first message, that first message and the thread's latest 10 messages
   (`list_thread_messages`). Both transports read `GET
   /open-apis/im/v1/messages/{id}` (`lark-cli api GET … --as bot`, or the bot
-  token's REST call) and try once more when the first read fails or takes 4 s
-  (lark-cli: `im +messages-mget --as bot --no-reactions`, whose rendering is
-  kept as it is); the message waits at most 10 s for this, names included.
+  token's REST call) and try once more when the first read fails (the
+  platform sometimes answers a long merged forward with its time-out after
+  about 5 s) or takes 7 s (lark-cli: `im +messages-mget --as bot
+  --no-reactions`, whose rendering is kept as it is); the message waits at
+  most 15 s for this, names included. A message that quotes is read in the
+  background, outside the channel's ingress, at most 4 at once across chats:
+  other chats, and `/stop` in any chat, do not wait for it, while a chat's
+  later messages wait behind it, so each chat reaches the Manager in order
+  (its downloads are read there too). A `/stop` publishes its chat's
+  messages still being read at once, with `stopped by the user` in place of
+  their quotes, ahead of the stop, which withdraws them like any queued
+  message. Such a message's receipt is recorded once it is published, and the
+  restart boundary does not move past it before then.
   What was read goes in `payload["quoted"]` (`Quote`: kind, id, type, sender,
   lines), never in `payload["text"]`, which gate routing and `/stop` read. The
   Manager shows it after the user's words, under a line saying it is quoted
@@ -6021,8 +6031,10 @@ implementation supplies it and is retested.
   `[card message]`; a recalled message `[recalled]`. A merged forward's
   children are read live, so they can include replies posted after the
   forward. Images and files in quoted messages are numbered after the
-  message's own, share its 10 attachments, and inside a merged forward
-  download through the forward's id (its children's ids are refused). A read
+  message's own and share its 10 attachments. A merged forward's raw read
+  gives each child the keys of its own message, so those download through the
+  child's id (the forward's id refuses them); lark-cli's rendering shows the
+  forward's own copies, which download through the forward's id. A read
   that fails leaves `[quoted message om_… could not be read: <why>]` (timeout,
   recalled, missing permission im:message:readonly, error <code>) and the
   message goes on; one with no words of its own but a quote is answered too.
