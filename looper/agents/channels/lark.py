@@ -14,9 +14,8 @@ import math
 import re
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from random import uniform as _reconnect_jitter
 from time import monotonic, time
@@ -41,9 +40,9 @@ from .chat_history import record_reply
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, SenderPolicy, observe_chat, log_route
 from . import lark_content, lark_quote
 from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, mention
-from .lark_quote import Quote, QuoteKind
 from .lark_transport import CliTransport, LarkTransport
 from .lark_inbox import LarkInbox, history_event
+from .lark_quote import QuoteKind, QuoteRead, QuoteRef
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
 
 logger = logging.getLogger(__name__)
@@ -54,19 +53,12 @@ RejectedListener = Callable[[str, str | None], Awaitable[None]]
 
 # How long finding a group sender's name may hold up their message; then the Manager gets the open_id.
 _NAME_LOOKUP_SECONDS = 5.0
-# How long reading what a message quotes may hold it up, names included; then it goes on with what was read. A
-# long merged forward's raw read fails after about 5 s and its rendered read then takes about 6 s.
+# How long reading what a message quotes may take, names included; then it goes on with what was read. A long
+# merged forward's raw read fails after about 5 s and its rendered read then takes about 6 s.
 _QUOTE_SECONDS = 15.0
-_DOWNLOAD_MESSAGE_SECONDS = 60.0
-# Messages read in the background at once (what they quote, their downloads), across chats.
-_DELIVERY_CONCURRENCY = 4
-# Unpublished messages, in one chat and in all: past either, a message's quotes are not read ("busy").
-_CHAT_PENDING_MAX = 10
-_PENDING_MAX = 100
-# The waits between a background message's tries to publish it, or to record it; then it is given up (held).
-_DELIVERY_RETRY_SECONDS = (0.5, 1.0, 2.0, 4.0)
 # Group messages in a thread, whose answers go in the thread: the latest ones kept.
 _THREAD_MESSAGES_KEPT = 1_000
+_DOWNLOAD_MESSAGE_SECONDS = 60.0
 _CATCHUP_MAX_AGE = 15 * 60
 _CATCHUP_OVERLAP = 10
 _CATCHUP_MAX_CHATS = 100
@@ -127,36 +119,6 @@ def _not_received(attachments: list[Attachment]) -> str:
             reason += "（缺少权限 im:message:readonly）"
         items.append(label + reason)
     return f"有 {len(items)} 个附件没有收下：" + "；".join(items) + "。其余内容已交给 Manager。"
-
-
-class _DeliveryState(str, Enum):
-    PENDING = "pending"  # being read, or waiting for its chat's earlier messages
-    PUBLISHED = "published"  # on the bus, its receipt not written yet
-    RECORDED = "recorded"  # its receipt written: done
-    HELD = "held"  # given up: not recorded, so it holds the restart boundary and its chat's later messages
-
-
-@dataclass
-class _Delivery:
-    """An admitted message on its way to the Manager: what is read for it (``targets``, its resources, its sender's
-    name) and what its envelope carries. ``withdraw`` publishes it at once, as withdrawn, with nothing more read (a
-    ``/stop``); ``busy`` leaves its quotes unread (too many messages are waiting)."""
-
-    event: dict[str, Any]
-    chat_id: str
-    group: bool
-    message_id: str
-    text: str
-    inbound: lark_content.Inbound
-    manager_id: str
-    metadata: dict[str, Any]
-    sender: str
-    targets: list[tuple[QuoteKind, str]]
-    withdraw: asyncio.Event = field(default_factory=asyncio.Event)
-    busy: bool = False
-    state: _DeliveryState = _DeliveryState.PENDING
-    previous: _Delivery | None = None
-    task: asyncio.Task[None] | None = None
 
 
 def _check_lark_cli_available() -> bool:
@@ -222,13 +184,6 @@ class LarkChannelAdapter(ChannelAdapter):
         self._bot_poll_logged_at: float | None = None
         self._inbox: LarkInbox | None = None
         self._ingress_lock = asyncio.Lock()
-        # Messages read in the background, by id, until their receipts are written (a held one stays: it keeps the
-        # restart boundary, a catch-up window and the bot poll where they are); each chat's last one, which the next
-        # waits for, so a chat reaches the Manager in order; the chats whose messages are held.
-        self._unsettled: dict[str, _Delivery] = {}
-        self._chat_tail: dict[str, _Delivery] = {}
-        self._held_chats: set[str] = set()
-        self._delivery_slots = asyncio.Semaphore(_DELIVERY_CONCURRENCY)
         self._running = False
         # correlation_id → lark chat_id for reply routing
         self._correlation_chat: dict[str, str] = {}
@@ -288,7 +243,7 @@ class LarkChannelAdapter(ChannelAdapter):
     async def stop(self) -> None:
         # Cancellation during admission/download must not move the recovery boundary past that message.
         ready = getattr(self._transport, "consumer_started", None)
-        clean = (not self._ingress_lock.locked() and not self._unsettled
+        clean = (not self._ingress_lock.locked()
                  and ready is not None and ready.is_set())
         stopped_at = time()
         self._running = False
@@ -299,10 +254,6 @@ class LarkChannelAdapter(ChannelAdapter):
                     await task
                 except asyncio.CancelledError:
                     pass
-        deliveries = [delivery.task for delivery in self._unsettled.values() if delivery.task is not None]
-        for task in deliveries:
-            task.cancel()
-        await asyncio.gather(*deliveries, return_exceptions=True)
         await self._reactions.stop()
         if isinstance(self._transport, CliTransport):
             self._transport.on_thread_activity = None
@@ -727,7 +678,7 @@ class LarkChannelAdapter(ChannelAdapter):
                     ):
                         await self._catchup_messages(page, chat_id, start=start, end=end, stats=stats)
                     await self._catchup_threads(chat_id, start=start, end=end, stats=stats)
-                    if failures == stats["failures"] and await self._settled(chat_id):
+                    if failures == stats["failures"]:
                         await self._inbox.complete(chat_id)
                 except Exception:
                     stats["failures"] += 1
@@ -787,7 +738,7 @@ class LarkChannelAdapter(ChannelAdapter):
                                                            stats=stats, seen=seen, bots_only=True)
                 if thread_activity:
                     await self._catchup_threads(chat_id, start=start, end=end, stats=stats, seen=seen, bots_only=True)
-                if not stats["failures"] and not stats["thread_failures"] and await self._settled(chat_id):
+                if not stats["failures"] and not stats["thread_failures"]:
                     last_poll[chat_id] = end
                 else:
                     logger.warning("%s: bot poll failed chat=%s failures=%s thread_failures=%s",
@@ -816,8 +767,7 @@ class LarkChannelAdapter(ChannelAdapter):
             await asyncio.sleep(_HEARTBEAT_SECONDS)
             ready = getattr(self._transport, "consumer_started", None)
             if (self._inbox is not None
-                    and not self._ingress_lock.locked() and not self._unsettled
-                    and ready is not None and ready.is_set()):
+                    and not self._ingress_lock.locked() and ready is not None and ready.is_set()):
                 try:
                     await self._inbox.checkpoint(time())
                 except Exception:
@@ -876,8 +826,7 @@ class LarkChannelAdapter(ChannelAdapter):
     async def _handle_lark_event(self, event: dict[str, Any]) -> Literal["handled", "duplicate", "ignored", "too_old"]:
         async with self._ingress_lock:
             message_id = event.get("message_id")
-            if message_id in self._unsettled or (
-                    self._inbox is not None and message_id and await self._inbox.processed(message_id)):
+            if self._inbox is not None and message_id and await self._inbox.processed(message_id):
                 return "duplicate"
             created = event.get("_catchup_created_at")
             if created is not None and created.before(time() - _CATCHUP_MAX_AGE):
@@ -894,20 +843,21 @@ class LarkChannelAdapter(ChannelAdapter):
                 logger.info("lark_bot_message chat=%s bot_id=%s message_id=%s outcome=%s",
                             event.get("chat_id"), event.get("sender_id"), message_id,
                             "handled" if handled else event.get("_bot_outcome", "ignored"))
-            if (self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT
-                    and not event.get("_deferred")):  # recorded once published, or held to be read again
+            if self._inbox is not None and message_id and event.get("type") == RECEIVE_EVENT:
                 await self._inbox.finish(message_id, chat_id=event.get("chat_id") or "",
                                    thread_id=(event.get("thread_id") or "") if handled else "", at=time())
             return "handled" if handled else "ignored"
 
     async def _process_lark_event(self, event: dict[str, Any]) -> bool | None:
-        """Publish text, rich posts and merged forwards to the Bus, with what they quote, and answer other admitted
-        message types. The event is lark-cli's flat one: ``chat_id``,
+        """Publish text, rich posts and merged forwards to the Bus, with a reference to what they quote
+        (``payload["quote_ref"]``, read by the Manager), and answer other admitted message types. The event is
+        lark-cli's flat one: ``chat_id``,
         ``chat_type`` (``p2p`` or ``group``), ``message_id``, ``message_type``, ``sender_id`` (the open_id),
         ``sender_type``, ``mentions`` (each ``id``, an open_id, ``key`` and ``name``), ``content``, a text
         message's text with each mention shown as ``@name``, for a reply ``reply_to`` and ``root_id``, and in a
         thread ``thread_id``."""
         assert self._bus is not None
+        import uuid as _uuid
 
         if event.get("type", "") != RECEIVE_EVENT:
             return
@@ -995,8 +945,9 @@ class LarkChannelAdapter(ChannelAdapter):
                 logger.warning("%s: bot turn limit chat=%s count=%s", self.channel_id, chat_id, len(turns) + 1)
                 event["_bot_outcome"] = "limited"
                 return
+        stop = is_stop_command(text)
         if await self._turned_off(chat_id, message_id if group else None, manager_id=manager_id,
-                                  explicit=explicit, stop=is_stop_command(text)):
+                                  explicit=explicit, stop=stop):
             return
         if bot:
             turns.append(now)
@@ -1016,250 +967,82 @@ class LarkChannelAdapter(ChannelAdapter):
                                chat_id, exc_info=True)
             return True
         self._reactions.add(chat_id, message_id)  # the bot saw it; in the background, the Manager gets it now
-        stop = is_stop_command(text)
-        delivery = _Delivery(event, chat_id, group, message_id, text, inbound, manager_id, metadata,
-                             sender_open_id or "", [] if stop else self._quote_targets(
-                                 event, message_id, forward=inbound.kind is lark_content.ContentKind.FORWARD))
-        if stop:
-            # Claimed at once: this chat's messages still being read go first, as withdrawn, so none becomes a turn.
-            await self._withdraw(chat_id)
-        elif chat_id in self._held_chats:
-            # Behind a message that could not be published: left unrecorded, read again in order after a restart.
-            logger.warning("%s: held message %s behind a message not delivered in %s", self.channel_id, message_id,
-                           chat_id)
-            event["_deferred"] = True
-            return True
-        elif delivery.targets or chat_id in self._chat_tail:
-            # Read in the background, behind this chat's earlier messages: other chats and stops do not wait.
-            self._schedule(delivery)
-            event["_deferred"] = True
-            return True
-        await self._bus.publish(self._envelope(delivery, *await self._prepare(delivery)))
-        return True
-
-    async def _prepare(self, delivery: _Delivery) -> tuple[list[Quote], list[Attachment], str]:
-        """What the message's envelope needs read: its quotes, its and their resources (the ones not received are
-        told in one reply), and in a group its sender's name."""
-        message_id = delivery.message_id
-        quoted: list[Quote] = []
-        quoted_resources: tuple[lark_content.ResourceRef, ...] = ()
-        if delivery.busy:
-            quoted = self._unread(delivery, "busy")
-        elif delivery.targets:
-            try:
-                quoted, quoted_resources = await self._quote(delivery)
-            except Exception:
-                logger.warning("%s: could not read what message %s quotes", self.channel_id, message_id,
-                               exc_info=True)
-                quoted = self._unread(delivery, "internal error")
-        resources = delivery.inbound.resources + quoted_resources
-        attachments = await self._collect(message_id, resources) if resources else []
+        attachments = await self._collect(message_id, inbound.resources) if inbound.resources else []
         if any(item.state is not AttachmentState.SAVED for item in attachments):
             try:
                 reply = _not_received(attachments)
-                if delivery.group:
+                if group:
                     await self._reply(message_id, text=reply)
                 else:
-                    await self._transport.send(chat_id=delivery.chat_id, text=reply)
+                    await self._transport.send(chat_id=chat_id, text=reply)
                 attachments = [replace(item, told=True) if item.state is not AttachmentState.SAVED else item
                                for item in attachments]
             except LarkCliError:
                 logger.warning("%s: could not report attachments not received", self.channel_id, exc_info=True)
-        name = await self._sender_name(delivery.sender) if delivery.group else ""
-        return quoted, attachments, name
-
-    @staticmethod
-    def _unread(delivery: _Delivery, why: str) -> list[Quote]:
-        """The message's quotes, each saying why it was not read."""
-        return [lark_quote.build(kind, ref, [], error=why)[0] for kind, ref in delivery.targets]
-
-    def _envelope(self, delivery: _Delivery, quoted: list[Quote], attachments: list[Attachment],
-                  sender_name: str, *, withdrawn: bool = False) -> MessageEnvelope:
-        """The message's envelope, with its reply routing registered: built once, however often it is published."""
-        import uuid as _uuid
-
-        chat_id, message_id, event = delivery.chat_id, delivery.message_id, delivery.event
         correlation_id = str(_uuid.uuid4())
         self._correlation_chat[correlation_id] = chat_id
-        context = {"chat_id": chat_id, "chat_type": "group" if delivery.group else "p2p", "sender_id": delivery.sender,
+        context = {"chat_id": chat_id, "chat_type": "group" if group else "p2p", "sender_id": sender_open_id or "",
                    "message_id": message_id}
         # What the message replies to: the message it answers and the first of its thread (a gate's messages).
         for key in ("reply_to", "root_id", "thread_id"):
             if isinstance(ref := event.get(key), str) and ref:
                 context[key] = ref
-        if delivery.group:
+        if group:
             if message_id:
                 self._group_message[correlation_id] = message_id
-            context["sender_name"] = sender_name
+            context["sender_name"] = await self._sender_name(sender_open_id or "")
+        # What it quotes is read by the Manager, as it prepares the turn (``read_quote``); a /stop reads nothing.
+        quote_ref = None if stop else QuoteRef.received(
+            self.channel_id, event, forward=inbound.kind is lark_content.ContentKind.FORWARD)
 
         envelope = MessageEnvelope.create(
             source=self._address,
-            target=manager_address(delivery.manager_id),
+            target=manager_address(manager_id),
             message_type=MessageType.USER_MESSAGE,
             payload={
-                "text": delivery.text,
-                # The user stopped it before it was read: the Manager records it, never as a turn or a gate reply.
-                **({"withdrawn": True} if withdrawn else {}),
-                **({"quoted": [quote.to_payload() for quote in quoted]} if quoted else {}),
+                "text": text,
                 **({"attachments": [item.to_payload() for item in attachments]} if attachments else {}),
+                **({"quote_ref": quote_ref.to_payload()} if quote_ref is not None else {}),
                 "language": "zh",
                 "channel_context": context,
             },
             correlation_id=correlation_id,
-            metadata=delivery.metadata,
+            metadata=metadata,
         )
-        return envelope
+        await self._bus.publish(envelope)
+        return True
 
-    def _schedule(self, delivery: _Delivery) -> None:
-        pending = [item for item in self._unsettled.values() if item.state is _DeliveryState.PENDING]
-        if delivery.targets and (len(pending) >= _PENDING_MAX or sum(
-                item.chat_id == delivery.chat_id for item in pending) >= _CHAT_PENDING_MAX):
-            delivery.busy = True
-            logger.warning("%s: too many messages waiting; message %s goes without its quotes read",
-                           self.channel_id, delivery.message_id)
-        delivery.previous = self._chat_tail.get(delivery.chat_id)
-        self._unsettled[delivery.message_id] = delivery
-        self._chat_tail[delivery.chat_id] = delivery
-        delivery.task = asyncio.create_task(self._deliver_later(delivery))
-
-        def done(_: asyncio.Task[None]) -> None:
-            if self._chat_tail.get(delivery.chat_id) is delivery:
-                del self._chat_tail[delivery.chat_id]
-
-        delivery.task.add_done_callback(done)
-
-    async def _deliver_later(self, delivery: _Delivery) -> None:
-        """Read what the message needs (at most ``_DELIVERY_CONCURRENCY`` at once), unless a stop withdraws it; once
-        its chat's previous message is recorded, publish it and write its receipt, each tried again after
-        ``_DELIVERY_RETRY_SECONDS``. A message that cannot be published or recorded, or whose previous one was
-        held, is held: it stays unrecorded and unsettled, so the restart boundary stays before it and the next
-        start reads it again, in order with the chat's later messages, which are held too."""
-        async def bounded() -> tuple[list[Quote], list[Attachment], str]:
-            async with self._delivery_slots:
-                return await self._prepare(delivery)
-
-        work = asyncio.create_task(bounded())
-        withdrawn = asyncio.create_task(delivery.withdraw.wait())
-        try:
-            await asyncio.wait({work, withdrawn}, return_when=asyncio.FIRST_COMPLETED)
-        finally:
-            for task in (work, withdrawn):
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(work, withdrawn, return_exceptions=True)
-        if delivery.withdraw.is_set():
-            prepared: tuple[list[Quote], list[Attachment], str] = ([], [], delivery.sender)
-        elif not work.cancelled() and work.exception() is None:
-            prepared = work.result()
-        else:
-            logger.warning("%s: could not read for message %s", self.channel_id, delivery.message_id,
-                           exc_info=work.exception())
-            prepared = (self._unread(delivery, "internal error"), [], delivery.sender)
-        previous, delivery.previous = delivery.previous, None  # no chain of finished messages is kept
-        if previous is not None:
-            if previous.task is not None:
-                await asyncio.gather(previous.task, return_exceptions=True)
-            if previous.state is not _DeliveryState.RECORDED:
-                return self._hold(delivery, "an earlier message in its chat was not delivered")
-        envelope = self._envelope(delivery, *prepared, withdrawn=delivery.withdraw.is_set())
-        assert self._bus is not None
-        if not await self._retried(lambda: self._bus.publish(envelope), "publish", delivery):
-            return self._hold(delivery, "it could not be published")
-        delivery.state = _DeliveryState.PUBLISHED
-        if self._inbox is not None and delivery.event.get("type") == RECEIVE_EVENT:
-            inbox = self._inbox
-            if not await self._retried(lambda: inbox.finish(
-                    delivery.message_id, chat_id=delivery.chat_id,
-                    thread_id=delivery.event.get("thread_id") or "", at=time()), "record", delivery):
-                # Published, not recorded: read again after a restart, it can reach the Manager twice.
-                return self._hold(delivery, "its receipt could not be written")
-        delivery.state = _DeliveryState.RECORDED
-        self._unsettled.pop(delivery.message_id, None)
-
-    async def _retried(self, attempt: Callable[[], Awaitable[Any]], what: str, delivery: _Delivery) -> bool:
-        for delay in (*_DELIVERY_RETRY_SECONDS, None):
-            try:
-                await attempt()
-                return True
-            except Exception:
-                logger.warning("%s: could not %s message %s%s", self.channel_id, what, delivery.message_id,
-                               f"; trying again in {delay:g} s" if delay is not None else "", exc_info=True)
-                if delay is None:
-                    return False
-                await asyncio.sleep(delay)
-        return False
-
-    def _hold(self, delivery: _Delivery, why: str) -> None:
-        delivery.state = _DeliveryState.HELD
-        self._held_chats.add(delivery.chat_id)
-        logger.error("lark_delivery_held channel=%s chat=%s message=%s reason=%s: it and the chat's later messages "
-                     "stay unrecorded, to be read again after a restart", self.channel_id, delivery.chat_id,
-                     delivery.message_id, why)
-
-    async def _settled(self, chat_id: str) -> bool:
-        """Whether the chat's messages read in the background are all recorded, once those still running end."""
-        running = [delivery.task for delivery in list(self._unsettled.values())
-                   if delivery.chat_id == chat_id and delivery.task is not None and not delivery.task.done()]
-        if running:
-            await asyncio.gather(*running, return_exceptions=True)
-        return not any(delivery.chat_id == chat_id for delivery in self._unsettled.values())
-
-    async def _withdraw(self, chat_id: str) -> None:
-        """Publish this chat's messages still being read at once, as withdrawn, in order."""
-        pending = [delivery for delivery in self._unsettled.values()
-                   if delivery.chat_id == chat_id and delivery.state is _DeliveryState.PENDING]
-        for delivery in pending:
-            delivery.withdraw.set()
-        tasks = [delivery.task for delivery in pending if delivery.task is not None]
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-    def _quote_targets(self, event: dict[str, Any], message_id: str, *,
-                       forward: bool) -> list[tuple[QuoteKind, str]]:
-        """What the message quotes: a merged forward itself, else the message it replies to, and in a thread, when
-        that is not the thread's first message, the first message (with the latest replies); none when the
-        transport cannot read messages."""
-        if not hasattr(self._transport, "get_message"):
-            return []
-        reply_to, root_id, thread_id = (value if isinstance(value := event.get(key), str) else ""
-                                        for key in ("reply_to", "root_id", "thread_id"))
-        wanted = [(QuoteKind.FORWARD, message_id)] if forward else [(QuoteKind.REPLY, reply_to)] if reply_to else []
-        if (reply_to and root_id and root_id != reply_to and thread_id
-                and hasattr(self._transport, "list_thread_messages")):
-            wanted.append((QuoteKind.THREAD, root_id))
-        return wanted
-
-    async def _quote(self, delivery: _Delivery) -> tuple[list[Quote], tuple[lark_content.ResourceRef, ...]]:
-        """The message's quotes (``lark_quote``), read as the bot within ``_QUOTE_SECONDS``; a read that fails
-        becomes a line saying why."""
+    async def read_quote(self, ref: QuoteRef, *, after: int) -> QuoteRead:
+        """What a message received here quotes (``QuoteRef.targets``), read as the bot within ``_QUOTE_SECONDS``,
+        names included; a read that fails becomes a line saying why. The images and files in it are saved beside
+        the message's own, numbered after its ``after`` and within its limits (``_collect``). The Manager calls it
+        while it prepares the message's turn (``lark_quote.QuoteReader``)."""
         read = self._transport.get_message  # type: ignore[attr-defined]
-        event, message_id, wanted = delivery.event, delivery.message_id, delivery.targets
-        after = len(delivery.inbound.resources)
-        reply_to, thread_id = str(event.get("reply_to") or ""), str(event.get("thread_id") or "")
+        wanted = ref.targets()
         deadline = monotonic() + _QUOTE_SECONDS
 
-        async def fetch(kind: QuoteKind, ref: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+        async def fetch(kind: QuoteKind, target: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
             try:
                 async with asyncio.timeout(deadline - monotonic()):
                     if kind is not QuoteKind.THREAD:
-                        return await read(ref, timeout=deadline - monotonic()), [], ""
+                        return await read(target, timeout=deadline - monotonic()), [], ""
                     root, page = await asyncio.gather(
-                        read(ref, timeout=deadline - monotonic()),
-                        self._transport.list_thread_messages(thread_id),  # type: ignore[attr-defined]
+                        read(target, timeout=deadline - monotonic()),
+                        self._transport.list_thread_messages(ref.thread_id),  # type: ignore[attr-defined]
                         return_exceptions=True)
                     for result in (root, page):
                         if isinstance(result, BaseException):
                             raise result
-                    shown = {message_id, ref, reply_to}
+                    shown = {ref.message_id, target, ref.parent_id}
                     replies = [item for item in page["messages"] if item.get("message_id") not in shown]
                     return root, replies[:lark_quote.THREAD_TAIL][::-1], ""
             except (TimeoutError, LarkCliError) as exc:
                 return [], [], lark_quote.failure(exc)
             except Exception:
-                logger.warning("%s: could not read quoted message %s", self.channel_id, ref, exc_info=True)
+                logger.warning("%s: could not read quoted message %s", self.channel_id, target, exc_info=True)
                 return [], [], "error"
 
-        read_all = await asyncio.gather(*(fetch(kind, ref) for kind, ref in wanted))
+        read_all = await asyncio.gather(*(fetch(kind, target) for kind, target in wanted))
         names: dict[str, str] = {}
         if ids := lark_quote.sender_ids(item for items, thread, _ in read_all for item in (*items, *thread)):
             try:
@@ -1267,18 +1050,15 @@ class LarkChannelAdapter(ChannelAdapter):
                                                max(min(_NAME_LOOKUP_SECONDS, deadline - monotonic()), 0.1))
             except (TimeoutError, LarkCliError):
                 names = {}
-        quoted: list[Quote] = []
+        quotes: list[lark_quote.Quote] = []
         resources: list[lark_content.ResourceRef] = []
-        for (kind, ref), (items, thread, error) in zip(wanted, read_all):
-            quote, found = lark_quote.build(kind, ref, items, thread=thread, names=names, error=error,
+        for (kind, target), (items, thread, error) in zip(wanted, read_all):
+            quote, found = lark_quote.build(kind, target, items, thread=thread, names=names, error=error,
                                             own=(self._bot_open_id, self._bot_app_id), after=after + len(resources))
-            quoted.append(quote)
+            quotes.append(quote)
             resources += found
-            logger.info("lark_quote channel=%s message=%s quoted=%s kind=%s type=%s messages=%d lines=%d chars=%d "
-                        "resources=%d outcome=%s", self.channel_id, message_id, ref, kind.value,
-                        quote.message_type or "unknown", quote.messages, len(quote.lines),
-                        sum(len(line) for line in quote.lines), len(found), error or "read")
-        return quoted, tuple(resources)
+        attachments = await self._collect(ref.message_id, tuple(resources)) if resources else []
+        return QuoteRead(tuple(quotes), tuple(attachments))
 
     async def _collect(self, message_id: str, refs: tuple[lark_content.ResourceRef, ...]) -> list[Attachment]:
         deadline = monotonic() + _DOWNLOAD_MESSAGE_SECONDS

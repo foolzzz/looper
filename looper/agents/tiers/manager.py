@@ -367,12 +367,15 @@ STOP_HANDLING_SEC = 3.0
 STOP_FINISH_SEC = 10.0
 # A retiring Manager may abandon an unresponsive turn, but must never block deletion indefinitely.
 STOP_DRAIN_SEC = 10.0
+# How long reading what a channel's message quotes may hold its turn: the channel's own read (15 s) and the downloads
+# of what it shows (60 s), with a margin, so a reader that hangs never holds the Manager.
+QUOTE_READ_SEC = 80.0
 
 # The one command Looper answers itself in a chat with the Manager: a message that is exactly this (trimmed, any
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
-    "persist_user_message", "route_to_gate", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
+    "persist_user_message", "route_to_gate", "read_quote", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "agent_settings", "templates", "library", "library_server", "llmrec_attach", "build_user_message",
     "claude_command", "tool_listing", "switch_session", "claude_stop", "resume_brief", "recorder_start", "claude_start", "recorder_finish",
     "recorder_annotate",
@@ -387,6 +390,7 @@ class Ask:
     note: str = ""
     turn: Turn | None = None
     retried: bool = False  # the resume retry: running goes back to starting
+    quoted: lark_quote.QuoteRead | None = None  # what the message quotes, read once (``_read_quote``)
 
 
 @dataclass
@@ -418,6 +422,7 @@ class Prepared:
     switch: Any = None
     turn_text: str = ""
     run: RunState = field(default_factory=RunState)
+    quoted: lark_quote.QuoteRead | None = None
 
 
 def api_handoff_prompt(reason: str, max_chars: int) -> str:
@@ -760,6 +765,8 @@ class ManagerAgent:
         self._has_templates = False  # from the last read of the Manager's task templates
         self.on_turned_off: Callable[[str], None] | None = None
         self.stop_chat: Callable[..., Awaitable[ChatStopSummary]] | None = None
+        # Reads what a channel's message quotes, by the channel's id; the fleet sets it (``ChannelRegistry``).
+        self.read_quote: lark_quote.ReadQuote | None = None
         self._config = config
         self._runtime_root = runtime_root
         self._broadcaster = broadcaster
@@ -899,10 +906,6 @@ class ManagerAgent:
                     await self._stop_from_chat(envelope)
                     bus.settle(envelope.message_id)
                     continue
-                if envelope.payload.get("withdrawn") is True:
-                    await self._record_withdrawn(envelope)
-                    bus.settle(envelope.message_id)
-                    continue
                 self._register_turn(envelope)
             queue.put_nowait(envelope)
         self._task = asyncio.create_task(self._message_loop())
@@ -943,12 +946,6 @@ class ManagerAgent:
         on, queued or not."""
         if envelope.target.agent_id != self.agent_id:
             return False
-        if envelope.payload.get("withdrawn") is True:
-            # A channel's message the user stopped before it was read: never a turn, never a gate reply.
-            task = asyncio.create_task(self._record_withdrawn(envelope))
-            self._stop_tasks.add(task)
-            task.add_done_callback(self._stop_tasks.discard)
-            return True
         if self._drain is not None and self._drain.draining:
             return False
         text = envelope.payload.get("text")
@@ -969,17 +966,6 @@ class ManagerAgent:
                                     channel_id=origin["channel_id"],
                                     client_message_id=client_id if isinstance(client_id, str) and client_id else None)
         return token
-
-    async def _record_withdrawn(self, envelope: MessageEnvelope) -> None:
-        """A message the user withdrew before the model had it: kept in the chat's history, and the next turn is
-        told, as for a queued message a stop withdraws."""
-        first_line = " ".join(str(envelope.payload.get("text", "")).split())[:80]
-        self._stopped_notes = [*self._stopped_notes, f'[Looper] The user withdrew a message before you saw it (it '
-                               f'began: "{first_line}"). Do not act on it unless they ask again.'][-3:]
-        try:
-            await self._persist_user(envelope, str(envelope.payload.get("text", "")))
-        except Exception:
-            logger.warning("%s: could not keep withdrawn message %s", self._log, envelope.message_id, exc_info=True)
 
     async def _stop_from_chat(self, envelope: MessageEnvelope) -> None:
         try:
@@ -1174,6 +1160,34 @@ class ManagerAgent:
             token.settle(token.outcome)
             self._last_activity = self._clock()
 
+    async def _read_quote(self, envelope: MessageEnvelope, ref: lark_quote.QuoteRef) -> lark_quote.QuoteRead:
+        """What the message quotes, read through the channel that received it (``read_quote``), its images and
+        files numbered after the message's own. A channel that is not running, a read that fails or runs past
+        ``QUOTE_READ_SEC``, or an error here leaves each quote saying it could not be read: the message is
+        answered all the same. One ``lark_quote`` line logs what was read, never its content."""
+        started = time.monotonic()
+        own = envelope.payload.get("attachments")
+        try:
+            if self.read_quote is None:
+                raise lark_quote.QuoteUnavailable("no channel reads quotes here")
+            async with asyncio.timeout(QUOTE_READ_SEC):
+                read = await self.read_quote(ref, after=len(own) if isinstance(own, list) else 0)
+        except lark_quote.QuoteUnavailable as exc:
+            logger.warning("%s: could not read what %s quotes: %s", self._log, ref.message_id, exc)
+            read = lark_quote.unread(ref, "channel not running")
+        except TimeoutError:
+            read = lark_quote.unread(ref, "timeout")
+        except Exception:
+            logger.warning("%s: could not read what %s quotes", self._log, ref.message_id, exc_info=True)
+            read = lark_quote.unread(ref, "internal error")
+        errors = [quote.error for quote in read.quotes if quote.error]
+        logger.info("lark_quote channel=%s message=%s kind=%s quoted=%s messages=%d chars=%d attachments=%d "
+                    "outcome=%s seconds=%.1f", ref.channel_id, ref.message_id, ref.kind.value,
+                    ",".join(quote.message_id for quote in read.quotes), sum(quote.messages for quote in read.quotes),
+                    sum(len(line) for quote in read.quotes for line in quote.lines), len(read.attachments),
+                    ",".join(errors) or "read", time.monotonic() - started)
+        return read
+
     async def _persist_user(self, envelope: MessageEnvelope, text: str) -> None:
         self._persisted.add(envelope.message_id)
         await self._persist_chat(envelope, "user", text, envelope.message_id)
@@ -1345,8 +1359,11 @@ class ManagerAgent:
             if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
                 self._acting(token)
                 return Prepared(action=lambda: self._send_reply(envelope, gate.reply, persist=False))
-            if not text.strip() and not envelope.payload.get("quoted"):
+            quote_ref = lark_quote.QuoteRef.from_payload(envelope.payload.get("quote_ref"))
+            if not text.strip() and quote_ref is None:  # a bare forward or @-mention under a message is answered
                 return Prepared()
+            # Read here, in the message's turn: in order, stoppable, and again when a restart replays the message.
+            quoted = await token.step("read_quote", self._read_quote(envelope, quote_ref)) if quote_ref else None
             origin = _message_origin(envelope)
             client_id, client_name = _message_client(envelope)
             # The calls Claude makes while answering belong to this message and its chat (and its API client).
@@ -1376,7 +1393,8 @@ class ManagerAgent:
             await token.step("turn_lock", self._turn_lock.acquire())
             self._lock_owner = token
             waiting = self.ops.begin_turn(turn, binding=token.binding) if self.ops is not None else ""
-            ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn)
+            ask = Ask(text, "\n".join(part for part in (waiting, gate.note, stopped_note) if part), turn,
+                      quoted=quoted)
         token.prepared_ask = ask
         await token.step("load_db_config", self._load_db_config())
         if self._turned_off:  # the fleet has not stopped this instance yet: it must not act as the Manager
@@ -1453,13 +1471,15 @@ class ManagerAgent:
             switch = session_switch.context_full(
                 self._claude.context_tokens, self._claude.context_limit, runtime=self._session_runtime,
                 profile=self._session_profile, provider=self._session_provider)
+        attachments = chat_attachments.from_payload(envelope.payload.get("attachments"), self._runtime_root)
         turn_text = await token.step("build_user_message", self._build_user_message(
             ask.message, ask.note, channel=channel_line(envelope), envelope=envelope,
-            attachments=chat_attachments.from_payload(envelope.payload.get("attachments"), self._runtime_root),
-            image_input=launch.runtime.image_input))
+            attachments=[*attachments, *(ask.quoted.attachments if ask.quoted else ())],
+            quoted=ask.quoted.quotes if ask.quoted else (), image_input=launch.runtime.image_input))
         return Prepared(
             envelope=envelope, turn=ask.turn, message=ask.message, note=ask.note, retried=ask.retried, system_prompt=system_prompt,
-            launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text)
+            launch=launch, prompt_file=prompt_file, signature=signature, switch=switch, turn_text=turn_text,
+            quoted=ask.quoted)
 
     @contextmanager
     def _runtime_start_budget(self, launch: Launch) -> Iterator[float]:
@@ -1870,12 +1890,13 @@ class ManagerAgent:
                 logger.warning("could not link the Manager's turn to its task", exc_info=True)
 
     async def _run_turn(self, message: str, context_envelope: MessageEnvelope, *, ops_turn: Turn | None = None,
-                        note: str = "", retried: bool = False, token: TurnToken | None = None) -> str:
+                        note: str = "", retried: bool = False, token: TurnToken | None = None,
+                        quoted: lark_quote.QuoteRead | None = None) -> str:
         """Prepare, start and run one turn for ``message`` (a caller outside a chat message has no token of its
         own; the resume retry has the turn's)."""
         token = token or self._running_token or self._detached_token(context_envelope)
         prepared = await self._prepare_turn(
-            token, context_envelope, ask=Ask(message, note, ops_turn, retried))
+            token, context_envelope, ask=Ask(message, note, ops_turn, retried, quoted))
         return await self._run_prepared(token, prepared)
 
     def _detached_token(self, envelope: MessageEnvelope) -> TurnToken:
@@ -2137,7 +2158,7 @@ class ManagerAgent:
                 # A rejected first request may not have stored its predecessor's handoff yet.
                 self._pending_switch = switch
             return await self._run_turn(message, context_envelope, ops_turn=ops_turn, note=note, retried=True,
-                                        token=token)
+                                        token=token, quoted=prepared.quoted)
 
         self._settle()
 
@@ -2665,6 +2686,7 @@ class ManagerAgent:
 
     async def _build_user_message(self, user_message: str, note: str = "", *, channel: str = "",
                                   envelope: MessageEnvelope | None = None, attachments: Sequence[Attachment] = (),
+                                  quoted: Sequence[lark_quote.Quote] = (),
                                   image_input: ImageInput = ImageInput.NONE) -> str:
         parts = await self._projects_section()
         parts += await self._templates_section()
@@ -2683,7 +2705,7 @@ class ManagerAgent:
         if channel:
             parts += [channel, ""]
         parts.append(user_message)
-        if envelope is not None and (quoted := lark_quote.quotes(envelope.payload.get("quoted"))):
+        if quoted:
             parts += ["", *lark_quote.section(quoted)]
         if attachments:
             parts += ["", *chat_attachments.section(attachments, image_input)]

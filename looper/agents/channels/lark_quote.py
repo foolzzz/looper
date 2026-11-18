@@ -1,20 +1,22 @@
 """What a Lark message quotes, for the Manager: the message it replies to, the messages of a merged forward, and in
 a thread its first message and latest replies.
 
-The adapter reads them as the bot when the message reaches it (``LarkChannelAdapter._quote``); ``build`` turns the
-raw message items into a bounded ``Quote``, carried in ``payload["quoted"]`` beside the user's own words (never in
-``payload["text"]``, which gate routing and ``/stop`` read), and the Manager shows them after those words
-(``section``), marked as quoted content and not as instructions."""
+The adapter reads nothing when the message arrives: it puts a small ``QuoteRef`` in ``payload["quote_ref"]`` (never
+quoted content in ``payload["text"]``, which gate routing and ``/stop`` read). The Manager reads it while it prepares
+the turn, through the channel that received it (``QuoteReader``, ``ChannelRegistry.read_quote``); ``build`` turns the
+raw message items into a bounded ``Quote``, and the Manager shows them after the user's words (``section``), marked
+as quoted content and not as instructions."""
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
+from ..chat_attachments import Attachment
 from . import lark_content
 from .lark_cli import MESSAGE_GONE_CODES, TIMEOUT
 from .lark_content import ResourceRef
@@ -38,6 +40,60 @@ class QuoteKind(str, Enum):
 
 
 @dataclass(frozen=True)
+class QuoteRef:
+    """What a received message points to, for the Manager to read (``payload["quote_ref"]``): the message itself
+    when it is a merged forward (``FORWARD``), else the message it replies to (``REPLY``), and also, in a thread,
+    when that is not the thread's first message, the first message and the latest replies (``THREAD``)."""
+
+    channel_id: str
+    chat_id: str
+    message_id: str
+    kind: QuoteKind
+    parent_id: str = ""
+    root_id: str = ""
+    thread_id: str = ""
+
+    @classmethod
+    def received(cls, channel_id: str, event: Mapping[str, Any], *, forward: bool) -> QuoteRef | None:
+        """The reference of a received message (lark-cli's flat event); None when it points to nothing."""
+        chat_id, message_id, parent_id, root_id, thread_id = (
+            value if isinstance(value := event.get(key), str) else ""
+            for key in ("chat_id", "message_id", "reply_to", "root_id", "thread_id"))
+        if not message_id or not (forward or parent_id):
+            return None
+        kind = (QuoteKind.FORWARD if forward else QuoteKind.THREAD if root_id and root_id != parent_id and thread_id
+                else QuoteKind.REPLY)
+        return cls(channel_id, chat_id, message_id, kind, parent_id, root_id, thread_id)
+
+    def targets(self) -> list[tuple[QuoteKind, str]]:
+        """What is read: each quote's kind and the message it is read as."""
+        if self.kind is QuoteKind.FORWARD:
+            return [(QuoteKind.FORWARD, self.message_id)]
+        return [(QuoteKind.REPLY, self.parent_id), *([(QuoteKind.THREAD, self.root_id)]
+                                                     if self.kind is QuoteKind.THREAD else [])]
+
+    def to_payload(self) -> dict[str, str]:
+        return {"channel_id": self.channel_id, "chat_id": self.chat_id, "message_id": self.message_id,
+                "kind": self.kind.value, **{key: value for key, value in (
+                    ("parent_id", self.parent_id), ("root_id", self.root_id), ("thread_id", self.thread_id)) if value}}
+
+    @classmethod
+    def from_payload(cls, raw: Any) -> QuoteRef | None:
+        """The reference ``to_payload`` wrote; None for anything else."""
+        if not isinstance(raw, Mapping) or not all(isinstance(raw.get(key, ""), str) for key in (
+                "channel_id", "chat_id", "message_id", "kind", "parent_id", "root_id", "thread_id")):
+            return None
+        try:
+            ref = cls(raw["channel_id"], raw.get("chat_id", ""), raw["message_id"], QuoteKind(raw["kind"]),
+                      raw.get("parent_id", ""), raw.get("root_id", ""), raw.get("thread_id", ""))
+        except (KeyError, ValueError):
+            return None
+        complete = ref.channel_id and ref.message_id and (ref.kind is QuoteKind.FORWARD or ref.parent_id) and (
+            ref.kind is not QuoteKind.THREAD or (ref.root_id and ref.thread_id))
+        return ref if complete else None
+
+
+@dataclass(frozen=True)
 class Quote:
     kind: QuoteKind
     message_id: str
@@ -47,24 +103,33 @@ class Quote:
     messages: int = 0  # a merged forward's messages, a thread's replies
     error: str = ""  # why it could not be read
 
-    def to_payload(self) -> dict[str, Any]:
-        return {"kind": self.kind.value, "message_id": self.message_id, "message_type": self.message_type,
-                "sender": self.sender, "lines": list(self.lines), "messages": self.messages, "error": self.error}
 
-    @classmethod
-    def from_payload(cls, raw: Any) -> Quote | None:
-        try:
-            return cls(QuoteKind(raw["kind"]), str(raw["message_id"]), str(raw.get("message_type") or ""),
-                       str(raw.get("sender") or ""), tuple(str(line) for line in raw.get("lines") or ()),
-                       int(raw.get("messages") or 0), str(raw.get("error") or ""))
-        except (KeyError, TypeError, ValueError, AttributeError):
-            return None
+@dataclass(frozen=True)
+class QuoteRead:
+    """What a reader returns: the quotes, and the images and files in them, saved beside the message's own."""
+
+    quotes: tuple[Quote, ...]
+    attachments: tuple[Attachment, ...] = ()
 
 
-def quotes(raw: Any) -> list[Quote]:
-    """The quotes a message's payload carries (``payload["quoted"]``)."""
-    found = (Quote.from_payload(item) for item in raw) if isinstance(raw, list) else ()
-    return [item for item in found if item is not None]
+class QuoteUnavailable(RuntimeError):
+    """No running channel reads the quote: the channel the reference names is not running, or reads none."""
+
+
+@runtime_checkable
+class QuoteReader(Protocol):
+    async def read_quote(self, ref: QuoteRef, *, after: int) -> QuoteRead:
+        """What ``ref`` points to; the images and files in it are numbered after the message's own ``after``."""
+        ...
+
+
+# A channel's quote reading by the reference's channel id (``ChannelRegistry.read_quote``), for the Manager.
+ReadQuote = Callable[..., Awaitable[QuoteRead]]
+
+
+def unread(ref: QuoteRef, why: str) -> QuoteRead:
+    """Each of the reference's quotes, saying why it could not be read."""
+    return QuoteRead(tuple(build(kind, target, [], error=why)[0] for kind, target in ref.targets()))
 
 
 def failure(error: BaseException) -> str:

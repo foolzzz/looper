@@ -71,6 +71,45 @@ def test_stop_from_the_same_chat_stops_the_turn(agent_db: Any) -> None:
     asyncio.run(run())
 
 
+def test_stop_while_the_quote_is_read_stops_the_message_before_the_model(agent_db: Any) -> None:
+    """A Lark message that quotes another is read in its turn (``read_quote``): a /stop from its chat cancels the
+    read, the model never sees the message, and the next turn is told the user withdrew it."""
+    lark = channel_address("lark", "channel-lark")
+
+    def message(text: str, **payload: Any) -> MessageEnvelope:
+        return MessageEnvelope.create(
+            source=lark, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
+            payload={"text": text, "channel_context": {"chat_id": "oc_dm", "chat_type": "p2p", "message_id": "om_9"},
+                     **payload}, metadata={"origin_channel_id": "channel-lark"})
+
+    async def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            session, manager, bus, _, inbox = _setup(tmp)
+            reading, cancelled = asyncio.Event(), asyncio.Event()
+
+            async def read_quote(ref: Any, *, after: int) -> Any:
+                reading.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+
+            manager.read_quote = read_quote
+            handling = asyncio.create_task(manager._handle(message("这条说了什么？", quote_ref={
+                "channel_id": "channel-lark", "chat_id": "oc_dm", "message_id": "om_9", "kind": "reply",
+                "parent_id": "om_1"})))
+            await asyncio.wait_for(reading.wait(), 10)
+            await bus.publish(message("/stop"))
+            await asyncio.wait_for(handling, 10)
+            assert cancelled.is_set() and session.turns == [] and inbox.empty()
+            assert sorted(_texts(bus.get_queue(lark.agent_id))) == ["已停止当前回复。", "已停止，这次没有回复。"]
+            assert manager._stopped_notes == ['[Looper] The user withdrew a message before you saw it (it began: '
+                                              '"这条说了什么？"). Do not act on it unless they ask again.']
+            await bus.shutdown()
+
+    asyncio.run(run())
+
+
 def test_stop_from_another_chat_or_idle(agent_db: Any) -> None:
     async def run() -> None:
         with tempfile.TemporaryDirectory() as tmp:
