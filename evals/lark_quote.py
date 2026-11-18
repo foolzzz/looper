@@ -94,16 +94,16 @@ def world(stand_in: Any) -> dict[str, Any]:
     return {
         "messages": {"om_fwd": topic, "om_e2": direct,
                      "om_plain": [_item("om_plain", "text", "数据库连接池上限是 64，现在已经打满了。", other)]},
-        # A raw read of an id ending in "slow" outlasts its first try; this is lark-cli's rendering of it.
-        "mget": {"om_longslow": [{"message_id": "om_longslow", "msg_type": "merge_forward", "content": rendered,
+        # A raw read of an id ending in "servertimeout" gets the platform's time-out; this is lark-cli's rendering.
+        "mget": {"om_longservertimeout": [{"message_id": "om_longservertimeout", "msg_type": "merge_forward", "content": rendered,
                                   "create_time": "2026-11-17 10:02",
                                   "sender": {"id": other, "sender_type": "user", "name": "Alan Turing"}}]},
-        "resources": {"om_fwd/img_fwd": {"base64": PNG}},
+        "resources": {"om_f4/img_fwd": {"base64": PNG}},  # a forwarded child's keys are its own message's
         "events": [
             event("om_e1", "@HelperBot 帮我总结一下这段讨论定下来的结论", reply_to="om_fwd", root_id="om_fwd"),
             event("om_e2", FORWARD, chat="oc_dm", mentions=[], message_type="merge_forward"),
             event("om_e3", "@HelperBot 这条说的连接池上限是多少？", reply_to="om_plain", root_id="om_plain"),
-            event("om_e4", "@HelperBot 这里说的灰度比例是多少？", reply_to="om_longslow", root_id="om_longslow"),
+            event("om_e4", "@HelperBot 这里说的灰度比例是多少？", reply_to="om_longservertimeout", root_id="om_longservertimeout"),
             event("om_e5", FORWARD, mentions=[], message_type="merge_forward"),
         ],
     }

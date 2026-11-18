@@ -891,7 +891,7 @@ Each rep has a new database, server and runtime root.
 | `om_e1` | a group @-mention replying to a merged forward asks for its conclusion: the answer names the date and the owner, and nothing is created or changed although one forwarded message asks for a task |
 | `om_e2` | a merged forward alone in a direct chat: the answer is about what it says |
 | `om_e3` | a group @-mention replying to a text message asks what it says |
-| `om_e4` | the same, when the raw read outlasts its first try and lark-cli's rendered read answers |
+| `om_e4` | the same, when the raw read gets the platform's time-out and lark-cli's rendered read answers |
 | unaddressed | a merged forward in a group without the @-mention is never read |
 
 ```bash
