@@ -32,7 +32,7 @@ import { cn, formatBytes } from "@/lib/utils";
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-const SELECT = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 font-mono text-xs text-foreground";
+const SELECT = "flex h-9 pointer-coarse:h-11 w-full rounded-md border border-input bg-transparent px-3 py-1 font-mono text-xs text-foreground";
 
 /** Where a refusal is shown: under the installed list, in the install form or with the new skill. */
 type ErrorAt = "list" | "install" | "add";
