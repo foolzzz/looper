@@ -18,6 +18,36 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.13] - 2026-11-17
+
+### Added
+
+- **Dashboard: running agent processes with tokens per minute.** ([#1397](https://github.com/foolzzz/looper/pull/1397))
+  - "Agents running now" is a process table: Agent, Task / step, Runtime · model, PID, Time and TPM (the four token kinds on hover), with the total TPM of all agents in the header. Managers without a row (busy before their turn's run starts, or idle) are named below it.
+  - `/api/v1/system/overview` gains `processes` and `tpm`; `agents` is unchanged. TPM counts input, output, cache read and cache write tokens over the last 60 s. Codex, Coco and Cursor report usage only when a turn ends, so their rows show "—" while their tokens still count in the total. The run list is in memory only.
+- **Tasks list can hide schedule-created tasks.** ([#1403](https://github.com/foolzzz/looper/pull/1403))
+  - `tasks.page` (`POST /api/v1/tasks/page`) gains the optional `exclude_scheduled` (default false); the result gains `hidden_scheduled`. `exclude_scheduled` together with `schedule_id` is a 400 `invalid`.
+  - The Tasks page has a "Hide tasks from schedules" checkbox with "N hidden" beside it; unchecking writes `scheduled=include` to the address.
+
+### Changed
+
+- **The dashboard Tasks list and the project Overview "Tasks" preview hide tasks created by schedules by default.** ([#1403](https://github.com/foolzzz/looper/pull/1403)) The API default is unchanged: Manager tools, `loopercli` and other API clients see every task unless they pass `exclude_scheduled`. The Dashboard's group counts and needs-you links open the list with `scheduled=include`.
+- **Dashboard on phones, in three steps.** ([#1398](https://github.com/foolzzz/looper/pull/1398)) ([#1400](https://github.com/foolzzz/looper/pull/1400)) ([#1401](https://github.com/foolzzz/looper/pull/1401))
+  - Shared controls: on touch screens (`pointer: coarse`) form text is 16 px and Button, Input, selects, nav items and the Switch hit area are 44 px; the shell uses `dvh`. Desktop with a mouse is unchanged.
+  - Task detail header below `lg`: the task id, project selector, schedule badge and creator are behind a **Details** toggle.
+  - Tab bars (project and task) are one row that scrolls sideways, with the selected tab scrolled into view.
+  - Chat: the conversation list is an aside from `lg` (behind its toggle on 768 to 1023 px); the session id shows only from `lg`; below `sm` the header no longer shows "Online".
+  - A Pipeline narrower than 640 px fits with a zoom floor of 10/12. Tasks rows, registry card headers and Runs role cards are rearranged below `sm` or `lg`.
+  - The Tasks Manager filter is 32 px with a mouse at every width and 44 px on touch.
+
+### Fixed
+
+- **New project dialog.** ([#1398](https://github.com/foolzzz/looper/pull/1398)) It rendered 223 px wide inside the sidebar on desktop and phones; it now renders on `document.body`. Escape closes only the dialog; before, it closed the drawer behind it and left the dialog open.
+- **Navigation drawer scrolls** when taller than the screen; before, the project list shrank to 1 px and Import / Export fell off screen. ([#1398](https://github.com/foolzzz/looper/pull/1398))
+- **Chat header wraps** so New conversation and New session stay on screen at 360 to 768 px. ([#1398](https://github.com/foolzzz/looper/pull/1398))
+- **Sideways panning on phones.** ([#1401](https://github.com/foolzzz/looper/pull/1401)) The project Overview, task Overview work directory and the History `cwd:` line no longer widen the page.
+- **Lark messages that start with an @-mention are delivered.** ([#1399](https://github.com/foolzzz/looper/pull/1399)) lark-cli read such a body as `@path` and failed; `send_command`, `reply_command` and `edit_command` now pass a leading `@` as `@@`. Other bodies are unchanged. A body that is exactly `-` still makes lark-cli read stdin.
+
 ## [2.15.12] - 2026-11-16
 
 ### Added
