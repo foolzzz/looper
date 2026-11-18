@@ -102,7 +102,7 @@ function TaskCounts({ tasks }: { tasks: Overview["tasks"] }) {
         return (
           <a
             key={g.id}
-            href={`#tasks?group=${g.id}`}
+            href={`#tasks?group=${g.id}&scheduled=include`}
             title={g.id === "other" && others ? `Statuses no group knows: ${others}` : undefined}
             className="rounded-lg border border-border bg-card px-4 py-3 transition-colors hover:border-primary/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >

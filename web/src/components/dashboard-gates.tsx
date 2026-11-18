@@ -172,7 +172,7 @@ export function DashboardGates({ needsYou, waitingGates, revision }: {
     - Number(replyByGate.has(gateKey(a.task.task_id, a.gate.step_id))));
   const more = Math.max(0, waiting.length - LIMIT);
   const failure = error && <p role="alert" className="text-xs text-destructive [overflow-wrap:anywhere]">
-    Cannot refresh waiting gates ({error}). <a href="#tasks?group=needs_you" className={linkClass}>View tasks needing you</a>
+    Cannot refresh waiting gates ({error}). <a href="#tasks?group=needs_you&scheduled=include" className={linkClass}>View tasks needing you</a>
   </p>;
   if (!waiting.length && !moreTasks) return failure || null;
   return (
@@ -197,10 +197,10 @@ export function DashboardGates({ needsYou, waitingGates, revision }: {
             }} />
         ))}
       </div>
-      {more > 0 && <a href="#tasks?group=needs_you" className={`inline-flex min-h-11 items-center text-sm ${linkClass}`}>
+      {more > 0 && <a href="#tasks?group=needs_you&scheduled=include" className={`inline-flex min-h-11 items-center text-sm ${linkClass}`}>
         and {more} more
       </a>}
-      {moreTasks > 0 && <a href="#tasks?group=needs_you" className={`inline-flex min-h-11 items-center text-sm ${linkClass}`}>
+      {moreTasks > 0 && <a href="#tasks?group=needs_you&scheduled=include" className={`inline-flex min-h-11 items-center text-sm ${linkClass}`}>
         View {moreTasks} more {moreTasks === 1 ? "task" : "tasks"} needing you
       </a>}
     </section>
