@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Iterable
 from pathlib import Path
 from typing import Any, Awaitable, Protocol
-from urllib.parse import quote
 
 from . import lark_cli
 from .lark_content import ResourceRef
@@ -17,6 +17,9 @@ from .lark_content import ResourceRef
 logger = logging.getLogger(__name__)
 _CONSUMER_STDERR_LINES = 5
 _CONSUMER_STOP_GRACE_SEC = 5.0
+# A message read's first try; the rest of its time goes to the second (the platform gives up on a long merged
+# forward after about 5 s).
+READ_FIRST_SECONDS = 4.0
 
 
 class LarkTransport(Protocol):
@@ -136,6 +139,36 @@ class CliTransport:
             thread_id, page_token=page_token, profile=self._profile))
         return {**self._history_page(result), "chat_type": "group"}
 
+    async def get_message(self, message_id: str, *, timeout: float) -> list[dict[str, Any]]:
+        """The message's raw items as the bot reads it: a merged forward first, then its children (each naming it in
+        ``upper_message_id``). When that read fails or times out, the rest of ``timeout`` goes to
+        ``+messages-mget``, whose item has lark-cli's rendering (``rendered``: a merged forward as one block) and
+        the sender's ``name``; when that fails too, the first failure is raised."""
+        started = time.monotonic()
+        try:
+            answer = await lark_cli.run_json(lark_cli.message_command(message_id, profile=self._profile),
+                                             timeout=min(timeout, READ_FIRST_SECONDS))
+            items = answer.get("data", answer).get("items")
+            if not isinstance(items, list):
+                raise lark_cli.LarkCliError("the message read returned no items")
+            return items
+        except lark_cli.LarkCliError as first:
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                raise
+            try:
+                answer = await lark_cli.run_json(lark_cli.mget_command(message_id, profile=self._profile),
+                                                 timeout=remaining)
+            except lark_cli.LarkCliError:
+                raise first from None
+            messages = (answer.get("data") or {}).get("messages") if isinstance(answer.get("data"), dict) else None
+            if not isinstance(messages, list):
+                raise first from None
+            return [{"message_id": item.get("message_id") or "", "msg_type": item.get("msg_type") or "",
+                     "create_time": item.get("create_time") or "", "sender": item.get("sender") or {},
+                     "deleted": bool(item.get("deleted")), "rendered": str(item.get("content") or "")}
+                    for item in messages if isinstance(item, dict)]
+
     async def send(self, *, chat_id: str | None = None, user_id: str | None = None,
                    text: str | None = None, markdown: str | None = None,
                    idempotency_key: str | None = None, return_id: bool = False) -> str | None:
@@ -161,9 +194,7 @@ class CliTransport:
                     # Some shortcut versions return only the sent id and chat, omitting thread metadata.
                     if (resolve_thread and not (data.get("thread_id") and data.get("chat_id"))
                             and (sent_id := lark_cli.sent_message_id(answer))):
-                        result = await lark_cli.run_json([
-                            *lark_cli._base(self._profile), "api", "GET",
-                            f"/open-apis/im/v1/messages/{quote(sent_id, safe='')}", "--as", "bot"])
+                        result = await lark_cli.run_json(lark_cli.message_command(sent_id, profile=self._profile))
                         items = result.get("data", result).get("items") or []
                         data = items[0] if items else {}
                     if data.get("chat_id") and data.get("thread_id"):

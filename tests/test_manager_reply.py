@@ -684,9 +684,9 @@ def _task_chat(answers: list[str], messages: list[str | tuple[str, str]]) -> Sim
     return asyncio.run(_run())
 
 
-def _channel_turns(messages: list[tuple[Any, dict[str, Any], str]]) -> list[str]:
-    """Send each ``(source, channel_context, text)`` to one Manager, as that channel's adapter would; return the
-    user turns its Claude got."""
+def _channel_turns(messages: list[tuple[Any, ...]]) -> list[str]:
+    """Send each ``(source, channel_context, text)`` (and the rest of the payload, when a fourth item gives it) to
+    one Manager, as that channel's adapter would; return the user turns its Claude got."""
 
     async def _run() -> list[str]:
         with tempfile.TemporaryDirectory() as tmp:
@@ -697,10 +697,11 @@ def _channel_turns(messages: list[tuple[Any, dict[str, Any], str]]) -> list[str]
                 runtime_root=root,
             )
             manager._bus = bus
-            for index, (source, context, text) in enumerate(messages):
+            for index, (source, context, text, *more) in enumerate(messages):
                 await manager._handle(MessageEnvelope.create(
                     source=source, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
-                    payload={"text": text, "channel_context": context}, correlation_id=f"corr-{index}",
+                    payload={"text": text, "channel_context": context, **(more[0] if more else {})},
+                    correlation_id=f"corr-{index}",
                     metadata={"origin_channel_id": source.agent_id},
                 ))
             await manager.stop()
@@ -868,6 +869,32 @@ class TestManagerChannelLine:
             ["Channel: the Looper dashboard chat", "hi"],
             ["Channel: the Looper dashboard chat", "hello"],
         ]
+
+
+@pytest.mark.usefixtures("agent_db")
+def test_quoted_lark_content_follows_the_users_words_marked_and_bounded() -> None:
+    """What a Lark message replies to or forwards comes after the user's words, as quoted content, within the
+    quote's size cap; a message with no words of its own but a quote is answered too."""
+    from looper.agents.channels import lark_quote
+
+    def item(message_id: str, msg_type: str, text: str, **fields: Any) -> dict[str, Any]:
+        return {"message_id": message_id, "msg_type": msg_type, "create_time": "1763350000000",
+                "sender": {"id": "ou_2", "sender_type": "user"}, "body": {"content": json.dumps({"text": text})},
+                **fields}
+
+    children = [item(f"om_{n}", "text", "x" * 2_000, upper_message_id="om_f") for n in range(60)]
+    quote, _ = lark_quote.build(lark_quote.QuoteKind.REPLY, "om_f", [item("om_f", "merge_forward", ""), *children],
+                                names={"ou_2": "Bob"})
+    context = {"chat_id": "oc_team", "chat_type": "group", "sender_id": "ou_1", "sender_name": "Ada Lovelace"}
+    quoted = {"quoted": [quote.to_payload()]}
+    turns = _channel_turns([(LARK, context, "summarize this", quoted), (LARK, context, "", quoted)])
+    for turn, words in zip(turns, ("summarize this", "")):
+        _, found, block = turn.partition(f"Channel: a Lark group chat, from Ada Lovelace\n\n{words}\n\n")
+        assert found
+        assert block.startswith(lark_quote.INTRO + '\n<lark_quote id="om_f" type="merge_forward" from="Bob" '
+                                'note="the message this one replies to: a merged forward of 60 messages')
+        assert block.endswith("\n… 55 more not shown\n</lark_quote>")
+        assert len(block) <= lark_quote.BLOCK_MAX + 500
 
 
 def _system(**values: Any) -> dict[str, Any]:

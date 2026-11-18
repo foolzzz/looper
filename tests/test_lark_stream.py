@@ -318,7 +318,7 @@ def test_content_fallback_and_absent_thread_fields(message_type: str, content: s
             event = await asyncio.wait_for(received, 2)
             await fake.wait_acks(1)
             assert event["content"] == expected
-            assert "reply_to" not in event and "root_id" not in event
+            assert not {"reply_to", "root_id", "thread_id"} & event.keys()
     asyncio.run(main())
 
 
@@ -363,8 +363,24 @@ def test_post_locales_and_element_fallbacks(post: dict, expected: str) -> None:
     assert flat is not None and flat["content"] == expected
 
 
-def test_interactive_message_has_no_flat_event() -> None:
-    assert lark_stream._flat_event(json.dumps(_event(message_type="interactive")).encode()) is None
+def test_a_reply_in_a_thread_keeps_its_parent_root_and_thread() -> None:
+    event = _event()
+    event["event"]["message"].update(parent_id="om_parent", root_id="om_root", thread_id="omt_thread")
+    flat = lark_stream._flat_event(json.dumps(event).encode())
+    assert flat is not None
+    assert (flat["reply_to"], flat["root_id"], flat["thread_id"]) == ("om_parent", "om_root", "omt_thread")
+
+
+@pytest.mark.parametrize(("card", "expected"), [
+    ({"title": "Build failed", "elements": [[{"tag": "text", "text": "step 3"}, {"tag": "a", "text": "logs"}]]},
+     "Build failed\nstep 3\nlogs"),
+    ({"header": {"title": {"tag": "plain_text", "content": "Deploy"}},
+      "body": {"elements": [{"tag": "markdown", "content": "**done**"}]}}, "Deploy\n**done**"),
+    ({"elements": [[{"tag": "img", "image_key": "img_1"}]]}, "[card message]"),
+])
+def test_a_card_becomes_a_message_with_its_title_and_text(card: dict[str, Any], expected: str) -> None:
+    flat = lark_stream._flat_event(json.dumps(_event(message_type="interactive", content=json.dumps(card))).encode())
+    assert flat is not None and flat["message_type"] == "interactive" and flat["content"] == expected
 
 
 def test_cards_other_events_and_duplicate_events_are_acked_without_yielding() -> None:

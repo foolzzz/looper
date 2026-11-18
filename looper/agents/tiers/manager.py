@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 from ..broadcast import Broadcaster
 from ..drain import DrainState
 from ..bus import MessageBus
+from ..channels import lark_quote
 from ..channels.chat_history import CHAT_RECORD, chat_record
 from ..supervisor import cancel_and_wait
 from ..agent_settings import AgentSettings, AgentType, Launch, Layer, load_agent_settings
@@ -1323,7 +1324,7 @@ class ManagerAgent:
             if gate.kind in (RouteKind.KEPT, RouteKind.REFUSED):
                 self._acting(token)
                 return Prepared(action=lambda: self._send_reply(envelope, gate.reply, persist=False))
-            if not text.strip():
+            if not text.strip() and not envelope.payload.get("quoted"):
                 return Prepared()
             origin = _message_origin(envelope)
             client_id, client_name = _message_client(envelope)
@@ -2661,6 +2662,8 @@ class ManagerAgent:
         if channel:
             parts += [channel, ""]
         parts.append(user_message)
+        if envelope is not None and (quoted := lark_quote.quotes(envelope.payload.get("quoted"))):
+            parts += ["", *lark_quote.section(quoted)]
         if attachments:
             parts += ["", *chat_attachments.section(attachments, image_input)]
         return "\n".join(parts)

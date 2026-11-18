@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .allowlist import SenderAllowlist
 from .chat_routing import ChatResolver
 from .lark import LarkChannelAdapter, RejectedListener
 from .lark_bot_settings import stored_config
+from .lark_cli import LarkCliError
 from .lark_content import ResourceRef
 
 
@@ -46,6 +50,36 @@ class BotTransport:
 
     async def download(self, message_id: str, ref: ResourceRef, part: Path, *, max_bytes: int) -> None:
         await self._api.download(message_id, ref.key, ref.kind.value, part, max_bytes=max_bytes)
+
+    async def get_message(self, message_id: str, *, timeout: float) -> list[dict[str, Any]]:
+        """The message's raw items (a merged forward first, then its children); read once more, with the rest of
+        ``timeout``, when the first read fails or times out."""
+        from .lark_transport import READ_FIRST_SECONDS
+
+        started = time.monotonic()
+        path = f"/open-apis/im/v1/messages/{quote(message_id, safe='')}"
+        try:
+            answer = await asyncio.wait_for(self._api.call("GET", path), min(timeout, READ_FIRST_SECONDS))
+        except (TimeoutError, LarkCliError):
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                raise
+            answer = await asyncio.wait_for(self._api.call("GET", path), remaining)
+        items = (answer.get("data") or {}).get("items")
+        if not isinstance(items, list):
+            raise LarkCliError("the message read returned no items")
+        return items
+
+    async def list_thread_messages(self, thread_id: str, *, page_token: str = "") -> dict[str, Any]:
+        """A page of the thread's messages, newest first, as the CLI transport lists them."""
+        from .lark_transport import CliTransport
+
+        params: dict[str, Any] = {"container_id_type": "thread", "container_id": thread_id,
+                                  "sort_type": "ByCreateTimeDesc", "page_size": 50}
+        if page_token:
+            params["page_token"] = page_token
+        answer = await self._api.call("GET", "/open-apis/im/v1/messages", params=params)
+        return {**CliTransport._history_page(answer), "chat_type": "group"}
 
     def events(self) -> AsyncIterator[dict[str, Any]]:
         from .lark_stream import stream_events

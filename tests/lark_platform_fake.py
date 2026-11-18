@@ -28,6 +28,11 @@ class FakeLarkPlatform:
         self.sent: list[dict[str, Any]] = []
         self.requests: list[dict[str, Any]] = []
         self.resources: dict[tuple[str, str], tuple[bytes, str]] = {}
+        # Messages read by id (raw items: a merged forward first, then its children), threads' messages newest
+        # first, and paths whose next answer comes this many seconds late.
+        self.messages: dict[str, list[dict[str, Any]]] = {}
+        self.threads: dict[str, list[dict[str, Any]]] = {}
+        self.slow_once: dict[str, float] = {}
         self.chunked_resources: set[tuple[str, str]] = set()
         self.bot: dict[str, str] = {"app_name": "Test Bot", "open_id": "ou_bot000001"}
         self.users: list[dict[str, Any]] = []
@@ -115,6 +120,8 @@ class FakeLarkPlatform:
                                               if key != "authorization"},
                                   "authenticated": self._token is not None and
                                       headers.get("authorization") == f"Bearer {self._token}"})
+            if (delay := self.slow_once.pop(parsed.path, None)) is not None:
+                await asyncio.sleep(delay)
             status, answer = self._answer(method, parsed.path, query, body, headers)
             if isinstance(answer, tuple):
                 payload, content_type = answer
@@ -171,6 +178,13 @@ class FakeLarkPlatform:
         if method == "GET" and len(segments) == 8 and segments[6] == "resources":
             resource = self.resources.get((unquote(segments[5]), unquote(segments[7])))
             return (200, resource) if resource is not None else (400, {"code": 234003, "msg": "File not in msg."})
+        if method == "GET" and path == "/open-apis/im/v1/messages":
+            container = query.get("container_id", [""])[0] if query.get("container_id_type") == ["thread"] else ""
+            return 200, {"code": 0, "data": {"items": self.threads.get(container, []), "has_more": False}}
+        if method == "GET" and len(segments) == 6 and path.startswith("/open-apis/im/v1/messages/"):
+            items = self.messages.get(unquote(segments[5]))
+            return (200, {"code": 0, "data": {"items": items}}) if items is not None else (
+                400, {"code": 230001, "msg": "the message does not exist"})
         if path.startswith("/open-apis/im/v1/messages"):
             return self._message(method, path, query, body)
         if path == "/open-apis/contact/v3/users/batch":
@@ -281,7 +295,8 @@ class FakeLarkPlatform:
     async def push_message(self, *, text: str = "", sender: str = "ou_sender", chat_type: str = "p2p",
                            chat_id: str = "oc_chat", message_id: str | None = None,
                            mentions: Iterable[dict[str, Any]] = (), parent_id: str | None = None,
-                           root_id: str | None = None, event_id: str | None = None, split: int = 1,
+                           root_id: str | None = None, thread_id: str | None = None,
+                           event_id: str | None = None, split: int = 1,
                            message_type: str = "text", content: str | None = None) -> None:
         """Deliver a schema-2.0 message, optionally split across protocol frames."""
         message_id = message_id or f"om_fake_{self._event_count + 1}"
@@ -293,6 +308,8 @@ class FakeLarkPlatform:
             message["parent_id"] = parent_id
         if root_id:
             message["root_id"] = root_id
+        if thread_id:
+            message["thread_id"] = thread_id
         await self.push_event({"schema": "2.0", "header": {"event_id": event_id,
                               "event_type": "im.message.receive_v1"}, "event": {
                                   "sender": {"sender_id": {"open_id": sender}, "sender_type": "user"},

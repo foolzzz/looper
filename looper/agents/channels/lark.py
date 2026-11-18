@@ -38,8 +38,9 @@ from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
 from .chat_history import record_reply
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, SenderPolicy, observe_chat, log_route
-from . import lark_content
+from . import lark_content, lark_quote
 from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, mention
+from .lark_quote import Quote, QuoteKind
 from .lark_transport import CliTransport, LarkTransport
 from .lark_inbox import LarkInbox, history_event
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
@@ -52,6 +53,8 @@ RejectedListener = Callable[[str, str | None], Awaitable[None]]
 
 # How long finding a group sender's name may hold up their message; then the Manager gets the open_id.
 _NAME_LOOKUP_SECONDS = 5.0
+# How long reading what a message quotes may hold it up, names included; then it goes on with what was read.
+_QUOTE_SECONDS = 10.0
 _DOWNLOAD_MESSAGE_SECONDS = 60.0
 _CATCHUP_MAX_AGE = 15 * 60
 _CATCHUP_OVERLAP = 10
@@ -843,11 +846,12 @@ class LarkChannelAdapter(ChannelAdapter):
             return "handled" if handled else "ignored"
 
     async def _process_lark_event(self, event: dict[str, Any]) -> bool | None:
-        """Publish text and rich posts to the Bus, and answer other admitted message types.
-        The event is lark-cli's flat one: ``chat_id``,
+        """Publish text, rich posts and merged forwards to the Bus, with what they quote, and answer other admitted
+        message types. The event is lark-cli's flat one: ``chat_id``,
         ``chat_type`` (``p2p`` or ``group``), ``message_id``, ``message_type``, ``sender_id`` (the open_id),
         ``sender_type``, ``mentions`` (each ``id``, an open_id, ``key`` and ``name``), ``content``, a text
-        message's text with each mention shown as ``@name``, and for a reply ``reply_to`` and ``root_id``."""
+        message's text with each mention shown as ``@name``, for a reply ``reply_to`` and ``root_id``, and in a
+        thread ``thread_id``."""
         assert self._bus is not None
         import uuid as _uuid
 
@@ -903,7 +907,7 @@ class LarkChannelAdapter(ChannelAdapter):
         message_type = event.get("message_type", "")
         inbound = lark_content.parse(message_type, content, bot_mentions)
         text = inbound.text
-        if inbound.kind is not lark_content.ContentKind.UNSUPPORTED:
+        if inbound.kind in (lark_content.ContentKind.TEXT, lark_content.ContentKind.RICH):
             if not content.strip():
                 return
             if not text.strip() and not (event.get("reply_to") or event.get("root_id")):
@@ -956,7 +960,18 @@ class LarkChannelAdapter(ChannelAdapter):
                                chat_id, exc_info=True)
             return True
         self._reactions.add(chat_id, message_id)  # the bot saw it; in the background, the Manager gets it now
-        attachments = await self._collect(message_id, inbound.resources) if inbound.resources else []
+        quoted: list[Quote] = []
+        quoted_resources: tuple[lark_content.ResourceRef, ...] = ()
+        if not is_stop_command(text):  # a stop is claimed at once: nothing it quotes is read
+            try:
+                quoted, quoted_resources = await self._quote(
+                    event, message_id, forward=inbound.kind is lark_content.ContentKind.FORWARD,
+                    after=len(inbound.resources))
+            except Exception:
+                logger.warning("%s: could not read what message %s quotes", self.channel_id, message_id,
+                               exc_info=True)
+        resources = inbound.resources + quoted_resources
+        attachments = await self._collect(message_id, resources) if resources else []
         if any(item.state is not AttachmentState.SAVED for item in attachments):
             try:
                 reply = _not_received(attachments)
@@ -987,6 +1002,7 @@ class LarkChannelAdapter(ChannelAdapter):
             message_type=MessageType.USER_MESSAGE,
             payload={
                 "text": text,
+                **({"quoted": [quote.to_payload() for quote in quoted]} if quoted else {}),
                 **({"attachments": [item.to_payload() for item in attachments]} if attachments else {}),
                 "language": "zh",
                 "channel_context": context,
@@ -996,6 +1012,65 @@ class LarkChannelAdapter(ChannelAdapter):
         )
         await self._bus.publish(envelope)
         return True
+
+    async def _quote(self, event: dict[str, Any], message_id: str, *, forward: bool,
+                     after: int) -> tuple[list[Quote], tuple[lark_content.ResourceRef, ...]]:
+        """What the message quotes (``lark_quote``), read as the bot within ``_QUOTE_SECONDS``: a merged forward
+        itself, else the message it replies to, and in a thread, when that is not the thread's first message, the
+        first message and the latest replies. A read that fails becomes a line saying why; the message goes on."""
+        read = getattr(self._transport, "get_message", None)
+        if read is None:
+            return [], ()
+        reply_to, root_id, thread_id = (str(event.get(key) or "") for key in ("reply_to", "root_id", "thread_id"))
+        wanted = [(QuoteKind.FORWARD, message_id)] if forward else [(QuoteKind.REPLY, reply_to)] if reply_to else []
+        if (reply_to and root_id and root_id != reply_to and thread_id
+                and hasattr(self._transport, "list_thread_messages")):
+            wanted.append((QuoteKind.THREAD, root_id))
+        if not wanted:
+            return [], ()
+        deadline = monotonic() + _QUOTE_SECONDS
+
+        async def fetch(kind: QuoteKind, ref: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+            try:
+                async with asyncio.timeout(deadline - monotonic()):
+                    if kind is not QuoteKind.THREAD:
+                        return await read(ref, timeout=deadline - monotonic()), [], ""
+                    root, page = await asyncio.gather(
+                        read(ref, timeout=deadline - monotonic()),
+                        self._transport.list_thread_messages(thread_id),  # type: ignore[attr-defined]
+                        return_exceptions=True)
+                    for result in (root, page):
+                        if isinstance(result, BaseException):
+                            raise result
+                    shown = {message_id, ref, reply_to}
+                    replies = [item for item in page["messages"] if item.get("message_id") not in shown]
+                    return root, replies[:lark_quote.THREAD_TAIL][::-1], ""
+            except (TimeoutError, LarkCliError) as exc:
+                return [], [], lark_quote.failure(exc)
+            except Exception:
+                logger.warning("%s: could not read quoted message %s", self.channel_id, ref, exc_info=True)
+                return [], [], "error"
+
+        read_all = await asyncio.gather(*(fetch(kind, ref) for kind, ref in wanted))
+        names: dict[str, str] = {}
+        if ids := lark_quote.sender_ids(item for items, thread, _ in read_all for item in (*items, *thread)):
+            try:
+                names = await asyncio.wait_for(self._transport.names(ids),
+                                               max(min(_NAME_LOOKUP_SECONDS, deadline - monotonic()), 0.1))
+            except (TimeoutError, LarkCliError):
+                names = {}
+        quoted: list[Quote] = []
+        resources: list[lark_content.ResourceRef] = []
+        for (kind, ref), (items, thread, error) in zip(wanted, read_all):
+            quote, found = lark_quote.build(kind, ref, items, thread=thread, names=names, error=error,
+                                            own=(self._bot_open_id, self._bot_app_id), after=after + len(resources))
+            quoted.append(quote)
+            resources += found
+            logger.info("lark_quote channel=%s message=%s quoted=%s kind=%s type=%s messages=%d lines=%d chars=%d "
+                        "resources=%d outcome=%s", self.channel_id, message_id, ref, kind.value,
+                        quote.message_type or "unknown", quote.messages, len(quote.lines),
+                        sum(len(line) for line in quote.lines), len(found), error or "read")
+        return quoted, tuple(resources)
 
     async def _collect(self, message_id: str, refs: tuple[lark_content.ResourceRef, ...]) -> list[Attachment]:
         deadline = monotonic() + _DOWNLOAD_MESSAGE_SECONDS
@@ -1019,8 +1094,8 @@ class LarkChannelAdapter(ChannelAdapter):
                     item = replace(item, reason="could not be saved")
                 else:
                     maximum = files.IMAGE_MAX_BYTES if kind is AttachmentKind.IMAGE else files.FILE_MAX_BYTES
-                    await asyncio.wait_for(self._transport.download(message_id, ref, part, max_bytes=maximum),
-                                           min(30, remaining))
+                    await asyncio.wait_for(self._transport.download(ref.message_id or message_id, ref, part,
+                                                                    max_bytes=maximum), min(30, remaining))
                     item = files.accept(part, index=ref.index, kind=kind, name=ref.name,
                                         source=self.channel_type, max_bytes=maximum)
             except TooLarge:

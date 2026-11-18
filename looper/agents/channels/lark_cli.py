@@ -7,7 +7,8 @@ per app, so the sender allowlist records the app it was made for
 (``allowlist_app_id``) and the channel does not start under another one.
 
 Only read calls run here besides the adapter's receive, send, reply and reaction: ``whoami``,
-the bot's info (``api GET /open-apis/bot/v3/info --as bot``) and
+the bot's info (``api GET /open-apis/bot/v3/info --as bot``), the history and the messages a message quotes
+(``api GET /open-apis/im/v1/messages... --as bot``, ``im +messages-mget --as bot``) and
 ``contact +search-user --as user``; nothing reads lark-cli's configuration
 file, which holds the app secret.
 """
@@ -25,6 +26,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from ... import child_env
 
@@ -45,6 +47,10 @@ class LarkCliError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.error_type = error_type
+
+
+# ``LarkCliError.error_type`` of a call that did not answer in time.
+TIMEOUT = "timeout"
 
 
 # The Lark API's code for a message that cannot be replied to because it is gone: 230011 "The message is recalled."
@@ -104,6 +110,16 @@ def thread_history_command(thread_id: str, *, page_token: str = "", profile: str
         params["page_token"] = page_token
     return [*_base(profile), "api", "GET", "/open-apis/im/v1/messages", "--as", "bot",
             "--params", json.dumps(params)]
+
+
+def message_command(message_id: str, *, profile: str | None = None) -> list[str]:
+    """Read one message as the bot (``GET /open-apis/im/v1/messages/{id}``): a merged forward with its children."""
+    return [*_base(profile), "api", "GET", f"/open-apis/im/v1/messages/{quote(message_id, safe='')}", "--as", "bot"]
+
+
+def mget_command(message_id: str, *, profile: str | None = None) -> list[str]:
+    """Read one message as the bot through lark-cli's shortcut, which renders it (a merged forward as one block)."""
+    return [*_base(profile), "im", "+messages-mget", "--as", "bot", "--no-reactions", "--message-ids", message_id]
 
 
 def send_command(*, chat_id: str | None = None, user_id: str | None = None, text: str | None = None,
@@ -255,7 +271,7 @@ async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS, cwd: Pa
     except asyncio.TimeoutError:
         process.kill()
         await process.wait()
-        raise LarkCliError(f"lark-cli did not answer within {timeout:g} s") from None
+        raise LarkCliError(f"lark-cli did not answer within {timeout:g} s", error_type=TIMEOUT) from None
     except asyncio.CancelledError:
         # The channel is stopping: leave no lark-cli call behind.
         with contextlib.suppress(ProcessLookupError):
