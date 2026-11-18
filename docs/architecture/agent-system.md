@@ -6014,11 +6014,23 @@ implementation supplies it and is retested.
   background, outside the channel's ingress, at most 4 at once across chats:
   other chats, and `/stop` in any chat, do not wait for it, while a chat's
   later messages wait behind it, so each chat reaches the Manager in order
-  (its downloads are read there too). A `/stop` publishes its chat's
-  messages still being read at once, with `stopped by the user` in place of
-  their quotes, ahead of the stop, which withdraws them like any queued
-  message. Such a message's receipt is recorded once it is published, and the
-  restart boundary does not move past it before then.
+  (its downloads are read there too). Past 10 unpublished messages in a chat,
+  or 100 in all, a message's quotes are not read (`busy`), in order still. A
+  `/stop` publishes its chat's messages still being read at once, ahead of
+  itself, typed as withdrawn (`payload.withdrawn`): the Manager keeps them in
+  the chat's history and tells the next turn the user withdrew them, never
+  taking one as a turn or a gate reply. Such a message's receipt is written
+  only after it is published; publishing and writing are each tried 5 times
+  (0.5–4 s apart). Until the receipt is written the message keeps the restart
+  boundary (heartbeat and a clean stop), its chat's catch-up window and the
+  bot poll's window where they are. One that still fails is held
+  (`lark_delivery_held`, ERROR): it stays unrecorded, and so do its chat's
+  later messages, which are not published; the next start's catch-up reads
+  them again in order, within its 15-minute window. One published but not
+  recorded can then reach the Manager twice. An internal error reading a
+  quote leaves `could not be read: internal error`, so the message still
+  arrives. The adapter remembers the latest 1,000 group messages in a thread,
+  for answering in the thread.
   What was read goes in `payload["quoted"]` (`Quote`: kind, id, type, sender,
   lines), never in `payload["text"]`, which gate routing and `/stop` read. The
   Manager shows it after the user's words, under a line saying it is quoted
