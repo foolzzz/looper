@@ -104,7 +104,8 @@ def test_unavailable_owner_never_widens_the_filter(monkeypatch, owner_state):
             await pool.execute("UPDATE managers SET enabled=false, deleted_at=now() WHERE id=$1", OWNER)
         owner = OWNER if owner_state == "deleted" else "manager-unknown"
         assert (await projects.list_tasks_page())["counts"] == {"init": 2}
-        assert await projects.list_tasks_page(manager_id=owner) == {"tasks": [], "counts": {}, "next_before": None}
+        assert await projects.list_tasks_page(manager_id=owner) == {
+            "tasks": [], "counts": {}, "next_before": None, "hidden_scheduled": 0}
         assert await projects.list_tasks_page(manager_id=owner, compact=True) == {"tasks": [], "more": False}
     run_db(test, monkeypatch, timeout=30)
 

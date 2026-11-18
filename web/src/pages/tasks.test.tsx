@@ -20,7 +20,7 @@ const task = (id: string, day: number): TaskInfo => ({
   schedule_id: null, schedule_name: null, continues_schedule_session: false,
 });
 const page = (tasks: TaskInfo[], next_before: string | null = null): TaskPage => ({
-  tasks, next_before, counts: { completed: 5 },
+  tasks, next_before, counts: { completed: 5 }, hidden_scheduled: 0,
 });
 const newest = task("newest", 25);
 const first = task("first", 24);
@@ -148,6 +148,62 @@ describe("task list polling and pagination", () => {
     expect(rows()).toEqual(["first"]);
     expect(container.textContent).toContain("Executing");
     expect(button("Running3")).toBeDefined();
+  });
+
+  describe("hiding tasks created by schedules", () => {
+    const scheduled: TaskInfo = { ...task("from-schedule", 21), schedule_id: "sched-1", schedule_name: "Report" };
+    const showNavigating = async (query = "") => {
+      const render = (q: string): void => {
+        root.render(<TasksPage query={q} onNavigate={(_sub, next) => render(next || "")} />);
+      };
+      await act(async () => render(query));
+    };
+    const checkbox = () => container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+
+    it("hides them by default and says how many it hid", async () => {
+      await showNavigating();
+      expect(requests[0].filters?.excludeScheduled).toBe(true);
+      await finish(0, { ...page([first]), hidden_scheduled: 3 });
+      expect(checkbox().checked).toBe(true);
+      expect(checkbox().disabled).toBe(false);
+      expect(container.textContent).toContain("Hide tasks from schedules");
+      expect(container.textContent).toContain("3 hidden");
+    });
+
+    it("shows them when unchecked, keeps that in the address and refetches without the flag", async () => {
+      await showNavigating("project=demo");
+      await finish(0, { ...page([first]), hidden_scheduled: 3 });
+      await act(async () => checkbox().click());
+      expect(requests[1].filters?.excludeScheduled).toBeUndefined();
+      expect(requests[1].filters?.projectId).toBe("demo");
+      await finish(1, page([first, scheduled]));
+      expect(checkbox().checked).toBe(false);
+      expect(rows()).toEqual(["first", "from-schedule"]);
+      expect(container.textContent).not.toContain("hidden");
+      // The address carries scheduled=include, so a reload keeps the choice.
+      await act(async () => root.render(<TasksPage query="project=demo&scheduled=include" />));
+      expect(checkbox().checked).toBe(false);
+      expect(requests.at(-1)?.filters?.excludeScheduled).toBeUndefined();
+    });
+
+    it("lists a schedule's own tasks: the box is disabled and the flag is not sent", async () => {
+      await showNavigating("schedule=sched-1");
+      expect(requests[0].filters?.scheduleId).toBe("sched-1");
+      expect(requests[0].filters?.excludeScheduled).toBeUndefined();
+      await finish(0, page([scheduled]));
+      expect(checkbox().disabled).toBe(true);
+      expect(checkbox().checked).toBe(false);
+      expect(rows()).toEqual(["from-schedule"]);
+    });
+
+    it("does not insert a scheduled task from a live update while hiding them", async () => {
+      await showNavigating();
+      await finish(0, page([first]));
+      await tick(30_000);
+      expect(requests).toHaveLength(2);
+      await finish(1, page([scheduled, first]));
+      expect(rows()).toEqual(["first"]);
+    });
   });
 
   const fill = async (selector: string, value: string) => {

@@ -646,13 +646,15 @@ async def list_tasks(
     manager_id: str | None = None,
     project_ids: Sequence[str] | None = None,
     query: str = "",
+    exclude_scheduled: bool = False,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """The newest tasks (by creation, then id), each with its ``project_name`` and ``schedule_name``; only one
     project's when ``project_id`` is given, one schedule's when ``schedule_id`` is, only those covered by the
     ``status`` filter (unknown filters match exactly), or in
     ``group``, when it is, only those older than the task ``before`` when it is, and only ``manager_id``'s when given.
-    ``query`` searches the id, title, requirement, project name and goal before paging."""
+    ``query`` searches the id, title, requirement, project name and goal before paging. ``exclude_scheduled`` leaves
+    out the tasks an agent schedule created."""
     pool = pool or get_pool()
     statuses, inside = _group_filter(group)
     rows = await pool.fetch(
@@ -663,10 +665,12 @@ async def list_tasks(
           AND ($9::text IS NULL OR t.manager_id = $9)
           AND ($10 = '' OR {_SEARCH.format(parameter='$10')})
           AND ($11::text[] IS NULL OR t.project_id = ANY($11))
+          AND (NOT $12 OR t.schedule_id IS NULL)
         ORDER BY t.created_at DESC, t.id DESC LIMIT $7 OFFSET $8
         """,
         project_id, STATUS_FILTERS.get(status, (status,)) if status is not None else None,
         statuses, inside, schedule_id, before, limit, offset, manager_id, query, project_ids,
+        exclude_scheduled,
     )
     return [_task(r) for r in rows]
 
@@ -679,18 +683,20 @@ async def count_by_status(
     manager_id: str | None = None,
     project_ids: Sequence[str] | None = None,
     query: str = "",
+    exclude_scheduled: bool = False,
     pool: asyncpg.Pool | None = None,
 ) -> dict[str, int]:
-    """How many tasks ``list_tasks`` with these filters holds, by status filter; unknown statuses keep their keys.
-    Each task counts once, so summing the values gives the total."""
+    """How many tasks ``list_tasks`` with these filters (``exclude_scheduled`` included) holds, by status filter;
+    unknown statuses keep their keys. Each task counts once, so summing the values gives the total."""
     pool = pool or get_pool()
     statuses, inside = _group_filter(group)
     rows = await pool.fetch(
         f"SELECT t.status, count(*) AS n FROM tasks t JOIN projects p ON p.id=t.project_id "
         f"WHERE {_FILTERS} AND ($6 = '' OR {_SEARCH.format(parameter='$6')}) "
         "AND ($7::text IS NULL OR t.manager_id = $7) "
-        "AND ($8::text[] IS NULL OR t.project_id = ANY($8)) GROUP BY t.status",
-        project_id, None, statuses, inside, schedule_id, query, manager_id, project_ids,
+        "AND ($8::text[] IS NULL OR t.project_id = ANY($8)) AND (NOT $9 OR t.schedule_id IS NULL) "
+        "GROUP BY t.status",
+        project_id, None, statuses, inside, schedule_id, query, manager_id, project_ids, exclude_scheduled,
     )
     counts: dict[str, int] = {}
     for row in rows:

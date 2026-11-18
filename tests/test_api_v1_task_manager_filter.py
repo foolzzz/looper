@@ -37,9 +37,10 @@ def test_discovery_extends_only_requests_and_keeps_result_shapes():
     page = api_v1.find("POST", "/api/v1/tasks/page")
     compact = api_v1.find("POST", "/api/v1/ops/tasks/list")
     assert set(page.request["properties"]) == {
-        "project_id", "schedule_id", "group", "status", "before", "limit", "query", "manager_id"}
+        "project_id", "schedule_id", "group", "status", "before", "limit", "query", "manager_id",
+        "exclude_scheduled"}
     assert set(compact.request["properties"]) == {"task_id", "query", "group", "project", "limit", "manager_id"}
-    assert set(page.result["properties"]) == {"tasks", "counts", "next_before"}
+    assert set(page.result["properties"]) == {"tasks", "counts", "next_before", "hidden_scheduled"}
     assert set(compact.result["properties"]) == {"tasks", "more"}
     assert set(compact.result["properties"]["tasks"]["items"]["properties"]) == {
         "task_id", "name", "status", "group", "project", "created_at"}
