@@ -899,6 +899,10 @@ class ManagerAgent:
                     await self._stop_from_chat(envelope)
                     bus.settle(envelope.message_id)
                     continue
+                if envelope.payload.get("withdrawn") is True:
+                    await self._record_withdrawn(envelope)
+                    bus.settle(envelope.message_id)
+                    continue
                 self._register_turn(envelope)
             queue.put_nowait(envelope)
         self._task = asyncio.create_task(self._message_loop())
@@ -939,6 +943,12 @@ class ManagerAgent:
         on, queued or not."""
         if envelope.target.agent_id != self.agent_id:
             return False
+        if envelope.payload.get("withdrawn") is True:
+            # A channel's message the user stopped before it was read: never a turn, never a gate reply.
+            task = asyncio.create_task(self._record_withdrawn(envelope))
+            self._stop_tasks.add(task)
+            task.add_done_callback(self._stop_tasks.discard)
+            return True
         if self._drain is not None and self._drain.draining:
             return False
         text = envelope.payload.get("text")
@@ -959,6 +969,17 @@ class ManagerAgent:
                                     channel_id=origin["channel_id"],
                                     client_message_id=client_id if isinstance(client_id, str) and client_id else None)
         return token
+
+    async def _record_withdrawn(self, envelope: MessageEnvelope) -> None:
+        """A message the user withdrew before the model had it: kept in the chat's history, and the next turn is
+        told, as for a queued message a stop withdraws."""
+        first_line = " ".join(str(envelope.payload.get("text", "")).split())[:80]
+        self._stopped_notes = [*self._stopped_notes, f'[Looper] The user withdrew a message before you saw it (it '
+                               f'began: "{first_line}"). Do not act on it unless they ask again.'][-3:]
+        try:
+            await self._persist_user(envelope, str(envelope.payload.get("text", "")))
+        except Exception:
+            logger.warning("%s: could not keep withdrawn message %s", self._log, envelope.message_id, exc_info=True)
 
     async def _stop_from_chat(self, envelope: MessageEnvelope) -> None:
         try:

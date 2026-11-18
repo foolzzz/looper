@@ -23,6 +23,11 @@ from looper.agents.message import (
 OPEN_ID = "ou_7dab8a3d3cdcc9da365777c7ad535d62"
 OTHER_OPEN_ID = "ou_0f1e2d3c4b5a69788796a5b4c3d2e1f0"
 
+def _tasks(adapter: Any) -> list[Any]:
+    """The adapter's messages still being read in the background."""
+    return [delivery.task for delivery in adapter._unsettled.values() if delivery.task is not None]
+
+
 
 class TestWebChannelAdapter:
     def test_handle_user_message(self) -> None:
@@ -709,7 +714,7 @@ class TestLarkAllowlist:
                                          on_rejected=_rejected, bot_open_id=bot_open_id)
             adapter._bus = bus  # what start() sets, without running lark-cli
             await adapter._handle_lark_event(event)
-            await asyncio.gather(*adapter._deliveries)  # a reply's quote is read in the background
+            await asyncio.gather(*_tasks(adapter))  # a reply's quote is read in the background
             messages = _manager_messages(bus)
             await asyncio.gather(*adapter._reactions._pending)
             await adapter.stop()

@@ -897,6 +897,37 @@ def test_quoted_lark_content_follows_the_users_words_marked_and_bounded() -> Non
         assert len(block) <= lark_quote.BLOCK_MAX + 500
 
 
+@pytest.mark.usefixtures("agent_db")
+def test_a_withdrawn_lark_message_is_recorded_and_never_a_turn_or_a_gate_reply(tmp_path: Path) -> None:
+    """A /stop withdrew it while its quote was read: a gate reply must not reach its gate, nor the model."""
+    async def main() -> None:
+        bus = MessageBus(runtime_root=tmp_path)
+        manager = ManagerAgent(config=ManagerConfig(work_dir=tmp_path), runtime_root=tmp_path)
+        manager._bus = bus
+
+        async def no_gate(*args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("a withdrawn message was routed to a gate")
+
+        manager._route_to_gate = no_gate
+        bus.subscribe_topic(MessageType.USER_MESSAGE.value, manager._receive, consumes=True)
+        envelope = MessageEnvelope.create(
+            source=LARK, target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE, correlation_id="corr-w",
+            payload={"text": "用 Redis", "withdrawn": True, "channel_context": {
+                "chat_id": "oc_team", "chat_type": "group", "sender_id": "ou_1", "message_id": "om_w",
+                "reply_to": "om_gate_post"}},
+            metadata={"origin_channel_id": "channel-lark"})
+        try:
+            await bus.publish(envelope)
+            await asyncio.gather(*manager._stop_tasks)
+            assert bus.get_queue("manager").empty() and not manager._turns.live()
+            assert manager._stopped_notes == ['[Looper] The user withdrew a message before you saw it (it began: '
+                                              '"用 Redis"). Do not act on it unless they ask again.']
+        finally:
+            await bus.shutdown()
+
+    asyncio.run(main())
+
+
 def _system(**values: Any) -> dict[str, Any]:
     return {"scope": "system", **values}
 

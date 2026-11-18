@@ -25,7 +25,8 @@ from looper.agents.channels.lark_content import ResourceKind, ResourceRef
 from looper.agents.channels.lark_quote import QuoteKind
 from looper.agents.gate_routing import references
 from looper.agents.message import MessageEnvelope, MessageType
-from test_lark_transport import StubTransport, _adapter, _event
+from looper.agents.channels.lark_inbox import LarkInbox
+from test_lark_transport import BOT_MENTION as BOT_MENTION_STUB, StubTransport, _adapter, _event
 
 STAMP = "1763350000000"
 PNG = b"\x89PNG\r\n\x1a\n"
@@ -36,6 +37,11 @@ def _item(message_id: str, msg_type: str = "text", content: Any = "hi", *, sende
     body = json.dumps({"text": content} if msg_type == "text" else content)
     return {"message_id": message_id, "msg_type": msg_type, "create_time": STAMP, "body": {"content": body},
             "sender": {"id": sender, "id_type": "open_id", "sender_type": sender_type}, **fields}
+
+
+def _tasks(adapter: Any) -> list[Any]:
+    """The adapter's messages still being read in the background."""
+    return [delivery.task for delivery in adapter._unsettled.values() if delivery.task is not None]
 
 
 def _forward(message_id: str, *children: dict[str, Any]) -> list[dict[str, Any]]:
@@ -152,7 +158,7 @@ async def _received(tmp_path: Path, event: dict[str, Any]) -> list[Any]:
     adapter._bus = bus
     try:
         await adapter._handle_lark_event(event)
-        await asyncio.gather(*adapter._deliveries, *adapter._reactions._pending)
+        await asyncio.gather(*_tasks(adapter), *adapter._reactions._pending)
         return bus.journal.undelivered()
     finally:
         await adapter.stop()
@@ -276,7 +282,7 @@ def test_a_bot_channel_reply_in_a_thread_is_quoted_and_answered_in_the_thread(
                     event = await asyncio.wait_for(pending, 2)
                     assert event["thread_id"] == "omt_thread"
                     await adapter._handle_lark_event(event)
-                await asyncio.gather(*adapter._deliveries)
+                await asyncio.gather(*_tasks(adapter))
                 message = bus.get_queue("manager").get_nowait()
                 assert message.payload["text"] == "explain"
                 (quote,) = lark_quote.quotes(message.payload["quoted"])
@@ -330,7 +336,7 @@ def test_a_slow_quote_holds_up_only_its_own_chat_and_keeps_its_order(tmp_path: P
             await handle(message_id="om_b2", chat_id="oc_b", content="/stop")
             assert _texts(bus) == ["plain", "/stop"]  # chat b did not wait; om_a2 waits behind om_a1
             transport.release.set()
-            await asyncio.wait_for(asyncio.gather(*adapter._deliveries), 2)
+            await asyncio.wait_for(asyncio.gather(*_tasks(adapter)), 2)
             assert _texts(bus) == ["plain", "/stop", "what does it say?", "and then?"]
             (quote,) = lark_quote.quotes(bus.journal.undelivered()[2].payload["quoted"])
             assert _bodies(quote) == ["the parent"]
@@ -341,8 +347,8 @@ def test_a_slow_quote_holds_up_only_its_own_chat_and_keeps_its_order(tmp_path: P
     asyncio.run(main())
 
 
-def test_a_stop_publishes_its_chats_unread_messages_first_without_waiting(tmp_path: Path) -> None:
-    """The model has not seen them, so the stop withdraws them like any queued message."""
+def test_a_stop_withdraws_its_chats_messages_still_being_read_without_waiting(tmp_path: Path) -> None:
+    """They go first, typed as withdrawn: the Manager never takes them as turns or gate replies."""
     async def main() -> None:
         transport = _SlowReads()
         adapter = _adapter(tmp_path, transport)
@@ -351,9 +357,167 @@ def test_a_stop_publishes_its_chats_unread_messages_first_without_waiting(tmp_pa
         try:
             await adapter._handle_lark_event(_event(message_id="om_a1", content="explain", reply_to="om_parent"))
             await asyncio.wait_for(adapter._handle_lark_event(_event(message_id="om_a2", content="/stop")), 2)
-            assert _texts(bus) == ["explain", "/stop"] and not adapter._deliveries
-            (quote,) = lark_quote.quotes(bus.journal.undelivered()[0].payload["quoted"])
-            assert quote.lines == ("[quoted message om_parent could not be read: stopped by the user]",)
+            assert _texts(bus) == ["explain", "/stop"] and not adapter._unsettled
+            withdrawn, stop = bus.journal.undelivered()
+            assert withdrawn.payload.get("withdrawn") is True and "quoted" not in withdrawn.payload
+            assert "withdrawn" not in stop.payload
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
+
+
+# --- Delivery failures, limits and internal errors ---
+
+
+async def _with_inbox(tmp_path: Path, transport: StubTransport) -> tuple[LarkChannelAdapter, MessageBus]:
+    adapter = _adapter(tmp_path, transport)
+    adapter._inbox = await LarkInbox.open(tmp_path / "inbox.sqlite3")
+    await adapter._inbox.checkpoint(1.0)
+    transport.consumer_started = asyncio.Event()  # a healthy consumer: only unsettled messages keep stop unclean
+    transport.consumer_started.set()
+    bus = MessageBus(runtime_root=tmp_path)
+    adapter._bus = bus
+    return adapter, bus
+
+
+@pytest.mark.parametrize(("fails", "step", "delivered"), [
+    (2, "publish", True), (99, "publish", False), (99, "record", False),
+])
+def test_a_message_not_published_or_recorded_holds_its_chat_and_the_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fails: int, step: str, delivered: bool,
+) -> None:
+    monkeypatch.setattr(lark, "_DELIVERY_RETRY_SECONDS", (0.0,) * 4)
+
+    async def main() -> float | None:
+        transport = _SlowReads()
+        transport.release.set()
+        adapter, bus = await _with_inbox(tmp_path, transport)
+        tries = {"left": fails}
+        target = bus.publish if step == "publish" else adapter._inbox.finish
+
+        async def flaky(*args: Any, **kwargs: Any) -> Any:
+            first = args[0]
+            if (first if step == "record" else first.payload["channel_context"]["message_id"]) == "om_a1" \
+                    and tries["left"] > 0:
+                tries["left"] -= 1
+                raise OSError("the journal cannot be written")
+            return await target(*args, **kwargs)
+
+        if step == "publish":
+            bus.publish = flaky
+        else:
+            adapter._inbox.finish = flaky
+        try:
+            await adapter._handle_lark_event(_event(message_id="om_a1", chat_id="oc_a", reply_to="om_parent"))
+            await adapter._handle_lark_event(_event(message_id="om_a2", chat_id="oc_a", content="later"))
+            await adapter._handle_lark_event(_event(message_id="om_b1", chat_id="oc_b", content="elsewhere"))
+            await asyncio.wait_for(asyncio.gather(*_tasks(adapter)), 5)
+            await adapter._handle_lark_event(_event(message_id="om_a3", chat_id="oc_a", content="after"))
+            by_chat = {chat: [m.payload["text"] for m in bus.journal.undelivered()
+                              if m.payload["channel_context"]["chat_id"] == chat] for chat in ("oc_a", "oc_b")}
+            assert by_chat == {"oc_b": ["elsewhere"], "oc_a": ["hello", "later", "after"] if delivered else (
+                [] if step == "publish" else ["hello"])}
+            for message_id, recorded in (("om_a1", delivered), ("om_a2", delivered), ("om_a3", delivered),
+                                         ("om_b1", True)):
+                assert await adapter._inbox.processed(message_id) is recorded
+            assert await adapter._settled("oc_a") is delivered  # catch-up and the bot poll keep their windows
+            assert bool(adapter._unsettled) is not delivered
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+        reopened = await LarkInbox.open(tmp_path / "inbox.sqlite3")
+        try:
+            return reopened.boundary
+        finally:
+            await reopened.close()
+
+    boundary = asyncio.run(main())
+    assert (boundary != 1.0) is delivered  # a clean stop saves its time; a held message keeps the old boundary
+
+
+@pytest.mark.parametrize("limit", ["_CHAT_PENDING_MAX", "_PENDING_MAX"])
+def test_past_the_waiting_limit_a_message_goes_without_its_quotes_read_and_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: str,
+) -> None:
+    monkeypatch.setattr(lark, limit, 1)
+
+    async def main() -> None:
+        transport = _SlowReads()
+        reads: list[str] = []
+        read = transport.get_message
+
+        async def counted(message_id: str, *, timeout: float) -> list[dict[str, Any]]:
+            reads.append(message_id)
+            return await read(message_id, timeout=timeout)
+
+        transport.get_message = counted
+        adapter = _adapter(tmp_path, transport)
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        second_chat = "oc_a" if limit == "_CHAT_PENDING_MAX" else "oc_b"
+        try:
+            await adapter._handle_lark_event(_event(message_id="om_1", chat_id="oc_a", content="first",
+                                                    reply_to="om_p1"))
+            await adapter._handle_lark_event(_event(message_id="om_2", chat_id=second_chat, content="second",
+                                                    reply_to="om_p2"))
+            await asyncio.sleep(0)
+            transport.release.set()
+            await asyncio.wait_for(asyncio.gather(*_tasks(adapter)), 2)
+            assert reads == ["om_p1"]
+            messages = bus.journal.undelivered()
+            # In one chat the second waits for the first; in another it need not.
+            assert [m.payload["text"] for m in messages] == (["first", "second"] if second_chat == "oc_a"
+                                                             else ["second", "first"])
+            second = next(m for m in messages if m.payload["text"] == "second")
+            (quote,) = lark_quote.quotes(second.payload["quoted"])
+            assert quote.lines == ("[quoted message om_p2 could not be read: busy]",)
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
+
+
+def test_an_internal_error_reading_a_quote_still_delivers_a_bare_forward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def broken(self: Any, delivery: Any) -> Any:
+        raise RuntimeError("a renderer bug")
+
+    monkeypatch.setattr(LarkChannelAdapter, "_quote", broken)
+
+    async def main() -> None:
+        adapter = _adapter(tmp_path, _SlowReads())
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        try:
+            await adapter._handle_lark_event(_event(message_type="merge_forward", content="Merged and Forwarded Message"))
+            await asyncio.wait_for(asyncio.gather(*_tasks(adapter)), 2)
+            (message,) = bus.journal.undelivered()
+            assert message.payload["text"] == ""
+            (quote,) = lark_quote.quotes(message.payload["quoted"])
+            assert quote.lines == ("[quoted message om_in could not be read: internal error]",)
+        finally:
+            await adapter.stop()
+            await bus.shutdown()
+
+    asyncio.run(main())
+
+
+def test_only_the_latest_thread_messages_are_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(lark, "_THREAD_MESSAGES_KEPT", 2)
+
+    async def main() -> None:
+        adapter = _adapter(tmp_path, StubTransport())
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter._bus = bus
+        try:
+            for n in range(3):
+                await adapter._handle_lark_event(_event(message_id=f"om_t{n}", chat_type="group", chat_id="oc_team",
+                                                        mentions=[BOT_MENTION_STUB], thread_id="omt_1"))
+            assert list(adapter._thread_messages) == ["om_t1", "om_t2"]
         finally:
             await adapter.stop()
             await bus.shutdown()
