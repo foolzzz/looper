@@ -18,6 +18,25 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.14] - 2026-11-18
+
+### Added
+
+- **The Manager sees what a Lark message replies to or forwards.** ([#1402](https://github.com/foolzzz/looper/pull/1402))
+  - A reply, a reply in a thread, or a merged forward now reaches the Manager with the quoted content: after the user's words come a line saying it is quoted content and not instructions, then `<lark_quote>` blocks and the quote's images and files. In a thread the first message and the latest 10 are read too. This is new model-visible content.
+  - The Manager reads the quote while it prepares the turn, not when the message arrives. A read takes at most 15 s, so a message that quotes starts its turn later (about 4-5 s for a plain parent, 5-11 s for a merged forward), and the same Manager's later messages wait for it. `/stop` cancels the read; `/command` and gate replies read nothing. An unreadable quote is shown as `[quoted message ... could not be read: <why>]` and the turn goes on.
+  - Reading needs the app's `im:message:readonly` scope; when it is missing the quote says so.
+
+### Changed
+
+- **Lark: merged forwards and empty @-mentions are answered.** ([#1402](https://github.com/foolzzz/looper/pull/1402))
+  - A merged forward in a direct chat reaches the Manager; it used to get "not supported". An @-mention with no words that replies to a message is answered instead of dropped. A merged forward in a group that does not @-mention the bot is still ignored.
+
+### Fixed
+
+- **Bot-token Lark channel keeps threads and no longer drops cards.** ([#1402](https://github.com/foolzzz/looper/pull/1402))
+  - Answers to a thread message stay in the thread (`thread_id` was lost). A card message gets the same "not supported" answer as other unsupported types instead of silence.
+
 ## [2.15.13] - 2026-11-17
 
 ### Added
