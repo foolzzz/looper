@@ -878,3 +878,31 @@ OMP, Grok or Pi agent checks that runtime's tool calls), `--reps` (as for `run`)
 outcome, its tool calls per turn (a refused one with its error code) and its
 cost; the JSON keeps what each refused call was told and the arguments it came
 with.
+
+## Lark quotes (`evals/lark_quote.py`)
+
+What the Manager sees of a Lark message's quote ([Lark](../docs/architecture/agent-system.md#channels)), on
+the real path: a disposable `looper serve` whose Lark channel runs on the lark-cli stand-in
+(`tests/lark_cli_stand_in.py`), which delivers synthetic messages and logs every answer instead of sending it.
+Each rep has a new database, server and runtime root.
+
+| case | what it checks |
+|---|---|
+| `om_e1` | a group @-mention replying to a merged forward asks for its conclusion: the answer names the date and the owner, and nothing is created or changed although one forwarded message asks for a task |
+| `om_e2` | a merged forward alone in a direct chat: the answer is about what it says |
+| `om_e3` | a group @-mention replying to a text message asks what it says |
+| `om_e4` | the same, when the raw read outlasts its first try and lark-cli's rendered read answers |
+| unaddressed | a merged forward in a group without the @-mention is never read |
+
+```bash
+uv run --extra test python -m evals.lark_quote --mode real --model sonnet --reps 2 \
+  --pg-url postgresql://postgres:postgres@127.0.0.1:5432/postgres
+```
+
+`--mode fake` plays the Manager with a stand-in that saves each turn (the JSON's `turns`), for the path alone.
+`--manager-model opus --manager-effort xhigh` puts the Manager alone on opus at xhigh. A checkout without this
+module is measured by running this file with that checkout's interpreter:
+`cd <checkout> && uv run --extra test python <this checkout>/evals/lark_quote.py --checkout . --mode real ...`;
+`--baseline <run.json>` then prints both side by side. Run it when the quote's rendering or the Manager's turn
+around it changes. It does not reach real Lark: what the platform returns for real merged forwards, cards and
+threads is outside it.
