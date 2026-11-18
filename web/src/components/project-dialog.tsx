@@ -23,12 +23,16 @@ export function ProjectDialog({ projectsRoot, onClose, onCreated }: ProjectDialo
   const tooLong = backgroundTooLong(background);
   const [error, setError] = useState("");
 
+  // Escape closes this dialog only: caught before the sidebar drawer's own Escape handler, which would close the
+  // drawer behind it instead (and its re-render would drop this listener before it ran).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onClose();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [onClose]);
 
   const submit = async (e: React.FormEvent) => {

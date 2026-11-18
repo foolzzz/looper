@@ -11,7 +11,7 @@ vi.mock("@/lib/api", async (original) => ({
   fetchGates: vi.fn(), fetchProjectsList: vi.fn(), fetchOverview: vi.fn(),
 }));
 vi.mock("@/components/sign-out", () => ({ SignOut: () => null }));
-vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => null }));
+vi.mock("@/components/project-dialog", () => ({ ProjectDialog: () => <div role="dialog" /> }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const gates = (waiting: number): GateList => ({
@@ -134,5 +134,17 @@ describe("Sidebar version label", () => {
     vi.mocked(fetchOverview).mockReturnValue(new Promise(() => {}));
     await render();
     expect(host.textContent).not.toMatch(/v\d/);
+  });
+});
+
+describe("Sidebar New project dialog", () => {
+  it("opens on document.body, outside the sidebar that would confine it", async () => {
+    await render();
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>('button[aria-label="New project"]')!.click();
+    });
+    const dialog = document.querySelector('[role="dialog"]')!;
+    expect(dialog.parentElement).toBe(document.body);
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
   });
 });

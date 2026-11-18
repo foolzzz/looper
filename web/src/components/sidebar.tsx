@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   LayoutDashboard,
   MessageSquare,
@@ -81,7 +82,8 @@ export function Sidebar({
       id={SIDEBAR_ID}
       aria-label="Navigation"
       className={cn(
-        "fixed inset-y-0 left-0 z-40 flex h-screen w-56 flex-col border-r border-border bg-card",
+        // The whole column scrolls when it is taller than the screen (a phone on its side, Settings open).
+        "fixed inset-y-0 left-0 z-40 flex h-screen w-56 flex-col overflow-y-auto overscroll-contain border-r border-border bg-card",
         "transition-[transform,visibility] duration-200 motion-reduce:transition-none",
         "lg:visible lg:static lg:z-auto lg:translate-x-0",
         open ? "visible translate-x-0" : "invisible -translate-x-full",
@@ -240,7 +242,9 @@ function ProjectsSection({
   const [creating, setCreating] = useState(false);
 
   return (
-    <section aria-label="Projects" className="flex min-h-0 flex-1 flex-col border-t border-border">
+    // Below lg the list grows with its projects and the drawer scrolls; from lg up it scrolls on its own, and keeps
+    // a few rows when the window is short.
+    <section aria-label="Projects" className="flex flex-1 flex-col border-t border-border lg:min-h-32">
       <div className="flex shrink-0 items-center justify-between pl-5 pr-3 pt-3 pb-1">
         <span className="font-mono text-xs font-medium uppercase tracking-wider text-muted-foreground">
           Projects
@@ -256,7 +260,7 @@ function ProjectsSection({
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-3 space-y-0.5">
+      <div className="space-y-0.5 px-2 pb-3 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:overscroll-contain">
         {projects === null ? (
           error && <p className="px-3 py-1.5 text-xs text-destructive">{error}</p>
         ) : projects.length === 0 ? (
@@ -298,7 +302,8 @@ function ProjectsSection({
         )}
       </div>
 
-      {creating && (
+      {/* On document.body: the sidebar's translate would otherwise confine the fixed dialog to the sidebar. */}
+      {creating && createPortal(
         <ProjectDialog
           projectsRoot={projectsRoot}
           onClose={() => setCreating(false)}
@@ -306,7 +311,8 @@ function ProjectsSection({
             setCreating(false);
             onOpenProject(project.project_id);
           }}
-        />
+        />,
+        document.body,
       )}
     </section>
   );

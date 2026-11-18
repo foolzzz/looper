@@ -32,11 +32,11 @@ export function ManagerSessionProfileView({
   const profile = view.effective.profile;
   const name = profile ? sessionProfileLabel(profile) : "none";
   return (
-    <div className="flex flex-col gap-1 text-xs">
-      <div className="flex items-center gap-1.5 text-muted-foreground">
-        <span>Agent:</span>
-        <span className="hidden text-foreground sm:inline">{name}</span>
-        <span>({sourceText(view)})</span>
+    <div className="flex min-w-0 max-w-full flex-col gap-1 text-xs sm:max-w-xs">
+      <div className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
+        <span className="shrink-0">Agent:</span>
+        <span title={name} className="hidden min-w-0 truncate text-foreground sm:inline">{name}</span>
+        <span className="shrink-0">({sourceText(view)})</span>
       </div>
       <label className="sr-only" htmlFor="manager-session-profile">Agent Profile for this session</label>
       <select
