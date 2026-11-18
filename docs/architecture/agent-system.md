@@ -6027,13 +6027,16 @@ implementation supplies it and is retested.
   user's instructions, as `<lark_quote id=… type=… from=… note=…>` blocks: one
   line per message, `[MM-DD HH:MM] name: content`, replies one level in, at
   most 1,500 characters a message (300 for one this bot sent), 50 messages and
-  8,000 characters a block, then `… N more not shown`. A nested merged forward
+  8,000 characters a block, then `… N more not shown`. Quoted text cannot open
+  or close a block, and sender names and attribute values stay on one line
+  and cannot end the tag. A nested merged forward
   is expanded one level, deeper ones show `[merged forward, not expanded]`;
   cards show their title and text, else `[card message]`; a recalled message
   `[recalled]`. A merged forward's children are read live, so they can include
   replies posted after the forward. Images and files in quoted messages are
   saved beside the message's own, numbered after them, and share its 10
-  attachments; one not received is shown to the Manager as not received,
+  attachments; the files saved at intake stay (a replay replaces only the
+  quote's own); one not received is shown to the Manager as not received,
   without a separate notice to the user. A merged forward's raw read gives
   each child the keys of its own message, so those download through the
   child's id (the forward's id refuses them); lark-cli's rendering shows the
