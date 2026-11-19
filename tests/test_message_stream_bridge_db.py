@@ -193,10 +193,13 @@ def test_origin_follows_the_first_read_and_the_age_of_a_line(monkeypatch, tmp_pa
         # A first read keeps the last 24 hours only, all as an import.
         assert await rows(pool, "external_id, origin") == [("first_recent", "import")]
         assert report.events_skipped == 1
-        sup.append(tmp_path, "oc_a", sup.message("backfill", sent_at=old), sup.message("fresh", sent_at=sup.NOW))
-        await passes(pool, tmp_path)
+        sup.append(tmp_path, "oc_a", sup.message("backfill", sent_at=old), sup.message("fresh", sent_at=sup.NOW),
+                   sup.message("ancient", sent_at=sup.NOW - timedelta(days=30)))
+        report = await passes(pool, tmp_path)
+        # Later reads keep a week back at most, so a rewritten file cannot bring its whole history in.
         assert dict(await rows(pool, "external_id, origin")) == {
             "first_recent": "import", "backfill": "history", "fresh": "live"}
+        assert report.events_skipped == 1
 
     run_db(check, monkeypatch, setup=make_source(tmp_path), timeout=30)
 

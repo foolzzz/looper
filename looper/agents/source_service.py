@@ -7,7 +7,8 @@ import``. ``SourceService`` runs a pass for every bridged source on the source's
 
 ``origin`` of a stored event: a file read for the first time (or by an import) is ``import``; a line of a known file
 that was sent more than 24 hours before it was ingested is ``history``; the rest are ``live``. A first read keeps
-only the last 24 hours (an import: ``days``), so switching the bridge on never pulls a collector's whole history.
+only the last 24 hours (an import: ``days``) and a later read nothing older than seven days, so neither switching the
+bridge on nor a collector rewriting a file pulls its whole history in.
 Messages sent by one of Looper's own bots are never stored, and a direct chat that holds one is excluded.
 """
 
@@ -32,6 +33,9 @@ logger = logging.getLogger(__name__)
 TICK_SECONDS = 15.0
 FIRST_SCAN_DAYS = 1
 HISTORY_AFTER = timedelta(hours=24)
+# A pass that is not a first read or an import keeps nothing older: a collector that rewrites a file must not bring
+# its whole history in through the door a first read keeps shut.
+BRIDGE_MAX_AGE = timedelta(days=7)
 OWN_APPS_REFRESH_SECONDS = 300.0
 BRIDGE_CRON = "*/2 * * * *"
 
@@ -140,7 +144,7 @@ async def _ingest_file(source: Mapping[str, Any], path: Path, run_id: int | None
             user_open_id = source["user_open_id"]
             for message in scan.messages:
                 if looper_chat or (message.sender_kind == "app" and message.sender_id in own_apps) or (
-                        first and message.sent_at < first_since):
+                        message.sent_at < (first_since if first else now - BRIDGE_MAX_AGE)):
                     skipped += 1
                     continue
                 if message.external_id in seen_here:

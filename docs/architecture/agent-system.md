@@ -4523,7 +4523,8 @@ default) or a source that is `off`, the server does one query per tick.
   a pass killed in the middle of a file loses nothing and repeats nothing.
 - **Origin:** a file read for the first time keeps its last 24 hours (an import:
   `--days`) and marks them `import`; later lines sent over 24 hours before they
-  were stored are `history`, the rest `live`.
+  were stored are `history`, the rest `live`; a later read keeps nothing older
+  than seven days, so a collector that rewrites a file cannot bring its history in.
 - **Looper does not read itself back:** messages sent by an app that one of
   Looper's own enabled Lark channels acts as are not stored (app ids come from
   the channel configuration), and a direct chat holding one is excluded
