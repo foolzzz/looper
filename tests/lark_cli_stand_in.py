@@ -145,6 +145,17 @@ if args[:2] == ["api", "GET"] and args[2].startswith("/open-apis/im/v1/messages/
     if items is None:
         refuse("the message does not exist", api_code=230001)
     answer({{"code": 0, "msg": "success", "data": {{"items": items}}}})
+if args[:5] == ["api", "GET", "/open-apis/im/v1/messages/mget", "--as", "bot"] and args[5:6] == ["--params"]:
+    # The batch read: the world's "batch" items, else the message's own raw item, without a merged forward's
+    # children; at once, also for an id the single read is slow on.
+    message_id = json.loads(args[6])["message_ids"]
+    items = world.get("batch", {{}}).get(message_id)
+    if items is None:
+        items = [item for item in world.get("messages", {{}}).get(message_id) or []
+                 if item.get("message_id") == message_id][:1]
+    if not items:
+        refuse("the message does not exist", api_code=230001)
+    answer({{"code": 0, "msg": "success", "data": {{"items": items}}}})
 if args[:5] == ["api", "GET", "/open-apis/im/v1/messages", "--as", "bot"] and args[5:6] == ["--params"]:
     params = json.loads(args[6])
     if params.get("container_id_type") != "thread":
@@ -173,8 +184,10 @@ refuse('unknown command "%s" for "lark-cli"' % args[0])
 
 WORLD: dict[str, Any] = {
     "resources": {},
-    # Read by id (raw items), through lark-cli's shortcut (rendered) and threads' messages, newest first.
+    # Read by id (raw items), through the batch read when it differs, through lark-cli's shortcut (rendered) and
+    # threads' messages, newest first.
     "messages": {},
+    "batch": {},
     "mget": {},
     "threads": {},
     "active": "cli_main",
