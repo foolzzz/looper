@@ -65,7 +65,14 @@ Every field is optional, and ``None`` inherits today's behavior, but for ``user_
 - the room's consults: ``room_consult_budget_usd`` (what one may spend,
   ``CONSULT_BUDGET_RANGE``, 0.50 when unset), ``room_consult_timeout_seconds``
   and ``room_consults_per_task`` (0: every question for a seat no run is in
-  goes to the Planner), in ``ROOM_LIMITS``.
+  goes to the Planner), in ``ROOM_LIMITS``;
+- ``advisor``: whether the project's Planners consult the advisor (``on``) or
+  not (``off``, also when unset; the advisor RFC), and its limits
+  (``AdvisorLimits``): ``advisor_consult_budget_usd`` (what one consult may
+  spend, 0.01 to 5, 1 when unset), ``advisor_budget_usd`` (what a task's
+  consults may spend in all, 0.01 to 50, 5 when unset),
+  ``advisor_consults_per_task`` (0 to 100, 10 when unset) and
+  ``advisor_consults_per_step`` (0 to 10, 2 when unset).
 
 The columns live on ``projects`` (``db.projects.EXECUTION_COLUMNS``); this
 module owns their types and validation. Agents read them when a run or turn
@@ -113,6 +120,15 @@ ROOM_LIMITS: dict[str, tuple[int, int, int, str]] = {
 # What one consult may spend, in USD, and its default.
 CONSULT_BUDGET_RANGE = (0.01, 5.0)
 DEFAULT_CONSULT_BUDGET_USD = 0.50
+# The advisor's limits: each USD amount's range and default, and each count's (``AdvisorLimits``).
+ADVISOR_BUDGETS: dict[str, tuple[float, float, float, str]] = {
+    "advisor_consult_budget_usd": (0.01, 5.0, 1.0, "what one consult of the advisor may spend"),
+    "advisor_budget_usd": (0.01, 50.0, 5.0, "what a task's consults of the advisor may spend in all"),
+}
+ADVISOR_COUNTS: dict[str, tuple[int, int, int, str]] = {
+    "advisor_consults_per_task": (0, 100, 10, "consults of the advisor a task may have"),
+    "advisor_consults_per_step": (0, 10, 2, "consults of the advisor a step may have"),
+}
 
 
 class ReviewPolicy(str, Enum):
@@ -185,6 +201,21 @@ class RoomLimits:
     consult_budget_usd: float = DEFAULT_CONSULT_BUDGET_USD
 
 
+class AdvisorMode(str, Enum):
+    OFF = "off"
+    ON = "on"
+
+
+@dataclass(frozen=True)
+class AdvisorLimits:
+    """A project's limits on consults of the advisor, each set or its default."""
+
+    consult_budget_usd: float = ADVISOR_BUDGETS["advisor_consult_budget_usd"][2]
+    budget_usd: float = ADVISOR_BUDGETS["advisor_budget_usd"][2]
+    consults_per_task: int = ADVISOR_COUNTS["advisor_consults_per_task"][2]
+    consults_per_step: int = ADVISOR_COUNTS["advisor_consults_per_step"][2]
+
+
 class LessonsMode(str, Enum):
     OFF = "off"
     DRAFT = "draft"
@@ -221,6 +252,11 @@ class ProjectExecution:
     room_consult_budget_usd: float | None = None
     room_consult_timeout_seconds: int | None = None
     room_consults_per_task: int | None = None
+    advisor: AdvisorMode | None = None
+    advisor_consult_budget_usd: float | None = None
+    advisor_budget_usd: float | None = None
+    advisor_consults_per_task: int | None = None
+    advisor_consults_per_step: int | None = None
 
     def overlaid(self, workflow: Mapping[str, Any] | None) -> ProjectExecution:
         """Apply the immutable task workflow over the project's current settings."""
@@ -318,6 +354,17 @@ class ProjectExecution:
         return RoomLimits(**limits)
 
     @property
+    def advisor_on(self) -> bool:
+        """Whether the project's Planners consult the advisor: only when turned on."""
+        return self.advisor is AdvisorMode.ON
+
+    @property
+    def advisor_limits(self) -> AdvisorLimits:
+        return AdvisorLimits(**{field.removeprefix("advisor_"): value
+                                for field in (*ADVISOR_BUDGETS, *ADVISOR_COUNTS)
+                                if (value := getattr(self, field)) is not None})
+
+    @property
     def on_task_budget(self) -> TaskBudgetAction:
         return self.task_budget_action or TaskBudgetAction.FAIL
 
@@ -390,6 +437,19 @@ def _parse(field: str, raw: Any) -> Any:
         return _choice(field, raw, UserGates)
     if field == "agent_room":
         return _choice(field, raw, AgentRoom)
+    if field == "advisor":
+        return _choice(field, raw, AdvisorMode)
+    if field in ADVISOR_BUDGETS:
+        low, high, default, what = ADVISOR_BUDGETS[field]
+        value = budget_usd(raw, field=field)
+        if value is None or not low <= value <= high:
+            raise ValueError(f"{field} ({what}) must be from {low:g} to {high:g} USD, or null for {default:g}")
+        return value
+    if field in ADVISOR_COUNTS:
+        low, high, default, what = ADVISOR_COUNTS[field]
+        if isinstance(raw, bool) or not isinstance(raw, int) or not low <= raw <= high:
+            raise ValueError(f"{field} ({what}) must be a whole number from {low} to {high}, or null for {default}")
+        return raw
     if field == "room_consult_budget_usd":
         low, high = CONSULT_BUDGET_RANGE
         value = budget_usd(raw, field=field)

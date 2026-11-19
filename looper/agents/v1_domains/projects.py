@@ -5,7 +5,7 @@ from .. import projects as core
 from ..api_v1 import Operation, _array, _object, _STR, _NULL_STR, _INT, _BOOL, _summary
 from ..ops import Call, ErrorCode, OpError, Turn
 from ..ops.config import _deleting_project, answered, directory_change_impact, project_named
-from ..project_execution import FIELDS, ROOM_LIMITS
+from ..project_execution import ADVISOR_BUDGETS, ADVISOR_COUNTS, FIELDS, ROOM_LIMITS
 
 
 def _choice(*values):
@@ -16,12 +16,13 @@ def _choice(*values):
 EXECUTION = {
     "task_budget_usd": {"type": ["number", "null"]},
     "room_consult_budget_usd": {"type": ["number", "null"]},
+    **dict.fromkeys(ADVISOR_BUDGETS, {"type": ["number", "null"]}),
     **dict.fromkeys(("supervise_interval_seconds", "max_step_retries", "role_text_max_chars",
-                     "gate_reminder_hours", *ROOM_LIMITS), {"type": ["integer", "null"]}),
+                     "gate_reminder_hours", *ROOM_LIMITS, *ADVISOR_COUNTS), {"type": ["integer", "null"]}),
     "task_budget_action": _choice("wrap_up", "fail"), "review_policy": _choice("planner", "all"),
     "step_workspaces": _choice("shared", "worktree"), "task_workspaces": _choice("in_place", "worktree"),
     **dict.fromkeys(("planner_roles", "wait_commands", "user_gates", "agent_room", "operator_notes", "vault",
-                    "dependency_conditions"),
+                    "dependency_conditions", "advisor"),
                     _choice("off", "on")),
     **dict.fromkeys(("workspace_links", "verification_paths"), {"type": ["array", "null"], "items": _STR}),
     "distill_lessons": {"type": "string", "enum": ["off", "draft", "write"]},

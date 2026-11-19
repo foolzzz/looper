@@ -206,6 +206,14 @@ CREATE TABLE IF NOT EXISTS projects (
     CHECK (room_consults_per_task >= 0 AND room_consults_per_task <= 100),
     wait_commands TEXT CHECK (wait_commands IN ('off', 'on')),
     dependency_conditions TEXT CHECK (dependency_conditions IN ('off', 'on')),
+    -- The advisor (the advisor RFC, section 5.4): off unless on; each consult's budget, the task's consults and
+    -- their total, and a step's consults.
+    advisor TEXT CHECK (advisor IN ('off', 'on')),
+    advisor_consult_budget_usd DOUBLE PRECISION
+    CHECK (advisor_consult_budget_usd >= 0.01 AND advisor_consult_budget_usd <= 5),
+    advisor_budget_usd DOUBLE PRECISION CHECK (advisor_budget_usd >= 0.01 AND advisor_budget_usd <= 50),
+    advisor_consults_per_task INTEGER CHECK (advisor_consults_per_task >= 0 AND advisor_consults_per_task <= 100),
+    advisor_consults_per_step INTEGER CHECK (advisor_consults_per_step >= 0 AND advisor_consults_per_step <= 10),
     distill_lessons TEXT NOT NULL DEFAULT 'off' CONSTRAINT projects_distill_lessons_check
         CHECK (distill_lessons IN ('off', 'draft', 'write'))
 );

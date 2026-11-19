@@ -45,7 +45,8 @@ NEW_PROJECT_FIELDS = _object({
     "step_workspaces": _choice("shared", "worktree"), "task_workspaces": _choice("in_place", "worktree"),
     **dict.fromkeys(("workspace_links", "verification_paths"), _inherit("array", items=_STR)),
     **{field: _choice("on", "off") for field in (
-        "operator_notes", "vault", "planner_roles", "dependency_conditions", "wait_commands", "user_gates", "agent_room")},
+        "operator_notes", "vault", "planner_roles", "dependency_conditions", "wait_commands", "user_gates", "agent_room",
+        "advisor")},
     **{field: _inherit("integer") for field in (
         "supervise_interval_seconds", "max_step_retries", "role_text_max_chars", "gate_reminder_hours", *ROOM_LIMITS)},
     "room_consult_budget_usd": _inherit("number")}, ["name"], closed=True)
@@ -153,8 +154,18 @@ def _execution_impact(execution: ProjectExecution, submitted: dict) -> str:
     for field, label in room_labels.items():
         value = getattr(limits, field.removeprefix("room_"))
         values[field] = (label, format_usd(value) if field == "room_consult_budget_usd" else value)
+    advisor = execution.advisor_limits
+    values.update({
+        "advisor": ("Planner 请教 advisor", execution.advisor_on),
+        "advisor_consult_budget_usd": ("每次请教花费上限，USD", format_usd(advisor.consult_budget_usd)),
+        "advisor_budget_usd": ("每任务请教总花费上限，USD", format_usd(advisor.budget_usd)),
+        "advisor_consults_per_task": ("每任务请教次数", advisor.consults_per_task),
+        "advisor_consults_per_step": ("每步请教次数", advisor.consults_per_step),
+    })
     lines = []
     for field in FIELDS:
+        if field.startswith("advisor") and not execution.advisor_on:
+            continue  # the advisor's lines only once it is on: off, the disclosure stays as it was
         label, value = values[field]
         if isinstance(value, bool):
             value = "on" if value else "off"
