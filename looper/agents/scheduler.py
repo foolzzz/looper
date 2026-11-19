@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
@@ -74,6 +75,7 @@ from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, Message
 from .schedule_gate import GateResult, run_gate
 from .schedule_notify import Notifier, Sender, alert_policy
 from .scheduler_settings import effective_run_timeout
+from .subscription_runs import OwnApps, Poster, SubscriptionRuns
 from .system_prompt import TASK_REQUIREMENT_LIMIT
 
 logger = logging.getLogger(__name__)
@@ -405,6 +407,7 @@ class _Launched:
     overlap_count: int = 0
     overlap_run: Mapping[str, Any] | None = None
     resume_queued: bool = False  # a firing a drain deferred takes the free slot first (``_start_queued``)
+    subscription: bool = False  # a subscription's run: its window is fixed, ``SubscriptionRuns.execute`` does the rest
 
 
 class _DrainBegan(Exception):
@@ -418,7 +421,8 @@ class Scheduler:
 
     def __init__(self, *, bus: _Bus, clock: Callable[[], datetime] = _utcnow, tick_seconds: float = TICK_SECONDS,
                  sender: Sender | None = None, day_zone: str | None = None, dashboard_url: str = "",
-                 runtime_root: Path | None = None, drain: DrainState | None = None) -> None:
+                 runtime_root: Path | None = None, drain: DrainState | None = None, poster: Poster | None = None,
+                 claude_bin: str = "claude", own_apps: OwnApps | None = None) -> None:
         self._bus = bus
         self._clock = clock
         self._tick_seconds = tick_seconds
@@ -436,6 +440,13 @@ class Scheduler:
         self._drain = drain
         self._starting = 0
         self._gates = 0
+
+        async def no_apps() -> frozenset[str]:
+            return frozenset()
+
+        # What subscriptions push through (``poster``: the channels' ``post``) and which Lark apps are Looper's own.
+        self._subscriptions = SubscriptionRuns(poster=poster, own_apps=own_apps or no_apps, runtime_root=runtime_root,
+                                               clock=clock, claude_bin=claude_bin)
 
     def drain_waiting(self) -> dict[str, int]:
         return {"gates": self._gates, "starting": self._starting}
@@ -673,6 +684,8 @@ class Scheduler:
             started = await self._start_task(launched.task_id, schedule["project_id"], admitted_gate=admitted_gate)
         if launched.command is not None:
             await self._start_runner(schedule, launched.command)
+        if launched.subscription:
+            self._spawn(self._run_subscription(launched.run_id), gate=True)
         if launched.gate is not None:
             self._spawn(self._gate(schedule["id"], launched.run_id, launched.gate, launched.fingerprint,
                                    launched.gate_enabled), gate=True)
@@ -702,7 +715,8 @@ class Scheduler:
                   "trigger": firing.trigger.value, "missed": firing.missed,
                   "missed_since": firing.missed_since, "created_at": now}
         command = schedule["kind"] == "command"
-        if not command and await db_schedules.owner_error(conn, schedule["manager_id"], template_key=schedule.get("template_key")):
+        own_runs = schedule["kind"] != "agent"  # a command's or a subscription's run is its own, with no task
+        if not own_runs and await db_schedules.owner_error(conn, schedule["manager_id"], template_key=schedule.get("template_key")):
             return await self._create_run(conn, schedule, firing, now, common=common)
         open_runs = await db_schedules.open_runs(conn, schedule["id"])
         queued = next((run for run in open_runs if run["status"] == db_schedules.QUEUED), None)
@@ -720,14 +734,16 @@ class Scheduler:
             launched.resume_queued = free
             return launched
         busy = (next((run["id"] for run in open_runs if run["status"] == db_schedules.RUNNING), None)
-                if command else await self._busy_task(conn, schedule["id"]))
+                if own_runs else await self._busy_task(conn, schedule["id"]))
         if busy or queued or gating:
             if schedule["overlap"] == "queue" and queued is None:
                 return _Launched(await db_schedules.insert_run(conn, status=db_schedules.QUEUED, **common))
             reason = ("a run is already waiting for the previous command run" if queued and command
+                      else "a run is already waiting for the previous run" if queued and own_runs
                       else "a run is already waiting for the previous run's task" if queued
                       else "the previous run is still checking its gate" if gating
                       else f"the previous command run ({busy}) is still in progress" if command
+                      else f"the previous run ({busy}) is still in progress" if own_runs
                       else f"the previous run's task ({busy}) is still in progress")
             return await self._skip_overlap(conn, schedule, now, common, reason, open_runs)
         return await self._launch(conn, schedule, firing, now, common=common)
@@ -748,7 +764,7 @@ class Scheduler:
                     *, kind: str = "agent", **fields: Any) -> str:
         """Record every command skip; merge repeated agent skips on today's latest run."""
         merged = (await db_schedules.count_skip(conn, common["schedule_id"], status=status, at=now,
-                                                since=self.day_start(now)) if kind == "agent" else None)
+                                                since=self.day_start(now)) if kind != "command" else None)
         return merged or await db_schedules.insert_run(conn, status=status, finished_at=now, **common, **fields)
 
     async def _put(self, conn: asyncpg.Connection, run_id: str | None, common: Mapping[str, Any] | None,
@@ -770,7 +786,9 @@ class Scheduler:
         """A firing past the overlap check: skipped at the daily budget, gating, or its task created."""
         if schedule["kind"] == "command":
             return await self._start_command(conn, schedule, firing, now, common=common, run_id=run_id)
-        if await db_schedules.owner_error(conn, schedule["manager_id"], template_key=schedule.get("template_key")):
+        subscription = schedule["kind"] == "subscription"
+        if not subscription and await db_schedules.owner_error(conn, schedule["manager_id"],
+                                                                template_key=schedule.get("template_key")):
             return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id)
         budget = schedule["daily_budget_usd"]
         if budget is not None:
@@ -785,6 +803,8 @@ class Scheduler:
         # The run's timeout is fixed as it starts; changing the schedule or the default later leaves it be.
         timeout = {"run_timeout_seconds": await effective_run_timeout(schedule["run_timeout_mode"],
                                                                       schedule["run_timeout_seconds"], conn)}
+        if subscription:
+            return await self._start_subscription(conn, schedule, now, common=common, run_id=run_id, timeout=timeout)
         if schedule["gate_command"]:
             from .schedule_templates import effective_schedule, fingerprint
             try:
@@ -805,6 +825,35 @@ class Scheduler:
             return _Launched(run_id, gate=firing, fingerprint=expected, gate_enabled=schedule["enabled"],
                              overlap_recovered=recovered)
         return await self._create_run(conn, schedule, firing, now, common=common, run_id=run_id, started=timeout)
+
+    async def _start_subscription(self, conn: asyncpg.Connection, schedule: dict[str, Any], now: datetime, *,
+                                  common: Mapping[str, Any] | None, run_id: str | None,
+                                  timeout: Mapping[str, Any]) -> _Launched:
+        """A subscription's firing: its window is fixed now. With nothing selected in it no agent starts, and the
+        firing is a ``skipped_gate`` (counted on the day's latest one) with the cursor moved past the window; else the
+        run is ``running`` and ``SubscriptionRuns.execute`` takes it after the commit."""
+        window = await self._subscriptions.plan(conn, schedule, now=now)
+        if window is None:
+            if run_id is None:
+                assert common is not None
+                skipped = await self._skip(conn, "skipped_gate", now, common, kind="subscription", fired_at=now,
+                                           error="no new messages in the window")
+            else:
+                await db_schedules.update_run(conn, run_id, status="skipped_gate", fired_at=now, finished_at=now,
+                                              error="no new messages in the window")
+                skipped = run_id
+            await db_schedules.count_outcome(conn, schedule["id"], "skipped_gate", now)
+            return _Launched(skipped)
+        run_id = await self._put(conn, run_id, common, status=db_schedules.RUNNING, fired_at=now,
+                                 runner_pid=os.getpid(), runner_started=self._subscriptions.instance, **timeout)
+        await self._subscriptions.record(conn, run_id, window)
+        recovered = await db_schedules.reset_overlaps(conn, schedule["id"])
+        return _Launched(run_id, overlap_recovered=recovered, subscription=True)
+
+    async def _run_subscription(self, run_id: str) -> None:
+        """A subscription's run after its firing committed: its processor and push, then its message and alerts."""
+        await self._subscriptions.execute(run_id)
+        await self._notifier.run_ended(run_id)
 
     async def _start_command(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], firing: Firing,
                              now: datetime, *, common: Mapping[str, Any] | None = None,
@@ -1098,7 +1147,7 @@ class Scheduler:
                                 >= schedule["max_parallel_runs"])
                     else:
                         busy = (any(one["status"] == db_schedules.RUNNING for one in runs)
-                                if schedule["kind"] == "command" else await self._busy_task(conn, schedule_id))
+                                if schedule["kind"] != "agent" else await self._busy_task(conn, schedule_id))
                     if busy:
                         return
                     firing = Firing(Trigger(run["trigger"]), run["scheduled_for"], missed=run["missed"],
@@ -1155,6 +1204,9 @@ class Scheduler:
             try:
                 if run["kind"] == "command":
                     await self._settle_command(run, observations[run["id"]], now)
+                elif run["kind"] == "subscription":
+                    if await self._subscriptions.settle(run, now):
+                        self._spawn(self._notifier.run_ended(run["id"]))
                 else:
                     await self._settle(run, now)
             except Exception:

@@ -267,7 +267,9 @@ class Notifier:
         project = await db_projects.get_project(schedule["project_id"])
         project_name = (project or {}).get("name") or schedule["project_id"]
         status = run["status"]
-        if wants_run_message(schedule["notify"], status):
+        # A subscription's successful run already pushed (or kept) its output: the message is the output itself.
+        if wants_run_message(schedule["notify"], status) and not (
+                schedule["kind"] == "subscription" and status in db_schedules.SUCCESS):
             await self._deliver(schedule, Kind.RUN, run_text(schedule, project_name, run, base=self._base),
                                 run_id=run_id)
         now = self._clock()
@@ -396,7 +398,10 @@ class Notifier:
         channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
         status, error = "dashboard", None
         dashboard_alert = kind is not Kind.RUN and schedule.get("notify_format") == "deliverable"
-        if channel and chat and schedule["notify"] != "never" and not dashboard_alert:
+        # Until the operator confirms a subscription's push target, nothing it says goes there, alerts included.
+        unconfirmed = schedule.get("kind") == "subscription" and not (schedule.get("subscription") or {}).get(
+            "target_confirmed_at")
+        if channel and chat and schedule["notify"] != "never" and not dashboard_alert and not unconfirmed:
             if not any((t["channel"], t["chat"]) == (channel, chat) for t in await notify_targets()):
                 status, error = "failed", ("the notification target is unavailable: "
                                            "its allowlist entry or chat binding was removed")

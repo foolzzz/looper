@@ -164,8 +164,20 @@ def _check_project(call: Call, project: Mapping[str, Any]) -> None:
                                            "Manager or the dashboard")
 
 
+SUBSCRIPTION_REFUSAL = ("a subscription pushes the messages of a chat source to a chat: the operator manages it in "
+                        "the dashboard or with loopercli (schedule_admin), not through a Manager")
+
+
 async def _authorize(call: Call) -> None:
     """Check before confirmation and again at execution, against the confirmed schedule's immutable id."""
+    arguments, action = call.arguments, call.arguments["action"]
+    if call.confirmation:
+        arguments = {**arguments, "schedule": call.confirmation["schedule_id"], "project": None}
+    if action in ("create", "update") and (arguments.get("fields") or {}).get("kind") == schedules.Kind.SUBSCRIPTION.value:
+        raise OpError(ErrorCode.FORBIDDEN, SUBSCRIPTION_REFUSAL)
+    if action not in ("list", "create", "get") and (
+            await _schedule(arguments, call))["kind"] == schedules.Kind.SUBSCRIPTION.value:
+        raise OpError(ErrorCode.FORBIDDEN, SUBSCRIPTION_REFUSAL)
     if call.scope.tool_scope is not ManagerTools.TASKS:
         return
     arguments, action = call.arguments, call.arguments["action"]

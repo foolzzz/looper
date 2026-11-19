@@ -1112,7 +1112,7 @@ CREATE TABLE IF NOT EXISTS schedules (
     planner_session_profile TEXT,
     planner_session_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     planner_session_since TIMESTAMPTZ,
-    kind TEXT NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent', 'command')),
+    kind TEXT NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent', 'command', 'subscription')),
     command TEXT,
     env JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(env) = 'object'),
     env_file TEXT,
@@ -1579,3 +1579,46 @@ CREATE INDEX IF NOT EXISTS idx_source_events_sent ON source_events (source_id, s
 CREATE INDEX IF NOT EXISTS idx_source_events_run ON source_events (run_id) WHERE run_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_source_events_body ON source_events (sent_at) WHERE body IS NOT NULL;
 -- message stream end
+
+-- Subscriptions (message-stream RFC, section 7): the schedule kind that turns the events a source ingested after a
+-- cursor into one tool-less processor run and, once its target is confirmed, a push. Default off: no row, no
+-- behavior. connection.py applies this block (with the widened schedules.kind check) to databases that predate it, so
+-- keep it between the markers and idempotent.
+-- subscriptions begin
+CREATE TABLE IF NOT EXISTS subscriptions (
+    schedule_id         TEXT PRIMARY KEY REFERENCES schedules(id) ON DELETE CASCADE,
+    source_id           TEXT NOT NULL REFERENCES event_sources(id),
+    chat_kinds          TEXT[] NOT NULL CHECK (cardinality(chat_kinds) > 0 AND chat_kinds <@ ARRAY['p2p', 'group', 'topic', 'unknown']),
+    include_chats       TEXT[] NOT NULL DEFAULT '{}',
+    exclude_chats       TEXT[] NOT NULL DEFAULT '{}',
+    sender_kinds        TEXT[] NOT NULL CHECK (cardinality(sender_kinds) > 0 AND sender_kinds <@ ARRAY['user', 'app']),
+    exclude_mentions_me BOOLEAN NOT NULL DEFAULT false,
+    include_history     BOOLEAN NOT NULL DEFAULT false,
+    max_age_minutes     INTEGER NOT NULL CHECK (max_age_minutes BETWEEN 5 AND 10080),
+    max_events          INTEGER NOT NULL CHECK (max_events BETWEEN 1 AND 2000),
+    render              TEXT NOT NULL DEFAULT 'lines_v1' CHECK (render IN ('lines_v1')),
+    text_max_chars      INTEGER NOT NULL CHECK (text_max_chars BETWEEN 20 AND 4000),
+    quiet_word          TEXT NOT NULL DEFAULT 'SKIP' CHECK (quiet_word ~ '^[^[:space:]]{1,40}$'),
+    output_header       TEXT NOT NULL DEFAULT '' CHECK (length(output_header) <= 200),
+    output_kind         TEXT NOT NULL DEFAULT 'push' CHECK (output_kind IN ('push')),
+    cursor_seq          BIGINT NOT NULL DEFAULT 0 CHECK (cursor_seq >= 0),
+    cursor_at           TIMESTAMPTZ,
+    target_confirmed_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS subscription_runs (
+    run_id            TEXT PRIMARY KEY REFERENCES schedule_runs(id) ON DELETE CASCADE,
+    from_seq          BIGINT NOT NULL,
+    to_seq            BIGINT NOT NULL,
+    events_in_window  INTEGER NOT NULL DEFAULT 0,
+    events_selected   INTEGER NOT NULL DEFAULT 0,
+    events_too_old    INTEGER NOT NULL DEFAULT 0,
+    events_over_cap   INTEGER NOT NULL DEFAULT 0,
+    record_id         BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
+    outcome           TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (outcome IN ('pending', 'delivering', 'delivered', 'quiet', 'dashboard_only',
+                                         'output_invalid', 'failed')),
+    output_text       TEXT,
+    output_sha256     TEXT,
+    notification_id   TEXT REFERENCES schedule_notifications(id) ON DELETE SET NULL
+);
+-- subscriptions end

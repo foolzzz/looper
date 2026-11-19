@@ -39,9 +39,10 @@ import asyncpg
 
 from ..paths import home_runtime_root
 from ..db import channel_configs as db_channel_configs, connection as db_connection, llm_records as db_llm_records
-from ..db import projects as db_projects, schedules as db_schedules
+from ..db import message_stream as db_message_stream, projects as db_projects, schedules as db_schedules
+from ..db import subscriptions as db_subs
 from ..db import chat_bindings as db_chat_bindings
-from . import cron
+from . import cron, subscriptions
 from .agent_settings import CONCURRENCY_MAX, TASK_LIMIT_ROLES, budget_usd
 from .channels.allowlist import SENDER_ID_FORMATS, sender_ids
 from .message import builtin_channel_id
@@ -99,6 +100,7 @@ class Overlap(str, Enum):
 class Kind(str, Enum):
     AGENT = "agent"
     COMMAND = "command"
+    SUBSCRIPTION = "subscription"  # reads a message source's new events, runs the processor, pushes (``subscriptions``)
 
 
 class CatchUp(str, Enum):
@@ -216,7 +218,21 @@ def run_view(row: Mapping[str, Any], cost: Mapping[str, Any] | None = None, *,
 async def _run_views(rows: list[dict[str, Any]], *, runtime_root: Path | None = None) -> list[dict[str, Any]]:
     running = [row["task_id"] for row in rows if row.get("task_id") and row.get("cost_usd") is None]
     costs = await db_llm_records.task_costs(running) if running else {}
-    return [run_view(row, costs.get(row.get("task_id") or ""), runtime_root=runtime_root) for row in rows]
+    streams = await db_subs.get_runs([row["id"] for row in rows if row.get("kind") == Kind.SUBSCRIPTION.value])
+    views = [run_view(row, costs.get(row.get("task_id") or ""), runtime_root=runtime_root) for row in rows]
+    for view, row in zip(views, rows):
+        if row["id"] in streams:
+            view["subscription"] = subscription_run_view(streams[row["id"]])
+    return views
+
+
+def subscription_run_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    """What a subscription run read and made: its window (cursor positions, events in it, selected, dropped as too old
+    or over the cap), the processor's record and its outcome with the output."""
+    return {"from_seq": row["from_seq"], "to_seq": row["to_seq"], "events_in_window": row["events_in_window"],
+            "events_selected": row["events_selected"], "events_too_old": row["events_too_old"],
+            "events_over_cap": row["events_over_cap"], "record_id": row["record_id"], "outcome": row["outcome"],
+            "output_text": row["output_text"], "notification_id": row["notification_id"]}
 
 
 def _timeout_view(row: Mapping[str, Any], default: int | None) -> tuple[Any, int | None]:
@@ -296,6 +312,8 @@ def schedule_view(row: Mapping[str, Any], last_run: dict[str, Any] | None = None
                 ("updated_at", "planner_session_since"))},
         },
         "last_run": last_run,
+        **({"subscription": subscriptions.view(row["subscription"])}
+           if row.get("kind") == Kind.SUBSCRIPTION.value and row.get("subscription") else {}),
     }
 
 
@@ -308,7 +326,14 @@ def local_midnight(now: datetime | None = None) -> datetime:
 
 async def _schedule_answer(schedule_id: str, *, runtime_root: Path | None = None) -> dict[str, Any]:
     row = await _existing(schedule_id)
-    return {"schedule": (await _schedule_views([row], runtime_root=runtime_root))[0]}
+    view = (await _schedule_views([row], runtime_root=runtime_root))[0]
+    if row["kind"] == Kind.SUBSCRIPTION.value and row.get("subscription"):
+        # What the dashboard's confirmation shows, read here because the operator's own requests are not asked
+        # (``confirm_target`` is their word).
+        view["subscription"]["confirmation"] = (
+            await subscriptions.confirmation_text(row, now=_utcnow(), action="确认推送目标：")
+            if row["notify_channel"] else None)
+    return {"schedule": view}
 
 
 async def notify_targets(*, manager_id: str | None = None) -> list[dict[str, Any]]:
@@ -585,8 +610,8 @@ async def _fields(data: Mapping[str, Any], *, update: bool, resolve_profiles: bo
     if "notify_target" in data:
         fields.update(await _notify_target(data["notify_target"]))
     task_limits = _task_limits(data["task_limits"]) if "task_limits" in data else None
-    profiles = (await _profile_overrides(data["profile_overrides"]) if resolve_profiles
-                else data["profile_overrides"]) if "profile_overrides" in data else None
+    profiles = (await _profile_overrides(data["profile_overrides"], roles=(*TASK_PROFILE_ROLES, "processor"))
+                if resolve_profiles else data["profile_overrides"]) if "profile_overrides" in data else None
     return fields, profiles, task_limits
 
 
@@ -605,10 +630,32 @@ def _check_kind_fields(kind: str, merged: Mapping[str, Any]) -> None:
         if merged.get("run_timeout_mode") == RunTimeoutMode.INHERIT.value:
             raise RequestError(HTTP_400, "a command schedule's run_timeout_seconds is a number of seconds "
                                         "or null for no limit")
+    elif kind == Kind.SUBSCRIPTION.value:
+        if merged.get("notify_format", NotifyFormat.REPORT.value) != NotifyFormat.REPORT.value:
+            raise RequestError(HTTP_400, "a subscription supports notify_format = report only")
+        for field in ("command", "env", "env_file", "template_key", "template_inputs", "gate_command",
+                      "gate_timeout_seconds", "task_limits", "work_dir"):
+            if merged.get(field):
+                raise RequestError(HTTP_400, f"{field} does not apply to a subscription")
+        if merged.get("user_gates") == UserGates.ON.value:
+            raise RequestError(HTTP_400, "user_gates does not apply to a subscription")
+        if merged.get("overlap") == Overlap.PARALLEL.value:
+            raise RequestError(HTTP_400, "a subscription's runs cannot overlap: they would read the same window; "
+                                         "overlap is skip or queue")
+        if set(merged.get("profile_overrides") or {}) - {"processor"}:
+            raise RequestError(HTTP_400, "a subscription chooses the Agent Profile of its processor only")
+        if not merged.get("run_budget_usd"):
+            raise RequestError(HTTP_400, "run_budget_usd is required: the most one processor run may cost")
+        try:
+            _requirement(merged.get("requirement"))
+        except ValueError as exc:
+            raise RequestError(HTTP_400, f"requirement is the processor's instructions: {exc}") from None
     else:
         for field in ("command", "env", "env_file"):
             if merged.get(field):
                 raise RequestError(HTTP_400, f"{field} applies to command schedules only")
+        if "processor" in (merged.get("profile_overrides") or {}):
+            raise RequestError(HTTP_400, "a processor profile applies to subscriptions only")
         try:
             _requirement(merged.get("requirement"))
         except ValueError as exc:
@@ -674,28 +721,38 @@ async def list_all_schedules(*, runtime_root: Path | None = None) -> dict[str, A
 async def create_schedule(project_id: str, data: dict[str, Any], *, created_via: str = "dashboard",
                           now: datetime | None = None, runtime_root: Path | None = None) -> dict[str, Any]:
     await _existing_project(project_id)
+    stream = await _stream_fields(data, update=False)
+    data = {key: value for key, value in data.items() if key != "subscription"}
     fields, profiles, task_limits = await _fields(data, update=False, resolve_profiles=False)
     kind = fields.get("kind", Kind.AGENT.value)
+    if stream is not None and kind != Kind.SUBSCRIPTION.value:
+        raise RequestError(HTTP_400, "subscription applies to schedules of kind subscription only")
+    if stream is None and kind == Kind.SUBSCRIPTION.value:
+        raise RequestError(HTTP_400, "a subscription schedule needs its subscription: the stream it reads")
     _check_kind_fields(kind, {**fields, "profile_overrides": profiles,
                              **{key: data[key] for key in ("template_inputs", "task_limits") if key in data}})
-    profiles = await _profile_overrides(profiles) if "profile_overrides" in data else None
+    profiles = (await _profile_overrides(profiles, roles=(*TASK_PROFILE_ROLES, "processor"))
+                if "profile_overrides" in data else None)
     manager_id = fields.pop("manager_id")
     _check_rule(fields["cron"], fields["timezone"], now or _utcnow(),
-                gated=bool(fields.get("gate_command")) or kind == Kind.COMMAND.value)
+                gated=bool(fields.get("gate_command")) or kind in _NO_TASK_KINDS)
     fields["cron"] = cron.parse(fields["cron"]).text
     try:
         async with db_connection.transaction() as conn:
             from .schedule_templates import effective_schedule, merge_selection
             try:
-                fields.update(merge_selection({}, {**({"template_key": None} if kind == Kind.COMMAND.value else {}),
+                fields.update(merge_selection({}, {**({"template_key": None} if kind in _NO_TASK_KINDS else {}),
                                                   **fields}))
-                await effective_schedule(conn, {**fields, "manager_id": manager_id, "project_id": project_id,
-                                                "profile_overrides": profiles or {}}, enabled=False)
+                if kind != Kind.SUBSCRIPTION.value:  # a subscription creates no task: no directory, no template
+                    await effective_schedule(conn, {**fields, "manager_id": manager_id, "project_id": project_id,
+                                                    "profile_overrides": profiles or {}}, enabled=False)
             except ValueError as exc:
                 raise RequestError(HTTP_400, str(exc)) from None
             schedule_id = await db_schedules.create_schedule(conn, project_id=project_id, fields=fields,
                                                              profiles=profiles or {}, task_limits=task_limits,
                                                              created_via=created_via, manager_id=manager_id)
+            if stream is not None:
+                await db_subs.create(conn, schedule_id, stream)
     except ValueError as exc:
         raise RequestError(HTTP_400, str(exc)) from None
     except asyncpg.UniqueViolationError:
@@ -706,17 +763,110 @@ async def create_schedule(project_id: str, data: dict[str, Any], *, created_via:
     return await _schedule_answer(schedule_id, runtime_root=runtime_root)
 
 
+# Kinds whose firing creates no task: neither a gate nor a template, and a minimum interval like a gated schedule's.
+_NO_TASK_KINDS = (Kind.COMMAND.value, Kind.SUBSCRIPTION.value)
+
+
+async def _check_processor_runs(schedule_id: str) -> None:
+    """Enabling a subscription whose processor cannot run is refused, saying why (409), instead of failing at each fire."""
+    from . import processor
+
+    stored = await db_schedules.get_schedule(schedule_id)
+    if stored is None or stored["kind"] != Kind.SUBSCRIPTION.value:
+        return
+    if problem := (await processor.chosen_profile(stored["project_id"], schedule_id))["problem"]:
+        raise RequestError(HTTP_409, f"the subscription's processor cannot run: {problem}")
+
+
+async def _subscription_changes(conn: asyncpg.Connection, row: Mapping[str, Any], fields: dict[str, Any],
+                                stream: Mapping[str, Any] | None, *, enabled: bool | None, now: datetime,
+                                confirm_target: bool) -> dict[str, Any]:
+    """What a change of a subscription schedule does to its subscription row: the fields of ``stream``, a cursor at
+    the new source's end when the source changes, and the push target's confirmation (the module's notes)."""
+    changes = dict(stream or {})
+    current = row["subscription"]
+    if "source_id" in changes and changes["source_id"] != current["source_id"]:
+        changes["cursor_seq"] = await db_subs.committed_seq(conn, changes["source_id"])
+        changes["cursor_at"] = now
+    target = fields.get("notify_channel", row["notify_channel"])
+    asked = {**fields, **({"enabled": enabled} if enabled is not None else {})}
+    if target is None:
+        if current["target_confirmed_at"] is not None:
+            changes["target_confirmed_at"] = None
+    elif confirm_target:
+        changes["target_confirmed_at"] = now
+    elif subscriptions.needs_confirmation(row, asked):
+        changes["target_confirmed_at"] = None
+    return changes
+
+
+async def confirm_target(schedule_id: str, *, now: datetime | None = None, runtime_root: Path | None = None,
+                         expected_version: str | None = None) -> dict[str, Any]:
+    """The operator confirms the push target of a subscription as it is now (they were shown ``confirmation_text``)."""
+    async with db_connection.transaction() as conn:
+        row = await db_schedules.lock_schedule(conn, schedule_id)
+        if row is None:
+            raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
+        try:
+            await db_schedules.check_configuration_version(conn, row, expected_version)
+        except db_schedules.ConfigurationChanged as exc:
+            raise RequestError(HTTP_409, str(exc)) from None
+        if row["kind"] != Kind.SUBSCRIPTION.value:
+            raise RequestError(HTTP_400, "only a subscription has a push target to confirm")
+        if not row["notify_channel"]:
+            raise RequestError(HTTP_400, "the subscription has no notify_target: its output stays on the dashboard")
+        await db_subs.update(conn, schedule_id, {"target_confirmed_at": now or _utcnow()})
+    return await _schedule_answer(schedule_id, runtime_root=runtime_root)
+
+
+async def reset_cursor(schedule_id: str, after: datetime, *, runtime_root: Path | None = None) -> dict[str, Any]:
+    """Move a subscription's cursor to just before the first event its source ingested after ``after``: its next run
+    reads exactly the events stored since then. Refused while a run is in progress. Returns the schedule and
+    where the cursor is (``cursor``)."""
+    async with db_connection.transaction() as conn:
+        row = await db_schedules.lock_schedule(conn, schedule_id)
+        if row is None:
+            raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
+        if row["kind"] != Kind.SUBSCRIPTION.value:
+            raise RequestError(HTTP_400, "only a subscription has a cursor")
+        if await db_schedules.open_runs(conn, schedule_id):
+            raise RequestError(HTTP_409, "a run of the subscription is in progress: reset its cursor when it ends")
+        cursor = await db_subs.reset_cursor_after(conn, schedule_id, after)
+    return {**await _schedule_answer(schedule_id, runtime_root=runtime_root), "cursor": cursor}
+
+
+async def _stream_fields(data: Mapping[str, Any], *, update: bool) -> dict[str, Any] | None:
+    """The ``subscription`` of a request, validated, or None when it has none; its source must exist."""
+    if "subscription" not in data:
+        return None
+    try:
+        stream = subscriptions.parse(data["subscription"], update=update)
+    except ValueError as exc:
+        raise RequestError(HTTP_400, str(exc)) from None
+    if "source_id" in stream and await db_message_stream.get_source(stream["source_id"]) is None:
+        known = ", ".join(source["id"] for source in await db_message_stream.list_sources()) or "none"
+        raise RequestError(HTTP_400, f"subscription.source_id: no event source {stream['source_id']!r}; known: {known}")
+    return stream
+
+
 async def get_schedule(schedule_id: str, *, runtime_root: Path | None = None) -> dict[str, Any]:
     return await _schedule_answer(schedule_id, runtime_root=runtime_root)
 
 
 async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: datetime | None = None,
-                          runtime_root: Path | None = None, expected_version: str | None = None) -> dict[str, Any]:
+                          runtime_root: Path | None = None, expected_version: str | None = None,
+                          confirm_target: bool = False) -> dict[str, Any]:
     """Change the fields given. Enabling sets the next fire time from now (nothing missed before runs), as does a
-    new rule or zone on an enabled schedule; disabling clears it."""
+    new rule or zone on an enabled schedule; disabling clears it. A subscription's push target is confirmed by the
+    operator (``confirm_target``: the caller has shown them what the schedule does): enabling it, or changing its
+    target, rule or zone, clears the confirmation unless this change is confirmed."""
     if not data:
         raise RequestError(HTTP_400, "give at least one field to change")
     now = now or _utcnow()
+    stream = await _stream_fields(data, update=True)
+    data = {key: value for key, value in data.items() if key != "subscription"}
+    if not data and stream is None:
+        raise RequestError(HTTP_400, "give at least one field to change")
     fields, profiles, task_limits = await _fields(data, update=True, resolve_profiles=False)
     if "kind" in fields:
         stored = await _existing(schedule_id)
@@ -727,12 +877,14 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
     enabled = data.get("enabled")
     if "enabled" in data and not isinstance(enabled, bool):
         raise RequestError(HTTP_400, "enabled must be true or false")
+    if enabled:
+        await _check_processor_runs(schedule_id)
     if "profile_overrides" in data:
         if profiles:
             stored = await _existing(schedule_id)
             _check_kind_fields(stored["kind"], {**stored, **fields, "profile_overrides": profiles})
         # Profile lookup borrows its own connection; resolve before holding the schedule's row lock.
-        profiles = await _profile_overrides(profiles)
+        profiles = await _profile_overrides(profiles, roles=(*TASK_PROFILE_ROLES, "processor"))
     try:
         async with db_connection.transaction() as conn:
             row = await db_schedules.lock_schedule(conn, schedule_id)
@@ -740,23 +892,28 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
                 raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
             await db_schedules.check_configuration_version(conn, row, expected_version, changes=fields)
             kind = row["kind"]
+            if stream is not None and kind != Kind.SUBSCRIPTION.value:
+                raise RequestError(HTTP_400, "subscription applies to schedules of kind subscription only")
             _check_kind_fields(kind, {**row, **fields,
                 "profile_overrides": profiles if "profile_overrides" in data else row["profile_overrides"],
                 **{key: data[key] for key in ("template_inputs", "task_limits") if key in data}})
             rule_text, zone_name = fields.get("cron", row["cron"]), fields.get("timezone", row["timezone"])
-            gated = bool(fields.get("gate_command", row["gate_command"])) or kind == Kind.COMMAND.value
+            gated = bool(fields.get("gate_command", row["gate_command"])) or kind in _NO_TASK_KINDS
             rule = _check_rule(rule_text, zone_name, now, gated=gated,
                                removes_gate=kind == Kind.AGENT.value and bool(row["gate_command"]) and not gated)
             if "cron" in fields:
                 fields["cron"] = rule.text
             from .schedule_templates import effective_schedule, merge_selection, MissingDirectory
             try:
-                fields.update(merge_selection(row, {**({"template_key": None} if kind == Kind.COMMAND.value else {}),
+                fields.update(merge_selection(row, {**({"template_key": None} if kind in _NO_TASK_KINDS else {}),
                                                     **fields}))
             except ValueError as exc:
                 raise RequestError(HTTP_400, str(exc)) from None
             will_run = row["enabled"] if enabled is None else enabled
-            if data != {"enabled": False}:
+            stream_changes = (await _subscription_changes(conn, row, fields, stream, enabled=enabled, now=now,
+                                                          confirm_target=confirm_target)
+                              if kind == Kind.SUBSCRIPTION.value else {})
+            if data != {"enabled": False} and kind != Kind.SUBSCRIPTION.value:
                 try:
                     await effective_schedule(conn, {**row, **fields,
                         "profile_overrides": profiles if profiles is not None else row["profile_overrides"]},
@@ -775,6 +932,8 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
                     or fields.get("success_deadline", row["success_deadline"]) != row["success_deadline"]):
                 fields["rule_changed_at"] = now  # so does it from a new rule, zone or deadline
             await db_schedules.update_schedule(conn, schedule_id, fields, profiles=profiles, task_limits=task_limits)
+            if stream_changes:
+                await db_subs.update(conn, schedule_id, stream_changes)
     except db_schedules.ConfigurationChanged as exc:
         raise RequestError(HTTP_409, str(exc)) from None
     except asyncpg.UniqueViolationError:

@@ -1,0 +1,129 @@
+"""What the subscription tests share: a message source with synthetic events, a push target the channels know, a poster
+that sends one message per idempotency key as Lark does, and a processor that answers as the test says."""
+
+from __future__ import annotations
+
+import json
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+import pytest
+
+from looper.agents import processor
+from looper.agents.channels.base import PostReceipt
+from looper.agents.scheduler import Scheduler
+from looper.db import chat_bindings
+
+UTC = timezone.utc
+SOURCE = "stream"
+DM = "ou_operatorsynthetic"  # the operator's direct chat: an allowlisted sender of the built-in Lark channel
+GROUP = "oc_pushgroupsynthetic"  # a group the Lark channel is bound to
+UNBOUND_GROUP = "oc_unboundsynthetic"
+INSTRUCTIONS = "Pick the funny things people said. Reply SKIP when there is nothing."
+SUBSCRIPTION = {"source_id": SOURCE, "chat_kinds": ["group", "topic"], "sender_kinds": ["user", "app"],
+                "exclude_mentions_me": True, "max_age_minutes": 180, "max_events": 500, "text_max_chars": 200,
+                "quiet_word": "SKIP", "output_header": "🍉 吃瓜速报 · 过去1小时"}
+
+
+class Poster:
+    """The channels' ``post``: one message per idempotency key (a repeated key sends nothing and answers as before),
+    optionally failing or breaking for a test."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+        self.calls = 0
+        self.fail_with: str | None = None
+        self.break_after: int | None = None  # raise after this many messages were sent: a crash in the push
+
+    async def __call__(self, channel_id: str, target: Any, text: str, *, reply_to: str | None = None,
+                       idempotency_key: str | None = None) -> PostReceipt:
+        self.calls += 1
+        if self.fail_with:
+            return PostReceipt(False, error=self.fail_with)
+        if idempotency_key is not None and any(m["key"] == idempotency_key for m in self.sent):
+            return PostReceipt(True, external_ids=("om_again",))
+        self.sent.append({"channel_id": channel_id, "target": target, "text": text, "key": idempotency_key})
+        if self.break_after is not None and len(self.sent) >= self.break_after:
+            raise RuntimeError("the process died after the push")
+        return PostReceipt(True, external_ids=(f"om_{len(self.sent)}",))
+
+
+class FakeProcessor:
+    """``processor.run`` as the test scripts it: records what it was given, answers with ``reply`` or fails."""
+
+    def __init__(self, reply: str = "- 《Ops room》: someone spilled coffee") -> None:
+        self.reply: str | None = reply
+        self.failure: processor.ProcessorFailure | None = None
+        self.cost = 0.01
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, **kwargs: Any) -> processor.ProcessorRun:
+        self.calls.append(kwargs)
+        if self.failure is not None:
+            return processor.ProcessorRun(None, None, self.cost, failure=self.failure, detail="synthetic failure")
+        return processor.ProcessorRun(self.reply, None, self.cost)
+
+
+def processor_says(monkeypatch: pytest.MonkeyPatch, reply: str = "- 《Ops room》: someone spilled coffee") -> FakeProcessor:
+    fake = FakeProcessor(reply)
+    monkeypatch.setattr(processor, "run", fake)
+    return fake
+
+
+async def lark_targets(pool: Any) -> None:
+    """The built-in Lark channel with the operator's direct chat on its allowlist and a bound group."""
+    from looper.agents.serve import seed_channel_configs
+
+    await seed_channel_configs(pool)
+    await pool.execute("UPDATE channel_configs SET config = config || $1::jsonb WHERE channel_id = 'channel-lark'",
+                       json.dumps({"allowed_open_ids": [DM]}))
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await chat_bindings.put_binding("channel-lark", GROUP, "manager", conn=conn)
+
+
+async def source(pool: Any, source_id: str = SOURCE) -> None:
+    await pool.execute("INSERT INTO event_sources (id, kind, name) VALUES ($1, 'lark_user', 'Stream') "
+                       "ON CONFLICT DO NOTHING", source_id)
+
+
+async def chat(pool: Any, chat_id: str, *, kind: str = "group", name: str = "Ops room", source_id: str = SOURCE) -> None:
+    await pool.execute("INSERT INTO source_chats (source_id, chat_id, kind, name) VALUES ($1, $2, $3, $4) "
+                       "ON CONFLICT DO NOTHING", source_id, chat_id, kind, name)
+
+
+async def person(pool: Any, open_id: str, name: str, source_id: str = SOURCE) -> None:
+    await pool.execute("INSERT INTO source_people (source_id, open_id, name, name_source) VALUES ($1, $2, $3, 'contact') "
+                       "ON CONFLICT DO NOTHING", source_id, open_id, name)
+
+
+async def add(pool: Any, text: str, *, chat_id: str = "oc_ops", kind: str = "group", sent_at: datetime,
+              sender: str = "ou_alice", sender_kind: str = "user", mentions_me: bool = False, origin: str = "live",
+              source_id: str = SOURCE, commit: bool = True, ingested_at: datetime | None = None,
+              chat_name: str = "Ops room") -> int:
+    """A stored event; the source's committed sequence follows it unless ``commit`` is false."""
+    await chat(pool, chat_id, kind=kind, name=chat_name, source_id=source_id)
+    seq = await pool.fetchval(
+        "INSERT INTO source_events (source_id, external_id, chat_id, sender_id, sender_kind, sent_at, msg_type, "
+        "mentions_me, text, body_bytes, origin, ingested_at) VALUES ($1, $2, $3, $4, $5, $6, 'text', $7, $8, 1, $9, "
+        "COALESCE($10, now())) RETURNING seq",
+        source_id, f"om_{uuid.uuid4().hex[:10]}", chat_id, sender, sender_kind, sent_at, mentions_me, text, origin,
+        ingested_at)
+    if commit:
+        await pool.execute("UPDATE event_sources SET committed_seq = GREATEST(committed_seq, $2) WHERE id = $1",
+                           source_id, seq)
+    return seq
+
+
+def scheduler_with(env: Any, *, poster: Poster | None = None, sender: Any = None, own_apps: Any = None) -> Scheduler:
+    """A scheduler on the test's clock that pushes through ``poster`` (the env's replaces it)."""
+    scheduler = Scheduler(bus=env.bus, clock=env.clock, sender=sender, day_zone="America/Los_Angeles",
+                          runtime_root=env.runtime_root, poster=poster, own_apps=own_apps)
+    scheduler._commands.prepare()
+    env.scheduler = scheduler
+    return scheduler
+
+
+def minutes_ago(env: Any, minutes: float) -> datetime:
+    return env.clock.now - timedelta(minutes=minutes)

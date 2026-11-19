@@ -717,13 +717,13 @@ async def check_workspace(query: dict[str, str]) -> dict[str, Any]:
     return {**workspace["check"], "default_mode": default.value, "notes_on": execution.notes_on}
 
 
-async def _profile_overrides(raw: Any) -> dict[str, str]:
+async def _profile_overrides(raw: Any, *, roles: Sequence[str] = TASK_PROFILE_ROLES) -> dict[str, str]:
     """``profile_overrides``, a new task's (or a schedule's) choice of Agent Profile per role, checked as
     ``profile_choices`` checks a task's choice (by id or name), as role -> profile id; an empty or null entry
     chooses nothing."""
     if isinstance(raw, dict):
         raw = {role: None if profile == "" else profile for role, profile in raw.items()}
-    chosen = await profile_choices(raw, clearing=True, field="profile_overrides")
+    chosen = await profile_choices(raw, clearing=True, field="profile_overrides", roles=roles)
     return {role: profile_id for role, profile_id in chosen.items() if profile_id is not None}
 
 
@@ -1301,7 +1301,8 @@ def _prompt_modes(raw: Any) -> dict[str, str | None]:
 
 
 async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles",
-                          pool: asyncpg.Pool | asyncpg.Connection | None = None) -> dict[str, str | None]:
+                          pool: asyncpg.Pool | asyncpg.Connection | None = None,
+                          roles: Sequence[str] = TASK_PROFILE_ROLES) -> dict[str, str | None]:
     """``profiles`` (the request's ``field``), a task's choice of Agent Profile per role (by id or name), as role ->
     profile id (None: drop the task's choice, only when ``clearing``); each one registered and able to run its role.
     400 otherwise."""
@@ -1311,13 +1312,14 @@ async def profile_choices(raw: Any, *, clearing: bool, field: str = "profiles",
     if not raw:
         return {}
     if not isinstance(raw, dict):
-        raise RequestError(HTTP_400, f'{field} must be an object: {{"planner" | "worker" | "reviewer": profile}}')
+        listed = " | ".join(f'"{role}"' for role in roles)
+        raise RequestError(HTTP_400, f"{field} must be an object: {{{listed}: profile}}")
     registered: list[dict[str, Any]] | None = None
     chosen: dict[str, str | None] = {}
     for role, wanted in raw.items():
-        if role not in TASK_PROFILE_ROLES:
+        if role not in roles:
             raise RequestError(HTTP_400, f"{field}: a task chooses the Agent Profile of its "
-                                         f"{', '.join(TASK_PROFILE_ROLES)} only, not {role!r}")
+                                         f"{', '.join(roles)} only, not {role!r}")
         if wanted is None:
             if not clearing:
                 raise RequestError(HTTP_400, f"{field}.{role}: give an Agent Profile, or leave the role out")
