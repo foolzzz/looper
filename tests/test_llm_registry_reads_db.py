@@ -122,7 +122,7 @@ def test_every_layer_and_usage_reads_the_same_model_reference(monkeypatch):
         assert usage['allowed_in'] == ['Test project']
         view = service.profile_view(profile, usage)
         assert view['profile_id'] == 'agent-test' and view['used_by'] == usage
-        assert view['roles'] == ['manager', 'planner', 'worker', 'reviewer']
+        assert view['roles'] == ['manager', 'planner', 'worker', 'reviewer', 'processor']
         assert view['cost']['source'] == 'provider_price'
         assert view['cost']['unpriced'] == ['unknown-model'] and view['warnings']
         assert SECRET not in repr((rows, view))
@@ -212,7 +212,7 @@ def test_profile_view_preserves_usage_cost_and_warnings_from_normalized_settings
     assert view['profile_id'] == 'agent-test' and view['model_id'] == 'model-test'
     assert view['model']['name'] == 'unknown-model[1m]'
     assert view['provider']['provider_id'] == 'prov-test' and view['provider_name'] == 'Saved account'
-    assert view['roles'] == ['manager', 'planner', 'worker', 'reviewer'] and view['used_by'] == used
+    assert view['roles'] == ['manager', 'planner', 'worker', 'reviewer', 'processor'] and view['used_by'] == used
     assert view['cost'] == {'source': 'provider_price', 'equivalent': False, 'unpriced': ['unknown-model[1m]']}
     assert view['warnings'] and view['custom_prompt'] == 'Saved prompt'
     assert 'wrong-model' not in repr(view)

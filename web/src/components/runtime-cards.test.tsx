@@ -39,7 +39,7 @@ function registry(pi: Runtime | null): Registry {
     providers: [], models: [], profiles: [], vendor_types: [], prices: { as_of: "", sources: [], models: {} },
     limits: { api_formats: [{ family: "anthropic", label: "Anthropic", protocols: [{ protocol: "anthropic-messages", label: "Anthropic Messages" }] }, { family: "openai", label: "OpenAI", protocols: [{ protocol: "openai-responses", label: "OpenAI Responses" }, { protocol: "openai-chat", label: "OpenAI Chat Completions" }] }],
       name_max_chars: 100, models_max: 10, model_fields: [], price_fields: [], protocols: ["openai-chat", "openai-responses"],
-      auth_kinds: ["api_key"], effort_levels: [], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [] },
+      auth_kinds: ["api_key"], effort_levels: [], role_capabilities: { manager: [], planner: [], worker: [], reviewer: [], processor: [] },
       secret_mask: "", provider_env_owned: [],
     },
   };
@@ -120,7 +120,8 @@ describe("Agent Runtimes", () => {
     await show();
     const node = [...container.querySelectorAll("h3")].find((h) => h.textContent === "Coco (TRAE CLI)")!.closest("li")!;
     expect(fact(node, "Version")).toContain("traecli 0.214.1");
-    expect(fact(node, "Roles")).toBe("Manager: cannot runPlanner: cannot runWorker: can runReviewer: can run");
+    expect(fact(node, "Roles")).toBe(
+      "Manager: cannot runPlanner: cannot runWorker: can runReviewer: can runProcessor: cannot run");
     expect(node.textContent).not.toContain("Install");
   });
 
@@ -271,7 +272,7 @@ describe("Agent Runtimes", () => {
     expect(fact(node, "Version")).toContain("1.3.0");
     expect(fact(node, "Path")).toContain("/usr/local/bin/pi");
     expect(fact(node, "Roles").match(/: can run/g)).toHaveLength(4);
-    expect(fact(node, "Roles")).not.toContain(": cannot run");
+    expect(fact(node, "Roles").match(/: cannot run/g)).toEqual([": cannot run"]);  // the processor's
     expect(node.textContent).toContain("Found as pi on the server's PATH.");
     expect(node.textContent).not.toMatch(/login/i);
     expect([...node.querySelectorAll("button")].map((button) => button.textContent)).toEqual(["Re-detect"]);
@@ -288,7 +289,7 @@ describe("Agent Runtimes", () => {
     expect(fact(node, "Version")).toContain(version);
     expect(fact(node, "Version")).toContain(probeError);
     expect(fact(node, "Capabilities")).toBe("none");
-    expect(fact(node, "Roles").match(/: cannot run/g)).toHaveLength(4);
+    expect(fact(node, "Roles").match(/: cannot run/g)).toHaveLength(5);
     expect(node.textContent).toContain(INSTALL);
     expect(node.textContent).not.toMatch(/login/i);
   });

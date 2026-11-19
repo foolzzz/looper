@@ -1,7 +1,8 @@
 """The ``agent_setting_layers`` table: one row of agent settings per layer and place; and a task's profiles.
 
 A layer is ``system``, ``role`` (with a role), ``project`` (with a project)
-or ``role_project`` (with both). A NULL field is not set at its layer;
+or ``role_project`` (with both). A schedule may choose the processor's profile (``schedule_profile_overrides``), over
+those four. A NULL field is not set at its layer;
 ``env`` is a JSON list of ``{"key", "value"}`` (a null value unsets a key);
 ``profile_id`` is the Agent Profile its roles run (its model and effort with it); ``max_concurrency`` (the Workers'
 or the Reviewers' role layer only) how many of them run at once in a task that sets none. A task may choose
@@ -49,7 +50,7 @@ def _row(row: asyncpg.Record) -> dict[str, Any]:
 async def list_layers(
     project_id: str | None = None, *, task_id: str | None = None, step_id: str | None = None,
     task_role: tuple[str, int] | None = None, manager_id: str | None = None,
-    with_session: bool = True, pool: asyncpg.Pool | None = None,
+    with_session: bool = True, schedule_id: str | None = None, pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """Every row outside projects (system and role layers), and ``project_id``'s rows when given, each with its
     ``profile`` (``profile_registry.PROFILE_JSON``, or None); with ``task_id``, also a ``task`` row per role the task
@@ -58,7 +59,8 @@ async def list_layers(
     Planner chose one for that step; with ``task_role`` too (a role's key and version), a ``task_role`` row for the
     role's kind when that version's profile is allowed by its project or its workflow snapshot; with ``manager_id``, a
     ``session`` row for that Manager when the user chose a profile for its current session (unless ``with_session``
-    is False) and, for a Manager other than ``manager``, a ``manager`` row when its definition has a profile."""
+    is False) and, for a Manager other than ``manager``, a ``manager`` row when its definition has a profile; with
+    ``schedule_id``, a ``schedule`` row for the processor when that schedule chose its profile."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         f"SELECT l.scope, l.role, l.project_id, l.harness_prompt, l.profile_id, l.env, l.run_budget_usd, "
@@ -66,10 +68,17 @@ async def list_layers(
         f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = l.profile_id) AS profile "
         "FROM agent_setting_layers l WHERE l.project_id IS NULL OR l.project_id = $1 "
         "ORDER BY array_position(ARRAY['system', 'role', 'project', 'role_project'], l.scope), "
-        "l.project_id NULLS FIRST, array_position(ARRAY['manager', 'planner', 'worker', 'reviewer'], l.role)",
+        "l.project_id NULLS FIRST, array_position(ARRAY['manager', 'planner', 'worker', 'reviewer', 'processor'], "
+        "l.role)",
         project_id,
     )
     layers = [_row(r) for r in rows]
+    if schedule_id is not None:
+        chosen_schedule = await pool.fetch(
+            f"SELECT 'schedule' AS scope, o.role, o.profile_id, "
+            f"(SELECT {PROFILE_JSON} FROM {PROFILE_JOIN} WHERE a.id = o.profile_id) AS profile "
+            "FROM schedule_profile_overrides o WHERE o.schedule_id = $1 AND o.role = 'processor'", schedule_id)
+        layers += [_row(r) for r in chosen_schedule]
     if manager_id is not None and manager_id != "manager":
         defined = await pool.fetch(
             f"SELECT 'manager' AS scope, 'manager' AS role, md.profile_id, "

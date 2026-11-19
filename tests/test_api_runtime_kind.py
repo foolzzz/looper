@@ -67,7 +67,8 @@ def test_api_profile_refuses_other_roles(runtime, role):
 def test_servable_roles_preserves_capabilities_and_applies_runtime_restriction(runtime, runtime_type):
     adapter = runtimes.ADAPTERS[runtime_type]
     assert registry.servable_roles(adapter.capabilities, runtime_type) == (
-        ["manager"] if runtime_type == "api" else ["manager", "planner", "worker", "reviewer"])
+        {"api": ["manager"], "claude-code": ["manager", "planner", "worker", "reviewer", "processor"],
+         "codex": ["manager", "planner", "worker", "reviewer"]}[runtime_type])
     # A registered older version's recorded capabilities remain authoritative.
     assert registry.servable_roles([], runtime_type) == []
     assert registry.servable_roles([runtimes.Capability.RUN], runtime_type) == (

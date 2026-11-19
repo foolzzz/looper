@@ -8,7 +8,7 @@ import { AGENT_PROFILE } from "@/lib/settings-pages";
 import { useRegistry } from "@/lib/use-registry";
 import { cn } from "@/lib/utils";
 
-const ROLES: AgentRole[] = ["manager", "planner", "worker", "reviewer"];
+const ROLES: AgentRole[] = ["manager", "planner", "worker", "reviewer", "processor"];
 const TTADK_RUNTIMES = [
   { type: "coco", runtime_id: "rt-ttadk-coco", name: "ttadk-coco" },
   { type: "codex", runtime_id: "rt-ttadk-codex", name: "ttadk-codex" },

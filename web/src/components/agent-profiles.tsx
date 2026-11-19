@@ -489,7 +489,9 @@ function UsedBy({ used }: { used: ProfileUsedBy }) {
 
 function SystemPromptPreview({ profile }: { profile: AgentProfile }) {
   const id = useId();
-  const [role, setRole] = useState<AgentRole>(profile.roles[0] ?? "worker");
+  // The processor's prompt is composed for each run from what it processes: there is nothing to preview.
+  const roles = profile.roles.filter((item) => item !== "processor");
+  const [role, setRole] = useState<AgentRole>(roles[0] ?? "worker");
   const [preview, setPreview] = useState<PromptPreview | null>(null);
   const action = useAction();
   useEffect(() => setPreview(null), [profile]);
@@ -510,13 +512,13 @@ function SystemPromptPreview({ profile }: { profile: AgentProfile }) {
               id={`${id}-role`}
               value={role}
               onChange={(e) => { setRole(e.target.value as AgentRole); setPreview(null); }}
-              disabled={action.busy || !profile.roles.length}
+              disabled={action.busy || !roles.length}
               className={SELECT}
             >
-              {profile.roles.map((item) => <option key={item} value={item}>{roleLabel(item)}</option>)}
+              {roles.map((item) => <option key={item} value={item}>{roleLabel(item)}</option>)}
             </select>
           </div>
-          <Button type="button" size="sm" variant="outline" onClick={load} disabled={action.busy || !profile.roles.length}>
+          <Button type="button" size="sm" variant="outline" onClick={load} disabled={action.busy || !roles.length}>
             {action.busy && <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />}Load
           </Button>
         </div>

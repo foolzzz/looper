@@ -38,6 +38,9 @@ async def preview(profile_id: str, role: str, project_id: str | None = None) -> 
         agent = AgentType(role)
     except ValueError:
         raise RegistryError("role is required and must be planner, worker, reviewer or manager") from None
+    if agent is AgentType.PROCESSOR:
+        raise RegistryError("the processor's prompt is composed for each run from what it processes; its run "
+                            "record (Runs) shows the whole prompt")
     row = await db_profiles.get_profile(profile_id)
     if row is None:
         raise RegistryNotFound(f"no Agent Profile {profile_id!r}")

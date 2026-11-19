@@ -58,7 +58,7 @@ AGENT_SETTINGS = _object({
 PROJECT_AGENT_SETTINGS = _object({
     "project_id": _STR, "limits": SETTING_LIMITS,
     "project": _object({"values": LAYER_VALUES}, closed=True),
-    "roles": _object({role.value: LAYER_STATE for role in agent_settings.TASK_ROLES}, closed=True),
+    "roles": _object({role.value: LAYER_STATE for role in agent_settings.PROJECT_ROLES}, closed=True),
 }, closed=True)
 ROLE_CONFIG_PATCH = _object({
     "display_name": _STR, "enabled": _BOOL, "system_prompt": _STR, "max_turns": _INT,

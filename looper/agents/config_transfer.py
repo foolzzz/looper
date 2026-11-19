@@ -1515,8 +1515,8 @@ class _Importer:
             scopes = ("project", "role_project") if project_label else ("system", "role")
             if scope not in scopes:
                 raise _Skip(f"scope {scope!r} is not {' or '.join(scopes)} here")
-            roles = ("planner", "worker", "reviewer") if scope == "role_project" else (
-                "manager", "planner", "worker", "reviewer")
+            roles = ("planner", "worker", "reviewer", "processor") if scope == "role_project" else (
+                "manager", "planner", "worker", "reviewer", "processor")
             if scope in ("role", "role_project") and role not in roles:
                 raise _Skip(f"role {role!r} is not one of {', '.join(roles)}")
             if scope in ("system", "project") and role is not None:
