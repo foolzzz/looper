@@ -32,11 +32,13 @@ const PROFILE = {
   roles: ["manager", "planner", "worker", "reviewer"],
 };
 const STATE = { values: VALUES, effective: EFFECTIVE };
-const ROLES = { manager: STATE, planner: STATE, worker: STATE, reviewer: STATE, processor: STATE };
+const ROLES = { manager: STATE, planner: STATE, worker: STATE, reviewer: STATE, processor: STATE,
+                // the advisor's profile falls back to its built-in one, never the shared defaults
+                advisor: { values: VALUES, effective: { ...EFFECTIVE, profile: { ...EFFECTIVE.profile, source: "builtin" } } } };
 
 const posted: { url: string; body: unknown }[] = [];
 
-function serve() {
+function serve(roles = ["planner", "processor"]) {
   posted.length = 0;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -48,9 +50,8 @@ function serve() {
     }
     const result = url === "/api/v1/registry/view" ? { profiles: [PROFILE], runtime_types: [], runtimes: [], providers: [], models: [] }
       : url === "/api/v1/allowed_profiles/get" ? { profiles: [], choosable: [] }
-      : url.endsWith("/roles/list") ? { configs: [
-          { role: "planner", display_name: "Planner", enabled: true, system_prompt: "", default_prompt: "" },
-          { role: "processor", display_name: "Processor", enabled: true, system_prompt: "", default_prompt: "" }] }
+      : url.endsWith("/roles/list") ? { configs: roles.map((role) => (
+          { role, display_name: role[0].toUpperCase() + role.slice(1), enabled: true, system_prompt: "", default_prompt: "" })) }
       : url === "/api/v1/project_agent_settings/get" ? { limits: LIMITS, project: { values: VALUES }, roles: ROLES }
       : { limits: LIMITS, system: STATE, roles: ROLES };
     return Response.json(url.startsWith("/api/v1/") ? { status: "ok", result } : result);
@@ -107,6 +108,25 @@ describe("the processor's settings", () => {
     try {
       const option = container.querySelector<HTMLOptionElement>("#roles-system-profile option[value='tools']")!;
       expect([option.disabled, option.textContent?.includes("cannot run")]).toEqual([false, false]);
+    } finally {
+      done();
+    }
+  });
+});
+
+describe("the advisor's settings", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("say it runs with no tools and falls back to its built-in profile, not the shared defaults", async () => {
+    serve(["advisor"]);
+    const { container, done } = await rendered(<RolesSection sub="advisor" />);
+    try {
+      expect(container.querySelector("#roles-advisor-button")?.textContent).toContain("with no tools");
+      expect(container.querySelector("#roles-advisor-button")?.textContent).toContain("(built-in)");
+      const panel = container.querySelector("#roles-advisor-panel")!.textContent;
+      expect(panel).toContain("No tools: no built-in tool, MCP server, plugin, skill or command");
+      expect(panel).toContain("the shared defaults do not apply to it");
+      expect(panel).not.toContain("Harness");
     } finally {
       done();
     }
