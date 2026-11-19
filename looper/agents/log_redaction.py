@@ -37,6 +37,11 @@ def add_secret(value: str) -> None:
         _secrets = (*_secrets, value)
 
 
+def registered() -> tuple[str, ...]:
+    """The values registered with ``add_secret``."""
+    return _secrets
+
+
 def redact(text: str) -> str:
     """``text`` with the registered secrets and any bot token in a URL path masked."""
     for secret in _secrets:

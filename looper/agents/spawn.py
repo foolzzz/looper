@@ -91,10 +91,16 @@ class ChildRun:
     max_turns: int = 2
     role: AgentType | None = None
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    # Its kind of run in llm_records, when not its spawn kind's (a judge's run for an advisor's consult).
+    run_kind: str | None = None
+
+    @property
+    def record_kind(self) -> str:
+        return self.run_kind or _KINDS[self.kind][1]
 
     @property
     def agent_id(self) -> str:
-        return f"{self.kind.value}-{self.run_id}"
+        return f"{self.record_kind}-{self.run_id}"
 
 
 @dataclass(frozen=True)
@@ -177,7 +183,7 @@ async def run_child(child: ChildRun, *, parent: SpawnParent, settings: AgentSett
     from .processor import run_cost
     from .runtimes import RuntimeUnsupported
 
-    access, run_kind, _ = _KINDS[child.kind]
+    access, run_kind = _KINDS[child.kind][0], child.record_kind
     cap = min(cap_usd, settings.max_budget_usd or cap_usd)
     if cap < MIN_RUN_USD:
         return ChildResult(None, failure=ChildFailure.BUDGET,
