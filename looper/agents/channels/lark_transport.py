@@ -17,8 +17,9 @@ from .lark_content import ResourceRef
 logger = logging.getLogger(__name__)
 _CONSUMER_STDERR_LINES = 5
 _CONSUMER_STOP_GRACE_SEC = 5.0
-# A message read's first try; the rest of its time goes to the second. Measured through lark-cli: a raw read
-# takes 4–5 s, and on a long merged forward the platform sometimes gives up after about 5 s.
+# A message read's first try; the rest of its time goes to the second. Measured through lark-cli: a single read
+# takes 4–5 s (about 1.5 s of it lark-cli's own start and sign-in, the rest the platform's), the batch read of
+# the same message about 3 s; on a long merged forward the platform sometimes gives up after about 5 s.
 READ_FIRST_SECONDS = 7.0
 
 
@@ -36,6 +37,21 @@ class LarkTransport(Protocol):
     async def names(self, open_ids: Iterable[str]) -> dict[str, str]: ...
     def available(self) -> bool: ...
     async def aclose(self) -> None: ...
+
+
+def _batch_items(batch: asyncio.Future[dict[str, Any]], message_id: str) -> list[dict[str, Any]] | None:
+    """The batch read's answer when it stands for the single read's: the message alone, not recalled (the single
+    read says why), and neither a merged forward nor a card; else None."""
+    if not batch.done() or batch.cancelled() or batch.exception() is not None:
+        return None
+    data = batch.result().get("data")
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list) or len(items) != 1 or not isinstance(item := items[0], dict):
+        return None
+    if item.get("message_id") != message_id or item.get("deleted") or item.get("msg_type") in {
+            "merge_forward", "interactive"}:
+        return None
+    return items
 
 
 async def _stop_consumer(process: asyncio.subprocess.Process) -> None:
@@ -141,9 +157,29 @@ class CliTransport:
 
     async def get_message(self, message_id: str, *, timeout: float) -> list[dict[str, Any]]:
         """The message's raw items as the bot reads it: a merged forward first, then its children (each naming it in
-        ``upper_message_id``). When that read fails or times out, the rest of ``timeout`` goes to
-        ``+messages-mget``, whose item has lark-cli's rendering (``rendered``: a merged forward as one block) and
-        the sender's ``name``; when that fails too, the first failure is raised."""
+        ``upper_message_id``). The batch read runs beside that read and answers instead when it returns the
+        message, not recalled, and it is neither a merged forward (whose children only the single read returns) nor
+        a card; otherwise the single read answers (``_read_message``)."""
+        single = asyncio.ensure_future(self._read_message(message_id, timeout=timeout))
+        batch = asyncio.ensure_future(lark_cli.run_json(lark_cli.batch_message_command(
+            message_id, profile=self._profile), timeout=min(timeout, READ_FIRST_SECONDS)))
+        try:
+            await asyncio.wait((single, batch), return_when=asyncio.FIRST_COMPLETED)
+            if not single.done() and (items := _batch_items(batch, message_id)) is not None:
+                return items
+            return await single
+        finally:
+            for task in (single, batch):
+                task.cancel()  # lark-cli's process is killed (``lark_cli.run``)
+            await asyncio.wait((single, batch))
+            for task in (single, batch):
+                if not task.cancelled():
+                    task.exception()  # retrieved: the other read's failure is not the answer
+
+    async def _read_message(self, message_id: str, *, timeout: float) -> list[dict[str, Any]]:
+        """The single read (``GET /open-apis/im/v1/messages/{id}``). When it fails or times out, the rest of
+        ``timeout`` goes to ``+messages-mget``, whose item has lark-cli's rendering (``rendered``: a merged forward
+        as one block) and the sender's ``name``; when that fails too, the first failure is raised."""
         started = time.monotonic()
         try:
             answer = await lark_cli.run_json(lark_cli.message_command(message_id, profile=self._profile),

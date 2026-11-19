@@ -109,10 +109,14 @@ class Quote:
 
 @dataclass(frozen=True)
 class QuoteRead:
-    """What a reader returns: the quotes, and the images and files in them, saved beside the message's own."""
+    """What a reader returns: the quotes, and the images and files in them, saved beside the message's own; and how
+    long the reads, the senders' names and the downloads took, one after the other."""
 
     quotes: tuple[Quote, ...]
     attachments: tuple[Attachment, ...] = ()
+    read_seconds: float = 0.0
+    names_seconds: float = 0.0
+    files_seconds: float = 0.0
 
 
 class QuoteUnavailable(RuntimeError):

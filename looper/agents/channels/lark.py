@@ -1019,7 +1019,8 @@ class LarkChannelAdapter(ChannelAdapter):
         while it prepares the message's turn (``lark_quote.QuoteReader``)."""
         read = self._transport.get_message  # type: ignore[attr-defined]
         wanted = ref.targets()
-        deadline = monotonic() + _QUOTE_SECONDS
+        started = monotonic()
+        deadline = started + _QUOTE_SECONDS
 
         async def fetch(kind: QuoteKind, target: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
             try:
@@ -1049,6 +1050,7 @@ class LarkChannelAdapter(ChannelAdapter):
                 return [], [], "error"
 
         read_all = await asyncio.gather(*(fetch(kind, target) for kind, target in wanted))
+        read_at = monotonic()
         names: dict[str, str] = {}
         if ids := lark_quote.sender_ids(item for items, thread, _ in read_all for item in (*items, *thread)):
             try:
@@ -1056,6 +1058,7 @@ class LarkChannelAdapter(ChannelAdapter):
                                                max(min(_NAME_LOOKUP_SECONDS, deadline - monotonic()), 0.1))
             except (TimeoutError, LarkCliError):
                 names = {}
+        named_at = monotonic()
         quotes: list[lark_quote.Quote] = []
         resources: list[lark_content.ResourceRef] = []
         for (kind, target), (items, thread, error) in zip(wanted, read_all):
@@ -1067,7 +1070,8 @@ class LarkChannelAdapter(ChannelAdapter):
             resources += found
         # Beside the message's own, which stay (they are numbered before ``after``); read again on a replay.
         attachments = await self._collect(ref.message_id, tuple(resources), keep=True) if resources else []
-        return QuoteRead(tuple(quotes), tuple(attachments))
+        return QuoteRead(tuple(quotes), tuple(attachments), read_seconds=read_at - started,
+                         names_seconds=named_at - read_at, files_seconds=monotonic() - named_at)
 
     async def _collect(self, message_id: str, refs: tuple[lark_content.ResourceRef, ...], *,
                        keep: bool = False) -> list[Attachment]:

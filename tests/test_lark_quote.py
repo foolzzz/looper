@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from contextlib import aclosing
 from pathlib import Path
 from typing import Any
@@ -355,7 +356,7 @@ def test_a_raw_read_that_times_out_falls_back_to_the_rendered_read_once(
     # A stand-in killed at its first try may not have logged it yet; the rendered read comes once, last.
     reads = [argv[2] if argv[0] == "api" else argv[1] for argv in _reads(lark_cli_stand_in)]
     assert reads[-1] == "+messages-mget" and reads.count("+messages-mget") == 1
-    assert set(reads[:-1]) <= {f"/open-apis/im/v1/messages/{parent}"}
+    assert set(reads[:-1]) <= {f"/open-apis/im/v1/messages/{parent}", "/open-apis/im/v1/messages/mget"}
     downloads = [argv for argv in _calls(lark_cli_stand_in) if "+messages-resources-download" in argv]
     assert downloads[0][downloads[0].index("--message-id") + 1] == parent  # the rendering shows the forward's copies
 
@@ -420,6 +421,34 @@ def test_a_reply_to_a_threads_first_message_with_no_other_reply_shown_reads_as_a
     (quote,) = asyncio.run(_read(tmp_path, _thread_reply())).quotes
     assert (quote.kind, quote.message_id, quote.error, _bodies(quote)) == (QuoteKind.REPLY, "om_root", "", ["start"])
     assert lark_quote.section([quote])[1].endswith(' note="the message this one replies to">')
+
+
+@pytest.mark.parametrize(("batch", "said"), [
+    # The batch read answers for a message on its own, and the single read is stopped.
+    ([_item("om_pslow", content="from the batch read")], "from the batch read"),
+    # Anything else waits for the single read (slow here: it falls back to the rendered read): a merged forward
+    # (only the single read has its children), a card, a recalled message (the single read says why) and a
+    # failed batch read.
+    (_forward("om_pslow"), "rendered"),
+    ([_item("om_pslow", "interactive", {"title": "from the batch read"})], "rendered"),
+    ([_item("om_pslow", deleted=True)], "rendered"),
+    ([], "rendered"),
+])
+def test_a_message_read_takes_the_batch_read_only_for_a_message_on_its_own(
+    tmp_path: Path, lark_cli_stand_in: Path, monkeypatch: pytest.MonkeyPatch, batch: list[dict[str, Any]], said: str,
+) -> None:
+    monkeypatch.setattr(lark_transport, "READ_FIRST_SECONDS", 0.5)
+    _world(tmp_path, messages={"om_pslow": [_item("om_pslow", content="from the single read")]},
+           batch={"om_pslow": batch},
+           mget={"om_pslow": [{"message_id": "om_pslow", "msg_type": "text", "content": "rendered"}]})
+    started = time.monotonic()
+    (item,) = asyncio.run(lark_transport.CliTransport().get_message("om_pslow", timeout=15))
+    assert said in (item["rendered"] if "rendered" in item else item["body"]["content"])
+    assert time.monotonic() - started < 3  # the single read (5 s here) was stopped, not waited for
+    reads = [argv[2] if argv[0] == "api" else argv[1] for argv in _reads(lark_cli_stand_in)]
+    assert reads[:2] in (["/open-apis/im/v1/messages/om_pslow", "/open-apis/im/v1/messages/mget"],
+                         ["/open-apis/im/v1/messages/mget", "/open-apis/im/v1/messages/om_pslow"])
+    assert reads[2:] == ([] if batch and said != "rendered" else ["+messages-mget"])
 
 
 def test_the_registry_reads_through_the_running_channel_the_reference_names(tmp_path: Path) -> None:
