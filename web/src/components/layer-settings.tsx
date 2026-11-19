@@ -175,6 +175,7 @@ export function LayerSettingsForm({
   submitLabel = "Save",
   onDirtyChange,
   profileFirst = false,
+  harnessField = true,
 }: {
   idPrefix: string;
   layer: Exclude<SettingLayer, "builtin">;
@@ -191,6 +192,8 @@ export function LayerSettingsForm({
   /** Told whether the form holds unsaved edits. */
   onDirtyChange?: (dirty: boolean) => void;
   profileFirst?: boolean;
+  /** False for a layer of the processor, which has no harness: its system prompt is its role prompt and instructions. */
+  harnessField?: boolean;
 }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(values));
   const [busy, setBusy] = useState(false);
@@ -280,42 +283,44 @@ export function LayerSettingsForm({
       {profileFirst && (
         <h4 className="border-t border-border pt-4 text-xs font-semibold">More overrides</h4>
       )}
-      <div className="space-y-1">
-        <HarnessField
-          id={`${idPrefix}-harness`}
-          label="Harness prompt"
-          value={draft.harness}
-          onChange={(harness) => set({ harness })}
-          inherits={HARNESS_INHERITS[layer]}
-          rows={draft.harness.trim() ? 10 : 3}
-          hint={harnessHint}
-        />
-        {harness && (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <Now>
-              Now: {harness.value.length} chars · {sourceText(harness.source, layer, harness.from_role)}
-            </Now>
-            {!draft.harness.trim() && (
-              <button
-                type="button"
-                onClick={() => set({ harness: harness.value })}
-                className="text-[11px] text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                Start from it
-              </button>
-            )}
-          </div>
-        )}
-        {!harness && isSystem && !draft.harness.trim() && (
-          <button
-            type="button"
-            onClick={() => set({ harness: limits.builtin_harness_prompt })}
-            className="text-[11px] text-primary underline-offset-2 hover:underline"
-          >
-            Start from the built-in text
-          </button>
-        )}
-      </div>
+      {harnessField && (
+        <div className="space-y-1">
+          <HarnessField
+            id={`${idPrefix}-harness`}
+            label="Harness prompt"
+            value={draft.harness}
+            onChange={(harness) => set({ harness })}
+            inherits={HARNESS_INHERITS[layer]}
+            rows={draft.harness.trim() ? 10 : 3}
+            hint={harnessHint}
+          />
+          {harness && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <Now>
+                Now: {harness.value.length} chars · {sourceText(harness.source, layer, harness.from_role)}
+              </Now>
+              {!draft.harness.trim() && (
+                <button
+                  type="button"
+                  onClick={() => set({ harness: harness.value })}
+                  className="text-[11px] text-primary underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  Start from it
+                </button>
+              )}
+            </div>
+          )}
+          {!harness && isSystem && !draft.harness.trim() && (
+            <button
+              type="button"
+              onClick={() => set({ harness: limits.builtin_harness_prompt })}
+              className="text-[11px] text-primary underline-offset-2 hover:underline"
+            >
+              Start from the built-in text
+            </button>
+          )}
+        </div>
+      )}
 
       {isSystem && (
         <div className="space-y-1">

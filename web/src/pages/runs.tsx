@@ -41,7 +41,7 @@ function formatTime(iso: string | null) {
 // --- Agent Card ---
 
 /** The agents in the order a task meets them. */
-const AGENT_ORDER = ["manager", "planner", "worker", "reviewer"];
+const AGENT_ORDER = ["manager", "planner", "worker", "reviewer", "processor"];
 
 function agentRank(agentId: string) {
   const at = AGENT_ORDER.indexOf(agentId);
@@ -110,7 +110,7 @@ function AgentCard({
   );
 }
 
-const ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer"];
+const ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer", "processor"];
 const isRole = (role: string): role is AgentRole => (ROLES as readonly string[]).includes(role);
 
 // --- Runs Tab ---

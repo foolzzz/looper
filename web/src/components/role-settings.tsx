@@ -13,6 +13,7 @@ import {
   updateRoleConfig,
   updateRoleSettings,
   updateSystemSettings,
+  TOOL_ROLES,
   type AgentRole,
   type AgentSettings,
   type EffectiveSettings,
@@ -25,7 +26,7 @@ import { profileLabel, profileName, useRegistry } from "@/lib/use-registry";
 import { formatUsd } from "@/lib/usage";
 import { cn } from "@/lib/utils";
 
-const ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer"];
+const ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer", "processor"];
 const isRole = (role: string): role is AgentRole => (ROLES as readonly string[]).includes(role);
 
 /** The role configs in the order a task meets them. */
@@ -37,7 +38,9 @@ function rank(role: string) {
 // --- The role prompt ---
 
 /** The role prompt: one text, the role layer of the agent's system prompt. */
-function RolePromptEditor({ id, value, onChange }: { id: string; value: string; onChange: (v: string) => void }) {
+function RolePromptEditor({ id, value, onChange, processor }: {
+  id: string; value: string; onChange: (v: string) => void; processor: boolean;
+}) {
   const lineCount = value.split("\n").length;
 
   return (
@@ -49,9 +52,19 @@ function RolePromptEditor({ id, value, onChange }: { id: string; value: string; 
         </span>
       </div>
       <p id={`${id}-hint`} className="text-[11px] text-muted-foreground">
-        This text is the role layer. At launch Looper combines it with the harness, the project, the task and the
-        reply format into the agent&apos;s system prompt, added to the runtime&apos;s own; a run&apos;s history page
-        (from Runs) shows that whole prompt.
+        {processor ? (
+          <>
+            This text is the role layer. At launch Looper follows it with the instructions of what it processes and
+            the reply format, in place of the runtime&apos;s own prompt; a run&apos;s history page (from Runs) shows
+            that whole prompt.
+          </>
+        ) : (
+          <>
+            This text is the role layer. At launch Looper combines it with the harness, the project, the task and the
+            reply format into the agent&apos;s system prompt, added to the runtime&apos;s own; a run&apos;s history
+            page (from Runs) shows that whole prompt.
+          </>
+        )}
       </p>
       <textarea
         id={id}
@@ -139,17 +152,28 @@ function RoleConfigForm({
         </div>
       </div>
 
-      <div className="space-y-1">
-        <span className="text-xs font-medium text-muted-foreground">Permissions</span>
-        <p className="text-sm">
-          Every tool, no permission prompts{" "}
-          <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">--dangerously-skip-permissions</code>
-        </p>
-        <p className="text-[11px] text-muted-foreground">
-          The same for every Looper agent; the role prompt says what this agent is for. Lark and Telegram pass on
-          only the senders listed in Settings → Channels.
-        </p>
-      </div>
+      {config.role === "processor" ? (
+        <div className="space-y-1">
+          <span className="text-xs font-medium text-muted-foreground">Permissions</span>
+          <p className="text-sm">No tools: no built-in tool, MCP server, plugin, skill or command</p>
+          <p className="text-[11px] text-muted-foreground">
+            It reads messages other people wrote and can only reply. Its Agent Profile needs a runtime that can run
+            without tools.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-1">
+          <span className="text-xs font-medium text-muted-foreground">Permissions</span>
+          <p className="text-sm">
+            Every tool, no permission prompts{" "}
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">--dangerously-skip-permissions</code>
+          </p>
+          <p className="text-[11px] text-muted-foreground">
+            The same for every Looper agent with tools; the role prompt says what this agent is for. Lark and
+            Telegram pass on only the senders listed in Settings → Channels.
+          </p>
+        </div>
+      )}
 
       <div className="flex items-center justify-between rounded-md border border-border px-4 py-3">
         <div className="flex items-center gap-2">
@@ -171,6 +195,7 @@ function RoleConfigForm({
         id={`${id}-prompt`}
         value={form.system_prompt}
         onChange={(v) => setForm({ ...form, system_prompt: v })}
+        processor={config.role === "processor"}
       />
 
       {config.default_prompt && config.system_prompt !== config.default_prompt && (
@@ -201,6 +226,7 @@ const ROLE_JOBS: Record<AgentRole, string> = {
   planner: "plans each task and decides every step",
   worker: "carries out one step",
   reviewer: "checks a step's result",
+  processor: "turns messages others wrote into what its instructions ask, with no tools",
 };
 
 /** The Shared defaults row (the system layer): its id, and its link #settings/roles/shared. */
@@ -236,10 +262,19 @@ function roleSummary(role: AgentRole, effective: EffectiveSettings | undefined, 
   if (effective) {
     const own = effective.profile.source === "role";
     parts.push(`${effectiveProfileText(effective, registry)} (${own ? "own" : "shared"})`);
+    const cannot = cannotRun(role, effective, registry);
+    if (cannot) parts.push(cannot);
     const limit = effective.max_concurrency?.value;
     if (limit != null && (role === "worker" || role === "reviewer")) parts.push(`up to ${limit} per task`);
   }
   return parts.join(" · ");
+}
+
+/** Why the role's Agent Profile cannot run it, as far as the registry tells (the processor needs a runtime without
+ * tools, and the shared defaults' profile need not have one); null when it can or when that is not known. */
+export function cannotRun(role: AgentRole, effective: EffectiveSettings, registry: Registry | null) {
+  const profile = registry?.profiles.find((p) => p.profile_id === effective.profile.value.profile_id);
+  return profile && !profile.roles.includes(role) ? `cannot run the ${roleLabel(role)}: choose a profile that can` : null;
 }
 
 /**
@@ -329,7 +364,7 @@ export function RolesSection({ sub }: { sub: string }) {
               <LayerSettingsForm
                 idPrefix="roles-system"
                 layer="system"
-                roles={[...ROLES]}
+                roles={[...TOOL_ROLES]}
                 values={settings.system.values}
                 effective={settings.system.effective}
                 limits={settings.limits}
@@ -392,6 +427,7 @@ export function RolesSection({ sub }: { sub: string }) {
                         limits={settings.limits}
                         submitLabel="Save overrides"
                         onDirtyChange={marks.layer}
+                        harnessField={role !== "processor"}
                         onSave={async (changes) => {
                           const next = await updateRoleSettings(role, changes);
                           setSettings(next);

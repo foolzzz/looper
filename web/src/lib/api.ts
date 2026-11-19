@@ -287,7 +287,7 @@ export interface TokenRate {
 /** An agent process running now (or a Worker/Reviewer waiting for room under its task's limit). */
 export interface AgentProcess {
   agent_id: string;
-  role: "manager" | "planner" | "worker" | "reviewer" | "consult";
+  role: "manager" | "planner" | "worker" | "reviewer" | "consult" | "processor";
   /** A Manager's display name; null otherwise. */
   name: string | null;
   task_id: string | null;
@@ -3863,10 +3863,12 @@ export type LibraryKind = "plugin" | "skill" | "mcp";
 /** How an item was acquired: imported from this machine, uploaded, taken from git, written in Settings ("ui": a skill
  * or an MCP server) or in a project. */
 export type ItemOrigin = "machine" | "upload" | "git" | "ui" | "project";
-export type AgentRole = "manager" | "planner" | "worker" | "reviewer";
-/** An install's roles: the built-in ones, and "task_role", the roles a task's Planner defines: such an install loads
- * only for a run of a role that names its item. */
-export type InstallRole = AgentRole | "task_role";
+export type AgentRole = "manager" | "planner" | "worker" | "reviewer" | "processor";
+/** The roles whose runs have tools: every role but the processor, which runs with none. */
+export const TOOL_ROLES: readonly AgentRole[] = ["manager", "planner", "worker", "reviewer"];
+/** An install's roles: the built-in ones with tools, and "task_role", the roles a task's Planner defines: such an
+ * install loads only for a run of a role that names its item. */
+export type InstallRole = Exclude<AgentRole, "processor"> | "task_role";
 export const TASK_ROLE: InstallRole = "task_role";
 /** An install's role in words: a built-in role's name, or what TASK_ROLE means. */
 export const installRoleLabel = (role: InstallRole) => (role === TASK_ROLE ? "roles naming it" : role);
