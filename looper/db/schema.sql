@@ -1433,3 +1433,149 @@ CREATE INDEX IF NOT EXISTS idx_llm_requests_route ON llm_requests (route_id, sta
 CREATE INDEX IF NOT EXISTS idx_llm_requests_agent ON llm_requests (agent_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_requests_task ON llm_requests (task_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_llm_requests_started ON llm_requests (started_at);
+
+-- Message stream (message-stream RFC): the sources Looper reads messages from, their chats and people, the events
+-- they yield and the runs that ingest them. Default off: no row, no behavior. connection.py applies this block
+-- to databases that predate it, so keep it between the markers and idempotent.
+-- message stream begin
+CREATE TABLE IF NOT EXISTS event_sources (
+    id                      TEXT PRIMARY KEY,
+    kind                    TEXT NOT NULL CHECK (kind IN ('lark_user')),
+    name                    TEXT NOT NULL CHECK (btrim(name) <> ''),
+    lark_profile            TEXT NOT NULL DEFAULT '',
+    user_open_id            TEXT,
+    ingest_mode             TEXT NOT NULL DEFAULT 'off' CHECK (ingest_mode IN ('off', 'bridge', 'collect')),
+    bridge_dir              TEXT NOT NULL DEFAULT '',
+    bridge_start_from       TEXT NOT NULL DEFAULT 'end' CHECK (bridge_start_from IN ('end', 'beginning')),
+    cron                    TEXT NOT NULL DEFAULT '*/10 * * * *',
+    timezone                TEXT NOT NULL DEFAULT 'UTC',
+    watermark_at            TIMESTAMPTZ,
+    sweep_after             TEXT,
+    sweep_cycle_runs        INTEGER NOT NULL DEFAULT 18 CHECK (sweep_cycle_runs BETWEEN 1 AND 288),
+    committed_seq           BIGINT NOT NULL DEFAULT 0,
+    auth_state              TEXT NOT NULL DEFAULT 'unknown'
+                            CHECK (auth_state IN ('unknown', 'ready', 'needs_refresh', 'expired', 'missing')),
+    auth_checked_at         TIMESTAMPTZ,
+    refresh_expires_at      TIMESTAMPTZ,
+    last_run_at             TIMESTAMPTZ,
+    last_ok_at              TIMESTAMPTZ,
+    last_listing_at         TIMESTAMPTZ,
+    body_retention_days     INTEGER CHECK (body_retention_days > 0),
+    app_body_retention_days INTEGER DEFAULT 30 CHECK (app_body_retention_days > 0),
+    stale_alert_at          TIMESTAMPTZ,
+    auth_alert_at           TIMESTAMPTZ,
+    partial_alert_at        TIMESTAMPTZ,
+    alert_channel           TEXT,
+    alert_chat              TEXT,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (ingest_mode <> 'bridge' OR bridge_dir <> '')
+);
+CREATE TABLE IF NOT EXISTS source_chats (
+    source_id        TEXT NOT NULL REFERENCES event_sources(id) ON DELETE CASCADE,
+    chat_id          TEXT NOT NULL,
+    kind             TEXT NOT NULL CHECK (kind IN ('p2p', 'group', 'topic', 'unknown')),
+    name             TEXT NOT NULL DEFAULT '',
+    inclusion        TEXT NOT NULL DEFAULT 'included' CHECK (inclusion IN ('included', 'excluded')),
+    exclusion_reason TEXT CHECK (exclusion_reason IN ('operator', 'looper_channel')),
+    state            TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'left', 'failing')),
+    cursor_time      TIMESTAMPTZ,
+    cursor_ids       TEXT[] NOT NULL DEFAULT '{}',
+    last_pulled_at   TIMESTAMPTZ,
+    last_message_at  TIMESTAMPTZ,
+    failures         INTEGER NOT NULL DEFAULT 0,
+    last_error       TEXT,
+    last_error_code  INTEGER,
+    bridge_offset    BIGINT,
+    bridge_size      BIGINT,
+    bridge_inode     TEXT,
+    bridge_last_id   TEXT,
+    bridge_mtime     TIMESTAMPTZ,
+    -- The file's first read is not finished: what is still to read is part of that import, not live news.
+    bridge_importing BOOLEAN NOT NULL DEFAULT false,
+    excluded_at      TIMESTAMPTZ,
+    purged_at        TIMESTAMPTZ,
+    PRIMARY KEY (source_id, chat_id),
+    CHECK ((inclusion = 'excluded') = (exclusion_reason IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS source_threads (
+    source_id      TEXT NOT NULL,
+    thread_id      TEXT NOT NULL,
+    chat_id        TEXT NOT NULL,
+    cursor_time    TIMESTAMPTZ,
+    cursor_ids     TEXT[] NOT NULL DEFAULT '{}',
+    last_pulled_at TIMESTAMPTZ,
+    failures       INTEGER NOT NULL DEFAULT 0,
+    last_error     TEXT,
+    PRIMARY KEY (source_id, thread_id),
+    FOREIGN KEY (source_id, chat_id) REFERENCES source_chats(source_id, chat_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS source_people (
+    source_id    TEXT NOT NULL REFERENCES event_sources(id) ON DELETE CASCADE,
+    open_id      TEXT NOT NULL,
+    name         TEXT NOT NULL DEFAULT '',
+    name_source  TEXT NOT NULL CHECK (name_source IN ('contact', 'mention', 'none')),
+    refreshed_at TIMESTAMPTZ,
+    PRIMARY KEY (source_id, open_id)
+);
+CREATE TABLE IF NOT EXISTS source_runs (
+    id                BIGSERIAL PRIMARY KEY,
+    source_id         TEXT NOT NULL REFERENCES event_sources(id) ON DELETE CASCADE,
+    mode              TEXT NOT NULL CHECK (mode IN ('bridge', 'collect', 'listing', 'import')),
+    trigger           TEXT NOT NULL CHECK (trigger IN ('scheduled', 'catch_up', 'manual')),
+    status            TEXT NOT NULL CHECK (status IN ('running', 'ok', 'partial', 'interrupted', 'search_failed',
+                                                      'auth_failed', 'failed', 'skipped_busy')),
+    started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at       TIMESTAMPTZ,
+    window_from       TIMESTAMPTZ,
+    window_to         TIMESTAMPTZ,
+    watermark_before  TIMESTAMPTZ,
+    watermark_after   TIMESTAMPTZ,
+    slices            INTEGER,
+    search_hits       INTEGER,
+    unindexed         INTEGER,
+    chats_pulled      INTEGER,
+    chats_failed      INTEGER,
+    threads_pulled    INTEGER,
+    threads_failed    INTEGER,
+    sweep_chats       INTEGER,
+    sweep_failed      INTEGER,
+    sweep_found       INTEGER,
+    events_new        INTEGER NOT NULL DEFAULT 0,
+    events_seen       INTEGER NOT NULL DEFAULT 0,
+    events_skipped    INTEGER NOT NULL DEFAULT 0,
+    files_rescanned   INTEGER,
+    error             TEXT,
+    error_code        INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_source_runs_source ON source_runs (source_id, id DESC);
+CREATE TABLE IF NOT EXISTS source_events (
+    seq             BIGSERIAL PRIMARY KEY,
+    source_id       TEXT NOT NULL REFERENCES event_sources(id) ON DELETE CASCADE,
+    external_id     TEXT NOT NULL,
+    chat_id         TEXT NOT NULL,
+    thread_id       TEXT,
+    root_id         TEXT,
+    parent_id       TEXT,
+    sender_id       TEXT NOT NULL DEFAULT '',
+    sender_kind     TEXT NOT NULL CHECK (sender_kind IN ('user', 'app', 'other')),
+    sent_at         TIMESTAMPTZ NOT NULL,
+    msg_type        TEXT NOT NULL,
+    mentions_me     BOOLEAN NOT NULL,
+    mention_ids     TEXT[] NOT NULL DEFAULT '{}',
+    text            TEXT NOT NULL,
+    body            JSONB,
+    body_bytes      INTEGER NOT NULL,
+    body_dropped_at TIMESTAMPTZ,
+    origin          TEXT NOT NULL CHECK (origin IN ('live', 'history', 'import')),
+    run_id          BIGINT REFERENCES source_runs(id) ON DELETE SET NULL,
+    ingested_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (source_id, external_id),
+    FOREIGN KEY (source_id, chat_id) REFERENCES source_chats(source_id, chat_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_source_events_seq ON source_events (source_id, seq);
+CREATE INDEX IF NOT EXISTS idx_source_events_chat ON source_events (source_id, chat_id, sent_at);
+CREATE INDEX IF NOT EXISTS idx_source_events_sent ON source_events (source_id, sent_at);
+CREATE INDEX IF NOT EXISTS idx_source_events_run ON source_events (run_id) WHERE run_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_source_events_body ON source_events (sent_at) WHERE body IS NOT NULL;
+-- message stream end

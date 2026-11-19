@@ -3000,6 +3000,65 @@ export const deleteGatewayAlias = (alias: string) => gatewayOperation<GatewaySet
 export const revealGatewayKey = () => gatewayOperation<{ key: string }>("key_reveal");
 export const rotateGatewayKey = () => gatewayOperation<{ key: string }>("key_rotate");
 
+export interface MessageStreamRun {
+  run_id: number;
+  mode: string;
+  trigger: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  events_new: number;
+  events_seen: number;
+  events_skipped: number;
+  files_rescanned: number | null;
+  error: string | null;
+}
+
+export interface MessageStreamSource {
+  source_id: string;
+  name: string;
+  kind: string;
+  ingest_mode: "off" | "bridge" | "collect";
+  bridge_dir: string;
+  start_from: "end" | "beginning";
+  cron: string;
+  timezone: string;
+  user_open_id: string | null;
+  health: "off" | "healthy" | "degraded" | "stale";
+  last_run_at: string | null;
+  last_ok_at: string | null;
+  committed_seq: number;
+  events: number;
+  events_last_hour: number;
+  newest_sent_at: string | null;
+  body_bytes: number;
+  chats: number;
+  chats_excluded: number;
+  chats_failing: number;
+  last_run: MessageStreamRun | null;
+}
+
+export interface MessageStreamConfiguration {
+  source_id?: string;
+  ingest_mode?: "off" | "bridge";
+  bridge_dir?: string;
+  start_from?: "end" | "beginning";
+  user_open_id?: string | null;
+}
+
+async function messageStreamOperation<T extends object>(operation: string, fields: object = {}, signal?: AbortSignal): Promise<T> {
+  const result = await callV1<T>(`/api/v1/message_stream/${operation}`, fields, { signal });
+  if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
+  return result;
+}
+
+export const fetchMessageStream = (signal?: AbortSignal) =>
+  messageStreamOperation<{ sources: MessageStreamSource[] }>("status", {}, signal);
+export const fetchMessageStreamRuns = (source_id: string, signal?: AbortSignal) =>
+  messageStreamOperation<{ source_id: string; runs: MessageStreamRun[] }>("runs", { source_id, limit: 20 }, signal);
+export const configureMessageStream = (fields: MessageStreamConfiguration) =>
+  messageStreamOperation<MessageStreamSource>("configure", fields);
+
 export interface LlmrecSettingsUpdate {
   enabled?: boolean;
   include_oauth?: boolean;

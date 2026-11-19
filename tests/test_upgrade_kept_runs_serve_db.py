@@ -17,6 +17,7 @@ import pytest
 from evals.prompt_regression.runner import Api, free_port, fresh_database
 from looper import ops_config
 from looper.agents import keeper, operator_auth, service
+from tests import leak_guard
 from tests.db_support import DSN
 from tests.runner_support import require_disposable_database
 from tests.test_drain_serve_db import _completed, _events, _project, _task, _until
@@ -26,6 +27,8 @@ from tests.test_service_upgrade_serve_db import _commit, _git
 pytestmark = [
     pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set"),
     pytest.mark.skipif(sys.platform != "darwin", reason="launchd verification requires macOS"),
+    # It registers a job in the real per-user launchd domain, so a plain local run must not start it.
+    pytest.mark.skipif(not os.environ.get("LOOPER_TEST_LAUNCHD"), reason="set LOOPER_TEST_LAUNCHD=1 to run"),
 ]
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,7 +57,7 @@ def _source(root: Path) -> tuple[str, str, str]:
     return base, target, incompatible
 
 
-def test_launchd_upgrade_keeps_the_child_and_reports_adoption():
+def test_launchd_upgrade_keeps_the_child_and_reports_adoption(request):
     require_disposable_database(str(DSN), served=False)
     uv = shutil.which("uv")
     if not uv:
@@ -86,7 +89,10 @@ def test_launchd_upgrade_keeps_the_child_and_reports_adoption():
                                    capture_output=True, text=True, env=env, timeout=120)
         assert installed.returncode == 0, installed.stderr
         python = source / ".venv/bin/python"
-        label = "com.looper.test-upgrade-" + uuid.uuid4().hex[:12]
+        label = leak_guard.LAUNCHD_PREFIX + uuid.uuid4().hex[:12]
+        # Unload the job however the test ends; a killed run is swept at the next session start.
+        leak_guard.track_launchd(label)
+        request.addfinalizer(lambda: (leak_guard.bootout(label), leak_guard.untrack(label)))
 
         def command(operation, *args, timeout=120, check=True):
             result = subprocess.run([str(python), "-m", "looper.cli", "service", operation,

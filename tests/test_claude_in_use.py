@@ -83,7 +83,7 @@ def test_runtime_types_in_use_follow_every_layer_and_fallback(monkeypatch):
         # Nothing chosen: every role runs the built-in Claude Code profile.
         assert await _types(pool) == {"claude-code"}
         codex = await _codex_profile(pool, "agent-codex")
-        for role in ROLES[:-1]:
+        for role in (r for r in ROLES if r != "reviewer"):
             await pool.execute("INSERT INTO agent_setting_layers (scope, role, profile_id) VALUES ('role', $1, $2)",
                                role, codex)
         assert await _types(pool) == {"codex", "claude-code"}  # the reviewer role still runs the built-in profile

@@ -90,6 +90,12 @@ def staged_dashboard_dir() -> Path:
     return directory
 
 
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Reap keepers and launchd jobs that an aborted earlier run left behind."""
+    from tests.leak_guard import sweep
+    sweep()
+
+
 def pytest_configure(config: pytest.Config) -> None:
     if (shard := os.environ.get("LOOPER_TEST_SHARD")) is not None:
         match = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", shard)
