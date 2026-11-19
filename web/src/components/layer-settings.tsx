@@ -175,7 +175,6 @@ export function LayerSettingsForm({
   submitLabel = "Save",
   onDirtyChange,
   profileFirst = false,
-  harnessField = true,
 }: {
   idPrefix: string;
   layer: Exclude<SettingLayer, "builtin">;
@@ -192,8 +191,6 @@ export function LayerSettingsForm({
   /** Told whether the form holds unsaved edits. */
   onDirtyChange?: (dirty: boolean) => void;
   profileFirst?: boolean;
-  /** False for a layer of the processor, which has no harness: its system prompt is its role prompt and instructions. */
-  harnessField?: boolean;
 }) {
   const [draft, setDraft] = useState<Draft>(() => draftOf(values));
   const [busy, setBusy] = useState(false);
@@ -202,6 +199,9 @@ export function LayerSettingsForm({
   const { registry } = useRegistry();
   const isSystem = layer === "system";
   const [only] = roles;
+  // The processor's own layers have no harness (its prompt is its role prompt and its instructions) and no prompt
+  // mode: it always replaces the runtime's prompt.
+  const processor = roles.length === 1 && only === "processor";
   const concurrencyRole: TaskLimitRole | null =
     layer === "role" && roles.length === 1 && (only === "worker" || only === "reviewer") ? only : null;
 
@@ -283,7 +283,7 @@ export function LayerSettingsForm({
       {profileFirst && (
         <h4 className="border-t border-border pt-4 text-xs font-semibold">More overrides</h4>
       )}
-      {harnessField && (
+      {!processor && (
         <div className="space-y-1">
           <HarnessField
             id={`${idPrefix}-harness`}
@@ -361,7 +361,7 @@ export function LayerSettingsForm({
           />
           <NowValue id={`${idPrefix}-budget-now`} setting={effective?.run_budget_usd} layer={layer} show={budgetText} />
         </div>
-        {layer === "role" && (
+        {layer === "role" && !processor && (
           <div className="space-y-1 sm:col-span-2">
             <label htmlFor={`${idPrefix}-prompt-mode`} className="text-xs font-medium text-muted-foreground">
               System prompt

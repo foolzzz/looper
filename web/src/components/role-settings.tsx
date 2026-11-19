@@ -427,7 +427,6 @@ export function RolesSection({ sub }: { sub: string }) {
                         limits={settings.limits}
                         submitLabel="Save overrides"
                         onDirtyChange={marks.layer}
-                        harnessField={role !== "processor"}
                         onSave={async (changes) => {
                           const next = await updateRoleSettings(role, changes);
                           setSettings(next);

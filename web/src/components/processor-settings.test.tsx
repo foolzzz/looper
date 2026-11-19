@@ -59,7 +59,7 @@ async function rendered(view: React.ReactElement) {
 describe("the processor's settings", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it.each(["roles", "project"])("have a %s row with no harness that says when its profile cannot run it", async (view) => {
+  it.each(["roles", "project"])("have a %s row with no harness or prompt mode that says when its profile cannot run it", async (view) => {
     serve();
     const { container, done } = await rendered(view === "roles" ? <RolesSection sub="processor" />
       : <ProjectAgentSettingsSection projectId="project" linked="processor" />);
@@ -69,6 +69,7 @@ describe("the processor's settings", () => {
       const panel = container.querySelector(`#${row}-panel`)!;
       expect(panel.querySelector("[id$='-profile']")).toBeTruthy();
       expect(panel.querySelector("[id$='-harness']")).toBeNull();
+      expect(panel.querySelector("[id$='-prompt-mode']")).toBeNull();  // it always replaces the runtime's prompt
       if (view === "roles") expect(panel.textContent).toContain("No tools");
     } finally {
       done();

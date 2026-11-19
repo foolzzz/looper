@@ -307,7 +307,6 @@ export function ProjectAgentSettingsSection({ projectId, linked }: { projectId: 
                     profileFirst
                     submitLabel="Save overrides"
                     onDirtyChange={dirty.layer}
-                    harnessField={role !== "processor"}
                     onSave={async (changes) => {
                       const next = await updateProjectRoleSettings(projectId, role, changes);
                       setSettings(next);
