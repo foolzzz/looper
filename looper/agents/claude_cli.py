@@ -100,12 +100,12 @@ def repository_root(directory: Path) -> Path:
     return directory
 
 
-def _outside_memory(cwd: Path) -> list[str]:
+def _outside_memory(cwd: Path, *, repository: bool = True) -> list[str]:
     """The memory files Claude Code would read from outside the project.
 
     That is, from every directory above the repository root (the work
-    directory itself when it is not in a repository), and the operator's
-    user memory wherever the repository is.
+    directory itself when it is not in a repository, or with ``repository``
+    False), and the operator's user memory wherever the repository is.
     """
     patterns: list[str] = []
 
@@ -117,7 +117,7 @@ def _outside_memory(cwd: Path) -> list[str]:
 
     # Both spellings of a path through a symbolic link.
     for directory in dict.fromkeys((cwd.absolute(), cwd.resolve())):
-        for parent in repository_root(directory).parents:
+        for parent in (repository_root(directory) if repository else directory).parents:
             add(parent, "CLAUDE.md", ".claude/CLAUDE.md", ".claude/rules/**", "AGENTS.md", ".claude/AGENTS.md")
     config_dirs = [Path.home() / ".claude"]
     if os.environ.get("CLAUDE_CONFIG_DIR"):
@@ -139,16 +139,20 @@ def clear_private_settings(runtime_root: Path) -> int:
 
 
 def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = None,
-                   settings_dir: Path | None = None) -> list[str]:
+                   settings_dir: Path | None = None, repository: bool = True) -> list[str]:
     """The flags that keep the operator's personal Claude Code configuration out of an agent run in ``cwd``.
 
-    Every agent's command carries them, so the agents cannot diverge.
+    Every agent's command carries them, so the agents cannot diverge. A run
+    with no tools (the processor's) has no repository: with ``repository``
+    False, every directory above ``cwd`` is outside it, so no ``CLAUDE.md`` or
+    ``AGENTS.md`` above its directory loads even when the runtime root is in
+    a checkout.
     The explicit ``env`` pins runtime-owned variables over project settings;
     it carries only a local route token, never an upstream provider credential.
     The result depends only on those values, ``cwd`` and where the operator's
     configuration lives, so a resident agent's command stays the same between turns.
     """
-    settings = {"autoMemoryEnabled": False, "claudeMdExcludes": _outside_memory(Path(cwd)),
+    settings = {"autoMemoryEnabled": False, "claudeMdExcludes": _outside_memory(Path(cwd), repository=repository),
                 "crossSessionInbound": "refuse"}
     if env is not None:
         settings["env"] = env
@@ -407,6 +411,17 @@ def peer_args(agent_teams: bool) -> list[str]:
     ListAgents finds no such tool, and a run with agent teams starts a named teammate, messages it and gets its reply.
     """
     return ["--disallowedTools", ",".join((LIST_PEERS, *(() if agent_teams else (SEND_MESSAGE,))))]
+
+
+# The flags of a run with no tools (the processor's), in place of its permissions, plugins, knowledge and MCP
+# servers. Verified against Claude Code 2.1.328 in --print stream-json mode with the isolation flags: its init event
+# lists 23 tools without --tools "" and none with it, 55 slash commands and 19 skills without
+# --disable-slash-commands and none with it, and no MCP server (--strict-mcp-config, no --mcp-config); a
+# transcript under ~/.claude/projects is written without --no-session-persistence and none with it. --tools takes
+# several values, so a flag must follow its "". Claude Code's own built-in plugins are still listed (they add no
+# tool, command or skill), and one UserPromptSubmit hook from neither the operator's settings nor a project still
+# ran, adding nothing. No permission prompt can be answered (READ_ONLY_MODE), though no tool is left to ask for one.
+NO_TOOLS_ARGS = (*READ_ONLY_MODE, "--tools", "", "--disable-slash-commands", "--no-session-persistence")
 
 
 def consult_args() -> list[str]:

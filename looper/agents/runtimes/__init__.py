@@ -196,6 +196,9 @@ class Capability(str, Enum):
     AUTONOMOUS_TURNS = "autonomous_turns"  # it runs a turn of its own when background work ends, and says so
     READ_TOOLS = "read_tools"  # it can run with only the tools that read (OMP's --tools), keeping its MCP tools
     COST_REPORT = "cost_report"  # it reports what a run cost
+    # It can run with no tool at all: no built-in tool, MCP server, plugin, skill or command (the processor's runs),
+    # as checked on a real run (its init lists no tool and no MCP server).
+    NO_TOOLS = "no_tools"
 
 
 class ImageInput(str, Enum):
@@ -238,13 +241,19 @@ class CostSource(str, Enum):
 
 
 # What each role needs of its runtime. The Manager and a Planner keep one process per session and resume it
-# after a restart; a Worker or Reviewer runs once, taking the Planner's steering while it runs.
+# after a restart; a Worker or Reviewer runs once, taking the Planner's steering while it runs; the processor runs
+# once with no tools, over messages other people wrote.
 ROLE_CAPABILITIES: Mapping[str, frozenset[Capability]] = {
     "manager": frozenset({Capability.RESIDENT_SESSION, Capability.RESUME}),
     "planner": frozenset({Capability.RESIDENT_SESSION, Capability.RESUME}),
     "worker": frozenset({Capability.RUN}),
     "reviewer": frozenset({Capability.RUN}),
+    "processor": frozenset({Capability.RUN, Capability.NO_TOOLS}),
 }
+# The roles whose runs have tools: every role but the processor. A profile chosen for all of them at once (the
+# shared defaults) or as another profile's fallback is checked against these; a profile is checked for the processor
+# where it is chosen for it (its role, in a project, by a schedule) and again when the processor launches.
+TOOL_ROLES = ("manager", "planner", "worker", "reviewer")
 
 
 @dataclass(frozen=True)

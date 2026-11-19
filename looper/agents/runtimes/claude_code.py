@@ -134,8 +134,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
     streams_usage = True
     default_executable = "claude"
     image_input = ImageInput.READ_TOOL
-    # Verified against Claude Code 2.1.285 (claude_cli); its replies follow Looper's contracts by prompt, so no
-    # structured_output.
+    # Verified against Claude Code 2.1.285 (claude_cli), no_tools against 2.1.328 (claude_cli.NO_TOOLS_ARGS); its
+    # replies follow Looper's contracts by prompt, so no structured_output.
     capabilities = frozenset(set(Capability) - {Capability.STRUCTURED_OUTPUT, Capability.READ_TOOLS, Capability.STEER})
     room_push = RoomPush.USER_TURN
     run_input = True  # stdin can stay open between a Worker's waiting turns
@@ -200,6 +200,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         from ..llmrec.gateway import translated
 
         # Project settings load after process env; pin the attached route and all translation safeguards here too.
+        repository = not (launch is not None and launch.no_tools)
         env = None
         if launch is not None and translated(launch):
             env = {**dict(TRANSLATED_ENV), AUTH_TOKEN: "", API_KEY: ""}
@@ -211,7 +212,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             if isinstance(launch.llmrec, LlmrecRoute) and launch.llmrec.kind is RouteKind.TRANSLATE:
                 env[BASE_URL] = launch.llmrec.url
                 env[AUTH_TOKEN] = launch.llmrec.local_token
-        return claude_cli.isolation_args(cwd, env=env, settings_dir=settings_dir)
+        return claude_cli.isolation_args(cwd, env=env, settings_dir=settings_dir, repository=repository)
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
                       executable: str | None = None, launcher: Launcher = Launcher.NATIVE) -> None:
@@ -275,12 +276,19 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         operator's other Claude Code sessions denied (``claude_cli.peer_args``), the model, the effort, the plugin
         directories of the installed items, the directories of the project knowledge, the per-run spend cap (when
         Claude Code's own figure is the run's cost), the provider's binding and, with agent teams
-        (``Launch.agent_teams``), where teammates run."""
+        (``Launch.agent_teams``), where teammates run. A run with no tools (``Launch.no_tools``) has none of the
+        permissions, items, knowledge or teammates: ``claude_cli.NO_TOOLS_ARGS`` with its model, effort, cap and
+        binding."""
         from ..claude_cli import (
-            budget_args, consult_args, knowledge_args, library_args, peer_args, permission_args, read_only_args,
+            NO_TOOLS_ARGS, budget_args, consult_args, knowledge_args, library_args, peer_args, permission_args,
+            read_only_args,
         )
 
         provider = launch.profile.provider
+        budget = budget_args(launch.max_budget_usd) if self.cost_source(provider) is CostSource.RUNTIME else []
+        if launch.no_tools:
+            return [*NO_TOOLS_ARGS, "--model", launch.model, *(["--effort", launch.effort] if launch.effort else []),
+                    *budget, *self.bind_provider(provider, launch.model, launch.effort).args]
         return [
             *(consult_args() if launch.consult else
               read_only_args(launch.library, cwd=cwd if cwd is not None else Path.cwd(),
@@ -291,7 +299,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             *(["--effort", launch.effort] if launch.effort else []),
             *library_args(launch.library),
             *knowledge_args(launch.knowledge),
-            *(budget_args(launch.max_budget_usd) if self.cost_source(provider) is CostSource.RUNTIME else []),
+            *budget,
             *self.bind_provider(provider, launch.model, launch.effort).args,
             *(TEAMMATE_MODE_ARGS if launch.agent_teams else ()),
         ]
@@ -379,9 +387,10 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # Partial deltas keep the run's heartbeat current while Claude thinks.
             "--include-partial-messages",
             # The prompt and any later user turns arrive on stdin, so the
-            # Planner can step in while the run is going.
+            # Planner can step in while the run is going. A run with no tools gets other people's messages as its
+            # prompt: they are not echoed back into its stream (and its record).
             "--input-format", "stream-json",
-            "--replay-user-messages",
+            *([] if launch.no_tools else ["--replay-user-messages"]),
             # None of the operator's personal settings, memory, hooks, plugins
             # or MCP servers (whose teardown could also make the CLI exit
             # non-zero). Built-in tools are unaffected; the permissions every

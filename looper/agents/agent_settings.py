@@ -9,12 +9,15 @@ one winning (``agent_setting_layers``, one row per layer and place):
 
 1. **system** (Settings): every agent;
 2. **role** (Settings → Roles): one role, everywhere: the Manager, the Planner,
-   the Workers or the Reviewers;
-3. **project** (the project's Settings tab): the Planner, Workers and
-   Reviewers of one project;
+   the Workers, the Reviewers or the processor;
+3. **project** (the project's Settings tab): the Planner, Workers,
+   Reviewers and processor of one project;
 4. **role in a project** (the same tab): one of those roles in one project.
 
-The Manager spans every project, so it has only the first two. Workers and
+The Manager spans every project, so it has only the first two. The processor
+(a run with no tools over other people's messages, ``processor``) has no task:
+over its four layers comes the Agent Profile its schedule chose for it
+(``schedule_profile_overrides``, ``Layer.SCHEDULE``). Workers and
 Reviewers are never configured one by one; a task may choose the profile of
 its Planner, Workers or Reviewers, which wins over every layer for that task
 only (``Layer.TASK``, a task's ``profile_overrides``). Under it, over every layer, comes the task's
@@ -75,7 +78,7 @@ from .profile_registry import (
 )
 from .knowledge import EMPTY_KNOWLEDGE, AgentKnowledge
 from .library import EMPTY_LIBRARY, AgentLibrary
-from .runtimes import ApiProtocol, AuthKind, Capability, CostSource, ReadOnly
+from .runtimes import TOOL_ROLES as TOOL_ROLE_NAMES, ApiProtocol, AuthKind, Capability, CostSource, ReadOnly
 from .system_prompt_mode import SystemPromptMode, system_prompt_mode
 
 if TYPE_CHECKING:
@@ -143,9 +146,15 @@ class AgentType(str, Enum):
     PLANNER = "planner"
     WORKER = "worker"
     REVIEWER = "reviewer"
+    PROCESSOR = "processor"
 
 
 TASK_ROLES = (AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER)
+# The roles a project's layers apply to: its tasks' and the processor of its schedules.
+PROJECT_ROLES = (*TASK_ROLES, AgentType.PROCESSOR)
+# The roles whose runs have tools (``runtimes.TOOL_ROLES``): the shared defaults' profile is checked against these, and
+# the Manager's settings tool knows only these.
+TOOL_ROLES = tuple(AgentType(role) for role in TOOL_ROLE_NAMES)
 # The roles whose concurrency a limit counts, in one task: one Planner runs a task, and any number of tasks run.
 TASK_LIMIT_ROLES = (AgentType.WORKER, AgentType.REVIEWER)
 # The roles a task's Planner may choose the Agent Profile of: never its own.
@@ -158,6 +167,8 @@ BUILTIN_CONCURRENCY = {AgentType.WORKER: 16, AgentType.REVIEWER: 8}
 BUILTIN_SYSTEM_PROMPT_MODE = {
     AgentType.MANAGER: SystemPromptMode.REPLACE, AgentType.PLANNER: SystemPromptMode.REPLACE,
     AgentType.WORKER: SystemPromptMode.APPEND, AgentType.REVIEWER: SystemPromptMode.APPEND,
+    # The processor has no tools: the runtime's own prompt, which describes them, does not apply.
+    AgentType.PROCESSOR: SystemPromptMode.REPLACE,
 }
 
 
@@ -170,7 +181,8 @@ class Layer(str, Enum):
     defined that a run runs as (``task_roles``), over the Planner's choices and under the task's own; ``SESSION`` is
     the Agent Profile the user chose for the Manager's current session (``agent_sessions.selected_profile_id``), the
     Manager's last layer; ``MANAGER`` is the profile of a Manager's definition (``managers.profile_id``), under
-    its session's choice.
+    its session's choice; ``SCHEDULE`` is the profile a schedule chose for its processor runs, the processor's last
+    layer.
     """
 
     BUILTIN = "builtin"
@@ -185,6 +197,7 @@ class Layer(str, Enum):
     TASK = "task"
     SESSION = "session"
     MANAGER = "manager"
+    SCHEDULE = "schedule"
 
 
 class SettingsError(ValueError):
@@ -425,6 +438,9 @@ def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict
         elif raw is None or raw == "":
             values[name] = None
         elif name == "harness_prompt":
+            if role is AgentType.PROCESSOR:
+                raise SettingsError("the processor has no harness: its system prompt is its role prompt (Settings → "
+                                    "Roles, Role prompt) and the instructions of what it processes")
             text = harness_prompt(raw)
             values[name] = None if not text or (scope is Layer.SYSTEM and _is_builtin_harness(text)) else text
         elif name == "profile_id":
@@ -575,7 +591,7 @@ Place = tuple[Layer, AgentType | None]  # a layer and its role, within one proje
 def _chain(role: AgentType | None, project_id: str | None) -> list[Place]:
     """The layers that apply to ``role`` (None: the system layer alone), first to last; a Worker's or Reviewer's
     Planner's choices, the profile of the task role a run runs as, then a task's own choice of profile, when there
-    are any, come last."""
+    are any, come last; the processor's last is its schedule's choice."""
     if role is None:
         return [(Layer.SYSTEM, None)]
     chain: list[Place] = [(Layer.SYSTEM, None), (Layer.ROLE, role)]
@@ -585,6 +601,8 @@ def _chain(role: AgentType | None, project_id: str | None) -> list[Place]:
         chain += [(Layer.PLANNER_TASK, role), (Layer.PLANNER_STEP, role), (Layer.TASK_ROLE, role)]
     if role is AgentType.MANAGER:
         chain += [(Layer.MANAGER, role), (Layer.SESSION, role)]
+    elif role is AgentType.PROCESSOR:
+        chain.append((Layer.SCHEDULE, role))
     else:
         chain.append((Layer.TASK, role))
     return chain
@@ -723,13 +741,14 @@ async def load_task_limit(role: AgentType, task_id: str | None) -> int:
 async def load_agent_settings(
     role: AgentType | str, project_id: str | None = None, task_id: str | None = None, step_id: str | None = None,
     task_role: tuple[str, int] | None = None, manager_session: bool = True, manager_id: str = "manager",
-    *, profile_id: str | None = None, wait: bool = True,
+    *, profile_id: str | None = None, wait: bool = True, schedule_id: str | None = None,
 ) -> AgentSettings:
     """``role``'s settings in ``project_id`` (or outside any project) and, with ``task_id``, the profile that task
     and its Planner chose for it (with ``step_id``, the Planner's choice for that step too; with ``task_role``, a
     role's key and version, the profile of that role of the task), read now; the built-in defaults, with ``error``
     set, when the layers cannot be read. The Manager ``manager_id``'s settings include the profile of its definition and, unless
-    ``manager_session`` is False, the profile chosen for its session. ``profile_id`` pins an existing run's
+    ``manager_session`` is False, the profile chosen for its session; the processor's, with ``schedule_id``, the
+    profile that schedule chose for it. ``profile_id`` pins an existing run's
     recorded profile when adopting it, ahead of the current selection. Views pass ``wait=False`` to use cached
     login checks; launches wait for a current answer by default."""
     from ..db import agent_setting_layers, profile_registry
@@ -739,6 +758,8 @@ async def load_agent_settings(
         extra["manager_id"] = manager_id
         if not manager_session:
             extra["with_session"] = False
+    if AgentType(role) is AgentType.PROCESSOR and schedule_id is not None:
+        extra["schedule_id"] = schedule_id
     try:
         rows = await agent_setting_layers.list_layers(project_id, task_id=task_id, step_id=step_id,
                                                       task_role=task_role, **extra)
@@ -920,8 +941,16 @@ class Launch:
         """Whether the run has Claude Code's agent teams: its profile's, never for a Planner. A Planner's plan and
         each of its decisions are read from the result of its own turn, so a turn that waits for a teammate ends
         without its decision, and the teammate's later turns are Claude's own, only logged (#26); the Planner runs
-        work in parallel through Looper's Workers, whose steps Looper tracks, which teammates would bypass."""
-        return self.profile.agent_teams and self.role is not AgentType.PLANNER and not self.read_only
+        work in parallel through Looper's Workers, whose steps Looper tracks, which teammates would bypass. A run
+        with no tools (``no_tools``) has none either."""
+        return (self.profile.agent_teams and self.role is not AgentType.PLANNER and not self.read_only
+                and not self.no_tools)
+
+    @property
+    def no_tools(self) -> bool:
+        """Whether the run has no tool at all (the processor's): its runtime leaves out every built-in tool, MCP
+        server, plugin, skill, command and knowledge directory (``Capability.NO_TOOLS``)."""
+        return self.role is AgentType.PROCESSOR
 
     @property
     def read_only(self) -> bool:
@@ -1202,7 +1231,7 @@ async def project_settings_view(project_id: str) -> dict[str, Any]:
         "roles": {
             role.value: {"values": layers.get((Layer.ROLE_PROJECT, role), EMPTY_LAYER).view(),
                          "effective": _effective(role, layers, project_id)}
-            for role in TASK_ROLES
+            for role in PROJECT_ROLES
         },
     }
 
@@ -1222,7 +1251,8 @@ async def update_system(data: Any) -> dict[str, Any]:
     from ..db import agent_setting_layers
 
     values = layer_update(data, Layer.SYSTEM)
-    await _check_profile(values, AgentType)
+    # The processor inherits the shared defaults too, but they need not run it: its launch says why when they cannot.
+    await _check_profile(values, TOOL_ROLES)
     await agent_setting_layers.put_layer(Layer.SYSTEM.value, None, None, values)
     return await settings_view()
 
@@ -1243,10 +1273,11 @@ async def update_project(project_id: str, data: Any, role: str | None = None) ->
 
     from ..db import agent_setting_layers
 
-    agent = _role(role, TASK_ROLES) if role is not None else None
+    agent = _role(role, PROJECT_ROLES) if role is not None else None
     scope = Layer.ROLE_PROJECT if agent else Layer.PROJECT
     values = layer_update(data, scope, agent)
     await _existing_project(project_id)
+    # As for the shared defaults, the project layer's profile need not run the processor.
     await _check_profile(values, [agent] if agent else TASK_ROLES)
     try:
         await agent_setting_layers.put_layer(scope.value, agent.value if agent else None, project_id, values)
