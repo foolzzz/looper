@@ -18,6 +18,23 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.16] - 2026-11-19
+
+### Changed
+
+- **Group chats: no wait or concurrency notices, short schedule replies.** ([#1419](https://github.com/foolzzz/looper/pull/1419), fixes [#1412](https://github.com/foolzzz/looper/issues/1412))
+  - A Lark or Telegram group no longer gets the notice that a task's wait timed out or that the Planner changed its concurrency; both stay in the dashboard and the journal. The Planner's concurrency tool answers `user_told: false` for a group task.
+  - A schedule update in a group is answered with one line naming the schedule, its project and the changed settings (no values, directories or fire times). Enabling or running a schedule, raising a cap and editing an enabled command ask one short question without the schedule's settings.
+  - Direct chats and the dashboard are unchanged. The group's schedule update reply is model-visible content.
+
+### Fixed
+
+- **Tests: the scheduled installed-runtime tests are green again.** ([#1416](https://github.com/foolzzz/looper/pull/1416)) Tests lagged earlier deliberate product changes; test only, no behavior change.
+
+### Documentation
+
+- **Message stream and subscriptions RFC.** ([#1415](https://github.com/foolzzz/looper/pull/1415)) A design proposal only; no code or behavior change.
+
 ## [2.15.15] - 2026-11-18
 
 ### Added
