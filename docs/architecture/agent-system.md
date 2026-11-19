@@ -4946,7 +4946,14 @@ will.
   against 2.1.328: a project's UserPromptSubmit hook that writes a file ran,
   with the prompt on its stdin, under `--setting-sources project`, and under
   neither of these; a hook from the administrator's managed settings still
-  runs, which `disableAllHooks` does not reach). It runs in an empty private
+  runs, which `disableAllHooks` does not reach). Those managed hooks are a
+  typed fact (`RuntimeAdapter.managed_hooks`: Claude Code reads
+  `managed-settings.json` in its macOS and Linux places; the file, the hook
+  events, whether it could be read): `chosen_profile` returns them
+  (`managed_hooks`), each run's record names them, and the system setting
+  `processor.refuse_with_managed_hooks` (default false; `processor_settings.get`
+  and `.update`, Settings → Roles, Processor) refuses a run while they are
+  present. It runs in an empty private
   directory under the runtime root (`.local/processor/<id>`, removed
   afterwards), with every `CLAUDE.md` and `AGENTS.md` above that directory
   excluded even when the runtime root is in a checkout.
@@ -4977,16 +4984,19 @@ will.
   model requests are not recorded (llmrec), `input_text` is only a reference
   to the batch (the caller's window reference, the text's sha256 and its
   length), and of its stream it keeps only the runtime's own events (the init
-  event) and the result: the model's messages, whose thinking may restate the
-  batch, are counted for usage and never stored. Deleting the messages deletes
-  their text from every place Looper keeps it but the outputs.
+  event) and the result's typed fields: the model's messages, whose thinking
+  may restate the batch, are counted for usage and never stored. Its error is
+  only what happened (no stderr tail, `single_run.run_once(quiet=True)`), with
+  the category in `metadata.processor_failure`; its output is a successful
+  result's only. Deleting the messages deletes their text from every place
+  Looper keeps it but the outputs.
 - **Where it shows.** Settings → Roles and a project's Agent Profiles tab have
   a Processor row (no harness field; whether its profile can run it); runtime
   cards and a profile's "used by" list it. The Manager's tools do not name it,
   its `looper_settings` neither shows nor sets it, and `looper_agent_profiles`
-  lists runtimes, types and profiles without the processor among their roles
-  or `no_tools` among their capabilities: what the Manager sees is what it saw
-  before the role.
+  lists runtimes, types and profiles without the processor among their roles,
+  in their `used_by` or `no_tools` among their capabilities: what the Manager
+  sees is what it saw before the role.
 
 ### Turns Claude runs on its own
 
