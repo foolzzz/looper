@@ -214,11 +214,43 @@ def _package_version(executable: str, package: str) -> str | None:
     return ""
 
 
-def enable(runtime_root: Path) -> RunnerSupervisor | None:
-    """Install the adapter once at serve startup, retaining failures without a CLI fallback."""
-    node, pi = shutil.which("node"), shutil.which("pi")
+class PiRuntimeConflict(RuntimeError):
+    """Agent Profiles in use run Pi runtimes with different executables, which one runner cannot serve."""
+
+
+async def configured_executable(database_url: str) -> str:
+    """The executable of the Pi runtime that the Agent Profiles in use launch (the profiles selected at any layer
+    and the ones they fall back to), ``pi`` when none is in use or its executable is empty or the registry cannot be
+    read yet. Raises ``PiRuntimeConflict`` naming the executables when in-use Pi runtimes differ."""
+    import asyncpg
+
+    from ...db import profile_registry
+    from ..agent_settings import AgentType
+    from ..profile_registry import BUILTIN_PROFILE
+
+    try:
+        conn = await asyncpg.connect(database_url, timeout=5)
+        try:
+            rows = await profile_registry.runtimes_in_use(
+                BUILTIN_PROFILE.id, [role.value for role in AgentType], pool=conn)
+        finally:
+            await conn.close()
+    except Exception as exc:
+        logger.info("cannot read the Pi runtime in use (%s); using `pi` from PATH", type(exc).__name__)
+        return PiRuntime.default_executable
+    executables = sorted({row["executable"] or PiRuntime.default_executable for row in rows if row["type"] == "pi"})
+    if len(executables) > 1:
+        raise PiRuntimeConflict("Agent Profiles in use run Pi runtimes with different executables ("
+                                + ", ".join(executables) + "); the Pi runner serves one. Point them at one executable.")
+    return executables[0] if executables else PiRuntime.default_executable
+
+
+def enable(runtime_root: Path, executable: str = PiRuntime.default_executable) -> RunnerSupervisor | None:
+    """Install the adapter once at serve startup, retaining failures without a CLI fallback. ``executable`` is the
+    registered Pi runtime's (``configured_executable``)."""
+    node, pi = shutil.which("node"), shutil.which(executable)
     if not node or not pi:
-        unavailable = _opt_out("node 22.19+ and pi are not both on PATH")
+        unavailable = _opt_out(f"node 22.19+ and {executable} are not both on PATH")
     else:
         try:
             result = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=2, check=True)

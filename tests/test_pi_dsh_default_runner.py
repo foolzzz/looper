@@ -712,3 +712,58 @@ def test_dsh_validation_uses_runner_evidence_unless_dsh_cli(tmp_path, monkeypatc
     assert launcher.main(["task-basic", "--real", "--dsh-cli", pg, url]) == 0
     assert seen["dsh_runner"] is False
     assert launcher.main(["smoke", "--real", "--dsh-cli", "--dsh-runner", pg, url]) == 2
+
+
+def test_pi_runner_starts_the_registered_runtime_s_executable(tmp_path, monkeypatch):
+    monkeypatch.setitem(ADAPTERS, "pi", PiRuntime())
+    custom = _package(tmp_path / "custom", "@earendil-works/pi-coding-agent", "1.3.2")
+    seen = {}
+
+    def supervisor(root, commands, **kwargs):
+        seen["command"] = commands["pi"]
+        return object()
+
+    monkeypatch.setattr(pi_runner.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="v22.19.0"))
+    # `pi` on PATH is some other executable (or none); only the registered one is the runner's.
+    monkeypatch.setattr(pi_runner.shutil, "which", lambda name: {"node": "/node", custom: custom}.get(name))
+    monkeypatch.setattr(pi_runner, "RunnerSupervisor", supervisor)
+    assert pi_runner.enable(tmp_path, custom) is not None
+    assert ADAPTERS["pi"].unavailable is None and ADAPTERS["pi"].pi == Path(custom).resolve()
+    assert str(Path(custom).resolve()) in map(str, seen["command"])
+    assert pi_runner.enable(tmp_path) is None
+    assert "pi are not both on PATH" in ADAPTERS["pi"].unavailable
+
+
+def test_configured_pi_executable_comes_from_the_runtime_the_profiles_in_use_launch(monkeypatch):
+    from looper.db import profile_registry
+
+    rows = [{"type": "codex", "executable": "codex"}, {"type": "pi", "executable": "/opt/pi-2/bin/pi"}]
+    seen = []
+
+    class Conn:
+        async def close(self):
+            pass
+
+    async def connect(*args, **kwargs):
+        return Conn()
+
+    async def runtimes_in_use(builtin, roles, **kwargs):
+        seen.append(builtin)
+        return rows
+
+    import asyncpg
+
+    monkeypatch.setattr(asyncpg, "connect", connect)
+    monkeypatch.setattr(profile_registry, "runtimes_in_use", runtimes_in_use)
+    # An idle registered Pi runtime is not in the in-use rows, so it cannot be picked.
+    assert asyncio.run(pi_runner.configured_executable("postgresql://x/y")) == "/opt/pi-2/bin/pi"
+    assert seen == ["agent-claude-code-opus"]
+    rows[1]["executable"] = ""
+    assert asyncio.run(pi_runner.configured_executable("postgresql://x/y")) == "pi"
+    rows[:] = [{"type": "pi", "executable": "/opt/pi/bin/pi"}, {"type": "pi", "executable": "/opt/pi-2/bin/pi"}]
+    with pytest.raises(pi_runner.PiRuntimeConflict, match="/opt/pi-2/bin/pi, |/opt/pi/bin/pi, /opt/pi-2/bin/pi"):
+        asyncio.run(pi_runner.configured_executable("postgresql://x/y"))
+    rows.clear()
+    assert asyncio.run(pi_runner.configured_executable("postgresql://x/y")) == "pi"
+    monkeypatch.setattr(profile_registry, "runtimes_in_use", None)
+    assert asyncio.run(pi_runner.configured_executable("postgresql://x/y")) == "pi"

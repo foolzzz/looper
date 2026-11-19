@@ -228,7 +228,10 @@ real-model planning quality.
 
 ### Real mode: the effect, on demand
 
-Runs real Claude Code (`haiku` by default) and costs money. Every Claude Code
+Runs real Claude Code (`haiku` by default; `--agent` or `--register-agent` choose another
+runtime and model) and costs money. Real mode needs the `claude` CLI on PATH only when a Claude Code agent
+runs, and refuses to start without it then; the other runtimes' executables and logins are found by the
+eval's server, which says what is missing. Every Claude Code
 run gets `--max-budget-usd` (default 0.25), and the run stops once its tasks
 have spent `--total-cap-usd` (default 0.80); a task that reaches the cap is
 cancelled and the rest are skipped. `--model` sets the model in the system
@@ -258,8 +261,8 @@ uv run --extra test python -m evals.prompt_regression run --mode real \
   --pg-url postgresql://postgres:postgres@127.0.0.1:5432/postgres
 ```
 
-Options: `--model` (every role runs Claude Code with its own login and this
-model, the Agent Profile `claude-code/<model>`), `--agent <name>` (every role
+Options: `--model` (default `haiku`: every role runs Claude Code with its own login and this
+model, the Agent Profile `claude-code/<model>`; ignored with `--agent` or `--register-agent`), `--agent <name>` (every role
 runs this Agent Profile instead: one registered in the eval's new database,
 such as the built-in `claude-code/opus`; the run records it as `agent`),
 `--provider-preset <id>` (every role runs Claude Code with a provider registered from this
@@ -376,6 +379,7 @@ For a fixed ended Worker history, `python -m evals.dsh_consult_replay` records r
 consult requests, token usage and final answer shape. See the
 [before/after measurement and replay instructions](../docs/plans/2026-10-29-dsh-consult-validation.md).
 This opt-in check uses synthetic serve-test captures and never runs in the default tests.
+`--model` (default `deepseek-flash`) and `--effort` (default `high`) choose the model it replays.
 
 [DSH's RFC](../docs/architecture/rfcs/dsh-runtime-v0.zh-CN.md#9-验收与边界)
 tracks passed, failed and untested separately. Local fake responses and the
@@ -931,7 +935,10 @@ uv run --extra test python -m evals.lark_quote --mode real --model sonnet --reps
 ```
 
 `--mode fake` plays the Manager with a stand-in that saves each turn (the JSON's `turns`), for the path alone.
-`--manager-model opus --manager-effort xhigh` puts the Manager alone on opus at xhigh. A checkout without this
+`--manager-model opus --manager-effort xhigh` puts the Manager alone on opus at xhigh. `--model` (default
+`sonnet`) is the Claude Code model of every role in real mode; `--agent NAME` or `--register-agent SPEC.json`
+(as for `prompt_regression run`) puts every role on another registered agent instead, and then the `claude` CLI
+is needed only for `--manager-model`. A checkout without this
 module is measured by running this file with that checkout's interpreter:
 `cd <checkout> && uv run --extra test python <this checkout>/evals/lark_quote.py --checkout . --mode real ...`;
 `--baseline <run.json>` then prints both side by side. Run it when the quote's rendering or the Manager's turn

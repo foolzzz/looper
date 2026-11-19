@@ -72,7 +72,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--mode", choices=("fake", "real"), default="fake",
                      help="fake: the scripted stand-in Claude (free); real: Claude Code (costs money)")
     run.add_argument("--model", default="haiku",
-                     help="real mode: every role runs Claude Code with this model (default haiku)")
+                     help="real mode: every role runs Claude Code with this model (default haiku; ignored with --agent or "
+                          "--register-agent, which choose the runtime too; the `claude` CLI is needed only for Claude Code)")
     run.add_argument("--agent", help="every role runs this agent, by name, instead (a registered agent of the "
                                      "eval's new database, such as the built-in claude-code/opus)")
     run.add_argument("--register-agent", type=Path, metavar="SPEC.json",
@@ -118,7 +119,8 @@ def _parser() -> argparse.ArgumentParser:
 
     talk = sub.add_parser("dialogs", help="Run the Manager's dialogs and check what Looper did after each reply.")
     talk.add_argument("--mode", choices=("fake", "real"), default="fake")
-    talk.add_argument("--model", default="haiku", help="real mode: every role runs Claude Code with this model")
+    talk.add_argument("--model", default="haiku", help="real mode: every role runs Claude Code with this model "
+                      "(default haiku; ignored with --agent or --register-agent)")
     talk.add_argument("--agent", help="every role runs this agent, by name, instead")
     talk.add_argument("--register-agent", type=Path, metavar="SPEC.json",
                       help="register this agent and run every role on it, as for run")

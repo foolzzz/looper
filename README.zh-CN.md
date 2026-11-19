@@ -105,7 +105,7 @@ EOF
 chmod 600 ~/.looper/ops/server.toml
 ```
 
-然后运行 `looper doctor`：它检查 PostgreSQL、Claude Code 和其他运行时的登录、已开启的渠道、`pg_dump` 和 git，缺什么就给出修复方法。`PATH` 上没有 Claude Code 时它会报失败，即使你的角色用的是别的运行时。
+然后运行 `looper doctor`：它检查 PostgreSQL、Claude Code 和其他运行时的登录、已开启的渠道、`pg_dump` 和 git，缺什么就给出修复方法。与其他运行时一样，只有在用的 Agent Profile 跑在 Claude Code 上时才检查它；在 Settings → Roles 里另选 Agent Profile 之前，所有角色都由内置的 Claude Code 档案运行。
 
 > **仅限升级旧安装。** 仍用变量设置数据库 URL 的安装（shell 或 `.env` 里的 `LOOPER_DATABASE_URL`，或更早的 `LOOPX_DATABASE_URL`）可以改跑一次 `looper config init-ops`，不用手写文件。它按当前生效的值写成同一个文件，权限 0600，已有文件则拒绝覆盖。已有数据库保持原名。
 

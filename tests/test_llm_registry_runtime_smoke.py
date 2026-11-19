@@ -287,7 +287,10 @@ def test_bridge_current_profile_is_preserved_before_launch(tmp_path, bridge_sour
             assert metadata["llm_model"]["name"] == "opus"
             assert metadata["llm_model"]["protocol"] == "anthropic-messages"
             assert record["status"] == "completed"
-            capture = json.loads((tmp_path / "launch-capture.jsonl").read_text().splitlines()[-1])
+            # The self-check may also probe the CLI (`--version`, `auth status`) once this role makes Claude Code in
+            # use; the launch is the capture that carries a model.
+            captures = [json.loads(line) for line in (tmp_path / "launch-capture.jsonl").read_text().splitlines()]
+            capture = [c for c in captures if "--model" in c["argv"]][-1]
             assert capture["argv"][capture["argv"].index("--model") + 1] == "opus"
 
 

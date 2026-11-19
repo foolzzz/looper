@@ -652,7 +652,7 @@ def test_startup_bot_backlog_reaches_only_an_enabled_manager(
             "database", "Database", serve.self_check.OK, "")))
         for name in ("codex_login_check", "grok_login_check"):
             monkeypatch.setattr(serve.self_check, name, async_check)
-        monkeypatch.setattr(serve.self_check, "check_claude", lambda _: [sync_check()])
+        monkeypatch.setattr(serve.self_check, "check_claude", lambda *_: [sync_check()])
         monkeypatch.setattr(serve.self_check, "check_git", sync_check)
         monkeypatch.setattr(serve.self_check, "check_lark_cli", lambda _: check)
         ops = ops_config.OpsConfig(runtime_root=tmp_path, path=tmp_path / "ops.toml", database_url=DSN, port=0,

@@ -90,6 +90,7 @@ from .compare import outcome
 from .metrics import runner_evidence
 from .runner import (
     INTERRUPTED, Api, ErrorClass, EvalError, Outcome, _git, aborted_reason, check_case_budget, error_row,
+    planned_runtime_types, require_claude,
     _all_events, fresh_database, install_claude, model_name, register_agent, run_suite, running_server, select_agent, write_result,
 )
 
@@ -3021,6 +3022,9 @@ def run(
     if jobs > 1 and total_cap_usd is not None and case_budget_usd is None:
         raise EvalError("--jobs above 1 under a total cap needs --case-budget-usd (the most one case may spend)")
     real_claude = shutil.which("claude") if mode == "real" else None
+    require_claude(mode, real_claude, planned_runtime_types(
+        register=register, agent=agent, model=model, manager_model=manager_model,
+        specs=(manager_agent, switch_agent)))
     git = _git()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -3060,11 +3064,13 @@ def run(
                                     pi_runtime=pi_runtime, dsh_runtime=dsh_runtime) as api:
                     named = register_agent(api, register)["name"] if register is not None else agent
                     picked = select_agent(api, agent=named, model=model)
+                    require_claude(mode, real_claude, [picked.get("runtime_type")])
                     if register is not None:
                         api.post("/api/v1/agent_settings/update_system", {"values": {
                             "profile_id": picked["profile_id"], "run_budget_usd": max_budget_usd}})["result"]
                     if manager_agent is not None:
                         registered = register_agent(api, manager_agent)
+                        require_claude(mode, real_claude, [registered.get("runtime_type")])
                         api.post("/api/v1/agent_settings/update_role", {
                             "role": "manager", "values": {"profile_id": registered["profile_id"],
                                                            "run_budget_usd": max_budget_usd}})["result"]

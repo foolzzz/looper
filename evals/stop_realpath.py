@@ -3,7 +3,13 @@
 Run by hand (it needs Claude Code or OMP with a DeepSeek key, and a disposable PostgreSQL server)::
 
     python -m evals.stop_realpath --runtime claude|omp [--repeat 3] [--out FILE] [--pg-url URL]
-        [--ports 8791-8799] [--deepseek-model deepseek-flash] [--key-from-zsh]
+        [--ports 8791-8799] [--claude-model sonnet] [--deepseek-model deepseek-flash] [--key-from-zsh]
+        [--register-agent SPEC.json]
+
+``--runtime`` picks the cells (claude: an interruptible runtime, omp: one with no interrupt), and the Manager runs the
+default agent of that runtime (Claude Code with ``--claude-model``, OMP with DeepSeek ``--deepseek-model``); with
+``--register-agent`` it runs that agent instead (a spec as in ``evals/README.md``, whose runtime type must be
+``claude-code`` for claude or ``omp`` for omp). The ``claude`` CLI is needed only for a Claude Code agent.
 
 Every cell sends a message through ``POST /api/v1/operator_chat/send``, follows its events, stops at the cell's moment through
 ``POST /api/v1/operator_chat/stop`` and checks what is left. OMP runs per turn and has no interrupt: its cell checks that the
@@ -18,6 +24,7 @@ import argparse
 import contextlib
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -39,6 +46,7 @@ RESERVED_PORT = 8767
 FINAL_WITHIN_S = 15.0
 GONE_AFTER_S = 5.0
 DEEPSEEK_KEY_ENV = "DEEPSEEK_API_KEY"
+RUNTIME_TYPES = {"claude": "claude-code", "omp": "omp"}  # --runtime: the runtime type its cells fit
 
 
 @dataclass(frozen=True)
@@ -97,7 +105,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pg-url", default=os.environ.get("LOOPER_EVAL_DATABASE_URL")
                         or os.environ.get("LOOPER_TEST_DATABASE_URL"))
     parser.add_argument("--ports", default=None, help="the server's port from this range (FIRST-LAST), never 8767")
-    parser.add_argument("--deepseek-model", default="deepseek-flash")
+    parser.add_argument("--claude-model", default="sonnet", help="the Claude Code agent's model (default sonnet)")
+    parser.add_argument("--deepseek-model", default="deepseek-flash", help="the OMP agent's model (default deepseek-flash)")
+    parser.add_argument("--register-agent", type=Path, metavar="SPEC.json", dest="register_agent",
+                        help="the Manager runs this registered agent instead of the default of --runtime")
     parser.add_argument("--cells", default=None, help="only these cells (comma-separated keys; probe included)")
     parser.add_argument("--keep-log", type=Path, default=None, help="copy the server's log here at the end")
     parser.add_argument("--key-from-zsh", action="store_true",
@@ -105,6 +116,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.repeat < 1:
         parser.error("--repeat must be at least 1")
+    args.spec = json.loads(args.register_agent.read_text(encoding="utf-8")) if args.register_agent else None
+    if args.spec is not None:
+        kind = (args.spec.get("runtime") or {}).get("type")
+        if kind != RUNTIME_TYPES[args.runtime]:
+            parser.error(f"--runtime {args.runtime} needs a {RUNTIME_TYPES[args.runtime]} agent; the spec's runtime "
+                         f"is {kind!r}")
     if args.ports is not None:
         try:
             first, last = (int(part) for part in args.ports.split("-", 1))
@@ -528,11 +545,14 @@ def run_probe(api: Api, database_url: str, rep: int) -> CellResult:
     return CellResult("probe", rep, why, ", ".join(f"{a['tool']} {a['status']}" for a in actions) or "no action")
 
 
-def _set_profile(api: Api, runtime: str, *, deepseek_model: str = "deepseek-flash") -> None:
-    if runtime == "claude":
+def _set_profile(api: Api, runtime: str, *, claude_model: str = "sonnet", deepseek_model: str = "deepseek-flash",
+                 spec: dict[str, Any] | None = None) -> None:
+    if spec is not None:
+        chosen = runner.register_agent(api, spec)
+    elif runtime == "claude":
         chosen = runner.register_agent(api, {
             "runtime": {"type": "claude-code"}, "provider": {"provider_id": "prov-claude-subscription"},
-            "model": {"name": "sonnet", "protocol": "anthropic-messages"}, "agent": {"name": "stop-real/claude"}})
+            "model": {"name": claude_model, "protocol": "anthropic-messages"}, "agent": {"name": "stop-real/claude"}})
     else:
         chosen = runner.register_agent(api, {
             "runtime": {"type": "omp"},
@@ -554,7 +574,10 @@ def _kill_tree(process: subprocess.Popen) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     server_env: dict[str, str] = {}
-    if args.runtime == "omp":
+    if args.runtime == "claude" and shutil.which("claude") is None:
+        print("error: a Claude Code agent needs the `claude` CLI, and there is none on PATH", file=sys.stderr)
+        return 2
+    if args.runtime == "omp" and args.spec is None:
         key = key_from_zsh() if args.key_from_zsh else os.environ.get(DEEPSEEK_KEY_ENV, "")
         if not key:
             print(f"error: the OMP profile needs ${DEEPSEEK_KEY_ENV}", file=sys.stderr)
@@ -575,7 +598,7 @@ def main(argv: list[str] | None = None) -> int:
         bin_dir.mkdir()
         work = tmp / "work"
         work.mkdir()
-        version = claude_version()
+        version = claude_version() if args.runtime == "claude" else None
         home = tmp / "home"
         home.mkdir()
         keychains = Path.home() / "Library" / "Keychains"
@@ -592,7 +615,8 @@ def main(argv: list[str] | None = None) -> int:
                                        log_path=tmp / "server.log", home=home, env=server_env) as api:
                 api.timeout = 60.0
                 api.post("/api/v1/chat_settings/update", {"stop_enabled": True})
-                _set_profile(api, args.runtime, deepseek_model=args.deepseek_model)
+                _set_profile(api, args.runtime, claude_model=args.claude_model, deepseek_model=args.deepseek_model,
+                             spec=args.spec)
                 for rep in range(1, args.repeat + 1):
                     try:
                         results.append(run_probe(api, database_url, rep))
