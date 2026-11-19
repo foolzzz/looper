@@ -25,7 +25,10 @@ from typing import Any
 from ...db import agent_sessions as db_agent_sessions, system_settings
 from ...db import agent_setting_layers as db_layers, profile_registry as db_profiles, role_configs as db_roles
 from .. import agent_settings, projects, schedules, scheduler_settings, vault, wait_service, waits
-from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, TASK_ROLES, AgentType, Layer, LayerValues, SettingsError
+from ..agent_settings import (
+    CONCURRENCY_MAX, EMPTY_LAYER, PROJECT_ROLES, TASK_ROLES, TOOL_ROLES, AgentType, Layer, LayerValues,
+    SettingsError,
+)
 from ..agent_settings import default_concurrency, index_layers, layer_update, resolve
 from ..llmrec import settings as llmrec_settings
 from ..project_execution import format_usd
@@ -43,6 +46,8 @@ FIELD_WORDS = {"harness_prompt": "Harness prompt", "profile_id": "Agent Profile"
                "run_budget_usd": "每次运行的花费上限", "max_concurrency": "并发上限", "timeout_seconds": "超时",
                "boundaries": "规划者定义的角色的边界"}
 LIMIT_NOTE = "调低不会停止正在运行的工作：超出的运行完为止，新的会等待；调高后排队的会立即开始。"
+# The roles this tool sets and shows: the processor is configured on the dashboard.
+_TOOL_ROLES = tuple(role.value for role in TOOL_ROLES)
 
 
 @dataclass(frozen=True)
@@ -59,10 +64,17 @@ class _Place:
 
     @property
     def roles(self) -> tuple[AgentType, ...]:
-        """The roles whose settings it changes."""
+        """The roles whose settings it changes that this tool shows."""
         if self.role is not None:
             return (self.role,)
-        return TASK_ROLES if self.project else tuple(AgentType)
+        return TASK_ROLES if self.project else TOOL_ROLES
+
+    @property
+    def affected(self) -> tuple[AgentType, ...]:
+        """Every role whose settings it changes, the processor's too: a cap it raises for any of them is confirmed."""
+        if self.role is not None:
+            return (self.role,)
+        return PROJECT_ROLES if self.project else tuple(AgentType)
 
     @property
     def name(self) -> str:
@@ -136,7 +148,7 @@ def _raises_a_cap(place: _Place, layers: Mapping[Any, LayerValues], checked: Map
     if "run_budget_usd" not in checked:
         return False
     after = _after(layers, place, checked)
-    for role in place.roles:
+    for role in place.affected:
         before_cap = resolve(role, layers, place.project_id).max_budget_usd
         after_cap = resolve(role, after, place.project_id).max_budget_usd
         if before_cap is not None and (after_cap is None or after_cap > before_cap):
@@ -509,7 +521,7 @@ async def _view(call: Call) -> dict[str, Any]:
                 "shared_defaults": _layer_set(view["system"]["values"], profiles),
                 "roles": {role: {"set": _layer_set(entry["values"], profiles),
                                  "effective": _effective(entry["effective"]), "timeout_seconds": timeouts.get(role)}
-                          for role, entry in view["roles"].items()},
+                          for role, entry in view["roles"].items() if role in _TOOL_ROLES},
                 "knowledge_vault": {key: vault_view[key] for key in
                                     ("configured", "path", "writable", "rules_file", "problem")}}
         if call.arguments.get("role") == AgentType.MANAGER.value and (session := await _manager_session(profiles, call.manager_id)):
@@ -520,7 +532,7 @@ async def _view(call: Call) -> dict[str, Any]:
     allowed = await answered(projects.allowed_profiles_view(project["id"]))
     return {"project": project["name"], "project_layer": _layer_set(view["project"]["values"], profiles),
             "roles": {role: {"set": _layer_set(entry["values"], profiles), "effective": _effective(entry["effective"])}
-                      for role, entry in view["roles"].items()},
+                      for role, entry in view["roles"].items() if role in _TOOL_ROLES},
             "allowed_profiles": [p["name"] for p in allowed["profiles"]],
             "allowed_profiles_note": None if allowed["profiles"] else "empty: Planners may choose any profile"}
 
@@ -611,7 +623,7 @@ TOOLS: tuple[Tool, ...] = (
                 "knowledge_vault": {"type": "object", "description": "knowledge_vault: path (absolute), writable "
                                     "(folders in it), rules_file; {\"path\": null} turns it off."},
                 "project": {"type": "string", "minLength": 1, "description": "The project's name."},
-                "role": {"type": "string", "enum": [role.value for role in AgentType]},
+                "role": {"type": "string", "enum": list(_TOOL_ROLES)},
                 "values": {
                     "type": "object", "description": "set: what to change; null inherits.",
                     "properties": {

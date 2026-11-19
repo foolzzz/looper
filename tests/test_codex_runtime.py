@@ -608,10 +608,10 @@ def test_the_probe_reads_only_the_version(tmp_path: Path) -> None:
     assert CODEX.probe(str(tmp_path / "nothing")).error == f"{str(tmp_path / 'nothing')!r} was not found"
 
 
-def test_its_capabilities_cover_every_role() -> None:
-    from looper.agents.runtimes import ROLE_CAPABILITIES
+def test_its_capabilities_cover_every_role_with_tools() -> None:
+    from looper.agents.runtimes import ROLE_CAPABILITIES, TOOL_ROLES
 
-    assert all(needs <= CODEX.capabilities for needs in ROLE_CAPABILITIES.values())
+    assert all(ROLE_CAPABILITIES[role] <= CODEX.capabilities for role in TOOL_ROLES)
     assert os.environ.get(KEY_ENV) is None
 
 

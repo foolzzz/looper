@@ -14,7 +14,7 @@ from tests.test_profile_registry_db import _call, _model_id, _ok
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
-BUILTIN = {"manager": "replace", "planner": "replace", "worker": "append", "reviewer": "append"}
+BUILTIN = {"manager": "replace", "planner": "replace", "worker": "append", "reviewer": "append", "processor": "replace"}
 
 
 async def _profile(name: str, **fields: Any) -> dict[str, Any]:

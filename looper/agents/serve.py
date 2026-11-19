@@ -322,6 +322,7 @@ async def seed_role_configs(pool: Any = None) -> None:
     recommendation; an edited one is kept (``role_configs.seed_defaults``).
     """
     from ..db.role_configs import seed_defaults
+    from .processor import PROCESSOR_ROLE_PROMPT, PROCESSOR_TIMEOUT_SEC
     from .tiers.manager import DEFAULT_SYSTEM_PROMPT
     from .tiers.planner import DEFAULT_SYSTEM_PROMPT as PLANNER_SYSTEM_PROMPT
     from .tiers.worker import DEFAULT_SYSTEM_PROMPT as WORKER_SYSTEM_PROMPT, REVIEWER_SYSTEM_PROMPT
@@ -352,6 +353,13 @@ async def seed_role_configs(pool: Any = None) -> None:
             "timeout_seconds": 86400,
             # The role prompt of every Reviewer (the verdict contract follows it).
             "system_prompt": REVIEWER_SYSTEM_PROMPT,
+        },
+        {
+            "role": "processor",
+            "display_name": "Processor",
+            "timeout_seconds": PROCESSOR_TIMEOUT_SEC,  # at most, per run
+            # Its instructions and reply contract follow it.
+            "system_prompt": PROCESSOR_ROLE_PROMPT,
         },
     ], pool=pool)
 

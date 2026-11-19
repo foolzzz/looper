@@ -15,7 +15,7 @@ from typing import Any
 
 import asyncpg
 
-ROLES = ("manager", "planner", "worker", "reviewer")
+ROLES = ("manager", "planner", "worker", "reviewer", "processor")
 
 
 def _json(value: Any) -> Any:

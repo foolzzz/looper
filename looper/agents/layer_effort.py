@@ -24,7 +24,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .agent_settings import TASK_ROLES, AgentType, Layer
+from .agent_settings import TASK_ROLES, TOOL_ROLES, AgentType, Layer
 from .profile_registry import BUILTIN_PROFILE, AgentProfile, LegacyAgentProfile, RegistryError, check_roles
 
 logger = logging.getLogger(__name__)
@@ -167,7 +167,8 @@ def convert(layers: Mapping[Key, Before], profiles: Iterable[AgentProfile],
             selected[key] = want
 
     settle([SYSTEM])
-    for role in AgentType:
+    # The processor came after layers stopped setting an effort.
+    for role in TOOL_ROLES:
         settle([SYSTEM, (Layer.ROLE, role, None)])
 
     for project in sorted({key[2] for key in layers if key[2] is not None}):

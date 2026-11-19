@@ -8,7 +8,7 @@ from ..ops.config import answered
 from ..ops.settings import _Place
 from .global_settings import LAYER_UPDATE, PROJECT_AGENT_SETTINGS, _operation, layer_impact
 
-PROJECT_ROLE = {"type": "string", "enum": [role.value for role in agent_settings.TASK_ROLES]}
+PROJECT_ROLE = {"type": "string", "enum": [role.value for role in agent_settings.PROJECT_ROLES]}
 ALLOWED_PROFILE = _object({
     "profile_id": _STR, "name": _STR, "runtime": _STR, "model": _STR, "effort": _NULL_STR,
     "roles": _array({"type": "string", "enum": ["worker", "reviewer"]}),
