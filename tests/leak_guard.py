@@ -59,9 +59,34 @@ def _write(name: str, record: dict) -> None:
         {"owner": owner, "owner_started": proc_tree._start_time(owner), **record}))
 
 
+def _command(pid: int) -> str | None:
+    shown = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+                           timeout=10, check=False)
+    return shown.stdout.strip() or None
+
+
 def track(pid: int) -> None:
     """Record a process this session started, so a later session can reap it."""
-    _write(f"{os.getpid()}-{pid}.json", {"pid": pid, "started": proc_tree._start_time(pid)})
+    _write(f"{os.getpid()}-{pid}.json", {"pid": pid, "started": proc_tree._start_time(pid),
+                                         "command": _command(pid)})
+
+
+def _is_recorded_process(record: dict) -> bool:
+    """True only when the pid still runs the very process that was recorded and leads its own group.
+
+    A pid recycled by an unrelated process (possibly the operator's live service) differs in start
+    time or command line, and is never signalled.
+    """
+    pid = record.get("pid")
+    if not (isinstance(pid, int) and pid > 1 and record.get("started") and record.get("command")):
+        return False
+    if proc_tree._start_time(pid) != record["started"] or _command(pid) != record["command"]:
+        print(f"leak_guard: pid {pid} is no longer the recorded process; left alone", file=sys.stderr)
+        return False
+    try:
+        return os.getpgid(pid) == pid
+    except ProcessLookupError:
+        return False
 
 
 def track_launchd(label: str) -> None:
@@ -114,26 +139,27 @@ def sweep() -> list[str]:
         except (OSError, ValueError, KeyError):
             path.unlink(missing_ok=True)
             continue
-        pid = record.get("pid")
-        if pid and record.get("started") and proc_tree._start_time(pid) == record["started"]:
-            _kill_group(pid)
-            removed.append(f"pid {pid}")
-        if record.get("label") and sys.platform == "darwin":
-            bootout(record["label"])
-            removed.append(record["label"])
+        if _is_recorded_process(record):
+            _kill_group(record["pid"])
+            removed.append(f"pid {record['pid']}")
         path.unlink(missing_ok=True)
     if sys.platform == "darwin":
         removed += sweep_launchd()
     return removed
 
 
+def _under_temp(path: Path) -> bool:
+    roots = {os.path.realpath(root) for root in ("/tmp", tempfile.gettempdir())}
+    return any(os.path.realpath(path).startswith(root + os.sep) for root in roots)
+
+
 def sweep_launchd() -> list[str]:
-    """Unload ``com.looper.test-upgrade-*`` jobs whose plist is gone (their temporary HOME was deleted)."""
+    """Unload ``com.looper.test-upgrade-*`` jobs whose plist is under a temp dir and no longer exists."""
     listed = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=20, check=False)
     removed = []
     for label in re.findall(rf"\t({re.escape(LAUNCHD_PREFIX)}[0-9a-f]+)$", listed.stdout, re.MULTILINE):
         plist = _plist_of(label)
-        if plist is None or not plist.exists():
+        if plist is not None and not plist.exists() and _under_temp(plist):
             bootout(label)
             removed.append(label)
     return removed

@@ -99,7 +99,9 @@ def test_an_aborted_session_is_swept_by_the_next_one():
 def test_launchd_sweep_unloads_only_jobs_whose_plist_is_gone(monkeypatch, tmp_path):
     kept = tmp_path / "kept.plist"
     kept.write_text("")
-    labels = {"com.looper.test-upgrade-aaa": tmp_path / "missing.plist", "com.looper.test-upgrade-bbb": kept}
+    labels = {"com.looper.test-upgrade-aaa": Path("/tmp/lu.gone/missing.plist"),
+              "com.looper.test-upgrade-bbb": kept,
+              "com.looper.test-upgrade-ccc": Path("/Users/someone/Library/LaunchAgents/missing.plist")}
     booted = []
 
     def run(argv, **_):
@@ -113,3 +115,28 @@ def test_launchd_sweep_unloads_only_jobs_whose_plist_is_gone(monkeypatch, tmp_pa
 
     monkeypatch.setattr(leak_guard.subprocess, "run", run)
     assert leak_guard.sweep_launchd() == ["com.looper.test-upgrade-aaa"] == booted
+
+
+def test_a_recycled_pid_is_never_signalled(tmp_path):
+    # Another process now holds the recorded pid: same pid, but a different start time or command.
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    try:
+        leak_guard.track(victim.pid)
+        record = {"pid": victim.pid, "started": leak_guard.proc_tree._start_time(victim.pid),
+                  "command": leak_guard._command(victim.pid)}
+        assert leak_guard._is_recorded_process(record)
+        assert not leak_guard._is_recorded_process({**record, "started": "Mon Jan  1 00:00:00 2001"})
+        assert not leak_guard._is_recorded_process({**record, "command": "some other command"})
+        assert not leak_guard._is_recorded_process({**{k: v for k, v in record.items() if k != "command"}})
+        # A dead owner with a mismatching record: the sweep removes the record and leaves the process.
+        leak_guard._write("0-recycled.json", {**record, "command": "some other command"})
+        # The helper stamps this session as owner; make the owner a pid that does not exist.
+        path = leak_guard._RECORDS / "0-recycled.json"
+        path.write_text(path.read_text().replace(f'"owner": {os.getpid()}', '"owner": 4194305'))
+        leak_guard.sweep()
+        assert _alive(victim.pid)
+    finally:
+        leak_guard.untrack(victim.pid)
+        (leak_guard._RECORDS / "0-recycled.json").unlink(missing_ok=True)
+        victim.kill()
+        victim.wait()
