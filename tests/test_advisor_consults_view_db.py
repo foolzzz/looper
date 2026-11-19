@@ -42,18 +42,31 @@ def test_a_tasks_page_shows_its_consults_and_a_task_without_any_shows_none(monke
         await advisor_advice.record_advice(answered, ADVICE)
         await advisor_advice.adopt(answered, {"adoption": "partial", "items": []})
         await advisor_advice.unlock("task-a", "step-a", 1, True)
-        blocked = await advisor.open_consult(advisor.Brief("task-a", "step-a", 2, advisor.Source.OPTIONAL),
+        withdrawn = await advisor.open_consult(advisor.Brief("task-a", "step-a", 2, advisor.Source.OPTIONAL),
+                                               budget_usd=1)
+        await advisor.withdraw(withdrawn, "the plan changed")
+        blocked = await advisor.open_consult(advisor.Brief("task-a", "step-a", 3, advisor.Source.OPTIONAL),
                                              budget_usd=1)
-        await advisor.withdraw(blocked, "the plan changed")
+        for number in range(advisor.RETURNS_MAX + 1):  # the last return blocks it
+            await agent_spawns.move(blocked, SpawnState.LINTING, expect=SpawnState.DRAFTING)
+            hits = [{"stage": "code", "category": "local_path", "field": "problem", "start": 3, "end": 20}]
+            if number == 0:
+                hits.append({"stage": "judge", "category": "not_standalone"})
+            await advisor._return(await agent_spawns.get(blocked), ["fix it"], hits)
         consults = await advisor_advice.consults_view("task-a")
-        assert [c["id"] for c in consults] == [answered, blocked]
-        first, second = consults
+        assert [c["id"] for c in consults] == [answered, withdrawn, blocked]
+        first, second, third = consults
         assert (first["source"], first["kind"], first["attempt"], first["state"], first["adoption"],
                 first["unlocked"]) == ("checkpoint", "plan_review", 1, "answered", "partial", True)
         assert first["answers"] == [{"question_id": "q1", "conclusion": "Keep the old column.", "confidence": "high"}]
         assert first["spent_usd"] == pytest.approx(0.3) and first["status"] == "answered"
         assert (second["source"], second["attempt"], second["state"], second["failure"], second["answers"]) == (
             "optional", 2, "failed", "no_request", [])
+        assert (first["checks"], second["checks"]) == ([], [])
+        # a blocked consult shows the checks its request failed, by category and count, never where they matched
+        assert (third["state"], third["failure"], third["returns"], third["checks"]) == (
+            "blocked", "blocked", advisor.RETURNS_MAX, [{"stage": "code", "category": "local_path", "count": 3},
+                                                        {"stage": "judge", "category": "not_standalone", "count": 1}])
         assert "THE REQUEST TEXT" not in repr(consults)
         detail = await task_detail("task-a")
         assert detail["advisor"]["consults"] == consults

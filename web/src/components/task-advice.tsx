@@ -27,6 +27,31 @@ const ADOPTION: Record<string, string> = {
   rejected: "Planner did not adopt it",
 };
 
+/** What a failed check of the request found, by its category (the format, code and judge checks). */
+const CHECK: Record<string, string> = {
+  format: "not in the request format",
+  secret: "a key, token or secret",
+  binding: "what an alias stands for",
+  local_path: "a local path",
+  url: "a URL",
+  identity: "an address, person or id",
+  person: "a person",
+  raw_log: "a raw log",
+  dangling: "a reference to what the request does not contain",
+  verbatim: "the local material copied word for word",
+  not_standalone: "it did not stand on its own",
+  unanswerable: "it was too vague to answer",
+  other: "something else private",
+};
+
+/** The checks a request failed, by category and how many times; never what they matched. */
+function checksText(consult: AdvisorConsult) {
+  if (!consult.checks.length) return null;
+  return consult.checks
+    .map(({ category, count }) => `${CHECK[category] ?? category.replaceAll("_", " ")}${count > 1 ? ` ×${count}` : ""}`)
+    .join(", ");
+}
+
 /** Whether the attempt the advice was for passed; nothing until that attempt is judged. */
 function unlockedText(consult: AdvisorConsult) {
   if (consult.unlocked == null) return null;
@@ -48,6 +73,7 @@ export function StepConsults({ consults }: { consults: AdvisorConsult[] }) {
       {consults.map((consult) => {
         const state = STATE[consult.state];
         const unlocked = unlockedText(consult);
+        const checks = checksText(consult);
         const detail = [
           consult.failure && consult.state !== "answered" && consult.state !== "blocked" ? consult.failure : null,
           consult.status === "out_of_scope" ? "the advisor said it was beyond what it can judge" : null,
@@ -71,6 +97,7 @@ export function StepConsults({ consults }: { consults: AdvisorConsult[] }) {
                 {consult.returns > 0 && ` · request returned ${consult.returns}×`}
               </span>
             </div>
+            {checks && <p className="text-xs text-muted-foreground">Checks the request failed: {checks}</p>}
             {consult.answers.map((answer) => (
               <p key={answer.question_id} className="text-sm">
                 <span className="font-mono text-xs text-muted-foreground">{answer.question_id}</span>{" "}

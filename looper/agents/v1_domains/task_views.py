@@ -115,6 +115,7 @@ TASK_DETAIL["properties"]["run_roles"] = {"type": "object", "additionalPropertie
 TASK_DETAIL["properties"]["advisor"] = _object({"consults": _array(_object({
     "id": _INT, "step_id": _NULL_STR, "source": _NULL_STR, "kind": _NULL_STR, "attempt": _NULL_INT, "state": _STR,
     "failure": _NULL_STR, "rounds": _INT, "returns": _INT, "spent_usd": _NUMBER, "status": _NULL_STR,
+    "checks": _array(_object({"stage": _STR, "category": _STR, "count": _INT}, closed=True)),
     "answers": _array(_object({"question_id": _STR, "conclusion": _STR, "confidence": _NULL_STR}, closed=True)),
     "adoption": _NULL_STR, "unlocked": {"type": ["boolean", "null"]}, "created_at": _STR, "finished_at": _NULL_STR},
     closed=True))}, ["consults"], closed=True)

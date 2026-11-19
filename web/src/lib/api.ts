@@ -1944,6 +1944,8 @@ export interface AdvisorConsult {
   returns: number;
   spent_usd: number;
   status: "answered" | "needs_info" | "out_of_scope" | null;
+  /** The checks its request failed, by stage and category, with how many times; never where they matched. */
+  checks: { stage: string; category: string; count: number }[];
   answers: { question_id: string; conclusion: string; confidence: string | null }[];
   adoption: "adopted" | "partial" | "rejected" | null;
   unlocked: boolean | null;

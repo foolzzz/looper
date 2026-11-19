@@ -5,6 +5,7 @@ once there is one."""
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
@@ -81,11 +82,12 @@ async def for_step(step_id: str, *, pool: asyncpg.Pool | None = None) -> list[di
 
 async def consults_view(task_id: str, *, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """The task's consults of the advisor, oldest first, as its page shows them: where each came from and for which
-    attempt, how it ended (its state and why it failed), its rounds, returns and spend, the advisor's conclusions,
-    what the Planner took of them and whether the attempt passed. Never the request's text."""
+    attempt, how it ended (its state and why it failed), its rounds, returns and spend, the checks its request failed
+    (their stage and category, with how many times), the advisor's conclusions, what the Planner took of them and
+    whether the attempt passed. Never the request's text, nor where a check matched."""
     pool = pool or get_pool()
     rows = await pool.fetch(
-        """SELECT s.id, s.step_id, s.state, s.rounds, s.returns, s.spent_usd, s.brief, s.result->>'failure' AS failure,
+        """SELECT s.id, s.step_id, s.state, s.rounds, s.returns, s.spent_usd, s.brief, s.result,
                   s.created_at, s.finished_at, a.kind, a.attempt, a.advice, a.adoption, a.unlocked
              FROM agent_spawns s LEFT JOIN advisor_advice a ON a.spawn_id = s.id
             WHERE s.task_id = $1 AND s.kind = 'advisor' ORDER BY s.id""", task_id)
@@ -93,11 +95,15 @@ async def consults_view(task_id: str, *, pool: asyncpg.Pool | None = None) -> li
     for row in rows:
         brief = json.loads(row["brief"]) if isinstance(row["brief"], str) else (row["brief"] or {})
         advice = json.loads(row["advice"]) if isinstance(row["advice"], str) else (row["advice"] or {})
+        result = json.loads(row["result"]) if isinstance(row["result"], str) else (row["result"] or {})
+        checks = Counter((str(c.get("stage")), str(c.get("category"))) for c in result.get("checks", []))
         consults.append({
             "id": row["id"], "step_id": row["step_id"], "source": brief.get("source"), "kind": row["kind"],
             "attempt": row["attempt"] if row["attempt"] is not None else brief.get("attempt"),
-            "state": row["state"], "failure": row["failure"], "rounds": row["rounds"], "returns": row["returns"],
+            "state": row["state"], "failure": result.get("failure"), "rounds": row["rounds"], "returns": row["returns"],
             "spent_usd": float(row["spent_usd"]), "status": advice.get("status"),
+            "checks": [{"stage": stage, "category": category, "count": count}
+                       for (stage, category), count in checks.items()],
             "answers": [{"question_id": a["question_id"], "conclusion": a["conclusion"],
                          "confidence": a.get("confidence")} for a in advice.get("answers", [])],
             "adoption": row["adoption"], "unlocked": row["unlocked"],

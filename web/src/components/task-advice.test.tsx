@@ -5,7 +5,7 @@ import type { AdvisorConsult } from "@/lib/api";
 
 const ANSWERED: AdvisorConsult = {
   id: 1, step_id: "step-a", source: "checkpoint", kind: "plan_review", attempt: 1, state: "answered", failure: null,
-  rounds: 2, returns: 1, spent_usd: 0.2104, status: "answered",
+  rounds: 2, returns: 1, spent_usd: 0.2104, status: "answered", checks: [{ stage: "code", category: "url", count: 1 }],
   answers: [{ question_id: "q1", conclusion: "Keep the old column until the switch is verified.", confidence: "high" }],
   adoption: "partial", unlocked: true, created_at: "2026-11-19T10:00:00+00:00", finished_at: "2026-11-19T10:01:00+00:00",
 };
@@ -21,16 +21,20 @@ describe("StepConsults", () => {
     expect(shown).toContain("Planner adopted part of it");
     expect(shown).toContain("Attempt 1 passed after it");
     expect(shown).toContain("2 rounds · request returned 1×");
+    expect(shown).toContain("Checks the request failed: a URL");
   });
 
   it("says why a consult gave no answer, in words, and nothing before the attempt is judged", () => {
     const blocked: AdvisorConsult = { ...ANSWERED, id: 2, source: "optional", attempt: 3, state: "blocked",
-      failure: "blocked", answers: [], adoption: null, unlocked: null, status: null, rounds: 0, returns: 2 };
-    const failed: AdvisorConsult = { ...blocked, id: 3, state: "failed", failure: "refused" };
+      failure: "blocked", answers: [], adoption: null, unlocked: null, status: null, rounds: 0, returns: 2,
+      checks: [{ stage: "code", category: "local_path", count: 3 }, { stage: "judge", category: "not_standalone", count: 1 }] };
+    const failed: AdvisorConsult = { ...blocked, id: 3, state: "failed", failure: "refused", checks: [] };
     const shown = text(renderToStaticMarkup(<StepConsults consults={[blocked, failed]} />));
     expect(shown).toContain("Asked by the Planner after a failed attempt · for attempt 3");
     expect(shown).toContain("Blocked: the request failed its checks");
     expect(shown).toContain("Failed (refused)");
+    expect(shown).toContain("Checks the request failed: a local path ×3, it did not stand on its own");
+    expect(shown.match(/Checks the request failed/g)).toHaveLength(1);
     expect(shown).not.toContain("passed");
     expect(shown).not.toContain("adopted");
     expect(renderToStaticMarkup(<StepConsults consults={[]} />)).toBe("");
