@@ -18,6 +18,21 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.17] - 2026-11-19
+
+### Added
+
+- **Message stream bridge (default off).** ([#1425](https://github.com/foolzzz/looper/pull/1425)) Additive migration `message_stream` (`event_sources`, `source_chats`, `source_threads`, `source_people`, `source_runs`, `source_events`); `ingest_mode = bridge` reads an existing collector's per-chat files into PostgreSQL, a Message stream dashboard page shows its state, and `looper msgflow import --days N [--dry-run] [--per-file] [--source ID]` imports history. Enabling the bridge with `start_from = beginning` imports all history; the default `end` stores only what comes later.
+- **`processor` role and `no_tools` capability (default off).** ([#1424](https://github.com/foolzzz/looper/pull/1424)) Additive migration `processor_role`; a tool-less Claude Code run configured by an Agent Profile, with a Processor row in Settings → Roles. Nothing starts a processor run yet.
+
+### Fixed
+
+- **Tests: no leaked launchd job or keeper processes, no macOS hang.** ([#1427](https://github.com/foolzzz/looper/pull/1427)) Test only, no behavior change.
+
+### Documentation
+
+- **Manager completion, ledger and briefing RFC.** ([#1426](https://github.com/foolzzz/looper/pull/1426), [#1428](https://github.com/foolzzz/looper/pull/1428)) Design proposal and its decided questions; no code or behavior change.
+
 ## [2.15.16] - 2026-11-19
 
 ### Changed

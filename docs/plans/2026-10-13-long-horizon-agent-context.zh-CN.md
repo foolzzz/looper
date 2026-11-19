@@ -34,6 +34,8 @@
 
 | 阶段 | 主题 | 状态 | 依赖 |
 |---|---|---|---|
+| 2026-11-19 | 发布 v2.15.17：包含消息流桥接与 `message_stream` 迁移（#1425）、processor 角色与 `no_tools` 能力及 `processor_role` 迁移（#1424）、测试泄漏与 macOS 卡死修复（#1427）、Manager 收尾 / 账本 / 晨报 RFC（#1426）。 |
+| 2026-11-19 | Manager 收尾、账本与晨报 RFC 的待定问题定稿（#1428，只改文档）：Q1–Q9 按推荐答案决定，第 11 节改为「已定的问题」；操作员 id 不预填，开启账本时列出未设操作员 id 的机器人；命令行写入保持 `via = cli` 并在账本页和晨报里标出；收尾回合沿用 Manager 角色已有的单次预算。 |
 | M0 | 项目背景；四类 agent 的 prompt 分层；记录并展示 system prompt | ✅ 已交付（looper #13） | — |
 | M1 | 上下文隔离与可复现 | ✅ 已交付（looper #17） | M0 |
 | M1.5 | harness 与 role 分层；harness 继承链 | ✅ 已交付（looper #19） | M1 |
@@ -879,7 +881,7 @@ M7 先让计划状态有唯一来源（M7a），再在其上加任务记忆（M7
 
 24. **热升级 v0**（[RFC](../architecture/rfcs/hot-upgrade-v0.zh-CN.md)）：组件指纹、升级计划、排空、`looper service upgrade` 与重启恢复已交付；Claude Code 看护与启动接管已交付，默认关闭。`CONTROL_PLANE` 安全规划、分级排空期限、接管报告与 P1/P2 状态检查已交付；本分支验证 macOS launchd 替身链路并补齐启动结束原因、截断轮次和 systemd 生效配置检查，真实 Claude、Linux systemd 与 PostgreSQL 集群重启仍未验证（[证据](../validation/kept-runs/README.md)），S2、S3 待做。#909 仍待默认开启与无条件单实例锁一并关闭。
 25. **消息流与订阅**（2026-11-18 维护者定方向，设计见[消息流与订阅 RFC](../architecture/rfcs/message-stream-v0.zh-CN.md)，未开始；PR 顺序见 RFC 第 13 节，各 PR 默认关闭、可独立回滚）：P0 RFC；P1 事件表与桥接（`ingest_mode = bridge`、`SourceService`、`looper msgflow import`、最小消息流页）；P2 `processor` 角色与不带工具的运行（`Capability.NO_TOOLS`）；P3 订阅类型（`schedules.kind = 'subscription'`）；P4 `looper msgflow export`；P5 Looper 自己采集与对账；P6 消息流页的会话、保留期与删除；P7 管家工具。吃瓜订阅不做影子运行：P1–P3 合入后直接开启，外部采集器的吃瓜同一小时改为 dry-run 对照一天。
-26. **Manager 收尾、账本与晨报**（设计文档的 M8，2026-11-19 维护者逐条确认方向，设计见[Manager 收尾、账本与晨报 RFC](../architecture/rfcs/manager-completion-ledger-v0.zh-CN.md)，未开始；PR 顺序与测试见 RFC 第 9 节，各 PR 默认关闭、可独立回滚）：C1 完成事件表与记录（关闭时也记 `skipped` 行，发出的内容不变）；C2 `[COMPLETION]` 回合、契约与兜底；C3 60 秒合并窗口、队列时限、定时任务来源与设置页；L1 账本表与 `looper ledger` 命令行；L2 `looper_ledger_add`、`looper_ledger_update`、操作者 ID 与自动登记；L3 待办页；L4 账本契约；B1 晨报输入与快照；B2 晨报模板与 processor 说明；B3 回「确认 L-xxxx」；B4 随 M7a ④⑤ 接入承诺与意图。C1 与 L1 和 M7a ②③ 并行，等 #1420 的修复合入后开工；晨报等 M7a P3 与 L1、L2 合入。RFC 第 11 节的 Q1–Q9 待维护者答复。
+26. **Manager 收尾、账本与晨报**（设计文档的 M8，2026-11-19 维护者逐条确认方向，设计见[Manager 收尾、账本与晨报 RFC](../architecture/rfcs/manager-completion-ledger-v0.zh-CN.md)，未开始；PR 顺序与测试见 RFC 第 9 节，各 PR 默认关闭、可独立回滚）：C1 完成事件表与记录（关闭时也记 `skipped` 行，发出的内容不变）；C2 `[COMPLETION]` 回合、契约与兜底；C3 60 秒合并窗口、队列时限、定时任务来源与设置页；L1 账本表与 `looper ledger` 命令行；L2 `looper_ledger_add`、`looper_ledger_update`、操作者 ID 与自动登记；L3 待办页；L4 账本契约；B1 晨报输入与快照；B2 晨报模板与 processor 说明；B3 回「确认 L-xxxx」；B4 随 M7a ④⑤ 接入承诺与意图。C1 与 L1 和 M7a ②③ 并行，等 #1420 的修复合入后开工；晨报等 M7a P3 与 L1、L2 合入。RFC 第 11 节的 Q1–Q9 已于 2026-11-19 按推荐答案定下。
 
 ### 5.1 核心缺陷（优先修，穿插在阶段之间）
 

@@ -1,6 +1,6 @@
 # RFC：Manager 收尾、账本与晨报 v0（`manager_events`、`ledger_items`、`input_kind = briefing`）
 
-- **状态：** 草案。方向由维护者在 2026-11-19 逐条确认（第 1.4 节）；第 11 节的问题各有推荐答案，维护者答复前按推荐执行。本文合入后按第 9 节的 PR 顺序实现。
+- **状态：** 草案。方向由维护者在 2026-11-19 逐条确认（第 1.4 节）；第 11 节的 Q1–Q9 由维护者在 2026-11-19 按推荐答案定下。本文合入后按第 9 节的 PR 顺序实现。
 - **需求：** 维护者希望 Looper 的机器人更像一个助理：任务结束时由 Manager 用一句话收尾，说清要你决定什么，而不是只发一段模板通知；等你确认的事、你做过的决定、谁在做什么有一个地方集中看，「转述」永远不能冒充你的批准；每个工作日早上收到一份一屏以内的晨报。
 - **相关：** [消息流与订阅 RFC](message-stream-v0.zh-CN.md)（`kind: subscription`、`processor`，M7a）、[管家平台工具 RFC](manager-platform-tools-v0.zh-CN.md)（风险档、确认、`manager_actions`）、[用户关卡 RFC](user-gate-v0.zh-CN.md)、[定时任务 RFC](scheduled-tasks-v0.zh-CN.md) 与[命令型定时任务 RFC](command-schedules-v0.zh-CN.md)（通知、告警、可观测性的做法）、[场景管家 RFC](scenario-managers.zh-CN.md)；[开发计划](../../plans/2026-10-13-long-horizon-agent-context.zh-CN.md) 第 1 节和第 5 节；`docs/architecture/agent-system.md` 的 "Task reports"、"Turns Claude runs on its own"、"The Manager's platform tools"、"User gates"、"Schedules: tasks on a time rule"。
 - **核对基线：** `main` `6d200d4c7`；另读了未合入的 #1424（processor 角色）和 #1425（事件表与桥接）。本文只读了代码，没有启动服务。
@@ -219,7 +219,7 @@ Read with your tools (looper_tasks get, looper_costs) only when the facts above 
 
 **能做什么：** 只读。这一轮的 ops `Turn` 没有 `message_id`，`Turn.autonomous` 为真：`write`、`high` 档的调用返回 `needs_user_turn` 并照常留痕，`looper_confirm` 一律拒绝，不消耗任何待确认的操作。工具列表不变（常驻进程的工具列表在启动时就定了，按回合换列表会让进程重启）；「只读」由 ops 按回合执行，不靠提示词。`Turn` 新增类型化的 `origin`（`user`、`own`、`completion`），`autonomous` 改为 `origin != user`，现有两种回合的判定不变。
 
-**运行记录：** `llm_records` 一行，`agent_id` 是 Manager，`metadata.completion = {batch, event_ids, task_ids}`，花费算 Manager 的，不挂到任务上。Runs 页能按「收尾回合」筛出。
+**运行记录：** `llm_records` 一行，`agent_id` 是 Manager，`metadata.completion = {batch, event_ids, task_ids}`，花费算 Manager 的，不挂到任务上。每次运行的花费上限沿用 Manager 角色现有的设置，收尾回合不另设上限（Q9）。Runs 页能按「收尾回合」筛出。
 
 ### 3.6 回复与兜底
 
@@ -364,7 +364,7 @@ ALTER TABLE ledger_items ADD CONSTRAINT ledger_items_close_fk
 | 自动登记 | `system` | `system` | 只能 `add` 有源条目 |
 | 收尾回合、Claude 自己的回合 | 不能写 | — | `write` 档返回 `needs_user_turn` |
 
-**操作者 ID：** 现在没有类型化的「操作者是谁」：飞书白名单（`allowed_open_ids`）和 Telegram 白名单可以有好几个人。新增渠道配置字段 `operator_sender_id`（和白名单放在同一个 `channel_configs.config` 里，格式用 `SENDER_ID_FORMATS` 同一个规则校验，并且必须在白名单内），在 Settings → Channels 每个机器人上填。按机器人分开存，是因为飞书的 open_id 按应用区分，同一个人在两个机器人下的 open_id 不同。没填的机器人，私聊回合一律按 `relayed` 记，待办页顶部提示去填；迁移不替你自动填（Q1）。配置导出、导入照常带上这个字段。
+**操作者 ID：** 现在没有类型化的「操作者是谁」：飞书白名单（`allowed_open_ids`）和 Telegram 白名单可以有好几个人。新增渠道配置字段 `operator_sender_id`（和白名单放在同一个 `channel_configs.config` 里，格式用 `SENDER_ID_FORMATS` 同一个规则校验，并且必须在白名单内），在 Settings → Channels 每个机器人上填。按机器人分开存，是因为飞书的 open_id 按应用区分，同一个人在两个机器人下的 open_id 不同。没填的机器人，私聊回合一律按 `relayed` 记；迁移不替你自动填（Q1）。打开账本时（Settings → Chat 的开关，或 `PUT /api/settings/chat`），只要有启用的飞书、Telegram 机器人没填，确认框就逐个列出它们，写明「在这些机器人的私聊里，你做的决定会记成转述，直到你在 Settings → Channels 填上「我的 ID」」，并给出跳转；接口的返回带同样的提示。之后待办页顶部一直提示，直到都填上。配置导出、导入照常带上这个字段。
 
 ### 4.4 动作和谁能做
 
@@ -471,7 +471,7 @@ Looper itself registers open gates, confirmations and tasks: never add those.
 | `looper ledger close L-0012 [--cancel] [--note N] --session LABEL` | 结项（默认 `done`），`--cancel` 撤销 |
 | `looper ledger confirm L-0012 [--note N] --session LABEL` | 确认一条转述的决定 |
 
-- **来源标记：** 写入命令必须带 `--session`（交互式会话的标签，例如「工具名 + 日期 + 话题」），记进事件的 `session_label`，界面显示为「命令行 · <标签>」。
+- **来源标记：** 写入命令必须带 `--session`（交互式会话的标签，例如「工具名 + 日期 + 话题」），记进事件的 `session_label`，界面显示为「命令行 · <标签>」；待办页的列表和详情、晨报里的条目都标出「命令行」来源（Q6）。
 - **在 Looper 启动的 agent 里拒绝写入：** Looper 给它启动的每个 agent 运行时进程设置环境变量 `LOOPER_AGENT_RUN=<角色>`（`child_env` 之外由 Looper 自己加）；`looper ledger` 的写入命令看到它就拒绝（退出码 4），说明「在你自己的终端里运行」。这是减速带，不是沙箱：agent 和服务以同一个用户运行，有 shell 就能去掉这个变量（`child_env` 的说明里已经写明这一点）。剩余风险见第 8 节和 Q6。
 - **退出码：** 0 成功（`list` 有结果）；1 `list` 没有结果；2 用法错误；3 账本没有启用；4 被拒绝（规则或身份）；5 找不到条目；6 连不上数据库。「没有启用」和「没有结果」分别说明，和已定的 `looper leads search` 接口一致。
 - `loopercli` 只读：`/api/v1` 的 `ledger.list`、`ledger.get`，写入不开放。
@@ -538,7 +538,8 @@ erDiagram
   "window": {"from": "…", "to": "…", "covers_weekend": true},
   "decisions": [
     {"ref": "L-0012", "kind": "pending | relayed_decision | gate", "title": "…", "project": "…",
-     "due_at": "…", "overdue_days": 1, "link": "…", "reply": "确认 L-0012"}
+     "due_at": "…", "overdue_days": 1, "via": "dashboard | lark | telegram | cli | api", "link": "…",
+     "reply": "确认 L-0012"}
   ],
   "anomalies": [
     {"kind": "task_failed | schedule_alert | source_alert | completion_fallbacks", "ref": "task-… | <定时任务名>",
@@ -556,7 +557,7 @@ erDiagram
 
 | 一节 | 来源 | 规则 |
 |---|---|---|
-| 要你拍板 `decisions` | 未结的自有 `pending`、待核实的转述决定、打开的关卡；⑤ 之后加未处理的意图（`intents`，带「建 I-0042」） | 逾期在前，再按到期时间，没有到期的按登记时间；关卡只列在等你回答的（`waiting_for_planner` 为假）；待确认的操作不列（它们 10 分钟就过期） |
+| 要你拍板 `decisions` | 未结的自有 `pending`、待核实的转述决定、打开的关卡；⑤ 之后加未处理的意图（`intents`，带「建 I-0042」） | 逾期在前，再按到期时间，没有到期的按登记时间；关卡只列在等你回答的（`waiting_for_planner` 为假）；待确认的操作不列（它们 10 分钟就过期）；`via` 是新增或确认这一条的事件经由哪里，`cli` 渲染为「命令行写入」 |
 | 异常 `anomalies` | 窗口内失败的任务（不含你停止、取消的）；告警还没恢复的定时任务和订阅（`failures_alert_at`、`stale_alert_at`、`deadline_alert_at`、`overlap_alert_at` 不为空）；M7a 来源的健康问题（`stale`、`auth_problem`）；收尾回合连续兜底（第 6 节） | 按开始时间 |
 | 昨天结束的任务 `ended_tasks` | 窗口内 `completed` 的任务，不含定时任务建的 | `conclusion` 是总结首段的第一句，最多 120 字 |
 | 3 天内到期的承诺 `commitments` | M7a ④ 的消息线索里类型为承诺、`valid` 且 3 天内到期的 | ④ 合入后接入；之前这一节为空 |
@@ -652,7 +653,7 @@ Looper 没有单独的指标系统，照命令型定时任务 RFC 第 15.2 节�
 - **转述不能升级：** 群聊、API 客户端、非操作者的私聊发送者写进来的都是 `relayed`，只能新增和备注。
 - **群聊看不到别处的账本：** 群聊回合的 `list`、`get` 只返回本群记下的条目；收尾回合不在群里跑，晨报只推到私聊目标。
 - **账本工具只给默认 Manager：** 场景 Manager（即使在私聊里）、Planner、Worker、Reviewer、processor 没有。
-- **命令行的剩余风险：** `looper ledger` 写入算你本人（C3）。Looper 启动的 agent 和服务是同一个用户，有 shell 就能运行它；`LOOPER_AGENT_RUN` 让它默认拒绝，事件记 `via = cli` 和会话标签，待办页可见，但这不是隔离（Q6）。
+- **命令行的剩余风险：** `looper ledger` 写入算你本人（C3）。Looper 启动的 agent 和服务是同一个用户，有 shell 就能运行它；`LOOPER_AGENT_RUN` 让它默认拒绝，事件记 `via = cli` 和会话标签，待办页和晨报里都标出来源，但这不是隔离；这是 v1 已接受的已知限制（Q6）。
 - **收尾回合只读：** 由 ops 按回合执行；它不能确认任何待确认的操作，也不能建任务。
 - **不可信内容：** 快照里的任务名、总结、账本标题和以后的线索摘要都只在 processor 的数据块里出现；收尾回合里的总结首段同样标明是结果摘录。
 - **仓库边界：** 测试只用合成数据和替身；仓库、fixture、截图和 PR 里没有真实的会话名、人名、open_id、本机路径和真实的决定内容。
@@ -695,16 +696,18 @@ Looper 没有单独的指标系统，照命令型定时任务 RFC 第 15.2 节�
 | 晨报 processor 失败就不推 | 晨报是有内容才推的，失败时推代码列表更有用；processor 只负责措辞 |
 | 「确认 L-xxxx」交给模型 | 代码处理确定、不花钱，Manager 的运行时不可用时也能用；其他说法照常交给模型 |
 
-## 11. 待决问题（需要维护者决定，各有推荐）
+## 11. 已定的问题
 
-| # | 问题 | 推荐 |
+2026-11-19 维护者同意不再单独评审 RFC，Q1–Q9 都按推荐答案定下：
+
+| # | 问题 | 决定 |
 |---|---|---|
-| Q1 | 「我的 ID」要不要在白名单只有一个人时自动填上 | 不自动填：白名单只有一个人不代表那就是你；Settings → Channels 填一次，没填时待办页提示 |
-| Q2 | 合并窗口：固定 60 秒后投递（每个结束都晚约 60 秒），还是第一个立即投递、之后 60 秒内的合并 | 固定 60 秒：一阵结束的任务只发一条；任务很少需要精确到分钟的提醒 |
+| Q1 | 「我的 ID」要不要在白名单只有一个人时自动填上 | 不自动填。在 Settings → Channels 每个机器人上填一次；打开账本的确认框里列出还没填的机器人，写明后果（第 4.3 节），待办页顶部也提示 |
+| Q2 | 合并窗口：固定 60 秒后投递，还是第一个立即投递、之后 60 秒内的合并 | 固定 60 秒（第 3.4 节）：一阵结束的任务只发一条 |
 | Q3 | 队列时限：收尾回合排队超过多久改发代码通知 | 15 分钟 |
-| Q4 | 定时任务建的任务要不要自动登记成 `work_item` | 不登记：每小时一个的定时任务会把待办页淹没；它们失败时在晨报的「异常」里出现 |
-| Q5 | 你自己在群里说的「定了」算不算你本人 | 按 C3 的字面不算，记成转述，之后在私聊或控制台一键确认；群里的上下文（引用、转发）更容易混进别人的话 |
-| Q6 | 命令行以你本人的身份写入，Looper 启动的 agent 理论上也能运行它 | 接受：默认拒绝 `LOOPER_AGENT_RUN`，记来源和会话标签，待办页可见；真正的隔离要等 agent 不再和服务同一个用户运行 |
-| Q7 | 晨报遇到节假日 | 第一版不处理（工作日规则照推）；需要时再加一个类型化的跳过日期列表 |
-| Q8 | 机器睡过 09:15，醒来后补推的时限 | 3 小时（12:15 之后不补，下一份覆盖） |
-| Q9 | 收尾回合的花费：`notify = always` 的每小时定时任务开了它，一天约 24 轮 | 照 `notify` 执行，不另设上限；Settings → Chat 的计数里显示最近 24 小时的收尾花费 |
+| Q4 | 定时任务建的任务要不要自动登记成 `work_item` | 不登记；它们失败时在晨报的「异常」里出现 |
+| Q5 | 你自己在群里说的「定了」算不算你本人 | 不算，按 C3 的字面记成转述，之后在私聊或控制台确认 |
+| Q6 | 命令行以你本人的身份写入，Looper 启动的 agent 理论上也能运行它 | 作为 v1 的已知限制接受：写入记 `via = cli` 和会话标签，看到 `LOOPER_AGENT_RUN` 就拒绝，待办页和晨报里都标出「命令行」来源（第 4.8、5.2、8 节）；真正的隔离要等 agent 不再和服务以同一个用户运行 |
+| Q7 | 晨报遇到节假日 | v1 不处理，工作日规则照推 |
+| Q8 | 机器睡过 09:15，醒来后补推的时限 | 3 小时（`fire_window_minutes = 180`，12:15 之后不补，下一份覆盖） |
+| Q9 | 收尾回合的花费 | 不另设上限，用 Manager 现有的每次运行花费上限（第 3.5 节）；Settings → Chat 的计数里显示最近 24 小时的收尾花费 |
