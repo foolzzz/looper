@@ -566,6 +566,8 @@ def run_task(
         if vault_dir is None:
             raise EvalError(f"{task.id} needs the knowledge vault, and the server has no eval vault")
         project["vault"] = "on"
+    if task.advisor:
+        project["advisor"] = "on"
     before = snapshot(work_dir)
     started = time.monotonic()
     workflow = {}
