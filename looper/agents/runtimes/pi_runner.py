@@ -214,11 +214,32 @@ def _package_version(executable: str, package: str) -> str | None:
     return ""
 
 
-def enable(runtime_root: Path) -> RunnerSupervisor | None:
-    """Install the adapter once at serve startup, retaining failures without a CLI fallback."""
-    node, pi = shutil.which("node"), shutil.which("pi")
+async def configured_executable(database_url: str) -> str:
+    """The executable of the registered Pi runtime that Agent Profiles use (the first, by name), as its profiles
+    launch it; ``pi`` when none is registered or the registry cannot be read yet."""
+    import asyncpg
+
+    from ...db import profile_registry
+
+    try:
+        conn = await asyncpg.connect(database_url, timeout=5)
+        try:
+            rows = await profile_registry.list_runtimes(pool=conn)
+        finally:
+            await conn.close()
+    except Exception:
+        logger.info("cannot read the registered Pi runtime; using `pi` from PATH", exc_info=True)
+        return PiRuntime.default_executable
+    return next((row["executable"] or PiRuntime.default_executable
+                 for row in rows if row["type"] == "pi" and row["profile_count"]), PiRuntime.default_executable)
+
+
+def enable(runtime_root: Path, executable: str = PiRuntime.default_executable) -> RunnerSupervisor | None:
+    """Install the adapter once at serve startup, retaining failures without a CLI fallback. ``executable`` is the
+    registered Pi runtime's (``configured_executable``)."""
+    node, pi = shutil.which("node"), shutil.which(executable)
     if not node or not pi:
-        unavailable = _opt_out("node 22.19+ and pi are not both on PATH")
+        unavailable = _opt_out(f"node 22.19+ and {executable} are not both on PATH")
     else:
         try:
             result = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=2, check=True)
