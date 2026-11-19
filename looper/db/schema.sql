@@ -1608,7 +1608,9 @@ CREATE TABLE IF NOT EXISTS ledger_items (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     closed_at     TIMESTAMPTZ,
-    CONSTRAINT ledger_items_source CHECK (
+    sourced       BOOLEAN GENERATED ALWAYS AS (source_kind IS NOT NULL) STORED,
+    UNIQUE (id, sourced),
+    CONSTRAINT ledger_items_source CHECK (COALESCE(
         (source_kind IS NULL AND gate_step_id IS NULL AND action_id IS NULL AND task_id IS NULL
          AND status IS NOT NULL)
         OR (source_kind = 'gate' AND kind = 'pending' AND gate_step_id IS NOT NULL
@@ -1616,7 +1618,7 @@ CREATE TABLE IF NOT EXISTS ledger_items (
         OR (source_kind = 'confirmation' AND kind = 'pending' AND action_id IS NOT NULL
             AND gate_step_id IS NULL AND task_id IS NULL AND status IS NULL)
         OR (source_kind = 'task' AND kind = 'work_item' AND task_id IS NOT NULL
-            AND gate_step_id IS NULL AND action_id IS NULL AND status IS NULL)),
+            AND gate_step_id IS NULL AND action_id IS NULL AND status IS NULL), false)),
     CONSTRAINT ledger_items_owner CHECK ((owner_kind = 'user') = (owner_ref IS NULL)),
     CONSTRAINT ledger_items_confirmed CHECK ((confirmed_event_id IS NULL) = (confirmed_actor IS NULL)
                                              AND (confirmed_event_id IS NULL OR kind = 'decision')),
@@ -1634,6 +1636,7 @@ CREATE INDEX IF NOT EXISTS idx_ledger_items_open ON ledger_items (kind, due_at) 
 CREATE TABLE IF NOT EXISTS ledger_events (
     id            BIGSERIAL PRIMARY KEY,
     item_id       BIGINT NOT NULL REFERENCES ledger_items(id) ON DELETE CASCADE,
+    item_sourced  BOOLEAN NOT NULL,   -- whether the item is sourced; the key below keeps it true to the item
     action        TEXT NOT NULL CHECK (action IN ('add', 'note', 'amend', 'confirm', 'close', 'cancel',
                                                   'supersede', 'reopen')),
     actor_kind    TEXT NOT NULL CHECK (actor_kind IN ('user', 'relayed', 'system')),
@@ -1650,6 +1653,9 @@ CREATE TABLE IF NOT EXISTS ledger_events (
     changes       JSONB CHECK (changes IS NULL OR jsonb_typeof(changes) = 'object'),
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (id, actor_kind),
+    FOREIGN KEY (item_id, item_sourced) REFERENCES ledger_items (id, sourced),
+    -- the system adds sourced items and only those; the user and a relayed message add own items
+    CONSTRAINT ledger_events_add CHECK (action <> 'add' OR (actor_kind = 'system') = item_sourced),
     CONSTRAINT ledger_events_actor CHECK (action IN ('add', 'note') OR actor_kind = 'user'),
     CONSTRAINT ledger_events_system CHECK ((actor_kind = 'system') = (via = 'system')
                                            AND (actor_kind <> 'system' OR action = 'add')),

@@ -210,7 +210,7 @@ SELECT i.*, g.state AS gate_state, t.status AS task_status, ce.state AS confirma
        (SELECT e.actor_kind FROM ledger_events e WHERE e.item_id = i.id AND e.action = 'add') AS added_by
 FROM ledger_items i
 LEFT JOIN task_user_gates g ON g.step_id = i.gate_step_id
-LEFT JOIN tasks t ON t.id = i.task_id
+LEFT JOIN tasks t ON t.id = COALESCE(i.task_id, g.task_id)
 LEFT JOIN manager_actions a ON a.id = i.action_id
 LEFT JOIN LATERAL (SELECT CASE
         WHEN a.id IS NULL THEN NULL
@@ -315,7 +315,8 @@ async def list_events(item_id: int, *, limit: int | None = None, db: Db | None =
     rows = await _db(db).fetch(
         "SELECT * FROM (SELECT * FROM ledger_events WHERE item_id = $1 ORDER BY id DESC LIMIT $2) AS e ORDER BY id",
         item_id, limit or 10_000)
-    return [dict(row) for row in rows]
+    return [{**row, "changes": json.loads(row["changes"]) if isinstance(row["changes"], str) else row["changes"]}
+            for row in map(dict, rows)]
 
 
 async def counts(*, db: Db | None = None) -> dict[str, int]:
@@ -382,6 +383,11 @@ async def apply(action: str, actor: Actor, *, item_id: int | None = None, new: N
     async with _transaction(db) as conn:
         if action == "add":
             return await _add(conn, new, actor, note, quote)
+        if action == "supersede" and superseded_by:
+            # Both decisions are locked, lowest id first, so two supersedes that cross cannot wait on each other;
+            # the state is read after the locks.
+            await conn.fetch("SELECT id FROM ledger_items WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE",
+                             [item_id, superseded_by])
         row = await conn.fetchrow("SELECT * FROM ledger_items WHERE id = $1 FOR UPDATE", item_id)
         if row is None:
             raise LedgerRefused("not_found", f"{format_id(item_id)} does not exist")
@@ -425,7 +431,8 @@ async def apply(action: str, actor: Actor, *, item_id: int | None = None, new: N
             sets = {"status": "open", "superseded_by": None}
         else:  # amend
             sets, changes = _amend(item, fields or {})
-        event = await _event(conn, item_id, action, actor, note=note, quote=quote, changes=changes)
+        event = await _event(conn, item_id, item["source_kind"] is not None, action, actor, note=note, quote=quote,
+                             changes=changes)
         if action == "confirm":
             sets = {"confirmed_event_id": event, "confirmed_actor": "user"}
         elif action in ("close", "cancel", "supersede"):
@@ -455,16 +462,16 @@ async def _update(conn: asyncpg.Connection, item_id: int, sets: Mapping[str, Any
         raise LedgerRefused("invalid", f"the change is not valid ({error.constraint_name})") from None
 
 
-async def _event(conn: asyncpg.Connection, item_id: int, action: str, actor: Actor, *, note: str | None,
-                 quote: str | None, changes: Mapping[str, Any] | None) -> int:
+async def _event(conn: asyncpg.Connection, item_id: int, sourced: bool, action: str, actor: Actor, *,
+                 note: str | None, quote: str | None, changes: Mapping[str, Any] | None) -> int:
     try:
         return await conn.fetchval(
-            "INSERT INTO ledger_events (item_id, action, actor_kind, actor_id, relayed_by, via, manager_id, channel_id, "
-            "chat, message_id, session_label, quote, note, changes) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb) RETURNING id",
+            "INSERT INTO ledger_events (item_id, item_sourced, action, actor_kind, actor_id, relayed_by, via, manager_id, "
+            "channel_id, chat, message_id, session_label, quote, note, changes) "
+            "VALUES ($1, $15, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb) RETURNING id",
             item_id, action, actor.kind, actor.actor_id, actor.relayed_by, actor.via, actor.manager_id,
             actor.channel_id, actor.chat, actor.message_id, actor.session_label, quote, note,
-            None if changes is None else json.dumps(changes, default=str))
+            None if changes is None else json.dumps(changes, default=str), sourced)
     except asyncpg.CheckViolationError as error:
         raise LedgerRefused("invalid", f"the event is not valid ({error.constraint_name})") from None
 
@@ -487,7 +494,8 @@ async def _add(conn: asyncpg.Connection, new: NewItem, actor: Actor, note: str |
         existing = await conn.fetchrow(_SELECT + " WHERE i.gate_step_id = $1 OR i.action_id = $2 OR i.task_id = $3",
                                        new.gate_step_id, new.action_id, new.task_id)
         return item_view(existing)
-    event = await _event(conn, item_id, "add", actor, note=note, quote=quote, changes=None)
+    event = await _event(conn, item_id, new.source_kind is not None, "add", actor, note=note, quote=quote,
+                         changes=None)
     if new.kind == "decision" and actor.kind == "user":  # what the user decides is confirmed from the start
         await _update(conn, item_id, {"confirmed_event_id": event, "confirmed_actor": "user"})
     return item_view(await conn.fetchrow(_SELECT + " WHERE i.id = $1", item_id))

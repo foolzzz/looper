@@ -10,8 +10,8 @@ from tests.db_support import DSN, run_db
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 
 ITEM = "INSERT INTO ledger_items (kind, title, status) VALUES ('{kind}', 'T', 'open') RETURNING id"
-EVENT = ("INSERT INTO ledger_events (item_id, action, actor_kind, relayed_by, via) "
-         "VALUES ($1, $2, $3, $4, $5) RETURNING id")
+EVENT = ("INSERT INTO ledger_events (item_id, item_sourced, action, actor_kind, relayed_by, via) "
+         "VALUES ($1, false, $2, $3, $4, $5) RETURNING id")
 
 
 def test_a_relayed_event_cannot_be_referenced_by_a_confirmation_or_a_closing(monkeypatch):
@@ -46,7 +46,6 @@ def test_only_add_and_note_can_be_relayed_and_the_system_only_adds(monkeypatch, 
             await pool.fetchval(EVENT, item, action, "system", None, "system")
         for allowed in ("add", "note"):
             await pool.fetchval(EVENT, item, allowed, "relayed", "someone", "api")
-        await pool.fetchval(EVENT, item, "add", "system", None, "system")
         with pytest.raises(asyncpg.CheckViolationError):
             await pool.fetchval(EVENT, item, "note", "system", None, "system")
 
@@ -121,3 +120,36 @@ def test_a_database_without_the_tables_gets_them_on_upgrade(monkeypatch):
         assert await pool.fetchval("SELECT count(*) FROM ledger_items") == 1
 
     run_db(check, monkeypatch, timeout=30)
+
+
+def test_the_system_adds_sourced_items_and_only_those(monkeypatch):
+    async def check(pool):
+        seeded = await sup.seed(pool)
+        own = await pool.fetchval(ITEM.format(kind="decision"))
+        sourced = await pool.fetchval("INSERT INTO ledger_items (kind, title, source_kind, task_id) "
+                                      "VALUES ('work_item', 'T', 'task', $1) RETURNING id", seeded["task"])
+        insert = ("INSERT INTO ledger_events (item_id, item_sourced, action, actor_kind, relayed_by, via) "
+                  "VALUES ($1, $2, 'add', $3, NULL, $4)")
+        with pytest.raises(asyncpg.CheckViolationError):  # the system adding to an operator's own decision
+            await pool.execute(insert, own, False, "system", "system")
+        with pytest.raises(asyncpg.CheckViolationError):  # a user adding a sourced item
+            await pool.execute(insert, sourced, True, "user", "dashboard")
+        with pytest.raises(asyncpg.ForeignKeyViolationError):  # an event cannot misstate what its item is
+            await pool.execute(insert, own, True, "system", "system")
+        await pool.execute(insert, sourced, True, "system", "system")
+        await pool.execute(insert, own, False, "user", "dashboard")
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_a_null_cannot_slip_past_the_source_rule(monkeypatch):
+    async def check(pool):
+        seeded = await sup.seed(pool)
+        with pytest.raises(asyncpg.CheckViolationError):  # a task id with no source kind and no status
+            await pool.execute("INSERT INTO ledger_items (kind, title, task_id) VALUES ('work_item', 'T', $1)",
+                               seeded["task"])
+        with pytest.raises(asyncpg.CheckViolationError):
+            await pool.execute("INSERT INTO ledger_items (kind, title, gate_step_id) VALUES ('pending', 'T', $1)",
+                               seeded["gate"])
+
+    run_db(check, monkeypatch, timeout=20)

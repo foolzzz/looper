@@ -1,5 +1,6 @@
 """``db.ledger.apply``: who may do what, the states it moves an item through, and how a sourced item reads its source."""
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -133,7 +134,7 @@ def test_amend_records_what_changed_and_refuses_what_cannot(monkeypatch):
             "Reply by Monday", due, "manager:manager", "proj")
         (_, event) = await ledger.list_events(item, db=pool)
         assert event["changes"] is not None
-        assert {k: v for k, v in json.loads(event["changes"]).items() if k != "due_at"} == {
+        assert {k: v for k, v in event["changes"].items() if k != "due_at"} == {
             "title": ["Reply by Friday", "Reply by Monday"], "owner": ["user", "manager:manager"],
             "project_id": [None, "proj"]}
         for fields, code in (({}, "invalid"), ({"status": "done"}, "invalid"), ({"title": "  "}, "invalid"),
@@ -261,3 +262,42 @@ def test_an_actor_is_consistent():
                              ("user", "api", {"relayed_by": "x"}), ("owner", "api", {})):
         with pytest.raises(ValueError):
             ledger.Actor(kind, via, **extra)
+
+
+def test_a_gate_item_has_its_tasks_project(monkeypatch):
+    async def check(pool):
+        seeded = await sup.seed(pool)
+        gate = await sup.add_sourced(pool, seeded, "gate")
+        assert gate["project_id"] == "proj"
+        assert [i["id"] for i in (await ledger.list_items(project_id="proj", db=pool))[0]] == [gate["id"]]
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_amend_events_come_back_as_objects(monkeypatch):
+    async def check(pool):
+        item = (await sup.add_own(pool))["number"]
+        await ledger.apply("amend", sup.USER, item_id=item, db=pool, fields={"title": "Reply by Monday"})
+        events = await ledger.list_events(item, db=pool)
+        assert [e["changes"] for e in events] == [None, {"title": ["Reply by Friday", "Reply by Monday"]}]
+
+    run_db(check, monkeypatch, timeout=20)
+
+
+def test_two_decisions_superseding_each_other_do_not_deadlock(monkeypatch):
+    async def check(pool):
+        a = (await sup.add_own(pool, "decision", title="A"))["number"]
+        b = (await sup.add_own(pool, "decision", title="B"))["number"]
+        # One transaction holds A, as a supersede of A would. Another supersedes B by A. Each then needs the
+        # other's row (the foreign key to the superseding decision), the cycle that used to deadlock.
+        async with pool.acquire() as holder:
+            tx = holder.transaction()
+            await tx.start()
+            await holder.fetch("SELECT id FROM ledger_items WHERE id = $1 FOR UPDATE", a)
+            other = asyncio.ensure_future(ledger.apply("supersede", sup.USER, item_id=b, superseded_by=a, db=pool))
+            await asyncio.sleep(0.5)
+            await holder.fetch("SELECT id FROM ledger_items WHERE id = $1 FOR KEY SHARE", b)
+            await tx.commit()
+        assert (await other)["status"] == "superseded"
+
+    run_db(check, monkeypatch, timeout=30, max_size=4)

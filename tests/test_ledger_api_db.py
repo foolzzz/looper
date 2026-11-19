@@ -2,6 +2,7 @@
 
 import pytest
 
+from looper.agents import api_v1
 from looper.db import ledger
 from tests import ledger_support as sup
 from tests.db_support import DSN, run_db, v1_api
@@ -40,8 +41,15 @@ def test_list_and_get_read_the_ledger_for_the_operator_and_a_client(monkeypatch,
                 assert (len(answer["result"]["items"]), answer["result"]["more"]) == (2, 1)
                 status, answer = await call("ledger.list", {"status": "done"}, client=client)
                 assert [i["status"] for i in answer["result"]["items"]] == ["done"]
+            await ledger.apply("amend", sup.USER, item_id=decision["number"], db=pool, fields={"title": "Use SQLite"})
             status, answer = await call("ledger.get", {"item": decision["id"]}, client=True)
             assert status == 200
+            for operation in ("ledger.get", "ledger.list"):  # what the API returns is what it declares
+                declared = next(op for op in api_v1.operations() if op.operation_id == operation)
+                _, shown = await call(operation, {"item": decision["id"]} if operation == "ledger.get" else {})
+                api_v1.validate_arguments(declared.result, shown["result"])
+            assert answer["result"]["events"][-1]["changes"] == {"title": ["Use PostgreSQL", "Use SQLite"]}
+            answer["result"]["events"] = answer["result"]["events"][:1]
             (event,) = answer["result"]["events"]
             assert (event["actor_kind"], event["via"], event["relayed_by"]) == ("relayed", "api", "client:demo")
             assert "manager_id" not in event
