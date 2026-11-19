@@ -139,21 +139,28 @@ def clear_private_settings(runtime_root: Path) -> int:
 
 
 def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = None,
-                   settings_dir: Path | None = None, repository: bool = True) -> list[str]:
+                   settings_dir: Path | None = None, sealed: bool = False) -> list[str]:
     """The flags that keep the operator's personal Claude Code configuration out of an agent run in ``cwd``.
 
     Every agent's command carries them, so the agents cannot diverge. A run
-    with no tools (the processor's) has no repository: with ``repository``
-    False, every directory above ``cwd`` is outside it, so no ``CLAUDE.md`` or
-    ``AGENTS.md`` above its directory loads even when the runtime root is in
-    a checkout.
+    with no tools (the processor's) is ``sealed``: no settings file loads
+    (``--setting-sources ""``), so no project's hooks, every hook is off
+    (``disableAllHooks``), and every ``CLAUDE.md`` and ``AGENTS.md`` above its
+    directory is excluded even when the runtime root is in a checkout.
+    Verified against Claude Code 2.1.328 in ``--print`` stream-json mode: a
+    project's UserPromptSubmit hook that writes a file ran, with the prompt
+    on its stdin, under ``--setting-sources project``, and ran under neither
+    ``--setting-sources ""`` nor ``disableAllHooks``; a hook from the
+    administrator's managed settings ran in each case (``disableAllHooks``
+    does not turn those off).
     The explicit ``env`` pins runtime-owned variables over project settings;
     it carries only a local route token, never an upstream provider credential.
     The result depends only on those values, ``cwd`` and where the operator's
     configuration lives, so a resident agent's command stays the same between turns.
     """
-    settings = {"autoMemoryEnabled": False, "claudeMdExcludes": _outside_memory(Path(cwd), repository=repository),
-                "crossSessionInbound": "refuse"}
+    settings: dict[str, Any] = {"autoMemoryEnabled": False,
+                                "claudeMdExcludes": _outside_memory(Path(cwd), repository=not sealed),
+                                "crossSessionInbound": "refuse", **({"disableAllHooks": True} if sealed else {})}
     if env is not None:
         settings["env"] = env
     content = json.dumps(settings, ensure_ascii=False, separators=(",", ":"))
@@ -174,7 +181,7 @@ def isolation_args(cwd: str | os.PathLike[str], *, env: dict[str, str] | None = 
             Path(temporary).unlink(missing_ok=True)
         content = str(target)
     return [
-        "--setting-sources", "project",
+        "--setting-sources", "" if sealed else "project",
         "--strict-mcp-config",
         "--settings", content,
     ]
@@ -419,8 +426,8 @@ def peer_args(agent_teams: bool) -> list[str]:
 # --disable-slash-commands and none with it, and no MCP server (--strict-mcp-config, no --mcp-config); a
 # transcript under ~/.claude/projects is written without --no-session-persistence and none with it. --tools takes
 # several values, so a flag must follow its "". Claude Code's own built-in plugins are still listed (they add no
-# tool, command or skill), and one UserPromptSubmit hook from neither the operator's settings nor a project still
-# ran, adding nothing. No permission prompt can be answered (READ_ONLY_MODE), though no tool is left to ask for one.
+# tool, command or skill); its settings and hooks are sealed off by ``isolation_args(sealed=True)``. No permission
+# prompt can be answered (READ_ONLY_MODE), though no tool is left to ask for one.
 NO_TOOLS_ARGS = (*READ_ONLY_MODE, "--tools", "", "--disable-slash-commands", "--no-session-persistence")
 
 
@@ -1451,8 +1458,11 @@ class ClaudeRunRecorder:
         autonomous: bool = False,
         whole_process: bool = False,
         pid_of: Callable[[], int | None] | None = None,
+        keep: Callable[[dict[str, Any]], bool] | None = None,
     ) -> None:
         self._agent_id = agent_id
+        # Which events the record keeps (None: every one but usage and partial deltas); the rest are still counted.
+        self._keep = keep
         self._autonomous = autonomous
         # A fresh whole process reports its own totals; a fork/resume also reports its inherited history.
         self._whole_process = whole_process
@@ -1633,6 +1643,8 @@ class ClaudeRunRecorder:
         """Write ``event``, once ``account`` has taken it, to the run's record."""
         await self._heartbeat()
         if self._record_id is None or event.get("type") in ("usage", "stream_event"):
+            return
+        if self._keep is not None and not self._keep(event):
             return
         from ..db import llm_records
 

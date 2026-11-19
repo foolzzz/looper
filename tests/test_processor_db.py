@@ -45,7 +45,8 @@ if mode == "hang":
     time.sleep(60)
 usage = {"input_tokens": 40, "output_tokens": 6, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
 emit({"type": "assistant", "session_id": "s-1", "message": {"id": "m-1", "role": "assistant", "model": "claude-sonnet",
-      "content": [{"type": "text", "text": "The canary deploy failed twice."}], "usage": usage}})
+      "content": [{"type": "thinking", "thinking": "The batch says: " + turn["message"]["content"][-60:]},
+                  {"type": "text", "text": "The canary deploy failed twice."}], "usage": usage}})
 emit({"type": "result", "subtype": "success", "is_error": mode == "error", "result": "The canary deploy failed twice.",
       "session_id": "s-1", "total_cost_usd": 0.5 if mode == "over_cap" else 0.01, "usage": usage})
 '''
@@ -167,9 +168,11 @@ def test_a_processor_run_gives_its_reply_and_keeps_no_message_text(monkeypatch: 
         assert json.loads(record["input_text"]) == {"from_seq": 3, "to_seq": 9, "render": "lines_v1", "chars": len(BATCH),
                                                     "sha256": hashlib.sha256(BATCH.encode()).hexdigest()}
         assert json.loads(record["metadata"])["subscription"] == {"schedule_id": "sched-1", "from_seq": 3, "to_seq": 9}
+        # Its thinking restates the batch: only the final output and usage are kept, never what led to them.
         events = await pool.fetch("SELECT event::text FROM llm_record_events WHERE record_id = $1", done.record_id)
         assert events and not any(TOKEN in row["event"] for row in events)
         assert TOKEN not in json.dumps(record, default=str)
+        assert (record["output_text"], record["output_tokens"]) == ("The canary deploy failed twice.", 6)
 
     run_db(test, monkeypatch, setup=seed_role_configs)
 

@@ -10,9 +10,9 @@ to it; ``chosen_profile`` says beforehand which Agent Profile the run would use,
   (``check_roles``) and, when it comes from a layer that serves other roles too, when the processor launches.
 - **No tools.** Claude Code runs with ``claude_cli.NO_TOOLS_ARGS``: no built-in tool, MCP server, plugin, skill,
   command or knowledge directory, nothing installed for it, no agent teams, its session not kept and its messages
-  not echoed into its stream. Its directory is an empty private one under the runtime root, removed afterwards,
-  and every ``CLAUDE.md`` and ``AGENTS.md`` above it is excluded.
-- **Its system prompt replaces the runtime's** (``BUILTIN_SYSTEM_PROMPT_MODE``): the profile's custom prompt, the
+  not echoed into its stream; sealed (``claude_cli.isolation_args``): no settings file, no hook, no ``CLAUDE.md``
+  or ``AGENTS.md`` above its directory, an empty private one under the runtime root, removed afterwards.
+- **Its system prompt replaces the runtime's**, always (``system_prompt_mode_choice``): the profile's custom prompt, the
   role prompt (``role_configs.processor``, ``PROCESSOR_ROLE_PROMPT`` recommended), the instructions, then the reply
   contract with the quiet word. The harness and the boundaries speak of tools and permissions: neither is in it.
   The batch is the run's one user turn, inside a ``<messages>`` block.
@@ -22,8 +22,9 @@ to it; ``chosen_profile`` says beforehand which Agent Profile the run would use,
   needs the local gateway, cannot run: no cap would hold, or its requests would be recorded.
 - **Its record** (``llm_records``): ``agent_id`` ``processor:<owner>``, no task, the caller's metadata; model
   requests are not recorded (llmrec), and ``input_text`` holds only a reference to the batch (the caller's window
-  reference, the text's sha256 and length), never the batch, so deleting the messages deletes their text from
-  every place Looper keeps it.
+  reference, the text's sha256 and length), never the batch, and of its stream only the runtime's own events and
+  the result (``_kept``): the model's messages, whose thinking may restate the batch, are counted, never stored.
+  Deleting the messages deletes their text from every place Looper keeps it but the outputs.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_settings import AgentSettings, AgentType, Launch, load_agent_settings, sha256_text
+from .runtimes import CostSource
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,23 @@ def user_turn(text: str) -> str:
     """The batch as the run's user turn: in a ``<messages>`` block that nothing in it can close."""
     body = _MARKER.sub(r"&lt;\1messages&gt;", text)
     return f"{INPUT_LEAD}\n<messages>\n{body}\n</messages>"
+
+
+def _kept(event: Mapping[str, Any]) -> bool:
+    """What a processor run's record keeps of its stream: the runtime's own events (its init, with its tools and MCP
+    servers) and the result (its output and usage)."""
+    return event.get("type") in ("system", "result")
+
+
+def run_cost(recorded: float | None, result: Mapping[str, Any] | None, source: CostSource) -> float | None:
+    """A run's cost: its record's, else, for a runtime whose own figure is the run's cost, the result's
+    ``total_cost_usd``; None when unknown (another runtime's figure is not its provider's price)."""
+    if recorded is not None:
+        return recorded
+    reported = (result or {}).get("total_cost_usd")
+    if source is CostSource.RUNTIME and isinstance(reported, (int, float)) and not isinstance(reported, bool):
+        return float(reported)
+    return None
 
 
 def is_quiet(reply: str, quiet_word: str) -> bool:
@@ -233,7 +252,7 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
             return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=str(exc))
         recorder = ClaudeRunRecorder(agent_id=agent_id, task_id=None, command=command, cwd=str(directory),
                                      input_text=reference, system_prompt=system_prompt, launch=launch,
-                                     whole_process=True)
+                                     whole_process=True, keep=_kept)
         await recorder.start()
         if metadata:
             await recorder.annotate(dict(metadata))
@@ -247,14 +266,13 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
     finally:
         shutil.rmtree(directory, ignore_errors=True)
     result, record_id = finished.result, recorder.record_id
-    cost: float | None = None
+    recorded: float | None = None
     try:
         row = await llm_records.get_record(record_id) if record_id is not None else None
-        cost = float(row["cost_usd"]) if row and row.get("cost_usd") is not None else None
+        recorded = float(row["cost_usd"]) if row and row.get("cost_usd") is not None else None
     except Exception:
         logger.warning("cannot read the cost of processor run %s", record_id, exc_info=True)
-    if cost is None and isinstance((result or {}).get("total_cost_usd"), (int, float)):
-        cost = float(result["total_cost_usd"])  # a fresh process's own figure
+    cost = run_cost(recorded, result, launch.cost_source)
     failed = None
     if finished.timed_out:
         failed = ProcessorFailure.TIMEOUT, f"no reply within {deadline:g} s"

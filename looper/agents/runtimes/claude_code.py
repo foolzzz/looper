@@ -200,7 +200,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         from ..llmrec.gateway import translated
 
         # Project settings load after process env; pin the attached route and all translation safeguards here too.
-        repository = not (launch is not None and launch.no_tools)
+        sealed = launch is not None and launch.no_tools
         env = None
         if launch is not None and translated(launch):
             env = {**dict(TRANSLATED_ENV), AUTH_TOKEN: "", API_KEY: ""}
@@ -212,7 +212,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             if isinstance(launch.llmrec, LlmrecRoute) and launch.llmrec.kind is RouteKind.TRANSLATE:
                 env[BASE_URL] = launch.llmrec.url
                 env[AUTH_TOKEN] = launch.llmrec.local_token
-        return claude_cli.isolation_args(cwd, env=env, settings_dir=settings_dir, repository=repository)
+        return claude_cli.isolation_args(cwd, env=env, settings_dir=settings_dir, sealed=sealed)
 
     def check_pairing(self, provider: ProviderSpec, model: str, effort: str | None = None, *,
                       executable: str | None = None, launcher: Launcher = Launcher.NATIVE) -> None:

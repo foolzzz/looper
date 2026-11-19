@@ -464,7 +464,11 @@ def layer_update(data: Any, scope: Layer, role: AgentType | None = None) -> dict
             if scope is not Layer.ROLE:
                 raise SettingsError("system_prompt_mode is set per role: set it on the role's layer "
                                     "(Settings → Roles), not on the shared defaults or in a project")
-            values[name] = _stored_prompt_mode(raw).value
+            mode = _stored_prompt_mode(raw)
+            if role is AgentType.PROCESSOR and mode is not SystemPromptMode.REPLACE:
+                raise SettingsError("the processor always replaces the runtime's prompt, which describes tools it "
+                                    "does not have")
+            values[name] = mode.value
         else:
             values[name] = budget_usd(raw)
     return values
@@ -666,9 +670,12 @@ def resolve(role: AgentType | str | None, layers: Mapping[Place, LayerValues],
 def system_prompt_mode_choice(role: AgentType | None, layers: Mapping[Place, LayerValues],
                               ) -> tuple[SystemPromptMode, Layer]:
     """The mode of ``role`` and the layer it came from: the task's own choice (``Layer.TASK``, a Planner, Worker or
-    Reviewer), else its role layer's, else the built-in one. No role (the system layer alone) appends."""
+    Reviewer), else its role layer's, else the built-in one. No role (the system layer alone) appends; the processor
+    always replaces (a runtime's own prompt describes the tools it does not have), whatever a layer says."""
     if role is None:
         return SystemPromptMode.APPEND, Layer.BUILTIN
+    if role is AgentType.PROCESSOR:
+        return SystemPromptMode.REPLACE, Layer.BUILTIN
     for layer in (Layer.TASK, Layer.ROLE):
         mode = layers.get((layer, role), EMPTY_LAYER).system_prompt_mode
         if mode is not None:
