@@ -24,8 +24,8 @@ from looper.agents.profile_registry import LegacyProviderSpec as ProviderSpec, R
 from looper.agents.runtimes import ADAPTERS, ApiProtocol, AuthKind, RuntimeUnsupported, adapter
 from tests.runtime_model_helpers import resolved_profile
 
-# sha256 of ``_command_lines`` on main 961070ce4, before the access level.
-COMMAND_LINES_SHA256 = "4924fc143af5d8a3215adb1191c87b3e4a7258a53257017c438eeffaf3595c73"
+# sha256 of ``_command_lines`` on main 961070ce4, before the access level (the same on macOS and Linux).
+COMMAND_LINES_SHA256 = "73e7b9e04fd07ff27d649609434cfe7754dc0e85d680f6fd6f124838a74f2183"
 
 ROLES = (AgentType.MANAGER, AgentType.PLANNER, AgentType.WORKER, AgentType.REVIEWER, AgentType.PROCESSOR)
 
@@ -136,9 +136,9 @@ def _command_lines(root: Path) -> dict[str, Any]:
 
 @pytest.fixture
 def fixed_root() -> Any:
-    """A directory whose parents are the same on every machine (``/tmp``, then ``/``): Claude Code's command names
-    each parent of its working directory."""
-    root = Path(tempfile.mkdtemp(prefix="looper-access-", dir="/tmp"))
+    """A directory with no symbolic link in its path (macOS's ``/tmp`` is one, which would name each path twice),
+    whose parents a command names only in the parts the digest drops."""
+    root = Path(tempfile.mkdtemp(prefix="looper-access-", dir="/tmp")).resolve()
     yield root
     shutil.rmtree(root, ignore_errors=True)
 
