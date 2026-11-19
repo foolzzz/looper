@@ -1603,7 +1603,10 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     output_kind         TEXT NOT NULL DEFAULT 'push' CHECK (output_kind IN ('push')),
     cursor_seq          BIGINT NOT NULL DEFAULT 0 CHECK (cursor_seq >= 0),
     cursor_at           TIMESTAMPTZ,
-    target_confirmed_at TIMESTAMPTZ
+    target_confirmed_at TIMESTAMPTZ,
+    -- What the operator was shown when they confirmed (``agents/subscriptions.py`` ``config_version``): a push needs it
+    -- to still be what the schedule is.
+    target_confirmed_version TEXT
 );
 CREATE TABLE IF NOT EXISTS subscription_runs (
     run_id            TEXT PRIMARY KEY REFERENCES schedule_runs(id) ON DELETE CASCADE,
@@ -1615,11 +1618,30 @@ CREATE TABLE IF NOT EXISTS subscription_runs (
     events_over_cap   INTEGER NOT NULL DEFAULT 0,
     record_id         BIGINT REFERENCES llm_records(id) ON DELETE SET NULL,
     outcome           TEXT NOT NULL DEFAULT 'pending'
-                      CHECK (outcome IN ('pending', 'delivering', 'delivered', 'quiet', 'dashboard_only',
+                      CHECK (outcome IN ('pending', 'delivering', 'delivered', 'uncertain', 'quiet', 'dashboard_only',
                                          'output_invalid', 'failed')),
     output_text       TEXT,
     output_sha256     TEXT,
-    notification_id   TEXT REFERENCES schedule_notifications(id) ON DELETE SET NULL
+    notification_id   TEXT REFERENCES schedule_notifications(id) ON DELETE SET NULL,
+    -- Where the run may push and under which configuration: set when it started with the target confirmed, NULL
+    -- otherwise (its output stays on the dashboard).
+    target_channel    TEXT,
+    target_chat       TEXT,
+    config_version    TEXT
+);
+-- One message of a run's push: pending, then sending (written before the channel is asked), then sent, failed (the
+-- channel said no: asked again) or uncertain (it was being sent when the process died, or the channel's answer was
+-- lost: never sent again).
+CREATE TABLE IF NOT EXISTS subscription_deliveries (
+    run_id       TEXT NOT NULL REFERENCES subscription_runs(run_id) ON DELETE CASCADE,
+    segment      INTEGER NOT NULL CHECK (segment >= 1),
+    text         TEXT NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'sending', 'sent', 'failed', 'uncertain')),
+    attempts     INTEGER NOT NULL DEFAULT 0,
+    error        TEXT,
+    external_ids TEXT[] NOT NULL DEFAULT '{}',
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (run_id, segment)
 );
 -- subscriptions end
 -- Manager completion events (manager completion ledger RFC, C1): one row per task end that has a chat to tell.

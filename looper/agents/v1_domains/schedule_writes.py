@@ -82,10 +82,10 @@ RESULTS = {
 }
 
 
-def _op(action, fields, result, *, risk="write"):
+def _op(action, fields, result, *, risk="write", required=None):
     description = f"Change schedules: {action.replace('_', ' ')}."
     return Operation(f"schedule_admin.{action}", "POST", f"/api/v1/schedule_admin/{action}",
-                     description, description, _object(fields, closed=True), result,
+                     description, description, _object(fields, required, closed=True), result,
                      risk=risk, confirms=action != "create")
 
 
@@ -98,7 +98,8 @@ OPERATIONS = (
     _op("run", _ID, _object({"run": RUN}), risk="high"),
     # A subscription's push target, shown to the operator and confirmed as it is now; and its cursor, moved to just
     # before the first event its source ingested after a time (the switch from an outside collector).
-    _op("confirm_target", _ID, _object({"schedule": SCHEDULE}), risk="high"),
+    _op("confirm_target", {**_ID, "config_version": _STR}, _object({"schedule": SCHEDULE}), risk="high",
+        required=["schedule_id"]),
     _op("reset_cursor", {**_ID, "after": {"type": "string", "format": "date-time"}},
         _object({"schedule": SCHEDULE, "cursor": _object({
             "cursor_seq": {"type": "integer"}, "committed_seq": {"type": "integer"},
@@ -137,6 +138,12 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
         if not row["notify_channel"]:
             raise OpError(ErrorCode.INVALID, "the subscription has no notify_target to confirm")
         arguments["_schedule_version"] = db_schedules.configuration_version(row, project_work_dir=project_dir)
+        shown = await subscriptions.config_version(row)
+        if arguments.get("config_version") not in (None, shown):
+            raise OpError(ErrorCode.CONFLICT, "the subscription changed since config_version was read: read it again")
+        # A client is shown what the schedule is now; confirming confirms that.
+        if principal.kind == "client":
+            arguments["_config_version"] = shown
         return await subscriptions.confirmation_text(row, now=now, action="确认推送目标：")
     if action == "reset_cursor":
         if await db_schedules.open_runs(db_connection.get_pool(), row["id"]):
@@ -172,13 +179,17 @@ async def _subscription_impact(action, row, arguments, project_dir, subject, pri
             await schedules._check_processor_runs(row["id"])
         except schedules.RequestError as exc:
             raise OpError(ErrorCode.CONFLICT, str(exc)) from None
+    if "profile_overrides" in rest:
+        raise OpError(ErrorCode.INVALID, "change the processor's Agent Profile in a request of its own: what you "
+                                         "confirm is the profile that runs")
     arguments["_schedule_version"] = db_schedules.configuration_version(
         row, project_work_dir=project_dir, changes=fields)
-    # Only a client that was asked and confirmed has the operator's word; the dashboard's own request is not asked,
-    # and its operator confirms the target after (``confirm_target``).
-    arguments["_confirm_target"] = principal.kind == "client" and bool(fields.get("notify_channel", row["notify_channel"]))
     after = {**row, **fields, "enabled": data.get("enabled", row["enabled"]),
              "subscription": {**row["subscription"], **(stream or {})}}
+    # Only a client that was asked and confirmed has the operator's word, and only for what it was shown: the
+    # dashboard's own request is not asked, and its operator confirms the target after (``confirm_target``).
+    arguments["_confirm_version"] = (await subscriptions.config_version(after)
+                                     if principal.kind == "client" and after.get("notify_channel") else None)
     return await subscriptions.confirmation_text(after, now=now, action=f"{'启用并更新' if enabling else '更新'}")
 
 
@@ -291,9 +302,14 @@ async def run(server, operation, arguments, principal, headers):
         result = await answered(schedules.update_schedule(arguments["schedule_id"], arguments["fields"],
                                                           runtime_root=server._runtime_root,
                                                           expected_version=arguments.get("_schedule_version"),
-                                                          confirm_target=bool(arguments.get("_confirm_target"))))
+                                                          confirm_version=arguments.get("_confirm_version")))
     elif action == "confirm_target":
-        result = await answered(schedules.confirm_target(arguments["schedule_id"], runtime_root=server._runtime_root,
+        version = arguments.get("config_version") or arguments.get("_config_version")
+        if not version:
+            raise OpError(ErrorCode.INVALID, "config_version is required: read it from the schedule's subscription "
+                                             "(schedule_admin.get) and confirm what it showed")
+        result = await answered(schedules.confirm_target(arguments["schedule_id"], config_version=version,
+                                                         runtime_root=server._runtime_root,
                                                          expected_version=arguments.get("_schedule_version")))
     elif action == "reset_cursor":
         result = await answered(schedules.reset_cursor(arguments["schedule_id"], _after(arguments.get("after")),

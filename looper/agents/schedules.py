@@ -31,6 +31,7 @@ from typing import Any
 
 import asyncio
 import base64
+import logging
 import os
 import re
 from pathlib import Path
@@ -54,6 +55,8 @@ from .scheduler_settings import default_run_timeout, min_interval_seconds
 from .scheduler import GATE_TIMEOUT_DEFAULT_SECONDS, GATE_TIMEOUT_MAX_SECONDS
 from .system_prompt import TASK_REQUIREMENT_LIMIT
 from .tiers.task import resolve_work_dir
+
+logger = logging.getLogger(__name__)
 
 NAME_MAX_CHARS = 80
 # A run's task requirement is the schedule's and the run context the scheduler appends (``scheduler.run_requirement``).
@@ -219,10 +222,13 @@ async def _run_views(rows: list[dict[str, Any]], *, runtime_root: Path | None = 
     running = [row["task_id"] for row in rows if row.get("task_id") and row.get("cost_usd") is None]
     costs = await db_llm_records.task_costs(running) if running else {}
     streams = await db_subs.get_runs([row["id"] for row in rows if row.get("kind") == Kind.SUBSCRIPTION.value])
+    sent = await db_subs.deliveries_of(list(streams))
     views = [run_view(row, costs.get(row.get("task_id") or ""), runtime_root=runtime_root) for row in rows]
     for view, row in zip(views, rows):
         if row["id"] in streams:
-            view["subscription"] = subscription_run_view(streams[row["id"]])
+            view["subscription"] = {**subscription_run_view(streams[row["id"]]),
+                                    "deliveries": [{k: d[k] for k in ("segment", "state", "attempts", "error")}
+                                                   for d in sent.get(row["id"], [])]}
     return views
 
 
@@ -716,10 +722,16 @@ async def _schedule_views(rows: list[dict[str, Any]], *, runtime_root: Path | No
     spent = await db_schedules.spent_since_each(db_connection.get_pool(), ids, local_midnight())
     default = await default_run_timeout()
     targets = {(target["channel"], target["chat"]) for target in await notify_targets()}
-    return [{**schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]], default_timeout=default),
-             "notify_target_available": not row.get("notify_channel") or
-                 (row["notify_channel"], row["notify_chat"]) in targets}
-            for row in rows]
+    found = [{**schedule_view(row, views.get(row["id"]), spent_today=spent[row["id"]], default_timeout=default),
+              "notify_target_available": not row.get("notify_channel") or
+                  (row["notify_channel"], row["notify_chat"]) in targets}
+             for row in rows]
+    for row, view in zip(rows, found):
+        if view.get("subscription"):
+            view["subscription"]["config_version"] = await subscriptions.config_version(row)
+            view["subscription"]["uncertain_deliveries"] = await db_subs.uncertain_count(
+                row["id"], since=_utcnow() - timedelta(days=7))
+    return found
 
 
 async def list_schedules(project_id: str, *, runtime_root: Path | None = None) -> dict[str, Any]:
@@ -795,8 +807,7 @@ async def _check_processor_runs(schedule_id: str) -> None:
 
 
 async def _subscription_changes(conn: asyncpg.Connection, row: Mapping[str, Any], fields: dict[str, Any],
-                                stream: Mapping[str, Any] | None, *, enabled: bool | None, now: datetime,
-                                confirm_target: bool) -> dict[str, Any]:
+                                stream: Mapping[str, Any] | None, *, enabled: bool | None, now: datetime) -> dict[str, Any]:
     """What a change of a subscription schedule does to its subscription row: the fields of ``stream``, a cursor at
     the new source's end when the source changes, and the push target's confirmation (the module's notes)."""
     changes = dict(stream or {})
@@ -806,19 +817,16 @@ async def _subscription_changes(conn: asyncpg.Connection, row: Mapping[str, Any]
         changes["cursor_at"] = now
     target = fields.get("notify_channel", row["notify_channel"])
     asked = {**fields, **({"enabled": enabled} if enabled is not None else {})}
-    if target is None:
-        if current["target_confirmed_at"] is not None:
-            changes["target_confirmed_at"] = None
-    elif confirm_target:
-        changes["target_confirmed_at"] = now
-    elif subscriptions.needs_confirmation(row, asked):
-        changes["target_confirmed_at"] = None
+    if (target is None and current["target_confirmed_at"] is not None) or (
+            target is not None and subscriptions.needs_confirmation(row, asked)):
+        changes.update(target_confirmed_at=None, target_confirmed_version=None)
     return changes
 
 
-async def confirm_target(schedule_id: str, *, now: datetime | None = None, runtime_root: Path | None = None,
-                         expected_version: str | None = None) -> dict[str, Any]:
-    """The operator confirms the push target of a subscription as it is now (they were shown ``confirmation_text``)."""
+async def confirm_target(schedule_id: str, *, config_version: str, now: datetime | None = None,
+                         runtime_root: Path | None = None, expected_version: str | None = None) -> dict[str, Any]:
+    """The operator confirms the push target of a subscription as they were shown it: ``config_version`` is the one
+    the schedule's view gave. Refused (409) when the schedule has another now: they confirmed something else."""
     async with db_connection.transaction() as conn:
         row = await db_schedules.lock_schedule(conn, schedule_id)
         if row is None:
@@ -831,7 +839,12 @@ async def confirm_target(schedule_id: str, *, now: datetime | None = None, runti
             raise RequestError(HTTP_400, "only a subscription has a push target to confirm")
         if not row["notify_channel"]:
             raise RequestError(HTTP_400, "the subscription has no notify_target: its output stays on the dashboard")
-        await db_subs.update(conn, schedule_id, {"target_confirmed_at": now or _utcnow()})
+        current = await subscriptions.config_version(row)
+        if config_version != current:
+            raise RequestError(HTTP_409, "the subscription changed since it was shown (its target, rule, zone, source "
+                                         "or processor Profile): read it again and confirm what it is now")
+        await db_subs.update(conn, schedule_id, {"target_confirmed_at": now or _utcnow(),
+                                                 "target_confirmed_version": current})
     return await _schedule_answer(schedule_id, runtime_root=runtime_root)
 
 
@@ -845,9 +858,14 @@ async def reset_cursor(schedule_id: str, after: datetime, *, runtime_root: Path 
             raise RequestError(HTTP_404, f"schedule {schedule_id!r} not found")
         if row["kind"] != Kind.SUBSCRIPTION.value:
             raise RequestError(HTTP_400, "only a subscription has a cursor")
+        if after > datetime.now(timezone.utc) + timedelta(seconds=5):
+            raise RequestError(HTTP_400, "after is in the future: events not stored yet cannot be skipped")
         if await db_schedules.open_runs(conn, schedule_id):
             raise RequestError(HTTP_409, "a run of the subscription is in progress: reset its cursor when it ends")
-        cursor = await db_subs.reset_cursor_after(conn, schedule_id, after)
+        try:
+            cursor = await db_subs.reset_cursor_after(conn, schedule_id, after)
+        except db_subs.SourceBusy:
+            raise RequestError(HTTP_409, "the source is being read right now: try again in a moment") from None
     return {**await _schedule_answer(schedule_id, runtime_root=runtime_root), "cursor": cursor}
 
 
@@ -871,11 +889,12 @@ async def get_schedule(schedule_id: str, *, runtime_root: Path | None = None) ->
 
 async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: datetime | None = None,
                           runtime_root: Path | None = None, expected_version: str | None = None,
-                          confirm_target: bool = False) -> dict[str, Any]:
+                          confirm_version: str | None = None) -> dict[str, Any]:
     """Change the fields given. Enabling sets the next fire time from now (nothing missed before runs), as does a
     new rule or zone on an enabled schedule; disabling clears it. A subscription's push target is confirmed by the
-    operator (``confirm_target``: the caller has shown them what the schedule does): enabling it, or changing its
-    target, rule or zone, clears the confirmation unless this change is confirmed."""
+    operator: enabling it, or changing its target, rule or zone, clears the confirmation; a caller that has shown
+    them the result passes its ``config_version`` (``confirm_version``) and, if the schedule still has it after the
+    change, the target is confirmed."""
     if not data:
         raise RequestError(HTTP_400, "give at least one field to change")
     now = now or _utcnow()
@@ -926,8 +945,15 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
             except ValueError as exc:
                 raise RequestError(HTTP_400, str(exc)) from None
             will_run = row["enabled"] if enabled is None else enabled
-            stream_changes = (await _subscription_changes(conn, row, fields, stream, enabled=enabled, now=now,
-                                                          confirm_target=confirm_target)
+            if (stream and stream.get("source_id", row.get("subscription", {}).get("source_id"))
+                    != (row.get("subscription") or {}).get("source_id")
+                    and await db_schedules.open_runs(conn, schedule_id)):
+                raise RequestError(HTTP_409, "a run of the subscription is in progress: change its source when it "
+                                             "ends (its window belongs to the source it started on)")
+            if "profile_overrides" in data and kind == Kind.SUBSCRIPTION.value and confirm_version is not None:
+                raise RequestError(HTTP_400, "change the processor's Agent Profile in a request of its own: what the "
+                                             "operator confirms is the profile that runs")
+            stream_changes = (await _subscription_changes(conn, row, fields, stream, enabled=enabled, now=now)
                               if kind == Kind.SUBSCRIPTION.value else {})
             if data != {"enabled": False} and kind != Kind.SUBSCRIPTION.value:
                 try:
@@ -957,6 +983,11 @@ async def update_schedule(schedule_id: str, data: dict[str, Any], *, now: dateti
     except asyncpg.ForeignKeyViolationError:
         raise RequestError(HTTP_400, "an Agent Profile the schedule chose was removed meanwhile; choose again") \
             from None
+    if confirm_version is not None:
+        try:
+            return await confirm_target(schedule_id, config_version=confirm_version, now=now, runtime_root=runtime_root)
+        except RequestError as exc:  # it changed again meanwhile: saved, and not confirmed
+            logger.warning("subscription %s: the change was saved but its target is not confirmed: %s", schedule_id, exc)
     return await _schedule_answer(schedule_id, runtime_root=runtime_root)
 
 

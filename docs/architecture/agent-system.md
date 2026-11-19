@@ -4657,25 +4657,37 @@ Manager's `looper_schedules` cannot create or change one.
   `@_user_N` keys, `@所有人`, `@all` and `@ou_…` lose their `@`, and the
   `output_header` goes above it. A reply with nothing left is `output_invalid`
   (the run fails, the cursor stays).
-- **The push** goes through the channel's `post` as the bot, to the schedule's
-  `notify_target`: an allowlisted direct chat, or a group the channel is bound
-  to (any other is refused when it is set). It is split at 4,000 characters by
-  the group notice's splitter and cut at three messages; each message has an
-  idempotency key, the run id (`srun-…`) and, for a later part, the run id and
-  its number. The output is saved (`subscription_runs.outcome` `delivering`)
-  before it is pushed, and the run ends, with its notification and its cursor,
-  in one transaction after: a server that died between them finds the run
-  `running` on its next pass and pushes again with the same keys (Lark sends one
-  message per key for an hour), then ends it. A run found in its processor ends
-  `interrupted`. A processor failure (`timeout` is `timed_out`) or a failed push
-  ends the run `failed`, leaves the cursor, and the next run's window includes it,
-  dropping what has become too old. The cursor moves only from where the run
-  started, so a reset made meanwhile wins. Runs are recorded in
-  `schedule_runs` (cost included, so `daily_budget_usd` and the alerts count them)
-  and `subscription_runs` (`from_seq`, `to_seq`, the counts, the processor's
-  record, `outcome`: `delivered`, `quiet`, `dashboard_only`, `output_invalid`,
-  `failed`, and the output); a successful run sends no message of its own, the
-  output is the message.
+- **The push** goes through the channel's `post` as the bot, to the target the
+  run started with (`subscription_runs.target_channel`, `target_chat`, pinned
+  only when the target was confirmed for the configuration then in force:
+  `config_version`). The output is split at 4,000 characters by the group
+  notice's splitter and cut at three messages, and each message is a row of
+  `subscription_deliveries` (`pending`, `sending`, `sent`, `failed`,
+  `uncertain`) with an idempotency key, the run id and, for a later part, the
+  run id and its number. Delivery is at most once: a message is claimed
+  (`sending`, committed) before the channel is asked; a message left `sending`
+  by a process that died, or whose ask raised, is `uncertain` and is never sent
+  again (neither Lark's hour-long key nor Telegram's lack of one is relied on),
+  and is counted in the schedule's view (`uncertain_deliveries`, the last 7
+  days), in the run's `deliveries` and in the log; a message the channel
+  refused is asked again, three asks in all. Before every message the run is
+  checked again: the schedule's target is still the pinned one, it still
+  notifies, the target is confirmed for the version the run started under and
+  that version is still the schedule's, and the sender is still allowed or the
+  group still bound; if not, the rest stays on the dashboard
+  (`dashboard_only`). The run ends, with its notification and its cursor, in one
+  transaction: all sent is `delivered`, some uncertain `uncertain`; a message
+  that failed all its asks ends the run `failed`, and the cursor moves only when
+  some message was sent or is uncertain (the window is then not read again; with
+  nothing out the next run reads it). A run found by a restart in its push
+  resumes it; one found in its processor ends `interrupted`. The cursor moves
+  only from where the run started, so a reset made meanwhile wins. Runs are
+  recorded in `schedule_runs` (cost included, so `daily_budget_usd` and the
+  alerts count them) and `subscription_runs` (window, counts, the processor's
+  record, `outcome`: `delivered`, `uncertain`, `quiet`, `dashboard_only`,
+  `output_invalid`, `failed`, and the output); a successful run sends no message
+  of its own, the output is the message. The Manager's `looper_schedules` shows a
+  subscription's state and counts only: no run summary or error, no output.
 - **The operator's word on a push target.** A subscription pushes only after
   `target_confirmed_at` is set; before that its output stays in the run
   (`dashboard_only`) and the cursor moves on, and its failures and alerts stay
@@ -4687,7 +4699,12 @@ Manager's `looper_schedules` cannot create or change one.
   processor's Agent Profile and the layer it comes from, whether the machine's
   managed hooks see the messages (「本机有企业管理的 hooks，会看到处理的消息」),
   and the caps; confirming applies the change and confirms the target.
-  `schedule_admin.confirm_target` confirms it as it is. The dashboard's own
+  `schedule_admin.confirm_target` confirms it for the `config_version` the
+  schedule's view showed (a digest of the target, rule, zone, source and the
+  processor Profile with its managed hooks; a mismatch is refused, so the
+  operator confirms only what they saw, and a change of any of them, the
+  processor's Profile included, leaves the target unconfirmed). A request that
+  enables or retargets and also changes the processor's Profile is refused. The dashboard's own
   requests are not asked: they leave it cleared, and the schedule's row says so,
   with "Confirm push target…" showing the same text (`subscription.confirmation`
   of the schedule's answer) before it calls `confirm_target`.
@@ -4695,7 +4712,10 @@ Manager's `looper_schedules` cannot create or change one.
   offset; a confirmation shows how many events it will read): it moves to just
   before the first event the source stored after that time (`ingested_at`), so
   the next run reads exactly those. It is refused while a run is in progress.
-  Changing `source_id` puts the cursor at the new source's end.
+  It waits for the source's writer lock (a pass reading its files, up to 20 s,
+  else 409) so that no write that began before the time commits after it is
+  counted, and a time in the future is refused. Changing `source_id` puts the
+  cursor at the new source's end, and is refused while a run is open.
 - **Not here:** the Manager's tools and prompts, export and import (a
   subscription's cursor and confirmation stay on the machine: a configuration
   file leaves it out), the digest and daily subscriptions, and Looper's own

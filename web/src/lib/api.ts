@@ -1169,6 +1169,10 @@ export interface SubscriptionInfo {
   target_confirmed_at: string | null;
   /** What the operator is shown to confirm the push target (only in a single schedule's answer). */
   confirmation?: string | null;
+  /** What a confirmation must name: the target, rule, zone, source and processor Profile as they are now. */
+  config_version?: string;
+  /** Messages of the last 7 days whose sending was cut off: they may not have been sent, and are not sent again. */
+  uncertain_deliveries?: number;
 }
 export type SubscriptionChatKind = "p2p" | "group" | "topic" | "unknown";
 export type SubscriptionSenderKind = "user" | "app";
@@ -1186,9 +1190,11 @@ export interface SubscriptionRunInfo {
   events_over_cap: number;
   record_id: number | null;
   /** "delivered" (pushed), "quiet", "dashboard_only" (the target is not confirmed), "failed", "output_invalid". */
-  outcome: "pending" | "delivering" | "delivered" | "quiet" | "dashboard_only" | "output_invalid" | "failed";
+  outcome: "pending" | "delivering" | "delivered" | "uncertain" | "quiet" | "dashboard_only" | "output_invalid" | "failed";
   output_text: string | null;
   notification_id: string | null;
+  /** Each message of its push: pending, sending, sent, failed or uncertain. */
+  deliveries?: { segment: number; state: string; attempts: number; error: string | null }[];
 }
 
 /** One firing of a schedule (or a "Run now"), and the task it started. */
@@ -1465,8 +1471,9 @@ export async function updateSchedule(scheduleId: string, fields: ScheduleUpdate)
 }
 
 /** The operator's word on a subscription's push target as it is now (they were shown `subscription.confirmation`). */
-export async function confirmSubscriptionTarget(scheduleId: string): Promise<ScheduleInfo> {
-  const result = await callV1<{ schedule: ScheduleInfo }>("/api/v1/schedule_admin/confirm_target", { schedule_id: scheduleId });
+export async function confirmSubscriptionTarget(scheduleId: string, configVersion: string): Promise<ScheduleInfo> {
+  const result = await callV1<{ schedule: ScheduleInfo }>("/api/v1/schedule_admin/confirm_target",
+    { schedule_id: scheduleId, config_version: configVersion });
   if ("status" in result) throw new V1Error(202, "unavailable", result.impact);
   return result.schedule;
 }

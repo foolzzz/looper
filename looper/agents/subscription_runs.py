@@ -7,18 +7,20 @@ and ``execute`` (outside the transaction) does the rest:
 
 1. read the window again, render it (``subscriptions.processor_input``) and give it to ``processor.run``;
 2. a reply that is the quiet word ends the run ``completed`` (outcome ``quiet``); one that is not goes to the
-   schedule's push target once the operator has confirmed it, and stays on the dashboard (``dashboard_only``) before;
-3. the output is saved (``delivering``) *before* it is pushed, and the run ends, its notification recorded and its
-   cursor moved, in one transaction after the push. A push is one message per part, each with the run's id as its
-   idempotency key, so a push made again after a crash (``settle``) sends nothing new while the channel still knows the
-   key (Lark: an hour).
+   target the run started with (``target_channel``/``target_chat``, pinned only when the operator had confirmed it for
+   the configuration then in force), and stays on the dashboard (``dashboard_only``) when there was none;
+3. its messages are rows of ``subscription_deliveries``, each claimed (``sending``, committed) before the channel is
+   asked and never sent again after that unless the channel answered that it did not send it: one left ``sending`` by
+   a process that died, or whose ask raised, is ``uncertain``. Before every message ``_refusal`` re-checks the pin; the
+   run ends, with its notification and its cursor, in one transaction.
 
-A run that fails (the processor, or the push) ends ``failed`` or ``timed_out`` and leaves the cursor, so the next
-run's window includes it, and what is older than ``max_age_minutes`` by then is dropped and counted.
+A run whose messages all failed ends ``failed`` and leaves the cursor; one that got a message out (sent or uncertain)
+moves it, so no later run starts a second push for the same window.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -35,6 +37,12 @@ from .message import builtin_channel_id
 from .task_notice import NotifyTarget, TargetKind
 
 logger = logging.getLogger(__name__)
+
+RETRY_DELAY_SECONDS = 2.0  # between the attempts to send a message the channel refused
+
+
+class _NoPoster(Exception):
+    pass
 
 # (channel id, target, text, idempotency key) -> whether it was sent, and why not.
 Poster = Callable[..., Awaitable[Any]]
@@ -70,7 +78,8 @@ class SubscriptionRuns:
     async def plan(self, conn: asyncpg.Connection, schedule: Mapping[str, Any], *,
                    now: datetime) -> dict[str, Any] | None:
         """The run's window: None when nothing in it is selected, then the cursor moves past it; else the window the
-        run is recorded with (``subscription_runs`` is written here, in the firing's transaction)."""
+        run is recorded with (``subscription_runs`` is written here, in the firing's transaction), with the target the
+        run may push to: the schedule's, when the operator has confirmed it for the configuration it has now."""
         sub = schedule["subscription"]
         to_seq = await db_subs.committed_seq(conn, sub["source_id"])
         from_seq = sub["cursor_seq"]
@@ -81,12 +90,18 @@ class SubscriptionRuns:
         if not picked["rows"]:
             await db_subs.advance_cursor(conn, schedule["id"], from_seq=from_seq, to_seq=to_seq, at=now)
             return None
-        return {"from_seq": from_seq, "to_seq": to_seq, **picked}
+        version = await subscriptions.config_version(schedule)
+        confirmed = (sub["target_confirmed_at"] is not None and sub.get("target_confirmed_version") == version
+                     and schedule.get("notify_channel") and schedule["notify"] != "never")
+        return {"from_seq": from_seq, "to_seq": to_seq, **picked,
+                "target": (schedule["notify_channel"], schedule["notify_chat"]) if confirmed else None,
+                "config_version": version if confirmed else None}
 
     async def record(self, conn: asyncpg.Connection, run_id: str, window: Mapping[str, Any]) -> None:
         await db_subs.insert_run(conn, run_id, from_seq=window["from_seq"], to_seq=window["to_seq"],
                                  in_window=window["in_window"], selected=len(window["rows"]),
-                                 too_old=window["too_old"], over_cap=window["over_cap"])
+                                 too_old=window["too_old"], over_cap=window["over_cap"], target=window["target"],
+                                 config_version=window["config_version"])
 
     # --- Executing ---
 
@@ -98,7 +113,13 @@ class SubscriptionRuns:
             await self._execute(run_id)
         except Exception as exc:
             logger.exception("subscription run %s failed", run_id)
-            await self._end(run_id, status="failed", outcome="failed", error=f"{type(exc).__name__}: {exc}")
+            stream = await db_subs.get_run(run_id)
+            if stream is not None and stream["outcome"] == "delivering":
+                # Its push is under way: what was sent is not sent again, and the window is not read twice.
+                await db_subs.settle_sending(run_id)
+                await self._finish_push(run_id, None)
+            else:
+                await self._end(run_id, status="failed", outcome="failed", error=f"{type(exc).__name__}: {exc}")
         finally:
             self.active.discard(run_id)
 
@@ -147,38 +168,103 @@ class SubscriptionRuns:
             await self._end(run_id, status="failed", outcome="output_invalid", cost=result.cost_usd,
                             error="the reply was empty once its @ marks were removed")
             return
-        channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
-        if not channel or not chat or schedule["notify"] == "never" or sub["target_confirmed_at"] is None:
+        if not stream["target_channel"] or not stream["config_version"]:  # not confirmed when it started
             await self._end(run_id, status="completed", outcome="dashboard_only", cost=result.cost_usd, advance=True,
                             summary=message, output=message)
             return
         await db_schedules.update_run(pool, run_id, cost_usd=result.cost_usd)
-        await db_subs.update_run(pool, run_id, outcome="delivering", output_text=message,
-                                 output_sha256=subscriptions.digest(message))
-        await self._deliver(run_id, schedule, message, cost=result.cost_usd)
+        async with db_connection.transaction() as conn:
+            await db_subs.update_run(conn, run_id, outcome="delivering", output_text=message,
+                                     output_sha256=subscriptions.digest(message))
+            await db_subs.create_deliveries(conn, run_id, subscriptions.push_parts(message))
+        await self._push(run_id)
 
-    async def _deliver(self, run_id: str, schedule: Mapping[str, Any], message: str, *,
-                       cost: float | None) -> None:
-        channel, chat = schedule["notify_channel"], schedule["notify_chat"]
-        if self._poster is None:
-            await self._end(run_id, status="failed", outcome="failed", cost=cost, output=message,
-                            error="this server cannot send messages")
-            return
-        parts = subscriptions.push_parts(message)
-        target = push_target(channel, chat)
-        for part, key in zip(parts, subscriptions.idempotency_keys(run_id, len(parts))):
-            try:
-                receipt = await self._poster(builtin_channel_id(channel), target, part, idempotency_key=key)
-            except Exception as exc:  # a channel's failure is the run's, never the scheduler's
-                receipt, error = None, f"{type(exc).__name__}: {exc}"
-            else:
-                error = receipt.error
-            if receipt is None or not receipt.success:
-                await self._end(run_id, status="failed", outcome="failed", cost=cost, output=message,
-                                error=f"the push to {channel} {chat} failed: {error or 'not sent'}")
-                return
-        await self._end(run_id, status="completed", outcome="delivered", cost=cost, advance=True, output=message,
-                        summary=message, pushed=(channel, chat))
+    async def _refusal(self, run_id: str) -> str | None:
+        """Why the run may not push now, read afresh before every message: its target is not the one it started with,
+        it is not confirmed for the configuration the run started under, the schedule no longer notifies, or the
+        target is no longer allowed (the sender left the allowlist, the group binding is gone). None: it may."""
+        from .schedules import notify_targets
+
+        stream = await db_subs.get_run(run_id)
+        run = await db_schedules.get_run(run_id)
+        schedule = await db_schedules.get_schedule(run["schedule_id"]) if run else None
+        if schedule is None or stream is None:
+            return "the schedule is gone"
+        sub = schedule["subscription"]
+        pinned = (stream["target_channel"], stream["target_chat"])
+        if (schedule.get("notify_channel"), schedule.get("notify_chat")) != pinned:
+            return "its push target was changed"
+        if schedule["notify"] == "never":
+            return "the schedule no longer notifies"
+        if sub["target_confirmed_at"] is None or sub.get("target_confirmed_version") != stream["config_version"]:
+            return "its push target is no longer confirmed"
+        if await subscriptions.config_version(schedule) != stream["config_version"]:
+            return "its configuration changed since it started"
+        if pinned not in {(t["channel"], t["chat"]) for t in await notify_targets()}:
+            return "its push target is no longer allowed or bound"
+        return None
+
+    async def _push(self, run_id: str) -> None:
+        """Push the run's saved output a message at a time (module notes): each is claimed (``sending``, committed)
+        before the channel is asked and is never sent again unless the channel answered that it did not send it; one
+        that was being sent when a process died is ``uncertain`` and is left. Ends the run."""
+        stream = await db_subs.get_run(run_id)
+        await db_subs.settle_sending(run_id)
+        channel, chat = stream["target_channel"], stream["target_chat"]
+        refused: str | None = None
+        for first in await db_subs.list_deliveries(run_id):
+            segment = first["segment"]
+            while True:
+                row = next(d for d in await db_subs.list_deliveries(run_id) if d["segment"] == segment)
+                if row["state"] not in ("pending", "failed") or row["attempts"] >= db_subs.DELIVERY_ATTEMPTS:
+                    break
+                if row["state"] == "failed":
+                    await asyncio.sleep(RETRY_DELAY_SECONDS)
+                if (refused := await self._refusal(run_id)) is not None:
+                    break
+                if not await db_subs.claim_segment(run_id, segment):
+                    break
+                try:
+                    if self._poster is None:
+                        raise _NoPoster
+                    receipt = await self._poster(builtin_channel_id(channel), push_target(channel, chat), row["text"],
+                                                 idempotency_key=subscriptions.idempotency_keys(
+                                                     run_id, segment)[segment - 1])
+                except _NoPoster:
+                    await db_subs.mark_segment(run_id, segment, "failed", error="this server cannot send messages")
+                except Exception as exc:  # whether the channel sent it is not known: it is not sent again
+                    logger.warning("subscription run %s message %d: uncertain after %s", run_id, segment, exc)
+                    await db_subs.mark_segment(run_id, segment, "uncertain", error=f"{type(exc).__name__}: {exc}")
+                else:
+                    if receipt.success:
+                        await db_subs.mark_segment(run_id, segment, "sent", external_ids=receipt.external_ids)
+                    else:
+                        await db_subs.mark_segment(run_id, segment, "failed", error=receipt.error or "not sent")
+            if refused is not None:
+                break
+        await self._finish_push(run_id, refused)
+
+    async def _finish_push(self, run_id: str, refused: str | None) -> None:
+        rows = await db_subs.list_deliveries(run_id)
+        stream = await db_subs.get_run(run_id)
+        message = stream["output_text"]
+        states = [d["state"] for d in rows]
+        out = any(state in ("sent", "uncertain") for state in states)
+        pushed = (stream["target_channel"], stream["target_chat"]) if "sent" in states else None
+        if "uncertain" in states:
+            logger.warning("subscription run %s: %d message(s) of its push are uncertain and will not be sent again",
+                           run_id, states.count("uncertain"))
+        if refused is not None:
+            await self._end(run_id, status="completed", outcome="dashboard_only", advance=True, output=message,
+                            summary=f"{message}\n\n(the rest stayed on the dashboard: {refused})", pushed=pushed)
+        elif any(state in ("pending", "failed", "sending") for state in states):
+            failed = next(d for d in rows if d["state"] in ("pending", "failed"))
+            await self._end(run_id, status="failed", outcome="failed", advance=out, output=message, pushed=pushed,
+                            error=f"the push to {stream['target_channel']} {stream['target_chat']} failed at message "
+                                  f"{failed['segment']} of {len(rows)}: {failed['error'] or 'not sent'}")
+        else:
+            await self._end(run_id, status="completed", outcome="uncertain" if "uncertain" in states else "delivered",
+                            advance=True, output=message, summary=message, pushed=pushed)
 
     # --- Ending ---
 
@@ -221,14 +307,12 @@ class SubscriptionRuns:
             return False
         stream = await db_subs.get_run(run["id"])
         if stream is not None and stream["outcome"] == "delivering" and stream["output_text"]:
-            schedule = await db_schedules.get_schedule(run["schedule_id"])
-            if schedule is not None and schedule.get("notify_channel"):
-                self.active.add(run["id"])
-                try:
-                    await self._deliver(run["id"], schedule, stream["output_text"], cost=run.get("cost_usd"))
-                finally:
-                    self.active.discard(run["id"])
-                return True
+            self.active.add(run["id"])
+            try:
+                await self._push(run["id"])
+            finally:
+                self.active.discard(run["id"])
+            return True
         await self._end(run["id"], status="interrupted", outcome="failed",
                         error="the server stopped while the run was in progress")
         return True

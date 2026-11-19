@@ -12,12 +12,12 @@ from typing import Any
 
 import pytest
 
-from looper.agents import processor
+from looper.agents import processor, subscription_runs
 from looper.agents.task_notice import TargetKind
-from looper.db import schedules as db_schedules
+from looper.db import schedules as db_schedules, subscriptions as db_subs
 from tests.db_support import DSN, run_db, v1_api
 from tests.schedule_support import ScheduleEnv, run_scheduled, with_sender
-from tests.subscription_support import (DM, GROUP, INSTRUCTIONS, SUBSCRIPTION, UNBOUND_GROUP, Poster, add, lark_targets, minutes_ago, person, processor_says, scheduler_with, source)
+from tests.subscription_support import (DM, GROUP, SOURCE, INSTRUCTIONS, SUBSCRIPTION, UNBOUND_GROUP, Poster, add, lark_targets, minutes_ago, person, processor_says, scheduler_with, source)
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
 UTC = timezone.utc
@@ -38,8 +38,15 @@ async def started(env: ScheduleEnv, *, target: Any = {"channel": "lark", "chat":
     return sid
 
 
+async def version_of(env: ScheduleEnv, sid: str) -> str:
+    view = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
+    return view["subscription"]["config_version"]
+
+
 async def confirm(env: ScheduleEnv, sid: str) -> None:
-    await env.ok("POST", "/api/v1/schedule_admin/confirm_target", {"schedule_id": sid})
+    """The operator confirms what the schedule's view shows."""
+    await env.ok("POST", "/api/v1/schedule_admin/confirm_target",
+                 {"schedule_id": sid, "config_version": await version_of(env, sid)})
 
 
 async def fire(env: ScheduleEnv, sid: str) -> dict[str, Any]:
@@ -69,6 +76,7 @@ def scenario(test, monkeypatch, tmp_path, *, reply: str = "- 《Ops room》: som
     """Run ``test(env, poster, fake)`` with the Lark targets, a scheduler that pushes through ``poster`` and a
     processor that answers ``reply``."""
     fake = processor_says(monkeypatch, reply)
+    monkeypatch.setattr(subscription_runs, "RETRY_DELAY_SECONDS", 0)
 
     async def body(env: ScheduleEnv) -> None:
         await lark_targets(env.pool)
@@ -299,30 +307,286 @@ def test_a_failed_push_fails_the_run_and_leaves_the_cursor(monkeypatch, tmp_path
 # --- A crash ---
 
 
-def test_a_push_made_before_the_run_could_end_is_not_made_twice_after_a_restart(monkeypatch, tmp_path):
+async def left_by_a_dead_server(env: ScheduleEnv, run: dict[str, Any], *, sending: int | None = None) -> None:
+    """The run as a server that died in its push leaves it: running, its output saved, message ``sending`` as it was."""
+    await env.pool.execute("UPDATE schedule_runs SET status = 'running', finished_at = NULL, error = NULL, "
+                           "runner_pid = 999999, runner_started = 'a dead server' WHERE id = $1", run["id"])
+    await env.pool.execute("UPDATE subscription_runs SET outcome = 'delivering', notification_id = NULL WHERE run_id = $1",
+                           run["id"])
+    await env.pool.execute("DELETE FROM schedule_notifications WHERE run_id = $1", run["id"])
+    await env.pool.execute("UPDATE subscriptions SET cursor_seq = $2 WHERE schedule_id = $1",
+                           run["schedule_id"], run["stream"]["from_seq"])
+    if sending is not None:
+        await env.pool.execute("UPDATE subscription_deliveries SET state = 'sending' WHERE run_id = $1 AND segment = $2",
+                               run["id"], sending)
+
+
+@pytest.mark.parametrize("dedupe", [True, False], ids=["key-remembered", "key-expired-or-ignored"])
+def test_a_message_that_was_being_sent_when_the_server_died_is_uncertain_and_never_sent_again(monkeypatch, tmp_path, dedupe):
+    async def check(env, poster, fake):
+        poster.dedupe = dedupe  # Lark forgets a key after an hour; Telegram has none: the channel cannot be relied on
+        sid = await started(env)
+        await confirm(env, sid)
+        top = await add(env.pool, "gossip", sent_at=minutes_ago(env, 5))
+        run = await fire(env, sid)
+        assert len(poster.sent) == 1
+        await left_by_a_dead_server(env, run, sending=1)
+        scheduler_with(env, poster=poster)  # the restarted server, however long after
+        await env.scheduler.tick()
+        await env.scheduler.idle()
+        again = await latest(env, sid)
+        assert again["id"] == run["id"] and again["status"] == "completed" and again["stream"]["outcome"] == "uncertain"
+        assert poster.calls == 1 and len(poster.sent) == 1  # the channel was not asked again
+        [segment] = await db_subs.list_deliveries(run["id"])
+        assert segment["state"] == "uncertain" and "stopped" in segment["error"]
+        assert await cursor(env, sid) == top  # the window is not read twice
+        view = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
+        assert view["subscription"]["uncertain_deliveries"] == 1
+        runs = (await env.ok("POST", "/api/v1/schedule_admin/runs", {"schedule_id": sid}))["runs"]
+        assert runs[0]["subscription"]["deliveries"][0]["state"] == "uncertain"
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_channel_that_raises_leaves_the_message_uncertain(monkeypatch, tmp_path):
     async def check(env, poster, fake):
         sid = await started(env)
         await confirm(env, sid)
         top = await add(env.pool, "gossip", sent_at=minutes_ago(env, 5))
-        poster.break_after = 1  # the push happens, then the process dies before the run is written as ended
+        poster.break_after = 1
         run = await fire(env, sid)
-        [sent] = poster.sent
-        # The server died: the run is left as it was, with its output saved and its push unrecorded.
-        await env.pool.execute("UPDATE schedule_runs SET status = 'running', finished_at = NULL, error = NULL, "
-                               "runner_pid = 999999, runner_started = 'a dead server' WHERE id = $1", run["id"])
-        await env.pool.execute("UPDATE subscription_runs SET outcome = 'delivering', notification_id = NULL "
-                               "WHERE run_id = $1", run["id"])
-        await env.pool.execute("DELETE FROM schedule_notifications WHERE run_id = $1", run["id"])
-        await env.pool.execute("UPDATE subscriptions SET cursor_seq = $2 WHERE schedule_id = $1", sid, run["stream"]["from_seq"])
-        poster.break_after = None
-        scheduler_with(env, poster=poster)  # the restarted server
+        assert run["status"] == "completed" and run["stream"]["outcome"] == "uncertain" and poster.calls == 1
+        assert await cursor(env, sid) == top
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_message_the_channel_refused_is_sent_again_under_the_same_run_up_to_its_attempts(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env)
+        await confirm(env, sid)
+        await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        poster.fail_segments = {1: 1, 2: 1}  # the first two asks are refused
+        run = await fire(env, sid)
+        assert run["status"] == "completed" and run["stream"]["outcome"] == "delivered"
+        [segment] = await db_subs.list_deliveries(run["id"])
+        assert (segment["state"], segment["attempts"]) == ("sent", 3) and len(poster.sent) == 1
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_push_cut_short_after_a_message_was_sent_is_not_started_again_by_the_next_run(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env)
+        await confirm(env, sid)
+        top = await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        poster.fail_segments = {2: 1, 3: 1, 4: 1}  # the second message is refused every time
+        run = await fire(env, sid)
+        assert run["status"] == "failed" and run["stream"]["outcome"] == "failed" and "message 2 of 2" in run["error"]
+        states = [d["state"] for d in await db_subs.list_deliveries(run["id"])]
+        assert states == ["sent", "failed"] and len(poster.sent) == 1
+        assert await cursor(env, sid) == top  # one message is out: its window is not read again
+        again = await fire(env, sid)
+        assert again["id"] != run["id"] and again["status"] == "skipped_gate" and len(poster.sent) == 1
+
+    scenario(check, monkeypatch, tmp_path, reply=("y" * 99 + "\n") * 60)
+
+
+def test_a_push_that_sent_nothing_leaves_its_window_for_the_next_run(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env)
+        await confirm(env, sid)
+        before = await cursor(env, sid)
+        await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        poster.fail_with = "down"
+        run = await fire(env, sid)
+        assert run["status"] == "failed" and await cursor(env, sid) == before
+        assert poster.calls == db_subs.DELIVERY_ATTEMPTS
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("what", ["target", "never", "binding", "cron", "allowlist"])
+def test_every_message_is_checked_against_what_the_run_started_with_and_nothing_else_is_pushed(monkeypatch, tmp_path, what):
+    async def check(env, poster, fake):
+        sid = await started(env, target={"channel": "lark", "chat": GROUP if what == "binding" else DM})
+        await confirm(env, sid)
+        await add(env.pool, "gossip", sent_at=minutes_ago(env, 5))
+
+        async def change() -> None:
+            if what == "target":
+                await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"notify_target": {"channel": "lark", "chat": GROUP}}})
+            elif what == "never":
+                await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"notify": "never"}})
+            elif what == "cron":
+                await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"cron": "10 * * * *"}})
+            elif what == "binding":
+                await env.pool.execute("DELETE FROM manager_chat_bindings")
+            else:
+                await env.pool.execute("UPDATE channel_configs SET config = jsonb_set(config, '{allowed_open_ids}', '[]') "
+                                       "WHERE channel_id = 'channel-lark'")
+        fake.during = change
+        run = await fire(env, sid)
+        assert poster.sent == [], what
+        assert run["status"] == "completed" and run["stream"]["outcome"] == "dashboard_only" and run["stream"]["output_text"]
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_delivery_a_restart_resumes_never_goes_to_a_target_changed_meanwhile(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env)
+        await confirm(env, sid)
+        await add(env.pool, "gossip", sent_at=minutes_ago(env, 5))
+        run = await fire(env, sid)
+        await left_by_a_dead_server(env, run)
+        await env.pool.execute("UPDATE subscription_deliveries SET state = 'pending', attempts = 0 WHERE run_id = $1",
+                               run["id"])
+        poster.sent.clear()
+        # The operator changes where it goes (A to B), and the server restarts: B is not confirmed.
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"notify_target": {"channel": "lark", "chat": GROUP}}})
+        scheduler_with(env, poster=poster)
         await env.scheduler.tick()
         await env.scheduler.idle()
-        again = await latest(env, sid)
-        assert again["id"] == run["id"] and again["status"] == "completed" and again["stream"]["outcome"] == "delivered"
-        assert len(poster.sent) == 1 and poster.sent[0] is sent  # the channel was asked again with the same key
-        assert poster.calls == 2 and await cursor(env, sid) == top
-        assert await env.pool.fetchval("SELECT count(*) FROM schedule_notifications WHERE run_id = $1", run["id"]) == 1
+        assert poster.sent == []
+        assert (await latest(env, sid))["stream"]["outcome"] == "dashboard_only"
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_run_is_pinned_to_the_target_it_started_with_even_when_another_is_confirmed_later(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env)
+        await confirm(env, sid)
+        await add(env.pool, "gossip", sent_at=minutes_ago(env, 5))
+
+        async def move_and_confirm() -> None:
+            await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"notify_target": {"channel": "lark", "chat": GROUP}}})
+            await confirm(env, sid)  # B is confirmed now, but this run began with A
+        fake.during = move_and_confirm
+        run = await fire(env, sid)
+        assert poster.sent == [] and run["stream"]["outcome"] == "dashboard_only"
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_confirmation_names_the_version_it_was_shown_and_a_changed_schedule_refuses_it(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env)
+        shown = await version_of(env, sid)  # the panel shows target A
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"notify_target": {"channel": "lark", "chat": GROUP}}})
+        status, answer = await env.call("POST", "/api/v1/schedule_admin/confirm_target",
+                                        {"schedule_id": sid, "config_version": shown})
+        assert status == 409 and "changed" in answer["error"]["message"]
+        assert await confirmed_at(env, sid) is None
+        status, answer = await env.call("POST", "/api/v1/schedule_admin/confirm_target", {"schedule_id": sid})
+        assert status in (400, 409) and "config_version" in answer["error"]["message"]
+        assert await confirmed_at(env, sid) is None
+        await confirm(env, sid)  # what it is now
+        assert await confirmed_at(env, sid) is not None
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_changing_the_processors_profile_unconfirms_the_target_because_the_confirmation_named_the_old_one(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        await env.pool.execute(
+            "INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES ('profile-gossip', 'Gossip', "
+            "'rt-claude-code', (SELECT id FROM llm_models WHERE provider_id = 'prov-claude-subscription' "
+            "AND name = 'sonnet'))")
+        sid = await started(env)
+        await confirm(env, sid)
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"profile_overrides": {"processor": "profile-gossip"}}})
+        await add(env.pool, "gossip", sent_at=minutes_ago(env, 5))
+        run = await fire(env, sid)
+        assert poster.sent == [] and run["stream"]["outcome"] == "dashboard_only"
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_the_source_cannot_change_while_a_run_is_open(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        sid = await started(env)
+        await source(env.pool, "other")
+        await env.pool.execute("INSERT INTO schedule_runs (id, schedule_id, scheduled_for, trigger, status) "
+                               "VALUES ('srun-open', $1, now(), 'manual', 'running')", sid)
+        status, answer = await env.call("POST", UPDATE, {"schedule_id": sid, "fields": {"subscription": {"source_id": "other"}}})
+        assert status == 409 and "in progress" in answer["error"]["message"]
+        assert (await env.pool.fetchval("SELECT source_id FROM subscriptions WHERE schedule_id = $1", sid)) == SOURCE
+        await env.pool.execute("UPDATE schedule_runs SET status = 'failed' WHERE id = 'srun-open'")
+        await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"subscription": {"source_id": "other"}}})
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_cursor_reset_waits_for_the_sources_writer_and_refuses_a_time_in_the_future(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        from looper.db import message_stream
+
+        sid = await started(env)
+        monkeypatch.setattr(db_subs, "LOCK_WAIT_SECONDS", 0.5)
+        async with env.pool.acquire() as writer:  # a pass reading the source's files: it holds the writer lock
+            assert await message_stream.try_lock(writer, SOURCE)
+            status, answer = await env.call("POST", "/api/v1/schedule_admin/reset_cursor",
+                                            {"schedule_id": sid, "after": datetime.now(UTC).isoformat()})
+            assert status == 409 and "being read" in answer["error"]["message"]
+            await message_stream.unlock(writer, SOURCE)
+        status, answer = await env.call("POST", "/api/v1/schedule_admin/reset_cursor", {
+            "schedule_id": sid, "after": (datetime.now(UTC) + timedelta(hours=1)).isoformat()})
+        assert status == 400 and "future" in answer["error"]["message"]
+        status, _ = await env.call("POST", "/api/v1/schedule_admin/reset_cursor",
+                                   {"schedule_id": sid, "after": datetime.now(UTC).isoformat()})
+        assert status == 200
+
+    scenario(check, monkeypatch, tmp_path)
+
+
+def test_a_client_enabling_with_a_profile_change_in_the_same_request_is_refused(monkeypatch, tmp_path):
+    async def run(pool):
+        await lark_targets(pool)
+        await source(pool)
+        from looper.db import projects
+
+        project = await projects.create_project(name="Streams", work_dir=str(tmp_path))
+        await pool.execute(
+            "INSERT INTO agent_profiles (id, name, runtime_id, model_id) VALUES ('profile-gossip', 'Gossip', "
+            "'rt-claude-code', (SELECT id FROM llm_models WHERE provider_id = 'prov-claude-subscription' "
+            "AND name = 'sonnet'))")
+        async with v1_api(tmp_path, pool) as call:
+            fields = {"name": "gossip", "cron": "5 * * * *", "timezone": "UTC", "kind": "subscription",
+                      "requirement": INSTRUCTIONS, "run_budget_usd": 0.5, "notify_target": {"channel": "lark", "chat": DM},
+                      "subscription": SUBSCRIPTION}
+            _, created = await call("schedule_admin.create", {"project_id": project["id"], "fields": fields}, client=True)
+            sid = created["result"]["schedule"]["schedule_id"]
+            status, refused = await call("schedule_admin.update", {"schedule_id": sid, "fields": {
+                "enabled": True, "profile_overrides": {"processor": "profile-gossip"}}}, client=True)
+            assert status == 400 and "request of its own" in refused["error"]["message"], refused
+            assert not await pool.fetchval("SELECT enabled FROM schedules WHERE id = $1", sid)
+
+    run_db(run, monkeypatch, timeout=60, max_size=4)
+
+
+def test_a_manager_sees_a_subscriptions_state_and_counts_but_never_what_it_made(monkeypatch, tmp_path):
+    async def check(env, poster, fake):
+        from looper.agents.ops import schedules as ops
+
+        secret = "SECRET-DIGEST-TEXT"
+        fake.reply = f"- {secret}"
+        sid = await started(env)
+        await confirm(env, sid)
+        await add(env.pool, "x", sent_at=minutes_ago(env, 5))
+        run = await fire(env, sid)
+        assert run["summary"] and secret in run["summary"]  # the dashboard has it
+        view = (await env.ok("POST", "/api/v1/schedule_admin/get", {"schedule_id": sid}))["schedule"]
+        runs = (await env.ok("POST", "/api/v1/schedule_admin/runs", {"schedule_id": sid}))["runs"]
+        listed = ops._run_listed(runs[0])
+        assert listed["summary"] is None and secret not in str(listed)
+        assert listed["status"] == "completed" and listed["cost_usd"] is not None
+        assert secret not in str(ops._listed(view)) and secret not in str(ops._run_listed(view["last_run"]))
+        await env.pool.execute("UPDATE schedule_runs SET summary = NULL, error = $2 WHERE id = $1", run["id"],
+                               f"the push failed: {secret}")
+        failed = (await env.ok("POST", "/api/v1/schedule_admin/runs", {"schedule_id": sid}))["runs"][0]
+        assert secret not in str(ops._run_listed(failed))
 
     scenario(check, monkeypatch, tmp_path)
 
@@ -429,7 +693,8 @@ def test_enabling_again_clears_the_confirmation_and_the_target_can_be_removed(mo
         await confirm(env, sid)
         await env.ok("POST", UPDATE, {"schedule_id": sid, "fields": {"notify_target": None}})
         assert await confirmed_at(env, sid) is None
-        status, answer = await env.call("POST", "/api/v1/schedule_admin/confirm_target", {"schedule_id": sid})
+        status, answer = await env.call("POST", "/api/v1/schedule_admin/confirm_target",
+                                        {"schedule_id": sid, "config_version": "any"})
         assert status == 400 and "no notify_target" in answer["error"]["message"]
 
     scenario(check, monkeypatch, tmp_path)

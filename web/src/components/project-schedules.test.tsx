@@ -785,7 +785,7 @@ describe("subscription schedules", () => {
       source_id: "stream", chat_kinds: ["group"], include_chats: [], exclude_chats: [], sender_kinds: ["user"],
       exclude_mentions_me: true, include_history: false, max_age_minutes: 180, max_events: 500, text_max_chars: 200,
       quiet_word: "SKIP", output_header: "", cursor_seq: 41, cursor_at: null, target_confirmed_at: confirmed,
-      confirmation: "确认推送目标：\n- 推送目标：Lark · ou_synthetic（私聊）\n- 本机有企业管理的 hooks，会看到处理的消息",
+      config_version: "v-shown", confirmation: "确认推送目标：\n- 推送目标：Lark · ou_synthetic（私聊）\n- 本机有企业管理的 hooks，会看到处理的消息",
     },
   } as ScheduleInfo);
 
@@ -806,9 +806,35 @@ describe("subscription schedules", () => {
     expect(container.querySelector("pre")?.textContent).toContain("本机有企业管理的 hooks，会看到处理的消息");
     expect(fetch).not.toHaveBeenCalledWith("/api/v1/schedule_admin/confirm_target", expect.anything());
     await act(async () => button("Confirm").click());
+    // It names the version the panel showed.
     expect(fetch).toHaveBeenLastCalledWith("/api/v1/schedule_admin/confirm_target", expect.objectContaining({
-      body: JSON.stringify({ schedule_id: "sched/a" }) }));
+      body: JSON.stringify({ schedule_id: "sched/a", config_version: "v-shown" }) }));
     expect(onChange).toHaveBeenCalledWith(subscription("2026-11-19T10:00:00Z"));
+  });
+
+  it("refuses to confirm a target that changed after the panel showed it, and shows what it is now", async () => {
+    let reads = 0;
+    const fetch = vi.fn(async (url: RequestInfo | URL) => {
+      if (url === "/api/v1/schedule_admin/get") {
+        reads += 1;
+        return Response.json({ status: "ok", result: { schedule: { ...subscription(null),
+          subscription: { ...subscription(null).subscription!, config_version: reads === 1 ? "v-shown" : "v-now" } } } });
+      }
+      if (url === "/api/v1/schedule_admin/confirm_target") return Response.json({ status: "error", error: {
+        code: "conflict", message: "the subscription changed since it was shown" } }, { status: 409 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetch);
+    const onChange = vi.fn();
+    await act(async () => root.render(<SubscriptionStatus schedule={subscription(null)} onChange={onChange} />));
+    const button = (text: string) => [...container.querySelectorAll("button")].find((item) => item.textContent === text)!;
+    await act(async () => button("Confirm push target…").click());
+    await act(async () => button("Confirm").click());
+    expect(fetch).toHaveBeenCalledWith("/api/v1/schedule_admin/confirm_target", expect.objectContaining({
+      body: JSON.stringify({ schedule_id: "sched/a", config_version: "v-shown" }) }));
+    expect(onChange).toHaveBeenCalledTimes(1);  // the schedule as it is now replaces what the panel showed
+    expect(onChange.mock.calls[0][0].subscription.config_version).toBe("v-now");
+    expect(container.querySelector("[role=group] pre")).toBeNull();
   });
 
   it("shows a confirmed target without the button, and resets the cursor to a time with its offset", async () => {

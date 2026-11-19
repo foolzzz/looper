@@ -1751,6 +1751,8 @@ export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleI
   const id = useId();
   const [panel, setPanel] = useState<"" | "confirm" | "reset">("");
   const [text, setText] = useState<string | null>(null);
+  /** The version of the schedule the panel shows: the confirmation names it. */
+  const [version, setVersion] = useState("");
   const [after, setAfter] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -1760,13 +1762,20 @@ export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleI
   const close = () => { setPanel(""); setError(""); };
   const openConfirm = async () => {
     setPanel("confirm"); setText(null); setError("");
-    try { setText((await fetchSchedule(schedule.schedule_id)).subscription?.confirmation ?? ""); }
-    catch (err) { setError(errorText(err)); }
+    try {
+      const shown = (await fetchSchedule(schedule.schedule_id)).subscription;
+      setVersion(shown?.config_version ?? "");
+      setText(shown?.confirmation ?? "");
+    } catch (err) { setError(errorText(err)); }
   };
   const confirm = async () => {
     setBusy(true); setError("");
-    try { onChange(await confirmSubscriptionTarget(schedule.schedule_id)); close(); }
-    catch (err) { setError(errorText(err)); }
+    try { onChange(await confirmSubscriptionTarget(schedule.schedule_id, version)); close(); }
+    catch (err) {
+      // It changed after it was shown (another tab, another request): what it is now replaces the panel.
+      setError(errorText(err));
+      void fetchSchedule(schedule.schedule_id).then((now) => { onChange(now); setText(null); setPanel(""); }, () => {});
+    }
     finally { setBusy(false); }
   };
   const reset = async () => {
@@ -1789,6 +1798,9 @@ export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleI
           : <><AlertCircle className="h-3.5 w-3.5 text-warning" aria-hidden="true" /><span className="text-warning">Push target not confirmed: output stays on this page.</span></>)
           : "Dashboard only: nothing is pushed."}
         <span className="tabular-nums">Cursor {sub.cursor_seq}</span>
+        {!!sub.uncertain_deliveries && <span className="text-warning" role="status">
+          {sub.uncertain_deliveries} message{sub.uncertain_deliveries === 1 ? "" : "s"} of the last 7 days may not have been sent
+          (cut off while sending; never sent again)</span>}
         {target && !sub.target_confirmed_at && panel !== "confirm" && (
           <Button type="button" variant="outline" size="sm" onClick={openConfirm} className="h-11 sm:h-7">Confirm push target…</Button>)}
         {panel !== "reset" && <Button type="button" variant="ghost" size="sm" onClick={() => { setPanel("reset"); setMoved(""); }} className="h-11 sm:h-7">Reset cursor…</Button>}
@@ -1824,7 +1836,7 @@ export function SubscriptionStatus({ schedule, onChange }: { schedule: ScheduleI
 }
 
 const OUTCOME_LABELS: Record<SubscriptionRunInfo["outcome"], string> = {
-  pending: "Reading", delivering: "Pushing", delivered: "Pushed", quiet: "Nothing to say", dashboard_only: "Kept here (target not confirmed)",
+  pending: "Reading", delivering: "Pushing", delivered: "Pushed", uncertain: "Pushed, some messages uncertain", quiet: "Nothing to say", dashboard_only: "Kept here (target not confirmed)",
   output_invalid: "Reply unusable", failed: "Not pushed",
 };
 
@@ -1839,6 +1851,7 @@ function SubscriptionRun({ run }: { run: ScheduleRunInfo }) {
         <span className="font-medium text-foreground">{OUTCOME_LABELS[sub.outcome]}</span>
         {" · "}{sub.events_selected} of {sub.events_in_window} messages read{dropped.length > 0 && ` (${dropped.join(", ")})`}
         {" · "}events {sub.from_seq + 1}–{sub.to_seq}
+        {sub.deliveries && sub.deliveries.length > 0 && ` · messages: ${sub.deliveries.map((d) => `${d.segment} ${d.state}`).join(", ")}`}
       </p>
       {sub.output_text && (
         <details className="mt-1">

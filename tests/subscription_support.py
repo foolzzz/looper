@@ -30,10 +30,12 @@ class Poster:
     """The channels' ``post``: one message per idempotency key (a repeated key sends nothing and answers as before),
     optionally failing or breaking for a test."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, dedupe: bool = True) -> None:
         self.sent: list[dict[str, Any]] = []
         self.calls = 0
+        self.dedupe = dedupe  # False: a channel whose key has expired, or that ignores it (Telegram)
         self.fail_with: str | None = None
+        self.fail_segments: dict[int, int] = {}  # the nth call that fails with "refused", n -> how many more times
         self.break_after: int | None = None  # raise after this many messages were sent: a crash in the push
 
     async def __call__(self, channel_id: str, target: Any, text: str, *, reply_to: str | None = None,
@@ -41,7 +43,9 @@ class Poster:
         self.calls += 1
         if self.fail_with:
             return PostReceipt(False, error=self.fail_with)
-        if idempotency_key is not None and any(m["key"] == idempotency_key for m in self.sent):
+        if self.fail_segments.get(self.calls):
+            return PostReceipt(False, error="refused")
+        if self.dedupe and idempotency_key is not None and any(m["key"] == idempotency_key for m in self.sent):
             return PostReceipt(True, external_ids=("om_again",))
         self.sent.append({"channel_id": channel_id, "target": target, "text": text, "key": idempotency_key})
         if self.break_after is not None and len(self.sent) >= self.break_after:
@@ -57,9 +61,12 @@ class FakeProcessor:
         self.failure: processor.ProcessorFailure | None = None
         self.cost = 0.01
         self.calls: list[dict[str, Any]] = []
+        self.during: Any = None  # an async function called while the processor "runs"
 
     async def __call__(self, **kwargs: Any) -> processor.ProcessorRun:
         self.calls.append(kwargs)
+        if self.during is not None:
+            await self.during()
         if self.failure is not None:
             return processor.ProcessorRun(None, None, self.cost, failure=self.failure, detail="synthetic failure")
         return processor.ProcessorRun(self.reply, None, self.cost)

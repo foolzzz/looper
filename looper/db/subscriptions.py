@@ -8,6 +8,7 @@ where the run started (``advance_cursor``): a reset made meanwhile wins.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Collection, Mapping, Sequence
 from datetime import datetime
 from typing import Any
@@ -22,7 +23,7 @@ Db = asyncpg.Pool | asyncpg.Connection
 FIELDS = ("source_id", "chat_kinds", "include_chats", "exclude_chats", "sender_kinds", "exclude_mentions_me",
           "include_history", "max_age_minutes", "max_events", "render", "text_max_chars", "quiet_word",
           "output_header", "output_kind")
-STATE_COLUMNS = ("cursor_seq", "cursor_at", "target_confirmed_at")
+STATE_COLUMNS = ("cursor_seq", "cursor_at", "target_confirmed_at", "target_confirmed_version")
 CHAT_KINDS = ("p2p", "group", "topic", "unknown")
 SENDER_KINDS = ("user", "app")
 
@@ -83,12 +84,34 @@ async def cursor_after(conn: Db, schedule_id: str, moment: datetime) -> dict[str
     return {"cursor_seq": cursor, "committed_seq": committed, "events_after": pending}
 
 
-async def reset_cursor_after(conn: asyncpg.Connection, schedule_id: str, moment: datetime) -> dict[str, Any]:
-    """Move the cursor to where ``cursor_after`` says; the new cursor, the committed sequence and the events after."""
+class SourceBusy(RuntimeError):
+    """The source is being written (a pass is reading its files)."""
+
+
+LOCK_WAIT_SECONDS = 20.0
+
+
+async def reset_cursor_after(conn: asyncpg.Connection, schedule_id: str, moment: datetime, *,
+                             wait: float = LOCK_WAIT_SECONDS) -> dict[str, Any]:
+    """Move the cursor to where ``cursor_after`` says; the new cursor, the committed sequence and the events after.
+    It takes the source's writer lock first, so no write that began before ``moment`` and commits after it is left out
+    of what it counts (an event's ``ingested_at`` is its transaction's start); ``SourceBusy`` when a pass holds it
+    for more than ``wait`` seconds."""
+    from . import message_stream
+
     await conn.execute("SELECT 1 FROM subscriptions WHERE schedule_id = $1 FOR UPDATE", schedule_id)
-    found = await cursor_after(conn, schedule_id, moment)
-    await conn.execute("UPDATE subscriptions SET cursor_seq = $2, cursor_at = now() WHERE schedule_id = $1",
-                       schedule_id, found["cursor_seq"])
+    source_id = await conn.fetchval("SELECT source_id FROM subscriptions WHERE schedule_id = $1", schedule_id)
+    deadline = asyncio.get_running_loop().time() + wait
+    while not await message_stream.try_lock(conn, source_id):
+        if asyncio.get_running_loop().time() >= deadline:
+            raise SourceBusy(source_id)
+        await asyncio.sleep(0.2)
+    try:
+        found = await cursor_after(conn, schedule_id, moment)
+        await conn.execute("UPDATE subscriptions SET cursor_seq = $2, cursor_at = now() WHERE schedule_id = $1",
+                           schedule_id, found["cursor_seq"])
+    finally:
+        await message_stream.unlock(conn, source_id)
     return found
 
 
@@ -139,11 +162,15 @@ async def window(conn: Db, sub: Mapping[str, Any], *, from_seq: int, to_seq: int
 
 
 async def insert_run(conn: asyncpg.Connection, run_id: str, *, from_seq: int, to_seq: int, in_window: int,
-                     selected: int, too_old: int, over_cap: int) -> None:
+                     selected: int, too_old: int, over_cap: int, target: tuple[str, str] | None = None,
+                     config_version: str | None = None) -> None:
+    """The run's window and, when it started with its push target confirmed, where it may push and under which
+    configuration (``config_version``)."""
     await conn.execute(
         "INSERT INTO subscription_runs (run_id, from_seq, to_seq, events_in_window, events_selected, events_too_old, "
-        "events_over_cap) VALUES ($1, $2, $3, $4, $5, $6, $7)", run_id, from_seq, to_seq, in_window, selected,
-        too_old, over_cap)
+        "events_over_cap, target_channel, target_chat, config_version) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        run_id, from_seq, to_seq, in_window, selected, too_old, over_cap, target[0] if target else None,
+        target[1] if target else None, config_version)
 
 
 async def get_run(run_id: str, *, db: Db | None = None) -> dict[str, Any] | None:
@@ -173,3 +200,59 @@ async def undelivered_runs(*, db: Db | None = None) -> list[dict[str, Any]]:
         "SELECT r.*, sr.from_seq, sr.to_seq, sr.output_text, sr.outcome FROM schedule_runs r "
         "JOIN subscription_runs sr ON sr.run_id = r.id WHERE r.status = 'running' AND sr.outcome = 'delivering'")
     return [dict(row) for row in rows]
+
+
+# --- A run's push, a message at a time ---
+
+DELIVERY_ATTEMPTS = 3
+
+
+async def create_deliveries(conn: asyncpg.Connection, run_id: str, parts: Sequence[str]) -> None:
+    await conn.executemany(
+        "INSERT INTO subscription_deliveries (run_id, segment, text) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        [(run_id, number, text) for number, text in enumerate(parts, 1)])
+
+
+async def list_deliveries(run_id: str, *, db: Db | None = None) -> list[dict[str, Any]]:
+    rows = await _db(db).fetch("SELECT * FROM subscription_deliveries WHERE run_id = $1 ORDER BY segment", run_id)
+    return [dict(row) for row in rows]
+
+
+async def deliveries_of(run_ids: Sequence[str], *, db: Db | None = None) -> dict[str, list[dict[str, Any]]]:
+    rows = await _db(db).fetch(
+        "SELECT run_id, segment, state, attempts, error FROM subscription_deliveries WHERE run_id = ANY($1::text[]) "
+        "ORDER BY run_id, segment", list(run_ids))
+    found: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        found.setdefault(row["run_id"], []).append(dict(row))
+    return found
+
+
+async def claim_segment(run_id: str, segment: int, *, db: Db | None = None) -> bool:
+    """Write ``sending`` (committed) before the channel is asked; False when the message is not pending or failed."""
+    result = await _db(db).execute(
+        "UPDATE subscription_deliveries SET state = 'sending', attempts = attempts + 1, updated_at = now() "
+        "WHERE run_id = $1 AND segment = $2 AND state IN ('pending', 'failed')", run_id, segment)
+    return result.endswith(" 1")
+
+
+async def mark_segment(run_id: str, segment: int, state: str, *, error: str | None = None,
+                       external_ids: Sequence[str] = (), db: Db | None = None) -> None:
+    await _db(db).execute(
+        "UPDATE subscription_deliveries SET state = $3, error = $4, external_ids = $5, updated_at = now() "
+        "WHERE run_id = $1 AND segment = $2", run_id, segment, state, error, list(external_ids))
+
+
+async def settle_sending(run_id: str, *, db: Db | None = None) -> int:
+    """Messages left ``sending`` by a process that is gone: the channel may have sent them, so they are ``uncertain``
+    and are not sent again."""
+    result = await _db(db).execute(
+        "UPDATE subscription_deliveries SET state = 'uncertain', error = 'the server stopped while it was being sent', "
+        "updated_at = now() WHERE run_id = $1 AND state = 'sending'", run_id)
+    return int(result.rsplit(" ", 1)[-1])
+
+
+async def uncertain_count(schedule_id: str, *, since: datetime, db: Db | None = None) -> int:
+    return await _db(db).fetchval(
+        "SELECT count(*) FROM subscription_deliveries d JOIN schedule_runs r ON r.id = d.run_id "
+        "WHERE r.schedule_id = $1 AND d.state = 'uncertain' AND r.created_at >= $2", schedule_id, since)

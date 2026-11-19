@@ -18,6 +18,7 @@ through the confirmation every write of a schedule goes through), the output sta
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
@@ -306,6 +307,20 @@ def idempotency_keys(run_id: str, count: int) -> list[str]:
 
 
 # --- What the operator confirms ---
+
+
+async def config_version(schedule: Mapping[str, Any]) -> str:
+    """What a push depends on, as one digest: where it goes, when it fires, the stream it reads and the processor
+    Profile (with the managed hooks that see the messages) that runs it as of now. A target is confirmed for one
+    version; a push goes out only while the schedule still has it."""
+    from . import processor
+
+    profile = await processor.chosen_profile(schedule["project_id"], schedule["id"])
+    hooks = profile.get("managed_hooks") or {}
+    facts = {"channel": schedule.get("notify_channel"), "chat": schedule.get("notify_chat"), "cron": schedule["cron"],
+             "timezone": schedule["timezone"], "source": (schedule.get("subscription") or {}).get("source_id"),
+             "profile": profile.get("profile_id"), "hooks": sorted(hooks.get("events") or []) if hooks else None}
+    return digest(json.dumps(facts, sort_keys=True, ensure_ascii=False))
 
 
 async def confirmation_text(schedule: Mapping[str, Any], *, now: datetime, action: str) -> str:

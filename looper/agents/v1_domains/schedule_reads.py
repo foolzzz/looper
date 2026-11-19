@@ -69,10 +69,14 @@ SUBSCRIPTION = _object({
                        "text_max_chars", "quiet_word", "output_header", "output_kind", "cursor_seq", "cursor_at",
                        "target_confirmed_at")])
 SUBSCRIPTION["properties"]["confirmation"] = _NULL_STR
+SUBSCRIPTION["properties"]["config_version"] = _STR  # what a confirmation of the target must name
+SUBSCRIPTION["properties"]["uncertain_deliveries"] = _INT  # messages of the last 7 days that may not have been sent
 SUBSCRIPTION_RUN = _object({
     "from_seq": _INT, "to_seq": _INT, "events_in_window": _INT, "events_selected": _INT, "events_too_old": _INT,
     "events_over_cap": _INT, "record_id": _NULL_INT, "outcome": _STR,
     **dict.fromkeys(("output_text", "notification_id"), _NULL_STR)})
+SUBSCRIPTION_RUN["properties"]["deliveries"] = _array(_object({"segment": _INT, "state": _STR, "attempts": _INT,
+                                                               "error": _NULL_STR}))
 RUN["properties"]["subscription"] = SUBSCRIPTION_RUN  # a subscription's runs only
 RUN["required"] = [name for name in RUN["required"] if name != "subscription"]
 _SCHEDULE_FIELDS["subscription"] = SUBSCRIPTION  # a subscription's only
