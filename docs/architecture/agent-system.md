@@ -2870,6 +2870,13 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   step's Worker is told of an earlier branch only while it exists). Removing a
   worktree drops only its own record in the repository (`git worktree remove
   --force`, never `prune`, which would drop the user's stale ones too).
+- **Claude Code check.** `looper doctor`, the startup checks and `POST /api/v1/system/status` check the Claude
+  Code CLI and its login (`claude_cli`, `claude_login`) only while an Agent Profile in use runs on a
+  `claude-code` runtime, as the other runtimes' logins are: a profile any layer (system, role, project, task and
+  the Planner's, Manager, session and schedule choices) selects, a profile it falls back to, a task role or
+  template, or the built-in `claude-code/opus` while the system layer and some role have no profile of their
+  own. With none, both are skipped and nothing says that agents cannot run; when the profiles cannot be read
+  the CLI is checked as before. The built-in runtime's executable stays `claude` on PATH.
 - **`looper doctor`** warns when git is missing or older than 2.40 (`looper
   serve` too, in `POST /api/v1/system/status`'s `checks`), and checks the default directory
   of each project set to `worktree` as the Planner would, with the paths it
