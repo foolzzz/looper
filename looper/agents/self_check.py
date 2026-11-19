@@ -232,6 +232,19 @@ async def claude_check(claude_bin: str = "claude") -> list[Check]:
     """``check_claude`` with the server's pool, for the profiles in use now."""
     return await asyncio.to_thread(check_claude, claude_bin, await claude_runtime_in_use())
 
+CLAUDE_CHECK_IDS = ("claude_cli", "claude_login")
+
+
+async def refresh_claude(previous: list[dict[str, str]], claude_bin: str = "claude") -> list[Check] | None:
+    """The Claude checks again for the profiles in use now, or ``None`` when ``previous`` (the last published
+    answers) still holds: the CLI and login probes run only when the answer flips between "no profile uses Claude
+    Code" and "one does", so a poll costs one profile query."""
+    in_use = await claude_runtime_in_use()
+    was_skipped = any(check.get("detail") == NO_CLAUDE_PROFILE for check in previous)
+    if in_use is False and not was_skipped or in_use is not False and was_skipped:
+        return await asyncio.to_thread(check_claude, claude_bin, in_use)
+    return None
+
 
 async def codex_login_check() -> Check:
     """``check_codex_login`` with the server's pool, read now (``/api/v1/system/status`` asks on every poll; the probe's
