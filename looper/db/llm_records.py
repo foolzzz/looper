@@ -84,8 +84,12 @@ def normalize_record_metadata(metadata: Any) -> Any:
                 "error": library.get("error"), "project_error": project.get("error")}}}
 
 
+# The run tree's columns, which no record view shows yet.
+_UNVIEWED = ("parent_record_id", "run_kind")
+
+
 def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
-    d = dict(row)
+    d = {key: value for key, value in dict(row).items() if key not in _UNVIEWED}
     for key in ("created_at", "finished_at", "last_output_at"):
         if d.get(key) is not None:
             d[key] = d[key].isoformat()
