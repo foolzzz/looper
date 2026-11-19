@@ -337,12 +337,12 @@ _WORKFLOW_SELECTIONS = (
 )
 
 
-async def runtime_types_in_use(builtin_profile_id: str, roles: Sequence[str], *,
-                               pool: asyncpg.Pool | asyncpg.Connection | None = None) -> set[str]:
-    """The runtime types of the Agent Profiles runs can use: those a layer, Manager, session, task, schedule, task
-    role, template, workflow preset or project allow-list selects, the profiles they fall back to, and
-    ``builtin_profile_id`` while the system layer and some role in ``roles`` have no profile of their own (so that
-    role runs the built-in one)."""
+async def runtimes_in_use(builtin_profile_id: str, roles: Sequence[str], *,
+                          pool: asyncpg.Pool | asyncpg.Connection | None = None) -> list[dict[str, str]]:
+    """The runtimes (``type`` and ``executable``) of the Agent Profiles runs can use: those a layer, Manager,
+    session, task, schedule, task role, template, workflow preset or project allow-list selects, the profiles they
+    fall back to, and ``builtin_profile_id`` while the system layer and some role in ``roles`` have no profile of
+    their own (so that role runs the built-in one)."""
     pool = pool or get_pool()
     selected = " UNION ".join([
         *(f"{select} WHERE {select.split()[1]} IS NOT NULL" for select in _PROFILE_SELECTIONS),
@@ -355,9 +355,15 @@ async def runtime_types_in_use(builtin_profile_id: str, roles: Sequence[str], *,
         "AND l.profile_id IS NOT NULL))), "
         "used(id) AS (SELECT id FROM base UNION SELECT a.fallback_profile_id FROM agent_profiles a "
         "JOIN used u ON u.id = a.id WHERE a.fallback_profile_id IS NOT NULL) "
-        "SELECT DISTINCT r.type FROM used u JOIN agent_profiles a ON a.id = u.id "
-        "JOIN agent_runtimes r ON r.id = a.runtime_id", builtin_profile_id, list(roles))
-    return {row["type"] for row in rows}
+        "SELECT DISTINCT r.type, r.executable FROM used u JOIN agent_profiles a ON a.id = u.id "
+        "JOIN agent_runtimes r ON r.id = a.runtime_id ORDER BY r.type, r.executable", builtin_profile_id, list(roles))
+    return [{"type": row["type"], "executable": row["executable"]} for row in rows]
+
+
+async def runtime_types_in_use(builtin_profile_id: str, roles: Sequence[str], *,
+                               pool: asyncpg.Pool | asyncpg.Connection | None = None) -> set[str]:
+    """The runtime types of ``runtimes_in_use``."""
+    return {row["type"] for row in await runtimes_in_use(builtin_profile_id, roles, pool=pool)}
 
 
 async def launcher_profile_count(launcher: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> int:

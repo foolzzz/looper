@@ -2904,9 +2904,15 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   Code CLI and its login (`claude_cli`, `claude_login`) only while an Agent Profile in use runs on a
   `claude-code` runtime, as the other runtimes' logins are: a profile any layer (system, role, project, task and
   the Planner's, Manager, session and schedule choices) selects, a profile it falls back to, a task role or
-  template, or the built-in `claude-code/opus` while the system layer and some role have no profile of their
-  own. With none, both are skipped and nothing says that agents cannot run; when the profiles cannot be read
-  the CLI is checked as before. The built-in runtime's executable stays `claude` on PATH.
+  template, a workflow preset's profiles, a project's list of profiles its Planners may choose from, or the
+  built-in `claude-code/opus` while the system layer and some role have no profile of their own (an empty
+  list, which lets a Planner choose any profile, counts none). With none, both are skipped and nothing says
+  that agents cannot run; when the profiles cannot be read the CLI is checked as before. `system/status`
+  runs the CLI and login probes again when this answer changes, so switching to or from a Claude Code profile
+  after startup shows in the next poll. The built-in runtime's executable stays `claude` on PATH.
+- **Pi runner executable.** With `[runtimes] pi = "runner"` the runner starts the executable of the Pi runtime
+  that the profiles in use launch (the same set as above), `pi` on PATH when none is; Pi runtimes with different
+  executables in use at once stop the start with a message naming them.
 - **`looper doctor`** warns when git is missing or older than 2.40 (`looper
   serve` too, in `POST /api/v1/system/status`'s `checks`), and checks the default directory
   of each project set to `worktree` as the Planner would, with the paths it

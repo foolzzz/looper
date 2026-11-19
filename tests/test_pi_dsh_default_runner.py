@@ -734,12 +734,11 @@ def test_pi_runner_starts_the_registered_runtime_s_executable(tmp_path, monkeypa
     assert "pi are not both on PATH" in ADAPTERS["pi"].unavailable
 
 
-def test_configured_pi_executable_comes_from_the_registered_runtime_in_use(monkeypatch):
+def test_configured_pi_executable_comes_from_the_runtime_the_profiles_in_use_launch(monkeypatch):
     from looper.db import profile_registry
 
-    rows = [{"type": "codex", "executable": "codex", "profile_count": 1},
-            {"type": "pi", "executable": "/opt/pi/bin/pi", "profile_count": 0},
-            {"type": "pi", "executable": "/opt/pi-2/bin/pi", "profile_count": 2}]
+    rows = [{"type": "codex", "executable": "codex"}, {"type": "pi", "executable": "/opt/pi-2/bin/pi"}]
+    seen = []
 
     class Conn:
         async def close(self):
@@ -748,17 +747,23 @@ def test_configured_pi_executable_comes_from_the_registered_runtime_in_use(monke
     async def connect(*args, **kwargs):
         return Conn()
 
-    async def list_runtimes(**kwargs):
+    async def runtimes_in_use(builtin, roles, **kwargs):
+        seen.append(builtin)
         return rows
 
     import asyncpg
 
     monkeypatch.setattr(asyncpg, "connect", connect)
-    monkeypatch.setattr(profile_registry, "list_runtimes", list_runtimes)
+    monkeypatch.setattr(profile_registry, "runtimes_in_use", runtimes_in_use)
+    # An idle registered Pi runtime is not in the in-use rows, so it cannot be picked.
     assert asyncio.run(pi_runner.configured_executable("postgresql://x/y")) == "/opt/pi-2/bin/pi"
-    rows[2]["executable"] = ""
+    assert seen == ["agent-claude-code-opus"]
+    rows[1]["executable"] = ""
     assert asyncio.run(pi_runner.configured_executable("postgresql://x/y")) == "pi"
+    rows[:] = [{"type": "pi", "executable": "/opt/pi/bin/pi"}, {"type": "pi", "executable": "/opt/pi-2/bin/pi"}]
+    with pytest.raises(pi_runner.PiRuntimeConflict, match="/opt/pi-2/bin/pi, |/opt/pi/bin/pi, /opt/pi-2/bin/pi"):
+        asyncio.run(pi_runner.configured_executable("postgresql://x/y"))
     rows.clear()
     assert asyncio.run(pi_runner.configured_executable("postgresql://x/y")) == "pi"
-    monkeypatch.setattr(profile_registry, "list_runtimes", None)
+    monkeypatch.setattr(profile_registry, "runtimes_in_use", None)
     assert asyncio.run(pi_runner.configured_executable("postgresql://x/y")) == "pi"

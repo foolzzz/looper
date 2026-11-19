@@ -132,3 +132,22 @@ def test_runtime_types_in_use_include_workflow_presets_and_project_allow_lists(m
         assert await _types(pool) == {"codex", "claude-code"}
 
     run_db(test, monkeypatch, timeout=30)
+
+
+@pytestmark_db
+def test_runtimes_in_use_carry_the_executable_of_the_runtime_a_profile_launches(monkeypatch):
+    async def test(pool):
+        codex = await _codex_profile(pool, "agent-codex")
+        await pool.execute("INSERT INTO agent_runtimes (id, name, type, executable, capabilities) "
+                           "VALUES ('rt-pi-idle', 'pi-idle', 'pi', '/gone/pi', ARRAY['run']), "
+                           "('rt-pi-used', 'pi-used', 'pi', '/opt/pi/bin/pi', ARRAY['run'])")
+        await pool.execute("INSERT INTO agent_profiles (id, name, runtime_id, model_id) "
+                           "SELECT 'agent-pi', 'agent-pi', 'rt-pi-used', id FROM llm_models LIMIT 1")
+        await pool.execute("INSERT INTO agent_setting_layers (scope, profile_id) VALUES ('system', $1)", codex)
+        used = await profile_registry.runtimes_in_use(BUILTIN_PROFILE.id, ROLES, pool=pool)
+        assert [r["executable"] for r in used if r["type"] == "pi"] == []
+        await pool.execute("INSERT INTO agent_setting_layers (scope, role, profile_id) VALUES ('role', 'worker', 'agent-pi')")
+        used = await profile_registry.runtimes_in_use(BUILTIN_PROFILE.id, ROLES, pool=pool)
+        assert [r["executable"] for r in used if r["type"] == "pi"] == ["/opt/pi/bin/pi"]
+
+    run_db(test, monkeypatch, timeout=30)

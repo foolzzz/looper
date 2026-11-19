@@ -582,7 +582,11 @@ async def _run_agent_system(
         from .runtimes import pi_runner, dsh_runner
 
         if ops.pi_runtime == "runner":
-            if supervisor := pi_runner.enable(runtime_root, await pi_runner.configured_executable(ops.database_url)):
+            try:
+                pi_executable = await pi_runner.configured_executable(ops.database_url)
+            except pi_runner.PiRuntimeConflict as exc:
+                raise StartupCheckFailed(str(exc)) from exc
+            if supervisor := pi_runner.enable(runtime_root, pi_executable):
                 supervisors.append(supervisor)
         if ops.dsh_runtime == "runner":
             if supervisor := dsh_runner.enable(runtime_root):
