@@ -1097,7 +1097,7 @@ async def _advisory_startup_checks(snapshot: list[dict[str, str]], database: sel
 
     try:
         probes = (
-            asyncio.to_thread(self_check.check_claude, claude_bin),
+            self_check.claude_check(claude_bin),
             self_check.codex_login_check(),
             self_check.grok_login_check(),
             self_check.cursor_login_check(),

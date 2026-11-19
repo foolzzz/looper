@@ -143,8 +143,16 @@ def _first_line(text: str) -> str:
     return next((line.strip() for line in text.splitlines() if line.strip()), "")
 
 
-def check_claude(claude_bin: str = "claude") -> list[Check]:
-    """Is the Claude Code CLI installed, and is it signed in? Two checks, CLI first."""
+CLAUDE_CODE = "claude-code"  # the runtime type
+NO_CLAUDE_PROFILE = "not checked: no Agent Profile in use runs on Claude Code"
+
+
+def check_claude(claude_bin: str = "claude", in_use: bool | None = None) -> list[Check]:
+    """Is the Claude Code CLI installed, and is it signed in? Two checks, CLI first. ``in_use``: whether an Agent
+    Profile that runs can use a Claude Code runtime (``None``: unknown, so checked); when none does, neither is."""
+    if in_use is False:
+        return [Check("claude_cli", "Claude Code CLI", SKIP, NO_CLAUDE_PROFILE),
+                Check("claude_login", "Claude login", SKIP, NO_CLAUDE_PROFILE)]
     path = shutil.which(claude_bin)
     if path is None:
         return [
@@ -204,6 +212,25 @@ def check_codex_login(profiles: int | None, problem: dict[str, str] | None, prob
     if status.state is LoginState.UNKNOWN:
         return Check("codex_login", "Codex login", WARN, f"not checked: {status.detail}", CODEX_LOGIN_FIX)
     return Check("codex_login", "Codex login", FAIL, status.detail, CODEX_LOGIN_FIX)
+
+
+async def claude_runtime_in_use(*, pool: Any = None) -> bool | None:
+    """Can an Agent Profile of a Claude Code runtime run (``None``: the profiles cannot be read)?"""
+    from ..db import profile_registry
+    from .agent_settings import AgentType
+    from .profile_registry import BUILTIN_PROFILE
+
+    try:
+        return CLAUDE_CODE in await profile_registry.runtime_types_in_use(
+            BUILTIN_PROFILE.id, [role.value for role in AgentType], pool=pool)
+    except Exception:
+        logger.warning("cannot read whether an Agent Profile uses Claude Code", exc_info=True)
+        return None
+
+
+async def claude_check(claude_bin: str = "claude") -> list[Check]:
+    """``check_claude`` with the server's pool, for the profiles in use now."""
+    return await asyncio.to_thread(check_claude, claude_bin, await claude_runtime_in_use())
 
 
 async def codex_login_check() -> Check:
@@ -671,6 +698,7 @@ class _DatabaseFacts:
     cursor_login_profiles: int | None = None
     coco_login_profiles: int | None = None
     coco_login_problem: dict[str, str] | None = None
+    claude_in_use: bool | None = None
     ttadk_runtimes: list[dict[str, Any]] | None = None
     worktree_projects: list[dict[str, Any]] | None = None
 
@@ -710,6 +738,7 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
             profiles, problem, grok_profiles, grok_problem = 0, None, 0, None
             cursor_profiles = 0
             coco_profiles, coco_problem = 0, None
+        claude_in_use = await claude_runtime_in_use(pool=conn)
         try:
             ttadk_runtimes = await _ttadk_runtime_rows(pool=conn)
         except (asyncpg.UndefinedTableError, asyncpg.UndefinedColumnError):
@@ -730,6 +759,7 @@ async def _database_facts(dsn: str) -> _DatabaseFacts:
             cursor_login_profiles=cursor_profiles,
             coco_login_profiles=coco_profiles,
             coco_login_problem=coco_problem,
+            claude_in_use=claude_in_use,
             ttadk_runtimes=ttadk_runtimes,
             worktree_projects=worktrees,
         )
@@ -747,7 +777,7 @@ async def run_checks(ops: OpsConfig, *, claude_bin: str = "claude") -> list[Chec
     from .runtimes import coco_login, cursor_login, grok_login
     from .runtimes.codex_login import probe_login
 
-    claude = await asyncio.to_thread(check_claude, claude_bin)
+    claude = await asyncio.to_thread(check_claude, claude_bin, facts.claude_in_use)
     codex = await asyncio.to_thread(check_codex_login, facts.codex_login_profiles, facts.codex_login_problem,
                                     probe_login)
     grok = check_grok_login(facts.grok_login_profiles, facts.grok_login_problem, grok_login.probe_login)

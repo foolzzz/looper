@@ -318,6 +318,38 @@ async def login_profile_count(runtime_type: str, *, pool: asyncpg.Pool | asyncpg
         "WHERE p.auth = 'oauth' AND p.oauth_runtime_type = $1", runtime_type))
 
 
+# Every place that selects an Agent Profile for runs: layers, Managers and their sessions, tasks, schedules, task
+# roles and templates. (``project_allowed_profiles`` only permits a profile, so it does not count.)
+_PROFILE_SELECTIONS = (
+    "SELECT profile_id FROM agent_setting_layers", "SELECT profile_id FROM managers",
+    "SELECT selected_profile_id FROM agent_sessions", "SELECT profile_id FROM task_profile_overrides",
+    "SELECT profile_id FROM task_planner_profiles", "SELECT profile_id FROM task_roles",
+    "SELECT profile_id FROM project_role_templates", "SELECT profile_id FROM schedule_profile_overrides",
+    "SELECT planner_profile_id FROM manager_task_templates", "SELECT worker_profile_id FROM manager_task_templates",
+    "SELECT reviewer_profile_id FROM manager_task_templates",
+)
+
+
+async def runtime_types_in_use(builtin_profile_id: str, roles: Sequence[str], *,
+                               pool: asyncpg.Pool | asyncpg.Connection | None = None) -> set[str]:
+    """The runtime types of the Agent Profiles runs can use: those a layer, Manager, session, task, schedule, task
+    role or template selects, the profiles they fall back to, and ``builtin_profile_id`` while the system layer and
+    some role in ``roles`` have no profile of their own (so that role runs the built-in one)."""
+    pool = pool or get_pool()
+    selected = " UNION ".join(f"{select} WHERE {select.split()[1]} IS NOT NULL" for select in _PROFILE_SELECTIONS)
+    rows = await pool.fetch(
+        f"WITH RECURSIVE base(id) AS ({selected} UNION SELECT $1 WHERE "
+        "NOT EXISTS (SELECT 1 FROM agent_setting_layers WHERE scope = 'system' AND profile_id IS NOT NULL) "
+        "AND EXISTS (SELECT 1 FROM unnest($2::text[]) AS r(role) WHERE NOT EXISTS ("
+        "SELECT 1 FROM agent_setting_layers l WHERE l.scope = 'role' AND l.role = r.role "
+        "AND l.profile_id IS NOT NULL))), "
+        "used(id) AS (SELECT id FROM base UNION SELECT a.fallback_profile_id FROM agent_profiles a "
+        "JOIN used u ON u.id = a.id WHERE a.fallback_profile_id IS NOT NULL) "
+        "SELECT DISTINCT r.type FROM used u JOIN agent_profiles a ON a.id = u.id "
+        "JOIN agent_runtimes r ON r.id = a.runtime_id", builtin_profile_id, list(roles))
+    return {row["type"] for row in rows}
+
+
 async def launcher_profile_count(launcher: str, *, pool: asyncpg.Pool | asyncpg.Connection | None = None) -> int:
     """How many Agent Profiles use a runtime with ``launcher``."""
     pool = pool or get_pool()
