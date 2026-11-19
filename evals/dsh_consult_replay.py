@@ -116,7 +116,7 @@ async def replay(args):
                         system_prompt={"mode": "append", "text": source["system_prompt"]},
                         fork_from={"session_id": source["source"]})
                     params["provider"].update(base_url=f"http://127.0.0.1:{server.server_port}",
-                                              model="deepseek-flash", effort="high")
+                                              model=args.model, effort=args.effort)
                     params["limits"]["max_requests_per_turn"] = 8
                     sid = (await client.call("session/new", params))["session_id"]
                     await client.prompt(sid, text=source["prompt"])
@@ -159,6 +159,8 @@ def main():
     parser.add_argument("--capture", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--runner-entry", type=Path)
+    parser.add_argument("--model", default="deepseek-flash", help="the DeepSeek model (default deepseek-flash)")
+    parser.add_argument("--effort", default="high", help="its effort (default high)")
     parser.add_argument("--reps", type=int, default=2, choices=(1, 2))
     args = parser.parse_args()
     if not os.environ.get("DEEPSEEK_API_KEY"):

@@ -151,7 +151,8 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path) -> dict[str, A
     if args.mode == "fake":
         (root / "manager.py").write_text(_FAKE_MANAGER, encoding="utf-8")
     else:
-        runner.install_claude(bin_dir, mode="real", real_claude=args.claude, max_budget_usd=args.max_budget_usd)
+        runner.install_claude(bin_dir, mode="real", real_claude=args.claude,
+                              max_budget_usd=None if args.spec else args.max_budget_usd)
     with runner.fresh_database(args.pg_url) as (database_url, _):
         async def seed() -> None:
             pool = await asyncpg.create_pool(database_url, min_size=1, max_size=2)
@@ -183,7 +184,9 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path) -> dict[str, A
         with runner.running_server(database_url=database_url, runtime_root=runtime, bin_dir=bin_dir,
                                    log_path=root / "serve.log", home=root / "home" if args.mode == "fake" else None) as api:
             if args.mode == "real":
-                runner.select_agent(api, agent=None, model=args.model)
+                agent = runner.register_agent(api, args.spec)["name"] if args.spec else args.agent
+                chosen = runner.select_agent(api, agent=agent, model=args.model)
+                runner.require_claude(args.mode, args.claude, [chosen.get("runtime_type")])
                 if args.manager_model:
                     from evals.prompt_regression.dialogs import _manager_profile
                     _manager_profile(api, args.manager_model, args.manager_effort)
@@ -230,12 +233,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--checkout", help="run this checkout's server (the baseline); default this one")
     parser.add_argument("--mode", choices=("fake", "real"), default="fake")
-    parser.add_argument("--model", default="sonnet")
+    parser.add_argument("--model", default="sonnet",
+                        help="real mode: every role runs Claude Code with this model (default sonnet; ignored with "
+                             "--agent or --register-agent)")
+    parser.add_argument("--agent", help="real mode: every role runs this registered agent, by name, instead")
+    parser.add_argument("--register-agent", type=Path, metavar="SPEC.json",
+                        help="real mode: register this agent (as for evals.prompt_regression) and run every role "
+                             "on it; the `claude` CLI is needed only for a Claude Code agent")
     parser.add_argument("--manager-model")
     parser.add_argument("--manager-effort")
     parser.add_argument("--reps", type=int, default=1)
     parser.add_argument("--max-budget-usd", type=float, default=2.0, help="each Claude Code run's cap")
-    parser.add_argument("--claude", default=shutil.which("claude"), help="the Claude Code binary (real mode)")
+    parser.add_argument("--claude", default=shutil.which("claude"),
+                        help="the Claude Code binary (real mode with a Claude Code agent; default `claude` on PATH)")
     parser.add_argument("--timeout", type=float, default=600, help="seconds a rep waits for every answer")
     parser.add_argument("--pg-url", default=os.environ.get("LOOPER_EVAL_DATABASE_URL"))
     parser.add_argument("--port", type=int, default=0)
@@ -249,6 +259,14 @@ def main() -> int:
     if args.checkout:
         sys.path.insert(0, str(Path(args.checkout).resolve()))
     sys.path.insert(1, str(HERE / "tests"))
+    from evals.prompt_regression import runner
+
+    args.spec = json.loads(args.register_agent.read_text(encoding="utf-8")) if args.register_agent else None
+    try:
+        runner.require_claude(args.mode, args.claude, runner.planned_runtime_types(
+            register=args.spec, agent=args.agent, model=args.model, manager_model=args.manager_model))
+    except runner.EvalError as exc:
+        parser.error(str(exc))
     spec = importlib.util.spec_from_file_location("lark_cli_stand_in", HERE / "tests" / "lark_cli_stand_in.py")
     stand_in = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -262,7 +280,7 @@ def main() -> int:
     import subprocess
     commit = subprocess.run(["git", "-C", str(checkout), "rev-parse", "--short", "HEAD"], capture_output=True,
                             text=True).stdout.strip()
-    run = {"schema": SCHEMA, "commit": commit, "mode": args.mode, "model": args.model if args.mode == "real" else None,
+    run = {"schema": SCHEMA, "commit": commit, "mode": args.mode, "model": args.model if args.mode == "real" else None, "agent": args.agent or ((args.spec or {}).get("agent") or {}).get("name"),
            "manager_model": args.manager_model, "manager_effort": args.manager_effort, "reps": reps}
     out = Path(args.out) if args.out else HERE / "evals" / "runs" / time.strftime(f"%Y%m%d-%H%M%S-lark-quote-{args.mode}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
