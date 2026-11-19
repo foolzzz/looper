@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TasksPage } from "@/pages/tasks";
+import { DEFAULT_STATUS_FILTERS, TasksPage } from "@/pages/tasks";
 import { fetchTasks, fetchWorkflows, previewWorkflow, fetchProjectsList, type Workflow, type Project, type TaskInfo, type TasksPage as TaskPage } from "@/lib/api";
 
 vi.mock("@/lib/api", async (original) => ({
@@ -133,21 +133,96 @@ describe("task list polling and pagination", () => {
     expect(body.profile_overrides).toBeUndefined();
   });
 
+  const showNavigating = async (query = "") => {
+    const render = (q: string): void => {
+      root.render(<TasksPage query={q} onNavigate={(_sub, next) => render(next || "")} />);
+    };
+    await act(async () => render(query));
+  };
+  const pressed = (label: string) => button(label)?.getAttribute("aria-pressed");
+
   it("shows the Running filter count and requests it without changing an executing badge", async () => {
     const executing: TaskInfo = { ...first, status: "executing", group: "in_progress" };
     const result = { ...page([executing]), counts: { running: 3, waiting: 1 } };
-    await act(async () => root.render(<TasksPage onNavigate={(_sub, query) => {
-      root.render(<TasksPage query={query} />);
-    }} />));
+    await showNavigating("status=all");
     await finish(0, result);
     expect(button("Running3")).toBeDefined();
     expect(button("All4")).toBeDefined();
+    expect(pressed("All4")).toBe("true");
     await click("Running3");
     expect(requests[1].filters?.status).toBe("running");
+    expect(requests[1].filters?.statuses).toBeUndefined();
     await finish(1, result);
     expect(rows()).toEqual(["first"]);
     expect(container.textContent).toContain("Executing");
     expect(button("Running3")).toBeDefined();
+    expect(pressed("Running3")).toBe("true");
+  });
+
+  describe("several status filters", () => {
+    it("selects Ready, Running, Waiting and Pending when the address has no status", async () => {
+      expect([...DEFAULT_STATUS_FILTERS]).toEqual(["init", "running", "waiting", "pending"]);
+      await showNavigating();
+      expect(requests[0].filters?.statuses).toEqual([...DEFAULT_STATUS_FILTERS]);
+      expect(requests[0].filters?.status).toBeUndefined();
+      expect(pressed("All")).toBe("false");
+      expect(pressed("Ready")).toBe("true");
+      expect(pressed("Running")).toBe("true");
+      expect(pressed("Waiting")).toBe("true");
+      expect(pressed("Pending")).toBe("true");
+      expect(pressed("Failed")).toBe("false");
+      expect(button("Ready")?.className).toContain("bg-primary");
+      expect(button("Failed")?.className).toContain("bg-muted");
+    });
+
+    it("toggles a chip on and off the current selection", async () => {
+      await showNavigating();
+      await click("Failed");
+      expect(requests[1].filters?.statuses).toEqual(["init", "running", "waiting", "pending", "failed"]);
+      await click("Ready");
+      expect(requests[2].filters?.statuses).toEqual(["running", "waiting", "pending", "failed"]);
+      expect(requests[2].filters?.status).toBeUndefined();
+    });
+
+    it("selects only the clicked chip from All, and returns to All when the last chip is cleared", async () => {
+      await showNavigating("status=all");
+      expect(requests[0].filters?.status).toBeUndefined();
+      expect(requests[0].filters?.statuses).toBeUndefined();
+      expect(pressed("All")).toBe("true");
+      await click("Failed");
+      expect(requests[1].filters?.status).toBe("failed");
+      expect(requests[1].filters?.statuses).toBeUndefined();
+      expect(pressed("Failed")).toBe("true");
+      expect(pressed("All")).toBe("false");
+      await click("Failed");
+      expect(requests[2].filters?.status).toBeUndefined();
+      expect(requests[2].filters?.statuses).toBeUndefined();
+      expect(pressed("All")).toBe("true");
+    });
+
+    it("reads a comma-separated list and a single legacy status", async () => {
+      await showNavigating("status=pending,init,running,waiting");
+      expect(requests[0].filters?.statuses).toEqual(["init", "running", "waiting", "pending"]);
+      await showNavigating("status=failed");
+      expect(requests.at(-1)?.filters?.status).toBe("failed");
+      expect(requests.at(-1)?.filters?.statuses).toBeUndefined();
+      await showNavigating("status=failed,bogus");
+      expect(requests.at(-1)?.filters?.status).toBe("failed");
+      await showNavigating("status=all");
+      expect(requests.at(-1)?.filters?.status).toBeUndefined();
+      expect(requests.at(-1)?.filters?.statuses).toBeUndefined();
+    });
+
+    it("shows Waiting for you when it is selected or its count is above zero", async () => {
+      await showNavigating();
+      expect(button("Waiting for you")).toBeUndefined();
+      await finish(0, { ...page([]), counts: { waiting_user: 2, init: 1 } });
+      expect(button("Waiting for you2")).toBeDefined();
+      expect(pressed("Waiting for you2")).toBe("false");
+      await showNavigating("status=waiting_user");
+      expect(button("Waiting for you")).toBeDefined();
+      expect(pressed("Waiting for you")).toBe("true");
+    });
   });
 
   describe("hiding tasks created by schedules", () => {

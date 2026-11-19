@@ -53,6 +53,12 @@ const STATUS_FILTERS = [
   "all", "init", "running", "waiting", "waiting_user", "pending", "completed", "failed", "cancelled", "stopped",
 ] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
+type StatusChip = Exclude<StatusFilter, "all">;
+
+/** Shown when the address has no `status`. Change this to change the page's default view. */
+export const DEFAULT_STATUS_FILTERS = ["init", "running", "waiting", "pending"] as const satisfies readonly StatusChip[];
+
+const STATUS_CHIPS: readonly StatusChip[] = STATUS_FILTERS.filter((name): name is StatusChip => name !== "all");
 
 function statusBadge(status: string) {
   switch (status) {
@@ -186,16 +192,32 @@ interface TasksPageProps {
   onNavigate?: (sub: string, query?: string) => void;
 }
 
-function filterQuery(project: string, group: TaskGroup | null, schedule = "", status: StatusFilter = "all", manager = "", search = "", includeScheduled = false): string {
+function filterQuery(project: string, group: TaskGroup | null, schedule = "", status: string | null = null, manager = "", search = "", includeScheduled = false): string {
   const query = new URLSearchParams();
   if (project) query.set("project", project);
   if (group) query.set("group", group);
   if (schedule) query.set("schedule", schedule);
-  if (status !== "all") query.set("status", status);
+  if (status) query.set("status", status);
   if (manager) query.set("manager", manager);
   if (search) query.set("query", search);
   if (includeScheduled) query.set("scheduled", "include");
   return query.toString();
+}
+
+/** No `status` is the default selection. `all` and a list that names nothing known are every task. */
+function parseStatuses(param: string | null): StatusChip[] {
+  if (param === null) return [...DEFAULT_STATUS_FILTERS];
+  if (param.trim() === "all") return [];
+  const wanted = new Set(param.split(",").map((part) => part.trim()).filter(Boolean));
+  return STATUS_CHIPS.filter((name) => wanted.has(name));
+}
+
+/** `all` clears the selection. The default selection is omitted so a link without `status` stays the default. */
+function encodeStatuses(selected: readonly StatusChip[]): string | null {
+  if (selected.length === 0) return "all";
+  if (selected.length === DEFAULT_STATUS_FILTERS.length
+    && selected.every((name, index) => name === DEFAULT_STATUS_FILTERS[index])) return null;
+  return selected.join(",");
 }
 
 /** Whether task `a` comes after `b` in the list (newest first: by creation, then id). */
@@ -222,12 +244,12 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   const scheduleFilter = params.get("schedule") || "";
   const managerFilter = params.get("manager") || "";
   const searchFilter = params.get("query") || "";
-  const statusParam = params.get("status");
-  const filter: StatusFilter = STATUS_FILTERS.find((f) => f === statusParam) ?? "all";
+  const selected = parseStatuses(params.get("status"));
+  const encodedStatus = encodeStatuses(selected);
   // Tasks agent schedules created are hidden unless "scheduled=include"; a schedule's own list shows them.
   const includeScheduled = params.get("scheduled") === "include";
   const hideScheduled = !includeScheduled && !scheduleFilter;
-  const listKey = filterQuery(projectFilter, groupFilter, scheduleFilter, filter, managerFilter, searchFilter, includeScheduled);
+  const listKey = filterQuery(projectFilter, groupFilter, scheduleFilter, encodedStatus, managerFilter, searchFilter, includeScheduled);
   const [managers, setManagers] = useState<ManagerInfo[] | null>(null);
   const [managerError, setManagerError] = useState("");
   useEffect(() => {
@@ -305,13 +327,22 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   }, [sub, query]);
   const setSelectedTaskId = (id: string | null) =>
     id ? onNavigate?.(id) : onNavigate?.("", listQuery.current);
-  const setProjectFilter = (id: string) => onNavigate?.("", filterQuery(id, groupFilter, scheduleFilter, filter, managerFilter, searchFilter, includeScheduled));
-  const clearGroup = () => onNavigate?.("", filterQuery(projectFilter, null, scheduleFilter, filter, managerFilter, searchFilter, includeScheduled));
-  const clearSchedule = () => onNavigate?.("", filterQuery(projectFilter, groupFilter, "", filter, managerFilter, searchFilter, includeScheduled));
-  const setFilter = (next: StatusFilter) => onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, next, managerFilter, searchFilter, includeScheduled));
+  const setProjectFilter = (id: string) => onNavigate?.("", filterQuery(id, groupFilter, scheduleFilter, encodedStatus, managerFilter, searchFilter, includeScheduled));
+  const clearGroup = () => onNavigate?.("", filterQuery(projectFilter, null, scheduleFilter, encodedStatus, managerFilter, searchFilter, includeScheduled));
+  const clearSchedule = () => onNavigate?.("", filterQuery(projectFilter, groupFilter, "", encodedStatus, managerFilter, searchFilter, includeScheduled));
+  const setStatuses = (next: readonly StatusChip[]) =>
+    onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, encodeStatuses(next), managerFilter, searchFilter, includeScheduled));
+  const toggleStatus = (name: StatusChip) => {
+    const next = selected.length === 0
+      ? [name]
+      : selected.includes(name)
+        ? selected.filter((item) => item !== name)
+        : STATUS_CHIPS.filter((item) => selected.includes(item) || item === name);
+    setStatuses(next);
+  };
   const setHideScheduled = (hide: boolean) =>
-    onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, filter, managerFilter, searchFilter, !hide));
-  const setManagerFilter = (id: string) => onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, filter, id, searchFilter, includeScheduled));
+    onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, encodedStatus, managerFilter, searchFilter, !hide));
+  const setManagerFilter = (id: string) => onNavigate?.("", filterQuery(projectFilter, groupFilter, scheduleFilter, encodedStatus, id, searchFilter, includeScheduled));
 
   // A fresh identity also rejects an old A response after navigating A → B → A.
   // Keep its cursor synchronous so pending pages see a refresh's boundary before React renders.
@@ -329,7 +360,8 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
     query: searchFilter || undefined,
     group: groupFilter ?? undefined,
     scheduleId: scheduleFilter || undefined,
-    status: filter === "all" ? undefined : filter,
+    ...(selected.length > 1 ? { statuses: [...selected] } : {}),
+    ...(selected.length === 1 ? { status: selected[0] } : {}),
     excludeScheduled: hideScheduled || undefined,
   };
 
@@ -540,7 +572,7 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
   }, [nameKnown, loading, scheduleFilter]);
   // Every task under the URL's filters, not only the pages loaded.
   const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
-  const shownTotal = filter === "all" ? total : counts[filter] || 0;
+  const shownTotal = selected.length === 0 ? total : selected.reduce((sum, name) => sum + (counts[name] || 0), 0);
 
   if (selectedTaskId) {
     return (
@@ -674,15 +706,17 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
         <div className="flex items-center gap-1 flex-wrap">
           {STATUS_FILTERS.map((f) => {
             const count = f === "all" ? total : counts[f] || 0;
+            const pressed = f === "all" ? selected.length === 0 : selected.includes(f);
             // Only a project with user gates has tasks that wait for the user.
-            if (f === "waiting_user" && count === 0 && filter !== f) return null;
+            if (f === "waiting_user" && count === 0 && !pressed) return null;
             return (
               <button
                 key={f}
                 type="button"
-                onClick={() => setFilter(f)}
+                aria-pressed={pressed}
+                onClick={() => (f === "all" ? setStatuses([]) : toggleStatus(f))}
                 className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-                  filter === f
+                  pressed
                     ? "bg-primary text-primary-foreground"
                     : "bg-muted text-muted-foreground hover:text-foreground"
                 }`}
@@ -759,9 +793,11 @@ export function TasksPage({ sub, query, onNavigate }: TasksPageProps) {
       ) : projectTasks.length === 0 ? (
         <div className="flex h-64 items-center justify-center">
           <p className="text-sm text-muted-foreground">
-            {filter !== "all"
-              ? `No ${filterLabel(filter).toLowerCase()} tasks`
-              : group
+            {selected.length === 1
+              ? `No ${filterLabel(selected[0]).toLowerCase()} tasks`
+              : selected.length > 1 && total > 0
+                ? "No tasks match the selected statuses"
+                : group
                 ? `No tasks · ${group.label}`
                 : scheduleFilter
                   ? "No tasks from this schedule"
