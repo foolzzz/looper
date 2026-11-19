@@ -1,14 +1,15 @@
 """What the processor makes of a batch of chat messages, on the real path: ``looper.agents.processor.run`` with the
-real runtime on a disposable database, the Agent Profile chosen for the processor's role layer by ``--profile``.
+real runtime on a disposable database, the Agent Profile set on the processor's role layer from a flag.
 
 Run from a checkout's root (it needs a disposable PostgreSQL server and the runtime's CLI)::
 
-    uv run --extra test python -m evals.processor --profile claude-code/sonnet --reps 2 \\
-        --claude ~/.local/bin/claude --pg-url URL [--cases quiet,content] [--baseline RUN.json]
+    uv run --extra test python -m evals.processor --register-agent evals/agents/claude-login-sonnet.example.json \\
+        --reps 2 --claude ~/.local/bin/claude --pg-url URL [--cases quiet,content] [--baseline RUN.json]
 
-``--profile`` names an Agent Profile in the eval's new database (the built-in ``claude-code/opus``), or
-``claude-code/<model>``, registered on Claude Code's own login when it is not there; the processor resolves it
-through its layers like any run. Every batch is synthetic (no real chat, person or message). Each case checks the
+``--register-agent SPEC.json`` registers runtime → provider → model → profile from a spec in the eval's new
+database (as the prompt eval's, ``runner.register_agent``); ``--profile NAME`` uses a profile already there (the
+built-in one). The processor's role layer then selects it, which refuses a runtime without ``no_tools``, and the
+processor resolves it through its layers like any run. No runtime, provider or model is named here. Every batch is synthetic (no real chat, person or message). Each case checks the
 reply and the run: no tool and no MCP server in the runtime's init event, no tool call, and no message of the batch
 in the run's record. The JSON goes to ``evals/runs/`` (ignored by git).
 """
@@ -111,31 +112,64 @@ def score(case: dict[str, Any], run: dict[str, Any]) -> dict[str, bool]:
     return checks
 
 
-async def _prepare(profile_name: str) -> str:
-    """Make ``profile_name`` the processor's role layer in the new database; its id."""
-    from looper.agents import agent_settings, profile_registry
+class _InProcessApi:
+    """The four registry calls ``runner.register_agent`` makes, answered by this process's registry (called from a
+    thread while ``loop`` runs)."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+
+    def post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        from evals.prompt_regression.runner import EvalError
+        from looper.agents import profile_registry as registry
+
+        calls = {
+            "/api/v1/registry/view": lambda: registry.registry_view(),
+            "/api/v1/provider_accounts/create": lambda: registry.create_provider(body),
+            "/api/v1/ops/models/create": lambda: registry.create_model(
+                {**{k: v for k, v in body.items() if k != "provider"}, "provider_id": body["provider"]}),
+            "/api/v1/profiles/create": lambda: registry.create_profile(body),
+        }
+        if path not in calls:
+            raise EvalError(f"the processor eval registers through the registry only, not {path}")
+        try:
+            return {"result": asyncio.run_coroutine_threadsafe(calls[path](), self.loop).result()}
+        except registry.RegistryError as exc:
+            raise EvalError(str(exc)) from None
+
+
+async def _prepare(args: argparse.Namespace) -> None:
+    """Set the processor's role layer to the profile the flags name (registered from ``--register-agent``'s spec,
+    or ``--profile``'s), refusing one whose runtime cannot run the processor (``no_tools``)."""
+    from evals.prompt_regression import runner
+    from looper.agents import agent_settings, processor
     from looper.agents.serve import seed_role_configs
     from looper.db import profile_registry as db_profiles
 
     await seed_role_configs()
-    found = next((row for row in await db_profiles.list_profiles() if row["name"] == profile_name), None)
-    if found is None:
-        runtime, _, model = profile_name.partition("/")
-        if runtime != "claude-code" or not model:
-            raise SystemExit(f"no Agent Profile {profile_name!r}: name a registered one, or claude-code/<model>")
-        models = (await profile_registry.list_models(provider_id="prov-claude-subscription"))["models"]
-        entry = next((m for m in models if m["name"] == model), None)
-        if entry is None:
-            raise SystemExit(f"the Claude login has no model {model!r}: it has {', '.join(m['name'] for m in models)}")
-        found = {"id": (await profile_registry.create_profile({
-            "name": profile_name, "runtime_id": "rt-claude-code", "model_id": entry["model_id"]}))["profile"]["profile_id"]}
-    await agent_settings.update_role("processor", {"profile_id": found["id"]})
-    return found["id"]
+    if args.register_agent:
+        spec = json.loads(Path(args.register_agent).read_text(encoding="utf-8"))
+        api = _InProcessApi(asyncio.get_running_loop())
+        profile_id = (await asyncio.to_thread(runner.register_agent, api, spec))["profile_id"]
+    else:
+        rows = await db_profiles.list_profiles()
+        row = next((r for r in rows if r["name"] == args.profile), None)
+        if row is None:
+            raise SystemExit(f"no Agent Profile {args.profile!r} in the eval's database (it has "
+                             f"{', '.join(r['name'] for r in rows)}); register one with --register-agent SPEC.json")
+        profile_id = row["id"]
+    try:
+        await agent_settings.update_role("processor", {"profile_id": profile_id})
+    except agent_settings.SettingsError as exc:
+        raise SystemExit(f"the processor cannot run this profile: {exc}") from None
+    if problem := (await processor.chosen_profile(wait=True))["problem"]:
+        raise SystemExit(f"the processor cannot run this profile: {problem}")
 
 
 async def _record(record_id: int | None, batch: str) -> dict[str, Any]:
     """What the runtime had and did in the run (its init event's tools and MCP servers, its tool calls), and whether
-    its record keeps any message of the batch (``text_kept``) outside the reply, which may quote one."""
+    its record keeps any message of the batch (``text_kept``) anywhere but in the final output (the record's
+    ``output_text`` and its first characters, ``output_summary``, and the result's ``result``), which may quote one."""
     from looper.db.connection import get_pool
 
     if record_id is None:
@@ -144,9 +178,10 @@ async def _record(record_id: int | None, batch: str) -> dict[str, Any]:
     rows = [row["event"] for row in await pool.fetch(
         "SELECT event::text AS event FROM llm_record_events WHERE record_id = $1 ORDER BY seq", record_id)]
     events = [json.loads(row) for row in rows]
-    record = await pool.fetchval("SELECT (to_jsonb(r) - 'output_text')::text FROM llm_records r WHERE id = $1",
-                                 record_id)
-    inputs = [row for row, event in zip(rows, events) if event.get("type") not in ("assistant", "result")]
+    record = await pool.fetchval("SELECT (to_jsonb(r) - 'output_text' - 'output_summary')::text FROM llm_records r "
+                                 "WHERE id = $1", record_id)
+    kept = [json.dumps({k: v for k, v in event.items() if not (event.get("type") == "result" and k == "result")},
+                       ensure_ascii=False) for event in events]
     # Each message's text (the part after "sender: "), as the record would hold it in JSON.
     texts = [json.dumps(line.split(": ", 1)[1], ensure_ascii=False)[1:-1] for line in batch.splitlines()]
     init = next((e for e in events if e.get("type") == "system" and e.get("subtype") == "init"), {})
@@ -160,7 +195,7 @@ async def _record(record_id: int | None, batch: str) -> dict[str, Any]:
     uses = sum(1 for e in events if e.get("type") == "assistant"
                for block in (e.get("message") or {}).get("content") or [] if block.get("type") == "tool_use")
     return {"init_tools": count(init.get("tools")), "init_mcp_servers": count(init.get("mcp_servers")),
-            "tool_uses": uses, "text_kept": any(text in kept for text in texts for kept in (record, *inputs))}
+            "tool_uses": uses, "text_kept": any(text in place for text in texts for place in (record, *kept))}
 
 
 async def evaluate(args: argparse.Namespace, database_url: str, root: Path) -> list[dict[str, Any]]:
@@ -170,7 +205,7 @@ async def evaluate(args: argparse.Namespace, database_url: str, root: Path) -> l
     await connection.init_pool(database_url, min_size=1, max_size=4)
     try:
         await connection.ensure_schema()
-        await _prepare(args.profile)
+        await _prepare(args)
         print("processor runs " + json.dumps(await processor.chosen_profile(), ensure_ascii=False), flush=True)
         runs = []
         for rep in range(1, args.reps + 1):
@@ -180,7 +215,7 @@ async def evaluate(args: argparse.Namespace, database_url: str, root: Path) -> l
                 done = await processor.run(
                     owner=f"eval-{key}", instructions=DIGEST, input_text=case["batch"],
                     input_ref={"case": key, "rep": rep, "render": "lines_v1"}, quiet_word=QUIET,
-                    budget_usd=args.budget_usd, timeout_s=args.timeout, runtime_root=root, claude_bin=args.claude)
+                    budget_usd=args.budget_usd, timeout_s=args.timeout, runtime_root=root, claude_bin=args.claude or "claude")
                 run = {"case": key, "rep": rep, "reply": done.reply, "failure": done.failure and done.failure.value,
                        "detail": done.detail, "cost_usd": done.cost_usd,
                        "seconds": round(time.monotonic() - started, 1),
@@ -209,12 +244,15 @@ def table(run: dict[str, Any], base: dict[str, Any] | None) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--profile", required=True, help="the processor's Agent Profile (its role layer)")
+    chosen = parser.add_mutually_exclusive_group(required=True)
+    chosen.add_argument("--register-agent", help="a runtime/provider/model/agent spec to register and run")
+    chosen.add_argument("--profile", help="an Agent Profile of the eval's new database to run")
     parser.add_argument("--reps", type=int, default=1)
     parser.add_argument("--cases", default=",".join(CASES), help=f"comma-separated, of {', '.join(CASES)}")
     parser.add_argument("--budget-usd", type=float, default=0.5, help="each run's cap")
     parser.add_argument("--timeout", type=float, default=300, help="each run's deadline in seconds")
-    parser.add_argument("--claude", default=shutil.which("claude"), help="the Claude Code binary")
+    parser.add_argument("--claude", default=shutil.which("claude"),
+                        help="the Claude Code executable for a Claude Code runtime that names none of its own")
     parser.add_argument("--pg-url", default=os.environ.get("LOOPER_EVAL_DATABASE_URL"))
     parser.add_argument("--out", help="the run's JSON; default evals/runs/<time>-processor.json")
     parser.add_argument("--baseline", help="a run's JSON to compare with")
@@ -224,8 +262,6 @@ def main() -> int:
     args.cases = [key.strip() for key in args.cases.split(",") if key.strip()]
     if unknown := [key for key in args.cases if key not in CASES]:
         parser.error(f"unknown case {unknown[0]!r}; the cases are {', '.join(CASES)}")
-    if not args.claude:
-        parser.error("no Claude Code binary: give --claude")
     sys.path.insert(0, str(HERE))
     from evals.prompt_regression import runner
 
@@ -234,7 +270,8 @@ def main() -> int:
         runs = asyncio.run(evaluate(args, database_url, Path(tmp) / "runtime"))
     commit = subprocess.run(["git", "-C", str(HERE), "rev-parse", "--short", "HEAD"], capture_output=True,
                             text=True).stdout.strip()
-    run = {"schema": SCHEMA, "commit": commit, "profile": args.profile, "reps": args.reps, "runs": runs}
+    run = {"schema": SCHEMA, "commit": commit, "profile": args.profile or args.register_agent, "reps": args.reps,
+           "runs": runs}
     out = Path(args.out) if args.out else HERE / "evals" / "runs" / time.strftime("%Y%m%d-%H%M%S-processor.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
