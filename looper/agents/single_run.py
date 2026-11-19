@@ -8,7 +8,9 @@
 - **The process tree** is read every ``TREE_WATCH_SEC`` while the run goes on and again before the result is
   recorded, and ended on every exit, success included; the run's own process group is signalled. A child that calls
   ``setsid`` between two reads and whose parent then exits is not found (a known limit).
-- **stderr** is drained, a short tail kept for the record's error.
+- **stderr** is drained, a short tail kept for the record's error, but for a ``quiet`` run (one given other people's
+  text, which what it writes may repeat): its record's error is only what happened, and its output only a successful
+  result's.
 """
 
 from __future__ import annotations
@@ -31,10 +33,12 @@ class StartFailed(Exception):
     """The run's process could not be started (its record is closed with why)."""
 
 
-def unsuccessful(result: Mapping[str, Any]) -> str | None:
+def unsuccessful(result: Mapping[str, Any], *, errors: bool = True) -> str | None:
     """Why a result must not be taken as the run's answer, e.g. a runtime that kept a valid final from a failed
-    exit."""
+    exit; with ``errors`` False, without the errors' own text."""
     if result.get("is_error"):
+        if not errors:
+            return "its run ended in error"
         return "its run ended in error: " + "; ".join(str(e) for e in result.get("errors") or []) [:300]
     if result.get("subtype") not in (None, "success"):
         return f"its run ended as {result.get('subtype')}, not success"
@@ -48,10 +52,11 @@ class Finished(NamedTuple):
 
 
 async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str, prompt: str, launch: Launch,
-                   timeout: float, what: str, label: str) -> Finished:
+                   timeout: float, what: str, label: str, quiet: bool = False) -> Finished:
     """Run ``command`` in ``cwd`` with ``prompt`` as its one user turn, recording it with ``recorder`` (already
     started), which is closed however the run ends; ``what`` names the run in its record's errors (``the consult``),
-    ``label`` in the log. Raises ``StartFailed`` when the process does not start."""
+    ``label`` in the log; ``quiet`` keeps what the process wrote out of the record (the module's notes). Raises
+    ``StartFailed`` when the process does not start."""
     runtime = launch.runtime
     try:
         process = await proc_tree.spawn(*command, cwd=cwd, env=launch.environment(),
@@ -129,7 +134,10 @@ async def run_once(recorder: ClaudeRunRecorder, command: list[str], *, cwd: str,
                 if not background.done():
                     background.cancel()
             await asyncio.gather(draining, watching, return_exceptions=True)
-            await recorder.finish(output_text=str((result or {}).get("result") or "") or None,
-                                  result_event=result, error=(error + "\n" + stderr_tail if stderr_tail else error)
-                                  if error else None)
+            output = str((result or {}).get("result") or "") or None
+            if quiet:
+                output = output if result is not None and unsuccessful(result) is None else None
+            elif error and stderr_tail:
+                error += "\n" + stderr_tail
+            await recorder.finish(output_text=output, result_event=result, error=error)
     return Finished(result, started, False)

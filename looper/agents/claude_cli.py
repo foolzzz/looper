@@ -1458,10 +1458,11 @@ class ClaudeRunRecorder:
         autonomous: bool = False,
         whole_process: bool = False,
         pid_of: Callable[[], int | None] | None = None,
-        keep: Callable[[dict[str, Any]], bool] | None = None,
+        keep: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
     ) -> None:
         self._agent_id = agent_id
-        # Which events the record keeps (None: every one but usage and partial deltas); the rest are still counted.
+        # What the record keeps of each event: the event to store, or None for nothing (None: each one but usage
+        # and partial deltas, whole); every event is still counted.
         self._keep = keep
         self._autonomous = autonomous
         # A fresh whole process reports its own totals; a fork/resume also reports its inherited history.
@@ -1644,7 +1645,7 @@ class ClaudeRunRecorder:
         await self._heartbeat()
         if self._record_id is None or event.get("type") in ("usage", "stream_event"):
             return
-        if self._keep is not None and not self._keep(event):
+        if self._keep is not None and (event := self._keep(event)) is None:
             return
         from ..db import llm_records
 

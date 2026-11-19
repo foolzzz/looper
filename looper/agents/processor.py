@@ -11,7 +11,9 @@ to it; ``chosen_profile`` says beforehand which Agent Profile the run would use,
 - **No tools.** Claude Code runs with ``claude_cli.NO_TOOLS_ARGS``: no built-in tool, MCP server, plugin, skill,
   command or knowledge directory, nothing installed for it, no agent teams, its session not kept and its messages
   not echoed into its stream; sealed (``claude_cli.isolation_args``): no settings file, no hook, no ``CLAUDE.md``
-  or ``AGENTS.md`` above its directory, an empty private one under the runtime root, removed afterwards.
+  or ``AGENTS.md`` above its directory, an empty private one under the runtime root, removed afterwards. Only the
+  machine's managed hooks still run (``RuntimeAdapter.managed_hooks``): ``chosen_profile`` and each record name
+  them, and ``REFUSE_KEY`` refuses a run while they are present.
 - **Its system prompt replaces the runtime's**, always (``system_prompt_mode_choice``): the profile's custom prompt, the
   role prompt (``role_configs.processor``, ``PROCESSOR_ROLE_PROMPT`` recommended), the instructions, then the reply
   contract with the quiet word. The harness and the boundaries speak of tools and permissions: neither is in it.
@@ -23,7 +25,9 @@ to it; ``chosen_profile`` says beforehand which Agent Profile the run would use,
 - **Its record** (``llm_records``): ``agent_id`` ``processor:<owner>``, no task, the caller's metadata; model
   requests are not recorded (llmrec), and ``input_text`` holds only a reference to the batch (the caller's window
   reference, the text's sha256 and length), never the batch, and of its stream only the runtime's own events and
-  the result (``_kept``): the model's messages, whose thinking may restate the batch, are counted, never stored.
+  the result's typed fields (``_kept``): the model's messages, whose thinking may restate the batch, are counted,
+  never stored; its error is only what happened, never what the process wrote (``single_run`` ``quiet``), its
+  failure's category in ``metadata.processor_failure``.
   Deleting the messages deletes their text from every place Looper keeps it but the outputs.
 """
 
@@ -88,10 +92,20 @@ def user_turn(text: str) -> str:
     return f"{INPUT_LEAD}\n<messages>\n{body}\n</messages>"
 
 
-def _kept(event: Mapping[str, Any]) -> bool:
+# What a processor run's record keeps of its result: no text (its output is the record's own, from a successful
+# result only; its errors may repeat what it was given).
+_RESULT_FIELDS = ("type", "subtype", "is_error", "duration_ms", "duration_api_ms", "num_turns", "session_id",
+                  "total_cost_usd", "usage", "modelUsage", "stop_reason", "uuid")
+
+
+def _kept(event: Mapping[str, Any]) -> dict[str, Any] | None:
     """What a processor run's record keeps of its stream: the runtime's own events (its init, with its tools and MCP
-    servers) and the result (its output and usage)."""
-    return event.get("type") in ("system", "result")
+    servers) and the result's typed fields (``_RESULT_FIELDS``); never the model's messages."""
+    if event.get("type") == "system":
+        return dict(event)
+    if event.get("type") == "result":
+        return {key: event[key] for key in _RESULT_FIELDS if key in event}
+    return None
 
 
 def run_cost(recorded: float | None, result: Mapping[str, Any] | None, source: CostSource) -> float | None:
@@ -108,6 +122,52 @@ def run_cost(recorded: float | None, result: Mapping[str, Any] | None, source: C
 def is_quiet(reply: str, quiet_word: str) -> bool:
     """Whether ``reply`` is the quiet word, with whitespace and Markdown markers removed."""
     return _MARKDOWN.sub("", reply) == quiet_word
+
+
+# Whether a processor run is refused while the machine's administrator has hooks for its runtime, which see what it
+# is given and which no launch turns off (``RuntimeAdapter.managed_hooks``); by default it runs.
+REFUSE_KEY = "processor.refuse_with_managed_hooks"
+
+
+async def _refuses_managed_hooks() -> bool:
+    from ..db import system_settings
+
+    return (await system_settings.get_settings([REFUSE_KEY])).get(REFUSE_KEY) == "true"
+
+
+def _managed_hooks(settings: AgentSettings) -> Any:
+    from .runtimes import ADAPTERS
+
+    adapter = ADAPTERS.get(settings.profile.runtime.type)
+    return adapter.managed_hooks() if adapter is not None else None
+
+
+def _managed_refusal(hooks: Any) -> str:
+    named = ", ".join(hooks.events) if hooks.events else "unreadable"
+    return (f"the machine's managed hooks ({named}, {hooks.source}) would see the messages, and "
+            f"{REFUSE_KEY} is on")
+
+
+async def settings_view() -> dict[str, Any]:
+    """The processor's system setting and the managed hooks its runtime (outside any project) has now."""
+    settings = await load_agent_settings(AgentType.PROCESSOR, wait=False)
+    hooks = _managed_hooks(settings)
+    return {"refuse_with_managed_hooks": await _refuses_managed_hooks(),
+            "managed_hooks": hooks.view() if hooks is not None else None}
+
+
+async def update_settings(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Set ``refuse_with_managed_hooks`` (true, false, or null for the default, false); ``ValueError`` for anything
+    else, which changes nothing."""
+    from ..db import system_settings
+
+    if not isinstance(body, Mapping) or set(body) != {"refuse_with_managed_hooks"}:
+        raise ValueError("give refuse_with_managed_hooks: true, false, or null for the default (false)")
+    value = body["refuse_with_managed_hooks"]
+    if value is not None and not isinstance(value, bool):
+        raise ValueError("refuse_with_managed_hooks must be true, false or null")
+    await system_settings.put_settings({REFUSE_KEY: None if value is None else ("true" if value else "false")})
+    return await settings_view()
 
 
 class ProcessorFailure(str, Enum):
@@ -171,11 +231,16 @@ def _problem(settings: AgentSettings) -> str | None:
 async def chosen_profile(project_id: str | None = None, schedule_id: str | None = None, *,
                          wait: bool = False) -> dict[str, Any]:
     """The Agent Profile a processor run in ``project_id`` for ``schedule_id`` would use (``profile_id``, ``name``,
-    ``model``, ``effort``, ``runtime``, ``provider``), the layer it comes from (``source``) and why it cannot run
-    (``problem``, None when it can); login checks are cached unless ``wait``."""
+    ``model``, ``effort``, ``runtime``, ``provider``), the layer it comes from (``source``), the managed hooks its
+    runtime has (``managed_hooks``: they see the messages; None for none) and why it cannot run (``problem``, None
+    when it can); login checks are cached unless ``wait``."""
     settings = await load_agent_settings(AgentType.PROCESSOR, project_id, schedule_id=schedule_id, wait=wait)
     view = settings.view()["profile"]
-    return {**view["value"], "source": view["source"], "problem": _problem(settings)}
+    hooks = _managed_hooks(settings)
+    problem = _problem(settings) or (
+        _managed_refusal(hooks) if hooks is not None and await _refuses_managed_hooks() else None)
+    return {**view["value"], "source": view["source"], "managed_hooks": hooks.view() if hooks is not None else None,
+            "problem": problem}
 
 
 def _system_prompt(settings: AgentSettings, role: _Role, instructions: str, quiet_word: str) -> Any:
@@ -221,6 +286,9 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
     settings = await load_agent_settings(AgentType.PROCESSOR, project_id, schedule_id=schedule_id)
     if problem := _problem(settings):
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=problem)
+    hooks = _managed_hooks(settings)
+    if hooks is not None and await _refuses_managed_hooks():
+        return ProcessorRun(None, failure=ProcessorFailure.REFUSED, detail=_managed_refusal(hooks))
     role = await _role()
     if not role.enabled:
         return ProcessorRun(None, failure=ProcessorFailure.REFUSED,
@@ -254,13 +322,15 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
                                      input_text=reference, system_prompt=system_prompt, launch=launch,
                                      whole_process=True, keep=_kept)
         await recorder.start()
-        if metadata:
-            await recorder.annotate(dict(metadata))
+        noted = {**(metadata or {}), **({"managed_hooks": hooks.view()} if hooks is not None else {})}
+        if noted:
+            await recorder.annotate(noted)
         try:
             finished = await single_run.run_once(
                 recorder, command, cwd=str(directory), prompt=user_turn(input_text), launch=launch, timeout=deadline,
-                what="the processor run", label=f"processor {agent_id} {run_id}")
+                what="the processor run", label=f"processor {agent_id} {run_id}", quiet=True)
         except single_run.StartFailed as exc:
+            await recorder.annotate({"processor_failure": ProcessorFailure.FAILED.value})
             return ProcessorRun(None, recorder.record_id, failure=ProcessorFailure.FAILED,
                                 detail=f"its runtime does not start: {exc}")
     finally:
@@ -280,12 +350,13 @@ async def run(*, owner: str, instructions: str, input_text: str, input_ref: Mapp
         failed = ProcessorFailure.FAILED, "its run ended without a result"
     elif launch.runtime.budget_error(result) is not None:
         failed = ProcessorFailure.BUDGET, f"it reached its spend cap of {cap:g} USD"
-    elif (why := single_run.unsuccessful(result)) is not None:
+    elif (why := single_run.unsuccessful(result, errors=False)) is not None:
         failed = ProcessorFailure.FAILED, why
     elif cost is None:
         failed = ProcessorFailure.BUDGET, f"its cost is unknown, so its cap of {cap:g} USD cannot be checked"
     elif cost > cap:
         failed = ProcessorFailure.BUDGET, f"it cost {cost:.4f} USD, over its cap of {cap:g} USD"
     if failed is not None:
+        await recorder.annotate({"processor_failure": failed[0].value})
         return ProcessorRun(None, record_id, cost, failure=failed[0], detail=failed[1])
     return ProcessorRun(str(result.get("result") or ""), record_id, cost)

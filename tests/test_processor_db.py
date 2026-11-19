@@ -43,6 +43,12 @@ emit({"type": "system", "subtype": "init", "session_id": "s-1", "model": "claude
       "mcp_servers": []})
 if mode == "hang":
     time.sleep(60)
+if mode == "error_text":  # what a failing run writes may carry the batch
+    sys.stderr.write("failed on: " + turn["message"]["content"])
+    sys.stderr.flush()
+    emit({"type": "result", "subtype": "error_during_execution", "is_error": True, "session_id": "s-1",
+          "result": turn["message"]["content"], "errors": [turn["message"]["content"]], "total_cost_usd": 0.01})
+    sys.exit(1)
 usage = {"input_tokens": 40, "output_tokens": 6, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
 emit({"type": "assistant", "session_id": "s-1", "message": {"id": "m-1", "role": "assistant", "model": "claude-sonnet",
       "content": [{"type": "thinking", "thinking": "The batch says: " + turn["message"]["content"][-60:]},
@@ -200,9 +206,11 @@ def test_a_processor_run_replaces_the_runtimes_prompt_with_its_role_instructions
     ("hang", "timeout", "no reply within 2 s"),
     ("over_cap", "budget", "over its cap of 0.1 USD"),
     ("error", "failed", "ended in error"),
+    ("error_text", "failed", "ended in error"),
 ])
-def test_a_processor_run_without_a_reply_says_why(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str,
-                                                  failure: str, why: str) -> None:
+def test_a_processor_run_without_a_reply_says_why_and_keeps_no_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str, failure: str, why: str,
+) -> None:
     from looper.agents.serve import seed_role_configs
 
     monkeypatch.setenv("PROCESSOR_MODE", mode)
@@ -213,6 +221,14 @@ def test_a_processor_run_without_a_reply_says_why(monkeypatch: pytest.MonkeyPatc
         done = await _run(tmp_path, timeout_s=2)
         assert (done.reply, done.failure.value) == (None, failure) and why in done.detail
         assert (done.record_id is None) == (mode == "off")
+        # Only a typed category and safe metadata: nothing the process wrote, on stdout or stderr.
+        assert TOKEN not in done.detail
+        if done.record_id is not None:
+            record = dict(await pool.fetchrow("SELECT * FROM llm_records WHERE id = $1", done.record_id))
+            events = await pool.fetch("SELECT event::text FROM llm_record_events WHERE record_id = $1",
+                                      done.record_id)
+            assert TOKEN not in json.dumps(record, default=str) and not any(TOKEN in r["event"] for r in events)
+            assert json.loads(record["metadata"])["processor_failure"] == failure
 
     run_db(test, monkeypatch, setup=seed_role_configs, timeout=60)
 
@@ -283,5 +299,55 @@ def test_startup_gives_the_builtin_claude_code_runtime_no_tools_and_leaves_regis
         rows = {r["id"]: list(r["capabilities"]) for r in await pool.fetch(
             "SELECT id, capabilities FROM agent_runtimes WHERE type = 'claude-code'")}
         assert "no_tools" in rows["rt-claude-code"] and rows["rt-claude-2"] == ["resume", "run"]
+
+    run_db(test, monkeypatch)
+
+
+@pytest.mark.parametrize("refuse", [False, True])
+def test_managed_hooks_are_reported_and_refuse_a_run_only_when_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                                   refuse: bool) -> None:
+    from looper.agents import processor
+    from looper.agents.runtimes import ManagedHooks
+    from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
+    from looper.agents.serve import seed_role_configs
+
+    hooks = ManagedHooks(source="/managed/settings.json", events=("UserPromptSubmit",))
+    monkeypatch.setattr(ClaudeCodeRuntime, "managed_hooks", lambda self: hooks)
+
+    async def test(pool: Any) -> None:
+        await processor.update_settings({"refuse_with_managed_hooks": refuse})
+        chosen = await processor.chosen_profile()
+        assert chosen["managed_hooks"] == {"source": "/managed/settings.json", "events": ["UserPromptSubmit"],
+                                           "readable": True}
+        assert (chosen["problem"] is not None) is refuse
+        done = await _run(tmp_path)
+        if refuse:
+            assert (done.failure.value, done.record_id) == ("refused", None) and "managed" in done.detail
+        else:
+            metadata = json.loads(await pool.fetchval("SELECT metadata FROM llm_records WHERE id = $1",
+                                                      done.record_id))
+            assert done.failure is None and metadata["managed_hooks"] == chosen["managed_hooks"]
+
+    run_db(test, monkeypatch, setup=seed_role_configs)
+
+
+def test_the_managed_hooks_setting_is_changed_through_the_api_with_confirmation(monkeypatch: pytest.MonkeyPatch,
+                                                                               tmp_path: Path) -> None:
+    from looper.agents import processor
+    from tests.db_support import v1_api
+
+    async def test(pool: Any) -> None:
+        async with v1_api(tmp_path, pool) as call:
+            status, asked = await call("processor_settings.update", {"refuse_with_managed_hooks": False}, client=True)
+            assert status == 202 and "managed hooks" in asked["impact"]
+            status, answer = await call("confirm", {"confirmation_id": asked["confirmation_id"]}, client=True)
+            assert status == 200 and answer["result"]["refuse_with_managed_hooks"] is False
+            status, answer = await call("processor_settings.update", {"refuse_with_managed_hooks": True})
+            assert status == 200 and (await processor.settings_view())["refuse_with_managed_hooks"] is True
+            status, answer = await call("processor_settings.update", {"refuse_with_managed_hooks": None})
+            assert status == 200 and answer["result"]["refuse_with_managed_hooks"] is False
+            status, answer = await call("processor_settings.update", {"refuse_with_managed_hooks": "yes"})
+            assert status == 400
+            assert await pool.fetchval("SELECT count(*) FROM system_settings WHERE key = $1", processor.REFUSE_KEY) == 0
 
     run_db(test, monkeypatch)
