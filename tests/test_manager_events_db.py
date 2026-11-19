@@ -1,5 +1,6 @@
 """Completion events: a task's end is recorded where its code notice is made, and nothing sent changes."""
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -373,3 +374,52 @@ def test_the_kind_of_a_notice_target():
     assert completion_events.target_kind(notice_of("dm", "t")) == "dm"
     assert completion_events.target_kind(notice_of("telegram_private", "t")) == "dm"
     assert completion_events.target_kind(notice_of("group", "t")) == "group"
+
+
+def test_a_failed_send_leaves_sent_at_empty_and_a_replay_sends_again(monkeypatch, tmp_path):
+    async def test(env: ScheduleEnv):
+        async def prepare():
+            sender = with_sender(env)
+            await allow_telegram(env)
+            schedule = await env.schedule(notify="always",
+                                          notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT})
+            run_id = await env.scheduler.run_now(schedule["schedule_id"])
+            return sender, run_id, (await db_schedules.get_run(run_id))["task_id"]
+
+        sender, run_id, task_id = await prepare()
+        sender.fail_with = "channel down"
+        await env.end_task(task_id, "completed", summary="done")
+        await env.scheduler.idle()
+        (row,) = await events(env.pool)
+        assert sender.sent == [] and row["sent_at"] is None
+        sender.fail_with = None
+        await env.scheduler._notifier.run_ended(run_id)
+        assert len(sender.sent) == 1 and (await events(env.pool))[0]["sent_at"] is not None
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("hang", ["record", "mark_sent"])
+def test_a_hanging_database_call_does_not_hold_back_the_notice(monkeypatch, tmp_path, hang):
+    async def check(pool):
+        manager, bus = await manager_with_task(pool, tmp_path)
+        monkeypatch.setattr(completion_events, "DB_TIMEOUT_SECONDS", 0.2)
+
+        async def hangs(*_, **__):
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(store, hang, hangs)
+        await asyncio.wait_for(manager._handle_goal_status(goal_status(notice=notice_of("dm", "ended"))), 5)
+        assert len(sent(bus, "channel-lark")) == 1
+        await bus.shutdown()
+
+    run_db(check, monkeypatch, timeout=30)
+
+
+def test_the_foreign_keys_that_are_cleared_or_cascaded_have_indexes(monkeypatch):
+    async def check(pool):
+        found = {row["indexname"] for row in await pool.fetch(
+            "SELECT indexname FROM pg_indexes WHERE tablename = 'manager_events'")}
+        assert {"idx_manager_events_task", "idx_manager_events_schedule_run", "idx_manager_events_record"} <= found
+
+    run_db(check, monkeypatch, timeout=30)

@@ -9,6 +9,7 @@ written, the notice is sent anyway.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -20,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 WEB_CHANNEL_ID = "channel-web"
 LEAD_CHARS = 600
+# A notice never waits longer than this for the event table (a lock wait or an exhausted pool).
+DB_TIMEOUT_SECONDS = 3.0
 
 
 def target_kind(notice: Notice) -> str:
@@ -42,9 +45,10 @@ async def _record(manager_id: str, task_id: str | None, **fields: Any) -> store.
     if not task_id:
         return None
     try:
-        recorded = await store.record(manager_id=manager_id, task_id=task_id, state="skipped", reason="off",
-                                      **fields)
-    except Exception:
+        recorded = await asyncio.wait_for(
+            store.record(manager_id=manager_id, task_id=task_id, state="skipped", reason="off", **fields),
+            DB_TIMEOUT_SECONDS)
+    except Exception:  # includes the timeout
         logger.exception("manager_event not recorded task=%s: sending the notice anyway", task_id)
         return None
     logger.info("manager_event recorded id=%s manager=%s task=%s target=%s state=%s reason=%s inserted=%s",
@@ -88,6 +92,6 @@ async def mark_sent(recorded: store.Recorded | None) -> None:
     if recorded is None:
         return
     try:
-        await store.mark_sent(recorded.row["id"])
+        await asyncio.wait_for(store.mark_sent(recorded.row["id"]), DB_TIMEOUT_SECONDS)
     except Exception:
         logger.exception("manager_event %s: could not record that its notice was sent", recorded.row["id"])

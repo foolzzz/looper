@@ -272,8 +272,8 @@ class Notifier:
             text = run_text(schedule, project_name, run, base=self._base)
             recorded = await self._record_end(schedule, run, text)
             if recorded is None or recorded.send_fallback:
-                await self._deliver(schedule, Kind.RUN, text, run_id=run_id)
-                await completion_events.mark_sent(recorded)
+                if await self._deliver(schedule, Kind.RUN, text, run_id=run_id) != "failed":
+                    await completion_events.mark_sent(recorded)
         now = self._clock()
         if status in db_schedules.FAILURES and schedule["consecutive_failures"] >= alert_policy(schedule).failures_after:
             if await self._switch(schedule["id"], "failures_alert_at", now):
@@ -414,7 +414,8 @@ class Notifier:
     async def _switch(schedule_id: str, column: str, at: datetime | None) -> bool:
         return await db_schedules.set_alert(db_connection.get_pool(), schedule_id, column, at)
 
-    async def _deliver(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None = None) -> None:
+    async def _deliver(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None = None) -> str:
+        """Send and record the message; its status: ``sent``, ``failed`` (not handed to a channel) or ``dashboard``."""
         from .schedules import notify_targets
 
         channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
@@ -443,3 +444,4 @@ class Notifier:
         except asyncpg.ForeignKeyViolationError:
             # Deleted since the message was written: its outbox went with it.
             logger.info("schedule %s was deleted: its %s message is not recorded", schedule["id"], kind.value)
+        return status

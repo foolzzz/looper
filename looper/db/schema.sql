@@ -1619,4 +1619,6 @@ CREATE INDEX IF NOT EXISTS idx_manager_events_open
     ON manager_events (manager_id, channel_id, chat, id) WHERE state IN ('pending', 'running');
 CREATE INDEX IF NOT EXISTS idx_manager_events_task ON manager_events (task_id);
 CREATE INDEX IF NOT EXISTS idx_manager_events_created ON manager_events (created_at);
+CREATE INDEX IF NOT EXISTS idx_manager_events_schedule_run ON manager_events (schedule_run_id) WHERE schedule_run_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_manager_events_record ON manager_events (record_id) WHERE record_id IS NOT NULL;
 -- manager events end
