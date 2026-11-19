@@ -68,14 +68,13 @@ from . import vault as vault_ops
 from .vault import TOOL_NAMES as VAULT_TOOL_NAMES, VaultUsage
 from ..agent_settings import CONCURRENCY_MAX, EMPTY_LAYER, PLANNER_CHOICE_ROLES, AgentType, Layer, index_layers
 from ..agent_settings import LayerValues, resolve
-from ..links import task_link
 from ..message import MessageEnvelope, MessageType, channel_address, planner_address
 from ..project_execution import ProjectExecution
 from ..projects import EDITABLE_STATUSES, allowed_profile_view, choosable_profiles
 from ..task_roles import NOT_ALLOWED, RoleError, RoleForbidden, RoleKind, TaskRole, Via, allowed_profile
 from ..task_roles import check_definition
 from ..task_roles import ITEMS_MAX, check_items, review_role_keys, role_items, role_key
-from ..task_notice import Notice, NotifyTarget, link_line, notify_channel
+from ..task_notice import Notice, NotifyTarget, notify_channel, task_link_line
 from ..tiers.journal import SUMMARY_MAX_CHARS, JournalKind, clip
 from ..tiers.worker import recheck_limits
 from . import ErrorCode, OpError, Risk, Tool, check_arguments
@@ -607,8 +606,9 @@ async def _notify(call: PlannerCall, task: Mapping[str, Any], lines: list[str], 
         return False
     name = db_tasks.task_name(title=task.get("title"), goal_id=task.get("goal_id"),
                               requirement=task.get("requirement"), task_id=call.task_id)
+    link = task_link_line(call.dashboard_url, call.task_id, channel, group=target.group)
     text = "\n".join([f"⚙️ 规划者调整了并发上限 · {clip(name, 40)}", *lines, *([f"理由：{reason}"] if reason else []),
-                      link_line(task_link(call.dashboard_url, call.task_id), channel)])
+                      *([link] if link else [])])
     try:
         await call.platform.bus.publish(MessageEnvelope.create(
             source=planner_address(call.task_id), target=channel_address(channel.value, task["origin_channel_id"]),

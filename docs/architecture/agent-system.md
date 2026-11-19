@@ -280,7 +280,7 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
   direct message, and for a group chat the group (`chat`, `oc_…`) with the
   sender to @-mention (`chat_mention`). `chat_group` says the chat is a group
   chat, of either channel (the turn's `group`); a task from before the
-  column reads as a direct chat.
+  column reads as a direct chat, so its notice stays the short one below.
   A task from before groups reads as it was sent then: a Lark task tells its
   sender, a Telegram task its chat.
   - A group chat is told only the task's end: the TaskRouter marks the
@@ -311,6 +311,21 @@ User → Chat/Lark/Telegram → Manager → TaskRouter → Planner → WorkerPoo
     delivered, or why the task ended), its line breaks kept, at most 300
     characters; the full text is on the task's page. Then the absolute link
     to that page (`links`; on Lark a Markdown link).
+  - In a group chat (`chat_group`) the people reading cannot open the
+    server's own address, so the notice carries the whole summary or closing
+    note instead of its first section, and the link only when the dashboard
+    address is public (`server.public_url` is set; `DashboardUrl.public`);
+    without one it has no link. A notice longer than 4,000 characters is sent
+    as several messages in order (`split_message`: cut between lines, a cut
+    inside a code fence closes it and reopens it in the next message, a
+    single over-long line cut where it must be). The first message keeps the
+    head line (and in Lark the @-mention), the rest are plain continuation. A
+    part that fails to send ends the notice; the parts already sent are not
+    sent again, and the delivery is recorded as failed as before. The gate
+    cards follow the same link rule (`task_link_line`); a group gets no wait
+    timeout or concurrency notice at all (above). A direct chat's notice, and
+    the dashboard, are unchanged. Schedule messages record no group fact and
+    keep their links.
   - A task without a notice gets its final status from the Manager as
     before: one asked for in the web chat, and one that recorded no chat. A
     task created from the dashboard or by a schedule is not told; the

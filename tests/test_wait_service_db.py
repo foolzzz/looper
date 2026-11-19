@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+
 from looper.agents import wait_service as service, waits
 from looper.agents.message import MessageType, channel_address, planner_address
 from looper.db import activity, projects, waits as db_waits

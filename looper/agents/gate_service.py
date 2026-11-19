@@ -69,6 +69,11 @@ class GateChat:
         """A Lark group: a reply there reaches the bot only when it @-mentions it, which the messages say."""
         return self.channel.is_lark and self.target.kind is TargetKind.CHAT
 
+    @property
+    def in_group(self) -> bool:
+        """A group chat, of either channel: the people there cannot open the server's own address."""
+        return self.lark_group or self.target.group
+
     def label(self) -> str:
         """The chat in words: "Lark group oc_...", "Lark ou_..." (a direct message), "Telegram 123"."""
         group = " group" if self.lark_group else ""
