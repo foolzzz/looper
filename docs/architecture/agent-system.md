@@ -5089,6 +5089,43 @@ will.
   in their `used_by` or `no_tools` among their capabilities: what the Manager
   sees is what it saw before the role.
 
+### Consults of the advisor
+
+A consult (`looper/agents/advisor.py`; [advisor RFC](rfcs/advisor-v0.zh-CN.md)) asks a stronger model about one
+step, through an abstract request that code checks first. Nothing starts one yet: the Planner's side comes behind
+the project switch `advisor` (RFC section 11).
+
+- **Two roles with no tools.** `advisor` answers; `advice_check` judges a request before it is sent. Their
+  runtime needs `run` and `no_tools` (`ROLE_CAPABILITIES`). Only their role layer (Settings → Roles) chooses their
+  Agent Profile and environment: the shared defaults and the project layers are for the roles with tools. With
+  none chosen each runs its own built-in profile (`profile_registry.BUILTIN_ROLE_PROFILES`, seeded with the schema
+  in `seeds.sql`): `claude-code/fable-5-2` (`claude-fable-5-2`, effort `high`) and `claude-code/haiku-5-5`
+  (`claude-haiku-5-5`). Without its built-in profile a role does not run, and no other model takes its place.
+  Their system prompt replaces the runtime's: the role prompt (`role_configs`) and the reply contract
+  (`advice.ADVISOR_CONTRACT`, `advice.JUDGE_CONTRACT`), with no harness.
+- **A consult** is an `agent_spawns` row (`open_consult`, `drafting`). Each request (`submit`) passes three checks
+  in order while the row is `linting`:
+  - format (`advice.parse_request`, AdviceRequest v1: typed fields within their limits, the kind's required items,
+    at most 12,000 characters; a checkpoint takes only `plan_review`);
+  - code (`advice_lint.lint`: secrets, a binding's real value, local paths, URLs, addresses and ids, raw logs,
+    dangling references, text copied from the local material);
+  - the judge (one `advice_check` run over the request alone: standalone, no leak, answerable at least 0.6).
+- **When a check fails**, the request goes back with what to fix. The message names the category and position,
+  never what was matched, and the row records the same. After 2 returns the consult is `blocked`. A judge that
+  cannot judge fails the consult: no request goes out unjudged.
+- **A request that passes** becomes the consult's question (`advisor_advice`) and starts a round of the advisor
+  (`spawn.run_child`, a fresh process each round). Its answer must fit AdviceResponse v1 (`advice.parse_response`),
+  or the consult fails.
+- **Rounds.** A `needs_info` answer waits for the Planner's supplement, which is checked again. A consult has at
+  most 3 rounds.
+- **Refusals.** A run whose model refused (`stop_reason: refusal`), or that another model answered, fails as
+  `refused`.
+- **Budget.** Each round's `--max-budget-usd` is what the consult has left (the judge's cost included). With less
+  than 0.10 USD left, the consult is `over_budget`.
+- **Records.** Every run's record has `run_kind` `advisor` or `advice_check` and the Planner's turn as its
+  `parent_record_id`. Its cost is the task's, counted in the Planner's share of `task_costs`.
+- **Restarts.** At startup, a consult a stopped server left `linting` or `asking` fails (`interrupted`).
+
 ### Turns Claude runs on its own
 
 A resident Claude (Manager, Planner) also runs turns that answer no message.
