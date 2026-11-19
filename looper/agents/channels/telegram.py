@@ -41,7 +41,7 @@ from ..message import (
     manager_address,
     parse_channel_id,
 )
-from ..task_notice import NotifyTarget
+from ..task_notice import Notice, NotifyTarget, split_message
 from .allowlist import SenderAllowlist
 from .. import chat_attachments, chat_commands, chat_settings
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostReceipt
@@ -335,7 +335,19 @@ class TelegramChannelAdapter(ChannelAdapter):
                 chat = int(envelope.payload.get("chat") or "")
             except ValueError:
                 return DeliveryReceipt(channel="telegram", success=False, error="a notice without a Telegram chat id")
-            return await self._send_answer(chat, str(envelope.payload.get("text") or ""))
+            notice = Notice.from_payload(envelope.payload)
+            if notice is None or not notice.target.group:
+                return await self._send_answer(chat, str(envelope.payload.get("text") or ""))
+            # A group's notice carries the whole summary: several messages in order. A part that fails ends the
+            # notice; the parts before it are not sent again.
+            parts = split_message(notice.text)
+            for number, part in enumerate(parts):
+                receipt = await self._send_answer(chat, part)
+                if not receipt.success:
+                    logger.warning("%s: part %d of %d of a task's end notice to %s failed: %s", self._channel_id,
+                                   number + 1, len(parts), chat, receipt.error)
+                    return receipt
+            return receipt
         corr_id = envelope.correlation_id
         chat_id = self._correlation_chat.get(corr_id)
         if chat_id is None and envelope.target == self._address:
