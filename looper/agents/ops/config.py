@@ -274,7 +274,11 @@ def _type_listed(view: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _profile_listed(view: Mapping[str, Any], profiles: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    used = profile_registry.usage_text(view["used_by"])
+    from ..runtimes import TOOL_ROLES
+
+    used_by = view["used_by"]
+    used = profile_registry.usage_text({**used_by, "layers": [
+        layer for layer in used_by["layers"] if layer["role"] is None or layer["role"] in TOOL_ROLES]})
     fallback_id = view.get("fallback_profile_id")
     return {"profile_id": view["profile_id"], "name": view["name"], "runtime": view["runtime_name"],
             "provider": view["provider"], "model_id": view["model_id"], "model": view["model"],
