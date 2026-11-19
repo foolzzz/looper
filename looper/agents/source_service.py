@@ -223,7 +223,8 @@ async def _pass(source: Mapping[str, Any], directory: Path, mode: str, trigger: 
                 raise
             except Exception as exc:
                 # Name the failure by chat and kind, never by its text: a database error can quote a message.
-                logger.warning("bridge read of a chat failed: %s", type(exc).__name__, exc_info=True)
+                logger.warning("bridge read of chat %s failed: %s", path.stem, type(exc).__name__)
+                logger.debug("bridge read failure", exc_info=True)
                 failures.append(f"{path.stem}: {type(exc).__name__}")
         report.files_failed = len(failures)
         report.failed_chats = [item.split(":", 1)[0] for item in failures]
