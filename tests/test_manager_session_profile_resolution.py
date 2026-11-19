@@ -52,7 +52,7 @@ def test_only_the_managers_chain_gains_the_session_layer(role: AgentType) -> Non
         assert chain == [(Layer.SYSTEM, None), (Layer.ROLE, AgentType.MANAGER),
                          (Layer.MANAGER, AgentType.MANAGER), (Layer.SESSION, AgentType.MANAGER)]
     else:
-        assert chain[-1] == (Layer.TASK, role)
+        assert chain[-1] == ((Layer.SCHEDULE, role) if role is AgentType.PROCESSOR else (Layer.TASK, role))
 
 
 @pytest.mark.parametrize("role, expected", [(AgentType.MANAGER, True), (AgentType.PLANNER, False)])

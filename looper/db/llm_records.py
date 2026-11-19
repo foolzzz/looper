@@ -327,12 +327,13 @@ async def list_events(
 
 # Which records belong to an agent role (the roles of role_configs). Each
 # task's Planner records its turns as planner-<task_id>; Workers and Reviewers
-# record under their per-run instance id.
+# record under their per-run instance id; the processor as processor:<owner>.
 _ROLE_FILTERS = {
     "manager": "(agent_id = 'manager' OR agent_id LIKE 'manager-%')",
     "planner": "agent_id LIKE 'planner-%'",
     "worker": "agent_id LIKE 'worker-%'",
     "reviewer": "agent_id LIKE 'reviewer-%'",
+    "processor": "agent_id LIKE 'processor:%'",
 }
 # A task's step runs: its Workers' and its Reviewers'.
 _STEP_RUNS = f"({_ROLE_FILTERS['worker']} OR {_ROLE_FILTERS['reviewer']})"

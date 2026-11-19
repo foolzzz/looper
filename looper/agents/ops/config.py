@@ -256,8 +256,29 @@ async def _confirming_project(call: Call) -> str | None:
 # --- looper_agent_profiles and looper_providers ---
 
 
+def _tool_roles(roles: Iterable[str]) -> list[str]:
+    """The roles with tools among ``roles``: the processor and its ``no_tools`` capability are configured on the
+    dashboard, so this tool lists what it did before them."""
+    from ..runtimes import TOOL_ROLES
+
+    return [role for role in roles if role in TOOL_ROLES]
+
+
+def _type_listed(view: Mapping[str, Any]) -> dict[str, Any]:
+    """A runtime type as this tool lists it: without the processor among its roles or ``no_tools`` among its
+    capabilities (``_tool_roles``)."""
+    from ..runtimes import Capability
+
+    return {**view, "roles": _tool_roles(view["roles"]),
+            "capabilities": [c for c in view["capabilities"] if c != Capability.NO_TOOLS.value]}
+
+
 def _profile_listed(view: Mapping[str, Any], profiles: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    used = profile_registry.usage_text(view["used_by"])
+    from ..runtimes import TOOL_ROLES
+
+    used_by = view["used_by"]
+    used = profile_registry.usage_text({**used_by, "layers": [
+        layer for layer in used_by["layers"] if layer["role"] is None or layer["role"] in TOOL_ROLES]})
     fallback_id = view.get("fallback_profile_id")
     return {"profile_id": view["profile_id"], "name": view["name"], "runtime": view["runtime_name"],
             "provider": view["provider"], "model_id": view["model_id"], "model": view["model"],
@@ -266,7 +287,7 @@ def _profile_listed(view: Mapping[str, Any], profiles: Iterable[Mapping[str, Any
             "custom_prompt": view.get("custom_prompt", ""),
             "fallback_profile_id": fallback_id,
             "fallback_profile_name": next((p["name"] for p in profiles if p["profile_id"] == fallback_id), None),
-            "roles": view["roles"], "builtin": view["builtin"],
+            "roles": _tool_roles(view["roles"]), "builtin": view["builtin"],
             "used_by": used or None}
 
 
@@ -321,9 +342,9 @@ async def _profiles(call: Call) -> dict[str, Any]:
     registry = await _registry(call)
     if action == "list":
         return {"profiles": [_profile_listed(p, registry["profiles"]) for p in registry["profiles"]],
-                "runtimes": [{"runtime_id": r["runtime_id"], "name": r["name"], "type": r["type"], "roles": r["roles"]}
-                             for r in registry["runtimes"]],
-                "runtime_types": registry["runtime_types"],
+                "runtimes": [{"runtime_id": r["runtime_id"], "name": r["name"], "type": r["type"],
+                              "roles": _tool_roles(r["roles"])} for r in registry["runtimes"]],
+                "runtime_types": [_type_listed(t) for t in registry["runtime_types"]],
                 "models": [{key: m[key] for key in ("model_id", "provider_id", "provider_name", "name", "protocol")}
                            for m in registry["models"]]}
     if action == "create":

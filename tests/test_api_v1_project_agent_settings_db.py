@@ -33,7 +33,7 @@ def test_project_role_system_precedence_and_null_inheritance_readback(tmp_path, 
                            "env": [{"key": "MODE", "value": "project"}]}}, operator=True)
             result = _result("project_agent_settings.update", body)
             assert status == 200 and result["project"]["values"]["run_budget_usd"] == 4
-            assert set(result["roles"]) == {"planner", "worker", "reviewer"}
+            assert set(result["roles"]) == {"planner", "worker", "reviewer", "processor"}
             assert result["roles"]["worker"]["effective"]["harness_prompt"] == {
                 "value": "Project example", "source": "project"}
             status, body = await _post(server, "project_agent_settings/update_role", {"project_id": project_id,
@@ -136,8 +136,8 @@ def test_budget_update_without_an_effective_increase_does_not_require_confirmati
     async def run(pool):
         project_id = await _project(pool)
         await agent_settings.update_project(project_id, {"run_budget_usd": 4})
-        for task_role in ("planner", "worker", "reviewer"):
-            await agent_settings.update_project(project_id, {"run_budget_usd": 2}, task_role)
+        for project_role in ("planner", "worker", "reviewer", "processor"):
+            await agent_settings.update_project(project_id, {"run_budget_usd": 2}, project_role)
         async with _configured(tmp_path) as server:
             path = "project_agent_settings/update_role" if role else "project_agent_settings/update"
             status, body = await _post(server, path, {"project_id": project_id,
