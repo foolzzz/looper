@@ -121,8 +121,9 @@ def test_project_directory_contract_matches_the_configured_root(monkeypatch, tmp
         assert "do not ask the user for a directory" in contract
         assert "A new project, or one without a default, needs the user" not in contract
     else:
-        # The unconfigured contract remains byte-identical to main before projects.root.
-        assert _sha(contract) == "2e4c00e9ec58332739186a1ff03b82e9594be6155acd7efa5e93f68862d78eff"
+        # The unconfigured contract is byte-identical to the reviewed one (since: a group chat is shown only the
+        # question whether to start or enable).
+        assert _sha(contract) == "41f2b15165aa64aeff54c7fb9108cce3fed2cd8d9973a88dd477d3423cacf448"
 
 
 @pytest.mark.usefixtures("agent_db")

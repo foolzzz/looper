@@ -185,6 +185,29 @@ def test_a_schedule_is_created_disabled_with_its_configuration_and_enabled_only_
     run_db(test, monkeypatch)
 
 
+def test_a_schedule_made_in_a_group_chat_shows_only_the_question_whether_to_enable_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """A group's members are not shown the schedule's configuration (directory, requirement, caps): only the
+    question; the schedule is created as from a direct chat."""
+    from looper.agents.ops.schedules import GROUP_ENABLE_QUESTION
+
+    async def test(pool: Any) -> None:
+        await _project(pool, "calc", str(tmp_path))
+        chat = _Chat(tmp_path, group=True)
+        (created,) = await chat.say("每个工作日早上 9 点检查依赖", _create())
+
+        assert created["status"] == "ok" and created["result"]["enabled"] is False, created
+        assert created["result"]["shown_to_user"] == (
+            "In this group chat Looper adds only the question whether to enable it after your reply, not the "
+            "schedule's configuration; do not repeat the question or list the configuration, and enable it only "
+            "when the user answers.")
+        assert chat.turns[0].blocks == [GROUP_ENABLE_QUESTION]
+        assert (await _view("deps"))["enabled"] is False
+
+    run_db(test, monkeypatch)
+
+
 def test_user_gates_are_configured_listed_changed_and_shown_before_enabling(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:

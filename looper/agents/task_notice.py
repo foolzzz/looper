@@ -5,13 +5,15 @@ Telegram and Lark can send a message unprompted (``ChannelAdapter.notify``),
 so a task asked for in one of them is told of its end there, once: when it
 completes or fails, the TaskRouter adds a ``Notice`` to the final status it
 passes to the Manager, for the ``NotifyTarget`` the task recorded when the
-Manager created it (``tasks.chat_id``, ``chat_kind`` and ``chat_mention``): a
-Telegram chat, a Lark user (a direct message), or a Lark group with the
-requester to @-mention. The Manager sends the notice to the channel instead of
-the final summary, on the same path as the task's progress, so it is the
-task's last message in that chat. A task without a notice (the web chat, or
-one that recorded no chat) gets its final status from the Manager as before;
-the dashboard shows the task.
+Manager created it (``tasks.chat_id``, ``chat_kind``, ``chat_mention`` and
+``chat_group``): a Telegram chat, a Lark user (a direct message), or a Lark
+group with the requester to @-mention. The Manager sends the notice to the
+channel instead of the final summary, on the same path as the task's progress,
+so it is the task's last message in that chat. A group chat (``group``) gets
+only the notice: its members asked a question, and the task's breakdown,
+progress and phase reports are the operator's (the dashboard shows them). A
+task without a notice (the web chat, or one that recorded no chat) gets its
+final status from the Manager as before; the dashboard shows the task.
 """
 
 from __future__ import annotations
