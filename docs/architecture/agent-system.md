@@ -4518,13 +4518,28 @@ default) or a source that is `off`, the server does one query per tick.
   the file is read again from the start. Only newline-terminated lines are read,
   a duplicate line is stored once (first copy wins, `UNIQUE (source_id,
   external_id)`), and line order is not send order.
-- **Commit:** one transaction per file holds its events, its saved state, the
-  run's counters and `committed_seq` (the largest `seq` stored, only growing), so
-  a pass killed in the middle of a file loses nothing and repeats nothing.
-- **Origin:** a file read for the first time keeps its last 24 hours (an import:
-  `--days`) and marks them `import`; later lines sent over 24 hours before they
-  were stored are `history`, the rest `live`; a later read keeps nothing older
-  than seven days, so a collector that rewrites a file cannot bring its history in.
+- **Commit:** a file is read in chunks of at most 8 MB, one transaction per
+  chunk holding its events, the file's saved state, the run's counters and
+  `committed_seq` (the largest `seq` stored, only growing). A pass killed in
+  the middle of a file loses nothing, repeats nothing and resumes at the last
+  chunk.
+- **Where a source starts** (`bridge_start_from`): `end` (the default) saves
+  every file's current end the first time it sees it and stores only what is
+  appended after; `beginning` reads each file from its start on its first read,
+  marking those events `import`. `looper msgflow import --days N` reads every
+  file from its start for the last N days in either case.
+- **Origin:** a first read or an import is `import`; later lines sent over 24
+  hours before they were stored are `history`, the rest `live`. A source that
+  starts from the end keeps nothing older than seven days from a later read, so
+  a collector that rewrites a file cannot bring its history in.
+- **Retention at the door:** a body older than its source's
+  `app_body_retention_days` (messages from apps, default 30) or
+  `body_retention_days` (people, default none) is stored as text only
+  (`body` NULL, `body_dropped_at` set). No job clears bodies later yet.
+- **Import report** (`looper msgflow import [--per-file]`): per file, messages
+  read, distinct ids, new, already stored or repeated, skipped, lines that were
+  not a message, an unterminated last line and files read again; every file
+  must add up (read = new + already stored + skipped).
 - **Looper does not read itself back:** messages sent by an app that one of
   Looper's own enabled Lark channels acts as are not stored (app ids come from
   the channel configuration), and a direct chat holding one is excluded
@@ -4535,8 +4550,8 @@ default) or a source that is `off`, the server does one query per tick.
   bridging on or off (the dashboard's switch). `looper msgflow import --days N
   [--dry-run] [--source ID]` reads every file from its start and stores the last
   N days; `--dry-run` rolls back what it counted.
-- **Not yet:** retention (the body columns and the settings exist; nothing
-  clears them), deleting a chat, the collector, subscriptions.
+- **Not yet:** a retention job for bodies already stored, deleting a chat, the
+  collector, subscriptions.
 
 ### User gates
 
