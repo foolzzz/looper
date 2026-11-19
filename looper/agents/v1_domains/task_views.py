@@ -118,7 +118,12 @@ OPERATIONS = (
         "Read a full task list page. Includes filters, status counts and an older-page cursor.",
         _object({"project_id": _STR, "schedule_id": _STR, "group": _GROUP,
             "manager_id": {"type": "string", "minLength": 1},
-            "status": {"type": "string", "enum": list(tasks.STATUS_GROUPS)}, "before": _STR,
+            "status": {"type": "string", "enum": list(tasks.STATUS_GROUPS)},
+            "statuses": {"type": "array", "items": {"type": "string", "minLength": 1},
+                         "minItems": 1, "maxItems": 10,
+                         "description": "Status filter names, the same names as status, 1 to 10. "
+                                        "The page is their union. Not together with status. Counts stay per filter."},
+            "before": _STR,
             "limit": {"type": "integer", "minimum": 1, "maximum": projects.TASKS_PAGE_MAX}, "query": _STR,
             "exclude_scheduled": {"type": "boolean", "description":
                 "Leave out tasks an agent schedule created (default false); not with schedule_id."}},
@@ -127,7 +132,7 @@ OPERATIONS = (
                  "description": "Counts by status filter; each task counted once. Unknown statuses keep their keys."},
                  "next_before": _NULL_STR,
                  "hidden_scheduled": {**_INT, "description": "How many tasks exclude_scheduled left out under the "
-                     "other filters (not status or cursor); 0 when it is not set."}}), risk="read"),
+                     "other filters (not status, statuses or the cursor); 0 when it is not set."}}), risk="read"),
     Operation("tasks.detail", "POST", "/api/v1/tasks/detail", "Read a task's full detail.",
         "Read a task's full detail. Includes configuration, history, workspaces and cost.",
         _object({"task_id": {"type": "string", "minLength": 1}}, closed=True), TASK_DETAIL, risk="read"),
