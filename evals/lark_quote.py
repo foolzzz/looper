@@ -131,11 +131,11 @@ def _answers(calls: list[list[str]]) -> dict[str, str]:
 
 def run_once(args: argparse.Namespace, stand_in: Any, root: Path) -> dict[str, Any]:
     import asyncpg
-    from evals.prompt_regression import runner
     from looper.agents.ops import API_CHANNEL
     from looper.agents.serve import seed_channel_configs
     from looper.db import connection
 
+    runner = args.runner
     runtime, bin_dir = root / "runtime", root / "bin"
     for path in (runtime, bin_dir, root / "home"):
         path.mkdir(parents=True)
@@ -186,10 +186,12 @@ def run_once(args: argparse.Namespace, stand_in: Any, root: Path) -> dict[str, A
             if args.mode == "real":
                 agent = runner.register_agent(api, args.spec)["name"] if args.spec else args.agent
                 chosen = runner.select_agent(api, agent=agent, model=args.model)
+                if args.spec:  # a registered agent runs under the same per-run cap as the others
+                    api.post("/api/v1/agent_settings/update_system", {"values": {
+                        "profile_id": chosen["profile_id"], "run_budget_usd": args.max_budget_usd}})
                 runner.require_claude(args.mode, args.claude, [chosen.get("runtime_type")])
                 if args.manager_model:
-                    from evals.prompt_regression.dialogs import _manager_profile
-                    _manager_profile(api, args.manager_model, args.manager_effort)
+                    args.dialogs._manager_profile(api, args.manager_model, args.manager_effort)
             world_file.write_text(json.dumps(full), encoding="utf-8")  # the consumer's next start delivers them
             deadline = time.monotonic() + args.timeout
             while time.monotonic() < deadline and not CASES.keys() <= _answers(_calls(log)).keys():
@@ -256,10 +258,18 @@ def main() -> int:
         parser.error("give --pg-url or LOOPER_EVAL_DATABASE_URL (a disposable PostgreSQL server)")
     if args.port == 8767:
         parser.error("8767 is the operator's port")
+    # The flags, their validation and the server API calls come from this script's own checkout; --checkout only
+    # chooses the server (and the looper code that seeds its database), which an older checkout may lack the helpers for.
+    sys.path.insert(0, str(HERE))
+    from evals.prompt_regression import dialogs, runner
+
+    args.runner, args.dialogs = runner, dialogs
     if args.checkout:
-        sys.path.insert(0, str(Path(args.checkout).resolve()))
+        runner.REPO_ROOT = Path(args.checkout).resolve()
+        for name in [m for m in sys.modules if m.split(".")[0] in ("looper", "evals") and m != "evals.lark_quote"]:
+            del sys.modules[name]
+        sys.path.insert(0, str(runner.REPO_ROOT))
     sys.path.insert(1, str(HERE / "tests"))
-    from evals.prompt_regression import runner
 
     args.spec = json.loads(args.register_agent.read_text(encoding="utf-8")) if args.register_agent else None
     try:

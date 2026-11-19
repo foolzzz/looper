@@ -1,7 +1,10 @@
 """The evals choose their agent's runtime and model by flags, and need the `claude` binary only for Claude Code."""
 
+import importlib
 import json
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -111,3 +114,53 @@ def test_dsh_consult_replay_model_and_effort_flags(monkeypatch):
 
 async def _noop():
     return None
+
+
+def test_lark_quote_register_agent_keeps_the_per_run_budget_cap(monkeypatch, tmp_path):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    posts = []
+
+    class Api:
+        def post(self, path, body):
+            posts.append((path, body))
+            return {"result": {}}
+
+    @contextmanager
+    def server(**kwargs):
+        kwargs["log_path"].write_text("")
+        yield Api()
+
+    @contextmanager
+    def database(url):
+        yield "postgresql://x/y", None
+
+    runner = SimpleNamespace(
+        install_claude=lambda *a, **k: None, fresh_database=database, running_server=server,
+        register_agent=lambda api, spec: {"name": "codex-eval"},
+        select_agent=lambda api, agent, model: {"profile_id": "p-codex", "runtime_type": "codex"},
+        require_claude=lambda *a: None)
+    args = SimpleNamespace(mode="real", spec=CODEX, agent=None, model="sonnet", manager_model=None, port=0,
+                           timeout=0, pg_url="x", claude=None, max_budget_usd=2.5, runner=runner, dialogs=None)
+    monkeypatch.setattr(lark_quote.asyncio, "run", lambda coro: coro.close() or {
+        "tasks": 0, "manager_writes": [], "cost_usd": 0.0})
+    monkeypatch.setattr(lark_quote.time, "sleep", lambda s: None)
+    stand_in = importlib.import_module("lark_cli_stand_in")
+    lark_quote.run_once(args, stand_in, tmp_path)
+    assert ("/api/v1/agent_settings/update_system",
+            {"values": {"profile_id": "p-codex", "run_budget_usd": 2.5}}) in posts
+
+
+def test_lark_quote_checkout_validates_with_the_current_helpers(tmp_path):
+    old = tmp_path / "old"  # an old checkout: its runner has none of the flag helpers
+    (old / "evals" / "prompt_regression").mkdir(parents=True)
+    (old / "evals" / "__init__.py").write_text("")
+    (old / "evals" / "prompt_regression" / "__init__.py").write_text("")
+    (old / "evals" / "prompt_regression" / "runner.py").write_text("REPO_ROOT = None\n")
+    done = subprocess.run(
+        [sys.executable, "-m", "evals.lark_quote", "--mode", "real", "--pg-url", "postgresql://x/y",
+         "--claude", "", "--checkout", str(old)],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 2 and "needs the `claude` CLI" in done.stderr
+    assert "AttributeError" not in done.stderr
