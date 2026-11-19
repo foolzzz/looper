@@ -14,7 +14,8 @@ and confirms in the next message.
 
 A new schedule is disabled. Looper adds its configuration (the rule in words,
 its next fire times, what it runs and what bounds it) to the reply, with the
-question whether to enable it: enabling is the approval (scheduled-tasks RFC
+question whether to enable it (in a group chat only the question: the
+configuration is the operator's): enabling is the approval (scheduled-tasks RFC
 D6), confirmed in the user's next message, so a schedule this turn created is neither enabled nor run in this turn
 (``Turn.created``): the user has not seen it yet. A change adds what it
 changed, before and after.
@@ -48,6 +49,8 @@ OPEN_WORDS = {db_schedules.RUNNING: "任务运行中", db_schedules.GATING: "前
 # How many next fire times a schedule's configuration shows.
 NEXT_SHOWN = 3
 ENABLE_QUESTION = "要启用吗？回复「启用」就启用，之后按规则无人值守地运行；也可以稍后在 Schedules 页打开它的开关。"
+# A group chat's, without the configuration (``tasks.GROUP_START_QUESTION``).
+GROUP_ENABLE_QUESTION = "要启用吗？@我回复「启用」就启用，之后按规则无人值守地运行。"
 # A schedule's settings as the user is shown them, in this order; ``fields.profiles`` is the API's profile_overrides.
 FIELD_WORDS = {
     "name": "名称", "cron": "时间规则", "timezone": "时区", "work_dir": "目录", "requirement": "需求",
@@ -290,8 +293,8 @@ def _not_created_now(call: Call, row: Mapping[str, Any]) -> None:
     """Refuses enabling or running a schedule this turn created."""
     action = call.arguments["action"]
     if action in ("enable", "run") and row["id"] in call.turn.created:
-        raise OpError(ErrorCode.CONFLICT, f"schedule {row['name']} was created in this turn: Looper shows the user its "
-                                          "configuration after your reply, with the question whether to enable it. "
+        raise OpError(ErrorCode.CONFLICT, f"schedule {row['name']} was created in this turn: Looper asks the user "
+                                          "after your reply whether to enable it. "
                                           f"Do not {action} it now; do it when the user answers")
 
 
@@ -317,11 +320,17 @@ async def _create(call: Call) -> dict[str, Any]:
     await _check_notify_target(call, data)
     view = (await answered(schedules.create_schedule(project["id"], data, created_via="manager")))["schedule"]
     turn.created.add(view["schedule_id"])
-    turn.blocks.append("\n".join([
-        "定时任务已创建，还没有启用：", *await _configuration(view, project), "", ENABLE_QUESTION]))
-    return {"schedule": _listed(view), "enabled": False,
-            "shown_to_user": "Looper adds the schedule's configuration and the question whether to enable it after "
-                             "your reply; do not repeat them, and enable it only when the user answers."}
+    if turn.group:
+        turn.blocks.append(GROUP_ENABLE_QUESTION)
+        told = ("In this group chat Looper adds only the question whether to enable it after your reply, not the "
+                "schedule's configuration; do not repeat the question or list the configuration, and enable it only "
+                "when the user answers.")
+    else:
+        turn.blocks.append("\n".join([
+            "定时任务已创建，还没有启用：", *await _configuration(view, project), "", ENABLE_QUESTION]))
+        told = ("Looper adds the schedule's configuration and the question whether to enable it after your reply; "
+                "do not repeat them, and enable it only when the user answers.")
+    return {"schedule": _listed(view), "enabled": False, "shown_to_user": told}
 
 
 def _refuse_other_owner_template(call: Call, row: Mapping[str, Any], data: Mapping[str, Any]) -> None:

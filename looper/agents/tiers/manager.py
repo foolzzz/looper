@@ -252,8 +252,9 @@ task's Planner waits for the user to answer).
   gate's questions yourself, and do not pass on a message that is not about one.
 - Looper writes some things to the user itself, after your reply: a new
   task's or schedule's configuration with the question whether to start or
-  enable it, what a schedule change changed, and what an operation needing
-  confirmation does. Do not repeat them; refer to them.
+  enable it (in a group chat only the question), what a schedule change
+  changed, and what an operation needing confirmation does. Do not repeat
+  them; refer to them.
 - Besides a new task (the user confirms it first, as above), do not ask the
   user to confirm an operation they asked for, such as creating, enabling,
   running, changing or deleting a schedule: call its tool. Looper asks them
@@ -296,7 +297,7 @@ Instead, follow this flow:
    - Any assumptions you are making
 2. **Wait for confirmation**: Ask the user to confirm, e.g. "确认创建吗？" / "Shall I create it?"
 3. **Create task**: ONLY after the user explicitly confirms (says things like "确认", "开始", "go", "yes", "好", "可以", "proceed"), call looper_task_create with a clear one-paragraph requirement that includes the clarifications, a title of a few words in the user's language, the project, and the directory when the user named one.
-4. **Start**: Creating a task does not start it. Looper adds the task's configuration to your reply and asks the user whether to start it now. When the user says to start it, call looper_task_control with action start. When the user declines or wants to wait, remind them how to start it later: by telling you, or with Start on the Tasks page.
+4. **Start**: Creating a task does not start it. Looper adds the task's configuration to your reply (in a group chat it leaves it out) and asks the user whether to start it now. When the user says to start it, call looper_task_control with action start. When the user declines or wants to wait, remind them how to start it later: by telling you, or with Start on the Tasks page.
 
 If the user says "不", "取消", "算了", "no", "cancel" or modifies the requirement, do NOT create the task. Instead continue the conversation.
 
@@ -560,6 +561,12 @@ def _message_origin(envelope: MessageEnvelope) -> dict[str, Any]:
             group = False
     return {"channel": channel, "channel_id": getattr(envelope.source, "agent_id", None),
             "sender": str(sender) if sender else None, "chat": chat, "group": group}
+
+
+def _group_task(envelope: MessageEnvelope) -> bool:
+    """Whether a task's report is of a task asked for in a group chat (``TaskRouter._report_metadata``): the group is
+    told the task's end, never its breakdown, progress or phase reports (``task_notice``)."""
+    return envelope.metadata.get("origin_group") is True
 
 
 def _recorded_origin(origin: dict[str, Any]) -> dict[str, Any]:
@@ -1783,7 +1790,7 @@ class ManagerAgent:
                 correlation_id=envelope.correlation_id,
                 metadata={"origin_channel_id": origin},
             ))
-        elif origin:
+        elif origin and not _group_task(envelope):
             progress_text = envelope.payload.get("phase_text") or envelope.payload.get("summary", "")
             if progress_text:
                 await self._task_progress(envelope, progress_text)
@@ -1822,7 +1829,7 @@ class ManagerAgent:
             title = envelope.metadata.get("task_title") or ""
             step_count = envelope.payload.get("step_count", 0)
             await self._web_thread_reply(envelope, thread, f"任务「{title}」已分解为 {step_count} 个步骤，开始执行。")
-        elif origin:
+        elif origin and not _group_task(envelope):
             step_count = envelope.payload.get("step_count", 0)
             await self._task_progress(envelope, f"任务已分解为 {step_count} 个步骤，开始执行...")
 

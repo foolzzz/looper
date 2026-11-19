@@ -41,6 +41,8 @@ def test_task_creation_keeps_progress_destination(monkeypatch, channel, group):
             assert row["chat_id"] == "ou_1" and row["chat_id"] != expected["chat_id"]
         restored = Task.from_row(row["id"], row)
         assert TaskRouter._report_metadata(question, restored)["reply_route"] == expected
+        # Whether it came from a group, which decides whether its progress is posted there.
+        assert row["chat_group"] is group and restored.notify is not None and restored.notify.group is group
 
     run_db(run, monkeypatch, timeout=20)
 
@@ -60,3 +62,4 @@ def test_existing_baseline_upgrades_once_and_preserves_tasks(monkeypatch):
         assert await pool.fetchval("SELECT count(*) FROM schema_migrations WHERE name = 'task_reply_route'") == 1
 
     run_db(run, monkeypatch, timeout=20)
+
