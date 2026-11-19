@@ -1030,9 +1030,15 @@ class LarkChannelAdapter(ChannelAdapter):
                         read(target, timeout=deadline - monotonic()),
                         self._transport.list_thread_messages(ref.thread_id),  # type: ignore[attr-defined]
                         return_exceptions=True)
-                    for result in (root, page):
-                        if isinstance(result, BaseException):
-                            raise result
+                    if isinstance(root, BaseException):
+                        raise root
+                    if isinstance(page, BaseException):
+                        if target != ref.parent_id or not isinstance(page, (TimeoutError, LarkCliError)):
+                            raise page
+                        # It replies to the first message, which is read: that alone, as a reply.
+                        logger.warning("%s: could not list thread %s: %s", self.channel_id, ref.thread_id,
+                                       lark_quote.failure(page))
+                        return root, [], ""
                     shown = {ref.message_id, target, ref.parent_id}
                     replies = [item for item in page["messages"] if item.get("message_id") not in shown]
                     return root, replies[:lark_quote.THREAD_TAIL][::-1], ""
@@ -1053,6 +1059,8 @@ class LarkChannelAdapter(ChannelAdapter):
         quotes: list[lark_quote.Quote] = []
         resources: list[lark_content.ResourceRef] = []
         for (kind, target), (items, thread, error) in zip(wanted, read_all):
+            if kind is QuoteKind.THREAD and target == ref.parent_id and not thread:
+                kind = QuoteKind.REPLY  # it replies to the first message, and nothing else in the thread is shown
             quote, found = lark_quote.build(kind, target, items, thread=thread, names=names, error=error,
                                             own=(self._bot_open_id, self._bot_app_id), after=after + len(resources))
             quotes.append(quote)

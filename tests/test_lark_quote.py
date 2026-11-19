@@ -143,16 +143,27 @@ def test_a_senders_name_cannot_end_the_tag_or_start_a_line(name: str) -> None:
 
 
 @pytest.mark.parametrize(("fields", "forward", "kind", "targets"), [
+    # A reply chain without a thread: the message replied to.
     ({"reply_to": "om_p", "root_id": "om_p"}, False, QuoteKind.REPLY, [(QuoteKind.REPLY, "om_p")]),
-    ({"reply_to": "om_p", "root_id": "om_r"}, False, QuoteKind.REPLY, [(QuoteKind.REPLY, "om_p")]),  # no thread
+    ({"reply_to": "om_p", "root_id": "om_r"}, False, QuoteKind.REPLY, [(QuoteKind.REPLY, "om_p")]),
+    # In a thread, replying to its first message: the thread, its first message read once.
+    ({"reply_to": "om_r", "root_id": "om_r", "thread_id": "omt"}, False, QuoteKind.THREAD,
+     [(QuoteKind.THREAD, "om_r")]),
+    # In a thread, replying to another message in it: that message, and the thread.
     ({"reply_to": "om_p", "root_id": "om_r", "thread_id": "omt"}, False, QuoteKind.THREAD,
      [(QuoteKind.REPLY, "om_p"), (QuoteKind.THREAD, "om_r")]),
-    ({"reply_to": "om_r", "root_id": "om_r", "thread_id": "omt"}, False, QuoteKind.REPLY, [(QuoteKind.REPLY, "om_r")]),
+    # In a thread, replying to nothing (its first message, say): nothing.
+    ({"thread_id": "omt"}, False, None, []),
+    ({"root_id": "om_in", "thread_id": "omt"}, False, None, []),
     ({}, True, QuoteKind.FORWARD, [(QuoteKind.FORWARD, "om_in")]),
 ])
-def test_a_received_message_points_to_what_it_quotes(fields: dict[str, Any], forward: bool, kind: QuoteKind,
-                                                     targets: list[tuple[QuoteKind, str]]) -> None:
+def test_a_received_message_points_to_what_it_quotes(fields: dict[str, Any], forward: bool,
+                                                     kind: QuoteKind | None, targets: list[tuple[QuoteKind, str]]
+                                                     ) -> None:
     ref = QuoteRef.received("channel-lark", {"chat_id": "oc_team", "message_id": "om_in", **fields}, forward=forward)
+    if kind is None:
+        assert ref is None
+        return
     assert ref is not None and ref.kind is kind and ref.targets() == targets
     assert QuoteRef.from_payload(json.loads(json.dumps(ref.to_payload()))) == ref
 
@@ -378,6 +389,39 @@ def test_a_reply_inside_a_thread_also_reads_its_first_message_and_latest_replies
     assert all(line.startswith("  [") for line in thread.lines[1:])
 
 
+def _thread_reply() -> QuoteRef:
+    return _ref(QuoteKind.THREAD, parent_id="om_root", root_id="om_root", thread_id="omt_1")
+
+
+def test_a_reply_to_a_threads_first_message_reads_it_once_with_the_latest_replies(
+    tmp_path: Path, lark_cli_stand_in: Path,
+) -> None:
+    root = _item("om_root", content="start")
+    replies = [_item(f"om_r{n}", content=f"reply {n}") for n in range(12, 0, -1)]  # newest first
+    _world(tmp_path, messages={"om_root": [root]}, threads={"omt_1": [_item("om_in", content="mine"), *replies, root]})
+    (thread,) = asyncio.run(_read(tmp_path, _thread_reply())).quotes
+    assert (thread.kind, thread.message_id, thread.messages) == (QuoteKind.THREAD, "om_root", lark_quote.THREAD_TAIL)
+    assert _bodies(thread) == ["start", *(f"reply {n}" for n in range(3, 13))]  # not the message itself
+    assert all(line.startswith("  [") for line in thread.lines[1:])
+    assert [argv[2] for argv in _reads(lark_cli_stand_in)].count("/open-apis/im/v1/messages/om_root") == 1
+
+
+@pytest.mark.parametrize("listing", ["only the message and the first", "fails"])
+def test_a_reply_to_a_threads_first_message_with_no_other_reply_shown_reads_as_a_reply(
+    tmp_path: Path, lark_cli_stand_in: Path, monkeypatch: pytest.MonkeyPatch, listing: str,
+) -> None:
+    root = _item("om_root", content="start")
+    _world(tmp_path, messages={"om_root": [root]}, threads={"omt_1": [_item("om_in"), root]})
+    if listing == "fails":
+        async def refused(self: Any, thread_id: str, *, page_token: str = "") -> dict[str, Any]:
+            raise LarkCliError("lark-cli exited 1: access denied", code=lark_quote.MISSING_SCOPE_CODE)
+
+        monkeypatch.setattr(lark_transport.CliTransport, "list_thread_messages", refused)
+    (quote,) = asyncio.run(_read(tmp_path, _thread_reply())).quotes
+    assert (quote.kind, quote.message_id, quote.error, _bodies(quote)) == (QuoteKind.REPLY, "om_root", "", ["start"])
+    assert lark_quote.section([quote])[1].endswith(' note="the message this one replies to">')
+
+
 def test_the_registry_reads_through_the_running_channel_the_reference_names(tmp_path: Path) -> None:
     class _Reader(StubTransport):
         async def get_message(self, message_id: str, *, timeout: float) -> list[dict[str, Any]]:
@@ -413,6 +457,9 @@ def test_a_bot_channel_reply_in_a_thread_is_quoted_and_answered_in_the_thread(
         async with FakeLarkPlatform() as fake:
             fake.users = [{"open_id": "ou_sender", "name": "Ada Lovelace"}, {"open_id": OPEN_ID, "name": "Bob"}]
             fake.messages["om_parent"] = [_item("om_parent", content="the parent")]
+            # The thread, newest first: the message itself, two replies and its first message.
+            fake.threads["omt_thread"] = [_item("om_ask", content="explain"), _item("om_r2", content="reply 2"),
+                                          _item("om_r1", content="reply 1"), _item("om_parent", content="the parent")]
             fake.slow_once["/open-apis/im/v1/messages/om_parent"] = 1.0  # the first read outlasts its try
             bus = MessageBus(runtime_root=tmp_path)
             bot = fake.bot["open_id"]
@@ -434,11 +481,12 @@ def test_a_bot_channel_reply_in_a_thread_is_quoted_and_answered_in_the_thread(
                 message = bus.get_queue("manager").get_nowait()
                 assert message.payload["text"] == "explain"
                 ref = QuoteRef.from_payload(message.payload["quote_ref"])
-                assert ref is not None and (ref.kind, ref.thread_id) == (QuoteKind.REPLY, "omt_thread")
+                assert ref is not None and (ref.kind, ref.thread_id) == (QuoteKind.THREAD, "omt_thread")
                 assert not [request for request in fake.requests
                             if request["path"] == "/open-apis/im/v1/messages/om_parent"]  # nothing read at intake
-                (quote,) = (await adapter.read_quote(ref, after=0)).quotes
-                assert _bodies(quote) == ["the parent"] and quote.sender == "Bob"
+                (quote,) = (await adapter.read_quote(ref, after=0)).quotes  # its first message, once
+                assert quote.kind is QuoteKind.THREAD and quote.sender == "Bob" and quote.messages == 2
+                assert _bodies(quote) == ["the parent", "reply 1", "reply 2"]
                 reads = [request for request in fake.requests if request["path"] == "/open-apis/im/v1/messages/om_parent"]
                 assert len(reads) == 2
                 await adapter.deliver(MessageEnvelope.create(

@@ -43,8 +43,9 @@ class QuoteKind(str, Enum):
 @dataclass(frozen=True)
 class QuoteRef:
     """What a received message points to, for the Manager to read (``payload["quote_ref"]``): the message itself
-    when it is a merged forward (``FORWARD``), else the message it replies to (``REPLY``), and also, in a thread,
-    when that is not the thread's first message, the first message and the latest replies (``THREAD``)."""
+    when it is a merged forward (``FORWARD``), else the message it replies to (``REPLY``); in a thread
+    (``thread_id``), also the thread's first message and its latest replies (``THREAD``), the first message read
+    once when it is the one replied to."""
 
     channel_id: str
     chat_id: str
@@ -62,14 +63,15 @@ class QuoteRef:
             for key in ("chat_id", "message_id", "reply_to", "root_id", "thread_id"))
         if not message_id or not (forward or parent_id):
             return None
-        kind = (QuoteKind.FORWARD if forward else QuoteKind.THREAD if root_id and root_id != parent_id and thread_id
-                else QuoteKind.REPLY)
+        kind = QuoteKind.FORWARD if forward else QuoteKind.THREAD if root_id and thread_id else QuoteKind.REPLY
         return cls(channel_id, chat_id, message_id, kind, parent_id, root_id, thread_id)
 
     def targets(self) -> list[tuple[QuoteKind, str]]:
         """What is read: each quote's kind and the message it is read as."""
         if self.kind is QuoteKind.FORWARD:
             return [(QuoteKind.FORWARD, self.message_id)]
+        if self.kind is QuoteKind.THREAD and self.parent_id == self.root_id:  # it replies to the first message
+            return [(QuoteKind.THREAD, self.root_id)]
         return [(QuoteKind.REPLY, self.parent_id), *([(QuoteKind.THREAD, self.root_id)]
                                                      if self.kind is QuoteKind.THREAD else [])]
 
