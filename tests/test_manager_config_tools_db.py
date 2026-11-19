@@ -275,8 +275,9 @@ def test_agent_profiles_are_created_changed_and_read_back(monkeypatch: pytest.Mo
         assert listed["profiles"][1]["used_by"] == "the worker role"
         assert listed["profiles"][1]["model_id"] == opus["model_id"]
         assert listed["runtimes"] == [{"runtime_id": "rt-claude-code", "name": "claude-code",
-                                       "type": "claude-code",
-                                       "roles": ["manager", "planner", "worker", "reviewer", "processor"]}]
+                                       "type": "claude-code", "roles": ["manager", "planner", "worker", "reviewer"]}]
+        # The processor and its capability are the dashboard's: the Manager's listing is as it was before them.
+        assert "processor" not in json.dumps(listed) and "no_tools" not in json.dumps(listed)
         assert {m["model_id"] for m in listed["models"]} == {
             m["model_id"] for m in (await _ok("POST", "/api/v1/ops/models/list", {}))["models"]}
         assert all("prices" not in m for m in listed["models"])
