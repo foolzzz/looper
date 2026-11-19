@@ -175,7 +175,7 @@ def test_a_lark_groups_messages_that_wait_for_an_answer_say_to_mention_the_bot(m
         card, closed = poster.posts
         assert card["target"] == NotifyTarget(TargetKind.CHAT, LARK_GROUP, LARK_USER) and GROUP_LINE in card["text"]
         assert closed["text"] == ("✅ 讨论结束 · storage\n决定：\n- PostgreSQL\n假设（没有经你确认）：\n- version 16\n"
-                                  "计划：加了 s2\n[/#tasks/task-a](/#tasks/task-a)")
+                                  "计划：加了 s2")  # no link: a group cannot open the server's own address
         assert GROUP_LINE not in closed["text"] and closed["reply_to"] == "om_101"
 
     run_db(test, monkeypatch)
